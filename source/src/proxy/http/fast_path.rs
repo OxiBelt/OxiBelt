@@ -7,16 +7,14 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use http::header::COOKIE;
-use http::{HeaderMap, Method, Request, Response, StatusCode};
+use http::{HeaderMap, Request, Response, StatusCode};
 use hyper::body::Body;
 use tracing::warn;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
-use crate::proxy::http::headers::{
-  ForwardedHeaderCache, is_upgrade_request, strip_hop_by_hop_headers,
-};
+use crate::proxy::http::headers::{ForwardedHeaderCache, strip_hop_by_hop_headers};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::request_framing::VerifiedContentLengthZeroBody;
 use crate::proxy::http::response::{
@@ -40,10 +38,14 @@ use super::{
   send_pool_with_retry, send_with_retry, with_downstream_response_timeout,
 };
 
+mod decision;
 mod direct;
 mod request_body;
 mod small_response;
 mod waf;
+#[cfg(test)]
+use self::decision::PlainProxyFastPathMissReason;
+use self::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_path_decision};
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 use self::request_body::{
   fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
@@ -114,6 +116,7 @@ fn fast_path_target_uri(
 pub(crate) struct PlainProxyFastPath;
 
 impl PlainProxyFastPath {
+  #[cfg(test)]
   pub(crate) fn eligible<B>(
     request: &Request<B>,
     state: &AppSnapshot,
@@ -122,17 +125,7 @@ impl PlainProxyFastPath {
   where
     B: Body,
   {
-    plain_proxy_fast_path_enabled_for_version(request, resolved)
-      && Self::supported_route(state, resolved)
-      && (!state.request_path_features.person_proof_api
-        || !state.waf.has_person_proof_api_path(request.uri().path()))
-      && (!resolved.execution_plan.features.cache
-        || !state
-          .cache
-          .policy_enabled(resolved.route.cache.as_deref(), request.method()))
-      && !semantics::is_native_grpc_request(request.headers(), &state.config)
-      && !is_upgrade_request(request)
-      && request.method() != Method::CONNECT
+    plain_proxy_fast_path_decision(request, state, resolved).is_ok()
   }
 
   fn supported_route(state: &AppSnapshot, resolved: &ResolvedRoute<'_>) -> bool {
@@ -573,8 +566,12 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
-  if !PlainProxyFastPath::eligible(&request, state.as_ref(), resolved) {
-    return Err(request);
+  match plain_proxy_fast_path_decision(&request, state.as_ref(), resolved) {
+    Ok(()) => record_plain_proxy_fast_path_decision(state.as_ref(), request_version, None),
+    Err(reason) => {
+      record_plain_proxy_fast_path_decision(state.as_ref(), request_version, Some(reason));
+      return Err(request);
+    }
   }
   let fast_path_waf = if plain_fast_path_waf_required(resolved) {
     match prepare_plain_fast_path_waf(
@@ -622,20 +619,6 @@ where
     )
     .await,
   )
-}
-
-fn plain_proxy_fast_path_enabled_for_version<B>(
-  request: &Request<B>,
-  resolved: &ResolvedRoute<'_>,
-) -> bool {
-  match request.version() {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => {
-      resolved.execution_plan.fast_path.plain_proxy_h1
-    }
-    http::Version::HTTP_2 => resolved.execution_plan.fast_path.plain_proxy_h2,
-    http::Version::HTTP_3 => resolved.execution_plan.fast_path.plain_proxy_h3,
-    _ => false,
-  }
 }
 
 fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) {

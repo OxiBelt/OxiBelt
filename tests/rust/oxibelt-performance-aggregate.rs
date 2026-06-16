@@ -11,6 +11,7 @@ use serde_json::Value;
 const MAX_RESULTS_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_WARNINGS: usize = 200;
 const DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO: f64 = 0.80;
+const DEFAULT_H1_FAST_PATH_MIN_HIT_RATE: f64 = 0.99;
 const DEFAULT_H2_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_H3_MIN_NGINX_RATIO: f64 = 0.80;
 const DEFAULT_RATIO_TARGET_NEAR_MISS_TOLERANCE: f64 = 0.005;
@@ -29,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 14;
+const COMPARISON_SCHEMA_VERSION: u32 = 15;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -198,6 +199,7 @@ struct BenchmarkRow {
     errors: u64,
     skipped: bool,
     reason: Option<String>,
+    fast_path_plain_proxy_h1: Option<FastPathSample>,
 }
 
 #[derive(Clone)]
@@ -264,6 +266,24 @@ struct AggregateBuilder {
     skipped_count: u64,
     skip_reasons: BTreeSet<String>,
     source_files: BTreeSet<String>,
+    fast_path_plain_proxy_h1: FastPathAggregateBuilder,
+}
+
+#[derive(Clone)]
+struct FastPathSample {
+    hits: u64,
+    misses: u64,
+    attempts: u64,
+    hit_rate: Option<f64>,
+}
+
+#[derive(Default)]
+struct FastPathAggregateBuilder {
+    sample_count: usize,
+    hits: u64,
+    misses: u64,
+    attempts: u64,
+    hit_rates: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -315,6 +335,22 @@ struct AggregateDistribution {
     per_shard_median_p99_ms: Vec<f64>,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct AggregateFastPathStats {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plain_proxy_h1: Option<FastPathAggregateStats>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct FastPathAggregateStats {
+    sample_count: usize,
+    hits: u64,
+    misses: u64,
+    attempts: u64,
+    median_hit_rate: Option<f64>,
+    min_hit_rate: Option<f64>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct AggregateStats {
     #[serde(default = "default_amd64_target_cpu")]
@@ -341,6 +377,8 @@ struct AggregateStats {
     source_files: Vec<String>,
     #[serde(default)]
     distribution: AggregateDistribution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fast_path: Option<AggregateFastPathStats>,
 }
 
 #[derive(Clone, Serialize)]
@@ -487,6 +525,7 @@ struct ReportSummary {
 #[derive(Clone, Copy, Serialize)]
 struct RegressionGateThresholds {
     h1_keepalive_min_nginx_ratio: f64,
+    h1_fast_path_min_hit_rate: f64,
     h2_min_nginx_ratio: f64,
     h3_min_nginx_ratio: f64,
     static_16k_h1c_min_caddy_ratio: f64,
@@ -573,6 +612,15 @@ impl GateDisposition {
         Self::Blocking {
             reason: reason.into(),
             evaluation_mode: "threshold".to_owned(),
+            stat_band: None,
+            baseline_source: None,
+        }
+    }
+
+    fn evidence_blocking(reason: impl Into<String>) -> Self {
+        Self::Blocking {
+            reason: reason.into(),
+            evaluation_mode: "evidence".to_owned(),
             stat_band: None,
             baseline_source: None,
         }
@@ -945,6 +993,9 @@ impl AggregateBuilder {
                 self.skip_reasons.insert(reason);
             }
         }
+        if let Some(fast_path) = row.fast_path_plain_proxy_h1 {
+            self.fast_path_plain_proxy_h1.push(fast_path);
+        }
         self.source_files.insert(source_file);
     }
 
@@ -988,7 +1039,37 @@ impl AggregateBuilder {
                 per_shard_median_rps: per_shard_medians(self.rps_values_by_shard),
                 per_shard_median_p99_ms: per_shard_medians(self.p99_values_by_shard),
             },
+            fast_path: self.fast_path_plain_proxy_h1.finish(),
         }
+    }
+}
+
+impl FastPathAggregateBuilder {
+    fn push(&mut self, sample: FastPathSample) {
+        self.sample_count += 1;
+        self.hits = self.hits.saturating_add(sample.hits);
+        self.misses = self.misses.saturating_add(sample.misses);
+        self.attempts = self.attempts.saturating_add(sample.attempts);
+        if let Some(hit_rate) = sample.hit_rate {
+            self.hit_rates.push(hit_rate);
+        }
+    }
+
+    fn finish(self) -> Option<AggregateFastPathStats> {
+        if self.sample_count == 0 {
+            return None;
+        }
+        let mut hit_rates = self.hit_rates;
+        Some(AggregateFastPathStats {
+            plain_proxy_h1: Some(FastPathAggregateStats {
+                sample_count: self.sample_count,
+                hits: self.hits,
+                misses: self.misses,
+                attempts: self.attempts,
+                median_hit_rate: percentile(&mut hit_rates, 50.0),
+                min_hit_rate: min_value(&hit_rates),
+            }),
+        })
     }
 }
 
@@ -2774,6 +2855,56 @@ fn parse_result_value(
         errors,
         skipped,
         reason,
+        fast_path_plain_proxy_h1: parse_fast_path_plain_proxy_h1(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+    })
+}
+
+fn parse_fast_path_plain_proxy_h1(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
+    let h1 = object
+        .get("fast_path")
+        .and_then(Value::as_object)
+        .and_then(|fast_path| fast_path.get("plain_proxy"))
+        .and_then(Value::as_object)
+        .and_then(|plain_proxy| plain_proxy.get("h1"))
+        .and_then(Value::as_object)?;
+
+    let hits = integer_named_field(h1, &["hits"], source_file, row_index, label, warnings)?;
+    let misses = integer_named_field(h1, &["misses"], source_file, row_index, label, warnings)?;
+    let attempts = integer_named_field(h1, &["attempts"], source_file, row_index, label, warnings)?;
+    let hit_rate = match h1.get("hit_rate") {
+        Some(Value::Null) | None => None,
+        Some(_) => numeric_field(h1, &["hit_rate"], source_file, row_index, label, warnings),
+    };
+    if hits.saturating_add(misses) != attempts {
+        warnings.push(format!(
+            "{source_file} row {row_index} ({label}): fast_path.plain_proxy.h1 attempts does not equal hits + misses"
+        ));
+    }
+    if let Some(rate) = hit_rate
+        && rate > 1.0
+    {
+        warnings.push(format!(
+            "{source_file} row {row_index} ({label}): fast_path.plain_proxy.h1 hit_rate is greater than 1.0"
+        ));
+    }
+
+    Some(FastPathSample {
+        hits,
+        misses,
+        attempts,
+        hit_rate,
     })
 }
 
@@ -3460,6 +3591,12 @@ fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresh
             ThresholdKind::NonNegative,
             warnings,
         ),
+        h1_fast_path_min_hit_rate: env_threshold(
+            "OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE",
+            DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
+            ThresholdKind::NonNegative,
+            warnings,
+        ),
         h2_min_nginx_ratio: env_threshold(
             "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
             DEFAULT_H2_MIN_NGINX_RATIO,
@@ -3586,6 +3723,12 @@ fn build_regression_gate_report(
                 comparator_shift_tolerance: DEFAULT_RATIO_TARGET_COMPARATOR_SHIFT_TOLERANCE,
             }),
         },
+        &mut findings,
+    );
+    collect_h1_fast_path_regression_gate(
+        aggregates,
+        primary_target_cpu,
+        thresholds.h1_fast_path_min_hit_rate,
         &mut findings,
     );
     collect_comparator_ratio_regression_gate(
@@ -4075,6 +4218,90 @@ fn collect_remote_signer_handshake_regression_gate(
                 ),
             },
             decision,
+        );
+    }
+}
+
+fn collect_h1_fast_path_regression_gate(
+    aggregates: &PrimaryAggregateMap,
+    primary_target_cpu: &str,
+    threshold: f64,
+    findings: &mut RegressionGateFindings,
+) {
+    let gate = "h1_fast_path_min_hit_rate";
+    let scenario = "h1-keepalive";
+    let context = RegressionGateContext {
+        amd64_target_cpu: primary_target_cpu,
+        gate,
+        group: ScenarioGroup::ReverseProxy.as_str(),
+        scenario,
+        threshold,
+    };
+    let Some(aggregate) = aggregates.get(&(Comparator::Oxibelt, scenario.to_owned())) else {
+        push_missing_regression_gate_metric(
+            findings,
+            context,
+            "min_hit_rate",
+            Some("oxibelt"),
+            "missing OxiBelt h1-keepalive row; cannot evaluate H1 fast-path hit-rate gate",
+        );
+        return;
+    };
+    let Some(fast_path) = aggregate
+        .fast_path
+        .as_ref()
+        .and_then(|fast_path| fast_path.plain_proxy_h1.as_ref())
+    else {
+        push_missing_regression_gate_metric(
+            findings,
+            context,
+            "min_hit_rate",
+            Some("oxibelt"),
+            "missing OxiBelt h1-keepalive fast-path evidence; cannot evaluate H1 fast-path hit-rate gate",
+        );
+        return;
+    };
+    if fast_path.attempts == 0 {
+        push_invalid_regression_gate_metric(
+            findings,
+            context,
+            "attempts",
+            0.0,
+            Some("oxibelt"),
+            "OxiBelt h1-keepalive fast-path evidence recorded zero attempts",
+        );
+        return;
+    }
+    let Some(min_hit_rate) = fast_path.min_hit_rate else {
+        push_missing_regression_gate_metric(
+            findings,
+            context,
+            "min_hit_rate",
+            Some("oxibelt"),
+            "missing OxiBelt h1-keepalive fast-path hit-rate value",
+        );
+        return;
+    };
+    if min_hit_rate < threshold {
+        push_threshold_regression_gate_metric(
+            findings,
+            RegressionGateFindingInput {
+                amd64_target_cpu: primary_target_cpu,
+                gate,
+                group: ScenarioGroup::ReverseProxy.as_str(),
+                scenario,
+                metric: "min_hit_rate",
+                observed: Some(min_hit_rate),
+                threshold,
+                comparator: None,
+                message: format!(
+                    "OxiBelt h1-keepalive H1 plain-proxy fast-path hit rate {:.4} < {:.4} ({} hits, {} misses)",
+                    min_hit_rate, threshold, fast_path.hits, fast_path.misses
+                ),
+            },
+            GateDisposition::evidence_blocking(
+                "minimum H1 fast-path evidence must meet the configured threshold",
+            ),
         );
     }
 }
@@ -6404,6 +6631,20 @@ mod tests {
         median_rps: f64,
         median_p99_ms: f64,
     ) -> AggregateStats {
+        let fast_path = if comparator == Comparator::Oxibelt && scenario == "h1-keepalive" {
+            Some(AggregateFastPathStats {
+                plain_proxy_h1: Some(FastPathAggregateStats {
+                    sample_count: 1,
+                    hits: 100,
+                    misses: 0,
+                    attempts: 100,
+                    median_hit_rate: Some(1.0),
+                    min_hit_rate: Some(1.0),
+                }),
+            })
+        } else {
+            None
+        };
         AggregateStats {
             amd64_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
             label: format!("{}-{scenario}", comparator.as_str()),
@@ -6427,6 +6668,7 @@ mod tests {
             skip_reasons: Vec::new(),
             source_files: vec!["synthetic/results.json".to_owned()],
             distribution: AggregateDistribution::default(),
+            fast_path,
         }
     }
 
@@ -6484,8 +6726,123 @@ mod tests {
                 .h1_keepalive_min_nginx_ratio,
             0.80
         );
+        assert_eq!(
+            report.regression_gates.thresholds.h1_fast_path_min_hit_rate,
+            0.99
+        );
         assert_eq!(report.regression_gates.thresholds.h2_min_nginx_ratio, 0.80);
         assert_eq!(report.regression_gates.thresholds.h3_min_nginx_ratio, 0.80);
+    }
+
+    #[test]
+    fn aggregate_parses_h1_fast_path_evidence_from_result_rows() {
+        let input_dir = temp_dir("h1-fast-path-parse");
+        let run_dir = input_dir.path().join("run-1");
+        std::fs::create_dir_all(&run_dir).expect("run dir should be created");
+        std::fs::write(
+            run_dir.join("results.json"),
+            r#"[{
+              "type": "load",
+              "label": "oxibelt-h1-keepalive",
+              "protocol": "h1",
+              "requests": 100,
+              "rps": 1000.0,
+              "p99_ms": 1.0,
+              "errors": 0,
+              "fast_path": {
+                "plain_proxy": {
+                  "h1": {
+                    "hits": 99,
+                    "misses": 1,
+                    "attempts": 100,
+                    "hit_rate": 0.99,
+                    "miss_reasons": {"cache_policy": 1}
+                  }
+                }
+              }
+            }]"#,
+        )
+        .expect("results should be written");
+
+        let report = aggregate(
+            input_dir.path(),
+            AggregateOptions {
+                profile: None,
+                expected_runs: None,
+                expected_shards: None,
+                expected_target_cpus: Vec::new(),
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+                accepted_regression_reason: None,
+            },
+        );
+        let h1 = report
+            .aggregates
+            .iter()
+            .find(|aggregate| {
+                aggregate.comparator == "oxibelt" && aggregate.scenario == "h1-keepalive"
+            })
+            .and_then(|aggregate| aggregate.fast_path.as_ref())
+            .and_then(|fast_path| fast_path.plain_proxy_h1.as_ref())
+            .expect("fast-path aggregate should exist");
+
+        assert_eq!(h1.hits, 99);
+        assert_eq!(h1.misses, 1);
+        assert_eq!(h1.attempts, 100);
+        assert_eq!(h1.min_hit_rate, Some(0.99));
+    }
+
+    #[test]
+    fn h1_fast_path_hit_rate_gate_fails_below_threshold() {
+        let mut aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Oxibelt,
+            "h1-keepalive",
+            100.0,
+            1.0,
+        );
+        let aggregate = aggregates
+            .get_mut(&(Comparator::Oxibelt, "h1-keepalive".to_owned()))
+            .expect("synthetic aggregate should exist");
+        aggregate.fast_path = Some(AggregateFastPathStats {
+            plain_proxy_h1: Some(FastPathAggregateStats {
+                sample_count: 1,
+                hits: 98,
+                misses: 2,
+                attempts: 100,
+                median_hit_rate: Some(0.98),
+                min_hit_rate: Some(0.98),
+            }),
+        });
+
+        let gates = build_regression_gate_report(
+            &aggregates,
+            RegressionGateThresholds {
+                h1_keepalive_min_nginx_ratio: DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
+                h2_min_nginx_ratio: DEFAULT_H2_MIN_NGINX_RATIO,
+                h3_min_nginx_ratio: DEFAULT_H3_MIN_NGINX_RATIO,
+                static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+                static_16k_h1c_min_nginx_ratio: DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO,
+                remote_signer_handshake_min_local_ratio:
+                    DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
+                waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
+                crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+                waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
+            },
+            None,
+            DEFAULT_AMD64_TARGET_CPU,
+            None,
+        );
+
+        assert!(gates.violations.iter().any(|violation| {
+            violation.gate == "h1_fast_path_min_hit_rate"
+                && violation.metric == "min_hit_rate"
+                && violation.observed == Some(0.98)
+                && violation.evaluation_mode == "evidence"
+        }));
     }
 
     #[test]
@@ -6531,6 +6888,7 @@ mod tests {
             &aggregates,
             RegressionGateThresholds {
                 h1_keepalive_min_nginx_ratio: 0.80,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
                 h2_min_nginx_ratio: 0.80,
                 h3_min_nginx_ratio: 0.80,
                 static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
@@ -6605,6 +6963,7 @@ mod tests {
             &aggregates,
             RegressionGateThresholds {
                 h1_keepalive_min_nginx_ratio: 0.80,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
                 h2_min_nginx_ratio: 0.80,
                 h3_min_nginx_ratio: 0.80,
                 static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
@@ -6680,6 +7039,7 @@ mod tests {
             &aggregates,
             RegressionGateThresholds {
                 h1_keepalive_min_nginx_ratio: 0.80,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
                 h2_min_nginx_ratio: 0.80,
                 h3_min_nginx_ratio: 0.80,
                 static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
@@ -6741,6 +7101,7 @@ mod tests {
             &aggregates,
             RegressionGateThresholds {
                 h1_keepalive_min_nginx_ratio: 0.80,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
                 h2_min_nginx_ratio: 0.80,
                 h3_min_nginx_ratio: 0.80,
                 static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,

@@ -1457,6 +1457,7 @@ async fn run_metrics(args: MetricsArgs) -> anyhow::Result<()> {
             "label": args.label,
             "mode": "prometheus",
             "server_session_storage": server_session_storage_metrics_json(&body),
+            "fast_path": fast_path_metrics_json(&body),
         })
     );
     Ok(())
@@ -1575,6 +1576,115 @@ fn server_session_storage_metrics_json(metrics: &str) -> serde_json::Value {
         "lock_wait_ns": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_lock_wait_ns_total"),
         "put_duration_ns": prometheus_u64(metrics, "oxibelt_tls_server_session_storage_put_duration_ns_total"),
     })
+}
+
+fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
+    let mut plain_proxy = serde_json::Map::new();
+    for protocol in ["h1", "h2", "h3"] {
+        plain_proxy.insert(
+            protocol.to_owned(),
+            fast_path_protocol_metrics_json(metrics, "plain_proxy", protocol),
+        );
+    }
+    serde_json::json!({ "plain_proxy": plain_proxy })
+}
+
+fn fast_path_protocol_metrics_json(metrics: &str, path: &str, protocol: &str) -> serde_json::Value {
+    let mut hits = 0;
+    let mut miss_reasons = BTreeMap::new();
+    for (labels, value) in prometheus_labeled_u64_samples(
+        metrics,
+        "oxibelt_http_fast_path_decisions_total",
+    ) {
+        if labels.get("path").map(String::as_str) != Some(path)
+            || labels.get("protocol").map(String::as_str) != Some(protocol)
+        {
+            continue;
+        }
+        match labels.get("outcome").map(String::as_str) {
+            Some("hit") => hits += value,
+            Some("miss") => {
+                let reason = labels
+                    .get("reason")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned());
+                *miss_reasons.entry(reason).or_insert(0) += value;
+            }
+            _ => {}
+        }
+    }
+    let misses = miss_reasons.values().sum::<u64>();
+    let attempts = hits + misses;
+    let hit_rate = if attempts == 0 {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(hits as f64 / attempts as f64)
+    };
+    serde_json::json!({
+        "hits": hits,
+        "misses": misses,
+        "attempts": attempts,
+        "hit_rate": hit_rate,
+        "miss_reasons": miss_reasons,
+    })
+}
+
+fn prometheus_labeled_u64_samples(
+    metrics: &str,
+    name: &str,
+) -> Vec<(BTreeMap<String, String>, u64)> {
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let mut parts = line.split_whitespace();
+            let sample = parts.next()?;
+            let value = parts.next()?.parse::<f64>().ok()?;
+            if !value.is_finite() || value < 0.0 {
+                return None;
+            }
+            let labels = sample
+                .strip_prefix(name)?
+                .strip_prefix('{')?
+                .strip_suffix('}')?;
+            Some((parse_prometheus_labels(labels), value as u64))
+        })
+        .collect()
+}
+
+fn parse_prometheus_labels(raw: &str) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    for part in raw.split(',') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value);
+        labels.insert(key.to_owned(), unescape_prometheus_label(value));
+    }
+    labels
+}
+
+fn unescape_prometheus_label(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some(other) => output.push(other),
+            None => output.push('\\'),
+        }
+    }
+    output
 }
 
 fn prometheus_u64(metrics: &str, name: &str) -> u64 {
@@ -2496,6 +2606,28 @@ oxibelt_tls_server_session_storage_put_duration_ns_total 23
         assert_eq!(parsed["take_count"], 17);
         assert_eq!(parsed["lock_wait_ns"], 19);
         assert_eq!(parsed["put_duration_ns"], 23);
+    }
+
+    #[test]
+    fn metrics_parser_extracts_plain_proxy_h1_fast_path_counters() {
+        let metrics = "\
+# TYPE oxibelt_http_fast_path_decisions_total counter
+oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"hit\",reason=\"eligible\"} 99
+# TYPE oxibelt_http_fast_path_decisions_total counter
+oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"miss\",reason=\"cache_policy\"} 1
+# TYPE oxibelt_http_fast_path_decisions_total counter
+oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outcome=\"hit\",reason=\"eligible\"} 17
+";
+
+        let parsed = fast_path_metrics_json(metrics);
+        let h1 = &parsed["plain_proxy"]["h1"];
+
+        assert_eq!(h1["hits"], 99);
+        assert_eq!(h1["misses"], 1);
+        assert_eq!(h1["attempts"], 100);
+        assert_eq!(h1["hit_rate"], 0.99);
+        assert_eq!(h1["miss_reasons"]["cache_policy"], 1);
+        assert_eq!(parsed["plain_proxy"]["h2"]["hits"], 17);
     }
 
     #[test]

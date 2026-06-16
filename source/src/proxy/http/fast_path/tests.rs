@@ -4,6 +4,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use http::Method;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
 
@@ -13,6 +14,7 @@ use crate::lifecycle::ConnectionDrain;
 use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
 mod body_shortcuts;
+mod decision;
 mod direct_selection;
 mod h3;
 mod response_body;

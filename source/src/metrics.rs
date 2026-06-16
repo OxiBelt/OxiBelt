@@ -13,6 +13,7 @@ use crate::tls::TlsServerSessionStorageStats;
 mod auth;
 mod crlite;
 mod detail;
+mod fast_path;
 mod ocsp;
 mod outbound_revocation;
 mod pool;
@@ -59,6 +60,7 @@ pub struct Metrics {
   crlite: crlite::CrliteMetrics,
   ocsp: ocsp::OcspMetrics,
   outbound_revocation: outbound_revocation::OutboundRevocationMetrics,
+  fast_path: fast_path::FastPathMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
   stream: stream::StreamMetrics,
   pool: pool::PoolMetrics,
@@ -129,6 +131,12 @@ impl Metrics {
     if status.is_server_error() {
       self.upstream_errors_total.increment();
     }
+  }
+
+  pub fn record_plain_proxy_fast_path_decision(&self, protocol: &str, outcome: &str, reason: &str) {
+    self
+      .fast_path
+      .record_plain_proxy_decision(protocol, outcome, reason);
   }
 
   pub fn record_cache_hit(&self) {
@@ -506,6 +514,7 @@ impl Metrics {
     self.append_crlite_prometheus(&mut output);
     self.append_ocsp_prometheus(&mut output);
     self.append_outbound_revocation_prometheus(&mut output);
+    self.append_fast_path_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
     self.append_stream_prometheus(&mut output);
     self.append_upstream_pool_prometheus(&mut output);
@@ -601,6 +610,10 @@ impl Metrics {
 
   fn append_upstream_pool_prometheus(&self, output: &mut String) {
     self.pool.append_prometheus(output);
+  }
+
+  fn append_fast_path_prometheus(&self, output: &mut String) {
+    self.fast_path.append_prometheus(output);
   }
 }
 

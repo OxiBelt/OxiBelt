@@ -46,6 +46,28 @@ fn prometheus_output_includes_tls_session_storage_diagnostics() {
 }
 
 #[test]
+fn prometheus_output_includes_plain_proxy_fast_path_decisions() {
+  let metrics = Metrics::new();
+  metrics.record_plain_proxy_fast_path_decision("h1", "hit", "eligible");
+  metrics.record_plain_proxy_fast_path_decision("h1", "miss", "cache_policy");
+  metrics.record_plain_proxy_fast_path_decision("h1", "miss", "unknown");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"hit\",reason=\"eligible\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"miss\",reason=\"cache_policy\"} 1"
+  ));
+  assert!(!body.contains("unknown"));
+}
+
+#[test]
 fn prometheus_output_includes_upstream_pool_health_metrics() {
   let metrics = Metrics::new();
   let config = MetricsConfig::default();

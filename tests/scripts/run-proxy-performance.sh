@@ -45,6 +45,8 @@ Environment:
                                       OxiBelt H1/H2 baseline p99 latency ceiling
   OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO
                                       minimum OxiBelt/Caddy RPS ratio for static 16KiB H1C (default: 0.80)
+  OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE
+                                      minimum OxiBelt H1 plain-proxy fast-path hit rate (default: 0.99)
   OXIBELT_PERF_WAF_ENFORCING_MIN_RPS
                                       minimum OxiBelt WAF enforcing RPS (default: 10000)
   OXIBELT_PERF_CRS_ENFORCING_MIN_RPS
@@ -194,6 +196,7 @@ max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
 tcp_baseline_max_p50_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P50_MS:-25}"
 tcp_baseline_max_p99_ms="${OXIBELT_PERF_TCP_BASELINE_MAX_P99_MS:-45}"
 static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0.80}"
+h1_fast_path_min_hit_rate="${OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE:-0.99}"
 waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-10000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-8000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.30}"
@@ -272,6 +275,10 @@ if [[ ! "${resource_settle_seconds}" =~ ^(0|[1-9][0-9]*)$ ]]; then
 fi
 if [[ ! "${static_16k_h1c_min_caddy_ratio}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO must be a non-negative number; got '${static_16k_h1c_min_caddy_ratio}'" >&2
+  exit 2
+fi
+if [[ ! "${h1_fast_path_min_hit_rate}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE must be a non-negative number; got '${h1_fast_path_min_hit_rate}'" >&2
   exit 2
 fi
 if [[ ! "${waf_enforcing_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
@@ -1369,7 +1376,7 @@ append_result() {
   local json="$1"
   json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
   printf '%s\n' "${json}" >>"${results_jsonl}"
-  local label type protocol skipped requests rps p95 p99 errors
+  local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate result_text
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
   type="$(jq -r '.type // "unknown"' <<<"${json}")"
   protocol="$(jq -r '.protocol // .mode // "-"' <<<"${json}")"
@@ -1384,8 +1391,13 @@ append_result() {
   p95="$(jq -r '.p95_ms // 0' <<<"${json}")"
   p99="$(jq -r '.p99_ms // 0' <<<"${json}")"
   errors="$(jq -r '.errors // 0' <<<"${json}")"
-  printf '| `%s` | `%s` | `%s` | %s req, %.2f/sec, p95 %.2f ms, p99 %.2f ms | errors=%s |\n' \
-    "${label}" "${type}" "${protocol}" "${requests}" "${rps}" "${p95}" "${p99}" "${errors}" >>"${summary_md}"
+  result_text="$(printf '%s req, %.2f/sec, p95 %.2f ms, p99 %.2f ms' "${requests}" "${rps}" "${p95}" "${p99}")"
+  fast_path_hit_rate="$(jq -r '.fast_path.plain_proxy.h1.hit_rate // empty' <<<"${json}")"
+  if [[ -n "${fast_path_hit_rate}" ]]; then
+    result_text="${result_text}, h1 fast-path $(jq -n -r --argjson rate "${fast_path_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
+  fi
+  printf '| `%s` | `%s` | `%s` | %s | errors=%s |\n' \
+    "${label}" "${type}" "${protocol}" "${result_text}" "${errors}" >>"${summary_md}"
 }
 
 assert_result() {
@@ -1870,9 +1882,12 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json
+  local json fast_path_before fast_path_after fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
+  fi
+  if plain_proxy_h1_fast_path_gate_required "${label}" "${protocol}" "${host}"; then
+    fast_path_before="$(plain_proxy_h1_fast_path_metrics "${host}" "${label}-fast-path-before")"
   fi
   local -a probe_args=(
     load
@@ -1894,6 +1909,12 @@ run_load() {
     json="$(run_profiled_probe_json "${label}" "${duration}" "${probe_args[@]}")"
   else
     json="$(run_probe_json "${probe_args[@]}")"
+  fi
+  if plain_proxy_h1_fast_path_gate_required "${label}" "${protocol}" "${host}"; then
+    fast_path_after="$(plain_proxy_h1_fast_path_metrics "${host}" "${label}-fast-path-after")"
+    fast_path_delta="$(plain_proxy_h1_fast_path_delta "${fast_path_before}" "${fast_path_after}")"
+    json="$(jq -c --argjson fast_path "${fast_path_delta}" '. + {fast_path: {plain_proxy: {h1: $fast_path}}}' <<<"${json}")"
+    assert_plain_proxy_h1_fast_path_hit_rate "${label}" "${fast_path_delta}"
   fi
   append_result "${json}"
   assert_result "${json}"
@@ -2039,6 +2060,85 @@ server_session_storage_metrics() {
     sleep 1
   done
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+plain_proxy_h1_fast_path_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.fast_path.plain_proxy.h1 // {
+        hits: 0,
+        misses: 0,
+        attempts: 0,
+        hit_rate: null,
+        miss_reasons: {}
+      }' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+plain_proxy_h1_fast_path_delta() {
+  local before="$1"
+  local after="$2"
+  jq -n -c \
+    --argjson before "${before}" \
+    --argjson after "${after}" \
+    --argjson threshold "${h1_fast_path_min_hit_rate}" \
+    'def diff($name):
+       (($after[$name] // 0) - ($before[$name] // 0)) as $value
+       | if $value < 0 then 0 else $value end;
+     def reason_delta($reason):
+       (((($after.miss_reasons // {})[$reason] // 0) - (($before.miss_reasons // {})[$reason] // 0)) as $value
+        | if $value < 0 then 0 else $value end);
+     (($before.miss_reasons // {}) + ($after.miss_reasons // {}) | keys_unsorted) as $reasons
+     | (reduce $reasons[] as $reason ({}; .[$reason] = reason_delta($reason))) as $miss_reasons
+     | (diff("hits")) as $hits
+     | ([$miss_reasons[]] | add // 0) as $misses
+     | ($hits + $misses) as $attempts
+     | {
+         hits: $hits,
+         misses: $misses,
+         attempts: $attempts,
+         hit_rate: (if $attempts == 0 then null else ($hits / $attempts) end),
+         threshold: $threshold,
+         miss_reasons: $miss_reasons
+       }'
+}
+
+plain_proxy_h1_fast_path_gate_required() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  [[ "${label}" == "oxibelt-h1-keepalive" && "${protocol}" == "h1" && "${host}" == "oxibelt" ]]
+}
+
+assert_plain_proxy_h1_fast_path_hit_rate() {
+  local label="$1"
+  local fast_path="$2"
+  local attempts hit_rate
+  attempts="$(jq -r '.attempts // 0' <<<"${fast_path}")"
+  if [[ "${attempts}" == "0" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} fast-path gate failed: no H1 plain-proxy fast-path decision samples were recorded"
+    return
+  fi
+  hit_rate="$(jq -r '.hit_rate // empty' <<<"${fast_path}")"
+  if [[ -z "${hit_rate}" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} fast-path gate failed: missing H1 hit-rate evidence"
+    return
+  fi
+  if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
+    handle_regression_gate_violation "OxiBelt ${label} fast-path gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
+  fi
 }
 
 server_session_storage_delta() {

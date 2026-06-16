@@ -2,6 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use oxibelt::config::{Config, MetricsDetail};
+use oxibelt::routes::RouteTable;
+use oxibelt::waf::WafEngine;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -588,6 +592,10 @@ assert_result() {{
 
 sample_stats() {{
   printf 'STATS %s\n' "$1" >>"${{events}}"
+}}
+
+plain_proxy_h1_fast_path_gate_required() {{
+  return 1
 }}
 
 {functions}
@@ -1438,6 +1446,36 @@ fn oxibelt_tls_resumption_performance_fixtures_pin_modes_and_metrics() {
             path.display()
         );
     }
+}
+
+#[test]
+fn oxibelt_baseline_fixture_enables_h1_fast_path_metrics() {
+    let path = oxibelt_performance_fixture_root()
+        .join("baseline")
+        .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let config: Config = toml::from_str(&config_text)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+    assert!(config.metrics.enabled, "baseline should expose /metrics");
+    assert_eq!(
+        config.metrics.detail,
+        MetricsDetail::Basic,
+        "baseline should avoid detailed metrics on the measured fast path"
+    );
+
+    let waf = WafEngine::new(&config).expect("WAF engine should build");
+    let table = RouteTable::new_with_waf(&config, &waf);
+    let resolved = table
+        .resolve("example.test", "/perf/h1", &config.upstreams)
+        .expect("/perf/h1 should resolve");
+
+    assert_eq!(resolved.route.name, "main-route");
+    assert!(
+        resolved.execution_plan.fast_path.plain_proxy_h1,
+        "/perf/h1 should keep the H1 plain-proxy fast-path plan"
+    );
 }
 
 #[test]
@@ -2376,6 +2414,28 @@ fn tls_resumption_mode_handshake_rows_run_as_fresh_oxibelt_only_smoke_rows() {
     assert!(
         script.contains("server_session_storage_delta"),
         "resumption rows should attach server-side session storage counter deltas"
+    );
+}
+
+#[test]
+fn h1_keepalive_row_attaches_plain_proxy_fast_path_hit_rate() {
+    let script = performance_script_text();
+
+    assert!(
+        script.contains("OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE"),
+        "performance script should expose the H1 fast-path hit-rate threshold"
+    );
+    assert!(
+        script.contains("plain_proxy_h1_fast_path_delta"),
+        "performance script should compute H1 fast-path counter deltas"
+    );
+    assert!(
+        script.contains("fast_path: {plain_proxy: {h1: $fast_path}}"),
+        "oxibelt-h1-keepalive rows should include fast-path hit-rate evidence"
+    );
+    assert!(
+        script.contains("assert_plain_proxy_h1_fast_path_hit_rate"),
+        "performance script should gate the H1 fast-path hit rate"
     );
 }
 
