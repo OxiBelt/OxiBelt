@@ -4,7 +4,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
 use http::{Response, StatusCode};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 
 use super::super::{body, fast_path_downstream_response_timeout, fast_path_response_body};
 use crate::config::TrailerMode;
@@ -87,6 +87,35 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
     .collect()
     .await
     .expect("placeholder body should collect")
+    .to_bytes();
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
+  let body = Empty::<Bytes>::new().map_err(|never| -> body::BoxError { match never {} });
+
+  let prepared = match fast_path_response_body(
+    &HeaderMap::new(),
+    body,
+    Duration::from_secs(1),
+    TrailerMode::Drop,
+    http::Version::HTTP_11,
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(response) => panic!("unexpected response status {}", response.status()),
+  };
+
+  assert!(prepared.known_small_response_body);
+  assert!(prepared.trailers_handled);
+  assert!(prepared.inlined_known_small_body.is_none());
+  let bytes = prepared
+    .body
+    .collect()
+    .await
+    .expect("empty body should collect")
     .to_bytes();
   assert!(bytes.is_empty());
 }

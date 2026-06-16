@@ -11,7 +11,8 @@ use crate::waf::{HeaderMutation, apply_header_mutations};
 
 use super::body::{BoxError, ProxyBody};
 use super::headers::{
-  ForwardedHeaderCache, add_forwarded_headers, set_effective_host_header, strip_hop_by_hop_headers,
+  ForwardedHeaderCache, ForwardedRequestHeaderValues, add_forwarded_headers_with_values,
+  set_effective_host_header, set_effective_host_header_value, strip_hop_by_hop_headers,
 };
 use super::version::upstream_request_version;
 
@@ -24,6 +25,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) downstream_port: u16,
   pub(crate) forwarded_header_mode: ForwardedHeaderMode,
   pub(crate) forwarded_header_cache: Option<&'a ForwardedHeaderCache>,
+  pub(crate) forwarded_request_header_values: Option<&'a ForwardedRequestHeaderValues>,
   pub(crate) preserve_host: bool,
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
@@ -53,12 +55,16 @@ pub(crate) fn rebuild_request_parts(
   strip_hop_by_hop_headers(&mut parts.headers);
 
   if options.preserve_host {
-    set_effective_host_header(&mut parts.headers, options.downstream_host);
+    if let Some(values) = options.forwarded_request_header_values {
+      set_effective_host_header_value(&mut parts.headers, values.host());
+    } else {
+      set_effective_host_header(&mut parts.headers, options.downstream_host);
+    }
   } else {
     parts.headers.remove(HOST);
   }
 
-  add_forwarded_headers(
+  add_forwarded_headers_with_values(
     &mut parts.headers,
     options.forwarded_client_addr,
     options.downstream_host,
@@ -66,6 +72,7 @@ pub(crate) fn rebuild_request_parts(
     options.downstream_port,
     options.forwarded_header_mode,
     options.forwarded_header_cache,
+    options.forwarded_request_header_values,
   );
 
   if options.compression.enabled || options.remove_accept_encoding {
@@ -116,6 +123,7 @@ mod tests {
       downstream_port: 443,
       forwarded_header_mode: ForwardedHeaderMode::Overwrite,
       forwarded_header_cache: None,
+      forwarded_request_header_values: None,
       preserve_host,
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],
@@ -173,5 +181,29 @@ mod tests {
 
     assert_eq!(rebuilt.headers()[HOST], "absolute.example");
     assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
+  }
+
+  #[test]
+  fn rebuild_request_reuses_precomputed_forwarded_header_values() {
+    let request = Request::builder()
+      .uri("/app?q=1")
+      .header(HOST, "header.example")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig::default();
+    let values = ForwardedRequestHeaderValues::new("example.test", 8443);
+    let mut options = rebuild_options(
+      "http://upstream.internal/app?q=1".parse().unwrap(),
+      &compression,
+      "bad\nhost",
+      true,
+    );
+    options.forwarded_request_header_values = Some(&values);
+
+    let rebuilt = rebuild_request(request, options);
+
+    assert_eq!(rebuilt.headers()[HOST], "example.test");
+    assert_eq!(rebuilt.headers()["x-forwarded-host"], "example.test");
+    assert_eq!(rebuilt.headers()["x-forwarded-port"], "8443");
   }
 }

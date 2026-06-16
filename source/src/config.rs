@@ -4808,6 +4808,15 @@ impl Default for SecurityHeadersConfig {
   }
 }
 
+impl SecurityHeadersConfig {
+  pub(crate) fn enabled(&self) -> bool {
+    self.hsts
+      || self.x_content_type_options.is_some()
+      || self.referrer_policy.is_some()
+      || self.permissions_policy.is_some()
+  }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]

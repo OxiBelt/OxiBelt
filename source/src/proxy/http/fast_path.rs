@@ -14,7 +14,9 @@ use tracing::warn;
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
-use crate::proxy::http::headers::{ForwardedHeaderCache, strip_hop_by_hop_headers};
+use crate::proxy::http::headers::{
+  ForwardedHeaderCache, ForwardedRequestHeaderValues, strip_hop_by_hop_headers,
+};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
 use crate::proxy::http::request_framing::VerifiedContentLengthZeroBody;
 use crate::proxy::http::response::{
@@ -270,6 +272,7 @@ impl PlainProxyFastPath {
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
     let (mut parts, body) = request.into_parts();
+    let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
 
     let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
       warn!(
@@ -297,6 +300,7 @@ impl PlainProxyFastPath {
       downstream_port,
       forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
       forwarded_header_cache,
+      forwarded_request_header_values: Some(&forwarded_request_header_values),
       preserve_host: upstream.preserve_host,
       upstream_version,
       waf_mutations: &request_waf.request_header_mutations,
@@ -442,8 +446,12 @@ impl PlainProxyFastPath {
     };
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-    apply_security_headers(&mut parts.headers, &state.config.security.headers);
-    apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
+    if state.request_path_features.security_response_headers {
+      apply_security_headers(&mut parts.headers, &state.config.security.headers);
+    }
+    if !request_waf.response_header_mutations.is_empty() {
+      apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
+    }
     if response_waf_enabled {
       let (request_method, request_uri) = request_context
         .as_ref()
@@ -502,9 +510,11 @@ impl PlainProxyFastPath {
         state.record_hot_path_response(response.status());
         return response;
       }
-      apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+      if !response_waf.response_header_mutations.is_empty() {
+        apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+      }
     }
-    if request_version != http::Version::HTTP_3 {
+    if fast_path_alt_svc_possible(state.as_ref(), downstream_scheme, request_version) {
       apply_alt_svc_header(
         &mut parts.headers,
         parts.status,
@@ -627,6 +637,19 @@ fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) 
   }
 }
 
+fn fast_path_alt_svc_possible(
+  state: &AppSnapshot,
+  downstream_scheme: &str,
+  request_version: http::Version,
+) -> bool {
+  state.alt_svc_header_value.is_some()
+    && downstream_scheme == "https"
+    && matches!(
+      request_version,
+      http::Version::HTTP_10 | http::Version::HTTP_11 | http::Version::HTTP_2
+    )
+}
+
 fn fast_path_downstream_response_timeout(
   response: Response<ProxyBody>,
   known_small_response_body: bool,
@@ -685,6 +708,12 @@ where
       body,
       known_small_response_body: true,
       inlined_known_small_body: inlined,
+      trailers_handled: true,
+    }),
+    SmallResponseDisposition::Streaming(body) if body.is_end_stream() => Ok(FastPathResponseBody {
+      body,
+      known_small_response_body: true,
+      inlined_known_small_body: None,
       trailers_handled: true,
     }),
     SmallResponseDisposition::Streaming(body) => Ok(FastPathResponseBody {

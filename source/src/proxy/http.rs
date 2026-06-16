@@ -1175,6 +1175,7 @@ where
     downstream_port,
     forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
     forwarded_header_cache,
+    forwarded_request_header_values: None,
     preserve_host: upstream.preserve_host,
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,

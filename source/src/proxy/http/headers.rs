@@ -32,6 +32,29 @@ pub(crate) struct ForwardedHeaderCache {
   x_forwarded_proto: HeaderValue,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ForwardedRequestHeaderValues {
+  host: Option<HeaderValue>,
+  port: HeaderValue,
+}
+
+impl ForwardedRequestHeaderValues {
+  pub(crate) fn new(host: &str, port: u16) -> Self {
+    Self {
+      host: effective_host_header_value(host),
+      port: port_header_value(port),
+    }
+  }
+
+  pub(crate) fn host(&self) -> Option<&HeaderValue> {
+    self.host.as_ref()
+  }
+
+  fn port(&self) -> &HeaderValue {
+    &self.port
+  }
+}
+
 pub(crate) fn build_forwarded_header_cache(
   peer_addr: std::net::SocketAddr,
   scheme: &str,
@@ -72,17 +95,17 @@ pub(crate) fn validate_authority_host_consistency<B>(
 pub(crate) struct HostConsistencyError;
 
 pub(crate) fn set_effective_host_header(headers: &mut HeaderMap, host: &str) {
-  if host.is_empty() {
+  let value = effective_host_header_value(host);
+  set_effective_host_header_value(headers, value.as_ref());
+}
+
+pub(crate) fn set_effective_host_header_value(headers: &mut HeaderMap, host: Option<&HeaderValue>) {
+  if let Some(value) = host
+    && !value.as_bytes().is_empty()
+  {
+    headers.insert(HOST, value.clone());
+  } else {
     headers.remove(HOST);
-    return;
-  }
-  match HeaderValue::from_str(host) {
-    Ok(value) => {
-      headers.insert(HOST, value);
-    }
-    Err(_) => {
-      headers.remove(HOST);
-    }
   }
 }
 
@@ -94,6 +117,29 @@ pub(crate) fn add_forwarded_headers(
   port: u16,
   mode: ForwardedHeaderMode,
   cache: Option<&ForwardedHeaderCache>,
+) {
+  add_forwarded_headers_with_values(
+    headers,
+    forwarded_client_addr,
+    host,
+    scheme,
+    port,
+    mode,
+    cache,
+    None,
+  );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_forwarded_headers_with_values(
+  headers: &mut HeaderMap,
+  forwarded_client_addr: std::net::SocketAddr,
+  host: &str,
+  scheme: &str,
+  port: u16,
+  mode: ForwardedHeaderMode,
+  cache: Option<&ForwardedHeaderCache>,
+  values: Option<&ForwardedRequestHeaderValues>,
 ) {
   remove_inbound_forwarded_headers(headers);
   let forwarded_ip = forwarded_client_addr.ip();
@@ -115,16 +161,20 @@ pub(crate) fn add_forwarded_headers(
     .unwrap_or_else(|| forwarded_proto_header_value(scheme));
   headers.insert(X_FORWARDED_PROTO, proto);
 
-  match HeaderValue::from_str(host) {
-    Ok(value) => {
-      headers.insert(X_FORWARDED_HOST, value);
-    }
-    Err(_) => {
-      headers.remove(X_FORWARDED_HOST);
-    }
+  if let Some(value) = values
+    .and_then(ForwardedRequestHeaderValues::host)
+    .cloned()
+    .or_else(|| effective_host_header_value(host))
+  {
+    headers.insert(X_FORWARDED_HOST, value);
+  } else {
+    headers.remove(X_FORWARDED_HOST);
   }
 
-  headers.insert(X_FORWARDED_PORT, port_header_value(port));
+  let port = values
+    .map(|values| values.port().clone())
+    .unwrap_or_else(|| port_header_value(port));
+  headers.insert(X_FORWARDED_PORT, port);
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -183,6 +233,13 @@ fn default_port_for_optional_scheme(scheme: &str) -> Option<u16> {
 
 fn remove_inbound_forwarded_headers(headers: &mut HeaderMap) {
   headers.remove(FORWARDED);
+}
+
+fn effective_host_header_value(host: &str) -> Option<HeaderValue> {
+  if host.is_empty() {
+    return None;
+  }
+  HeaderValue::from_str(host).ok()
 }
 
 fn forwarded_proto_header_value(scheme: &str) -> HeaderValue {

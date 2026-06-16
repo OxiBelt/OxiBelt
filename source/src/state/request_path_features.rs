@@ -13,6 +13,7 @@ pub(crate) struct RequestPathFeaturePlan {
   pub(crate) person_proof_api: bool,
   pub(crate) rate_limits: bool,
   pub(crate) runtime_introspection: bool,
+  pub(crate) security_response_headers: bool,
   pub(crate) system_access_log: bool,
   pub(crate) telemetry: bool,
 }
@@ -35,6 +36,7 @@ impl RequestPathFeaturePlan {
       person_proof_api,
       rate_limits: !config.rate_limits.is_empty(),
       runtime_introspection: config.admin.enabled,
+      security_response_headers: config.security.headers.enabled(),
       system_access_log: system_access_log_enabled,
       telemetry: telemetry_enabled,
     }
@@ -112,6 +114,29 @@ detail = "detailed"
     assert!(plan.rate_limits);
     assert!(plan.system_access_log);
     assert!(plan.telemetry);
+  }
+
+  #[test]
+  fn request_path_feature_plan_tracks_security_response_headers() {
+    let temp_dir = common::TempDir::new("request-path-features-security-headers");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "request-path-features-security-headers");
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      ),
+      r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+"#
+    );
+    let config = parse_config(&raw);
+    let plan = RequestPathFeaturePlan::new(&config, false, false, false, false, false);
+
+    assert!(plan.security_response_headers);
   }
 
   #[test]
