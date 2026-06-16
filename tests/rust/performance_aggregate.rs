@@ -39,6 +39,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
         .arg(output_dir);
     for name in [
         "OXIBELT_PERF_H1_KEEPALIVE_MIN_NGINX_RATIO",
+        "OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE",
         "OXIBELT_PERF_H2_MIN_NGINX_RATIO",
         "OXIBELT_PERF_H3_MIN_NGINX_RATIO",
         "OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO",
@@ -120,7 +121,7 @@ fn write_profile_results_array(dir: &Path, rows: Vec<Value>) {
 }
 
 fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> Value {
-    json!({
+    let mut row = json!({
         "type": "load",
         "label": label,
         "protocol": protocol,
@@ -131,7 +132,25 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
         "p95_ms": p50_ms + 2.0,
         "p99_ms": p99_ms,
         "errors": 1
-    })
+    });
+    if label == "oxibelt-h1-keepalive" {
+        row.as_object_mut()
+            .expect("load row should be an object")
+            .insert(
+                "fast_path".to_owned(),
+                json!({
+                    "plain_proxy": {
+                        "h1": {
+                            "hits": 1000,
+                            "misses": 0,
+                            "attempts": 1000,
+                            "hit_rate": 1.0
+                        }
+                    }
+                }),
+            );
+    }
+    row
 }
 
 fn with_target_cpu(mut row: Value, target_cpu: &str) -> Value {
@@ -841,7 +860,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 14);
+    assert_eq!(report["schema_version"], 15);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1035,7 +1054,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 14);
+    assert_eq!(report["schema_version"], 15);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
