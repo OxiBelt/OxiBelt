@@ -23,7 +23,7 @@ use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
 use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
-use crate::proxy::http::semantics::{self, configured_error_response, filter_trailers};
+use crate::proxy::http::semantics::{self, configured_error_response};
 use crate::proxy::http::upstream::select_request_upstream;
 use crate::proxy::http::uri::{self, UpstreamUriParts};
 use crate::proxy::http::version::select_upstream_http_version;
@@ -43,6 +43,7 @@ use super::{
 mod decision;
 mod direct;
 mod request_body;
+mod response_body;
 mod small_response;
 mod waf;
 #[cfg(test)]
@@ -53,7 +54,9 @@ use self::request_body::{
   fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_is_definitely_empty,
 };
-use self::small_response::{SmallResponseDisposition, try_inline_response_body};
+use self::response_body::{
+  FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
+};
 use self::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
 
 static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
@@ -706,87 +709,6 @@ fn fast_path_outbound_request_body(
     return body;
   }
   body::with_send_timeout(body, timeout, BodyTimeoutKind::UpstreamRequestSend)
-}
-
-struct FastPathResponseBody {
-  body: ProxyBody,
-  known_small_response_body: bool,
-  inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
-  trailers_handled: bool,
-  disposition: &'static str,
-  reason: &'static str,
-}
-
-struct FastPathResponseBodyError {
-  response: Response<ProxyBody>,
-  reason: &'static str,
-}
-
-async fn fast_path_response_body<B>(
-  headers: &HeaderMap,
-  response_body: B,
-  upstream_read_timeout: std::time::Duration,
-  trailer_mode: TrailerMode,
-  request_version: http::Version,
-) -> Result<FastPathResponseBody, FastPathResponseBodyError>
-where
-  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
-  B::Error: Into<body::BoxError> + Send + Sync + 'static,
-{
-  match try_inline_response_body(
-    headers,
-    response_body,
-    upstream_read_timeout,
-    trailer_mode,
-    request_version != http::Version::HTTP_3,
-  )
-  .await
-  {
-    SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
-      body,
-      known_small_response_body: true,
-      inlined_known_small_body: inlined,
-      trailers_handled: true,
-      disposition: "inlined",
-      reason: "known_small",
-    }),
-    SmallResponseDisposition::Streaming { body, .. } if body.is_end_stream() => {
-      Ok(FastPathResponseBody {
-        body,
-        known_small_response_body: true,
-        inlined_known_small_body: None,
-        trailers_handled: true,
-        disposition: "inlined",
-        reason: "empty",
-      })
-    }
-    SmallResponseDisposition::Streaming { body, reason } => Ok(FastPathResponseBody {
-      body: body::with_read_timeout(
-        body,
-        upstream_read_timeout,
-        BodyTimeoutKind::UpstreamResponseRead,
-      ),
-      known_small_response_body: false,
-      inlined_known_small_body: None,
-      trailers_handled: false,
-      disposition: "streamed",
-      reason: reason.as_str(),
-    }),
-    SmallResponseDisposition::Error { response, reason } => Err(FastPathResponseBodyError {
-      response,
-      reason: reason.as_str(),
-    }),
-  }
-}
-
-fn fast_path_filter_trailers(body: ProxyBody, mode: TrailerMode) -> ProxyBody {
-  if body.is_end_stream() {
-    return body;
-  }
-  if mode == TrailerMode::Pass {
-    return body;
-  }
-  filter_trailers(body, mode, false)
 }
 
 #[cfg(test)]
