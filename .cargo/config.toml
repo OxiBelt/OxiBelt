@@ -2,4 +2,4 @@
 target-dir = "source/target"
 
 [env]
-RUST_MIN_STACK = "8388608"
+RUST_MIN_STACK = "16777216"
