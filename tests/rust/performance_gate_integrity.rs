@@ -594,8 +594,8 @@ sample_stats() {{
   printf 'STATS %s\n' "$1" >>"${{events}}"
 }}
 
-plain_proxy_h1_fast_path_gate_required() {{
-  return 1
+plain_proxy_fast_path_gate_protocol() {{
+  return 0
 }}
 
 {functions}
@@ -2418,33 +2418,39 @@ fn tls_resumption_mode_handshake_rows_run_as_fresh_oxibelt_only_smoke_rows() {
 }
 
 #[test]
-fn h1_keepalive_row_attaches_plain_proxy_fast_path_hit_rate() {
+fn h1_and_h2_rows_attach_plain_proxy_fast_path_hit_rate() {
     let script = performance_script_text();
 
     assert!(
         script.contains("OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE"),
-        "performance script should expose the H1 fast-path hit-rate threshold"
+        "performance script should expose the fast-path hit-rate threshold"
     );
     assert!(
-        script.contains("plain_proxy_h1_fast_path_delta"),
-        "performance script should compute H1 fast-path counter deltas"
+        script.contains("plain_proxy_fast_path_delta"),
+        "performance script should compute fast-path counter deltas"
     );
     assert!(
-        script.contains("direct_h1_h1_transport_delta"),
+        script.contains("direct_h1_transport_delta"),
         "performance script should compute direct-H1 transport counter deltas"
     );
     assert!(
-        script.contains(
-            "fast_path: {plain_proxy: {h1: $fast_path}, transport: {direct_h1: {h1: $direct_h1}}}"
-        ),
-        "oxibelt-h1-keepalive rows should include fast-path and direct-H1 evidence"
+        script.contains("oxibelt-h1-keepalive:h1"),
+        "oxibelt-h1-keepalive rows should be selected for H1 fast-path gating"
     );
     assert!(
-        script.contains("assert_plain_proxy_h1_fast_path_hit_rate"),
-        "performance script should gate the H1 fast-path hit rate"
+        script.contains("oxibelt-h2:h2"),
+        "oxibelt-h2 rows should be selected for H2 fast-path gating"
     );
     assert!(
-        script.contains("assert_direct_h1_h1_transport_hit_rate"),
+        script.contains("{($protocol): $fast_path}"),
+        "gated rows should include protocol-keyed fast-path evidence"
+    );
+    assert!(
+        script.contains("assert_plain_proxy_fast_path_hit_rate"),
+        "performance script should gate the fast-path hit rate"
+    );
+    assert!(
+        script.contains("assert_direct_h1_transport_hit_rate"),
         "performance script should gate the direct-H1 transport hit rate"
     );
 }

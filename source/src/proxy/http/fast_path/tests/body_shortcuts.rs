@@ -278,10 +278,12 @@ async fn actual_end_stream_request_body_shortcut_does_not_poll_body() {
     false,
     false,
   )
-  .await
-  .collect()
-  .await
-  .expect("end-stream fast-path body should collect");
+  .await;
+  assert!(body.proven_empty());
+  let body = body
+    .collect()
+    .await
+    .expect("end-stream fast-path body should collect");
   assert!(body.to_bytes().is_empty());
 }
 
@@ -299,10 +301,12 @@ async fn h2_h3_actual_end_stream_request_body_shortcut_does_not_poll_body() {
       false,
       false,
     )
-    .await
-    .collect()
-    .await
-    .expect("end-stream h2/h3 fast-path body should collect");
+    .await;
+    assert!(body.proven_empty());
+    let body = body
+      .collect()
+      .await
+      .expect("end-stream h2/h3 fast-path body should collect");
 
     assert!(body.to_bytes().is_empty());
   }
@@ -413,6 +417,7 @@ async fn h2_h3_empty_probe_preserves_data_and_trailers() {
     true,
   )
   .await;
+  assert!(!data_body.proven_empty());
   assert_ne!(data_body.size_hint().upper(), Some(0));
   let data = data_body
     .collect()
@@ -427,10 +432,12 @@ async fn h2_h3_empty_probe_preserves_data_and_trailers() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("zero-size-hint trailer-only body should collect");
+  .await;
+  assert!(!trailers.proven_empty());
+  let trailers = trailers
+    .collect()
+    .await
+    .expect("zero-size-hint trailer-only body should collect");
   assert_eq!(trailers.trailers().unwrap()["x-trailer"], "kept");
 }
 
@@ -446,10 +453,12 @@ async fn h2_h3_empty_probe_keeps_pending_body_on_limited_timeout_path() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("pending body should stay readable after empty probe");
+  .await;
+  assert!(!data.proven_empty());
+  let data = data
+    .collect()
+    .await
+    .expect("pending body should stay readable after empty probe");
 
   assert_eq!(data.to_bytes(), Bytes::from_static(b"data"));
 }
@@ -463,10 +472,12 @@ async fn h2_h3_empty_probe_shortcuts_pending_then_eof() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("pending then EOF body should collect");
+  .await;
+  assert!(body.proven_empty());
+  let body = body
+    .collect()
+    .await
+    .expect("pending then EOF body should collect");
 
   assert!(body.to_bytes().is_empty());
 }
@@ -484,10 +495,12 @@ async fn h2_h3_empty_probe_skips_repoll_when_pending_marks_end_stream() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("pending body that marks end-stream should collect");
+  .await;
+  assert!(body.proven_empty());
+  let body = body
+    .collect()
+    .await
+    .expect("pending body that marks end-stream should collect");
 
   assert_eq!(poll_count.load(Ordering::SeqCst), 1);
   assert!(body.to_bytes().is_empty());
@@ -505,10 +518,12 @@ async fn h2_h3_empty_probe_preserves_late_data_trailers_and_errors() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("body that stays pending through the probe should remain readable");
+  .await;
+  assert!(!data.proven_empty());
+  let data = data
+    .collect()
+    .await
+    .expect("body that stays pending through the probe should remain readable");
   assert_eq!(data.to_bytes(), Bytes::from_static(b"late-data"));
 
   let trailers = fast_path_request_body(
@@ -521,10 +536,12 @@ async fn h2_h3_empty_probe_preserves_late_data_trailers_and_errors() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect("late trailer body should collect");
+  .await;
+  assert!(!trailers.proven_empty());
+  let trailers = trailers
+    .collect()
+    .await
+    .expect("late trailer body should collect");
   assert_eq!(trailers.trailers().unwrap()["x-trailer"], "late");
 
   let error = fast_path_request_body(
@@ -534,9 +551,11 @@ async fn h2_h3_empty_probe_preserves_late_data_trailers_and_errors() {
     false,
     true,
   )
-  .await
-  .collect()
-  .await
-  .expect_err("late body error should be preserved");
+  .await;
+  assert!(!error.proven_empty());
+  let error = error
+    .collect()
+    .await
+    .expect_err("late body error should be preserved");
   assert!(error.to_string().contains("late body error"));
 }

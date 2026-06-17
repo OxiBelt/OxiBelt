@@ -166,7 +166,7 @@ pub(super) async fn try_send_direct_h1(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_definitely_empty: bool,
+  request_body_proven_empty: bool,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
 ) -> DirectH1SendResult {
@@ -176,7 +176,7 @@ pub(super) async fn try_send_direct_h1(
     upstream_version,
     request_version,
     direct_selection_used,
-    request_body_definitely_empty,
+    request_body_proven_empty,
     &outbound,
   ) {
     metrics.record_fast_path_transport(protocol, "miss", reason);
@@ -212,11 +212,13 @@ fn direct_h1_guard_miss(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_definitely_empty: bool,
+  request_body_proven_empty: bool,
   outbound: &Request<ProxyBody>,
 ) -> Option<&'static str> {
-  if request_version != http::Version::HTTP_11
-    || !direct_selection_used
+  if !matches!(
+    request_version,
+    http::Version::HTTP_11 | http::Version::HTTP_2
+  ) || !direct_selection_used
     || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
   {
     return Some("unsupported_request");
@@ -227,7 +229,7 @@ fn direct_h1_guard_miss(
   {
     return Some("unsupported_upstream");
   }
-  if !request_body_definitely_empty || !outbound.body().is_end_stream() {
+  if !request_body_proven_empty || !outbound.body().is_end_stream() {
     return Some("request_body");
   }
   None
@@ -420,6 +422,50 @@ mod tests {
         &request,
       ),
       None
+    );
+  }
+
+  #[test]
+  fn guard_accepts_direct_empty_http2_get_to_plain_h1_upstream() {
+    let upstream = upstream("http://backend.internal:18080");
+    let request = Request::builder()
+      .method(Method::GET)
+      .uri("http://backend.internal/perf/h2?body=ok")
+      .body(empty_body())
+      .unwrap();
+
+    assert_eq!(
+      direct_h1_guard_miss(
+        &upstream,
+        HttpVersion::H1,
+        http::Version::HTTP_2,
+        true,
+        true,
+        &request,
+      ),
+      None
+    );
+  }
+
+  #[test]
+  fn guard_rejects_http2_when_empty_body_is_not_proven() {
+    let upstream = upstream("http://backend.internal:18080");
+    let request = Request::builder()
+      .method(Method::GET)
+      .uri("http://backend.internal/perf/h2?body=ok")
+      .body(empty_body())
+      .unwrap();
+
+    assert_eq!(
+      direct_h1_guard_miss(
+        &upstream,
+        HttpVersion::H1,
+        http::Version::HTTP_2,
+        true,
+        false,
+        &request,
+      ),
+      Some("request_body")
     );
   }
 

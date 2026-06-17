@@ -203,6 +203,7 @@ async fn h1_definitely_empty_request_body_shortcut_does_not_poll_body() {
       false,
     )
     .await;
+    assert!(body.proven_empty());
     let bytes = body
       .collect()
       .await

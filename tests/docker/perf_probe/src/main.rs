@@ -1587,10 +1587,12 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
         );
     }
     let mut direct_h1 = serde_json::Map::new();
-    direct_h1.insert(
-        "h1".to_owned(),
-        fast_path_transport_metrics_json(metrics, "direct_h1", "h1"),
-    );
+    for protocol in ["h1", "h2", "h3"] {
+        direct_h1.insert(
+            protocol.to_owned(),
+            fast_path_transport_metrics_json(metrics, "direct_h1", protocol),
+        );
+    }
     serde_json::json!({
         "plain_proxy": plain_proxy,
         "transport": {
@@ -2675,6 +2677,8 @@ oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outc
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"hit\",reason=\"used\"} 97
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"miss\",reason=\"send_error\"} 3
+# TYPE oxibelt_http_fast_path_transports_total counter
+oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h2\",outcome=\"hit\",reason=\"used\"} 19
 ";
 
         let parsed = fast_path_metrics_json(metrics);
@@ -2692,6 +2696,7 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",
         assert_eq!(direct_h1["attempts"], 100);
         assert_eq!(direct_h1["hit_rate"], 0.97);
         assert_eq!(direct_h1["miss_reasons"]["send_error"], 3);
+        assert_eq!(parsed["transport"]["direct_h1"]["h2"]["hits"], 19);
     }
 
     #[test]

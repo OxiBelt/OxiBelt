@@ -10,8 +10,58 @@ use crate::proxy::http::request_framing::{
   h2_or_h3_safe_method_empty_probe_allowed, http1_request_body_is_definitely_empty,
 };
 
+#[cfg(test)]
 pub(super) fn fast_path_empty_request_body() -> ProxyBody {
   empty_body()
+}
+
+pub(super) struct FastPathRequestBody {
+  body: ProxyBody,
+  proven_empty: bool,
+}
+
+impl FastPathRequestBody {
+  pub(super) fn empty() -> Self {
+    Self {
+      body: empty_body(),
+      proven_empty: true,
+    }
+  }
+
+  pub(super) fn streaming(body: ProxyBody) -> Self {
+    Self {
+      body,
+      proven_empty: false,
+    }
+  }
+
+  pub(super) fn proven_empty(&self) -> bool {
+    self.proven_empty
+  }
+
+  pub(super) fn into_body(self) -> ProxyBody {
+    self.body
+  }
+}
+
+impl Body for FastPathRequestBody {
+  type Data = bytes::Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Pin::new(&mut self.body).poll_frame(cx)
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.body.size_hint()
+  }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -21,25 +71,25 @@ pub(super) fn fast_path_request_body<B>(
   timeout: std::time::Duration,
   definitely_empty: bool,
   empty_probe_allowed: bool,
-) -> impl std::future::Future<Output = ProxyBody> + Send
+) -> impl std::future::Future<Output = FastPathRequestBody> + Send
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   async move {
     if body.is_end_stream() || definitely_empty {
-      return empty_body();
+      return FastPathRequestBody::empty();
     }
 
     if empty_probe_allowed {
       return fast_path_request_body_with_empty_probe(body, max_body_bytes, timeout).await;
     }
 
-    body::with_read_timeout(
+    FastPathRequestBody::streaming(body::with_read_timeout(
       Limited::new(body, max_body_bytes),
       timeout,
       BodyTimeoutKind::DownstreamRequestRead,
-    )
+    ))
   }
 }
 
@@ -48,7 +98,7 @@ fn fast_path_request_body_with_empty_probe<B>(
   body: B,
   max_body_bytes: usize,
   timeout: std::time::Duration,
-) -> impl std::future::Future<Output = ProxyBody> + Send
+) -> impl std::future::Future<Output = FastPathRequestBody> + Send
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
@@ -56,25 +106,25 @@ where
   async move {
     let mut body = body;
     let first = match fast_path_poll_request_body_once(Pin::new(&mut body)) {
-      Poll::Ready(None) => return empty_body(),
+      Poll::Ready(None) => return FastPathRequestBody::empty(),
       Poll::Ready(Some(frame)) => Some(frame),
       Poll::Pending => {
         if body.is_end_stream() {
-          return empty_body();
+          return FastPathRequestBody::empty();
         }
         tokio::task::yield_now().await;
         if body.is_end_stream() {
-          return empty_body();
+          return FastPathRequestBody::empty();
         }
         match fast_path_poll_request_body_once(Pin::new(&mut body)) {
-          Poll::Ready(None) => return empty_body(),
+          Poll::Ready(None) => return FastPathRequestBody::empty(),
           Poll::Ready(Some(frame)) => Some(frame),
           Poll::Pending => None,
         }
       }
     };
 
-    body::with_read_timeout(
+    FastPathRequestBody::streaming(body::with_read_timeout(
       Limited::new(
         PeekedRequestBody {
           first,
@@ -85,7 +135,7 @@ where
       ),
       timeout,
       BodyTimeoutKind::DownstreamRequestRead,
-    )
+    ))
   }
 }
 

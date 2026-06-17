@@ -53,8 +53,10 @@ use self::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_pat
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
 use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};
+#[cfg(test)]
+use self::request_body::fast_path_empty_request_body;
 use self::request_body::{
-  fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
+  FastPathRequestBody, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_is_definitely_empty,
 };
 use self::response_body::{
@@ -320,8 +322,8 @@ impl PlainProxyFastPath {
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
-    let body = if request_body_definitely_empty {
-      fast_path_empty_request_body()
+    let request_body = if request_body_definitely_empty {
+      FastPathRequestBody::empty()
     } else {
       let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
       let request_body_empty_probe_allowed =
@@ -335,7 +337,8 @@ impl PlainProxyFastPath {
       )
       .await
     };
-    let outbound = Request::from_parts(parts, body).map(|body| {
+    let request_body_proven_empty = request_body.proven_empty();
+    let outbound = Request::from_parts(parts, request_body.into_body()).map(|body| {
       fast_path_outbound_request_body(
         body,
         state.config.proxy.http.trailers,
@@ -359,7 +362,7 @@ impl PlainProxyFastPath {
       upstream_version,
       request_version,
       direct_h1_candidate,
-      request_body_definitely_empty,
+      request_body_proven_empty,
       outbound,
       timeouts,
     )
