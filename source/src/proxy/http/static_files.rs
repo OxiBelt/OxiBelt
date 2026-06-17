@@ -17,6 +17,7 @@ use super::body::ProxyBody;
 use crate::config::RouteStaticFilesConfig;
 
 mod finalize;
+mod head_bytes;
 mod open;
 mod path;
 mod response_plan;
@@ -24,6 +25,7 @@ mod route_options;
 mod runtime;
 pub(in crate::proxy::http) use self::finalize::finalize_response;
 pub(crate) use self::finalize::static_response_send_timeout;
+pub(crate) use self::head_bytes::StaticResponseHeadBytes;
 #[cfg(all(test, target_os = "linux"))]
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
@@ -59,6 +61,7 @@ pub(crate) enum StaticBodyPlan {
   Bytes {
     bytes: Bytes,
     source: StaticBodySource,
+    response_heads: Option<StaticResponseHeadBytes>,
   },
   File(StaticFileBodyPlan),
 }

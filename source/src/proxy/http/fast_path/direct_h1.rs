@@ -273,9 +273,10 @@ async fn send_prepared_request(
     None => connect_sender(&pool, metrics).await?,
   };
 
+  let mut retry = reused.then(|| prepared.retry_request());
   let response = match tokio::time::timeout(
     timeouts.upstream_first_byte,
-    sender.send_request(prepared.request()),
+    sender.send_request(prepared.into_request()),
   )
   .await
   {
@@ -284,9 +285,12 @@ async fn send_prepared_request(
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
       metrics.record_direct_h1_pool_event("reconnect");
       sender = connect_sender(&pool, metrics).await?;
+      let retry = retry
+        .take()
+        .expect("reused direct H1 sends should retain one retry request");
       tokio::time::timeout(
         timeouts.upstream_first_byte,
-        sender.send_request(prepared.request()),
+        sender.send_request(retry.into_request()),
       )
       .await
       .context("direct H1 upstream first-byte timeout")??
@@ -345,8 +349,13 @@ async fn connect_sender(
   Ok(sender)
 }
 
-#[derive(Clone)]
 struct PreparedDirectH1Request {
+  method: Method,
+  uri: Uri,
+  headers: HeaderMap,
+}
+
+struct RetryDirectH1Request {
   method: Method,
   uri: Uri,
   headers: HeaderMap,
@@ -371,14 +380,35 @@ impl PreparedDirectH1Request {
     })
   }
 
-  fn request(&self) -> Request<ProxyBody> {
+  fn retry_request(&self) -> RetryDirectH1Request {
+    RetryDirectH1Request {
+      method: self.method.clone(),
+      uri: self.uri.clone(),
+      headers: self.headers.clone(),
+    }
+  }
+
+  fn into_request(self) -> Request<ProxyBody> {
     let mut request = Request::builder()
-      .method(self.method.clone())
+      .method(self.method)
       .version(http::Version::HTTP_11)
-      .uri(self.uri.clone())
+      .uri(self.uri)
       .body(empty_body())
       .expect("direct H1 request parts should be valid");
-    *request.headers_mut() = self.headers.clone();
+    *request.headers_mut() = self.headers;
+    request
+  }
+}
+
+impl RetryDirectH1Request {
+  fn into_request(self) -> Request<ProxyBody> {
+    let mut request = Request::builder()
+      .method(self.method)
+      .version(http::Version::HTTP_11)
+      .uri(self.uri)
+      .body(empty_body())
+      .expect("direct H1 retry request parts should be valid");
+    *request.headers_mut() = self.headers;
     request
   }
 }

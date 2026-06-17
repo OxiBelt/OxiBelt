@@ -358,6 +358,12 @@ open_file_cache_max_entries = 8
 open_file_cache_ttl_ms = 10000
 hot_object_cache_max_bytes = 65536
 hot_object_cache_max_file_bytes = 65536
+
+[security.headers]
+hsts = true
+hsts_max_age_seconds = 63072000
+hsts_include_subdomains = true
+hsts_preload = true
 "#,
   );
   let config: Config = toml::from_str(&raw).expect("config should parse");
@@ -377,9 +383,24 @@ hot_object_cache_max_file_bytes = 65536
   .expect("plain static request should be eligible");
 
   match plan.response.body {
-    StaticBodyPlan::Bytes { bytes, source } => {
+    StaticBodyPlan::Bytes {
+      bytes,
+      source,
+      response_heads,
+    } => {
       assert_eq!(source.metric_label(), "hot_object");
       assert_eq!(bytes.as_ref(), b"cached sendfile");
+      let response_heads = response_heads.expect("hot full-object response should cache heads");
+      let keep_alive = std::str::from_utf8(response_heads.get(true)).unwrap();
+      assert!(keep_alive.starts_with("HTTP/1.1 200 OK\r\n"));
+      assert!(keep_alive.contains("content-length: 15\r\n"));
+      assert!(
+        keep_alive
+          .contains("strict-transport-security: max-age=63072000; includeSubDomains; preload\r\n")
+      );
+      assert!(keep_alive.contains("Connection: keep-alive\r\n\r\n"));
+      let close = std::str::from_utf8(response_heads.get(false)).unwrap();
+      assert!(close.contains("Connection: close\r\n\r\n"));
     }
     other => panic!("expected cached bytes body, got {other:?}"),
   }

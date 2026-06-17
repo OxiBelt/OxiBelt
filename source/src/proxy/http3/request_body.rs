@@ -56,6 +56,17 @@ async fn prepare_h3_request_body_inner<S>(request: Request<()>, mut stream: S) -
 where
   S: H3RequestBodyStream,
 {
+  if h2_or_h3_safe_method_empty_probe_allowed(
+    request.method(),
+    http::Version::HTTP_3,
+    request.headers(),
+  ) && stream.is_end_stream()
+  {
+    let (parts, _) = request.into_parts();
+    drop(stream);
+    return Request::from_parts(parts, empty_body());
+  }
+
   let first = match poll_h3_request_body_once(&mut stream).await {
     None
       if h2_or_h3_safe_method_empty_probe_allowed(
@@ -67,12 +78,7 @@ where
       if stream.is_end_stream() {
         Some(Ok(None))
       } else {
-        tokio::task::yield_now().await;
-        if stream.is_end_stream() {
-          Some(Ok(None))
-        } else {
-          poll_h3_request_body_once(&mut stream).await
-        }
+        None
       }
     }
     first => first,
@@ -179,7 +185,17 @@ where
   }
 
   fn is_end_stream(&self) -> bool {
-    self.ended
+    if self.ended {
+      return true;
+    }
+    if self.initial_frame.is_some() {
+      return false;
+    }
+    self
+      .stream
+      .lock()
+      .map(|stream| stream.is_end_stream())
+      .unwrap_or(false)
   }
 
   fn size_hint(&self) -> SizeHint {

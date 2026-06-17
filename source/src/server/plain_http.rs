@@ -26,7 +26,9 @@ use crate::limits::ConnectionLimitContext;
 use crate::proxy::http;
 use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
 use crate::proxy::http::response::{apply_security_headers, text_response};
-use crate::proxy::http::static_files::{self, StaticBodyPlan, StaticResponsePlan};
+use crate::proxy::http::static_files::{
+  self, StaticBodyPlan, StaticResponseHeadBytes, StaticResponsePlan,
+};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol, normalize_host};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
@@ -35,12 +37,14 @@ use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
 mod parse;
 mod plain_io;
+mod response_head;
 mod sendfile;
 mod static_access_log;
 mod static_helpers;
 mod static_waf;
 use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
+use self::response_head::response_head_bytes;
 use self::static_access_log::{StaticFastPathContext, emit_system_access_log};
 use self::static_helpers::{static_body_source_label, static_fast_path_request_has_body};
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
@@ -462,6 +466,7 @@ async fn eligible_static_plan(
   if !resolved.execution_plan.waf.request.enabled()
     && !resolved.execution_plan.waf.response.enabled()
   {
+    attach_cached_static_response_heads(&mut plan);
     return Some(TimedStaticResponsePlan {
       response: plan,
       response_send_timeout,
@@ -481,6 +486,12 @@ async fn eligible_static_plan(
     )
     .await,
   )
+}
+
+fn attach_cached_static_response_heads(plan: &mut StaticResponsePlan) {
+  if let StaticBodyPlan::Bytes { response_heads, .. } = &mut plan.body {
+    *response_heads = Some(StaticResponseHeadBytes::new(plan.status, &plan.headers));
+  }
 }
 
 async fn write_static_plan(
@@ -522,11 +533,21 @@ async fn write_static_plan(
       )
       .await?;
     }
-    StaticBodyPlan::Bytes { bytes, .. } => {
-      response_head_bytes(*status, headers, keep_alive, head_buffer);
+    StaticBodyPlan::Bytes {
+      bytes,
+      response_heads,
+      ..
+    } => {
+      let head = match response_heads {
+        Some(response_heads) => response_heads.get(keep_alive).as_ref(),
+        None => {
+          response_head_bytes(*status, headers, keep_alive, head_buffer);
+          head_buffer.as_slice()
+        }
+      };
       write_all_tcp_vectored(
         stream,
-        head_buffer,
+        head,
         bytes.as_ref(),
         response_send_timeout,
         "static fast-path bytes response write failed",
@@ -585,49 +606,6 @@ async fn write_response_head(
     "static sendfile response head write failed",
   )
   .await
-}
-
-fn response_head_bytes(
-  status: StatusCode,
-  headers: &HeaderMap,
-  keep_alive: bool,
-  output: &mut Vec<u8>,
-) {
-  let reason = status.canonical_reason().unwrap_or("");
-  output.clear();
-  output.reserve(256 + headers.len() * 48);
-  output.extend_from_slice(b"HTTP/1.1 ");
-  append_u16_decimal(output, status.as_u16());
-  output.push(b' ');
-  output.extend_from_slice(reason.as_bytes());
-  output.extend_from_slice(b"\r\n");
-  for (name, value) in headers {
-    output.extend_from_slice(name.as_str().as_bytes());
-    output.extend_from_slice(b": ");
-    output.extend_from_slice(value.as_bytes());
-    output.extend_from_slice(b"\r\n");
-  }
-  if keep_alive {
-    output.extend_from_slice(b"Connection: keep-alive\r\n");
-  } else {
-    output.extend_from_slice(b"Connection: close\r\n");
-  }
-  output.extend_from_slice(b"\r\n");
-}
-
-fn append_u16_decimal(output: &mut Vec<u8>, value: u16) {
-  let mut buf = [0_u8; 5];
-  let mut value = value;
-  let mut index = buf.len();
-  loop {
-    index -= 1;
-    buf[index] = b'0' + (value % 10) as u8;
-    value /= 10;
-    if value == 0 {
-      break;
-    }
-  }
-  output.extend_from_slice(&buf[index..]);
 }
 
 #[cfg(target_os = "linux")]

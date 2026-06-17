@@ -176,6 +176,7 @@ fn cached_full_bytes_plan(method: &Method, cached: Arc<CachedStaticObject>) -> S
     StaticBodyPlan::Bytes {
       bytes: cached.body.clone(),
       source: StaticBodySource::HotObject,
+      response_heads: None,
     }
   };
   StaticResponsePlan {
@@ -262,6 +263,7 @@ fn bytes_plan(
     StaticBodyPlan::Bytes {
       bytes,
       source: StaticBodySource::HotObject,
+      response_heads: None,
     }
   } else {
     let start = content.offset as usize;
@@ -269,6 +271,7 @@ fn bytes_plan(
     StaticBodyPlan::Bytes {
       bytes: bytes.slice(start..end),
       source: StaticBodySource::HotObject,
+      response_heads: None,
     }
   };
   StaticResponsePlan {

@@ -167,7 +167,7 @@ fn prepared_request_uses_origin_form_and_synthesizes_host() {
     .unwrap();
 
   let prepared = PreparedDirectH1Request::from_request(request, &origin).unwrap();
-  let request = prepared.request();
+  let request = prepared.into_request();
 
   assert_eq!(request.uri().to_string(), "/perf/h1?body=ok");
   assert_eq!(request.headers()[HOST], "backend.internal:18080");
@@ -185,7 +185,7 @@ fn prepared_request_preserves_existing_host() {
     .unwrap();
 
   let prepared = PreparedDirectH1Request::from_request(request, &origin).unwrap();
-  let request = prepared.request();
+  let request = prepared.into_request();
 
   assert_eq!(request.headers()[HOST], "public.example");
 }

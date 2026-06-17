@@ -86,8 +86,9 @@ fn elapsed_ms(started_at: Instant) -> u64 {
   started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn request_body_definitely_empty<B>(request: &Request<B>) -> bool {
+fn request_body_definitely_empty<B: hyper::body::Body>(request: &Request<B>) -> bool {
   fast_path_request_body_is_definitely_empty(request.version(), request.headers())
+    || request.body().is_end_stream()
     || request
       .extensions()
       .get::<VerifiedContentLengthZeroBody>()

@@ -15,7 +15,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body as _, Frame};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
 use crate::lifecycle::ConnectionDrain;
@@ -399,9 +399,19 @@ pub(crate) async fn handle_downstream_connection(
       state: snapshot.clone(),
       drain: drain.clone(),
     };
-    let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http3Request);
-    let status = handle_h3_request(request, stream, context).await?;
-    debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
+    tokio::spawn(async move {
+      let _request_guard = context
+        .state
+        .runtime_introspection_guard(RuntimeCounter::Http3Request);
+      match handle_h3_request(request, stream, context).await {
+        Ok(status) => {
+          debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
+        }
+        Err(error) => {
+          warn!(peer = %peer_addr, error = %error, "downstream HTTP/3 request failed");
+        }
+      }
+    });
   }
 }
 
