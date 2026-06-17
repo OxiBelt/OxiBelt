@@ -259,7 +259,7 @@ async fn send_prepared_request(
     Ok(Ok(response)) => response,
     Ok(Err(error)) if reused => {
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
-      let mut sender = connect_sender(&pool, metrics).await?;
+      sender = connect_sender(&pool, metrics).await?;
       tokio::time::timeout(
         timeouts.upstream_first_byte,
         sender.send_request(prepared.request()),
@@ -398,8 +398,12 @@ fn fast_path_metric_protocol(version: http::Version) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
   use http::header::{CONNECTION, HOST};
   use http::{HeaderValue, Request};
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::net::TcpListener;
 
   use super::*;
 
@@ -548,6 +552,131 @@ mod tests {
     assert!(h1_response_allows_reuse(&headers));
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, close"));
     assert!(!h1_response_allows_reuse(&headers));
+  }
+
+  #[tokio::test]
+  async fn reconnect_recycles_replacement_sender_after_stale_reuse() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let accepted_connections = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(serve_keepalive_listener(
+      listener,
+      accepted_connections.clone(),
+    ));
+
+    let mut upstream = upstream(&origin);
+    upstream.connect_timeout_ms = 1_000;
+    upstream.first_byte_timeout_ms = 1_000;
+    upstream.idle_timeout_ms = 30_000;
+    let pool = Arc::new(DirectH1Pool::new(&upstream).expect("loopback origin should be eligible"));
+    let stale_sender = closed_direct_h1_sender().await?;
+    assert!(
+      pool.put_sender(stale_sender).await.is_ok(),
+      "test sender should fit in the idle pool"
+    );
+
+    let metrics = Metrics::new();
+    let timeouts = direct_h1_test_timeouts();
+    send_and_recycle_direct_get(pool.clone(), &metrics, "/after-stale-reconnect", timeouts).await?;
+    send_and_recycle_direct_get(pool, &metrics, "/replacement-should-be-reused", timeouts).await?;
+
+    assert_eq!(
+      accepted_connections.load(Ordering::SeqCst),
+      1,
+      "the live replacement sender should be recycled instead of the stale sender"
+    );
+    server.abort();
+    Ok(())
+  }
+
+  async fn send_and_recycle_direct_get(
+    pool: Arc<DirectH1Pool>,
+    metrics: &Arc<Metrics>,
+    path: &str,
+    timeouts: EffectiveTimeouts,
+  ) -> anyhow::Result<()> {
+    let request = Request::builder()
+      .method(Method::GET)
+      .uri(path)
+      .body(empty_body())
+      .expect("test request should be valid");
+    let prepared = PreparedDirectH1Request::from_request(request, &pool.origin)?;
+    let mut direct = send_prepared_request(pool, metrics, prepared, timeouts).await?;
+    let lease = direct
+      .take_lease()
+      .expect("direct H1 response should retain its lease");
+    direct.response.into_body().collect().await?;
+    lease.recycle_if_reusable(true).await;
+    Ok(())
+  }
+
+  async fn closed_direct_h1_sender() -> anyhow::Result<SendRequest<ProxyBody>> {
+    let (client_io, server_io) = tokio::io::duplex(64);
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(client_io))
+      .await
+      .context("test direct H1 handshake should succeed")?;
+    drop(server_io);
+    let connection = tokio::spawn(connection);
+    let _ = tokio::time::timeout(Duration::from_secs(1), connection)
+      .await
+      .context("test direct H1 connection should close")?
+      .context("test direct H1 connection task should join")?;
+    Ok(sender)
+  }
+
+  async fn serve_keepalive_listener(listener: TcpListener, accepted_connections: Arc<AtomicUsize>) {
+    loop {
+      let Ok((stream, _)) = listener.accept().await else {
+        return;
+      };
+      accepted_connections.fetch_add(1, Ordering::SeqCst);
+      tokio::spawn(async move {
+        let _ = serve_keepalive_connection(stream).await;
+      });
+    }
+  }
+
+  async fn serve_keepalive_connection(mut stream: TcpStream) -> std::io::Result<()> {
+    while read_request_head(&mut stream).await? {
+      stream
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+        .await?;
+    }
+    Ok(())
+  }
+
+  async fn read_request_head(stream: &mut TcpStream) -> std::io::Result<bool> {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+      let read = stream.read(&mut buffer).await?;
+      if read == 0 {
+        return Ok(false);
+      }
+      request.extend_from_slice(&buffer[..read]);
+      if request.windows(4).any(|window| window == b"\r\n\r\n") {
+        return Ok(true);
+      }
+      if request.len() > 8192 {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          "test request head exceeded limit",
+        ));
+      }
+    }
+  }
+
+  fn direct_h1_test_timeouts() -> EffectiveTimeouts {
+    let timeout = Duration::from_secs(1);
+    EffectiveTimeouts {
+      response_send: timeout,
+      websocket_idle: timeout,
+      webtransport_idle: timeout,
+      upstream_connect: timeout,
+      upstream_first_byte: timeout,
+      upstream_read: timeout,
+      upstream_send: timeout,
+    }
   }
 
   fn upstream(origin: &str) -> UpstreamConfig {
