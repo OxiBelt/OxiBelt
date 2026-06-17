@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 15;
+const COMPARISON_SCHEMA_VERSION: u32 = 16;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -200,6 +200,7 @@ struct BenchmarkRow {
     skipped: bool,
     reason: Option<String>,
     fast_path_plain_proxy_h1: Option<FastPathSample>,
+    fast_path_transport_direct_h1_h1: Option<FastPathSample>,
 }
 
 #[derive(Clone)]
@@ -267,6 +268,7 @@ struct AggregateBuilder {
     skip_reasons: BTreeSet<String>,
     source_files: BTreeSet<String>,
     fast_path_plain_proxy_h1: FastPathAggregateBuilder,
+    fast_path_transport_direct_h1_h1: FastPathAggregateBuilder,
 }
 
 #[derive(Clone)]
@@ -339,6 +341,8 @@ struct AggregateDistribution {
 struct AggregateFastPathStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     plain_proxy_h1: Option<FastPathAggregateStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_direct_h1_h1: Option<FastPathAggregateStats>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -996,6 +1000,9 @@ impl AggregateBuilder {
         if let Some(fast_path) = row.fast_path_plain_proxy_h1 {
             self.fast_path_plain_proxy_h1.push(fast_path);
         }
+        if let Some(fast_path) = row.fast_path_transport_direct_h1_h1 {
+            self.fast_path_transport_direct_h1_h1.push(fast_path);
+        }
         self.source_files.insert(source_file);
     }
 
@@ -1010,6 +1017,10 @@ impl AggregateBuilder {
             .map(Comparator::as_str)
             .unwrap_or("unknown")
             .to_owned();
+        let fast_path = aggregate_fast_path_stats(
+            self.fast_path_plain_proxy_h1,
+            self.fast_path_transport_direct_h1_h1,
+        );
 
         AggregateStats {
             amd64_target_cpu: self.amd64_target_cpu,
@@ -1039,9 +1050,24 @@ impl AggregateBuilder {
                 per_shard_median_rps: per_shard_medians(self.rps_values_by_shard),
                 per_shard_median_p99_ms: per_shard_medians(self.p99_values_by_shard),
             },
-            fast_path: self.fast_path_plain_proxy_h1.finish(),
+            fast_path,
         }
     }
+}
+
+fn aggregate_fast_path_stats(
+    plain_proxy_h1: FastPathAggregateBuilder,
+    transport_direct_h1_h1: FastPathAggregateBuilder,
+) -> Option<AggregateFastPathStats> {
+    let plain_proxy_h1 = plain_proxy_h1.finish();
+    let transport_direct_h1_h1 = transport_direct_h1_h1.finish();
+    if plain_proxy_h1.is_none() && transport_direct_h1_h1.is_none() {
+        return None;
+    }
+    Some(AggregateFastPathStats {
+        plain_proxy_h1,
+        transport_direct_h1_h1,
+    })
 }
 
 impl FastPathAggregateBuilder {
@@ -1055,20 +1081,18 @@ impl FastPathAggregateBuilder {
         }
     }
 
-    fn finish(self) -> Option<AggregateFastPathStats> {
+    fn finish(self) -> Option<FastPathAggregateStats> {
         if self.sample_count == 0 {
             return None;
         }
         let mut hit_rates = self.hit_rates;
-        Some(AggregateFastPathStats {
-            plain_proxy_h1: Some(FastPathAggregateStats {
-                sample_count: self.sample_count,
-                hits: self.hits,
-                misses: self.misses,
-                attempts: self.attempts,
-                median_hit_rate: percentile(&mut hit_rates, 50.0),
-                min_hit_rate: min_value(&hit_rates),
-            }),
+        Some(FastPathAggregateStats {
+            sample_count: self.sample_count,
+            hits: self.hits,
+            misses: self.misses,
+            attempts: self.attempts,
+            median_hit_rate: percentile(&mut hit_rates, 50.0),
+            min_hit_rate: min_value(&hit_rates),
         })
     }
 }
@@ -2862,6 +2886,13 @@ fn parse_result_value(
             label,
             warnings,
         ),
+        fast_path_transport_direct_h1_h1: parse_fast_path_transport_direct_h1_h1(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
     })
 }
 
@@ -2879,7 +2910,50 @@ fn parse_fast_path_plain_proxy_h1(
         .and_then(Value::as_object)
         .and_then(|plain_proxy| plain_proxy.get("h1"))
         .and_then(Value::as_object)?;
+    parse_fast_path_sample(
+        h1,
+        "fast_path.plain_proxy.h1",
+        source_file,
+        row_index,
+        label,
+        warnings,
+    )
+}
 
+fn parse_fast_path_transport_direct_h1_h1(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
+    let h1 = object
+        .get("fast_path")
+        .and_then(Value::as_object)
+        .and_then(|fast_path| fast_path.get("transport"))
+        .and_then(Value::as_object)
+        .and_then(|transport| transport.get("direct_h1"))
+        .and_then(Value::as_object)
+        .and_then(|direct_h1| direct_h1.get("h1"))
+        .and_then(Value::as_object)?;
+    parse_fast_path_sample(
+        h1,
+        "fast_path.transport.direct_h1.h1",
+        source_file,
+        row_index,
+        label,
+        warnings,
+    )
+}
+
+fn parse_fast_path_sample(
+    h1: &serde_json::Map<String, Value>,
+    path: &str,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
     let hits = integer_named_field(h1, &["hits"], source_file, row_index, label, warnings)?;
     let misses = integer_named_field(h1, &["misses"], source_file, row_index, label, warnings)?;
     let attempts = integer_named_field(h1, &["attempts"], source_file, row_index, label, warnings)?;
@@ -2889,14 +2963,14 @@ fn parse_fast_path_plain_proxy_h1(
     };
     if hits.saturating_add(misses) != attempts {
         warnings.push(format!(
-            "{source_file} row {row_index} ({label}): fast_path.plain_proxy.h1 attempts does not equal hits + misses"
+            "{source_file} row {row_index} ({label}): {path} attempts does not equal hits + misses"
         ));
     }
     if let Some(rate) = hit_rate
         && rate > 1.0
     {
         warnings.push(format!(
-            "{source_file} row {row_index} ({label}): fast_path.plain_proxy.h1 hit_rate is greater than 1.0"
+            "{source_file} row {row_index} ({label}): {path} hit_rate is greater than 1.0"
         ));
     }
 
@@ -4247,11 +4321,7 @@ fn collect_h1_fast_path_regression_gate(
         );
         return;
     };
-    let Some(fast_path) = aggregate
-        .fast_path
-        .as_ref()
-        .and_then(|fast_path| fast_path.plain_proxy_h1.as_ref())
-    else {
+    let Some(fast_path) = aggregate.fast_path.as_ref() else {
         push_missing_regression_gate_metric(
             findings,
             context,
@@ -4261,47 +4331,104 @@ fn collect_h1_fast_path_regression_gate(
         );
         return;
     };
+    collect_h1_fast_path_sample_gate(
+        fast_path.plain_proxy_h1.as_ref(),
+        H1FastPathSampleGateInput {
+            context,
+            metric_prefix: "plain_proxy_h1",
+            evidence_name: "H1 plain-proxy fast-path",
+            missing_message: "missing OxiBelt h1-keepalive plain-proxy fast-path evidence; cannot evaluate H1 fast-path hit-rate gate",
+            zero_message: "OxiBelt h1-keepalive plain-proxy fast-path evidence recorded zero attempts",
+            missing_rate_message: "missing OxiBelt h1-keepalive plain-proxy fast-path hit-rate value",
+            failure_reason: "minimum H1 fast-path evidence must meet the configured threshold",
+        },
+        findings,
+    );
+    collect_h1_fast_path_sample_gate(
+        fast_path.transport_direct_h1_h1.as_ref(),
+        H1FastPathSampleGateInput {
+            context,
+            metric_prefix: "transport_direct_h1_h1",
+            evidence_name: "direct-H1 transport",
+            missing_message: "missing OxiBelt h1-keepalive direct-H1 transport evidence; cannot evaluate H1 direct-H1 transport hit-rate gate",
+            zero_message: "OxiBelt h1-keepalive direct-H1 transport evidence recorded zero attempts",
+            missing_rate_message: "missing OxiBelt h1-keepalive direct-H1 transport hit-rate value",
+            failure_reason: "minimum H1 direct-H1 transport evidence must meet the configured threshold",
+        },
+        findings,
+    );
+}
+
+struct H1FastPathSampleGateInput<'a> {
+    context: RegressionGateContext<'a>,
+    metric_prefix: &'a str,
+    evidence_name: &'a str,
+    missing_message: &'a str,
+    zero_message: &'a str,
+    missing_rate_message: &'a str,
+    failure_reason: &'a str,
+}
+
+fn collect_h1_fast_path_sample_gate(
+    fast_path: Option<&FastPathAggregateStats>,
+    input: H1FastPathSampleGateInput<'_>,
+    findings: &mut RegressionGateFindings,
+) {
+    let attempts_metric = format!("{}_attempts", input.metric_prefix);
+    let min_hit_rate_metric = format!("{}_min_hit_rate", input.metric_prefix);
+    let Some(fast_path) = fast_path else {
+        push_missing_regression_gate_metric(
+            findings,
+            input.context,
+            &min_hit_rate_metric,
+            Some("oxibelt"),
+            input.missing_message,
+        );
+        return;
+    };
     if fast_path.attempts == 0 {
         push_invalid_regression_gate_metric(
             findings,
-            context,
-            "attempts",
+            input.context,
+            &attempts_metric,
             0.0,
             Some("oxibelt"),
-            "OxiBelt h1-keepalive fast-path evidence recorded zero attempts",
+            input.zero_message,
         );
         return;
     }
     let Some(min_hit_rate) = fast_path.min_hit_rate else {
         push_missing_regression_gate_metric(
             findings,
-            context,
-            "min_hit_rate",
+            input.context,
+            &min_hit_rate_metric,
             Some("oxibelt"),
-            "missing OxiBelt h1-keepalive fast-path hit-rate value",
+            input.missing_rate_message,
         );
         return;
     };
-    if min_hit_rate < threshold {
+    if min_hit_rate < input.context.threshold {
         push_threshold_regression_gate_metric(
             findings,
             RegressionGateFindingInput {
-                amd64_target_cpu: primary_target_cpu,
-                gate,
-                group: ScenarioGroup::ReverseProxy.as_str(),
-                scenario,
-                metric: "min_hit_rate",
+                amd64_target_cpu: input.context.amd64_target_cpu,
+                gate: input.context.gate,
+                group: input.context.group,
+                scenario: input.context.scenario,
+                metric: &min_hit_rate_metric,
                 observed: Some(min_hit_rate),
-                threshold,
+                threshold: input.context.threshold,
                 comparator: None,
                 message: format!(
-                    "OxiBelt h1-keepalive H1 plain-proxy fast-path hit rate {:.4} < {:.4} ({} hits, {} misses)",
-                    min_hit_rate, threshold, fast_path.hits, fast_path.misses
+                    "OxiBelt h1-keepalive {} hit rate {:.4} < {:.4} ({} hits, {} misses)",
+                    input.evidence_name,
+                    min_hit_rate,
+                    input.context.threshold,
+                    fast_path.hits,
+                    fast_path.misses
                 ),
             },
-            GateDisposition::evidence_blocking(
-                "minimum H1 fast-path evidence must meet the configured threshold",
-            ),
+            GateDisposition::evidence_blocking(input.failure_reason),
         );
     }
 }
@@ -6641,6 +6768,14 @@ mod tests {
                     median_hit_rate: Some(1.0),
                     min_hit_rate: Some(1.0),
                 }),
+                transport_direct_h1_h1: Some(FastPathAggregateStats {
+                    sample_count: 1,
+                    hits: 100,
+                    misses: 0,
+                    attempts: 100,
+                    median_hit_rate: Some(1.0),
+                    min_hit_rate: Some(1.0),
+                }),
             })
         } else {
             None
@@ -6758,6 +6893,17 @@ mod tests {
                     "hit_rate": 0.99,
                     "miss_reasons": {"cache_policy": 1}
                   }
+                },
+                "transport": {
+                  "direct_h1": {
+                    "h1": {
+                      "hits": 98,
+                      "misses": 2,
+                      "attempts": 100,
+                      "hit_rate": 0.98,
+                      "miss_reasons": {"send_error": 2}
+                    }
+                  }
                 }
               }
             }]"#,
@@ -6784,13 +6930,24 @@ mod tests {
                 aggregate.comparator == "oxibelt" && aggregate.scenario == "h1-keepalive"
             })
             .and_then(|aggregate| aggregate.fast_path.as_ref())
-            .and_then(|fast_path| fast_path.plain_proxy_h1.as_ref())
             .expect("fast-path aggregate should exist");
+        let plain_proxy_h1 = h1
+            .plain_proxy_h1
+            .as_ref()
+            .expect("plain-proxy fast-path aggregate should exist");
+        let direct_h1 = h1
+            .transport_direct_h1_h1
+            .as_ref()
+            .expect("direct-H1 transport aggregate should exist");
 
-        assert_eq!(h1.hits, 99);
-        assert_eq!(h1.misses, 1);
-        assert_eq!(h1.attempts, 100);
-        assert_eq!(h1.min_hit_rate, Some(0.99));
+        assert_eq!(plain_proxy_h1.hits, 99);
+        assert_eq!(plain_proxy_h1.misses, 1);
+        assert_eq!(plain_proxy_h1.attempts, 100);
+        assert_eq!(plain_proxy_h1.min_hit_rate, Some(0.99));
+        assert_eq!(direct_h1.hits, 98);
+        assert_eq!(direct_h1.misses, 2);
+        assert_eq!(direct_h1.attempts, 100);
+        assert_eq!(direct_h1.min_hit_rate, Some(0.98));
     }
 
     #[test]
@@ -6814,6 +6971,14 @@ mod tests {
                 attempts: 100,
                 median_hit_rate: Some(0.98),
                 min_hit_rate: Some(0.98),
+            }),
+            transport_direct_h1_h1: Some(FastPathAggregateStats {
+                sample_count: 1,
+                hits: 100,
+                misses: 0,
+                attempts: 100,
+                median_hit_rate: Some(1.0),
+                min_hit_rate: Some(1.0),
             }),
         });
 
@@ -6839,7 +7004,7 @@ mod tests {
 
         assert!(gates.violations.iter().any(|violation| {
             violation.gate == "h1_fast_path_min_hit_rate"
-                && violation.metric == "min_hit_rate"
+                && violation.metric == "plain_proxy_h1_min_hit_rate"
                 && violation.observed == Some(0.98)
                 && violation.evaluation_mode == "evidence"
         }));

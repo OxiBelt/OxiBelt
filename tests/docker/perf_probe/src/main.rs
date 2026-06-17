@@ -1586,7 +1586,17 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
             fast_path_protocol_metrics_json(metrics, "plain_proxy", protocol),
         );
     }
-    serde_json::json!({ "plain_proxy": plain_proxy })
+    let mut direct_h1 = serde_json::Map::new();
+    direct_h1.insert(
+        "h1".to_owned(),
+        fast_path_transport_metrics_json(metrics, "direct_h1", "h1"),
+    );
+    serde_json::json!({
+        "plain_proxy": plain_proxy,
+        "transport": {
+            "direct_h1": direct_h1
+        }
+    })
 }
 
 fn fast_path_protocol_metrics_json(metrics: &str, path: &str, protocol: &str) -> serde_json::Value {
@@ -1597,6 +1607,50 @@ fn fast_path_protocol_metrics_json(metrics: &str, path: &str, protocol: &str) ->
         "oxibelt_http_fast_path_decisions_total",
     ) {
         if labels.get("path").map(String::as_str) != Some(path)
+            || labels.get("protocol").map(String::as_str) != Some(protocol)
+        {
+            continue;
+        }
+        match labels.get("outcome").map(String::as_str) {
+            Some("hit") => hits += value,
+            Some("miss") => {
+                let reason = labels
+                    .get("reason")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned());
+                *miss_reasons.entry(reason).or_insert(0) += value;
+            }
+            _ => {}
+        }
+    }
+    let misses = miss_reasons.values().sum::<u64>();
+    let attempts = hits + misses;
+    let hit_rate = if attempts == 0 {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(hits as f64 / attempts as f64)
+    };
+    serde_json::json!({
+        "hits": hits,
+        "misses": misses,
+        "attempts": attempts,
+        "hit_rate": hit_rate,
+        "miss_reasons": miss_reasons,
+    })
+}
+
+fn fast_path_transport_metrics_json(
+    metrics: &str,
+    transport: &str,
+    protocol: &str,
+) -> serde_json::Value {
+    let mut hits = 0;
+    let mut miss_reasons = BTreeMap::new();
+    for (labels, value) in prometheus_labeled_u64_samples(
+        metrics,
+        "oxibelt_http_fast_path_transports_total",
+    ) {
+        if labels.get("transport").map(String::as_str) != Some(transport)
             || labels.get("protocol").map(String::as_str) != Some(protocol)
         {
             continue;
@@ -2609,7 +2663,7 @@ oxibelt_tls_server_session_storage_put_duration_ns_total 23
     }
 
     #[test]
-    fn metrics_parser_extracts_plain_proxy_h1_fast_path_counters() {
+    fn metrics_parser_extracts_fast_path_counters() {
         let metrics = "\
 # TYPE oxibelt_http_fast_path_decisions_total counter
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"hit\",reason=\"eligible\"} 99
@@ -2617,10 +2671,15 @@ oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outc
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"miss\",reason=\"cache_policy\"} 1
 # TYPE oxibelt_http_fast_path_decisions_total counter
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outcome=\"hit\",reason=\"eligible\"} 17
+# TYPE oxibelt_http_fast_path_transports_total counter
+oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"hit\",reason=\"used\"} 97
+# TYPE oxibelt_http_fast_path_transports_total counter
+oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"miss\",reason=\"send_error\"} 3
 ";
 
         let parsed = fast_path_metrics_json(metrics);
         let h1 = &parsed["plain_proxy"]["h1"];
+        let direct_h1 = &parsed["transport"]["direct_h1"]["h1"];
 
         assert_eq!(h1["hits"], 99);
         assert_eq!(h1["misses"], 1);
@@ -2628,6 +2687,11 @@ oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outc
         assert_eq!(h1["hit_rate"], 0.99);
         assert_eq!(h1["miss_reasons"]["cache_policy"], 1);
         assert_eq!(parsed["plain_proxy"]["h2"]["hits"], 17);
+        assert_eq!(direct_h1["hits"], 97);
+        assert_eq!(direct_h1["misses"], 3);
+        assert_eq!(direct_h1["attempts"], 100);
+        assert_eq!(direct_h1["hit_rate"], 0.97);
+        assert_eq!(direct_h1["miss_reasons"]["send_error"], 3);
     }
 
     #[test]

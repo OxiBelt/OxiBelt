@@ -149,6 +149,10 @@ impl Metrics {
       .record_response_body(protocol, disposition, reason);
   }
 
+  pub fn record_fast_path_transport(&self, protocol: &str, outcome: &str, reason: &str) {
+    self.fast_path.record_transport(protocol, outcome, reason);
+  }
+
   pub fn record_http_upstream_client_request(&self, version: &str, scheme: &str, pool: &str) {
     self.upstream_client.record_request(version, scheme, pool);
   }

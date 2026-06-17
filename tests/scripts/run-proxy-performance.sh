@@ -1376,7 +1376,7 @@ append_result() {
   local json="$1"
   json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
   printf '%s\n' "${json}" >>"${results_jsonl}"
-  local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate result_text
+  local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate direct_h1_hit_rate result_text
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
   type="$(jq -r '.type // "unknown"' <<<"${json}")"
   protocol="$(jq -r '.protocol // .mode // "-"' <<<"${json}")"
@@ -1395,6 +1395,10 @@ append_result() {
   fast_path_hit_rate="$(jq -r '.fast_path.plain_proxy.h1.hit_rate // empty' <<<"${json}")"
   if [[ -n "${fast_path_hit_rate}" ]]; then
     result_text="${result_text}, h1 fast-path $(jq -n -r --argjson rate "${fast_path_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
+  fi
+  direct_h1_hit_rate="$(jq -r '.fast_path.transport.direct_h1.h1.hit_rate // empty' <<<"${json}")"
+  if [[ -n "${direct_h1_hit_rate}" ]]; then
+    result_text="${result_text}, direct h1 $(jq -n -r --argjson rate "${direct_h1_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
   fi
   printf '| `%s` | `%s` | `%s` | %s | errors=%s |\n' \
     "${label}" "${type}" "${protocol}" "${result_text}" "${errors}" >>"${summary_md}"
@@ -1882,12 +1886,13 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_before fast_path_after fast_path_delta
+  local json fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
   if plain_proxy_h1_fast_path_gate_required "${label}" "${protocol}" "${host}"; then
     fast_path_before="$(plain_proxy_h1_fast_path_metrics "${host}" "${label}-fast-path-before")"
+    direct_h1_before="$(direct_h1_h1_transport_metrics "${host}" "${label}-direct-h1-before")"
   fi
   local -a probe_args=(
     load
@@ -1912,9 +1917,12 @@ run_load() {
   fi
   if plain_proxy_h1_fast_path_gate_required "${label}" "${protocol}" "${host}"; then
     fast_path_after="$(plain_proxy_h1_fast_path_metrics "${host}" "${label}-fast-path-after")"
+    direct_h1_after="$(direct_h1_h1_transport_metrics "${host}" "${label}-direct-h1-after")"
     fast_path_delta="$(plain_proxy_h1_fast_path_delta "${fast_path_before}" "${fast_path_after}")"
-    json="$(jq -c --argjson fast_path "${fast_path_delta}" '. + {fast_path: {plain_proxy: {h1: $fast_path}}}' <<<"${json}")"
+    direct_h1_delta="$(direct_h1_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
+    json="$(jq -c --argjson fast_path "${fast_path_delta}" --argjson direct_h1 "${direct_h1_delta}" '. + {fast_path: {plain_proxy: {h1: $fast_path}, transport: {direct_h1: {h1: $direct_h1}}}}' <<<"${json}")"
     assert_plain_proxy_h1_fast_path_hit_rate "${label}" "${fast_path_delta}"
+    assert_direct_h1_h1_transport_hit_rate "${label}" "${direct_h1_delta}"
   fi
   append_result "${json}"
   assert_result "${json}"
@@ -2087,7 +2095,32 @@ plain_proxy_h1_fast_path_metrics() {
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
 }
 
-plain_proxy_h1_fast_path_delta() {
+direct_h1_h1_transport_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.fast_path.transport.direct_h1.h1 // {
+        hits: 0,
+        misses: 0,
+        attempts: 0,
+        hit_rate: null,
+        miss_reasons: {}
+      }' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+fast_path_counter_delta() {
   local before="$1"
   local after="$2"
   jq -n -c \
@@ -2115,6 +2148,14 @@ plain_proxy_h1_fast_path_delta() {
        }'
 }
 
+plain_proxy_h1_fast_path_delta() {
+  fast_path_counter_delta "$1" "$2"
+}
+
+direct_h1_h1_transport_delta() {
+  fast_path_counter_delta "$1" "$2"
+}
+
 plain_proxy_h1_fast_path_gate_required() {
   local label="$1"
   local protocol="$2"
@@ -2138,6 +2179,25 @@ assert_plain_proxy_h1_fast_path_hit_rate() {
   fi
   if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
     handle_regression_gate_violation "OxiBelt ${label} fast-path gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
+  fi
+}
+
+assert_direct_h1_h1_transport_hit_rate() {
+  local label="$1"
+  local fast_path="$2"
+  local attempts hit_rate
+  attempts="$(jq -r '.attempts // 0' <<<"${fast_path}")"
+  if [[ "${attempts}" == "0" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: no direct-H1 transport samples were recorded"
+    return
+  fi
+  hit_rate="$(jq -r '.hit_rate // empty' <<<"${fast_path}")"
+  if [[ -z "${hit_rate}" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: missing direct-H1 hit-rate evidence"
+    return
+  fi
+  if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
   fi
 }
 

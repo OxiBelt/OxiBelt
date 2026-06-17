@@ -2430,12 +2430,22 @@ fn h1_keepalive_row_attaches_plain_proxy_fast_path_hit_rate() {
         "performance script should compute H1 fast-path counter deltas"
     );
     assert!(
-        script.contains("fast_path: {plain_proxy: {h1: $fast_path}}"),
-        "oxibelt-h1-keepalive rows should include fast-path hit-rate evidence"
+        script.contains("direct_h1_h1_transport_delta"),
+        "performance script should compute direct-H1 transport counter deltas"
+    );
+    assert!(
+        script.contains(
+            "fast_path: {plain_proxy: {h1: $fast_path}, transport: {direct_h1: {h1: $direct_h1}}}"
+        ),
+        "oxibelt-h1-keepalive rows should include fast-path and direct-H1 evidence"
     );
     assert!(
         script.contains("assert_plain_proxy_h1_fast_path_hit_rate"),
         "performance script should gate the H1 fast-path hit rate"
+    );
+    assert!(
+        script.contains("assert_direct_h1_h1_transport_hit_rate"),
+        "performance script should gate the direct-H1 transport hit rate"
     );
 }
 

@@ -28,6 +28,7 @@ use crate::mitigation::MitigationSink;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
+use crate::proxy::http::fast_path::DirectH1Pools;
 use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
@@ -202,6 +203,7 @@ pub struct AppSnapshot {
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
   pub clients: UpstreamClientPools,
+  pub(crate) direct_h1_pools: DirectH1Pools,
   pub health_check_clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
@@ -315,6 +317,7 @@ impl AppSnapshot {
       "primary",
     )
     .context("failed to build upstream HTTP clients")?;
+    let direct_h1_pools = DirectH1Pools::new(&upstreams);
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
     let health_check_clients = build_clients(
       &health_check_upstreams,
@@ -490,6 +493,7 @@ impl AppSnapshot {
       upstream_uri_parts,
       upstream_uri_parts_by_index,
       clients,
+      direct_h1_pools,
       health_check_clients,
       control_http,
       h3_clients,
@@ -552,6 +556,7 @@ impl AppSnapshot {
       "primary",
     )
     .context("failed to build upstream HTTP clients")?;
+    let direct_h1_pools = DirectH1Pools::new(&upstreams);
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
     let health_check_clients = build_clients(
       &health_check_upstreams,
@@ -622,6 +627,7 @@ impl AppSnapshot {
       upstream_uri_parts,
       upstream_uri_parts_by_index,
       clients,
+      direct_h1_pools,
       health_check_clients,
       control_http: control_http.clone(),
       h3_clients,

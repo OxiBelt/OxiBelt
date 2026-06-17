@@ -28,11 +28,26 @@ const BODY_REASONS: [&str; 6] = [
 ];
 const BODY_COUNTERS_PER_PROTOCOL: usize = BODY_DISPOSITIONS.len() * BODY_REASONS.len();
 const BODY_COUNTER_COUNT: usize = PROTOCOLS.len() * BODY_COUNTERS_PER_PROTOCOL;
+const TRANSPORT_DIRECT_H1: &str = "direct_h1";
+const TRANSPORT_HIT_REASON: &str = "used";
+const TRANSPORT_MISS_REASONS: [&str; 8] = [
+  "unsupported_request",
+  "unsupported_upstream",
+  "request_body",
+  "connect_error",
+  "send_error",
+  "response_error",
+  "not_reusable",
+  "pool_full",
+];
+const TRANSPORT_OUTCOMES_PER_PROTOCOL: usize = 1 + TRANSPORT_MISS_REASONS.len();
+const TRANSPORT_COUNTER_COUNT: usize = PROTOCOLS.len() * TRANSPORT_OUTCOMES_PER_PROTOCOL;
 
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
   response_body_counters: [StripedCounter; BODY_COUNTER_COUNT],
+  transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
 }
 
 impl Default for FastPathMetrics {
@@ -40,6 +55,7 @@ impl Default for FastPathMetrics {
     Self {
       decision_counters: std::array::from_fn(|_| StripedCounter::default()),
       response_body_counters: std::array::from_fn(|_| StripedCounter::default()),
+      transport_counters: std::array::from_fn(|_| StripedCounter::default()),
     }
   }
 }
@@ -57,6 +73,13 @@ impl FastPathMetrics {
       return;
     };
     self.response_body_counters[index].increment();
+  }
+
+  pub(super) fn record_transport(&self, protocol: &str, outcome: &str, reason: &str) {
+    let Some(index) = transport_counter_index(protocol, outcome, reason) else {
+      return;
+    };
+    self.transport_counters[index].increment();
   }
 
   pub(super) fn append_prometheus(&self, output: &mut String) {
@@ -93,6 +116,26 @@ impl FastPathMetrics {
             .load(),
           );
         }
+      }
+      append_transport_counter(
+        output,
+        protocol,
+        "hit",
+        TRANSPORT_HIT_REASON,
+        self.transport_counters[transport_counter_index(protocol, "hit", TRANSPORT_HIT_REASON)
+          .expect("transport hit counter exists")]
+        .load(),
+      );
+      for reason in TRANSPORT_MISS_REASONS {
+        append_transport_counter(
+          output,
+          protocol,
+          "miss",
+          reason,
+          self.transport_counters[transport_counter_index(protocol, "miss", reason)
+            .expect("transport miss counter exists")]
+          .load(),
+        );
       }
     }
   }
@@ -131,6 +174,22 @@ fn response_body_counter_index(protocol: &str, disposition: &str, reason: &str) 
   )
 }
 
+fn transport_counter_index(protocol: &str, outcome: &str, reason: &str) -> Option<usize> {
+  let protocol_index = PROTOCOLS
+    .iter()
+    .position(|candidate| *candidate == protocol)?;
+  let offset = match (outcome, reason) {
+    ("hit", TRANSPORT_HIT_REASON) => 0,
+    ("miss", reason) => {
+      1 + TRANSPORT_MISS_REASONS
+        .iter()
+        .position(|candidate| *candidate == reason)?
+    }
+    _ => return None,
+  };
+  Some(protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL + offset)
+}
+
 fn append_labeled_counter(
   output: &mut String,
   protocol: &str,
@@ -141,6 +200,27 @@ fn append_labeled_counter(
   output.push_str("# TYPE oxibelt_http_fast_path_decisions_total counter\n");
   output.push_str("oxibelt_http_fast_path_decisions_total{path=\"");
   output.push_str(PATH_PLAIN_PROXY);
+  output.push_str("\",protocol=\"");
+  output.push_str(protocol);
+  output.push_str("\",outcome=\"");
+  output.push_str(outcome);
+  output.push_str("\",reason=\"");
+  output.push_str(reason);
+  output.push_str("\"} ");
+  output.push_str(&value.to_string());
+  output.push('\n');
+}
+
+fn append_transport_counter(
+  output: &mut String,
+  protocol: &str,
+  outcome: &str,
+  reason: &str,
+  value: u64,
+) {
+  output.push_str("# TYPE oxibelt_http_fast_path_transports_total counter\n");
+  output.push_str("oxibelt_http_fast_path_transports_total{transport=\"");
+  output.push_str(TRANSPORT_DIRECT_H1);
   output.push_str("\",protocol=\"");
   output.push_str(protocol);
   output.push_str("\",outcome=\"");
@@ -204,6 +284,25 @@ mod tests {
       metrics.response_body_counters
         [response_body_counter_index("h1", "inlined", "known_small").unwrap()]
       .load(),
+      1
+    );
+  }
+
+  #[test]
+  fn records_only_known_transport_label_sets() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_transport("h1", "hit", "used");
+    metrics.record_transport("h1", "miss", "request_body");
+    metrics.record_transport("h1", "miss", "unknown");
+    metrics.record_transport("h9", "hit", "used");
+
+    assert_eq!(
+      metrics.transport_counters[transport_counter_index("h1", "hit", "used").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters[transport_counter_index("h1", "miss", "request_body").unwrap()]
+        .load(),
       1
     );
   }

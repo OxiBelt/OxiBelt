@@ -42,6 +42,7 @@ use super::{
 
 mod decision;
 mod direct;
+pub(crate) mod direct_h1;
 mod request_body;
 mod response_body;
 mod small_response;
@@ -50,6 +51,8 @@ mod waf;
 use self::decision::PlainProxyFastPathMissReason;
 use self::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_path_decision};
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
+pub(crate) use self::direct_h1::DirectH1Pools;
+use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};
 use self::request_body::{
   fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_is_definitely_empty,
@@ -187,6 +190,7 @@ impl PlainProxyFastPath {
       &request_waf,
       direct_retry_enabled,
     );
+    let direct_h1_candidate = direct_selection.is_some();
     let (
       mut upstream,
       mut upstream_index,
@@ -339,14 +343,6 @@ impl PlainProxyFastPath {
       )
     });
 
-    let Some(client) =
-      state
-        .clients
-        .for_upstream_index(upstream_index, upstream.origin.scheme(), upstream_version)
-    else {
-      warn!(upstream = %upstream.name, "missing upstream client pool");
-      return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
-    };
     let upstream_started_at = fast_path_upstream_timing_required(
       state.as_ref(),
       response_waf_enabled,
@@ -354,41 +350,72 @@ impl PlainProxyFastPath {
     )
     .then(Instant::now);
     let mut report_pool_success = false;
-    let upstream_response = match if let Some(selection) = pool_selection.take() {
-      let (original_uri, pool_retry_cookie) = pool_retry_context
-        .as_ref()
-        .expect("pool retry context should exist for pool selections");
-      send_pool_with_retry(
-        state.as_ref(),
-        outbound,
-        upstream_index,
-        selection,
-        resolved.route,
-        original_uri,
-        &resolved.path_captures,
-        client_addr,
-        host,
-        downstream_scheme,
-        pool_retry_cookie.as_ref(),
-        &request_waf,
-        timeouts,
-        &retry_policy,
-      )
-      .await
-      .map(|success| {
-        upstream_index = success.upstream_index;
-        upstream = &state.upstreams[upstream_index];
-        access_log.set_upstream(&upstream.name, upstream.origin.scheme());
-        report_pool_success = success.report_success;
-        sticky_cookie = success.pool_selection.sticky_cookie();
-        pool_selection = Some(success.pool_selection);
-        success.response
-      })
-    } else if retry_policy.enabled {
-      send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
-    } else {
-      send_one_shot(client, outbound, timeouts).await
-    } {
+    let mut direct_h1_lease = None;
+    let upstream_response_result = match try_send_direct_h1(
+      &state.direct_h1_pools,
+      &state.metrics,
+      upstream_index,
+      upstream,
+      upstream_version,
+      request_version,
+      direct_h1_candidate,
+      request_body_definitely_empty,
+      outbound,
+      timeouts,
+    )
+    .await
+    {
+      DirectH1SendResult::Sent(result) => result.map(|mut direct| {
+        direct_h1_lease = direct.take_lease();
+        direct.response
+      }),
+      DirectH1SendResult::Fallback(outbound) => {
+        let Some(client) = state.clients.for_upstream_index(
+          upstream_index,
+          upstream.origin.scheme(),
+          upstream_version,
+        ) else {
+          warn!(upstream = %upstream.name, "missing upstream client pool");
+          return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+        };
+        if let Some(selection) = pool_selection.take() {
+          let (original_uri, pool_retry_cookie) = pool_retry_context
+            .as_ref()
+            .expect("pool retry context should exist for pool selections");
+          send_pool_with_retry(
+            state.as_ref(),
+            outbound,
+            upstream_index,
+            selection,
+            resolved.route,
+            original_uri,
+            &resolved.path_captures,
+            client_addr,
+            host,
+            downstream_scheme,
+            pool_retry_cookie.as_ref(),
+            &request_waf,
+            timeouts,
+            &retry_policy,
+          )
+          .await
+          .map(|success| {
+            upstream_index = success.upstream_index;
+            upstream = &state.upstreams[upstream_index];
+            access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+            report_pool_success = success.report_success;
+            sticky_cookie = success.pool_selection.sticky_cookie();
+            pool_selection = Some(success.pool_selection);
+            success.response
+          })
+        } else if retry_policy.enabled {
+          send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
+        } else {
+          send_one_shot(client, outbound, timeouts).await
+        }
+      }
+    };
+    let upstream_response = match upstream_response_result {
       Ok(response) => response,
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
@@ -463,6 +490,9 @@ impl PlainProxyFastPath {
         response_body_disposition,
         response_body_reason,
       );
+    }
+    if let Some(lease) = direct_h1_lease.take() {
+      lease.recycle_if_reusable(known_small_response_body).await;
     }
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
