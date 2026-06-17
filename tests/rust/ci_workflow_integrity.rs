@@ -184,6 +184,11 @@ fn docker_pull_retry_script_text() -> String {
         .expect("Docker pull retry script should be readable")
 }
 
+fn docker_integration_matrix_script_text() -> String {
+    fs::read_to_string(repo_root().join("tests/scripts/run-proxy-integration-matrix.sh"))
+        .expect("Docker integration matrix script should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
     let manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
         .expect("root Cargo.toml should be readable");
@@ -722,6 +727,60 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
             "each Docker integration job should pass {value}"
         );
     }
+}
+
+#[test]
+fn docker_integration_matrix_cargo_invocations_are_retry_hardened() {
+    let workflow = workflow_text();
+    let matrix_job = workflow_job_text(&workflow, "generate-test-matrices");
+    let script = docker_integration_matrix_script_text();
+    let cargo_matrix_helper = "cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix --";
+
+    assert!(
+        workflow.contains("CARGO_NET_RETRY: \"10\""),
+        "workflow should raise Cargo's registry retry budget for CI network flakes"
+    );
+    assert!(
+        matrix_job.contains("cargo_run_with_retry()")
+            && matrix_job.contains("printf 'cargo run failed with status")
+            && matrix_job.contains("delay=$((delay * 2))"),
+        "generate-test-matrices should retry transient cargo run failures"
+    );
+    assert_eq!(
+        matrix_job.matches(cargo_matrix_helper).count(),
+        2,
+        "generate-test-matrices should retry both Docker and browser matrix helper calls"
+    );
+    assert!(
+        !matrix_job.contains(
+            "cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix --"
+        ),
+        "generate-test-matrices should not call the matrix helper without retry"
+    );
+
+    assert!(
+        script.contains("cargo_run_with_retry()")
+            && script.contains("printf 'cargo run failed with status")
+            && script.contains("delay=$((delay * 2))"),
+        "Docker integration matrix script should retry transient cargo run failures"
+    );
+    assert_eq!(
+        script.matches(cargo_matrix_helper).count(),
+        1,
+        "Docker integration matrix materialization should use the cargo retry helper once"
+    );
+    assert!(
+        script.contains(
+            "cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \\\n  materialize"
+        ),
+        "Docker integration matrix materialization should preserve --locked and materialize arguments"
+    );
+    assert!(
+        !script.contains(
+            "\ncargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \\\n  materialize"
+        ),
+        "Docker integration matrix materialization should not bypass the retry helper"
+    );
 }
 
 #[test]

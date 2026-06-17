@@ -175,6 +175,28 @@ docker_build_with_retry() {
   done
 }
 
+cargo_run_with_retry() {
+  local attempt=1
+  local max_attempts=3
+  local status=0
+  local delay=5
+
+  while ((attempt <= max_attempts)); do
+    if cargo run "$@"; then
+      return 0
+    fi
+    status=$?
+    if ((attempt == max_attempts)); then
+      return "${status}"
+    fi
+    printf 'cargo run failed with status %s; retrying in %ss (%s/%s): cargo run %s\n' \
+      "${status}" "${delay}" "${attempt}" "${max_attempts}" "$*" >&2
+    sleep "${delay}"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+}
+
 require_preloaded_helper_image() {
   local image="$1"
   if [[ "${require_preloaded_helper_images}" != "1" ]]; then
@@ -204,7 +226,7 @@ ensure_helper_image() {
     "${context}" >/dev/null
 }
 
-cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
+cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
   materialize \
   --suite docker \
   --category "${category}" \

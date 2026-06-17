@@ -65,6 +65,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
 
 jobs:
   # Keep this job independent. If test jobs need it, a PR can intentionally
@@ -321,12 +322,34 @@ jobs:
       - name: Generate matrices
         id: matrices
         run: |
+          cargo_run_with_retry() {
+            local attempt=1
+            local max_attempts=3
+            local status=0
+            local delay=5
+
+            while ((attempt <= max_attempts)); do
+              if cargo run "$@"; then
+                return 0
+              fi
+              status=$?
+              if ((attempt == max_attempts)); then
+                return "${status}"
+              fi
+              printf 'cargo run failed with status %s; retrying in %ss (%s/%s): cargo run %s\n' \
+                "${status}" "${delay}" "${attempt}" "${max_attempts}" "$*" >&2
+              sleep "${delay}"
+              delay=$((delay * 2))
+              attempt=$((attempt + 1))
+            done
+          }
+
           write_docker_matrix() {
             local output_name="$1"
             local group="$2"
             local matrix
             matrix="$(
-              cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
+              cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
                 list --suite docker --format github-matrix --group "${group}"
             )"
             echo "${output_name}=${matrix}" >> "${GITHUB_OUTPUT}"
@@ -342,7 +365,7 @@ jobs:
           write_docker_matrix docker_security security
 
           browser_matrix="$(
-            cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
+            cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
               list --suite browser --format github-matrix
           )"
           echo "browser=${browser_matrix}" >> "${GITHUB_OUTPUT}"
