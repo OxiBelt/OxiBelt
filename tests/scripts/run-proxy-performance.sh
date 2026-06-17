@@ -1392,7 +1392,7 @@ append_result() {
   p99="$(jq -r '.p99_ms // 0' <<<"${json}")"
   errors="$(jq -r '.errors // 0' <<<"${json}")"
   result_text="$(printf '%s req, %.2f/sec, p95 %.2f ms, p99 %.2f ms' "${requests}" "${rps}" "${p95}" "${p99}")"
-  for fast_path_protocol in h1 h2; do
+  for fast_path_protocol in h1 h2 h3; do
     fast_path_hit_rate="$(jq -r --arg protocol "${fast_path_protocol}" '.fast_path.plain_proxy[$protocol].hit_rate // empty' <<<"${json}")"
     if [[ -n "${fast_path_hit_rate}" ]]; then
       result_text="${result_text}, ${fast_path_protocol} fast-path $(jq -n -r --argjson rate "${fast_path_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
@@ -2171,6 +2171,7 @@ plain_proxy_fast_path_gate_protocol() {
   case "${label}:${protocol}" in
     oxibelt-h1-keepalive:h1) printf 'h1' ;;
     oxibelt-h2:h2) printf 'h2' ;;
+    oxibelt-h3:h3) printf 'h3' ;;
   esac
 }
 

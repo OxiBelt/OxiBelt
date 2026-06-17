@@ -2673,12 +2673,16 @@ oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outc
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outcome=\"miss\",reason=\"cache_policy\"} 1
 # TYPE oxibelt_http_fast_path_decisions_total counter
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outcome=\"hit\",reason=\"eligible\"} 17
+# TYPE oxibelt_http_fast_path_decisions_total counter
+oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h3\",outcome=\"hit\",reason=\"eligible\"} 23
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"hit\",reason=\"used\"} 97
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"miss\",reason=\"send_error\"} 3
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h2\",outcome=\"hit\",reason=\"used\"} 19
+# TYPE oxibelt_http_fast_path_transports_total counter
+oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h3\",outcome=\"hit\",reason=\"used\"} 29
 ";
 
         let parsed = fast_path_metrics_json(metrics);
@@ -2691,12 +2695,14 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h2\",
         assert_eq!(h1["hit_rate"], 0.99);
         assert_eq!(h1["miss_reasons"]["cache_policy"], 1);
         assert_eq!(parsed["plain_proxy"]["h2"]["hits"], 17);
+        assert_eq!(parsed["plain_proxy"]["h3"]["hits"], 23);
         assert_eq!(direct_h1["hits"], 97);
         assert_eq!(direct_h1["misses"], 3);
         assert_eq!(direct_h1["attempts"], 100);
         assert_eq!(direct_h1["hit_rate"], 0.97);
         assert_eq!(direct_h1["miss_reasons"]["send_error"], 3);
         assert_eq!(parsed["transport"]["direct_h1"]["h2"]["hits"], 19);
+        assert_eq!(parsed["transport"]["direct_h1"]["h3"]["hits"], 29);
     }
 
     #[test]

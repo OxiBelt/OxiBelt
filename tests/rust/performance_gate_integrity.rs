@@ -2418,7 +2418,7 @@ fn tls_resumption_mode_handshake_rows_run_as_fresh_oxibelt_only_smoke_rows() {
 }
 
 #[test]
-fn h1_and_h2_rows_attach_plain_proxy_fast_path_hit_rate() {
+fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
     let script = performance_script_text();
 
     assert!(
@@ -2440,6 +2440,10 @@ fn h1_and_h2_rows_attach_plain_proxy_fast_path_hit_rate() {
     assert!(
         script.contains("oxibelt-h2:h2"),
         "oxibelt-h2 rows should be selected for H2 fast-path gating"
+    );
+    assert!(
+        script.contains("oxibelt-h3:h3"),
+        "oxibelt-h3 rows should be selected for H3 fast-path gating"
     );
     assert!(
         script.contains("{($protocol): $fast_path}"),

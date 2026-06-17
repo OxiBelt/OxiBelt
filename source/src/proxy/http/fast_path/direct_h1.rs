@@ -217,7 +217,7 @@ fn direct_h1_guard_miss(
 ) -> Option<&'static str> {
   if !matches!(
     request_version,
-    http::Version::HTTP_11 | http::Version::HTTP_2
+    http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
   ) || !direct_selection_used
     || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
   {
@@ -452,6 +452,28 @@ mod tests {
   }
 
   #[test]
+  fn guard_accepts_direct_empty_http3_get_to_plain_h1_upstream() {
+    let upstream = upstream("http://backend.internal:18080");
+    let request = Request::builder()
+      .method(Method::GET)
+      .uri("http://backend.internal/perf/h3?body=ok")
+      .body(empty_body())
+      .unwrap();
+
+    assert_eq!(
+      direct_h1_guard_miss(
+        &upstream,
+        HttpVersion::H1,
+        http::Version::HTTP_3,
+        true,
+        true,
+        &request,
+      ),
+      None
+    );
+  }
+
+  #[test]
   fn guard_rejects_http2_when_empty_body_is_not_proven() {
     let upstream = upstream("http://backend.internal:18080");
     let request = Request::builder()
@@ -465,6 +487,28 @@ mod tests {
         &upstream,
         HttpVersion::H1,
         http::Version::HTTP_2,
+        true,
+        false,
+        &request,
+      ),
+      Some("request_body")
+    );
+  }
+
+  #[test]
+  fn guard_rejects_http3_when_empty_body_is_not_proven() {
+    let upstream = upstream("http://backend.internal:18080");
+    let request = Request::builder()
+      .method(Method::GET)
+      .uri("http://backend.internal/perf/h3?body=ok")
+      .body(empty_body())
+      .unwrap();
+
+    assert_eq!(
+      direct_h1_guard_miss(
+        &upstream,
+        HttpVersion::H1,
+        http::Version::HTTP_3,
         true,
         false,
         &request,

@@ -185,6 +185,32 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                     }
                 }),
             );
+    } else if label == "oxibelt-h3" {
+        row.as_object_mut()
+            .expect("load row should be an object")
+            .insert(
+                "fast_path".to_owned(),
+                json!({
+                    "plain_proxy": {
+                        "h3": {
+                            "hits": 1000,
+                            "misses": 0,
+                            "attempts": 1000,
+                            "hit_rate": 1.0
+                        }
+                    },
+                    "transport": {
+                        "direct_h1": {
+                            "h3": {
+                                "hits": 1000,
+                                "misses": 0,
+                                "attempts": 1000,
+                                "hit_rate": 1.0
+                            }
+                        }
+                    }
+                }),
+            );
     }
     row
 }
@@ -896,7 +922,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 17);
+    assert_eq!(report["schema_version"], 18);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1090,7 +1116,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 17);
+    assert_eq!(report["schema_version"], 18);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);
