@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,19 @@ use crate::proxy::http::body::{
 use crate::proxy::http::response::text_response;
 
 const STATIC_BODY_CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StaticBodySource {
+  HotObject,
+}
+
+impl StaticBodySource {
+  pub(crate) fn metric_label(self) -> &'static str {
+    match self {
+      Self::HotObject => "hot_object",
+    }
+  }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct StaticResponseMetadata {
@@ -70,7 +84,7 @@ pub(crate) async fn response_from_plan(
   let mut response = match body {
     StaticBodyPlan::Empty => Response::new(empty_body()),
     StaticBodyPlan::Text(message) => text_response(status, &message),
-    StaticBodyPlan::Bytes(bytes) => {
+    StaticBodyPlan::Bytes { bytes, .. } => {
       let mut response = Response::new(full_body(bytes.clone()));
       if bytes.len() <= inline_max_bytes {
         response.extensions_mut().insert(KnownSmallResponseBody);
@@ -119,7 +133,7 @@ pub(crate) async fn response_from_plan(
 pub(super) fn cached_object_plan(
   method: &Method,
   headers: &HeaderMap,
-  cached: CachedStaticObject,
+  cached: Arc<CachedStaticObject>,
 ) -> StaticResponsePlan {
   let len = cached.body.len() as u64;
   if conditional_not_modified(headers, &cached.etag, cached.modified) {
@@ -139,8 +153,8 @@ pub(super) fn cached_object_plan(
       bytes_plan(
         method,
         StatusCode::PARTIAL_CONTENT,
-        cached.path,
-        cached.body,
+        cached.path.clone(),
+        cached.body.clone(),
         FileContentPlan {
           offset: start,
           body_len: end - start + 1,
@@ -154,12 +168,15 @@ pub(super) fn cached_object_plan(
   }
 }
 
-fn cached_full_bytes_plan(method: &Method, cached: CachedStaticObject) -> StaticResponsePlan {
+fn cached_full_bytes_plan(method: &Method, cached: Arc<CachedStaticObject>) -> StaticResponsePlan {
   let headers = cached.full_headers.clone();
   let body = if method == Method::HEAD || cached.body.is_empty() {
     StaticBodyPlan::Empty
   } else {
-    StaticBodyPlan::Bytes(cached.body)
+    StaticBodyPlan::Bytes {
+      bytes: cached.body.clone(),
+      source: StaticBodySource::HotObject,
+    }
   };
   StaticResponsePlan {
     status: StatusCode::OK,
@@ -242,11 +259,17 @@ fn bytes_plan(
   let body = if method == Method::HEAD || content.body_len == 0 {
     StaticBodyPlan::Empty
   } else if content.offset == 0 && content.body_len == bytes.len() as u64 {
-    StaticBodyPlan::Bytes(bytes)
+    StaticBodyPlan::Bytes {
+      bytes,
+      source: StaticBodySource::HotObject,
+    }
   } else {
     let start = content.offset as usize;
     let end = start + content.body_len as usize;
-    StaticBodyPlan::Bytes(bytes.slice(start..end))
+    StaticBodyPlan::Bytes {
+      bytes: bytes.slice(start..end),
+      source: StaticBodySource::HotObject,
+    }
   };
   StaticResponsePlan {
     status,

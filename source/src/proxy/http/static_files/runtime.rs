@@ -74,7 +74,7 @@ impl StaticFilesRuntime {
     root: &Path,
     path: &Path,
     response_metadata: &StaticResponseMetadata,
-  ) -> Option<CachedStaticObject> {
+  ) -> Option<Arc<CachedStaticObject>> {
     self.hot_objects.get(root, path, response_metadata)
   }
 
@@ -239,7 +239,7 @@ struct StaticObjectCacheKey {
 
 #[derive(Clone, Debug)]
 struct StaticHotObjectCacheEntry {
-  object: CachedStaticObject,
+  object: Arc<CachedStaticObject>,
   expires_at: Instant,
 }
 
@@ -270,7 +270,7 @@ impl StaticHotObjectCache {
     root: &Path,
     path: &Path,
     response_metadata: &StaticResponseMetadata,
-  ) -> Option<CachedStaticObject> {
+  ) -> Option<Arc<CachedStaticObject>> {
     if !self.enabled() {
       return None;
     }
@@ -284,7 +284,7 @@ impl StaticHotObjectCache {
       let inner = self.inner.read().expect("static file cache lock poisoned");
       let entry = inner.entries.get(&key)?;
       if entry.expires_at > now {
-        return Some(entry.object.clone());
+        return Some(Arc::clone(&entry.object));
       }
     }
 
@@ -317,7 +317,13 @@ impl StaticHotObjectCache {
       response_metadata: response_metadata.clone(),
     };
     let entry = StaticHotObjectCacheEntry {
-      object: CachedStaticObject::new(path, etag, modified, response_metadata, body),
+      object: Arc::new(CachedStaticObject::new(
+        path,
+        etag,
+        modified,
+        response_metadata,
+        body,
+      )),
       expires_at: Instant::now() + self.ttl,
     };
     let mut inner = self.inner.write().expect("static file cache lock poisoned");

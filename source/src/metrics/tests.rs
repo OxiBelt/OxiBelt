@@ -94,6 +94,46 @@ fn prometheus_output_includes_fast_path_response_body_dispositions() {
 }
 
 #[test]
+fn prometheus_output_includes_direct_h1_pool_events() {
+  let metrics = Metrics::new();
+  metrics.record_direct_h1_pool_event("hit");
+  metrics.record_direct_h1_pool_event("reconnect");
+  metrics.record_direct_h1_pool_event("unknown");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains("oxibelt_http_direct_h1_pool_events_total{event=\"hit\"} 1"));
+  assert!(body.contains("oxibelt_http_direct_h1_pool_events_total{event=\"reconnect\"} 1"));
+  assert!(!body.contains("event=\"unknown\""));
+}
+
+#[test]
+fn prometheus_output_includes_static_fast_path_responses() {
+  let metrics = Metrics::new();
+  metrics.record_static_fast_path_response("hot_object", "served");
+  metrics.record_static_fast_path_response("sendfile", "fallback");
+  metrics.record_static_fast_path_response("bytes", "served");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_static_fast_path_responses_total{source=\"hot_object\",outcome=\"served\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fallback\"} 1"
+  ));
+  assert!(!body.contains("source=\"bytes\""));
+}
+
+#[test]
 fn prometheus_output_includes_upstream_client_reuse_metrics() {
   let metrics = Metrics::new();
   metrics.record_http_upstream_client_request("h1", "http", "primary");

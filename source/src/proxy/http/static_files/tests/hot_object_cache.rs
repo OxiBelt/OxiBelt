@@ -21,8 +21,8 @@ fn hot_object_cache_hits_by_resolved_path() {
     .cached_object(&root, &path, &StaticResponseMetadata::for_path(&path))
     .expect("object should be cached by resolved path and metadata");
 
-  assert_eq!(cached.path, path);
-  assert_eq!(cached.body, Bytes::from_static(b"cached body"));
+  assert_eq!(cached.path.as_path(), path.as_path());
+  assert_eq!(cached.body.as_ref(), b"cached body");
   assert_eq!(
     cached.response_metadata.content_type,
     "text/plain; charset=utf-8"

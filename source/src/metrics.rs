@@ -153,6 +153,16 @@ impl Metrics {
     self.fast_path.record_transport(protocol, outcome, reason);
   }
 
+  pub fn record_direct_h1_pool_event(&self, event: &str) {
+    self.fast_path.record_direct_h1_pool_event(event);
+  }
+
+  pub fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
+    self
+      .fast_path
+      .record_static_fast_path_response(source, outcome);
+  }
+
   pub fn record_http_upstream_client_request(&self, version: &str, scheme: &str, pool: &str) {
     self.upstream_client.record_request(version, scheme, pool);
   }

@@ -32,6 +32,7 @@ use self::open::{
   OpenedStaticFile, StaticOpenError, open_verified_file, verify_cached_file_metadata,
 };
 pub(crate) use self::path::{StaticPathError, resolve_request_path};
+pub(crate) use self::response_plan::StaticBodySource;
 use self::response_plan::{
   FileContentPlan, RangeSelection, cached_object_plan, conditional_not_modified, etag_for_metadata,
   file_plan, not_modified_plan, parse_range, range_not_satisfiable_plan, read_file_bytes_for_cache,
@@ -55,7 +56,10 @@ pub(crate) struct StaticResponsePlan {
 pub(crate) enum StaticBodyPlan {
   Empty,
   Text(String),
-  Bytes(Bytes),
+  Bytes {
+    bytes: Bytes,
+    source: StaticBodySource,
+  },
   File(StaticFileBodyPlan),
 }
 
@@ -485,7 +489,13 @@ async fn plan_opened_file(
     return cached_object_plan(
       method,
       headers,
-      CachedStaticObject::new(path, etag, modified, response_metadata, bytes),
+      std::sync::Arc::new(CachedStaticObject::new(
+        path,
+        etag,
+        modified,
+        response_metadata,
+        bytes,
+      )),
     );
   }
 

@@ -1597,7 +1597,11 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
         "plain_proxy": plain_proxy,
         "transport": {
             "direct_h1": direct_h1
-        }
+        },
+        "pool": {
+            "direct_h1": direct_h1_pool_metrics_json(metrics)
+        },
+        "static_responses": static_fast_path_responses_json(metrics)
     })
 }
 
@@ -1683,6 +1687,47 @@ fn fast_path_transport_metrics_json(
         "hit_rate": hit_rate,
         "miss_reasons": miss_reasons,
     })
+}
+
+fn direct_h1_pool_metrics_json(metrics: &str) -> serde_json::Value {
+    let mut events = BTreeMap::new();
+    for (labels, value) in prometheus_labeled_u64_samples(
+        metrics,
+        "oxibelt_http_direct_h1_pool_events_total",
+    ) {
+        let event = labels
+            .get("event")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_owned());
+        *events.entry(event).or_insert(0) += value;
+    }
+    serde_json::json!(events)
+}
+
+fn static_fast_path_responses_json(metrics: &str) -> serde_json::Value {
+    let mut responses = serde_json::Map::new();
+    for (labels, value) in prometheus_labeled_u64_samples(
+        metrics,
+        "oxibelt_http_static_fast_path_responses_total",
+    ) {
+        let Some(source) = labels.get("source") else {
+            continue;
+        };
+        let Some(outcome) = labels.get("outcome") else {
+            continue;
+        };
+        let source_entry = responses
+            .entry(source.clone())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(source_object) = source_entry.as_object_mut() {
+            let current = source_object
+                .get(outcome)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            source_object.insert(outcome.clone(), serde_json::json!(current + value));
+        }
+    }
+    serde_json::Value::Object(responses)
 }
 
 fn prometheus_labeled_u64_samples(
@@ -2683,6 +2728,14 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h2\",outcome=\"hit\",reason=\"used\"} 19
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h3\",outcome=\"hit\",reason=\"used\"} 29
+# TYPE oxibelt_http_direct_h1_pool_events_total counter
+oxibelt_http_direct_h1_pool_events_total{event=\"hit\"} 113
+# TYPE oxibelt_http_direct_h1_pool_events_total counter
+oxibelt_http_direct_h1_pool_events_total{event=\"reconnect\"} 2
+# TYPE oxibelt_http_static_fast_path_responses_total counter
+oxibelt_http_static_fast_path_responses_total{source=\"hot_object\",outcome=\"served\"} 41
+# TYPE oxibelt_http_static_fast_path_responses_total counter
+oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fallback\"} 3
 ";
 
         let parsed = fast_path_metrics_json(metrics);
@@ -2703,6 +2756,10 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h3\",
         assert_eq!(direct_h1["miss_reasons"]["send_error"], 3);
         assert_eq!(parsed["transport"]["direct_h1"]["h2"]["hits"], 19);
         assert_eq!(parsed["transport"]["direct_h1"]["h3"]["hits"], 29);
+        assert_eq!(parsed["pool"]["direct_h1"]["hit"], 113);
+        assert_eq!(parsed["pool"]["direct_h1"]["reconnect"], 2);
+        assert_eq!(parsed["static_responses"]["hot_object"]["served"], 41);
+        assert_eq!(parsed["static_responses"]["sendfile"]["fallback"], 3);
     }
 
     #[test]

@@ -598,6 +598,10 @@ plain_proxy_fast_path_gate_protocol() {{
   return 0
 }}
 
+static_fast_path_gate_label() {{
+  return 1
+}}
+
 {functions}
 
 run_load "${{LOAD_LABEL:?}}" h2 oxibelt "/perf/h2?body=ok" 1 1

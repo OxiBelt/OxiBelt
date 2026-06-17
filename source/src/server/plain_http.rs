@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ::http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING, UPGRADE};
+use ::http::header::{CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
 use ::http::{HeaderMap, Method, StatusCode, Uri};
 use anyhow::{Context as AnyhowContext, bail};
 use hyper::body::Incoming;
@@ -37,10 +37,12 @@ mod parse;
 mod plain_io;
 mod sendfile;
 mod static_access_log;
+mod static_helpers;
 mod static_waf;
 use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
 use self::static_access_log::{StaticFastPathContext, emit_system_access_log};
+use self::static_helpers::{static_body_source_label, static_fast_path_request_has_body};
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 struct TimedStaticResponsePlan {
@@ -301,6 +303,9 @@ async fn try_sendfile_fast_path_inner(
     }
     served_requests += 1;
     snapshot.record_hot_path_response(status);
+    snapshot
+      .metrics
+      .record_static_fast_path_response(static_body_source_label(&plan.response.body), "served");
     if close_after_response {
       return Ok(SendfilePreflight::Done);
     }
@@ -391,19 +396,24 @@ async fn eligible_static_plan(
       });
     }
   };
-  let resolved = snapshot.route_table.resolve_normalized_host_with_context(
-    &host,
-    RouteMatchContext {
-      path: request_path,
-      method: Some(&request.method),
-      headers: Some(&request.headers),
-      query: request_uri.query(),
-      source_ip: Some(client_addr.ip()),
-      protocol: Some(RouteRequestProtocol::Http1),
-      tls: None,
-    },
-    &snapshot.upstreams,
-  )?;
+  let resolved = snapshot
+    .route_table
+    .try_resolve_simple_exact_host(&host, request_path, &snapshot.upstreams)
+    .or_else(|| {
+      snapshot.route_table.resolve_normalized_host_with_context(
+        &host,
+        RouteMatchContext {
+          path: request_path,
+          method: Some(&request.method),
+          headers: Some(&request.headers),
+          query: request_uri.query(),
+          source_ip: Some(client_addr.ip()),
+          protocol: Some(RouteRequestProtocol::Http1),
+          tls: None,
+        },
+        &snapshot.upstreams,
+      )
+    })?;
   if !resolved.execution_plan.fast_path.static_sendfile_like {
     return None;
   }
@@ -444,7 +454,7 @@ async fn eligible_static_plan(
   .await;
   if !matches!(
     &plan.body,
-    StaticBodyPlan::Empty | StaticBodyPlan::Bytes(_) | StaticBodyPlan::File(_)
+    StaticBodyPlan::Empty | StaticBodyPlan::Bytes { .. } | StaticBodyPlan::File(_)
   ) {
     return None;
   }
@@ -471,20 +481,6 @@ async fn eligible_static_plan(
     )
     .await,
   )
-}
-
-fn static_fast_path_request_has_body(headers: &HeaderMap) -> bool {
-  let mut content_lengths = headers.get_all(CONTENT_LENGTH).iter();
-  let Some(value) = content_lengths.next() else {
-    return false;
-  };
-  if content_lengths.next().is_some() {
-    return true;
-  }
-  value
-    .to_str()
-    .map(|value| value.trim() != "0")
-    .unwrap_or(true)
 }
 
 async fn write_static_plan(
@@ -526,7 +522,7 @@ async fn write_static_plan(
       )
       .await?;
     }
-    StaticBodyPlan::Bytes(bytes) => {
+    StaticBodyPlan::Bytes { bytes, .. } => {
       response_head_bytes(*status, headers, keep_alive, head_buffer);
       write_all_tcp_vectored(
         stream,

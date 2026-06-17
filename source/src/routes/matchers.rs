@@ -283,6 +283,10 @@ impl CompiledRouteMatcher {
   pub(super) fn specificity(&self) -> usize {
     self.specificity
   }
+
+  pub(super) fn is_prefix_only(&self) -> bool {
+    self.valid && self.prefix_only
+  }
 }
 
 impl CompiledRouteProtocol {

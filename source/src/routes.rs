@@ -19,6 +19,7 @@ pub use self::plan::{FastPathPlan, RouteExecutionPlan, RouteWafExecutionPlan, Wa
 pub struct RouteTable {
   routes: Vec<RouteEntry>,
   exact_hosts: HashMap<String, Vec<usize>>,
+  simple_exact_hosts: HashMap<String, Vec<usize>>,
   wildcard_hosts: WildcardHostTrie,
   catch_all_hosts: Vec<usize>,
   static_sendfile_prefixes: Vec<String>,
@@ -81,6 +82,10 @@ impl WildcardHostTrie {
       }
     }
   }
+
+  fn is_empty(&self) -> bool {
+    self.root.routes.is_empty() && self.root.children.is_empty()
+  }
 }
 
 /// Borrowed route resolution result used by request handlers.
@@ -124,6 +129,7 @@ impl RouteTable {
         .and_then(|name| upstream_indices.get(name).copied());
       table.push_route(route.clone(), execution_plan, upstream_index);
     }
+    table.rebuild_simple_exact_hosts();
     table
   }
 
@@ -133,6 +139,7 @@ impl RouteTable {
     for route in routes {
       table.push_route(route, RouteExecutionPlan::default(), None);
     }
+    table.rebuild_simple_exact_hosts();
     table
   }
 
@@ -140,6 +147,7 @@ impl RouteTable {
     Self {
       routes: Vec::new(),
       exact_hosts: HashMap::new(),
+      simple_exact_hosts: HashMap::new(),
       wildcard_hosts: WildcardHostTrie::default(),
       catch_all_hosts: Vec::new(),
       static_sendfile_prefixes: Vec::new(),
@@ -191,6 +199,23 @@ impl RouteTable {
       execution_plan,
       upstream_index,
     });
+  }
+
+  fn rebuild_simple_exact_hosts(&mut self) {
+    self.simple_exact_hosts.clear();
+    if !self.wildcard_hosts.is_empty() || !self.catch_all_hosts.is_empty() {
+      return;
+    }
+    for (host, route_indices) in &self.exact_hosts {
+      if route_indices
+        .iter()
+        .all(|index| self.routes[*index].matcher.is_prefix_only())
+      {
+        self
+          .simple_exact_hosts
+          .insert(host.clone(), route_indices.clone());
+      }
+    }
   }
 
   pub(crate) fn has_static_sendfile_candidates(&self) -> bool {
@@ -260,6 +285,38 @@ impl RouteTable {
       self.consider_route(&mut best, route_index, 1, context);
     }
 
+    Some(self.resolve_match(best?, upstreams))
+  }
+
+  pub(crate) fn try_resolve_simple_exact_host<'a>(
+    &'a self,
+    normalized_host: &str,
+    path: &str,
+    upstreams: &'a [UpstreamConfig],
+  ) -> Option<ResolvedRoute<'a>> {
+    let route_indices = self.simple_exact_hosts.get(normalized_host)?;
+    let host_score = 10_000 + normalized_host.len();
+    let mut best = None;
+    for &route_index in route_indices {
+      let entry = self.routes.get(route_index)?;
+      if !path_prefix_matches(entry.route.effective_path_prefix(), path) {
+        continue;
+      }
+      let candidate = RouteMatch {
+        route_index,
+        match_result: RouteMatcherResult::default(),
+        priority: entry.route.r#match.priority,
+        host_score,
+        path_len: entry.route.effective_path_prefix().len(),
+        matcher_specificity: 0,
+      };
+      if best
+        .as_ref()
+        .is_none_or(|current| candidate.is_better_than(current))
+      {
+        best = Some(candidate);
+      }
+    }
     Some(self.resolve_match(best?, upstreams))
   }
 
@@ -418,313 +475,7 @@ pub fn path_prefix_matches(prefix: &str, path: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-  use pretty_assertions::assert_eq;
-  use url::Url;
-
-  use super::*;
-  use crate::config::{HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
-
-  fn upstream(name: &str) -> UpstreamConfig {
-    UpstreamConfig {
-      name: name.to_string(),
-      origin: Url::parse("https://upstream.internal").unwrap(),
-      max_http_version: HttpVersion::H2,
-      connect_timeout_ms: 1_000,
-      request_timeout_ms: 10_000,
-      first_byte_timeout_ms: 10_000,
-      read_timeout_ms: 10_000,
-      send_timeout_ms: 10_000,
-      idle_timeout_ms: 75_000,
-      pool_max_idle_per_host: 128,
-      preserve_host: false,
-      websocket: true,
-      webrtc: true,
-      webtransport: true,
-      proxy_protocol_egress: ProxyProtocolEgressMode::Off,
-      tls: Default::default(),
-      extra_trusted_ca_certs: Vec::new(),
-    }
-  }
-
-  fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> RouteConfig {
-    RouteConfig {
-      name: name.into(),
-      hosts: hosts.iter().map(|host| (*host).into()).collect(),
-      path_prefix: path_prefix.into(),
-      r#match: Default::default(),
-      replace_prefix_with: None,
-      actions: Default::default(),
-      upstream: Some(upstream.into()),
-      upstream_pool: None,
-      static_root: None,
-      static_files: Default::default(),
-      upstream_http_version: None,
-      generic_http_upgrade: false,
-      connect_tunneling: false,
-      grpc_web: false,
-      external_auth: None,
-      ipm: Default::default(),
-      cache: None,
-      compression: None,
-      buffering: Default::default(),
-      timeouts: Default::default(),
-      retry: None,
-      waf: Default::default(),
-    }
-  }
-
-  #[test]
-  fn exact_host_beats_wildcard() {
-    let routes = vec![
-      RouteConfig {
-        name: "wild".into(),
-        hosts: vec!["*.example.com".into()],
-        path_prefix: "/".into(),
-        r#match: Default::default(),
-        replace_prefix_with: None,
-        actions: Default::default(),
-        upstream: Some("wild".into()),
-        upstream_pool: None,
-        static_root: None,
-        static_files: Default::default(),
-        upstream_http_version: None,
-        generic_http_upgrade: false,
-        connect_tunneling: false,
-        grpc_web: false,
-        external_auth: None,
-        ipm: Default::default(),
-        cache: None,
-        compression: None,
-        buffering: Default::default(),
-        timeouts: Default::default(),
-        retry: None,
-        waf: Default::default(),
-      },
-      RouteConfig {
-        name: "exact".into(),
-        hosts: vec!["api.example.com".into()],
-        path_prefix: "/".into(),
-        r#match: Default::default(),
-        replace_prefix_with: None,
-        actions: Default::default(),
-        upstream: Some("exact".into()),
-        upstream_pool: None,
-        static_root: None,
-        static_files: Default::default(),
-        upstream_http_version: None,
-        generic_http_upgrade: false,
-        connect_tunneling: false,
-        grpc_web: false,
-        external_auth: None,
-        ipm: Default::default(),
-        cache: None,
-        compression: None,
-        buffering: Default::default(),
-        timeouts: Default::default(),
-        retry: None,
-        waf: Default::default(),
-      },
-    ];
-    let upstreams = vec![upstream("wild"), upstream("exact")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    let resolved = table.resolve("api.example.com", "/v1", &upstreams).unwrap();
-    assert_eq!(resolved.route.name, "exact");
-  }
-
-  #[test]
-  fn normalized_host_resolve_matches_raw_resolve() {
-    let routes = vec![
-      route("fallback", &["*"], "/", "fallback"),
-      route("exact", &["api.example.com"], "/v1", "exact"),
-    ];
-    let upstreams = vec![upstream("fallback"), upstream("exact")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    let raw = table
-      .resolve("API.example.com:8443", "/v1/users", &upstreams)
-      .unwrap();
-    let normalized = table
-      .resolve_normalized_host("api.example.com", "/v1/users", &upstreams)
-      .unwrap();
-
-    assert_eq!(raw.route.name, normalized.route.name);
-    assert_eq!(normalized.route.name, "exact");
-    assert_eq!(
-      raw.upstream.unwrap().name,
-      normalized.upstream.unwrap().name
-    );
-  }
-
-  #[test]
-  fn longer_path_prefix_wins() {
-    let routes = vec![
-      RouteConfig {
-        name: "root".into(),
-        hosts: vec!["example.com".into()],
-        path_prefix: "/".into(),
-        r#match: Default::default(),
-        replace_prefix_with: None,
-        actions: Default::default(),
-        upstream: Some("root".into()),
-        upstream_pool: None,
-        static_root: None,
-        static_files: Default::default(),
-        upstream_http_version: None,
-        generic_http_upgrade: false,
-        connect_tunneling: false,
-        grpc_web: false,
-        external_auth: None,
-        ipm: Default::default(),
-        cache: None,
-        compression: None,
-        buffering: Default::default(),
-        timeouts: Default::default(),
-        retry: None,
-        waf: Default::default(),
-      },
-      RouteConfig {
-        name: "api".into(),
-        hosts: vec!["example.com".into()],
-        path_prefix: "/api".into(),
-        r#match: Default::default(),
-        replace_prefix_with: None,
-        actions: Default::default(),
-        upstream: Some("api".into()),
-        upstream_pool: None,
-        static_root: None,
-        static_files: Default::default(),
-        upstream_http_version: None,
-        generic_http_upgrade: false,
-        connect_tunneling: false,
-        grpc_web: false,
-        external_auth: None,
-        ipm: Default::default(),
-        cache: None,
-        compression: None,
-        buffering: Default::default(),
-        timeouts: Default::default(),
-        retry: None,
-        waf: Default::default(),
-      },
-    ];
-    let upstreams = vec![upstream("root"), upstream("api")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    let resolved = table
-      .resolve("example.com", "/api/users", &upstreams)
-      .unwrap();
-    assert_eq!(resolved.route.name, "api");
-  }
-
-  #[test]
-  fn normalize_host_removes_port() {
-    assert_eq!(normalize_host("Example.com:8443"), "example.com");
-    assert_eq!(normalize_host("[2001:db8::1]:8443"), "2001:db8::1");
-  }
-
-  #[test]
-  fn normalize_host_cow_borrows_common_normalized_hosts() {
-    assert!(matches!(
-      normalize_host_cow("example.com"),
-      std::borrow::Cow::Borrowed("example.com")
-    ));
-    assert!(matches!(
-      normalize_host_cow("example.com:8443"),
-      std::borrow::Cow::Borrowed("example.com")
-    ));
-    assert!(matches!(
-      normalize_host_cow("Example.com"),
-      std::borrow::Cow::Owned(value) if value == "example.com"
-    ));
-    assert_eq!(normalize_host("Example.com."), "example.com");
-  }
-
-  #[test]
-  fn longer_wildcard_suffix_wins() {
-    let routes = vec![
-      route("broad", &["*.example.com"], "/", "broad"),
-      route("narrow", &["*.api.example.com"], "/", "narrow"),
-    ];
-    let upstreams = vec![upstream("broad"), upstream("narrow")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    let resolved = table
-      .resolve("v1.api.example.com", "/", &upstreams)
-      .unwrap();
-
-    assert_eq!(resolved.route.name, "narrow");
-    assert_eq!(resolved.upstream.unwrap().name, "narrow");
-  }
-
-  #[test]
-  fn wildcard_hosts_ignore_empty_request_labels() {
-    let routes = vec![
-      route("fallback", &["*"], "/", "fallback"),
-      route("wild", &["*.example.com"], "/", "wild"),
-    ];
-    let upstreams = vec![upstream("fallback"), upstream("wild")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    for host in [".example.com", "api..example.com", "example.com"] {
-      let resolved = table.resolve(host, "/", &upstreams).unwrap();
-
-      assert_eq!(resolved.route.name, "fallback");
-      assert_eq!(resolved.upstream.unwrap().name, "fallback");
-    }
-
-    for host in ["api.example.com", "v1.api.example.com"] {
-      let resolved = table.resolve(host, "/", &upstreams).unwrap();
-
-      assert_eq!(resolved.route.name, "wild");
-      assert_eq!(resolved.upstream.unwrap().name, "wild");
-    }
-  }
-
-  #[test]
-  fn catch_all_host_is_fallback() {
-    let routes = vec![
-      route("fallback", &["*"], "/", "fallback"),
-      route("exact", &["api.example.com"], "/", "exact"),
-    ];
-    let upstreams = vec![upstream("fallback"), upstream("exact")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    assert_eq!(
-      table
-        .resolve("api.example.com", "/", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "exact"
-    );
-    assert_eq!(
-      table
-        .resolve("other.example.com", "/", &upstreams)
-        .unwrap()
-        .route
-        .name,
-      "fallback"
-    );
-  }
-
-  #[test]
-  fn equal_host_and_path_score_keeps_route_order() {
-    let routes = vec![
-      route("first", &["api.example.com"], "/api", "first"),
-      route("second", &["api.example.com"], "/api", "second"),
-    ];
-    let upstreams = vec![upstream("first"), upstream("second")];
-    let table = RouteTable::from_routes_for_tests(routes);
-
-    let resolved = table
-      .resolve("api.example.com", "/api/users", &upstreams)
-      .unwrap();
-
-    assert_eq!(resolved.route.name, "first");
-  }
-}
+mod tests;
 
 #[cfg(test)]
 mod more_tests;

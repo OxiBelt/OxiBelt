@@ -377,7 +377,10 @@ hot_object_cache_max_file_bytes = 65536
   .expect("plain static request should be eligible");
 
   match plan.response.body {
-    StaticBodyPlan::Bytes(bytes) => assert_eq!(bytes.as_ref(), b"cached sendfile"),
+    StaticBodyPlan::Bytes { bytes, source } => {
+      assert_eq!(source.metric_label(), "hot_object");
+      assert_eq!(bytes.as_ref(), b"cached sendfile");
+    }
     other => panic!("expected cached bytes body, got {other:?}"),
   }
 }

@@ -469,19 +469,25 @@ where
     return text_response(status, "rate limit exceeded");
   }
 
-  let Some(resolved) = state.route_table.resolve_normalized_host_with_context(
-    host,
-    RouteMatchContext {
-      path,
-      method: Some(request.method()),
-      headers: Some(request.headers()),
-      query: request.uri().query(),
-      source_ip: Some(client_addr.ip()),
-      protocol: Some(RouteRequestProtocol::from_http(request_version, protocol)),
-      tls: Some(tls.as_ref()),
-    },
-    &state.upstreams,
-  ) else {
+  let resolved = state
+    .route_table
+    .try_resolve_simple_exact_host(host, path, &state.upstreams)
+    .or_else(|| {
+      state.route_table.resolve_normalized_host_with_context(
+        host,
+        RouteMatchContext {
+          path,
+          method: Some(request.method()),
+          headers: Some(request.headers()),
+          query: request.uri().query(),
+          source_ip: Some(client_addr.ip()),
+          protocol: Some(RouteRequestProtocol::from_http(request_version, protocol)),
+          tls: Some(tls.as_ref()),
+        },
+        &state.upstreams,
+      )
+    });
+  let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);

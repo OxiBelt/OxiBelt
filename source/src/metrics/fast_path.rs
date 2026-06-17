@@ -42,12 +42,19 @@ const TRANSPORT_MISS_REASONS: [&str; 8] = [
 ];
 const TRANSPORT_OUTCOMES_PER_PROTOCOL: usize = 1 + TRANSPORT_MISS_REASONS.len();
 const TRANSPORT_COUNTER_COUNT: usize = PROTOCOLS.len() * TRANSPORT_OUTCOMES_PER_PROTOCOL;
+const DIRECT_H1_POOL_EVENTS: [&str; 5] = ["hit", "miss", "reconnect", "stale", "drop"];
+const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", "text"];
+const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
+const STATIC_FAST_PATH_COUNTER_COUNT: usize =
+  STATIC_FAST_PATH_SOURCES.len() * STATIC_FAST_PATH_OUTCOMES.len();
 
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
   response_body_counters: [StripedCounter; BODY_COUNTER_COUNT],
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
+  direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
+  static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
 }
 
 impl Default for FastPathMetrics {
@@ -56,6 +63,8 @@ impl Default for FastPathMetrics {
       decision_counters: std::array::from_fn(|_| StripedCounter::default()),
       response_body_counters: std::array::from_fn(|_| StripedCounter::default()),
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
+      direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
+      static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
     }
   }
 }
@@ -80,6 +89,20 @@ impl FastPathMetrics {
       return;
     };
     self.transport_counters[index].increment();
+  }
+
+  pub(super) fn record_direct_h1_pool_event(&self, event: &str) {
+    let Some(index) = direct_h1_pool_event_index(event) else {
+      return;
+    };
+    self.direct_h1_pool_counters[index].increment();
+  }
+
+  pub(super) fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
+    let Some(index) = static_fast_path_counter_index(source, outcome) else {
+      return;
+    };
+    self.static_fast_path_counters[index].increment();
   }
 
   pub(super) fn append_prometheus(&self, output: &mut String) {
@@ -138,6 +161,27 @@ impl FastPathMetrics {
         );
       }
     }
+    for event in DIRECT_H1_POOL_EVENTS {
+      append_direct_h1_pool_counter(
+        output,
+        event,
+        self.direct_h1_pool_counters
+          [direct_h1_pool_event_index(event).expect("pool event counter exists")]
+        .load(),
+      );
+    }
+    for source in STATIC_FAST_PATH_SOURCES {
+      for outcome in STATIC_FAST_PATH_OUTCOMES {
+        append_static_fast_path_counter(
+          output,
+          source,
+          outcome,
+          self.static_fast_path_counters[static_fast_path_counter_index(source, outcome)
+            .expect("static fast path counter exists")]
+          .load(),
+        );
+      }
+    }
   }
 }
 
@@ -188,6 +232,22 @@ fn transport_counter_index(protocol: &str, outcome: &str, reason: &str) -> Optio
     _ => return None,
   };
   Some(protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL + offset)
+}
+
+fn direct_h1_pool_event_index(event: &str) -> Option<usize> {
+  DIRECT_H1_POOL_EVENTS
+    .iter()
+    .position(|candidate| *candidate == event)
+}
+
+fn static_fast_path_counter_index(source: &str, outcome: &str) -> Option<usize> {
+  let source_index = STATIC_FAST_PATH_SOURCES
+    .iter()
+    .position(|candidate| *candidate == source)?;
+  let outcome_index = STATIC_FAST_PATH_OUTCOMES
+    .iter()
+    .position(|candidate| *candidate == outcome)?;
+  Some(source_index * STATIC_FAST_PATH_OUTCOMES.len() + outcome_index)
 }
 
 fn append_labeled_counter(
@@ -251,6 +311,26 @@ fn append_response_body_counter(
   output.push('\n');
 }
 
+fn append_direct_h1_pool_counter(output: &mut String, event: &str, value: u64) {
+  output.push_str("# TYPE oxibelt_http_direct_h1_pool_events_total counter\n");
+  output.push_str("oxibelt_http_direct_h1_pool_events_total{event=\"");
+  output.push_str(event);
+  output.push_str("\"} ");
+  output.push_str(&value.to_string());
+  output.push('\n');
+}
+
+fn append_static_fast_path_counter(output: &mut String, source: &str, outcome: &str, value: u64) {
+  output.push_str("# TYPE oxibelt_http_static_fast_path_responses_total counter\n");
+  output.push_str("oxibelt_http_static_fast_path_responses_total{source=\"");
+  output.push_str(source);
+  output.push_str("\",outcome=\"");
+  output.push_str(outcome);
+  output.push_str("\"} ");
+  output.push_str(&value.to_string());
+  output.push('\n');
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -303,6 +383,45 @@ mod tests {
     assert_eq!(
       metrics.transport_counters[transport_counter_index("h1", "miss", "request_body").unwrap()]
         .load(),
+      1
+    );
+  }
+
+  #[test]
+  fn records_only_known_direct_h1_pool_events() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_direct_h1_pool_event("hit");
+    metrics.record_direct_h1_pool_event("reconnect");
+    metrics.record_direct_h1_pool_event("unknown");
+
+    assert_eq!(
+      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("hit").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("reconnect").unwrap()].load(),
+      1
+    );
+  }
+
+  #[test]
+  fn records_only_known_static_fast_path_responses() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_static_fast_path_response("hot_object", "served");
+    metrics.record_static_fast_path_response("sendfile", "fallback");
+    metrics.record_static_fast_path_response("bytes", "served");
+    metrics.record_static_fast_path_response("sendfile", "unknown");
+
+    assert_eq!(
+      metrics.static_fast_path_counters
+        [static_fast_path_counter_index("hot_object", "served").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.static_fast_path_counters
+        [static_fast_path_counter_index("sendfile", "fallback").unwrap()]
+      .load(),
       1
     );
   }
