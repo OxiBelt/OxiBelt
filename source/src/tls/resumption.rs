@@ -167,6 +167,10 @@ impl TtlServerSessionCache {
     }
   }
 
+  fn remove_queued_entries_for_key(inner: &mut TtlServerSessionCacheInner, key: &[u8]) {
+    inner.order.retain(|queued| queued.key.as_slice() != key);
+  }
+
   fn shard(&self, key: &[u8]) -> &TtlServerSessionCacheShard {
     let index = if self.shards.len() == 1 {
       0
@@ -220,6 +224,9 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
       .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
+    if inner.entries.contains_key(&key) {
+      Self::remove_queued_entries_for_key(&mut inner, &key);
+    }
     let generation = inner.next_generation;
     inner.next_generation = inner.next_generation.wrapping_add(1);
     inner.order.push_back(QueuedServerSessionKey {
@@ -264,7 +271,10 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
       .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
-    inner.entries.remove(key).map(|stored| stored.value)
+    inner.entries.remove(key).map(|stored| {
+      Self::remove_queued_entries_for_key(&mut inner, key);
+      stored.value
+    })
   }
 
   fn can_cache(&self) -> bool {
@@ -512,6 +522,21 @@ mod tests {
   }
 
   #[test]
+  fn stateful_cache_tombstones_behind_live_entry_stay_bounded() {
+    let cache = TtlServerSessionCache::new(2, Duration::from_secs(60));
+
+    assert!(cache.put(b"live-front".to_vec(), b"live".to_vec()));
+    for index in 0..64u8 {
+      let key = vec![b'a', index];
+      assert!(cache.put(key.clone(), vec![index]));
+      assert_eq!(cache.take(&key), Some(vec![index]));
+    }
+
+    assert_eq!(cache.get(b"live-front"), Some(b"live".to_vec()));
+    assert_cache_lengths(&cache, 1, 1);
+  }
+
+  #[test]
   fn stateful_cache_expiry_removes_stale_order_entries() {
     let cache = TtlServerSessionCache::new(4, Duration::from_millis(1));
     assert!(cache.put(b"expired".to_vec(), b"old".to_vec()));
@@ -545,6 +570,7 @@ mod tests {
     assert!(cache.put(b"second".to_vec(), b"2".to_vec()));
     assert!(cache.put(b"first".to_vec(), b"new".to_vec()));
     assert_cache_order(&cache, &[b"second".as_slice(), b"first".as_slice()]);
+    assert_cache_lengths(&cache, 2, 2);
     assert!(cache.put(b"third".to_vec(), b"3".to_vec()));
 
     assert_eq!(cache.get(b"first"), Some(b"new".to_vec()));
@@ -653,13 +679,15 @@ mod tests {
         "shard order tombstones must stay bounded by shard capacity"
       );
       for queued in &inner.order {
-        if inner
+        let stored = inner
           .entries
           .get(&queued.key)
-          .is_some_and(|stored| stored.generation == queued.generation)
-        {
-          actual_live_order += 1;
-        }
+          .expect("order must only contain live entry keys");
+        assert_eq!(
+          stored.generation, queued.generation,
+          "order must only contain current live generations"
+        );
+        actual_live_order += 1;
       }
       actual_entries += inner.entries.len();
     }
