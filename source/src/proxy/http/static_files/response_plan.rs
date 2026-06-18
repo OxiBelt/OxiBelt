@@ -80,6 +80,7 @@ pub(crate) async fn response_from_plan(
     status,
     headers,
     body,
+    response_heads: _,
   } = plan;
   let mut response = match body {
     StaticBodyPlan::Empty => Response::new(empty_body()),
@@ -183,6 +184,7 @@ fn cached_full_bytes_plan(method: &Method, cached: Arc<CachedStaticObject>) -> S
     status: StatusCode::OK,
     headers,
     body,
+    response_heads: None,
   }
 }
 
@@ -230,6 +232,7 @@ pub(super) fn file_plan(
     status,
     headers,
     body,
+    response_heads: None,
   }
 }
 
@@ -278,6 +281,7 @@ fn bytes_plan(
     status,
     headers,
     body,
+    response_heads: None,
   }
 }
 
@@ -418,6 +422,7 @@ pub(super) fn not_modified_plan(
     status: StatusCode::NOT_MODIFIED,
     headers,
     body: StaticBodyPlan::Empty,
+    response_heads: None,
   }
 }
 
@@ -449,6 +454,7 @@ pub(super) fn range_not_satisfiable_plan(len: u64) -> StaticResponsePlan {
     status: StatusCode::RANGE_NOT_SATISFIABLE,
     headers,
     body: StaticBodyPlan::Empty,
+    response_heads: None,
   }
 }
 
@@ -466,6 +472,7 @@ pub(crate) fn text_plan(status: StatusCode, message: impl Into<String>) -> Stati
     status,
     headers,
     body: StaticBodyPlan::Text(message),
+    response_heads: None,
   }
 }
 

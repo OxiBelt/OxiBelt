@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::header::{CONNECTION, HOST};
 use http::{HeaderValue, Request};
+use http_body_util::Full;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -190,6 +191,72 @@ fn prepared_request_preserves_existing_host() {
   assert_eq!(request.headers()[HOST], "public.example");
 }
 
+#[tokio::test]
+async fn pool_keeps_exact_max_idle_across_shards() -> anyhow::Result<()> {
+  let mut upstream = upstream("http://backend.internal:18080");
+  upstream.pool_max_idle_per_host = 2;
+  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
+
+  assert!(pool.put_sender(closed_direct_h1_sender().await?).is_ok());
+  assert!(pool.put_sender(closed_direct_h1_sender().await?).is_ok());
+  assert!(
+    pool.put_sender(closed_direct_h1_sender().await?).is_err(),
+    "pool should preserve the configured total idle cap"
+  );
+  assert_eq!(pool.idle_count.load(Ordering::Acquire), 2);
+  Ok(())
+}
+
+#[tokio::test]
+async fn pool_prunes_stale_senders_on_take() -> anyhow::Result<()> {
+  let mut upstream = upstream("http://backend.internal:18080");
+  upstream.idle_timeout_ms = 1;
+  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
+  let sender = closed_direct_h1_sender().await?;
+  {
+    let mut shard = pool.idle_shards[0]
+      .lock()
+      .expect("test idle shard should lock");
+    shard.push(DirectH1IdleConnection {
+      sender,
+      idle_since: Instant::now() - Duration::from_secs(1),
+    });
+    pool.idle_count.store(1, Ordering::Release);
+  }
+
+  let taken = pool.take_sender();
+
+  assert!(taken.sender.is_none());
+  assert_eq!(taken.stale_pruned, 1);
+  assert_eq!(pool.idle_count.load(Ordering::Acquire), 0);
+  Ok(())
+}
+
+#[tokio::test]
+async fn streamed_body_recycles_direct_h1_sender_on_eof() -> anyhow::Result<()> {
+  let upstream = upstream("http://backend.internal:18080");
+  let pool =
+    Arc::new(DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible"));
+  let lease = DirectH1Lease {
+    pool: pool.clone(),
+    metrics: Metrics::new(),
+    sender: closed_direct_h1_sender().await?,
+    reusable_by_headers: true,
+  };
+  let body = Full::new(Bytes::from_static(b"ok"))
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed();
+  let collected = recycle_body_on_eof(body, lease)
+    .collect()
+    .await
+    .map_err(|error| anyhow::anyhow!(error))?
+    .to_bytes();
+
+  assert_eq!(collected.as_ref(), b"ok");
+  assert_eq!(pool.idle_count.load(Ordering::Acquire), 1);
+  Ok(())
+}
+
 #[test]
 fn connection_close_disables_reuse() {
   let mut headers = HeaderMap::new();
@@ -250,7 +317,7 @@ async fn send_and_recycle_direct_get(
     .take_lease()
     .expect("direct H1 response should retain its lease");
   direct.response.into_body().collect().await?;
-  lease.recycle_if_reusable(true).await;
+  lease.recycle_if_reusable(true);
   Ok(())
 }
 

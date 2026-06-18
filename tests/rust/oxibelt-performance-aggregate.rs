@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 18;
+const COMPARISON_SCHEMA_VERSION: u32 = 19;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -205,6 +205,7 @@ struct BenchmarkRow {
     fast_path_transport_direct_h1_h1: Option<FastPathSample>,
     fast_path_transport_direct_h1_h2: Option<FastPathSample>,
     fast_path_transport_direct_h1_h3: Option<FastPathSample>,
+    direct_h1_pool_events: Option<BTreeMap<String, u64>>,
 }
 
 #[derive(Clone)]
@@ -277,6 +278,7 @@ struct AggregateBuilder {
     fast_path_transport_direct_h1_h1: FastPathAggregateBuilder,
     fast_path_transport_direct_h1_h2: FastPathAggregateBuilder,
     fast_path_transport_direct_h1_h3: FastPathAggregateBuilder,
+    direct_h1_pool_events: CounterMapAggregateBuilder,
 }
 
 #[derive(Clone)]
@@ -294,6 +296,12 @@ struct FastPathAggregateBuilder {
     misses: u64,
     attempts: u64,
     hit_rates: Vec<f64>,
+}
+
+#[derive(Default)]
+struct CounterMapAggregateBuilder {
+    sample_count: usize,
+    values: BTreeMap<String, u64>,
 }
 
 #[derive(Default)]
@@ -359,6 +367,14 @@ struct AggregateFastPathStats {
     transport_direct_h1_h2: Option<FastPathAggregateStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport_direct_h1_h3: Option<FastPathAggregateStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direct_h1_pool: Option<CounterMapAggregateStats>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct CounterMapAggregateStats {
+    sample_count: usize,
+    values: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -1031,6 +1047,9 @@ impl AggregateBuilder {
         if let Some(fast_path) = row.fast_path_transport_direct_h1_h3 {
             self.fast_path_transport_direct_h1_h3.push(fast_path);
         }
+        if let Some(events) = row.direct_h1_pool_events {
+            self.direct_h1_pool_events.push(events);
+        }
         self.source_files.insert(source_file);
     }
 
@@ -1052,6 +1071,7 @@ impl AggregateBuilder {
             self.fast_path_transport_direct_h1_h1,
             self.fast_path_transport_direct_h1_h2,
             self.fast_path_transport_direct_h1_h3,
+            self.direct_h1_pool_events,
         );
 
         AggregateStats {
@@ -1094,6 +1114,7 @@ fn aggregate_fast_path_stats(
     transport_direct_h1_h1: FastPathAggregateBuilder,
     transport_direct_h1_h2: FastPathAggregateBuilder,
     transport_direct_h1_h3: FastPathAggregateBuilder,
+    direct_h1_pool: CounterMapAggregateBuilder,
 ) -> Option<AggregateFastPathStats> {
     let plain_proxy_h1 = plain_proxy_h1.finish();
     let plain_proxy_h2 = plain_proxy_h2.finish();
@@ -1101,12 +1122,14 @@ fn aggregate_fast_path_stats(
     let transport_direct_h1_h1 = transport_direct_h1_h1.finish();
     let transport_direct_h1_h2 = transport_direct_h1_h2.finish();
     let transport_direct_h1_h3 = transport_direct_h1_h3.finish();
+    let direct_h1_pool = direct_h1_pool.finish();
     if plain_proxy_h1.is_none()
         && plain_proxy_h2.is_none()
         && plain_proxy_h3.is_none()
         && transport_direct_h1_h1.is_none()
         && transport_direct_h1_h2.is_none()
         && transport_direct_h1_h3.is_none()
+        && direct_h1_pool.is_none()
     {
         return None;
     }
@@ -1117,6 +1140,7 @@ fn aggregate_fast_path_stats(
         transport_direct_h1_h1,
         transport_direct_h1_h2,
         transport_direct_h1_h3,
+        direct_h1_pool,
     })
 }
 
@@ -1143,6 +1167,26 @@ impl FastPathAggregateBuilder {
             attempts: self.attempts,
             median_hit_rate: percentile(&mut hit_rates, 50.0),
             min_hit_rate: min_value(&hit_rates),
+        })
+    }
+}
+
+impl CounterMapAggregateBuilder {
+    fn push(&mut self, values: BTreeMap<String, u64>) {
+        self.sample_count += 1;
+        for (name, value) in values {
+            let entry = self.values.entry(name).or_insert(0);
+            *entry = entry.saturating_add(value);
+        }
+    }
+
+    fn finish(self) -> Option<CounterMapAggregateStats> {
+        if self.sample_count == 0 {
+            return None;
+        }
+        Some(CounterMapAggregateStats {
+            sample_count: self.sample_count,
+            values: self.values,
         })
     }
 }
@@ -2971,6 +3015,13 @@ fn parse_result_value(
             label,
             warnings,
         ),
+        direct_h1_pool_events: parse_direct_h1_pool_events(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
     })
 }
 
@@ -3155,6 +3206,34 @@ fn parse_fast_path_sample(
         attempts,
         hit_rate,
     })
+}
+
+fn parse_direct_h1_pool_events(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<BTreeMap<String, u64>> {
+    let events = object
+        .get("fast_path")
+        .and_then(Value::as_object)
+        .and_then(|fast_path| fast_path.get("pool"))
+        .and_then(Value::as_object)
+        .and_then(|pool| pool.get("direct_h1"))
+        .and_then(Value::as_object)?;
+    let mut parsed = BTreeMap::new();
+    for (event, value) in events {
+        match value.as_u64() {
+            Some(count) => {
+                parsed.insert(event.clone(), count);
+            }
+            None => warnings.push(format!(
+                "{source_file} row {row_index} ({label}): fast_path.pool.direct_h1.{event} is not an unsigned integer"
+            )),
+        }
+    }
+    Some(parsed)
 }
 
 fn infer_amd64_target_cpu_from_path(path: &str) -> Option<String> {
@@ -7080,6 +7159,7 @@ mod tests {
                 transport_direct_h1_h1: Some(passing_fast_path_aggregate()),
                 transport_direct_h1_h2: None,
                 transport_direct_h1_h3: None,
+                direct_h1_pool: None,
             })
         } else if comparator == Comparator::Oxibelt && scenario == "h2" {
             Some(AggregateFastPathStats {
@@ -7089,6 +7169,7 @@ mod tests {
                 transport_direct_h1_h1: None,
                 transport_direct_h1_h2: Some(passing_fast_path_aggregate()),
                 transport_direct_h1_h3: None,
+                direct_h1_pool: None,
             })
         } else if comparator == Comparator::Oxibelt && scenario == "h3" {
             Some(AggregateFastPathStats {
@@ -7098,6 +7179,7 @@ mod tests {
                 transport_direct_h1_h1: None,
                 transport_direct_h1_h2: None,
                 transport_direct_h1_h3: Some(passing_fast_path_aggregate()),
+                direct_h1_pool: None,
             })
         } else {
             None
@@ -7237,6 +7319,15 @@ mod tests {
                       "miss_reasons": {"send_error": 2}
                     }
                   }
+                },
+                "pool": {
+                  "direct_h1": {
+                    "hit": 90,
+                    "miss": 10,
+                    "reconnect": 2,
+                    "stale": 1,
+                    "drop": 3
+                  }
                 }
               }
             }]"#,
@@ -7281,6 +7372,16 @@ mod tests {
         assert_eq!(direct_h1.misses, 2);
         assert_eq!(direct_h1.attempts, 100);
         assert_eq!(direct_h1.min_hit_rate, Some(0.98));
+        let pool = h1
+            .direct_h1_pool
+            .as_ref()
+            .expect("direct-H1 pool events should aggregate");
+        assert_eq!(pool.sample_count, 1);
+        assert_eq!(pool.values["hit"], 90);
+        assert_eq!(pool.values["miss"], 10);
+        assert_eq!(pool.values["reconnect"], 2);
+        assert_eq!(pool.values["stale"], 1);
+        assert_eq!(pool.values["drop"], 3);
     }
 
     #[test]
@@ -7475,6 +7576,7 @@ mod tests {
             }),
             transport_direct_h1_h2: None,
             transport_direct_h1_h3: None,
+            direct_h1_pool: None,
         });
 
         let gates = build_regression_gate_report(
@@ -7533,6 +7635,7 @@ mod tests {
                 min_hit_rate: Some(0.98),
             }),
             transport_direct_h1_h3: None,
+            direct_h1_pool: None,
         });
 
         let gates = build_regression_gate_report(
@@ -7592,6 +7695,7 @@ mod tests {
                 median_hit_rate: Some(0.98),
                 min_hit_rate: Some(0.98),
             }),
+            direct_h1_pool: None,
         });
 
         let gates = build_regression_gate_report(

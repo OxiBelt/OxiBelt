@@ -52,7 +52,7 @@ use self::decision::PlainProxyFastPathMissReason;
 use self::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_path_decision};
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
-use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};
+use self::direct_h1::{DirectH1SendResult, recycle_response_body, try_send_direct_h1};
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;
 use self::request_body::{
@@ -459,7 +459,7 @@ impl PlainProxyFastPath {
     }
     let (mut parts, response_body) = upstream_response.into_parts();
     let FastPathResponseBody {
-      body: response_body,
+      body: mut response_body,
       known_small_response_body,
       inlined_known_small_body,
       trailers_handled,
@@ -496,7 +496,7 @@ impl PlainProxyFastPath {
       );
     }
     if let Some(lease) = direct_h1_lease.take() {
-      lease.recycle_if_reusable(known_small_response_body).await;
+      response_body = recycle_response_body(response_body, lease, known_small_response_body);
     }
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);

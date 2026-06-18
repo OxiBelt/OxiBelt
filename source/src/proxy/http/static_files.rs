@@ -52,6 +52,7 @@ pub(crate) struct StaticResponsePlan {
   pub(crate) status: StatusCode,
   pub(crate) headers: HeaderMap,
   pub(crate) body: StaticBodyPlan,
+  pub(crate) response_heads: Option<StaticResponseHeadBytes>,
 }
 
 #[derive(Debug)]

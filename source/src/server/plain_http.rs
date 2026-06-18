@@ -489,8 +489,10 @@ async fn eligible_static_plan(
 }
 
 fn attach_cached_static_response_heads(plan: &mut StaticResponsePlan) {
+  let cached_heads = StaticResponseHeadBytes::new(plan.status, &plan.headers);
+  plan.response_heads = Some(cached_heads.clone());
   if let StaticBodyPlan::Bytes { response_heads, .. } = &mut plan.body {
-    *response_heads = Some(StaticResponseHeadBytes::new(plan.status, &plan.headers));
+    *response_heads = Some(cached_heads);
   }
 }
 
@@ -509,24 +511,37 @@ async fn write_static_plan(
     status,
     headers,
     body,
+    response_heads,
   } = response;
   let response_send_timeout = *response_send_timeout;
   match body {
     StaticBodyPlan::Empty => {
-      response_head_bytes(*status, headers, keep_alive, head_buffer);
+      let head = cached_or_rendered_response_head(
+        response_heads.as_ref(),
+        *status,
+        headers,
+        keep_alive,
+        head_buffer,
+      );
       write_all_tcp(
         stream,
-        head_buffer,
+        head,
         response_send_timeout,
         "static sendfile response head write failed",
       )
       .await?;
     }
     StaticBodyPlan::Text(message) => {
-      response_head_bytes(*status, headers, keep_alive, head_buffer);
+      let head = cached_or_rendered_response_head(
+        response_heads.as_ref(),
+        *status,
+        headers,
+        keep_alive,
+        head_buffer,
+      );
       write_all_tcp_vectored(
         stream,
-        head_buffer,
+        head,
         message.as_bytes(),
         response_send_timeout,
         "static fast-path text response write failed",
@@ -535,10 +550,10 @@ async fn write_static_plan(
     }
     StaticBodyPlan::Bytes {
       bytes,
-      response_heads,
+      response_heads: body_response_heads,
       ..
     } => {
-      let head = match response_heads {
+      let head = match response_heads.as_ref().or(body_response_heads.as_ref()) {
         Some(response_heads) => response_heads.get(keep_alive).as_ref(),
         None => {
           response_head_bytes(*status, headers, keep_alive, head_buffer);
@@ -555,13 +570,18 @@ async fn write_static_plan(
       .await?;
     }
     StaticBodyPlan::File(file) => {
-      write_response_head(
-        stream,
+      let head = cached_or_rendered_response_head(
+        response_heads.as_ref(),
         *status,
         headers,
         keep_alive,
-        response_send_timeout,
         head_buffer,
+      );
+      write_all_tcp(
+        stream,
+        head,
+        response_send_timeout,
+        "static sendfile response head write failed",
       )
       .await?;
       sendfile_all(
@@ -588,24 +608,6 @@ async fn write_static_plan(
     .await?;
   }
   Ok(())
-}
-
-async fn write_response_head(
-  stream: &mut TcpStream,
-  status: StatusCode,
-  headers: &HeaderMap,
-  keep_alive: bool,
-  response_send_timeout: Duration,
-  head_buffer: &mut Vec<u8>,
-) -> anyhow::Result<()> {
-  response_head_bytes(status, headers, keep_alive, head_buffer);
-  write_all_tcp(
-    stream,
-    head_buffer,
-    response_send_timeout,
-    "static sendfile response head write failed",
-  )
-  .await
 }
 
 #[cfg(target_os = "linux")]
@@ -717,6 +719,22 @@ async fn downstream_send_timeout<T>(
   match tokio::time::timeout(timeout, operation).await {
     Ok(result) => result.context(context),
     Err(_) => Err(BodyTimeoutError::new(BodyTimeoutKind::DownstreamResponseSend).into()),
+  }
+}
+
+fn cached_or_rendered_response_head<'a>(
+  response_heads: Option<&'a StaticResponseHeadBytes>,
+  status: StatusCode,
+  headers: &HeaderMap,
+  keep_alive: bool,
+  head_buffer: &'a mut Vec<u8>,
+) -> &'a [u8] {
+  match response_heads {
+    Some(response_heads) => response_heads.get(keep_alive).as_ref(),
+    None => {
+      response_head_bytes(status, headers, keep_alive, head_buffer);
+      head_buffer.as_slice()
+    }
   }
 }
 

@@ -1,16 +1,18 @@
 //! Direct upstream HTTP/1.1 transport for the plain-proxy fast path.
 //! It bypasses the legacy pooled client only for tightly guarded empty-body H1 requests.
 
-use std::collections::VecDeque;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bytes::Bytes;
 use http::header::{CONNECTION, HOST};
-use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri, request};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
 use http_body_util::{BodyExt, Empty};
-use hyper::body::{Body, Incoming};
+use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -51,7 +53,9 @@ struct DirectH1Pool {
   connect_timeout: Duration,
   idle_timeout: Duration,
   max_idle: usize,
-  idle: Mutex<VecDeque<DirectH1IdleConnection>>,
+  idle_count: AtomicUsize,
+  next_shard: AtomicUsize,
+  idle_shards: Vec<Mutex<Vec<DirectH1IdleConnection>>>,
 }
 
 struct DirectH1TakeSender {
@@ -62,27 +66,45 @@ struct DirectH1TakeSender {
 impl DirectH1Pool {
   fn new(upstream: &UpstreamConfig) -> Option<Self> {
     let origin = DirectH1Origin::from_url(&upstream.origin)?;
+    let max_idle = upstream.pool_max_idle_per_host;
+    let shard_count = max_idle.clamp(1, 16);
     Some(Self {
       origin,
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
-      max_idle: upstream.pool_max_idle_per_host,
-      idle: Mutex::new(VecDeque::new()),
+      max_idle,
+      idle_count: AtomicUsize::new(0),
+      next_shard: AtomicUsize::new(0),
+      idle_shards: (0..shard_count).map(|_| Mutex::new(Vec::new())).collect(),
     })
   }
 
   fn take_sender(&self) -> DirectH1TakeSender {
+    if self.max_idle == 0 {
+      return DirectH1TakeSender {
+        sender: None,
+        stale_pruned: 0,
+      };
+    }
+
     let now = Instant::now();
-    let mut idle = self.idle.lock().expect("direct H1 idle pool lock poisoned");
     let mut stale_pruned = 0;
-    while let Some(connection) = idle.pop_front() {
-      if now.duration_since(connection.idle_since) <= self.idle_timeout {
-        return DirectH1TakeSender {
-          sender: Some(connection.sender),
-          stale_pruned,
-        };
+    let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
+    for offset in 0..self.idle_shards.len() {
+      let shard_index = (start + offset) % self.idle_shards.len();
+      let mut idle = self.idle_shards[shard_index]
+        .lock()
+        .expect("direct H1 idle pool lock poisoned");
+      while let Some(connection) = idle.pop() {
+        self.idle_count.fetch_sub(1, Ordering::AcqRel);
+        if now.duration_since(connection.idle_since) <= self.idle_timeout {
+          return DirectH1TakeSender {
+            sender: Some(connection.sender),
+            stale_pruned,
+          };
+        }
+        stale_pruned += 1;
       }
-      stale_pruned += 1;
     }
     DirectH1TakeSender {
       sender: None,
@@ -95,15 +117,29 @@ impl DirectH1Pool {
       return Err(sender);
     }
 
-    let now = Instant::now();
-    let mut idle = self.idle.lock().expect("direct H1 idle pool lock poisoned");
-    idle.retain(|connection| now.duration_since(connection.idle_since) <= self.idle_timeout);
-    if idle.len() >= self.max_idle {
-      return Err(sender);
+    let mut observed = self.idle_count.load(Ordering::Acquire);
+    loop {
+      if observed >= self.max_idle {
+        return Err(sender);
+      }
+      match self.idle_count.compare_exchange_weak(
+        observed,
+        observed + 1,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        Ok(_) => break,
+        Err(current) => observed = current,
+      }
     }
-    idle.push_back(DirectH1IdleConnection {
+
+    let shard_index = self.next_shard.fetch_add(1, Ordering::Relaxed) % self.idle_shards.len();
+    let mut idle = self.idle_shards[shard_index]
+      .lock()
+      .expect("direct H1 idle pool lock poisoned");
+    idle.push(DirectH1IdleConnection {
       sender,
-      idle_since: now,
+      idle_since: Instant::now(),
     });
     Ok(())
   }
@@ -163,7 +199,7 @@ pub(super) struct DirectH1Lease {
 }
 
 impl DirectH1Lease {
-  pub(super) async fn recycle_if_reusable(self, body_consumed: bool) {
+  pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
     if body_consumed && self.reusable_by_headers {
       if self.pool.put_sender(self.sender).is_err() {
         self.metrics.record_direct_h1_pool_event("drop");
@@ -171,6 +207,75 @@ impl DirectH1Lease {
     } else {
       self.metrics.record_direct_h1_pool_event("drop");
     }
+  }
+}
+
+pub(super) fn recycle_response_body(
+  body: ProxyBody,
+  lease: DirectH1Lease,
+  body_consumed: bool,
+) -> ProxyBody {
+  if body_consumed {
+    lease.recycle_if_reusable(true);
+    return body;
+  }
+  recycle_body_on_eof(body, lease)
+}
+
+fn recycle_body_on_eof(body: ProxyBody, lease: DirectH1Lease) -> ProxyBody {
+  DirectH1RecycleBody {
+    body,
+    lease: Some(lease),
+  }
+  .boxed()
+}
+
+struct DirectH1RecycleBody {
+  body: ProxyBody,
+  lease: Option<DirectH1Lease>,
+}
+
+impl DirectH1RecycleBody {
+  fn recycle(&mut self, body_consumed: bool) {
+    if let Some(lease) = self.lease.take() {
+      lease.recycle_if_reusable(body_consumed);
+    }
+  }
+}
+
+impl Body for DirectH1RecycleBody {
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut TaskContext<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    match Pin::new(&mut self.body).poll_frame(cx) {
+      Poll::Ready(None) => {
+        self.recycle(true);
+        Poll::Ready(None)
+      }
+      Poll::Ready(Some(Err(error))) => {
+        self.recycle(false);
+        Poll::Ready(Some(Err(error)))
+      }
+      poll => poll,
+    }
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
+  }
+
+  fn size_hint(&self) -> hyper::body::SizeHint {
+    self.body.size_hint()
+  }
+}
+
+impl Drop for DirectH1RecycleBody {
+  fn drop(&mut self) {
+    self.recycle(false);
   }
 }
 
@@ -350,9 +455,7 @@ async fn connect_sender(
 }
 
 struct PreparedDirectH1Request {
-  method: Method,
-  uri: Uri,
-  headers: HeaderMap,
+  request: Request<ProxyBody>,
 }
 
 struct RetryDirectH1Request {
@@ -362,41 +465,38 @@ struct RetryDirectH1Request {
 }
 
 impl PreparedDirectH1Request {
-  fn from_request(request: Request<ProxyBody>, origin: &DirectH1Origin) -> anyhow::Result<Self> {
-    let (mut parts, _body) = request.into_parts();
-    ensure_host_header(&mut parts, origin)?;
-    let path_and_query = parts
-      .uri
+  fn from_request(
+    mut request: Request<ProxyBody>,
+    origin: &DirectH1Origin,
+  ) -> anyhow::Result<Self> {
+    let upstream_authority = request
+      .uri()
+      .authority()
+      .map(|authority| authority.as_str().to_owned());
+    ensure_host_header(request.headers_mut(), upstream_authority.as_deref(), origin)?;
+    let path_and_query = request
+      .uri()
       .path_and_query()
       .cloned()
       .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
     let mut uri_parts = http::uri::Parts::default();
     uri_parts.path_and_query = Some(path_and_query);
-    let uri = Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
-    Ok(Self {
-      method: parts.method,
-      uri,
-      headers: parts.headers,
-    })
+    *request.uri_mut() =
+      Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
+    *request.version_mut() = http::Version::HTTP_11;
+    Ok(Self { request })
   }
 
   fn retry_request(&self) -> RetryDirectH1Request {
     RetryDirectH1Request {
-      method: self.method.clone(),
-      uri: self.uri.clone(),
-      headers: self.headers.clone(),
+      method: self.request.method().clone(),
+      uri: self.request.uri().clone(),
+      headers: self.request.headers().clone(),
     }
   }
 
   fn into_request(self) -> Request<ProxyBody> {
-    let mut request = Request::builder()
-      .method(self.method)
-      .version(http::Version::HTTP_11)
-      .uri(self.uri)
-      .body(empty_body())
-      .expect("direct H1 request parts should be valid");
-    *request.headers_mut() = self.headers;
-    request
+    self.request
   }
 }
 
@@ -413,18 +513,18 @@ impl RetryDirectH1Request {
   }
 }
 
-fn ensure_host_header(parts: &mut request::Parts, origin: &DirectH1Origin) -> anyhow::Result<()> {
-  if parts.headers.contains_key(HOST) {
+fn ensure_host_header(
+  headers: &mut HeaderMap,
+  upstream_authority: Option<&str>,
+  origin: &DirectH1Origin,
+) -> anyhow::Result<()> {
+  if headers.contains_key(HOST) {
     return Ok(());
   }
-  let authority = parts
-    .uri
-    .authority()
-    .map(|authority| authority.as_str())
-    .unwrap_or(origin.authority.as_str());
+  let authority = upstream_authority.unwrap_or(origin.authority.as_str());
   let value =
     HeaderValue::from_str(authority).context("upstream authority is not a header value")?;
-  parts.headers.insert(HOST, value);
+  headers.insert(HOST, value);
   Ok(())
 }
 
