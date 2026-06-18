@@ -28,7 +28,7 @@ const BODY_REASONS: [&str; 6] = [
 ];
 const BODY_COUNTERS_PER_PROTOCOL: usize = BODY_DISPOSITIONS.len() * BODY_REASONS.len();
 const BODY_COUNTER_COUNT: usize = PROTOCOLS.len() * BODY_COUNTERS_PER_PROTOCOL;
-const TRANSPORT_DIRECT_H1: &str = "direct_h1";
+const TRANSPORTS: [&str; 2] = ["direct_h1", "direct_h2"];
 const TRANSPORT_HIT_REASON: &str = "used";
 const TRANSPORT_MISS_REASONS: [&str; 8] = [
   "unsupported_request",
@@ -41,7 +41,8 @@ const TRANSPORT_MISS_REASONS: [&str; 8] = [
   "pool_full",
 ];
 const TRANSPORT_OUTCOMES_PER_PROTOCOL: usize = 1 + TRANSPORT_MISS_REASONS.len();
-const TRANSPORT_COUNTER_COUNT: usize = PROTOCOLS.len() * TRANSPORT_OUTCOMES_PER_PROTOCOL;
+const TRANSPORT_COUNTERS_PER_TRANSPORT: usize = PROTOCOLS.len() * TRANSPORT_OUTCOMES_PER_PROTOCOL;
+const TRANSPORT_COUNTER_COUNT: usize = TRANSPORTS.len() * TRANSPORT_COUNTERS_PER_TRANSPORT;
 const DIRECT_H1_POOL_EVENTS: [&str; 5] = ["hit", "miss", "reconnect", "stale", "drop"];
 const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", "text"];
 const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
@@ -84,8 +85,14 @@ impl FastPathMetrics {
     self.response_body_counters[index].increment();
   }
 
-  pub(super) fn record_transport(&self, protocol: &str, outcome: &str, reason: &str) {
-    let Some(index) = transport_counter_index(protocol, outcome, reason) else {
+  pub(super) fn record_transport(
+    &self,
+    transport: &str,
+    protocol: &str,
+    outcome: &str,
+    reason: &str,
+  ) {
+    let Some(index) = transport_counter_index(transport, protocol, outcome, reason) else {
       return;
     };
     self.transport_counters[index].increment();
@@ -106,6 +113,37 @@ impl FastPathMetrics {
   }
 
   pub(super) fn append_prometheus(&self, output: &mut String) {
+    for transport in TRANSPORTS {
+      for protocol in PROTOCOLS {
+        append_transport_counter(
+          output,
+          transport,
+          protocol,
+          "hit",
+          TRANSPORT_HIT_REASON,
+          self.transport_counters[transport_counter_index(
+            transport,
+            protocol,
+            "hit",
+            TRANSPORT_HIT_REASON,
+          )
+          .expect("transport hit counter exists")]
+          .load(),
+        );
+        for reason in TRANSPORT_MISS_REASONS {
+          append_transport_counter(
+            output,
+            transport,
+            protocol,
+            "miss",
+            reason,
+            self.transport_counters[transport_counter_index(transport, protocol, "miss", reason)
+              .expect("transport miss counter exists")]
+            .load(),
+          );
+        }
+      }
+    }
     for protocol in PROTOCOLS {
       append_labeled_counter(
         output,
@@ -139,26 +177,6 @@ impl FastPathMetrics {
             .load(),
           );
         }
-      }
-      append_transport_counter(
-        output,
-        protocol,
-        "hit",
-        TRANSPORT_HIT_REASON,
-        self.transport_counters[transport_counter_index(protocol, "hit", TRANSPORT_HIT_REASON)
-          .expect("transport hit counter exists")]
-        .load(),
-      );
-      for reason in TRANSPORT_MISS_REASONS {
-        append_transport_counter(
-          output,
-          protocol,
-          "miss",
-          reason,
-          self.transport_counters[transport_counter_index(protocol, "miss", reason)
-            .expect("transport miss counter exists")]
-          .load(),
-        );
       }
     }
     for event in DIRECT_H1_POOL_EVENTS {
@@ -218,7 +236,15 @@ fn response_body_counter_index(protocol: &str, disposition: &str, reason: &str) 
   )
 }
 
-fn transport_counter_index(protocol: &str, outcome: &str, reason: &str) -> Option<usize> {
+fn transport_counter_index(
+  transport: &str,
+  protocol: &str,
+  outcome: &str,
+  reason: &str,
+) -> Option<usize> {
+  let transport_index = TRANSPORTS
+    .iter()
+    .position(|candidate| *candidate == transport)?;
   let protocol_index = PROTOCOLS
     .iter()
     .position(|candidate| *candidate == protocol)?;
@@ -231,7 +257,11 @@ fn transport_counter_index(protocol: &str, outcome: &str, reason: &str) -> Optio
     }
     _ => return None,
   };
-  Some(protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL + offset)
+  Some(
+    transport_index * TRANSPORT_COUNTERS_PER_TRANSPORT
+      + protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL
+      + offset,
+  )
 }
 
 fn direct_h1_pool_event_index(event: &str) -> Option<usize> {
@@ -273,6 +303,7 @@ fn append_labeled_counter(
 
 fn append_transport_counter(
   output: &mut String,
+  transport: &str,
   protocol: &str,
   outcome: &str,
   reason: &str,
@@ -280,7 +311,7 @@ fn append_transport_counter(
 ) {
   output.push_str("# TYPE oxibelt_http_fast_path_transports_total counter\n");
   output.push_str("oxibelt_http_fast_path_transports_total{transport=\"");
-  output.push_str(TRANSPORT_DIRECT_H1);
+  output.push_str(transport);
   output.push_str("\",protocol=\"");
   output.push_str(protocol);
   output.push_str("\",outcome=\"");
@@ -371,18 +402,29 @@ mod tests {
   #[test]
   fn records_only_known_transport_label_sets() {
     let metrics = FastPathMetrics::default();
-    metrics.record_transport("h1", "hit", "used");
-    metrics.record_transport("h1", "miss", "request_body");
-    metrics.record_transport("h1", "miss", "unknown");
-    metrics.record_transport("h9", "hit", "used");
+    metrics.record_transport("direct_h1", "h1", "hit", "used");
+    metrics.record_transport("direct_h2", "h2", "hit", "used");
+    metrics.record_transport("direct_h1", "h1", "miss", "request_body");
+    metrics.record_transport("direct_h1", "h1", "miss", "unknown");
+    metrics.record_transport("direct_h3", "h1", "hit", "used");
+    metrics.record_transport("direct_h1", "h9", "hit", "used");
 
     assert_eq!(
-      metrics.transport_counters[transport_counter_index("h1", "hit", "used").unwrap()].load(),
+      metrics.transport_counters
+        [transport_counter_index("direct_h1", "h1", "hit", "used").unwrap()]
+      .load(),
       1
     );
     assert_eq!(
-      metrics.transport_counters[transport_counter_index("h1", "miss", "request_body").unwrap()]
-        .load(),
+      metrics.transport_counters
+        [transport_counter_index("direct_h2", "h2", "hit", "used").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h1", "h1", "miss", "request_body").unwrap()]
+      .load(),
       1
     );
   }

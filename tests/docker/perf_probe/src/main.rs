@@ -1587,16 +1587,22 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
         );
     }
     let mut direct_h1 = serde_json::Map::new();
+    let mut direct_h2 = serde_json::Map::new();
     for protocol in ["h1", "h2", "h3"] {
         direct_h1.insert(
             protocol.to_owned(),
             fast_path_transport_metrics_json(metrics, "direct_h1", protocol),
         );
+        direct_h2.insert(
+            protocol.to_owned(),
+            fast_path_transport_metrics_json(metrics, "direct_h2", protocol),
+        );
     }
     serde_json::json!({
         "plain_proxy": plain_proxy,
         "transport": {
-            "direct_h1": direct_h1
+            "direct_h1": direct_h1,
+            "direct_h2": direct_h2
         },
         "pool": {
             "direct_h1": direct_h1_pool_metrics_json(metrics)
@@ -2728,6 +2734,8 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h2\",outcome=\"hit\",reason=\"used\"} 19
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h3\",outcome=\"hit\",reason=\"used\"} 29
+# TYPE oxibelt_http_fast_path_transports_total counter
+oxibelt_http_fast_path_transports_total{transport=\"direct_h2\",protocol=\"h2\",outcome=\"hit\",reason=\"used\"} 31
 # TYPE oxibelt_http_direct_h1_pool_events_total counter
 oxibelt_http_direct_h1_pool_events_total{event=\"hit\"} 113
 # TYPE oxibelt_http_direct_h1_pool_events_total counter
@@ -2756,6 +2764,7 @@ oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fall
         assert_eq!(direct_h1["miss_reasons"]["send_error"], 3);
         assert_eq!(parsed["transport"]["direct_h1"]["h2"]["hits"], 19);
         assert_eq!(parsed["transport"]["direct_h1"]["h3"]["hits"], 29);
+        assert_eq!(parsed["transport"]["direct_h2"]["h2"]["hits"], 31);
         assert_eq!(parsed["pool"]["direct_h1"]["hit"], 113);
         assert_eq!(parsed["pool"]["direct_h1"]["reconnect"], 2);
         assert_eq!(parsed["static_responses"]["hot_object"]["served"], 41);

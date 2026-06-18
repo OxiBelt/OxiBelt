@@ -5,18 +5,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use bytes::Bytes;
 use http::{HeaderValue, StatusCode};
-use http_body_util::combinators::BoxBody;
-use hyper::body::Incoming;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 
 use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::{ExternalCacheRuntime, ResponseCache};
 use crate::client_identity::ClientIdentityRuntime;
-use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::config::{Config, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -28,7 +23,7 @@ use crate::mitigation::MitigationSink;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
-use crate::proxy::http::fast_path::DirectH1Pools;
+use crate::proxy::http::fast_path::{DirectH1Pools, DirectH2Pools};
 use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
@@ -54,144 +49,9 @@ mod upstream_clients;
 
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
+pub use upstream_clients::UpstreamBody;
 use upstream_clients::build_clients;
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-pub type UpstreamBody = BoxBody<Bytes, BoxError>;
-type HyperConnector =
-  upstream_clients::InstrumentedConnector<hyper_rustls::HttpsConnector<HttpConnector>>;
-type H2cConnector = upstream_clients::InstrumentedConnector<HttpConnector>;
-type HyperClient = Client<HyperConnector, UpstreamBody>;
-type H2cClient = Client<H2cConnector, UpstreamBody>;
-
-#[derive(Clone)]
-struct ClientPool {
-  h1_only: HyperClient,
-  negotiated: HyperClient,
-  h2c: H2cClient,
-  metrics: Arc<Metrics>,
-  pool_label: &'static str,
-}
-
-impl ClientPool {
-  fn for_version(
-    &self,
-    origin_scheme: &str,
-    version: HttpVersion,
-  ) -> Option<UpstreamClientRef<'_>> {
-    match version {
-      HttpVersion::H1 => Some(UpstreamClientRef::Hyper {
-        client: &self.h1_only,
-        metrics: &self.metrics,
-        version: "h1",
-        pool: self.pool_label,
-      }),
-      HttpVersion::H2 if origin_scheme == "http" => Some(UpstreamClientRef::H2c {
-        client: &self.h2c,
-        metrics: &self.metrics,
-        version: "h2c",
-        pool: self.pool_label,
-      }),
-      HttpVersion::H2 => Some(UpstreamClientRef::Hyper {
-        client: &self.negotiated,
-        metrics: &self.metrics,
-        version: "h2",
-        pool: self.pool_label,
-      }),
-      HttpVersion::H3 => None,
-    }
-  }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum UpstreamClientRef<'a> {
-  Hyper {
-    client: &'a HyperClient,
-    metrics: &'a Arc<Metrics>,
-    version: &'static str,
-    pool: &'static str,
-  },
-  H2c {
-    client: &'a H2cClient,
-    metrics: &'a Arc<Metrics>,
-    version: &'static str,
-    pool: &'static str,
-  },
-}
-
-impl UpstreamClientRef<'_> {
-  pub(crate) async fn request(
-    &self,
-    request: http::Request<UpstreamBody>,
-  ) -> Result<http::Response<Incoming>, hyper_util::client::legacy::Error> {
-    let scheme = upstream_client_metric_scheme(request.uri());
-    match self {
-      Self::Hyper {
-        client,
-        metrics,
-        version,
-        pool,
-      } => {
-        metrics.record_http_upstream_client_request(version, scheme, pool);
-        client.request(request).await
-      }
-      Self::H2c {
-        client,
-        metrics,
-        version,
-        pool,
-      } => {
-        metrics.record_http_upstream_client_request(version, scheme, pool);
-        client.request(request).await
-      }
-    }
-  }
-}
-
-fn upstream_client_metric_scheme(uri: &http::Uri) -> &'static str {
-  match uri.scheme_str() {
-    Some("http") => "http",
-    Some("https") => "https",
-    _ => "other",
-  }
-}
-
-/// Per-upstream HTTP client pools keyed by validated upstream configuration.
-#[derive(Clone)]
-pub struct UpstreamClientPools {
-  by_upstream: HashMap<String, usize>,
-  pools: Vec<ClientPool>,
-}
-
-impl UpstreamClientPools {
-  pub(crate) fn for_upstream_index(
-    &self,
-    upstream_index: usize,
-    origin_scheme: &str,
-    version: HttpVersion,
-  ) -> Option<UpstreamClientRef<'_>> {
-    self
-      .pools
-      .get(upstream_index)
-      .and_then(|pool| pool.for_version(origin_scheme, version))
-  }
-
-  pub(crate) fn upstream_index(&self, upstream_name: &str) -> Option<usize> {
-    self.by_upstream.get(upstream_name).copied()
-  }
-
-  pub(crate) fn for_upstream_version(
-    &self,
-    upstream_name: &str,
-    origin_scheme: &str,
-    version: HttpVersion,
-  ) -> Option<UpstreamClientRef<'_>> {
-    self
-      .by_upstream
-      .get(upstream_name)
-      .and_then(|&index| self.for_upstream_index(index, origin_scheme, version))
-  }
-}
+pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
 
 /// Immutable snapshot of runtime configuration and derived state.
 #[derive(Clone)]
@@ -204,6 +64,7 @@ pub struct AppSnapshot {
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
   pub clients: UpstreamClientPools,
   pub(crate) direct_h1_pools: DirectH1Pools,
+  pub(crate) direct_h2_pools: DirectH2Pools,
   pub health_check_clients: UpstreamClientPools,
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
@@ -318,6 +179,14 @@ impl AppSnapshot {
     )
     .context("failed to build upstream HTTP clients")?;
     let direct_h1_pools = DirectH1Pools::new(&upstreams);
+    let direct_h2_pools = DirectH2Pools::new(
+      &upstreams,
+      &config.proxy.trusted_ca_certs,
+      &tls_resumption,
+      &config.proxy.http2,
+      &outbound_revocation,
+    )
+    .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
     let health_check_clients = build_clients(
       &health_check_upstreams,
@@ -494,6 +363,7 @@ impl AppSnapshot {
       upstream_uri_parts_by_index,
       clients,
       direct_h1_pools,
+      direct_h2_pools,
       health_check_clients,
       control_http,
       h3_clients,
@@ -557,6 +427,14 @@ impl AppSnapshot {
     )
     .context("failed to build upstream HTTP clients")?;
     let direct_h1_pools = DirectH1Pools::new(&upstreams);
+    let direct_h2_pools = DirectH2Pools::new(
+      &upstreams,
+      &config.proxy.trusted_ca_certs,
+      &previous.tls_resumption,
+      &config.proxy.http2,
+      &previous.outbound_revocation,
+    )
+    .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
     let health_check_clients = build_clients(
       &health_check_upstreams,
@@ -628,6 +506,7 @@ impl AppSnapshot {
       upstream_uri_parts_by_index,
       clients,
       direct_h1_pools,
+      direct_h2_pools,
       health_check_clients,
       control_http: control_http.clone(),
       h3_clients,

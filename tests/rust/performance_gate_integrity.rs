@@ -1483,6 +1483,31 @@ fn oxibelt_baseline_fixture_enables_h1_fast_path_metrics() {
 }
 
 #[test]
+fn oxibelt_no_http3_fixture_keeps_metrics_gate_reachable() {
+    let path = oxibelt_performance_fixture_root()
+        .join("baseline-no-http3")
+        .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let config: Config = toml::from_str(&config_text)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+    assert!(
+        !config.listeners.http3,
+        "negative HTTP/3 fixture should keep downstream HTTP/3 disabled"
+    );
+    assert!(
+        config.metrics.enabled,
+        "negative HTTP/3 fixture should expose /metrics for fast-path gate evidence"
+    );
+    assert_eq!(
+        config.metrics.detail,
+        MetricsDetail::Basic,
+        "negative HTTP/3 fixture should avoid detailed metrics on the measured fast path"
+    );
+}
+
+#[test]
 fn static_16k_h1c_ratio_gate_passes_when_oxibelt_is_close_to_caddy() {
     let run = static_16k_ratio_harness(
         &[

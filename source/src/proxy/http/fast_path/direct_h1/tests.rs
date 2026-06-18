@@ -233,6 +233,64 @@ async fn pool_prunes_stale_senders_on_take() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn pool_take_skips_contended_shard() -> anyhow::Result<()> {
+  let mut upstream = upstream("http://backend.internal:18080");
+  upstream.pool_max_idle_per_host = 2;
+  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
+  let first_sender = closed_direct_h1_sender().await?;
+  let second_sender = closed_direct_h1_sender().await?;
+  {
+    let mut first = pool.idle_shards[0]
+      .lock()
+      .expect("test idle shard should lock");
+    first.push(DirectH1IdleConnection {
+      sender: first_sender,
+      idle_since: Instant::now(),
+    });
+  }
+  {
+    let mut second = pool.idle_shards[1]
+      .lock()
+      .expect("test idle shard should lock");
+    second.push(DirectH1IdleConnection {
+      sender: second_sender,
+      idle_since: Instant::now(),
+    });
+  }
+  pool.idle_count.store(2, Ordering::Release);
+  pool.next_shard.store(0, Ordering::Release);
+
+  let _locked = pool.idle_shards[0]
+    .lock()
+    .expect("test idle shard should lock");
+  let taken = pool.take_sender();
+
+  assert!(
+    taken.sender.is_some(),
+    "take should scan another shard instead of blocking"
+  );
+  assert_eq!(pool.idle_count.load(Ordering::Acquire), 1);
+  Ok(())
+}
+
+#[tokio::test]
+async fn pool_put_drops_when_only_shard_is_contended() -> anyhow::Result<()> {
+  let upstream = upstream("http://backend.internal:18080");
+  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
+  let sender = closed_direct_h1_sender().await?;
+  let _locked = pool.idle_shards[0]
+    .lock()
+    .expect("test idle shard should lock");
+
+  assert!(
+    pool.put_sender(sender).is_err(),
+    "put should avoid blocking behind a contended shard"
+  );
+  assert_eq!(pool.idle_count.load(Ordering::Acquire), 0);
+  Ok(())
+}
+
+#[tokio::test]
 async fn streamed_body_recycles_direct_h1_sender_on_eof() -> anyhow::Result<()> {
   let upstream = upstream("http://backend.internal:18080");
   let pool =

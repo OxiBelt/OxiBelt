@@ -20,6 +20,7 @@ impl AppSnapshot {
       upstream_uri_parts_by_index: previous.upstream_uri_parts_by_index.clone(),
       clients: previous.clients.clone(),
       direct_h1_pools: previous.direct_h1_pools.clone(),
+      direct_h2_pools: previous.direct_h2_pools.clone(),
       health_check_clients: previous.health_check_clients.clone(),
       control_http: previous.control_http.clone(),
       h3_clients: previous.h3_clients.clone(),

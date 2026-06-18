@@ -96,13 +96,21 @@ struct TtlServerSessionCacheShard {
 #[derive(Debug, Default)]
 struct TtlServerSessionCacheInner {
   entries: HashMap<Vec<u8>, StoredServerSession>,
-  order: VecDeque<Vec<u8>>,
+  order: VecDeque<QueuedServerSessionKey>,
+  next_generation: u64,
 }
 
 #[derive(Debug, Clone)]
 struct StoredServerSession {
   value: Vec<u8>,
   inserted_at: Instant,
+  generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedServerSessionKey {
+  key: Vec<u8>,
+  generation: u64,
 }
 
 impl TtlServerSessionCache {
@@ -127,25 +135,35 @@ impl TtlServerSessionCache {
   }
 
   fn remove_expired_at(&self, inner: &mut TtlServerSessionCacheInner, now: Instant) {
-    while let Some(key) = inner.order.front() {
-      let Some(stored) = inner.entries.get(key) else {
+    while let Some(queued) = inner.order.front() {
+      let Some(stored) = inner.entries.get(&queued.key) else {
         inner.order.pop_front();
         continue;
       };
+      if stored.generation != queued.generation {
+        inner.order.pop_front();
+        continue;
+      }
       if now.duration_since(stored.inserted_at) <= self.ttl {
         break;
       }
-      let key = inner.order.pop_front().expect("front key should exist");
-      inner.entries.remove(&key);
+      let queued = inner.order.pop_front().expect("front key should exist");
+      inner.entries.remove(&queued.key);
     }
   }
 
   fn remove_over_capacity(&self, inner: &mut TtlServerSessionCacheInner) {
     while inner.entries.len() > self.shard_capacity {
-      let Some(key) = inner.order.pop_front() else {
+      let Some(queued) = inner.order.pop_front() else {
         break;
       };
-      inner.entries.remove(&key);
+      if inner
+        .entries
+        .get(&queued.key)
+        .is_some_and(|stored| stored.generation == queued.generation)
+      {
+        inner.entries.remove(&queued.key);
+      }
     }
   }
 
@@ -202,15 +220,18 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
       .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
-    if inner.entries.contains_key(&key) {
-      inner.order.retain(|queued| queued != &key);
-    }
-    inner.order.push_back(key.clone());
+    let generation = inner.next_generation;
+    inner.next_generation = inner.next_generation.wrapping_add(1);
+    inner.order.push_back(QueuedServerSessionKey {
+      key: key.clone(),
+      generation,
+    });
     inner.entries.insert(
       key,
       StoredServerSession {
         value,
         inserted_at: now,
+        generation,
       },
     );
     self.remove_over_capacity(&mut inner);
@@ -243,11 +264,7 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
       .expect("TLS session cache lock poisoned");
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
-    let value = inner.entries.remove(key).map(|stored| stored.value);
-    if value.is_some() {
-      inner.order.retain(|queued| queued.as_slice() != key);
-    }
-    value
+    inner.entries.remove(key).map(|stored| stored.value)
   }
 
   fn can_cache(&self) -> bool {
@@ -626,35 +643,28 @@ mod tests {
     );
   }
 
-  fn assert_cache_lengths(cache: &TtlServerSessionCache, entries: usize, order: usize) {
+  fn assert_cache_lengths(cache: &TtlServerSessionCache, entries: usize, live_order: usize) {
     let mut actual_entries = 0;
-    let mut actual_order = 0;
+    let mut actual_live_order = 0;
     for shard in &cache.shards {
       let inner = shard.inner.lock().expect("TLS session cache lock poisoned");
-      assert_eq!(
-        inner.order.len(),
-        inner.entries.len(),
-        "order must track every live entry"
-      );
       assert!(
         inner.order.len() <= cache.shard_capacity,
-        "shard order length must stay bounded by shard capacity"
+        "shard order tombstones must stay bounded by shard capacity"
       );
-      for key in &inner.order {
-        assert!(
-          inner.entries.contains_key(key),
-          "order must only contain live entry keys"
-        );
+      for queued in &inner.order {
+        if inner
+          .entries
+          .get(&queued.key)
+          .is_some_and(|stored| stored.generation == queued.generation)
+        {
+          actual_live_order += 1;
+        }
       }
       actual_entries += inner.entries.len();
-      actual_order += inner.order.len();
     }
     assert_eq!(actual_entries, entries);
-    assert_eq!(actual_order, order);
-    assert!(
-      actual_order <= cache.capacity,
-      "order length must stay bounded by capacity"
-    );
+    assert_eq!(actual_live_order, live_order);
   }
 
   fn assert_cache_order(cache: &TtlServerSessionCache, expected: &[&[u8]]) {
@@ -670,7 +680,13 @@ mod tests {
     let actual = inner
       .order
       .iter()
-      .map(|key| key.as_slice())
+      .filter(|queued| {
+        inner
+          .entries
+          .get(&queued.key)
+          .is_some_and(|stored| stored.generation == queued.generation)
+      })
+      .map(|queued| queued.key.as_slice())
       .collect::<Vec<_>>();
     assert_eq!(actual, expected);
   }

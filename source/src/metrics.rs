@@ -149,8 +149,16 @@ impl Metrics {
       .record_response_body(protocol, disposition, reason);
   }
 
-  pub fn record_fast_path_transport(&self, protocol: &str, outcome: &str, reason: &str) {
-    self.fast_path.record_transport(protocol, outcome, reason);
+  pub fn record_fast_path_transport(
+    &self,
+    transport: &str,
+    protocol: &str,
+    outcome: &str,
+    reason: &str,
+  ) {
+    self
+      .fast_path
+      .record_transport(transport, protocol, outcome, reason);
   }
 
   pub fn record_direct_h1_pool_event(&self, event: &str) {

@@ -7,18 +7,147 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
+use bytes::Bytes;
 use http::Uri;
+use http_body_util::combinators::BoxBody;
+use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use tower_service::Service;
 
-use crate::config::{ProxyHttp2Config, UpstreamConfig};
+use crate::config::{HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::tls;
 
-use super::{ClientPool, UpstreamClientPools};
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type UpstreamBody = BoxBody<Bytes, BoxError>;
+type HyperConnector = InstrumentedConnector<hyper_rustls::HttpsConnector<HttpConnector>>;
+type H2cConnector = InstrumentedConnector<HttpConnector>;
+type HyperClient = Client<HyperConnector, UpstreamBody>;
+type H2cClient = Client<H2cConnector, UpstreamBody>;
+
+#[derive(Clone)]
+pub(super) struct ClientPool {
+  h1_only: HyperClient,
+  negotiated: HyperClient,
+  h2c: H2cClient,
+  metrics: Arc<Metrics>,
+  pool_label: &'static str,
+}
+
+impl ClientPool {
+  fn for_version(
+    &self,
+    origin_scheme: &str,
+    version: HttpVersion,
+  ) -> Option<UpstreamClientRef<'_>> {
+    match version {
+      HttpVersion::H1 => Some(UpstreamClientRef::Hyper {
+        client: &self.h1_only,
+        metrics: &self.metrics,
+        version: "h1",
+        pool: self.pool_label,
+      }),
+      HttpVersion::H2 if origin_scheme == "http" => Some(UpstreamClientRef::H2c {
+        client: &self.h2c,
+        metrics: &self.metrics,
+        version: "h2c",
+        pool: self.pool_label,
+      }),
+      HttpVersion::H2 => Some(UpstreamClientRef::Hyper {
+        client: &self.negotiated,
+        metrics: &self.metrics,
+        version: "h2",
+        pool: self.pool_label,
+      }),
+      HttpVersion::H3 => None,
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum UpstreamClientRef<'a> {
+  Hyper {
+    client: &'a HyperClient,
+    metrics: &'a Arc<Metrics>,
+    version: &'static str,
+    pool: &'static str,
+  },
+  H2c {
+    client: &'a H2cClient,
+    metrics: &'a Arc<Metrics>,
+    version: &'static str,
+    pool: &'static str,
+  },
+}
+
+impl UpstreamClientRef<'_> {
+  pub(crate) async fn request(
+    &self,
+    request: http::Request<UpstreamBody>,
+  ) -> Result<http::Response<Incoming>, hyper_util::client::legacy::Error> {
+    let scheme = metric_scheme(request.uri());
+    match self {
+      Self::Hyper {
+        client,
+        metrics,
+        version,
+        pool,
+      } => {
+        metrics.record_http_upstream_client_request(version, scheme, pool);
+        client.request(request).await
+      }
+      Self::H2c {
+        client,
+        metrics,
+        version,
+        pool,
+      } => {
+        metrics.record_http_upstream_client_request(version, scheme, pool);
+        client.request(request).await
+      }
+    }
+  }
+}
+
+/// Per-upstream HTTP client pools keyed by validated upstream configuration.
+#[derive(Clone)]
+pub struct UpstreamClientPools {
+  pub(super) by_upstream: HashMap<String, usize>,
+  pub(super) pools: Vec<ClientPool>,
+}
+
+impl UpstreamClientPools {
+  pub(crate) fn for_upstream_index(
+    &self,
+    upstream_index: usize,
+    origin_scheme: &str,
+    version: HttpVersion,
+  ) -> Option<UpstreamClientRef<'_>> {
+    self
+      .pools
+      .get(upstream_index)
+      .and_then(|pool| pool.for_version(origin_scheme, version))
+  }
+
+  pub(crate) fn upstream_index(&self, upstream_name: &str) -> Option<usize> {
+    self.by_upstream.get(upstream_name).copied()
+  }
+
+  pub(crate) fn for_upstream_version(
+    &self,
+    upstream_name: &str,
+    origin_scheme: &str,
+    version: HttpVersion,
+  ) -> Option<UpstreamClientRef<'_>> {
+    self
+      .by_upstream
+      .get(upstream_name)
+      .and_then(|&index| self.for_upstream_index(index, origin_scheme, version))
+  }
+}
 
 #[derive(Clone)]
 pub(crate) struct InstrumentedConnector<C> {

@@ -24,6 +24,9 @@ use crate::metrics::Metrics;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
+const DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
+const TRANSPORT_DIRECT_H1: &str = "direct_h1";
+
 #[derive(Clone, Default)]
 pub(crate) struct DirectH1Pools {
   pools: Vec<Option<Arc<DirectH1Pool>>>,
@@ -80,7 +83,7 @@ impl DirectH1Pool {
   }
 
   fn take_sender(&self) -> DirectH1TakeSender {
-    if self.max_idle == 0 {
+    if self.max_idle == 0 || self.idle_count.load(Ordering::Acquire) == 0 {
       return DirectH1TakeSender {
         sender: None,
         stale_pruned: 0,
@@ -90,11 +93,12 @@ impl DirectH1Pool {
     let now = Instant::now();
     let mut stale_pruned = 0;
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
-    for offset in 0..self.idle_shards.len() {
+    let scan_limit = self.idle_shards.len().min(DIRECT_H1_SHARD_SCAN_LIMIT);
+    for offset in 0..scan_limit {
       let shard_index = (start + offset) % self.idle_shards.len();
-      let mut idle = self.idle_shards[shard_index]
-        .lock()
-        .expect("direct H1 idle pool lock poisoned");
+      let Ok(mut idle) = self.idle_shards[shard_index].try_lock() else {
+        continue;
+      };
       while let Some(connection) = idle.pop() {
         self.idle_count.fetch_sub(1, Ordering::AcqRel);
         if now.duration_since(connection.idle_since) <= self.idle_timeout {
@@ -117,6 +121,15 @@ impl DirectH1Pool {
       return Err(sender);
     }
 
+    let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
+    let scan_limit = self.idle_shards.len().min(DIRECT_H1_SHARD_SCAN_LIMIT);
+    let Some(mut idle) = (0..scan_limit).find_map(|offset| {
+      let shard_index = (start + offset) % self.idle_shards.len();
+      self.idle_shards[shard_index].try_lock().ok()
+    }) else {
+      return Err(sender);
+    };
+
     let mut observed = self.idle_count.load(Ordering::Acquire);
     loop {
       if observed >= self.max_idle {
@@ -133,10 +146,6 @@ impl DirectH1Pool {
       }
     }
 
-    let shard_index = self.next_shard.fetch_add(1, Ordering::Relaxed) % self.idle_shards.len();
-    let mut idle = self.idle_shards[shard_index]
-      .lock()
-      .expect("direct H1 idle pool lock poisoned");
     idle.push(DirectH1IdleConnection {
       sender,
       idle_since: Instant::now(),
@@ -301,30 +310,42 @@ pub(super) async fn try_send_direct_h1(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_fast_path_transport(protocol, "miss", reason);
+    metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", reason);
     return DirectH1SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_fast_path_transport(protocol, "miss", "unsupported_upstream");
+    metrics.record_fast_path_transport(
+      TRANSPORT_DIRECT_H1,
+      protocol,
+      "miss",
+      "unsupported_upstream",
+    );
     return DirectH1SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH1Request::from_request(outbound, &pool.origin) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_fast_path_transport(protocol, "miss", "unsupported_request");
+      metrics.record_fast_path_transport(
+        TRANSPORT_DIRECT_H1,
+        protocol,
+        "miss",
+        "unsupported_request",
+      );
       return DirectH1SendResult::Sent(Err(error));
     }
   };
 
   let result = send_prepared_request(pool, metrics, prepared, timeouts).await;
   match &result {
-    Ok(_) => metrics.record_fast_path_transport(protocol, "hit", "used"),
+    Ok(_) => metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "hit", "used"),
     Err(error) if error.to_string().contains("timed out") => {
-      metrics.record_fast_path_transport(protocol, "miss", "connect_error");
+      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", "connect_error");
     }
-    Err(_) => metrics.record_fast_path_transport(protocol, "miss", "send_error"),
+    Err(_) => {
+      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", "send_error");
+    }
   }
   DirectH1SendResult::Sent(result)
 }
