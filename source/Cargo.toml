@@ -38,7 +38,7 @@ httparse = "1.10.1"
 hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
-k8s-openapi = { version = "0.27.1", features = ["v1_35"] }
+k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
 kube = { version = "3.1.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.186"
 md-5 = "0.11.0"
