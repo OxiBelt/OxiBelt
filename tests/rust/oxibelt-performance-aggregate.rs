@@ -4287,6 +4287,12 @@ fn build_regression_gate_report(
         thresholds.h1_fast_path_min_hit_rate,
         &mut findings,
     );
+    collect_h2_upstream_direct_h2_regression_gate(
+        aggregates,
+        primary_target_cpu,
+        thresholds.h1_fast_path_min_hit_rate,
+        &mut findings,
+    );
     collect_comparator_ratio_regression_gate(
         aggregates,
         baseline,
@@ -4893,6 +4899,50 @@ fn collect_h2_fast_path_regression_gate(
         },
         findings,
     );
+}
+
+fn collect_h2_upstream_direct_h2_regression_gate(
+    aggregates: &PrimaryAggregateMap,
+    primary_target_cpu: &str,
+    threshold: f64,
+    findings: &mut RegressionGateFindings,
+) {
+    let gate = "h2_upstream_direct_h2_min_hit_rate";
+    for scenario in ["h2-upstream-h2c", "h2-upstream-h2"] {
+        let Some(aggregate) = aggregates.get(&(Comparator::Oxibelt, scenario.to_owned())) else {
+            continue;
+        };
+        let context = RegressionGateContext {
+            amd64_target_cpu: primary_target_cpu,
+            gate,
+            group: ScenarioGroup::OxibeltOnly.as_str(),
+            scenario,
+            threshold,
+        };
+        let Some(fast_path) = aggregate.fast_path.as_ref() else {
+            push_missing_regression_gate_metric(
+                findings,
+                context,
+                "transport_direct_h2_h2_min_hit_rate",
+                Some("oxibelt"),
+                "missing OxiBelt split H2 upstream direct-H2 transport evidence; cannot evaluate direct-H2 transport hit-rate gate",
+            );
+            continue;
+        };
+        collect_fast_path_sample_gate(
+            fast_path.transport_direct_h2_h2.as_ref(),
+            FastPathSampleGateInput {
+                context,
+                metric_prefix: "transport_direct_h2_h2",
+                evidence_name: "split H2 upstream direct-H2 transport",
+                missing_message: "missing OxiBelt split H2 upstream direct-H2 transport evidence; cannot evaluate direct-H2 transport hit-rate gate",
+                zero_message: "OxiBelt split H2 upstream direct-H2 transport evidence recorded zero attempts",
+                missing_rate_message: "missing OxiBelt split H2 upstream direct-H2 transport hit-rate value",
+                failure_reason: "minimum split H2 upstream direct-H2 transport evidence must meet the configured threshold",
+            },
+            findings,
+        );
+    }
 }
 
 fn collect_h3_fast_path_regression_gate(
@@ -7979,6 +8029,68 @@ mod tests {
         assert!(gates.violations.iter().any(|violation| {
             violation.gate == "h2_fast_path_min_hit_rate"
                 && violation.metric == "transport_direct_h1_h2_min_hit_rate"
+                && violation.observed == Some(0.98)
+                && violation.evaluation_mode == "evidence"
+        }));
+    }
+
+    #[test]
+    fn h2_upstream_direct_h2_fast_path_hit_rate_gate_fails_below_threshold() {
+        let mut aggregates = PrimaryAggregateMap::new();
+        insert_primary_aggregate(
+            &mut aggregates,
+            Comparator::Oxibelt,
+            "h2-upstream-h2",
+            100.0,
+            1.0,
+        );
+        let aggregate = aggregates
+            .get_mut(&(Comparator::Oxibelt, "h2-upstream-h2".to_owned()))
+            .expect("synthetic aggregate should exist");
+        aggregate.fast_path = Some(AggregateFastPathStats {
+            plain_proxy_h1: None,
+            plain_proxy_h2: Some(passing_fast_path_aggregate()),
+            plain_proxy_h3: None,
+            transport_direct_h1_h1: None,
+            transport_direct_h1_h2: None,
+            transport_direct_h1_h3: None,
+            transport_direct_h2_h1: None,
+            transport_direct_h2_h2: Some(FastPathAggregateStats {
+                sample_count: 1,
+                hits: 98,
+                misses: 2,
+                attempts: 100,
+                median_hit_rate: Some(0.98),
+                min_hit_rate: Some(0.98),
+            }),
+            transport_direct_h2_h3: None,
+            direct_h1_pool: None,
+            static_responses: None,
+        });
+
+        let gates = build_regression_gate_report(
+            &aggregates,
+            RegressionGateThresholds {
+                h1_keepalive_min_nginx_ratio: DEFAULT_H1_KEEPALIVE_MIN_NGINX_RATIO,
+                h1_fast_path_min_hit_rate: DEFAULT_H1_FAST_PATH_MIN_HIT_RATE,
+                h2_min_nginx_ratio: DEFAULT_H2_MIN_NGINX_RATIO,
+                h3_min_nginx_ratio: DEFAULT_H3_MIN_NGINX_RATIO,
+                static_16k_h1c_min_caddy_ratio: DEFAULT_STATIC_16K_H1C_MIN_CADDY_RATIO,
+                static_16k_h1c_min_nginx_ratio: DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO,
+                remote_signer_handshake_min_local_ratio:
+                    DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
+                waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
+                crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+                waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
+            },
+            None,
+            DEFAULT_AMD64_TARGET_CPU,
+            None,
+        );
+
+        assert!(gates.violations.iter().any(|violation| {
+            violation.gate == "h2_upstream_direct_h2_min_hit_rate"
+                && violation.metric == "transport_direct_h2_h2_min_hit_rate"
                 && violation.observed == Some(0.98)
                 && violation.evaluation_mode == "evidence"
         }));

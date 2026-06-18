@@ -140,6 +140,9 @@ fn prometheus_output_includes_upstream_client_reuse_metrics() {
   metrics.record_http_upstream_client_request("h1", "http", "primary");
   metrics.record_http_upstream_client_pool_miss("h1", "http", "primary");
   metrics.record_http_upstream_client_connection_created("h1", "http", "primary");
+  metrics.record_http_upstream_client_request("h3", "https", "primary");
+  metrics.record_http_upstream_client_pool_miss("h3", "https", "primary");
+  metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
 
   let body = metrics.prometheus(
     &MetricsConfig::default(),
@@ -158,6 +161,15 @@ fn prometheus_output_includes_upstream_client_reuse_metrics() {
   ));
   assert!(body.contains(
     "oxibelt_http_upstream_client_reuse_estimate{version=\"h1\",scheme=\"http\",pool=\"primary\"} 0.500000"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_requests_total{version=\"h3\",scheme=\"https\",pool=\"primary\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_pool_misses_total{version=\"h3\",scheme=\"https\",pool=\"primary\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_upstream_client_connections_created_total{version=\"h3\",scheme=\"https\",pool=\"primary\"} 1"
   ));
 }
 

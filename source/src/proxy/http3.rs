@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use h3::ext::Protocol;
 use http_body_util::BodyExt;
-use hyper::body::{Body as _, Frame};
+use hyper::body::Body as _;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -23,7 +23,6 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{
   InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES, KnownSmallResponseBody, ProxyBody,
-  boxed_error, channel_body,
 };
 use crate::proxy::http::response::text_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
@@ -38,10 +37,11 @@ type H3RequestRecvStream =
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
-const H3_BODY_CHANNEL_CAPACITY: usize = 16;
-
 mod request_body;
 mod request_tasks;
+mod response_body;
+#[cfg(test)]
+mod tests;
 mod webtransport_bridge;
 
 #[derive(Clone)]
@@ -111,7 +111,7 @@ pub(crate) struct UpstreamH3Pool {
   client_config: h3_quinn::quinn::ClientConfig,
   quic_config: crate::config::QuicConfig,
   quic_host_key_base_dir: Option<PathBuf>,
-  entries: Mutex<HashMap<H3PoolKey, Arc<PooledH3Connection>>>,
+  entries: Mutex<HashMap<H3PoolKey, Arc<H3PoolSlot>>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -127,6 +127,10 @@ struct PooledH3Connection {
   created_at: Instant,
   last_used: std::sync::Mutex<Instant>,
   driver_task: JoinHandle<()>,
+}
+
+struct H3PoolSlot {
+  connection: Mutex<Option<Arc<PooledH3Connection>>>,
 }
 
 impl PooledH3Connection {
@@ -163,15 +167,17 @@ impl UpstreamH3Pool {
     request: Request<ProxyBody>,
     upstream: &UpstreamConfig,
     timeouts: EffectiveTimeouts,
+    metrics: &Arc<crate::metrics::Metrics>,
   ) -> anyhow::Result<Response<ProxyBody>> {
     let uri = request.uri().clone();
+    metrics.record_http_upstream_client_request("h3", "https", "primary");
     let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
     let key = H3PoolKey {
       remote_addr,
       server_name,
     };
     let send_request = self
-      .send_request_for(key.clone(), upstream, timeouts)
+      .send_request_for(key.clone(), upstream, timeouts, metrics)
       .await?;
     match send_h3_request(send_request, request, &uri, timeouts).await {
       Ok(response) => Ok(response),
@@ -187,30 +193,19 @@ impl UpstreamH3Pool {
     key: H3PoolKey,
     upstream: &UpstreamConfig,
     timeouts: EffectiveTimeouts,
+    metrics: &Arc<crate::metrics::Metrics>,
   ) -> anyhow::Result<H3SendRequest> {
-    let mut entries = self.entries.lock().await;
-    if let Some(entry) = entries.get(&key).cloned() {
+    let slot = self.slot_for_key(key.clone()).await;
+    let mut connection = slot.connection.lock().await;
+    if let Some(entry) = connection.as_ref() {
       if entry.usable(upstream, &self.quic_config) {
         entry.mark_used();
         return Ok(entry.send_request.clone());
       }
-      entries.remove(&key);
+      *connection = None;
     }
 
-    if entries.len() >= self.quic_config.upstream_pool.max_connections_per_upstream
-      && let Some(oldest_key) = entries
-        .iter()
-        .min_by_key(|(_, entry)| {
-          *entry
-            .last_used
-            .lock()
-            .expect("pooled H3 connection last_used lock poisoned")
-        })
-        .map(|(key, _)| key.clone())
-    {
-      entries.remove(&oldest_key);
-    }
-
+    metrics.record_http_upstream_client_pool_miss("h3", "https", "primary");
     let connected = connect_h3_upstream(
       key.server_name.clone(),
       key.remote_addr,
@@ -220,6 +215,7 @@ impl UpstreamH3Pool {
       timeouts.upstream_connect,
     )
     .await?;
+    metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
     let entry = Arc::new(PooledH3Connection {
       _endpoint: connected.endpoint,
       connection: connected.connection,
@@ -229,12 +225,48 @@ impl UpstreamH3Pool {
       driver_task: connected.driver_task,
     });
     let send_request = entry.send_request.clone();
-    entries.insert(key, entry);
+    *connection = Some(entry);
     Ok(send_request)
   }
 
+  async fn slot_for_key(&self, key: H3PoolKey) -> Arc<H3PoolSlot> {
+    let mut entries = self.entries.lock().await;
+    if let Some(slot) = entries.get(&key) {
+      return slot.clone();
+    }
+
+    if entries.len() >= self.quic_config.upstream_pool.max_connections_per_upstream {
+      let oldest_key = entries
+        .iter()
+        .filter_map(|(candidate_key, slot)| {
+          let connection = slot.connection.try_lock().ok()?;
+          let entry = connection.as_ref()?;
+          let last_used = *entry
+            .last_used
+            .lock()
+            .expect("pooled H3 connection last_used lock poisoned");
+          Some((candidate_key.clone(), last_used))
+        })
+        .min_by_key(|(_, last_used)| *last_used)
+        .map(|(candidate_key, _)| candidate_key)
+        .or_else(|| entries.keys().next().cloned());
+      if let Some(oldest_key) = oldest_key {
+        entries.remove(&oldest_key);
+      }
+    }
+
+    let slot = Arc::new(H3PoolSlot {
+      connection: Mutex::new(None),
+    });
+    entries.insert(key, slot.clone());
+    slot
+  }
+
   async fn remove_entry(&self, key: &H3PoolKey) {
-    self.entries.lock().await.remove(key);
+    let slot = self.entries.lock().await.remove(key);
+    if let Some(slot) = slot {
+      *slot.connection.lock().await = None;
+    }
   }
 }
 
@@ -445,7 +477,9 @@ pub(crate) async fn forward_request(
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
   if let Some(pool) = state.h3_clients.for_upstream(&upstream.name) {
-    return pool.forward_request(request, upstream, timeouts).await;
+    return pool
+      .forward_request(request, upstream, timeouts, &state.metrics)
+      .await;
   }
 
   forward_one_shot_request(request, upstream, state, timeouts).await
@@ -458,6 +492,12 @@ pub(crate) async fn forward_one_shot_request(
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let uri = request.uri().clone();
+  state
+    .metrics
+    .record_http_upstream_client_request("h3", "https", "primary");
+  state
+    .metrics
+    .record_http_upstream_client_pool_miss("h3", "https", "primary");
   let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
     &state.config.proxy.trusted_ca_certs,
     &upstream.tls.ech,
@@ -481,6 +521,9 @@ pub(crate) async fn forward_one_shot_request(
     timeouts.upstream_connect,
   )
   .await?;
+  state
+    .metrics
+    .record_http_upstream_client_connection_created("h3", "https", "primary");
   let guard = OneShotH3Connection {
     _endpoint: connected.endpoint,
     connection: connected.connection,
@@ -489,7 +532,8 @@ pub(crate) async fn forward_one_shot_request(
 
   let response = send_h3_request(connected.send_request, request, &uri, timeouts).await?;
   let (parts, body) = response.into_parts();
-  let close_body = wrap_body_close_connection(body, move || drop(guard));
+  let close_body =
+    crate::proxy::http::body::with_drop_guard(body, Arc::new(std::sync::Mutex::new(Some(guard))));
   Ok(Response::from_parts(parts, close_body))
 }
 
@@ -566,57 +610,8 @@ async fn send_h3_request(
     }
     break parts;
   };
-  let (body_sender, body) = channel_body(H3_BODY_CHANNEL_CAPACITY);
-  tokio::spawn(async move {
-    loop {
-      match tokio::time::timeout(timeouts.upstream_read, stream.recv_data()).await {
-        Ok(Ok(Some(mut chunk))) => {
-          let len = chunk.remaining();
-          if body_sender
-            .send(Ok(Frame::data(chunk.copy_to_bytes(len))))
-            .await
-            .is_err()
-          {
-            break;
-          }
-        }
-        Ok(Ok(None)) => break,
-        Ok(Err(error)) => {
-          let _ = body_sender
-            .send(Err(boxed_error(std::io::Error::other(format!(
-              "failed to receive upstream HTTP/3 response data: {error}"
-            )))))
-            .await;
-          break;
-        }
-        Err(_) => {
-          let _ = body_sender
-            .send(Err(boxed_error(std::io::Error::other(
-              "upstream HTTP/3 response body read timed out",
-            ))))
-            .await;
-          break;
-        }
-      }
-    }
-  });
+  let body = response_body::upstream_h3_response_body(stream, timeouts.upstream_read);
   Ok(Response::from_parts(parts, body))
-}
-
-fn wrap_body_close_connection<F>(mut body: ProxyBody, close: F) -> ProxyBody
-where
-  F: FnOnce() + Send + 'static,
-{
-  let (body_sender, wrapped) = channel_body(H3_BODY_CHANNEL_CAPACITY);
-  tokio::spawn(async move {
-    while let Some(frame) = body.frame().await {
-      if body_sender.send(frame).await.is_err() {
-        break;
-      }
-    }
-    close();
-  });
-  wrapped
 }
 
 async fn handle_h3_request(
@@ -959,152 +954,4 @@ fn downstream_h3_accept_message_is_normal_close(message: &str) -> bool {
   ]
   .iter()
   .any(|needle| message.contains(needle))
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use http_body_util::{BodyExt, Full};
-
-  fn full_test_body(bytes: Bytes) -> ProxyBody {
-    Full::new(bytes)
-      .map_err(|never| -> crate::proxy::http::body::BoxError { match never {} })
-      .boxed()
-  }
-
-  #[test]
-  fn detects_webtransport_extended_connect() {
-    let mut request = Request::builder()
-      .method(Method::CONNECT)
-      .uri("https://example.com/session")
-      .body(())
-      .unwrap();
-    request.extensions_mut().insert(Protocol::WEB_TRANSPORT);
-
-    assert!(is_webtransport_request(&request));
-  }
-
-  #[test]
-  fn plain_connect_is_not_webtransport() {
-    let request = Request::builder()
-      .method(Method::CONNECT)
-      .uri("https://example.com/session")
-      .body(())
-      .unwrap();
-
-    assert!(!is_webtransport_request(&request));
-  }
-
-  #[test]
-  fn zero_rtt_policy_rejects_non_safe_early_data_methods() {
-    let request = Request::builder()
-      .method(Method::POST)
-      .uri("https://example.com/upload")
-      .body(())
-      .unwrap();
-
-    assert!(rejects_unsafe_early_data(
-      &request,
-      crate::config::QuicZeroRttMode::SafeMethods,
-      true
-    ));
-  }
-
-  #[test]
-  fn zero_rtt_policy_allows_safe_early_data_methods() {
-    for method in [Method::GET, Method::HEAD] {
-      let request = Request::builder()
-        .method(method)
-        .uri("https://example.com/read")
-        .body(())
-        .unwrap();
-
-      assert!(!rejects_unsafe_early_data(
-        &request,
-        crate::config::QuicZeroRttMode::SafeMethods,
-        true
-      ));
-    }
-  }
-
-  #[test]
-  fn zero_rtt_policy_ignores_spoofed_early_data_header_after_handshake() {
-    let request = Request::builder()
-      .method(Method::POST)
-      .uri("https://example.com/upload")
-      .header("early-data", "1")
-      .body(())
-      .unwrap();
-
-    assert!(!rejects_unsafe_early_data(
-      &request,
-      crate::config::QuicZeroRttMode::SafeMethods,
-      false
-    ));
-  }
-
-  #[test]
-  fn zero_rtt_policy_is_disabled_when_zero_rtt_is_off() {
-    let request = Request::builder()
-      .method(Method::POST)
-      .uri("https://example.com/upload")
-      .body(())
-      .unwrap();
-
-    assert!(!rejects_unsafe_early_data(
-      &request,
-      crate::config::QuicZeroRttMode::Off,
-      true
-    ));
-  }
-
-  #[test]
-  fn h3_accept_normal_close_messages_are_not_warnable() {
-    for message in [
-      "Remote error: ApplicationClose: H3_NO_ERROR",
-      "connection closed before request headers completed",
-      "connection closed",
-      "graceful shutdown",
-    ] {
-      assert!(downstream_h3_accept_message_is_normal_close(message));
-    }
-  }
-
-  #[test]
-  fn h3_accept_protocol_errors_remain_warnable() {
-    for message in [
-      "Local error: Application { code: H3_MESSAGE_ERROR, reason: \"bad frame\" }",
-      "Remote error: ApplicationClose: H3_FRAME_UNEXPECTED",
-      "Timeout",
-    ] {
-      assert!(!downstream_h3_accept_message_is_normal_close(message));
-    }
-  }
-
-  #[test]
-  fn h3_known_small_path_requires_marker_and_small_upper_bound() {
-    let small = full_test_body(Bytes::from_static(b"ok"));
-    assert!(use_h3_known_small_body_path(true, &small));
-    assert!(!use_h3_known_small_body_path(false, &small));
-
-    let (_sender, unknown_upper) = channel_body(1);
-    assert!(!use_h3_known_small_body_path(true, &unknown_upper));
-
-    let large = full_test_body(Bytes::from(vec![0; KNOWN_SMALL_BODY_MAX_BYTES + 1]));
-    assert!(!use_h3_known_small_body_path(true, &large));
-  }
-
-  #[tokio::test]
-  async fn h3_known_small_collect_rejects_body_over_limit() {
-    let body = full_test_body(Bytes::from(vec![0; KNOWN_SMALL_BODY_MAX_BYTES + 1]));
-    let error = collect_h3_known_small_body(body)
-      .await
-      .expect_err("known-small body over the limit should fail closed");
-
-    assert!(
-      error
-        .to_string()
-        .contains("known-small response body exceeded")
-    );
-  }
 }

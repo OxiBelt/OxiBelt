@@ -1900,11 +1900,12 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
   fast_path_protocol="$(plain_proxy_fast_path_gate_protocol "${label}" "${protocol}" "${host}")"
+  direct_transport="$(direct_transport_gate_transport "${label}" "${protocol}" "${host}")"
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_before="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-before" "${fast_path_protocol}")"
     direct_h1_before="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-before" "${fast_path_protocol}")"
@@ -1946,7 +1947,12 @@ run_load() {
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
     json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
     assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
-    assert_direct_h1_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_h1_delta}"
+    case "${direct_transport}" in
+      direct_h1) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h1_delta}" ;;
+      direct_h2) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h2_delta}" ;;
+      "") ;;
+      *) fail_with_diagnostics "invalid direct transport gate for ${label}: ${direct_transport}" ;;
+    esac
   fi
   if static_fast_path_gate_label "${label}" "${protocol}" "${host}"; then
     static_fast_path_after="$(static_fast_path_metrics "${host}" "${label}-static-fast-path-after")"
@@ -2284,6 +2290,21 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-h1-keepalive:h1) printf 'h1' ;;
     oxibelt-h2:h2) printf 'h2' ;;
     oxibelt-h3:h3) printf 'h3' ;;
+    oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
+    oxibelt-h2-upstream-h2:h2) printf 'h2' ;;
+  esac
+}
+
+direct_transport_gate_transport() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  if [[ "${host}" != "oxibelt" ]]; then
+    return
+  fi
+  case "${label}:${protocol}" in
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2) printf 'direct_h2' ;;
   esac
 }
 
@@ -2308,24 +2329,26 @@ assert_plain_proxy_fast_path_hit_rate() {
   fi
 }
 
-assert_direct_h1_transport_hit_rate() {
+assert_direct_transport_hit_rate() {
   local label="$1"
   local protocol="$2"
-  local fast_path="$3"
-  local attempts hit_rate protocol_name
+  local transport="$3"
+  local fast_path="$4"
+  local attempts hit_rate protocol_name transport_name
   protocol_name="${protocol^^}"
+  transport_name="${transport//_/ }"
   attempts="$(jq -r '.attempts // 0' <<<"${fast_path}")"
   if [[ "${attempts}" == "0" ]]; then
-    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: no ${protocol_name} direct-H1 transport samples were recorded"
+    handle_regression_gate_violation "OxiBelt ${label} ${transport_name} transport gate failed: no ${protocol_name} ${transport_name} transport samples were recorded"
     return
   fi
   hit_rate="$(jq -r '.hit_rate // empty' <<<"${fast_path}")"
   if [[ -z "${hit_rate}" ]]; then
-    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: missing ${protocol_name} direct-H1 hit-rate evidence"
+    handle_regression_gate_violation "OxiBelt ${label} ${transport_name} transport gate failed: missing ${protocol_name} ${transport_name} hit-rate evidence"
     return
   fi
   if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
-    handle_regression_gate_violation "OxiBelt ${label} direct-H1 transport gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
+    handle_regression_gate_violation "OxiBelt ${label} ${transport_name} transport gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
   fi
 }
 
@@ -3049,6 +3072,7 @@ run_all_serving_types() {
     run_external_benchmarks_for_comparator oxibelt oxibelt required
     run_static_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
+    run_oxibelt_h2_split_loads
     start_oxibelt "${oxibelt_handshake_scenario}" oxibelt
     run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt
     run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt

@@ -14,6 +14,7 @@ use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::sync::RwLock;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 use url::Url;
@@ -70,7 +71,7 @@ struct DirectH2Pool {
   idle_timeout: Duration,
   http2_config: ProxyHttp2Config,
   tls_config: Option<Arc<rustls::ClientConfig>>,
-  entry: tokio::sync::Mutex<Option<Arc<DirectH2Connection>>>,
+  entry: RwLock<Option<Arc<DirectH2Connection>>>,
 }
 
 struct DirectH2Connection {
@@ -79,20 +80,16 @@ struct DirectH2Connection {
 }
 
 impl DirectH2Connection {
-  fn usable(&self, idle_timeout: Duration) -> bool {
-    self
+  fn reusable_sender(&self, idle_timeout: Duration) -> Option<SendRequest<ProxyBody>> {
+    let mut last_used = self
       .last_used
       .lock()
-      .expect("direct H2 last-used lock poisoned")
-      .elapsed()
-      <= idle_timeout
-  }
-
-  fn mark_used(&self) {
-    *self
-      .last_used
-      .lock()
-      .expect("direct H2 last-used lock poisoned") = Instant::now();
+      .expect("direct H2 last-used lock poisoned");
+    if last_used.elapsed() > idle_timeout {
+      return None;
+    }
+    *last_used = Instant::now();
+    Some(self.sender.clone())
   }
 }
 
@@ -147,16 +144,24 @@ impl DirectH2Pool {
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
       http2_config: *http2_config,
       tls_config,
-      entry: tokio::sync::Mutex::new(None),
+      entry: RwLock::new(None),
     }))
   }
 
   async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<(SendRequest<ProxyBody>, bool)> {
-    let mut entry = self.entry.lock().await;
+    {
+      let entry = self.entry.read().await;
+      if let Some(connection) = entry.as_ref()
+        && let Some(sender) = connection.reusable_sender(self.idle_timeout)
+      {
+        return Ok((sender, true));
+      }
+    }
+
+    let mut entry = self.entry.write().await;
     if let Some(connection) = entry.as_ref() {
-      if connection.usable(self.idle_timeout) {
-        connection.mark_used();
-        return Ok((connection.sender.clone(), true));
+      if let Some(sender) = connection.reusable_sender(self.idle_timeout) {
+        return Ok((sender, true));
       }
       *entry = None;
     }
@@ -175,7 +180,7 @@ impl DirectH2Pool {
   }
 
   async fn clear_sender(&self) {
-    *self.entry.lock().await = None;
+    *self.entry.write().await = None;
   }
 
   async fn connect_sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<SendRequest<ProxyBody>> {

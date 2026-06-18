@@ -2,7 +2,7 @@
 
 use super::StripedCounter;
 
-const VERSIONS: [&str; 4] = ["h1", "h2", "h2c", "other"];
+const VERSIONS: [&str; 5] = ["h1", "h2", "h2c", "h3", "other"];
 const SCHEMES: [&str; 3] = ["http", "https", "other"];
 const POOLS: [&str; 3] = ["primary", "health", "other"];
 const COUNTER_COUNT: usize = VERSIONS.len() * SCHEMES.len() * POOLS.len();
@@ -171,12 +171,19 @@ mod tests {
     metrics.record_request("h1", "http", "primary");
     metrics.record_pool_miss("h1", "http", "primary");
     metrics.record_connection_created("h1", "http", "primary");
+    metrics.record_request("h3", "https", "primary");
+    metrics.record_pool_miss("h3", "https", "primary");
+    metrics.record_connection_created("h3", "https", "primary");
     metrics.record_request("h9", "http", "primary");
 
     let index = counter_index("h1", "http", "primary").unwrap();
     assert_eq!(metrics.requests[index].load(), 1);
     assert_eq!(metrics.pool_misses[index].load(), 1);
     assert_eq!(metrics.connections_created[index].load(), 1);
+    let h3_index = counter_index("h3", "https", "primary").unwrap();
+    assert_eq!(metrics.requests[h3_index].load(), 1);
+    assert_eq!(metrics.pool_misses[h3_index].load(), 1);
+    assert_eq!(metrics.connections_created[h3_index].load(), 1);
   }
 
   #[test]

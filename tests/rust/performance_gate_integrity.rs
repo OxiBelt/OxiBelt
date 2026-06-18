@@ -598,6 +598,10 @@ plain_proxy_fast_path_gate_protocol() {{
   return 0
 }}
 
+direct_transport_gate_transport() {{
+  return 0
+}}
+
 static_fast_path_gate_label() {{
   return 1
 }}
@@ -2483,8 +2487,14 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
         "performance script should gate the fast-path hit rate"
     );
     assert!(
-        script.contains("assert_direct_h1_transport_hit_rate"),
-        "performance script should gate the direct-H1 transport hit rate"
+        script.contains("assert_direct_transport_hit_rate"),
+        "performance script should gate expected direct transport hit rates"
+    );
+    assert!(
+        script.contains("oxibelt-h2-upstream-h2c:h2")
+            && script.contains("oxibelt-h2-upstream-h2:h2")
+            && script.contains("direct_h2"),
+        "split H2 upstream rows should gate direct-H2 transport evidence"
     );
 }
 
