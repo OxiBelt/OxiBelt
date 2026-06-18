@@ -205,7 +205,11 @@ struct BenchmarkRow {
     fast_path_transport_direct_h1_h1: Option<FastPathSample>,
     fast_path_transport_direct_h1_h2: Option<FastPathSample>,
     fast_path_transport_direct_h1_h3: Option<FastPathSample>,
+    fast_path_transport_direct_h2_h1: Option<FastPathSample>,
+    fast_path_transport_direct_h2_h2: Option<FastPathSample>,
+    fast_path_transport_direct_h2_h3: Option<FastPathSample>,
     direct_h1_pool_events: Option<BTreeMap<String, u64>>,
+    static_fast_path_responses: Option<BTreeMap<String, BTreeMap<String, u64>>>,
 }
 
 #[derive(Clone)]
@@ -278,7 +282,25 @@ struct AggregateBuilder {
     fast_path_transport_direct_h1_h1: FastPathAggregateBuilder,
     fast_path_transport_direct_h1_h2: FastPathAggregateBuilder,
     fast_path_transport_direct_h1_h3: FastPathAggregateBuilder,
+    fast_path_transport_direct_h2_h1: FastPathAggregateBuilder,
+    fast_path_transport_direct_h2_h2: FastPathAggregateBuilder,
+    fast_path_transport_direct_h2_h3: FastPathAggregateBuilder,
     direct_h1_pool_events: CounterMapAggregateBuilder,
+    static_fast_path_responses: NestedCounterMapAggregateBuilder,
+}
+
+struct AggregateFastPathInput {
+    plain_proxy_h1: FastPathAggregateBuilder,
+    plain_proxy_h2: FastPathAggregateBuilder,
+    plain_proxy_h3: FastPathAggregateBuilder,
+    transport_direct_h1_h1: FastPathAggregateBuilder,
+    transport_direct_h1_h2: FastPathAggregateBuilder,
+    transport_direct_h1_h3: FastPathAggregateBuilder,
+    transport_direct_h2_h1: FastPathAggregateBuilder,
+    transport_direct_h2_h2: FastPathAggregateBuilder,
+    transport_direct_h2_h3: FastPathAggregateBuilder,
+    direct_h1_pool: CounterMapAggregateBuilder,
+    static_responses: NestedCounterMapAggregateBuilder,
 }
 
 #[derive(Clone)]
@@ -302,6 +324,12 @@ struct FastPathAggregateBuilder {
 struct CounterMapAggregateBuilder {
     sample_count: usize,
     values: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct NestedCounterMapAggregateBuilder {
+    sample_count: usize,
+    values: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 #[derive(Default)]
@@ -367,14 +395,28 @@ struct AggregateFastPathStats {
     transport_direct_h1_h2: Option<FastPathAggregateStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport_direct_h1_h3: Option<FastPathAggregateStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_direct_h2_h1: Option<FastPathAggregateStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_direct_h2_h2: Option<FastPathAggregateStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_direct_h2_h3: Option<FastPathAggregateStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     direct_h1_pool: Option<CounterMapAggregateStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    static_responses: Option<NestedCounterMapAggregateStats>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct CounterMapAggregateStats {
     sample_count: usize,
     values: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct NestedCounterMapAggregateStats {
+    sample_count: usize,
+    values: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -1047,8 +1089,20 @@ impl AggregateBuilder {
         if let Some(fast_path) = row.fast_path_transport_direct_h1_h3 {
             self.fast_path_transport_direct_h1_h3.push(fast_path);
         }
+        if let Some(fast_path) = row.fast_path_transport_direct_h2_h1 {
+            self.fast_path_transport_direct_h2_h1.push(fast_path);
+        }
+        if let Some(fast_path) = row.fast_path_transport_direct_h2_h2 {
+            self.fast_path_transport_direct_h2_h2.push(fast_path);
+        }
+        if let Some(fast_path) = row.fast_path_transport_direct_h2_h3 {
+            self.fast_path_transport_direct_h2_h3.push(fast_path);
+        }
         if let Some(events) = row.direct_h1_pool_events {
             self.direct_h1_pool_events.push(events);
+        }
+        if let Some(responses) = row.static_fast_path_responses {
+            self.static_fast_path_responses.push(responses);
         }
         self.source_files.insert(source_file);
     }
@@ -1064,15 +1118,19 @@ impl AggregateBuilder {
             .map(Comparator::as_str)
             .unwrap_or("unknown")
             .to_owned();
-        let fast_path = aggregate_fast_path_stats(
-            self.fast_path_plain_proxy_h1,
-            self.fast_path_plain_proxy_h2,
-            self.fast_path_plain_proxy_h3,
-            self.fast_path_transport_direct_h1_h1,
-            self.fast_path_transport_direct_h1_h2,
-            self.fast_path_transport_direct_h1_h3,
-            self.direct_h1_pool_events,
-        );
+        let fast_path = aggregate_fast_path_stats(AggregateFastPathInput {
+            plain_proxy_h1: self.fast_path_plain_proxy_h1,
+            plain_proxy_h2: self.fast_path_plain_proxy_h2,
+            plain_proxy_h3: self.fast_path_plain_proxy_h3,
+            transport_direct_h1_h1: self.fast_path_transport_direct_h1_h1,
+            transport_direct_h1_h2: self.fast_path_transport_direct_h1_h2,
+            transport_direct_h1_h3: self.fast_path_transport_direct_h1_h3,
+            transport_direct_h2_h1: self.fast_path_transport_direct_h2_h1,
+            transport_direct_h2_h2: self.fast_path_transport_direct_h2_h2,
+            transport_direct_h2_h3: self.fast_path_transport_direct_h2_h3,
+            direct_h1_pool: self.direct_h1_pool_events,
+            static_responses: self.static_fast_path_responses,
+        });
 
         AggregateStats {
             amd64_target_cpu: self.amd64_target_cpu,
@@ -1107,29 +1165,29 @@ impl AggregateBuilder {
     }
 }
 
-fn aggregate_fast_path_stats(
-    plain_proxy_h1: FastPathAggregateBuilder,
-    plain_proxy_h2: FastPathAggregateBuilder,
-    plain_proxy_h3: FastPathAggregateBuilder,
-    transport_direct_h1_h1: FastPathAggregateBuilder,
-    transport_direct_h1_h2: FastPathAggregateBuilder,
-    transport_direct_h1_h3: FastPathAggregateBuilder,
-    direct_h1_pool: CounterMapAggregateBuilder,
-) -> Option<AggregateFastPathStats> {
-    let plain_proxy_h1 = plain_proxy_h1.finish();
-    let plain_proxy_h2 = plain_proxy_h2.finish();
-    let plain_proxy_h3 = plain_proxy_h3.finish();
-    let transport_direct_h1_h1 = transport_direct_h1_h1.finish();
-    let transport_direct_h1_h2 = transport_direct_h1_h2.finish();
-    let transport_direct_h1_h3 = transport_direct_h1_h3.finish();
-    let direct_h1_pool = direct_h1_pool.finish();
+fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateFastPathStats> {
+    let plain_proxy_h1 = input.plain_proxy_h1.finish();
+    let plain_proxy_h2 = input.plain_proxy_h2.finish();
+    let plain_proxy_h3 = input.plain_proxy_h3.finish();
+    let transport_direct_h1_h1 = input.transport_direct_h1_h1.finish();
+    let transport_direct_h1_h2 = input.transport_direct_h1_h2.finish();
+    let transport_direct_h1_h3 = input.transport_direct_h1_h3.finish();
+    let transport_direct_h2_h1 = input.transport_direct_h2_h1.finish();
+    let transport_direct_h2_h2 = input.transport_direct_h2_h2.finish();
+    let transport_direct_h2_h3 = input.transport_direct_h2_h3.finish();
+    let direct_h1_pool = input.direct_h1_pool.finish();
+    let static_responses = input.static_responses.finish();
     if plain_proxy_h1.is_none()
         && plain_proxy_h2.is_none()
         && plain_proxy_h3.is_none()
         && transport_direct_h1_h1.is_none()
         && transport_direct_h1_h2.is_none()
         && transport_direct_h1_h3.is_none()
+        && transport_direct_h2_h1.is_none()
+        && transport_direct_h2_h2.is_none()
+        && transport_direct_h2_h3.is_none()
         && direct_h1_pool.is_none()
+        && static_responses.is_none()
     {
         return None;
     }
@@ -1140,7 +1198,11 @@ fn aggregate_fast_path_stats(
         transport_direct_h1_h1,
         transport_direct_h1_h2,
         transport_direct_h1_h3,
+        transport_direct_h2_h1,
+        transport_direct_h2_h2,
+        transport_direct_h2_h3,
         direct_h1_pool,
+        static_responses,
     })
 }
 
@@ -1185,6 +1247,29 @@ impl CounterMapAggregateBuilder {
             return None;
         }
         Some(CounterMapAggregateStats {
+            sample_count: self.sample_count,
+            values: self.values,
+        })
+    }
+}
+
+impl NestedCounterMapAggregateBuilder {
+    fn push(&mut self, values: BTreeMap<String, BTreeMap<String, u64>>) {
+        self.sample_count += 1;
+        for (outer, inner_values) in values {
+            let inner = self.values.entry(outer).or_default();
+            for (name, value) in inner_values {
+                let entry = inner.entry(name).or_insert(0);
+                *entry = entry.saturating_add(value);
+            }
+        }
+    }
+
+    fn finish(self) -> Option<NestedCounterMapAggregateStats> {
+        if self.sample_count == 0 {
+            return None;
+        }
+        Some(NestedCounterMapAggregateStats {
             sample_count: self.sample_count,
             values: self.values,
         })
@@ -3015,7 +3100,35 @@ fn parse_result_value(
             label,
             warnings,
         ),
+        fast_path_transport_direct_h2_h1: parse_fast_path_transport_direct_h2_h1(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+        fast_path_transport_direct_h2_h2: parse_fast_path_transport_direct_h2_h2(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+        fast_path_transport_direct_h2_h3: parse_fast_path_transport_direct_h2_h3(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
         direct_h1_pool_events: parse_direct_h1_pool_events(
+            object,
+            source_file,
+            row_index,
+            label,
+            warnings,
+        ),
+        static_fast_path_responses: parse_static_fast_path_responses(
             object,
             source_file,
             row_index,
@@ -3087,8 +3200,9 @@ fn parse_fast_path_transport_direct_h1_h1(
     label: &str,
     warnings: &mut WarningBag,
 ) -> Option<FastPathSample> {
-    parse_fast_path_transport_direct_h1_protocol(
+    parse_fast_path_transport_protocol(
         object,
+        "direct_h1",
         "h1",
         source_file,
         row_index,
@@ -3104,8 +3218,9 @@ fn parse_fast_path_transport_direct_h1_h2(
     label: &str,
     warnings: &mut WarningBag,
 ) -> Option<FastPathSample> {
-    parse_fast_path_transport_direct_h1_protocol(
+    parse_fast_path_transport_protocol(
         object,
+        "direct_h1",
         "h2",
         source_file,
         row_index,
@@ -3121,8 +3236,9 @@ fn parse_fast_path_transport_direct_h1_h3(
     label: &str,
     warnings: &mut WarningBag,
 ) -> Option<FastPathSample> {
-    parse_fast_path_transport_direct_h1_protocol(
+    parse_fast_path_transport_protocol(
         object,
+        "direct_h1",
         "h3",
         source_file,
         row_index,
@@ -3131,8 +3247,63 @@ fn parse_fast_path_transport_direct_h1_h3(
     )
 }
 
-fn parse_fast_path_transport_direct_h1_protocol(
+fn parse_fast_path_transport_direct_h2_h1(
     object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
+    parse_fast_path_transport_protocol(
+        object,
+        "direct_h2",
+        "h1",
+        source_file,
+        row_index,
+        label,
+        warnings,
+    )
+}
+
+fn parse_fast_path_transport_direct_h2_h2(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
+    parse_fast_path_transport_protocol(
+        object,
+        "direct_h2",
+        "h2",
+        source_file,
+        row_index,
+        label,
+        warnings,
+    )
+}
+
+fn parse_fast_path_transport_direct_h2_h3(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<FastPathSample> {
+    parse_fast_path_transport_protocol(
+        object,
+        "direct_h2",
+        "h3",
+        source_file,
+        row_index,
+        label,
+        warnings,
+    )
+}
+
+fn parse_fast_path_transport_protocol(
+    object: &serde_json::Map<String, Value>,
+    transport_name: &str,
     protocol: &str,
     source_file: &str,
     row_index: usize,
@@ -3144,13 +3315,13 @@ fn parse_fast_path_transport_direct_h1_protocol(
         .and_then(Value::as_object)
         .and_then(|fast_path| fast_path.get("transport"))
         .and_then(Value::as_object)
-        .and_then(|transport| transport.get("direct_h1"))
+        .and_then(|transport| transport.get(transport_name))
         .and_then(Value::as_object)
-        .and_then(|direct_h1| direct_h1.get(protocol))
+        .and_then(|direct_transport| direct_transport.get(protocol))
         .and_then(Value::as_object)?;
     parse_fast_path_sample(
         sample,
-        &format!("fast_path.transport.direct_h1.{protocol}"),
+        &format!("fast_path.transport.{transport_name}.{protocol}"),
         source_file,
         row_index,
         label,
@@ -3232,6 +3403,42 @@ fn parse_direct_h1_pool_events(
                 "{source_file} row {row_index} ({label}): fast_path.pool.direct_h1.{event} is not an unsigned integer"
             )),
         }
+    }
+    Some(parsed)
+}
+
+fn parse_static_fast_path_responses(
+    object: &serde_json::Map<String, Value>,
+    source_file: &str,
+    row_index: usize,
+    label: &str,
+    warnings: &mut WarningBag,
+) -> Option<BTreeMap<String, BTreeMap<String, u64>>> {
+    let responses = object
+        .get("fast_path")
+        .and_then(Value::as_object)
+        .and_then(|fast_path| fast_path.get("static_responses"))
+        .and_then(Value::as_object)?;
+    let mut parsed = BTreeMap::new();
+    for (source, outcomes) in responses {
+        let Some(outcomes) = outcomes.as_object() else {
+            warnings.push(format!(
+                "{source_file} row {row_index} ({label}): fast_path.static_responses.{source} is not an object"
+            ));
+            continue;
+        };
+        let mut parsed_outcomes = BTreeMap::new();
+        for (outcome, value) in outcomes {
+            match value.as_u64() {
+                Some(count) => {
+                    parsed_outcomes.insert(outcome.clone(), count);
+                }
+                None => warnings.push(format!(
+                    "{source_file} row {row_index} ({label}): fast_path.static_responses.{source}.{outcome} is not an unsigned integer"
+                )),
+            }
+        }
+        parsed.insert(source.clone(), parsed_outcomes);
     }
     Some(parsed)
 }
@@ -7159,7 +7366,11 @@ mod tests {
                 transport_direct_h1_h1: Some(passing_fast_path_aggregate()),
                 transport_direct_h1_h2: None,
                 transport_direct_h1_h3: None,
+                transport_direct_h2_h1: None,
+                transport_direct_h2_h2: None,
+                transport_direct_h2_h3: None,
                 direct_h1_pool: None,
+                static_responses: None,
             })
         } else if comparator == Comparator::Oxibelt && scenario == "h2" {
             Some(AggregateFastPathStats {
@@ -7169,7 +7380,11 @@ mod tests {
                 transport_direct_h1_h1: None,
                 transport_direct_h1_h2: Some(passing_fast_path_aggregate()),
                 transport_direct_h1_h3: None,
+                transport_direct_h2_h1: None,
+                transport_direct_h2_h2: None,
+                transport_direct_h2_h3: None,
                 direct_h1_pool: None,
+                static_responses: None,
             })
         } else if comparator == Comparator::Oxibelt && scenario == "h3" {
             Some(AggregateFastPathStats {
@@ -7179,7 +7394,11 @@ mod tests {
                 transport_direct_h1_h1: None,
                 transport_direct_h1_h2: None,
                 transport_direct_h1_h3: Some(passing_fast_path_aggregate()),
+                transport_direct_h2_h1: None,
+                transport_direct_h2_h2: None,
+                transport_direct_h2_h3: None,
                 direct_h1_pool: None,
+                static_responses: None,
             })
         } else {
             None
@@ -7418,6 +7637,15 @@ mod tests {
                       "hit_rate": 0.96,
                       "miss_reasons": {"request_body": 4}
                     }
+                  },
+                  "direct_h2": {
+                    "h2": {
+                      "hits": 95,
+                      "misses": 5,
+                      "attempts": 100,
+                      "hit_rate": 0.95,
+                      "miss_reasons": {"send_error": 5}
+                    }
                   }
                 }
               }
@@ -7452,6 +7680,10 @@ mod tests {
             .transport_direct_h1_h2
             .as_ref()
             .expect("direct-H1 H2 transport aggregate should exist");
+        let direct_h2 = h2
+            .transport_direct_h2_h2
+            .as_ref()
+            .expect("direct-H2 H2 transport aggregate should exist");
 
         assert_eq!(plain_proxy_h2.hits, 97);
         assert_eq!(plain_proxy_h2.misses, 3);
@@ -7461,6 +7693,10 @@ mod tests {
         assert_eq!(direct_h1.misses, 4);
         assert_eq!(direct_h1.attempts, 100);
         assert_eq!(direct_h1.min_hit_rate, Some(0.96));
+        assert_eq!(direct_h2.hits, 95);
+        assert_eq!(direct_h2.misses, 5);
+        assert_eq!(direct_h2.attempts, 100);
+        assert_eq!(direct_h2.min_hit_rate, Some(0.95));
     }
 
     #[test]
@@ -7497,6 +7733,15 @@ mod tests {
                       "hit_rate": 0.94,
                       "miss_reasons": {"request_body": 6}
                     }
+                  },
+                  "direct_h2": {
+                    "h3": {
+                      "hits": 93,
+                      "misses": 7,
+                      "attempts": 100,
+                      "hit_rate": 0.93,
+                      "miss_reasons": {"send_error": 7}
+                    }
                   }
                 }
               }
@@ -7531,6 +7776,10 @@ mod tests {
             .transport_direct_h1_h3
             .as_ref()
             .expect("direct-H1 H3 transport aggregate should exist");
+        let direct_h2 = h3
+            .transport_direct_h2_h3
+            .as_ref()
+            .expect("direct-H2 H3 transport aggregate should exist");
 
         assert_eq!(plain_proxy_h3.hits, 95);
         assert_eq!(plain_proxy_h3.misses, 5);
@@ -7540,6 +7789,67 @@ mod tests {
         assert_eq!(direct_h1.misses, 6);
         assert_eq!(direct_h1.attempts, 100);
         assert_eq!(direct_h1.min_hit_rate, Some(0.94));
+        assert_eq!(direct_h2.hits, 93);
+        assert_eq!(direct_h2.misses, 7);
+        assert_eq!(direct_h2.attempts, 100);
+        assert_eq!(direct_h2.min_hit_rate, Some(0.93));
+    }
+
+    #[test]
+    fn aggregate_parses_static_fast_path_evidence_from_result_rows() {
+        let input_dir = temp_dir("static-fast-path-parse");
+        let run_dir = input_dir.path().join("run-1");
+        std::fs::create_dir_all(&run_dir).expect("run dir should be created");
+        std::fs::write(
+            run_dir.join("results.json"),
+            r#"[{
+              "type": "load",
+              "label": "oxibelt-static-16k-h1c",
+              "protocol": "h1c",
+              "requests": 100,
+              "rps": 1000.0,
+              "p99_ms": 1.0,
+              "errors": 0,
+              "fast_path": {
+                "static_responses": {
+                  "hot_object": {
+                    "served": 97
+                  },
+                  "sendfile": {
+                    "fallback": 3
+                  }
+                }
+              }
+            }]"#,
+        )
+        .expect("results should be written");
+
+        let report = aggregate(
+            input_dir.path(),
+            AggregateOptions {
+                profile: None,
+                expected_runs: None,
+                expected_shards: None,
+                expected_target_cpus: Vec::new(),
+                primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+                baseline_report: None,
+                baseline_context: None,
+                accepted_regression_reason: None,
+            },
+        );
+        let static_fast_path = report
+            .aggregates
+            .iter()
+            .find(|aggregate| {
+                aggregate.comparator == "oxibelt" && aggregate.scenario == "static-16k-h1c"
+            })
+            .and_then(|aggregate| aggregate.fast_path.as_ref())
+            .and_then(|fast_path| fast_path.static_responses.as_ref())
+            .expect("static fast-path aggregate should exist");
+
+        assert_eq!(static_fast_path.sample_count, 1);
+        assert_eq!(static_fast_path.values["hot_object"]["served"], 97);
+        assert_eq!(static_fast_path.values["sendfile"]["fallback"], 3);
     }
 
     #[test]
@@ -7576,7 +7886,11 @@ mod tests {
             }),
             transport_direct_h1_h2: None,
             transport_direct_h1_h3: None,
+            transport_direct_h2_h1: None,
+            transport_direct_h2_h2: None,
+            transport_direct_h2_h3: None,
             direct_h1_pool: None,
+            static_responses: None,
         });
 
         let gates = build_regression_gate_report(
@@ -7635,7 +7949,11 @@ mod tests {
                 min_hit_rate: Some(0.98),
             }),
             transport_direct_h1_h3: None,
+            transport_direct_h2_h1: None,
+            transport_direct_h2_h2: None,
+            transport_direct_h2_h3: None,
             direct_h1_pool: None,
+            static_responses: None,
         });
 
         let gates = build_regression_gate_report(
@@ -7695,7 +8013,11 @@ mod tests {
                 median_hit_rate: Some(0.98),
                 min_hit_rate: Some(0.98),
             }),
+            transport_direct_h2_h1: None,
+            transport_direct_h2_h2: None,
+            transport_direct_h2_h3: None,
             direct_h1_pool: None,
+            static_responses: None,
         });
 
         let gates = build_regression_gate_report(

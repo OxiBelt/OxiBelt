@@ -43,7 +43,17 @@ const TRANSPORT_MISS_REASONS: [&str; 8] = [
 const TRANSPORT_OUTCOMES_PER_PROTOCOL: usize = 1 + TRANSPORT_MISS_REASONS.len();
 const TRANSPORT_COUNTERS_PER_TRANSPORT: usize = PROTOCOLS.len() * TRANSPORT_OUTCOMES_PER_PROTOCOL;
 const TRANSPORT_COUNTER_COUNT: usize = TRANSPORTS.len() * TRANSPORT_COUNTERS_PER_TRANSPORT;
-const DIRECT_H1_POOL_EVENTS: [&str; 5] = ["hit", "miss", "reconnect", "stale", "drop"];
+const DIRECT_H1_POOL_EVENTS: [&str; 9] = [
+  "hit",
+  "miss",
+  "miss_empty",
+  "miss_locked",
+  "reconnect",
+  "stale",
+  "drop",
+  "drop_full",
+  "drop_locked",
+];
 const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", "text"];
 const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
 const STATIC_FAST_PATH_COUNTER_COUNT: usize =
@@ -96,6 +106,42 @@ impl FastPathMetrics {
       return;
     };
     self.transport_counters[index].increment();
+  }
+
+  pub(super) fn record_direct_h1_transport_hit(&self, protocol: &str) {
+    let Some(protocol_index) = protocol_index(protocol) else {
+      return;
+    };
+    self.transport_counters[transport_counter_index_by_parts(0, protocol_index, 0)].increment();
+  }
+
+  pub(super) fn record_direct_h1_transport_miss(&self, protocol: &str, reason: &str) {
+    let Some(protocol_index) = protocol_index(protocol) else {
+      return;
+    };
+    let Some(reason_index) = transport_miss_reason_index(reason) else {
+      return;
+    };
+    self.transport_counters[transport_counter_index_by_parts(0, protocol_index, 1 + reason_index)]
+      .increment();
+  }
+
+  pub(super) fn record_direct_h2_transport_hit(&self, protocol: &str) {
+    let Some(protocol_index) = protocol_index(protocol) else {
+      return;
+    };
+    self.transport_counters[transport_counter_index_by_parts(1, protocol_index, 0)].increment();
+  }
+
+  pub(super) fn record_direct_h2_transport_miss(&self, protocol: &str, reason: &str) {
+    let Some(protocol_index) = protocol_index(protocol) else {
+      return;
+    };
+    let Some(reason_index) = transport_miss_reason_index(reason) else {
+      return;
+    };
+    self.transport_counters[transport_counter_index_by_parts(1, protocol_index, 1 + reason_index)]
+      .increment();
   }
 
   pub(super) fn record_direct_h1_pool_event(&self, event: &str) {
@@ -204,9 +250,7 @@ impl FastPathMetrics {
 }
 
 fn counter_index(protocol: &str, outcome: &str, reason: &str) -> Option<usize> {
-  let protocol_index = PROTOCOLS
-    .iter()
-    .position(|candidate| *candidate == protocol)?;
+  let protocol_index = protocol_index(protocol)?;
   let offset = match (outcome, reason) {
     ("hit", HIT_REASON) => 0,
     ("miss", reason) => {
@@ -220,9 +264,7 @@ fn counter_index(protocol: &str, outcome: &str, reason: &str) -> Option<usize> {
 }
 
 fn response_body_counter_index(protocol: &str, disposition: &str, reason: &str) -> Option<usize> {
-  let protocol_index = PROTOCOLS
-    .iter()
-    .position(|candidate| *candidate == protocol)?;
+  let protocol_index = protocol_index(protocol)?;
   let disposition_index = BODY_DISPOSITIONS
     .iter()
     .position(|candidate| *candidate == disposition)?;
@@ -245,23 +287,39 @@ fn transport_counter_index(
   let transport_index = TRANSPORTS
     .iter()
     .position(|candidate| *candidate == transport)?;
-  let protocol_index = PROTOCOLS
-    .iter()
-    .position(|candidate| *candidate == protocol)?;
+  let protocol_index = protocol_index(protocol)?;
   let offset = match (outcome, reason) {
     ("hit", TRANSPORT_HIT_REASON) => 0,
-    ("miss", reason) => {
-      1 + TRANSPORT_MISS_REASONS
-        .iter()
-        .position(|candidate| *candidate == reason)?
-    }
+    ("miss", reason) => 1 + transport_miss_reason_index(reason)?,
     _ => return None,
   };
-  Some(
-    transport_index * TRANSPORT_COUNTERS_PER_TRANSPORT
-      + protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL
-      + offset,
-  )
+  Some(transport_counter_index_by_parts(
+    transport_index,
+    protocol_index,
+    offset,
+  ))
+}
+
+fn protocol_index(protocol: &str) -> Option<usize> {
+  PROTOCOLS
+    .iter()
+    .position(|candidate| *candidate == protocol)
+}
+
+fn transport_miss_reason_index(reason: &str) -> Option<usize> {
+  TRANSPORT_MISS_REASONS
+    .iter()
+    .position(|candidate| *candidate == reason)
+}
+
+fn transport_counter_index_by_parts(
+  transport_index: usize,
+  protocol_index: usize,
+  offset: usize,
+) -> usize {
+  transport_index * TRANSPORT_COUNTERS_PER_TRANSPORT
+    + protocol_index * TRANSPORT_OUTCOMES_PER_PROTOCOL
+    + offset
 }
 
 fn direct_h1_pool_event_index(event: &str) -> Option<usize> {
@@ -430,10 +488,48 @@ mod tests {
   }
 
   #[test]
+  fn specialized_transport_recorders_use_fixed_indexes() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_direct_h1_transport_hit("h1");
+    metrics.record_direct_h1_transport_miss("h2", "request_body");
+    metrics.record_direct_h2_transport_hit("h2");
+    metrics.record_direct_h2_transport_miss("h3", "connect_error");
+    metrics.record_direct_h1_transport_hit("h9");
+    metrics.record_direct_h1_transport_miss("h1", "unknown");
+
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h1", "h1", "hit", "used").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h1", "h2", "miss", "request_body").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h2", "h2", "hit", "used").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h2", "h3", "miss", "connect_error").unwrap()]
+      .load(),
+      1
+    );
+  }
+
+  #[test]
   fn records_only_known_direct_h1_pool_events() {
     let metrics = FastPathMetrics::default();
     metrics.record_direct_h1_pool_event("hit");
+    metrics.record_direct_h1_pool_event("miss_locked");
     metrics.record_direct_h1_pool_event("reconnect");
+    metrics.record_direct_h1_pool_event("drop_full");
     metrics.record_direct_h1_pool_event("unknown");
 
     assert_eq!(
@@ -441,7 +537,15 @@ mod tests {
       1
     );
     assert_eq!(
+      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("miss_locked").unwrap()].load(),
+      1
+    );
+    assert_eq!(
       metrics.direct_h1_pool_counters[direct_h1_pool_event_index("reconnect").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_full").unwrap()].load(),
       1
     );
   }

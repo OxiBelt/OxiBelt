@@ -78,6 +78,19 @@ impl StaticFilesRuntime {
     self.hot_objects.get(root, path, response_metadata)
   }
 
+  pub(crate) fn refresh_cached_object(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+    etag: &str,
+    modified: Option<SystemTime>,
+  ) -> Option<Arc<CachedStaticObject>> {
+    self
+      .hot_objects
+      .refresh_if_current(root, path, response_metadata, etag, modified)
+  }
+
   pub(crate) fn object_cache_accepts(&self, len: u64) -> bool {
     self.hot_objects.accepts(len)
   }
@@ -288,14 +301,39 @@ impl StaticHotObjectCache {
       }
     }
 
+    None
+  }
+
+  fn refresh_if_current(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+    etag: &str,
+    modified: Option<SystemTime>,
+  ) -> Option<Arc<CachedStaticObject>> {
+    if !self.enabled() {
+      return None;
+    }
+    let key = StaticObjectCacheKey {
+      root: root.to_path_buf(),
+      path: path.to_path_buf(),
+      response_metadata: response_metadata.clone(),
+    };
     let mut inner = self.inner.write().expect("static file cache lock poisoned");
     if inner
       .entries
       .get(&key)
-      .is_some_and(|entry| entry.expires_at <= now)
+      .is_some_and(|entry| entry.object.etag == etag && entry.object.modified == modified)
     {
-      remove_entry(&mut inner, &key);
+      let entry = inner
+        .entries
+        .get_mut(&key)
+        .expect("cache entry should exist after metadata match");
+      entry.expires_at = Instant::now() + self.ttl;
+      return Some(Arc::clone(&entry.object));
     }
+    remove_entry(&mut inner, &key);
     None
   }
 

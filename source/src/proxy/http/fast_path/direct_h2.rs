@@ -24,8 +24,6 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
-const TRANSPORT_DIRECT_H2: &str = "direct_h2";
-
 #[derive(Clone, Default)]
 pub(crate) struct DirectH2Pools {
   pools: Vec<Option<Arc<DirectH2Pool>>>,
@@ -251,41 +249,31 @@ pub(super) async fn try_send_direct_h2(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_fast_path_transport(TRANSPORT_DIRECT_H2, protocol, "miss", reason);
+    metrics.record_direct_h2_transport_miss(protocol, reason);
     return DirectH2SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_fast_path_transport(
-      TRANSPORT_DIRECT_H2,
-      protocol,
-      "miss",
-      "unsupported_upstream",
-    );
+    metrics.record_direct_h2_transport_miss(protocol, "unsupported_upstream");
     return DirectH2SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH2Request::from_request(outbound) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_fast_path_transport(
-        TRANSPORT_DIRECT_H2,
-        protocol,
-        "miss",
-        "unsupported_request",
-      );
+      metrics.record_direct_h2_transport_miss(protocol, "unsupported_request");
       return DirectH2SendResult::Sent(Err(error));
     }
   };
 
   let result = send_prepared_request(pool, metrics, prepared, timeouts).await;
   match &result {
-    Ok(_) => metrics.record_fast_path_transport(TRANSPORT_DIRECT_H2, protocol, "hit", "used"),
+    Ok(_) => metrics.record_direct_h2_transport_hit(protocol),
     Err(error) if error.to_string().contains("timed out") => {
-      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H2, protocol, "miss", "connect_error");
+      metrics.record_direct_h2_transport_miss(protocol, "connect_error");
     }
     Err(_) => {
-      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H2, protocol, "miss", "send_error");
+      metrics.record_direct_h2_transport_miss(protocol, "send_error");
     }
   }
   DirectH2SendResult::Sent(result)

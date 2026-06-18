@@ -25,8 +25,6 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
 const DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
-const TRANSPORT_DIRECT_H1: &str = "direct_h1";
-
 #[derive(Clone, Default)]
 pub(crate) struct DirectH1Pools {
   pools: Vec<Option<Arc<DirectH1Pool>>>,
@@ -64,6 +62,19 @@ struct DirectH1Pool {
 struct DirectH1TakeSender {
   sender: Option<SendRequest<ProxyBody>>,
   stale_pruned: usize,
+  miss_reason: DirectH1TakeMissReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectH1TakeMissReason {
+  None,
+  Empty,
+  Locked,
+}
+
+enum DirectH1PutError {
+  Full,
+  Locked,
 }
 
 impl DirectH1Pool {
@@ -87,16 +98,23 @@ impl DirectH1Pool {
       return DirectH1TakeSender {
         sender: None,
         stale_pruned: 0,
+        miss_reason: DirectH1TakeMissReason::Empty,
       };
     }
 
     let now = Instant::now();
     let mut stale_pruned = 0;
+    let mut locked_shards = 0;
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
-    let scan_limit = self.idle_shards.len().min(DIRECT_H1_SHARD_SCAN_LIMIT);
-    for offset in 0..scan_limit {
+    let shard_count = self.idle_shards.len();
+    let scan_limit = shard_count.min(DIRECT_H1_SHARD_SCAN_LIMIT);
+    for offset in 0..shard_count {
+      if offset >= scan_limit && self.idle_count.load(Ordering::Acquire) == 0 {
+        break;
+      }
       let shard_index = (start + offset) % self.idle_shards.len();
       let Ok(mut idle) = self.idle_shards[shard_index].try_lock() else {
+        locked_shards += 1;
         continue;
       };
       while let Some(connection) = idle.pop() {
@@ -105,35 +123,45 @@ impl DirectH1Pool {
           return DirectH1TakeSender {
             sender: Some(connection.sender),
             stale_pruned,
+            miss_reason: DirectH1TakeMissReason::None,
           };
         }
         stale_pruned += 1;
       }
     }
+    let miss_reason = if locked_shards > 0 && self.idle_count.load(Ordering::Acquire) > 0 {
+      DirectH1TakeMissReason::Locked
+    } else {
+      DirectH1TakeMissReason::Empty
+    };
     DirectH1TakeSender {
       sender: None,
       stale_pruned,
+      miss_reason,
     }
   }
 
-  fn put_sender(&self, sender: SendRequest<ProxyBody>) -> Result<(), SendRequest<ProxyBody>> {
+  fn put_sender(&self, sender: SendRequest<ProxyBody>) -> Result<(), DirectH1PutError> {
     if self.max_idle == 0 {
-      return Err(sender);
+      return Err(DirectH1PutError::Full);
+    }
+    if self.idle_count.load(Ordering::Acquire) >= self.max_idle {
+      return Err(DirectH1PutError::Full);
     }
 
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
-    let scan_limit = self.idle_shards.len().min(DIRECT_H1_SHARD_SCAN_LIMIT);
-    let Some(mut idle) = (0..scan_limit).find_map(|offset| {
+    let shard_count = self.idle_shards.len();
+    let Some(mut idle) = (0..shard_count).find_map(|offset| {
       let shard_index = (start + offset) % self.idle_shards.len();
       self.idle_shards[shard_index].try_lock().ok()
     }) else {
-      return Err(sender);
+      return Err(DirectH1PutError::Locked);
     };
 
     let mut observed = self.idle_count.load(Ordering::Acquire);
     loop {
       if observed >= self.max_idle {
-        return Err(sender);
+        return Err(DirectH1PutError::Full);
       }
       match self.idle_count.compare_exchange_weak(
         observed,
@@ -210,8 +238,12 @@ pub(super) struct DirectH1Lease {
 impl DirectH1Lease {
   pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
     if body_consumed && self.reusable_by_headers {
-      if self.pool.put_sender(self.sender).is_err() {
+      if let Err(error) = self.pool.put_sender(self.sender) {
         self.metrics.record_direct_h1_pool_event("drop");
+        match error {
+          DirectH1PutError::Full => self.metrics.record_direct_h1_pool_event("drop_full"),
+          DirectH1PutError::Locked => self.metrics.record_direct_h1_pool_event("drop_locked"),
+        }
       }
     } else {
       self.metrics.record_direct_h1_pool_event("drop");
@@ -310,41 +342,31 @@ pub(super) async fn try_send_direct_h1(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", reason);
+    metrics.record_direct_h1_transport_miss(protocol, reason);
     return DirectH1SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_fast_path_transport(
-      TRANSPORT_DIRECT_H1,
-      protocol,
-      "miss",
-      "unsupported_upstream",
-    );
+    metrics.record_direct_h1_transport_miss(protocol, "unsupported_upstream");
     return DirectH1SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH1Request::from_request(outbound, &pool.origin) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_fast_path_transport(
-        TRANSPORT_DIRECT_H1,
-        protocol,
-        "miss",
-        "unsupported_request",
-      );
+      metrics.record_direct_h1_transport_miss(protocol, "unsupported_request");
       return DirectH1SendResult::Sent(Err(error));
     }
   };
 
   let result = send_prepared_request(pool, metrics, prepared, timeouts).await;
   match &result {
-    Ok(_) => metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "hit", "used"),
+    Ok(_) => metrics.record_direct_h1_transport_hit(protocol),
     Err(error) if error.to_string().contains("timed out") => {
-      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", "connect_error");
+      metrics.record_direct_h1_transport_miss(protocol, "connect_error");
     }
     Err(_) => {
-      metrics.record_fast_path_transport(TRANSPORT_DIRECT_H1, protocol, "miss", "send_error");
+      metrics.record_direct_h1_transport_miss(protocol, "send_error");
     }
   }
   DirectH1SendResult::Sent(result)
@@ -393,6 +415,11 @@ async fn send_prepared_request(
     metrics.record_direct_h1_pool_event("hit");
   } else {
     metrics.record_direct_h1_pool_event("miss");
+    match reused_sender.miss_reason {
+      DirectH1TakeMissReason::None => {}
+      DirectH1TakeMissReason::Empty => metrics.record_direct_h1_pool_event("miss_empty"),
+      DirectH1TakeMissReason::Locked => metrics.record_direct_h1_pool_event("miss_locked"),
+    }
   }
   let mut sender = match reused_sender.sender {
     Some(sender) => sender,

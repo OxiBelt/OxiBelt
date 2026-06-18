@@ -161,6 +161,26 @@ impl Metrics {
       .record_transport(transport, protocol, outcome, reason);
   }
 
+  pub fn record_direct_h1_transport_hit(&self, protocol: &str) {
+    self.fast_path.record_direct_h1_transport_hit(protocol);
+  }
+
+  pub fn record_direct_h1_transport_miss(&self, protocol: &str, reason: &str) {
+    self
+      .fast_path
+      .record_direct_h1_transport_miss(protocol, reason);
+  }
+
+  pub fn record_direct_h2_transport_hit(&self, protocol: &str) {
+    self.fast_path.record_direct_h2_transport_hit(protocol);
+  }
+
+  pub fn record_direct_h2_transport_miss(&self, protocol: &str, reason: &str) {
+    self
+      .fast_path
+      .record_direct_h2_transport_miss(protocol, reason);
+  }
+
   pub fn record_direct_h1_pool_event(&self, event: &str) {
     self.fast_path.record_direct_h1_pool_event(event);
   }

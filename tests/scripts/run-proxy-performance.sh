@@ -1376,7 +1376,7 @@ append_result() {
   local json="$1"
   json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
   printf '%s\n' "${json}" >>"${results_jsonl}"
-  local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate direct_h1_hit_rate direct_h1_pool_events static_sources result_text fast_path_protocol
+  local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate direct_h1_hit_rate direct_h2_hit_rate direct_h1_pool_events static_sources result_text fast_path_protocol
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
   type="$(jq -r '.type // "unknown"' <<<"${json}")"
   protocol="$(jq -r '.protocol // .mode // "-"' <<<"${json}")"
@@ -1400,6 +1400,10 @@ append_result() {
     direct_h1_hit_rate="$(jq -r --arg protocol "${fast_path_protocol}" '.fast_path.transport.direct_h1[$protocol].hit_rate // empty' <<<"${json}")"
     if [[ -n "${direct_h1_hit_rate}" ]]; then
       result_text="${result_text}, direct h1 ${fast_path_protocol} $(jq -n -r --argjson rate "${direct_h1_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
+    fi
+    direct_h2_hit_rate="$(jq -r --arg protocol "${fast_path_protocol}" '.fast_path.transport.direct_h2[$protocol].hit_rate // empty' <<<"${json}")"
+    if [[ -n "${direct_h2_hit_rate}" ]]; then
+      result_text="${result_text}, direct h2 ${fast_path_protocol} $(jq -n -r --argjson rate "${direct_h2_hit_rate}" '($rate * 100.0 | tostring) + "%"')"
     fi
   done
   static_sources="$(jq -r '.fast_path.static_responses // {} | to_entries | map(.key + " served=" + ((.value.served // 0) | tostring)) | join(", ")' <<<"${json}")"
@@ -1608,7 +1612,7 @@ run_external_h2load() {
   output_path="${external_h2load_dir}/${artifact_name}.txt"
   output_file="external-h2load/${artifact_name}.txt"
   if [[ "${protocol}" == "h3" ]]; then
-    command="cp /tls/proxy-ca.pem /usr/local/share/ca-certificates/oxibelt-proxy.crt && update-ca-certificates >/dev/null && exec h2load -D ${duration_seconds}s --warm-up-time=${warmup_seconds}s -c ${concurrency} -m 16 --h3 --no-udp-gso --connect-to ${host}:8443 --sni proxy -H ':authority: example.test' 'https://proxy:8443/perf/h2?body=ok'"
+    command="cp /tls/proxy-ca.pem /usr/local/share/ca-certificates/oxibelt-proxy.crt && update-ca-certificates >/dev/null && exec h2load -D ${duration_seconds}s --warm-up-time=${warmup_seconds}s -c ${concurrency} -m 16 --h3 --no-udp-gso --connect-to ${host}:8443 --sni proxy -H ':authority: example.test' 'https://proxy:8443/perf/h3?body=ok'"
   else
     command="cp /tls/proxy-ca.pem /usr/local/share/ca-certificates/oxibelt-proxy.crt && update-ca-certificates >/dev/null && exec h2load -D ${duration_seconds}s --warm-up-time=${warmup_seconds}s -c ${concurrency} -m 16 --alpn-list h2 --connect-to ${host}:8443 --sni proxy -H ':authority: example.test' 'https://proxy:8443/perf/h2?body=ok'"
   fi
@@ -1896,7 +1900,7 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
@@ -1904,6 +1908,7 @@ run_load() {
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_before="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-before" "${fast_path_protocol}")"
     direct_h1_before="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-before" "${fast_path_protocol}")"
+    direct_h2_before="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-before" "${fast_path_protocol}")"
     direct_h1_pool_before="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-before")"
   fi
   if static_fast_path_gate_label "${label}" "${protocol}" "${host}"; then
@@ -1933,11 +1938,13 @@ run_load() {
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_after="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-after" "${fast_path_protocol}")"
     direct_h1_after="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-after" "${fast_path_protocol}")"
+    direct_h2_after="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-after" "${fast_path_protocol}")"
     direct_h1_pool_after="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-after")"
     fast_path_delta="$(plain_proxy_fast_path_delta "${fast_path_before}" "${fast_path_after}")"
     direct_h1_delta="$(direct_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
+    direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
-    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, transport: {direct_h1: {($protocol): $direct_h1}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
+    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
     assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
     assert_direct_h1_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_h1_delta}"
   fi
@@ -2118,10 +2125,11 @@ plain_proxy_fast_path_metrics() {
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
 }
 
-direct_h1_transport_metrics() {
+fast_path_transport_metrics() {
   local host="$1"
   local label="$2"
-  local protocol="$3"
+  local transport="$3"
+  local protocol="$4"
   local attempt json
   for attempt in $(seq 1 10); do
     if json="$(run_probe_json metrics \
@@ -2130,7 +2138,7 @@ direct_h1_transport_metrics() {
       --port 9090 \
       --authority ops.test \
       --path /metrics)"; then
-      jq -c --arg protocol "${protocol}" '.fast_path.transport.direct_h1[$protocol] // {
+      jq -c --arg transport "${transport}" --arg protocol "${protocol}" '.fast_path.transport[$transport][$protocol] // {
         hits: 0,
         misses: 0,
         attempts: 0,
@@ -2142,6 +2150,14 @@ direct_h1_transport_metrics() {
     sleep 1
   done
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+direct_h1_transport_metrics() {
+  fast_path_transport_metrics "$1" "$2" direct_h1 "$3"
+}
+
+direct_h2_transport_metrics() {
+  fast_path_transport_metrics "$1" "$2" direct_h2 "$3"
 }
 
 direct_h1_pool_metrics() {
@@ -2215,6 +2231,10 @@ plain_proxy_fast_path_delta() {
 }
 
 direct_h1_transport_delta() {
+  fast_path_counter_delta "$1" "$2"
+}
+
+direct_h2_transport_delta() {
   fast_path_counter_delta "$1" "$2"
 }
 

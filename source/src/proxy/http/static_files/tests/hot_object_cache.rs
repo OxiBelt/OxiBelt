@@ -55,6 +55,45 @@ fn hot_object_cache_expires_entries() {
 }
 
 #[test]
+fn hot_object_cache_refreshes_matching_expired_entry() {
+  let temp_dir = common::TempDir::new("static-hot-object-cache-refresh-expired");
+  let root = temp_dir.path().join("public");
+  std::fs::create_dir_all(&root).unwrap();
+  let path = root.join("app.txt");
+  std::fs::write(&path, "cached body").unwrap();
+  let runtime = runtime_for_root(&root, hot_object_cache_config(4, 1, 1024));
+  let metadata = std::fs::metadata(&path).unwrap();
+  let etag = etag_for_metadata(&metadata);
+  let modified = metadata.modified().ok();
+  let response_metadata = StaticResponseMetadata::for_path(&path);
+
+  runtime.store_object(
+    &root,
+    path.clone(),
+    etag.clone(),
+    modified,
+    response_metadata.clone(),
+    Bytes::from_static(b"cached body"),
+  );
+  std::thread::sleep(Duration::from_millis(10));
+
+  assert!(
+    runtime
+      .cached_object(&root, &path, &response_metadata)
+      .is_none()
+  );
+  let refreshed = runtime
+    .refresh_cached_object(&root, &path, &response_metadata, &etag, modified)
+    .expect("matching expired object should refresh");
+  assert_eq!(refreshed.body.as_ref(), b"cached body");
+  assert!(
+    runtime
+      .cached_object(&root, &path, &response_metadata)
+      .is_some()
+  );
+}
+
+#[test]
 fn hot_object_cache_evicts_oldest_entry_when_full() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-eviction");
   let root = temp_dir.path().join("public");

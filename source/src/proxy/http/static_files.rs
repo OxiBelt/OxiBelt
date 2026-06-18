@@ -464,9 +464,8 @@ async fn plan_opened_file(
   let etag = etag_for_metadata(&metadata);
   if status.is_success()
     && allow_hot_object_cache
-    && let Some(cached) = runtime.cached_object(root, &path, &response_metadata)
-    && cached.etag == etag
-    && cached.modified == modified
+    && let Some(cached) =
+      runtime.refresh_cached_object(root, &path, &response_metadata, &etag, modified)
   {
     return cached_object_plan(method, headers, cached);
   }
@@ -584,8 +583,13 @@ fn cached_full_object_plan(
   };
   let etag = etag_for_metadata(&metadata);
   let modified = metadata.modified().ok();
-  (cached.etag == etag && cached.modified == modified)
-    .then(|| cached_object_plan(method, headers, cached))
+  if cached.etag == etag && cached.modified == modified {
+    let cached = runtime
+      .refresh_cached_object(root, path, &response_metadata, &etag, modified)
+      .unwrap_or(cached);
+    return Some(cached_object_plan(method, headers, cached));
+  }
+  None
 }
 
 enum CandidatePlan {
