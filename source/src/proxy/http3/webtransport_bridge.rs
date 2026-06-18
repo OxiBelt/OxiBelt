@@ -19,11 +19,12 @@ use tracing::debug;
 
 use super::{
   H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection, handle_h3_request,
-  is_webtransport_request, rejects_unsafe_early_data, respond_to_h3_request,
+  is_webtransport_request, rejects_unsafe_early_data, request_tasks, respond_to_h3_request,
 };
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http::response::text_response;
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::waf::WafStreamClose;
 
@@ -81,6 +82,7 @@ pub(super) async fn serve_webtransport_connection(
   early_data: crate::quic::h3::EarlyDataTracker,
   mut shutdown: watch::Receiver<bool>,
   drain: ConnectionDrain,
+  mut request_admission: request_tasks::RequestAdmission,
 ) -> anyhow::Result<()> {
   let downstream = Arc::new(DownstreamWebTransportConnection::new(h3_connection));
   let (events_tx, mut events_rx) = mpsc::channel(256);
@@ -102,6 +104,7 @@ pub(super) async fn serve_webtransport_connection(
     early_data.clone(),
     drain.clone(),
     events_tx.clone(),
+    &mut request_admission,
   )
   .await?;
 
@@ -178,6 +181,7 @@ pub(super) async fn serve_webtransport_connection(
               early_data.clone(),
               drain.clone(),
               events_tx.clone(),
+              &mut request_admission,
             )
             .await?;
           }
@@ -252,6 +256,7 @@ async fn handle_downstream_request(
   early_data: crate::quic::h3::EarlyDataTracker,
   drain: ConnectionDrain,
   events: mpsc::Sender<DispatcherEvent>,
+  request_admission: &mut request_tasks::RequestAdmission,
 ) -> anyhow::Result<()> {
   if drain.is_draining() {
     respond_to_h3_request(
@@ -284,6 +289,11 @@ async fn handle_downstream_request(
     )
     .await?;
   } else {
+    if !request_admission.try_admit() {
+      respond_to_h3_request(stream, request_tasks::too_many_requests_response()).await?;
+      return Ok(());
+    }
+
     let context = H3DownstreamRequestContext {
       peer_addr,
       udp_connection_id,
@@ -292,6 +302,9 @@ async fn handle_downstream_request(
       state,
       drain,
     };
+    let _request_guard = context
+      .state
+      .runtime_introspection_guard(RuntimeCounter::Http3Request);
     let status = handle_h3_request(request, stream, context).await?;
     debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
   }

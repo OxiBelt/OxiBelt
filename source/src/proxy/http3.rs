@@ -15,7 +15,6 @@ use http_body_util::BodyExt;
 use hyper::body::{Body as _, Frame};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
 
 use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
 use crate::lifecycle::ConnectionDrain;
@@ -42,6 +41,7 @@ type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 const H3_BODY_CHANNEL_CAPACITY: usize = 16;
 
 mod request_body;
+mod request_tasks;
 mod webtransport_bridge;
 
 #[derive(Clone)]
@@ -323,6 +323,8 @@ pub(crate) async fn handle_downstream_connection(
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
+  let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
+  let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
   let mut h3_connection = h3::server::builder()
     .enable_extended_connect(true)
     .enable_datagram(true)
@@ -334,38 +336,54 @@ pub(crate) async fn handle_downstream_connection(
 
   loop {
     if *shutdown.borrow() || *data_plane_drain.borrow() {
+      request_tasks.abort_all().await;
       return Ok(());
     }
     let resolver = tokio::select! {
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
+          request_tasks.abort_all().await;
           return Ok(());
         }
         continue;
       }
       changed = data_plane_drain.changed() => {
         if changed.is_ok() && *data_plane_drain.borrow() {
+          request_tasks.abort_all().await;
           return Ok(());
         }
+        continue;
+      }
+      _ = request_tasks.join_next(), if !request_tasks.is_empty() => {
         continue;
       }
       accepted = h3_connection.accept() => {
         match accepted {
           Ok(resolver) => resolver,
-          Err(error) if downstream_h3_accept_closed_normally(&error) => return Ok(()),
-          Err(error) => return Err(error).context("failed to accept downstream HTTP/3 request"),
+          Err(error) if downstream_h3_accept_closed_normally(&error) => {
+            request_tasks.wait_all().await;
+            return Ok(());
+          }
+          Err(error) => {
+            request_tasks.abort_all().await;
+            return Err(error).context("failed to accept downstream HTTP/3 request");
+          }
         }
       }
     };
     let Some(resolver) = resolver else {
+      request_tasks.wait_all().await;
       return Ok(());
     };
 
-    let (request, stream) = resolver
-      .resolve_request()
-      .await
-      .context("failed to resolve downstream HTTP/3 request")?;
+    let (request, stream) = match resolver.resolve_request().await {
+      Ok(resolved) => resolved,
+      Err(error) => {
+        request_tasks.abort_all().await;
+        return Err(error).context("failed to resolve downstream HTTP/3 request");
+      }
+    };
     let is_early_data = early_data.take(stream.id());
 
     if rejects_unsafe_early_data(&request, snapshot.config.quic.zero_rtt, is_early_data) {
@@ -374,6 +392,7 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if is_webtransport_request(&request) {
+      request_tasks.wait_all().await;
       webtransport_bridge::serve_webtransport_connection(
         h3_connection,
         request,
@@ -386,10 +405,26 @@ pub(crate) async fn handle_downstream_connection(
         early_data.clone(),
         shutdown,
         drain.clone(),
+        request_admission,
       )
       .await?;
       return Ok(());
     }
+
+    if !request_admission.try_admit() {
+      respond_to_h3_request(stream, request_tasks::too_many_requests_response()).await?;
+      continue;
+    }
+
+    let Some(request_task_permit) = request_tasks::acquire_permit_or_stop(
+      &mut request_tasks,
+      &mut shutdown,
+      &mut data_plane_drain,
+    )
+    .await?
+    else {
+      return Ok(());
+    };
 
     let context = H3DownstreamRequestContext {
       peer_addr,
@@ -399,19 +434,7 @@ pub(crate) async fn handle_downstream_connection(
       state: snapshot.clone(),
       drain: drain.clone(),
     };
-    tokio::spawn(async move {
-      let _request_guard = context
-        .state
-        .runtime_introspection_guard(RuntimeCounter::Http3Request);
-      match handle_h3_request(request, stream, context).await {
-        Ok(status) => {
-          debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
-        }
-        Err(error) => {
-          warn!(peer = %peer_addr, error = %error, "downstream HTTP/3 request failed");
-        }
-      }
-    });
+    request_tasks.spawn(request, stream, context, request_task_permit);
   }
 }
 
