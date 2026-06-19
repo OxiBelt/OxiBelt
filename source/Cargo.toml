@@ -18,7 +18,7 @@ argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.42", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 base64 = "0.22.1"
 brotli = "8.0.4"
-bytes = "1.11.1"
+bytes = "1.12.0"
 clap = { version = "4.6.1", features = ["derive"] }
 clubcard-crlite = { version = "0.4.0", default-features = false, features = ["builder"] }
 der = "0.8.0"
@@ -38,8 +38,10 @@ httparse = "1.10.1"
 hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
-k8s-openapi = { version = "0.27.1", features = ["v1_35"] }
-kube = { version = "3.1.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
+# gateway-api 0.21.0 still depends on k8s-openapi 0.27.x and needs a version feature.
+k8s-openapi-v027 = { package = "k8s-openapi", version = "0.27.1", features = ["v1_35"] }
+kube = { version = "4.0.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.186"
 md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "zerocopy"] }
@@ -66,7 +68,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
 unicode-normalization = "0.1.25"
 url = { version = "2.5.8", features = ["serde"] }
-webpki-roots = "1.0.7"
+webpki-roots = "1.0.8"
 web-transport-quinn = { version = "0.11.9", default-features = false, features = ["aws-lc-rs"] }
 quic-parser = { version = "0.1.5", features = ["ring"] }
 x509-cert = "0.2.5"
