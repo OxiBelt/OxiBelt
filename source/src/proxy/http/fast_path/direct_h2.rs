@@ -1,6 +1,7 @@
 //! Direct upstream HTTP/2 transport for the plain-proxy fast path.
 //! It is limited to direct empty-body safe requests and falls back for all broader semantics.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -149,6 +150,20 @@ impl DirectH2Pool {
   }
 
   async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<(SendRequest<ProxyBody>, bool)> {
+    self
+      .sender_with(metrics, || self.connect_sender(metrics))
+      .await
+  }
+
+  async fn sender_with<F, Fut>(
+    &self,
+    metrics: &Arc<Metrics>,
+    connect_sender: F,
+  ) -> anyhow::Result<(SendRequest<ProxyBody>, bool)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
+  {
     {
       let entry = self.entry.read().await;
       if let Some(connection) = entry.as_ref()
@@ -158,14 +173,12 @@ impl DirectH2Pool {
       }
     }
 
-    {
-      let mut entry = self.entry.write().await;
-      if let Some(connection) = entry.as_ref() {
-        if let Some(sender) = connection.reusable_sender(self.idle_timeout) {
-          return Ok((sender, true));
-        }
-        *entry = None;
+    let mut entry = self.entry.write().await;
+    if let Some(connection) = entry.as_ref() {
+      if let Some(sender) = connection.reusable_sender(self.idle_timeout) {
+        return Ok((sender, true));
       }
+      *entry = None;
     }
 
     metrics.record_http_upstream_client_pool_miss(
@@ -173,18 +186,11 @@ impl DirectH2Pool {
       self.origin.scheme,
       "primary",
     );
-    let sender = self.connect_sender(metrics).await?;
+    let sender = connect_sender().await?;
     let connection = Arc::new(DirectH2Connection {
       sender: sender.clone(),
       last_used: Mutex::new(Instant::now()),
     });
-
-    let mut entry = self.entry.write().await;
-    if let Some(existing) = entry.as_ref()
-      && let Some(existing_sender) = existing.reusable_sender(self.idle_timeout)
-    {
-      return Ok((existing_sender, true));
-    }
     *entry = Some(connection);
     Ok((sender, false))
   }
