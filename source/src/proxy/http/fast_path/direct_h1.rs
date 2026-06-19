@@ -94,7 +94,8 @@ impl DirectH1Pool {
   }
 
   fn take_sender(&self) -> DirectH1TakeSender {
-    if self.max_idle == 0 || self.idle_count.load(Ordering::Acquire) == 0 {
+    let idle_count = self.idle_count.load(Ordering::Acquire);
+    if self.max_idle == 0 || idle_count == 0 {
       return DirectH1TakeSender {
         sender: None,
         stale_pruned: 0,
@@ -107,11 +108,8 @@ impl DirectH1Pool {
     let mut locked_shards = 0;
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
     let shard_count = self.idle_shards.len();
-    let scan_limit = shard_count.min(DIRECT_H1_SHARD_SCAN_LIMIT);
-    for offset in 0..shard_count {
-      if offset >= scan_limit && self.idle_count.load(Ordering::Acquire) == 0 {
-        break;
-      }
+    let scan_limit = direct_h1_shard_scan_limit(shard_count, idle_count);
+    for offset in 0..scan_limit {
       let shard_index = (start + offset) % self.idle_shards.len();
       let Ok(mut idle) = self.idle_shards[shard_index].try_lock() else {
         locked_shards += 1;
@@ -145,16 +143,19 @@ impl DirectH1Pool {
     if self.max_idle == 0 {
       return Err(DirectH1PutError::Full);
     }
-    if self.idle_count.load(Ordering::Acquire) >= self.max_idle {
+    let idle_count = self.idle_count.load(Ordering::Acquire);
+    if idle_count >= self.max_idle {
       return Err(DirectH1PutError::Full);
     }
 
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
     let shard_count = self.idle_shards.len();
-    let Some(mut idle) = (0..shard_count).find_map(|offset| {
-      let shard_index = (start + offset) % self.idle_shards.len();
-      self.idle_shards[shard_index].try_lock().ok()
-    }) else {
+    let Some(mut idle) =
+      (0..direct_h1_shard_scan_limit(shard_count, idle_count)).find_map(|offset| {
+        let shard_index = (start + offset) % self.idle_shards.len();
+        self.idle_shards[shard_index].try_lock().ok()
+      })
+    else {
       return Err(DirectH1PutError::Locked);
     };
 
@@ -179,6 +180,14 @@ impl DirectH1Pool {
       idle_since: Instant::now(),
     });
     Ok(())
+  }
+}
+
+fn direct_h1_shard_scan_limit(shard_count: usize, idle_count: usize) -> usize {
+  if idle_count <= DIRECT_H1_SHARD_SCAN_LIMIT {
+    shard_count
+  } else {
+    shard_count.min(DIRECT_H1_SHARD_SCAN_LIMIT)
   }
 }
 

@@ -1905,7 +1905,7 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta static_fast_path_before static_fast_path_after static_fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
@@ -1913,6 +1913,7 @@ run_load() {
   direct_transport="$(direct_transport_gate_transport "${label}" "${protocol}" "${host}")"
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_before="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-before" "${fast_path_protocol}")"
+    request_body_before="$(fast_path_request_body_metrics "${host}" "${label}-request-body-before" "${fast_path_protocol}")"
     direct_h1_before="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-before" "${fast_path_protocol}")"
     direct_h2_before="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-before" "${fast_path_protocol}")"
     direct_h1_pool_before="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-before")"
@@ -1943,14 +1944,16 @@ run_load() {
   fi
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_after="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-after" "${fast_path_protocol}")"
+    request_body_after="$(fast_path_request_body_metrics "${host}" "${label}-request-body-after" "${fast_path_protocol}")"
     direct_h1_after="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-after" "${fast_path_protocol}")"
     direct_h2_after="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-after" "${fast_path_protocol}")"
     direct_h1_pool_after="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-after")"
     fast_path_delta="$(plain_proxy_fast_path_delta "${fast_path_before}" "${fast_path_after}")"
+    request_body_delta="$(counter_map_delta "${request_body_before}" "${request_body_after}")"
     direct_h1_delta="$(direct_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
     direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
-    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
+    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
     assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
     case "${direct_transport}" in
       direct_h1) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h1_delta}" ;;
@@ -2169,6 +2172,26 @@ direct_h1_transport_metrics() {
 
 direct_h2_transport_metrics() {
   fast_path_transport_metrics "$1" "$2" direct_h2 "$3"
+}
+
+fast_path_request_body_metrics() {
+  local host="$1"
+  local label="$2"
+  local protocol="$3"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c --arg protocol "${protocol}" '.fast_path.request_body[$protocol] // {}' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
 }
 
 direct_h1_pool_metrics() {
@@ -2942,9 +2965,38 @@ run_oxibelt_aggressive_long_run() {
 }
 
 run_reverse_proxy_group() {
+  local ran_oxibelt=0 ran_nginx=0 ran_caddy=0 ran_openresty=0
+  local nginx_h3_mode=disabled
+
+  # Primary comparator rows run before diagnostics so external tool failures
+  # cannot erase quorum evidence for nginx/Caddy/OpenResty reverse-proxy rows.
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
+    ran_oxibelt=1
+  fi
+
+  if has_comparator nginx; then
+    start_nginx
+    nginx_h3_mode="$(resolve_nginx_h3_mode)"
+    run_common_loads nginx nginx "${nginx_h3_mode}"
+    ran_nginx=1
+  fi
+
+  if has_comparator caddy; then
+    start_caddy
+    run_common_loads caddy caddy required
+    ran_caddy=1
+  fi
+
+  if has_comparator openresty; then
+    start_openresty
+    run_common_loads openresty openresty disabled
+    ran_openresty=1
+  fi
+
+  if (( ran_oxibelt )); then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_external_benchmarks_for_comparator oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
     run_oxibelt_h2_split_loads
@@ -2954,24 +3006,20 @@ run_reverse_proxy_group() {
     run_oxibelt_tls_resumption_handshake_rows
   fi
 
-  if has_comparator nginx; then
+  if (( ran_nginx )); then
     start_nginx
-    nginx_h3_mode="$(resolve_nginx_h3_mode)"
-    run_common_loads nginx nginx "${nginx_h3_mode}"
     run_external_benchmarks_for_comparator nginx nginx "${nginx_h3_mode}"
     run_handshake "nginx-tls-handshake-h2" h2 nginx
   fi
 
-  if has_comparator caddy; then
+  if (( ran_caddy )); then
     start_caddy
-    run_common_loads caddy caddy required
     run_external_benchmarks_for_comparator caddy caddy required
     run_handshake "caddy-tls-handshake-h2" h2 caddy
   fi
 
-  if has_comparator openresty; then
+  if (( ran_openresty )); then
     start_openresty
-    run_common_loads openresty openresty disabled
     run_external_benchmarks_for_comparator openresty openresty disabled
     run_handshake "openresty-tls-handshake-h2" h2 openresty
   fi

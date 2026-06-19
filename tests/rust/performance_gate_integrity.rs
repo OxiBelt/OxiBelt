@@ -2485,6 +2485,10 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
     "performance script should compute direct-H1 transport counter deltas"
   );
   assert!(
+    script.contains("fast_path_request_body_metrics"),
+    "performance script should attach request-body proof counter deltas"
+  );
+  assert!(
     script.contains("oxibelt-h1-keepalive:h1"),
     "oxibelt-h1-keepalive rows should be selected for H1 fast-path gating"
   );

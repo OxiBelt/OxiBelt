@@ -28,6 +28,9 @@ const BODY_REASONS: [&str; 6] = [
 ];
 const BODY_COUNTERS_PER_PROTOCOL: usize = BODY_DISPOSITIONS.len() * BODY_REASONS.len();
 const BODY_COUNTER_COUNT: usize = PROTOCOLS.len() * BODY_COUNTERS_PER_PROTOCOL;
+const REQUEST_BODY_OUTCOMES: [&str; 4] =
+  ["already_empty", "verified_empty", "probe_eof", "streaming"];
+const REQUEST_BODY_COUNTER_COUNT: usize = PROTOCOLS.len() * REQUEST_BODY_OUTCOMES.len();
 const TRANSPORTS: [&str; 2] = ["direct_h1", "direct_h2"];
 const TRANSPORT_HIT_REASON: &str = "used";
 const TRANSPORT_MISS_REASONS: [&str; 8] = [
@@ -63,6 +66,7 @@ const STATIC_FAST_PATH_COUNTER_COUNT: usize =
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
   response_body_counters: [StripedCounter; BODY_COUNTER_COUNT],
+  request_body_counters: [StripedCounter; REQUEST_BODY_COUNTER_COUNT],
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
   static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
@@ -73,6 +77,7 @@ impl Default for FastPathMetrics {
     Self {
       decision_counters: std::array::from_fn(|_| StripedCounter::default()),
       response_body_counters: std::array::from_fn(|_| StripedCounter::default()),
+      request_body_counters: std::array::from_fn(|_| StripedCounter::default()),
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
@@ -93,6 +98,13 @@ impl FastPathMetrics {
       return;
     };
     self.response_body_counters[index].increment();
+  }
+
+  pub(super) fn record_request_body(&self, protocol: &str, outcome: &str) {
+    let Some(index) = request_body_counter_index(protocol, outcome) else {
+      return;
+    };
+    self.request_body_counters[index].increment();
   }
 
   pub(super) fn record_transport(
@@ -224,6 +236,16 @@ impl FastPathMetrics {
           );
         }
       }
+      for outcome in REQUEST_BODY_OUTCOMES {
+        append_request_body_counter(
+          output,
+          protocol,
+          outcome,
+          self.request_body_counters
+            [request_body_counter_index(protocol, outcome).expect("request body counter exists")]
+          .load(),
+        );
+      }
     }
     for event in DIRECT_H1_POOL_EVENTS {
       append_direct_h1_pool_counter(
@@ -276,6 +298,14 @@ fn response_body_counter_index(protocol: &str, disposition: &str, reason: &str) 
       + disposition_index * BODY_REASONS.len()
       + reason_index,
   )
+}
+
+fn request_body_counter_index(protocol: &str, outcome: &str) -> Option<usize> {
+  let protocol_index = protocol_index(protocol)?;
+  let outcome_index = REQUEST_BODY_OUTCOMES
+    .iter()
+    .position(|candidate| *candidate == outcome)?;
+  Some(protocol_index * REQUEST_BODY_OUTCOMES.len() + outcome_index)
 }
 
 fn transport_counter_index(
@@ -400,6 +430,17 @@ fn append_response_body_counter(
   output.push('\n');
 }
 
+fn append_request_body_counter(output: &mut String, protocol: &str, outcome: &str, value: u64) {
+  output.push_str("# TYPE oxibelt_http_fast_path_request_bodies_total counter\n");
+  output.push_str("oxibelt_http_fast_path_request_bodies_total{protocol=\"");
+  output.push_str(protocol);
+  output.push_str("\",outcome=\"");
+  output.push_str(outcome);
+  output.push_str("\"} ");
+  output.push_str(&value.to_string());
+  output.push('\n');
+}
+
 fn append_direct_h1_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("# TYPE oxibelt_http_direct_h1_pool_events_total counter\n");
   output.push_str("oxibelt_http_direct_h1_pool_events_total{event=\"");
@@ -453,6 +494,25 @@ mod tests {
       metrics.response_body_counters
         [response_body_counter_index("h1", "inlined", "known_small").unwrap()]
       .load(),
+      1
+    );
+  }
+
+  #[test]
+  fn records_only_known_request_body_label_sets() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_request_body("h2", "verified_empty");
+    metrics.record_request_body("h3", "probe_eof");
+    metrics.record_request_body("h3", "unknown");
+    metrics.record_request_body("h9", "streaming");
+
+    assert_eq!(
+      metrics.request_body_counters[request_body_counter_index("h2", "verified_empty").unwrap()]
+        .load(),
+      1
+    );
+    assert_eq!(
+      metrics.request_body_counters[request_body_counter_index("h3", "probe_eof").unwrap()].load(),
       1
     );
   }

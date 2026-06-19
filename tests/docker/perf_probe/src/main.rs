@@ -1599,6 +1599,7 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
   }
   serde_json::json!({
       "plain_proxy": plain_proxy,
+      "request_body": fast_path_request_body_metrics_json(metrics),
       "transport": {
           "direct_h1": direct_h1,
           "direct_h2": direct_h2
@@ -1608,6 +1609,27 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
       },
       "static_responses": static_fast_path_responses_json(metrics)
   })
+}
+
+fn fast_path_request_body_metrics_json(metrics: &str) -> serde_json::Value {
+  let mut protocols = serde_json::Map::new();
+  for protocol in ["h1", "h2", "h3"] {
+    let mut outcomes = BTreeMap::new();
+    for (labels, value) in
+      prometheus_labeled_u64_samples(metrics, "oxibelt_http_fast_path_request_bodies_total")
+    {
+      if labels.get("protocol").map(String::as_str) != Some(protocol) {
+        continue;
+      }
+      let outcome = labels
+        .get("outcome")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned());
+      *outcomes.entry(outcome).or_insert(0) += value;
+    }
+    protocols.insert(protocol.to_owned(), serde_json::json!(outcomes));
+  }
+  serde_json::Value::Object(protocols)
 }
 
 fn fast_path_protocol_metrics_json(metrics: &str, path: &str, protocol: &str) -> serde_json::Value {
@@ -2723,6 +2745,10 @@ oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h1\",outc
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h2\",outcome=\"hit\",reason=\"eligible\"} 17
 # TYPE oxibelt_http_fast_path_decisions_total counter
 oxibelt_http_fast_path_decisions_total{path=\"plain_proxy\",protocol=\"h3\",outcome=\"hit\",reason=\"eligible\"} 23
+# TYPE oxibelt_http_fast_path_request_bodies_total counter
+oxibelt_http_fast_path_request_bodies_total{protocol=\"h2\",outcome=\"probe_eof\"} 11
+# TYPE oxibelt_http_fast_path_request_bodies_total counter
+oxibelt_http_fast_path_request_bodies_total{protocol=\"h3\",outcome=\"verified_empty\"} 13
 # TYPE oxibelt_http_fast_path_transports_total counter
 oxibelt_http_fast_path_transports_total{transport=\"direct_h1\",protocol=\"h1\",outcome=\"hit\",reason=\"used\"} 97
 # TYPE oxibelt_http_fast_path_transports_total counter
@@ -2754,6 +2780,8 @@ oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fall
     assert_eq!(h1["miss_reasons"]["cache_policy"], 1);
     assert_eq!(parsed["plain_proxy"]["h2"]["hits"], 17);
     assert_eq!(parsed["plain_proxy"]["h3"]["hits"], 23);
+    assert_eq!(parsed["request_body"]["h2"]["probe_eof"], 11);
+    assert_eq!(parsed["request_body"]["h3"]["verified_empty"], 13);
     assert_eq!(direct_h1["hits"], 97);
     assert_eq!(direct_h1["misses"], 3);
     assert_eq!(direct_h1["attempts"], 100);

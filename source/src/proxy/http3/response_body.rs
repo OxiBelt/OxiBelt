@@ -1,6 +1,5 @@
 use std::fmt;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ pub(super) fn upstream_h3_response_body(
   upstream_h3_response_body_inner(stream, timeout)
 }
 
-trait H3ResponseBodyStream: Send + Unpin + 'static {
+trait H3ResponseBodyStream: Send + Sync + Unpin + 'static {
   type Error: fmt::Display + Send + Sync + 'static;
 
   fn poll_recv_data_bytes(
@@ -60,7 +59,7 @@ where
   S: H3ResponseBodyStream,
 {
   UpstreamH3ResponseBody {
-    stream: Mutex::new(stream),
+    stream,
     timeout,
     sleep: None,
     ended: false,
@@ -72,7 +71,7 @@ struct UpstreamH3ResponseBody<S>
 where
   S: H3ResponseBodyStream,
 {
-  stream: Mutex<S>,
+  stream: S,
   timeout: Duration,
   sleep: Option<Pin<Box<Sleep>>>,
   ended: bool,
@@ -83,11 +82,7 @@ where
   S: H3ResponseBodyStream,
 {
   fn stop_sending(&mut self) {
-    let stream = match self.stream.get_mut() {
-      Ok(stream) => stream,
-      Err(poisoned) => poisoned.into_inner(),
-    };
-    stream.stop_sending();
+    self.stream.stop_sending();
   }
 }
 
@@ -106,15 +101,8 @@ where
     if this.ended {
       return Poll::Ready(None);
     }
-    if this.sleep.is_none() {
-      this.sleep = Some(Box::pin(tokio::time::sleep(this.timeout)));
-    }
 
-    let stream = match this.stream.get_mut() {
-      Ok(stream) => stream,
-      Err(poisoned) => poisoned.into_inner(),
-    };
-    match stream.poll_recv_data_bytes(cx) {
+    match this.stream.poll_recv_data_bytes(cx) {
       Poll::Ready(Ok(Some(chunk))) => {
         this.sleep = None;
         Poll::Ready(Some(Ok(Frame::data(chunk))))
@@ -130,12 +118,15 @@ where
         Poll::Ready(Some(Err(upstream_h3_response_body_error(error))))
       }
       Poll::Pending => {
+        if this.sleep.is_none() {
+          this.sleep = Some(Box::pin(tokio::time::sleep(this.timeout)));
+        }
         if let Some(sleep) = this.sleep.as_mut()
           && sleep.as_mut().poll(cx).is_ready()
         {
           this.sleep = None;
           this.ended = true;
-          stream.stop_sending();
+          this.stream.stop_sending();
           return Poll::Ready(Some(Err(boxed_error(BodyTimeoutError::new(
             BodyTimeoutKind::UpstreamResponseRead,
           )))));

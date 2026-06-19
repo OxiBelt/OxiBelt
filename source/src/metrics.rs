@@ -149,6 +149,10 @@ impl Metrics {
       .record_response_body(protocol, disposition, reason);
   }
 
+  pub fn record_fast_path_request_body(&self, protocol: &str, outcome: &str) {
+    self.fast_path.record_request_body(protocol, outcome);
+  }
+
   pub fn record_fast_path_transport(
     &self,
     transport: &str,

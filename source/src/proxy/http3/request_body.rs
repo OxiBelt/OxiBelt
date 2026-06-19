@@ -10,7 +10,9 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error};
-use crate::proxy::http::request_framing::h2_or_h3_safe_method_empty_probe_allowed;
+use crate::proxy::http::request_framing::{
+  VerifiedEmptyRequestBody, h2_or_h3_safe_method_empty_probe_allowed,
+};
 
 use super::H3RequestRecvStream;
 
@@ -64,7 +66,7 @@ where
   {
     let (parts, _) = request.into_parts();
     drop(stream);
-    return Request::from_parts(parts, empty_body());
+    return verified_empty_request(parts);
   }
 
   let first = match poll_h3_request_body_once(&mut stream).await {
@@ -88,7 +90,7 @@ where
     Some(Ok(None)) => {
       let (parts, _) = request.into_parts();
       drop(stream);
-      Request::from_parts(parts, empty_body())
+      verified_empty_request(parts)
     }
     Some(Ok(Some(chunk))) => {
       direct_h3_request_body_with_initial(request, stream, Some(Ok(Frame::data(chunk))))
@@ -213,6 +215,12 @@ fn empty_body() -> ProxyBody {
   Empty::<Bytes>::new()
     .map_err(|never| -> BoxError { match never {} })
     .boxed()
+}
+
+fn verified_empty_request(parts: http::request::Parts) -> Request<ProxyBody> {
+  let mut request = Request::from_parts(parts, empty_body());
+  request.extensions_mut().insert(VerifiedEmptyRequestBody);
+  request
 }
 
 #[cfg(test)]

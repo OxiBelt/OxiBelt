@@ -18,7 +18,9 @@ use crate::proxy::http::headers::{
   ForwardedHeaderCache, ForwardedRequestHeaderValues, strip_hop_by_hop_headers,
 };
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
-use crate::proxy::http::request_framing::VerifiedContentLengthZeroBody;
+use crate::proxy::http::request_framing::{
+  VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
+};
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
@@ -65,9 +67,11 @@ use self::helpers::{
 };
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;
+#[cfg(test)]
+use self::request_body::fast_path_request_body;
 use self::request_body::{
-  FastPathRequestBody, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
-  fast_path_request_body_is_definitely_empty,
+  FastPathRequestBody, FastPathRequestBodyMetrics, fast_path_request_body_empty_probe_allowed,
+  fast_path_request_body_is_definitely_empty, fast_path_request_body_with_metrics,
 };
 use self::response_body::{
   FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
@@ -102,6 +106,10 @@ fn request_body_definitely_empty<B: hyper::body::Body>(request: &Request<B>) -> 
     || request
       .extensions()
       .get::<VerifiedContentLengthZeroBody>()
+      .is_some()
+    || request
+      .extensions()
+      .get::<VerifiedEmptyRequestBody>()
       .is_some()
 }
 
@@ -338,18 +346,43 @@ impl PlainProxyFastPath {
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
+    let request_body_protocol = fast_path_metric_protocol(request_version);
     let request_body = if request_body_definitely_empty {
+      if state.request_path_features.hot_path_metrics {
+        let outcome = if parts
+          .extensions
+          .get::<VerifiedContentLengthZeroBody>()
+          .is_some()
+          || parts.extensions.get::<VerifiedEmptyRequestBody>().is_some()
+        {
+          "verified_empty"
+        } else {
+          "already_empty"
+        };
+        state
+          .metrics
+          .record_fast_path_request_body(request_body_protocol, outcome);
+      }
       FastPathRequestBody::empty()
     } else {
       let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
       let request_body_empty_probe_allowed =
         fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers);
-      fast_path_request_body(
+      let metrics =
+        state
+          .request_path_features
+          .hot_path_metrics
+          .then_some(FastPathRequestBodyMetrics {
+            metrics: state.metrics.as_ref(),
+            protocol: request_body_protocol,
+          });
+      fast_path_request_body_with_metrics(
         body,
         state.config.limits.max_request_body_bytes as usize,
         client_body_timeout,
         false,
         request_body_empty_probe_allowed,
+        metrics,
       )
       .await
     };

@@ -375,11 +375,12 @@ async fn eligible_static_plan(
     .get(HOST)
     .and_then(|value| value.to_str().ok())
     .map(normalize_host)?;
-  let request_path = request
+  let (request_path, request_query) = request
     .target
     .split_once('?')
-    .map_or(request.target.as_str(), |(path, _)| path);
-  let request_uri: Uri = request.target.parse().ok()?;
+    .map_or((request.target.as_str(), None), |(path, query)| {
+      (path, Some(query))
+    });
   let client_addr = match crate::identity::resolve_client_addr(
     &request.headers,
     peer_addr,
@@ -410,7 +411,7 @@ async fn eligible_static_plan(
           path: request_path,
           method: Some(&request.method),
           headers: Some(&request.headers),
-          query: request_uri.query(),
+          query: request_query,
           source_ip: Some(client_addr.ip()),
           protocol: Some(RouteRequestProtocol::Http1),
           tls: None,
@@ -434,14 +435,17 @@ async fn eligible_static_plan(
   let access_log_needed = snapshot.request_path_features.system_access_log
     || resolved.execution_plan.waf.request.enabled()
     || resolved.execution_plan.waf.response.enabled();
-  let mut access_log = access_log_needed.then(|| {
-    StaticFastPathContext::new(
+  let mut access_log = if access_log_needed {
+    let request_uri: Uri = request.target.parse().ok()?;
+    Some(StaticFastPathContext::new(
       request_uri,
       peer_addr,
       host.clone(),
       resolved.route.name.clone(),
-    )
-  });
+    ))
+  } else {
+    None
+  };
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
