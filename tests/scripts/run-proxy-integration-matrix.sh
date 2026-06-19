@@ -1293,6 +1293,51 @@ protocol_probe_client_with_sni_and_ca() {
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
 }
 
+protocol_probe_dpi_tls_client_with_sni_and_ca() {
+  local profile="$1"
+  local server_name="$2"
+  local authority="$3"
+  local path="$4"
+  local expect_status="$5"
+  local ca_file="$6"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-dpi-tls-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      dpi-tls-client \
+      --profile "${profile}" \
+      --host proxy \
+      --port 8443 \
+      --server-name "${server_name}" \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/probe-ca.pem \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${ca_file}" "${client_container}:/tmp/probe-ca.pem"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "DPI TLS protocol probe failed after retries with status ${status}: profile=${profile} server_name=${server_name} authority=${authority} path=${path}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "DPI TLS protocol probe did not reach expected status ${expect_status}"
+}
+
 protocol_probe_websocket_client() {
   local authority="$1"
   local path="$2"

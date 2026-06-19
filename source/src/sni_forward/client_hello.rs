@@ -17,15 +17,25 @@ pub(crate) enum ClientHelloSni {
 }
 
 pub(crate) fn tls_record_client_hello_sni(data: &[u8]) -> anyhow::Result<ClientHelloSni> {
-  let Some(record_len) = tls_record_len(data)? else {
-    return Ok(ClientHelloSni::Incomplete);
-  };
-  if data.len() < record_len {
-    return Ok(ClientHelloSni::Incomplete);
+  let mut cursor = 0usize;
+  let mut handshake = Vec::new();
+  let mut expected_handshake_len = None;
+  loop {
+    let Some((payload_start, record_end)) = tls_record_bounds(data, cursor)? else {
+      return Ok(ClientHelloSni::Incomplete);
+    };
+    handshake.extend_from_slice(&data[payload_start..record_end]);
+    if expected_handshake_len.is_none() {
+      expected_handshake_len = client_hello_message_len(&handshake)?;
+    }
+    if let Some(expected_len) = expected_handshake_len
+      && handshake.len() >= expected_len
+    {
+      let sni = raw_client_hello_sni(&handshake[..expected_len]).context("invalid TLS record")?;
+      return Ok(ClientHelloSni::Complete(sni));
+    }
+    cursor = record_end;
   }
-  let sni =
-    raw_client_hello_sni(&data[TLS_RECORD_HEADER_LEN..record_len]).context("invalid TLS record")?;
-  Ok(ClientHelloSni::Complete(sni))
 }
 
 pub(crate) fn raw_client_hello_sni(data: &[u8]) -> anyhow::Result<Option<String>> {
@@ -42,6 +52,20 @@ fn parse_raw_client_hello_sni(data: &[u8]) -> anyhow::Result<Option<String>> {
   let body_len = cursor.read_u24()?;
   let body = cursor.take(body_len)?;
   parse_client_hello_body_sni(body)
+}
+
+fn client_hello_message_len(data: &[u8]) -> anyhow::Result<Option<usize>> {
+  if data.len() < 4 {
+    return Ok(None);
+  }
+  let mut cursor = ByteCursor::new(data);
+  let handshake_type = cursor.read_u8()?;
+  ensure!(
+    handshake_type == TLS_HANDSHAKE_CLIENT_HELLO,
+    "expected TLS ClientHello handshake"
+  );
+  let body_len = cursor.read_u24()?;
+  Ok(Some(4 + body_len))
 }
 
 fn parse_client_hello_body_sni(body: &[u8]) -> anyhow::Result<Option<String>> {
@@ -117,15 +141,27 @@ fn parse_server_name_extension_sni(extension: &[u8]) -> anyhow::Result<Option<St
   Ok(sni)
 }
 
-fn tls_record_len(data: &[u8]) -> anyhow::Result<Option<usize>> {
+fn tls_record_bounds(data: &[u8], offset: usize) -> anyhow::Result<Option<(usize, usize)>> {
   if data.len() < TLS_RECORD_HEADER_LEN {
     return Ok(None);
   }
-  if data[0] != 0x16 {
+  let header_end = offset
+    .checked_add(TLS_RECORD_HEADER_LEN)
+    .context("TLS record offset overflow")?;
+  if data.len() < header_end {
+    return Ok(None);
+  }
+  if data[offset] != 0x16 {
     bail!("expected TLS handshake record");
   }
-  let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
-  Ok(Some(TLS_RECORD_HEADER_LEN + record_len))
+  let record_len = u16::from_be_bytes([data[offset + 3], data[offset + 4]]) as usize;
+  let record_end = header_end
+    .checked_add(record_len)
+    .context("TLS record length overflow")?;
+  if data.len() < record_end {
+    return Ok(None);
+  }
+  Ok(Some((header_end, record_end)))
 }
 
 fn normalize_visible_sni(value: &str) -> anyhow::Result<String> {
@@ -234,6 +270,21 @@ mod tests {
   }
 
   #[test]
+  fn tls_record_parser_reassembles_fragmented_client_hello() {
+    let host = "split.example.test";
+    let hello = client_hello_with_sni(host);
+    let sni_offset = hello
+      .windows(host.len())
+      .position(|window| window == host.as_bytes())
+      .expect("synthetic hello includes SNI");
+    let record = fragmented_tls_records(&hello, sni_offset + 1);
+
+    let sni = tls_record_client_hello_sni(&record).expect("parse");
+
+    assert_eq!(sni, ClientHelloSni::Complete(Some(host.to_string())));
+  }
+
+  #[test]
   fn raw_client_hello_parser_allows_missing_sni() {
     let hello = client_hello_without_extensions();
 
@@ -308,6 +359,13 @@ mod tests {
     );
     record.extend_from_slice(payload);
     record
+  }
+
+  fn fragmented_tls_records(payload: &[u8], split_at: usize) -> Vec<u8> {
+    assert!(split_at > 0 && split_at < payload.len());
+    let mut records = tls_record(&payload[..split_at]);
+    records.extend_from_slice(&tls_record(&payload[split_at..]));
+    records
   }
 
   fn client_hello_with_sni(sni: &str) -> Vec<u8> {

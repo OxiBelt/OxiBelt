@@ -3,8 +3,9 @@ use std::convert::Infallible;
 use std::env;
 use std::fs;
 use std::future::Future;
-use std::io;
-use std::net::SocketAddr;
+use std::io::{self, Read as StdRead, Write as StdWrite};
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
+use std::ops::Range;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +31,7 @@ use md5::{Digest, Md5};
 use ring::hmac;
 use rustls::client::Resumption;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
+use rustls::{ClientConfig, ClientConnection, HandshakeKind, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -106,6 +107,65 @@ struct DownstreamArgs {
     headers: HeaderMap,
     ca_cert: String,
     expect_status: Option<u16>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DpiTlsProfile {
+    ByedpiSplitSni,
+    ByedpiTlsrecSni,
+    GoodbyeDpiNativeFrag,
+    GoodbyeDpiFragBySni,
+    DpibreakSegment01,
+    DpibreakSegment05,
+}
+
+impl DpiTlsProfile {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "byedpi-split-sni" => Ok(Self::ByedpiSplitSni),
+            "byedpi-tlsrec-sni" => Ok(Self::ByedpiTlsrecSni),
+            "goodbyedpi-native-frag" => Ok(Self::GoodbyeDpiNativeFrag),
+            "goodbyedpi-frag-by-sni" => Ok(Self::GoodbyeDpiFragBySni),
+            "dpibreak-segment-0-1" => Ok(Self::DpibreakSegment01),
+            "dpibreak-segment-0-5" => Ok(Self::DpibreakSegment05),
+            _ => bail!("unsupported DPI TLS profile: {raw}"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ByedpiSplitSni => "byedpi-split-sni",
+            Self::ByedpiTlsrecSni => "byedpi-tlsrec-sni",
+            Self::GoodbyeDpiNativeFrag => "goodbyedpi-native-frag",
+            Self::GoodbyeDpiFragBySni => "goodbyedpi-frag-by-sni",
+            Self::DpibreakSegment01 => "dpibreak-segment-0-1",
+            Self::DpibreakSegment05 => "dpibreak-segment-0-5",
+        }
+    }
+}
+
+struct DpiTlsArgs {
+    profile: DpiTlsProfile,
+    host: String,
+    port: u16,
+    server_name: String,
+    authority: String,
+    path: String,
+    ca_cert: String,
+    expect_status: Option<u16>,
+}
+
+struct ClientHelloView {
+    record: Range<usize>,
+    payload: Range<usize>,
+    sni_name: Range<usize>,
+}
+
+struct DpiTlsWritePlan {
+    chunks: Vec<Vec<u8>>,
+    tcp_chunk_count: usize,
+    tls_record_count: usize,
+    sni_offset: usize,
 }
 
 struct TlsResumptionLoadArgs {
@@ -284,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
         "turn-upstream" => serve_turn_upstream(parse_turn_upstream_args(args)?).await,
         "turn-client" => run_turn_client(parse_turn_client_args(args)?).await,
         "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
+        "dpi-tls-client" => run_dpi_tls_client(parse_dpi_tls_args(args)?).await,
         "tls-resumption-load" => {
             run_tls_resumption_load(parse_tls_resumption_load_args(args)?).await
         }
@@ -305,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
     eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -819,6 +880,48 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         zero_length_body_end_delay_ms,
         omit_content_length,
         headers,
+        ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+        expect_status,
+    })
+}
+
+fn parse_dpi_tls_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<DpiTlsArgs> {
+    let mut profile = None;
+    let mut host = None;
+    let mut port = None;
+    let mut server_name = None;
+    let mut authority = None;
+    let mut path = None;
+    let mut ca_cert = None;
+    let mut expect_status = None;
+
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--profile" => profile = Some(DpiTlsProfile::parse(&value)?),
+            "--host" => host = Some(value),
+            "--port" => port = Some(value.parse().context("invalid --port value")?),
+            "--server-name" => server_name = Some(value),
+            "--authority" => authority = Some(value),
+            "--path" => path = Some(validate_origin_form_path(&value)?),
+            "--ca-cert" => ca_cert = Some(value),
+            "--expect-status" => {
+                expect_status = Some(value.parse().context("invalid --expect-status value")?);
+            }
+            _ => bail!("unknown dpi-tls-client flag: {flag}"),
+        }
+    }
+
+    let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+    Ok(DpiTlsArgs {
+        profile: profile.ok_or_else(|| anyhow!("--profile is required"))?,
+        host: host.ok_or_else(|| anyhow!("--host is required"))?,
+        port: port.ok_or_else(|| anyhow!("--port is required"))?,
+        authority: authority.unwrap_or_else(|| server_name.clone()),
+        server_name,
+        path: path.ok_or_else(|| anyhow!("--path is required"))?,
         ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
         expect_status,
     })
@@ -1819,6 +1922,483 @@ async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
     }
 
     println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+async fn run_dpi_tls_client(args: DpiTlsArgs) -> anyhow::Result<()> {
+    let expected = args.expect_status;
+    let output = tokio::task::spawn_blocking(move || dpi_tls_http1_request(args))
+        .await
+        .context("DPI TLS probe task failed")??;
+
+    if let Some(expected) = expected {
+        let status = output["status"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("probe output did not contain numeric status"))?;
+        if status != u64::from(expected) {
+            eprintln!("{}", serde_json::to_string(&output)?);
+            bail!("expected DPI TLS probe status {expected}, got {status}");
+        }
+    }
+
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+fn dpi_tls_http1_request(args: DpiTlsArgs) -> anyhow::Result<serde_json::Value> {
+    let config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+    let server_name = ServerName::try_from(args.server_name.clone())
+        .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+    let mut conn = ClientConnection::new(Arc::new(config), server_name)
+        .context("failed to initialize rustls client connection")?;
+    let mut client_hello = Vec::new();
+    while conn.wants_write() {
+        let written = conn
+            .write_tls(&mut client_hello)
+            .context("failed to collect ClientHello bytes")?;
+        if written == 0 {
+            break;
+        }
+    }
+    if client_hello.is_empty() {
+        bail!("rustls did not produce an initial ClientHello");
+    }
+
+    let plan = dpi_tls_write_plan(args.profile, &client_hello)?;
+    let mut stream = StdTcpStream::connect((args.host.as_str(), args.port))
+        .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .context("failed to set DPI TLS probe read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .context("failed to set DPI TLS probe write timeout")?;
+
+    for (index, chunk) in plan.chunks.iter().enumerate() {
+        stream
+            .write_all(chunk)
+            .context("failed to write fragmented ClientHello chunk")?;
+        stream
+            .flush()
+            .context("failed to flush fragmented ClientHello chunk")?;
+        if index + 1 < plan.chunks.len() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    complete_rustls_handshake(&mut conn, &mut stream)?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        args.path, args.authority
+    );
+    conn.writer()
+        .write_all(request.as_bytes())
+        .context("failed to write DPI TLS HTTP request")?;
+    flush_rustls(&mut conn, &mut stream)?;
+
+    let (status, headers, body) = read_http1_response_from_rustls(&mut conn, &mut stream)?;
+    Ok(serde_json::json!({
+        "negotiated_protocol": "http/1.1",
+        "profile": args.profile.label(),
+        "status": status,
+        "headers": headers,
+        "body": String::from_utf8_lossy(&body),
+        "client_hello_bytes": client_hello.len(),
+        "tcp_chunks": plan.tcp_chunk_count,
+        "tls_records": plan.tls_record_count,
+        "sni_offset": plan.sni_offset,
+    }))
+}
+
+fn flush_rustls(
+    conn: &mut ClientConnection,
+    stream: &mut StdTcpStream,
+) -> anyhow::Result<()> {
+    while conn.wants_write() {
+        let written = conn
+            .write_tls(stream)
+            .context("failed to write pending TLS bytes")?;
+        if written == 0 {
+            break;
+        }
+    }
+    stream.flush().context("failed to flush TLS stream")?;
+    Ok(())
+}
+
+fn complete_rustls_handshake(
+    conn: &mut ClientConnection,
+    stream: &mut StdTcpStream,
+) -> anyhow::Result<()> {
+    while conn.is_handshaking() {
+        flush_rustls(conn, stream)?;
+        let read = conn
+            .read_tls(stream)
+            .context("failed to read TLS handshake bytes")?;
+        if read == 0 {
+            bail!("peer closed before TLS handshake completed");
+        }
+        conn.process_new_packets()
+            .context("failed to process TLS handshake bytes")?;
+    }
+    flush_rustls(conn, stream)?;
+    Ok(())
+}
+
+fn read_http1_response_from_rustls(
+    conn: &mut ClientConnection,
+    stream: &mut StdTcpStream,
+) -> anyhow::Result<(u16, BTreeMap<String, String>, Vec<u8>)> {
+    let mut response = Vec::new();
+    loop {
+        drain_rustls_plaintext(conn, &mut response)?;
+        if http1_response_complete(&response)? {
+            break;
+        }
+
+        flush_rustls(conn, stream)?;
+        let read = conn
+            .read_tls(stream)
+            .context("failed to read TLS response bytes")?;
+        if read == 0 {
+            break;
+        }
+        conn.process_new_packets()
+            .context("failed to process TLS response bytes")?;
+    }
+
+    let head_end = find_http1_head_end(&response)
+        .ok_or_else(|| anyhow!("HTTP/1 response did not contain a complete header block"))?;
+    let head = std::str::from_utf8(&response[..head_end])
+        .context("HTTP/1 response headers were not UTF-8")?;
+    let status = parse_http1_status(&response)?;
+    let headers = parse_http1_headers(head);
+    let body = response[(head_end + 4)..].to_vec();
+    Ok((status, headers, body))
+}
+
+fn drain_rustls_plaintext(
+    conn: &mut ClientConnection,
+    response: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match conn.reader().read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => response.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(error).context("failed to drain TLS plaintext"),
+        }
+    }
+}
+
+fn http1_response_complete(response: &[u8]) -> anyhow::Result<bool> {
+    let Some((body_start, content_length)) = http1_body_bounds(response)? else {
+        return Ok(false);
+    };
+    let Some(content_length) = content_length else {
+        return Ok(false);
+    };
+    Ok(response.len() >= body_start + content_length)
+}
+
+fn http1_body_bounds(response: &[u8]) -> anyhow::Result<Option<(usize, Option<usize>)>> {
+    let Some(head_end) = find_http1_head_end(response) else {
+        return Ok(None);
+    };
+    let head = std::str::from_utf8(&response[..head_end])
+        .context("HTTP/1 response headers were not UTF-8")?;
+    let headers = parse_http1_headers(head);
+    let content_length = headers
+        .get("content-length")
+        .map(|value| value.parse().context("invalid HTTP/1 Content-Length"))
+        .transpose()?;
+    Ok(Some((head_end + 4, content_length)))
+}
+
+fn find_http1_head_end(response: &[u8]) -> Option<usize> {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+}
+
+fn dpi_tls_write_plan(
+    profile: DpiTlsProfile,
+    client_hello: &[u8],
+) -> anyhow::Result<DpiTlsWritePlan> {
+    let view = client_hello_view(client_hello)?;
+    let sni_midpoint = view.sni_name.start + (view.sni_name.len() / 2).max(1);
+    let (chunks, tls_record_count) = match profile {
+        DpiTlsProfile::ByedpiSplitSni => {
+            let chunks = chunk_by_offsets(client_hello, &[sni_midpoint]);
+            let tls_record_count = tls_record_count(client_hello)?;
+            (chunks, tls_record_count)
+        }
+        DpiTlsProfile::ByedpiTlsrecSni => {
+            let split = split_first_tls_record(client_hello, &[view.sni_name.start + 1])?;
+            let tls_record_count = tls_record_count(&split)?;
+            (vec![split], tls_record_count)
+        }
+        DpiTlsProfile::GoodbyeDpiNativeFrag => {
+            let chunks = chunk_by_offsets(client_hello, &[2]);
+            let tls_record_count = tls_record_count(client_hello)?;
+            (chunks, tls_record_count)
+        }
+        DpiTlsProfile::GoodbyeDpiFragBySni => {
+            let chunks = chunk_by_offsets(client_hello, &[view.sni_name.start]);
+            let tls_record_count = tls_record_count(client_hello)?;
+            (chunks, tls_record_count)
+        }
+        DpiTlsProfile::DpibreakSegment01 => {
+            let chunks = chunk_by_offsets(client_hello, &[1]);
+            let tls_record_count = tls_record_count(client_hello)?;
+            (chunks, tls_record_count)
+        }
+        DpiTlsProfile::DpibreakSegment05 => {
+            let chunks = chunk_by_offsets(client_hello, &[5]);
+            let tls_record_count = tls_record_count(client_hello)?;
+            (chunks, tls_record_count)
+        }
+    };
+
+    Ok(DpiTlsWritePlan {
+        tcp_chunk_count: chunks.len(),
+        tls_record_count,
+        sni_offset: view.sni_name.start,
+        chunks,
+    })
+}
+
+fn chunk_by_offsets(bytes: &[u8], offsets: &[usize]) -> Vec<Vec<u8>> {
+    let mut offsets = offsets
+        .iter()
+        .copied()
+        .filter(|offset| *offset > 0 && *offset < bytes.len())
+        .collect::<Vec<_>>();
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    let mut chunks = Vec::with_capacity(offsets.len() + 1);
+    let mut start = 0usize;
+    for offset in offsets {
+        chunks.push(bytes[start..offset].to_vec());
+        start = offset;
+    }
+    chunks.push(bytes[start..].to_vec());
+    chunks
+}
+
+fn split_first_tls_record(bytes: &[u8], offsets: &[usize]) -> anyhow::Result<Vec<u8>> {
+    let view = first_tls_record_view(bytes)?;
+    let mut payload_offsets = offsets
+        .iter()
+        .copied()
+        .filter(|offset| *offset > view.payload.start && *offset < view.payload.end)
+        .collect::<Vec<_>>();
+    payload_offsets.sort_unstable();
+    payload_offsets.dedup();
+    if payload_offsets.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut output = Vec::with_capacity(bytes.len() + payload_offsets.len() * 5);
+    output.extend_from_slice(&bytes[..view.record.start]);
+    let mut start = view.payload.start;
+    for offset in payload_offsets
+        .into_iter()
+        .chain(std::iter::once(view.payload.end))
+    {
+        append_tls_record(
+            &mut output,
+            bytes[view.record.start],
+            &bytes[(view.record.start + 1)..(view.record.start + 3)],
+            &bytes[start..offset],
+        )?;
+        start = offset;
+    }
+    output.extend_from_slice(&bytes[view.record.end..]);
+    Ok(output)
+}
+
+fn append_tls_record(
+    output: &mut Vec<u8>,
+    content_type: u8,
+    version: &[u8],
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    if payload.len() > u16::MAX as usize {
+        bail!("TLS record payload is too large: {}", payload.len());
+    }
+    output.push(content_type);
+    output.extend_from_slice(version);
+    output.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    output.extend_from_slice(payload);
+    Ok(())
+}
+
+fn tls_record_count(bytes: &[u8]) -> anyhow::Result<usize> {
+    let mut offset = 0usize;
+    let mut count = 0usize;
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(5)
+            .ok_or_else(|| anyhow!("TLS record offset overflow"))?;
+        if header_end > bytes.len() {
+            bail!("truncated TLS record header at byte {offset}");
+        }
+        let len = u16::from_be_bytes([bytes[offset + 3], bytes[offset + 4]]) as usize;
+        offset = header_end
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("TLS record length overflow"))?;
+        if offset > bytes.len() {
+            bail!("truncated TLS record payload");
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn first_tls_record_view(bytes: &[u8]) -> anyhow::Result<ClientHelloView> {
+    if bytes.len() < 5 {
+        bail!("ClientHello is missing the TLS record header");
+    }
+    if bytes[0] != 0x16 {
+        bail!("expected TLS handshake record, got content type {}", bytes[0]);
+    }
+    let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    let record_end = 5usize
+        .checked_add(record_len)
+        .ok_or_else(|| anyhow!("TLS record length overflow"))?;
+    if record_end > bytes.len() {
+        bail!("ClientHello TLS record is truncated");
+    }
+    Ok(ClientHelloView {
+        record: 0..record_end,
+        payload: 5..record_end,
+        sni_name: 0..0,
+    })
+}
+
+fn client_hello_view(bytes: &[u8]) -> anyhow::Result<ClientHelloView> {
+    let mut view = first_tls_record_view(bytes)?;
+    let mut cursor = view.payload.start;
+    if read_u8_at(bytes, cursor, "handshake type")? != 0x01 {
+        bail!("first TLS handshake message is not a ClientHello");
+    }
+    cursor += 1;
+    let handshake_len = read_u24_at(bytes, cursor, "ClientHello length")?;
+    cursor += 3;
+    let body_end = cursor
+        .checked_add(handshake_len)
+        .ok_or_else(|| anyhow!("ClientHello length overflow"))?;
+    if body_end > view.payload.end {
+        bail!("ClientHello handshake message spans beyond the first TLS record");
+    }
+
+    cursor = cursor
+        .checked_add(2 + 32)
+        .ok_or_else(|| anyhow!("ClientHello legacy header overflow"))?;
+    ensure_len(bytes, cursor, 1, "session id length")?;
+    let session_len = bytes[cursor] as usize;
+    cursor += 1;
+    cursor = cursor
+        .checked_add(session_len)
+        .ok_or_else(|| anyhow!("ClientHello session id overflow"))?;
+    let cipher_suites_len = read_u16_at(bytes, cursor, "cipher suites length")?;
+    cursor += 2;
+    cursor = cursor
+        .checked_add(cipher_suites_len)
+        .ok_or_else(|| anyhow!("ClientHello cipher suites overflow"))?;
+    ensure_len(bytes, cursor, 1, "compression methods length")?;
+    let compression_len = bytes[cursor] as usize;
+    cursor += 1;
+    cursor = cursor
+        .checked_add(compression_len)
+        .ok_or_else(|| anyhow!("ClientHello compression methods overflow"))?;
+    let extensions_len = read_u16_at(bytes, cursor, "extensions length")?;
+    cursor += 2;
+    let extensions_end = cursor
+        .checked_add(extensions_len)
+        .ok_or_else(|| anyhow!("ClientHello extensions overflow"))?;
+    if extensions_end > body_end {
+        bail!("ClientHello extensions exceed handshake body");
+    }
+
+    while cursor < extensions_end {
+        ensure_len(bytes, cursor, 4, "extension header")?;
+        let extension_type = read_u16_at(bytes, cursor, "extension type")?;
+        let extension_len = read_u16_at(bytes, cursor + 2, "extension length")?;
+        cursor += 4;
+        let extension_end = cursor
+            .checked_add(extension_len)
+            .ok_or_else(|| anyhow!("ClientHello extension overflow"))?;
+        if extension_end > extensions_end {
+            bail!("ClientHello extension exceeds extension block");
+        }
+        if extension_type == 0x0000 {
+            view.sni_name = parse_sni_extension(bytes, cursor, extension_end)?;
+            return Ok(view);
+        }
+        cursor = extension_end;
+    }
+
+    bail!("ClientHello did not contain a server_name extension")
+}
+
+fn parse_sni_extension(bytes: &[u8], start: usize, end: usize) -> anyhow::Result<Range<usize>> {
+    let list_len = read_u16_at(bytes, start, "server_name list length")?;
+    let mut cursor = start + 2;
+    let list_end = cursor
+        .checked_add(list_len)
+        .ok_or_else(|| anyhow!("server_name list length overflow"))?;
+    if list_end > end {
+        bail!("server_name list exceeds extension length");
+    }
+
+    while cursor < list_end {
+        ensure_len(bytes, cursor, 3, "server_name entry")?;
+        let name_type = bytes[cursor];
+        let name_len = read_u16_at(bytes, cursor + 1, "server_name length")?;
+        cursor += 3;
+        let name_end = cursor
+            .checked_add(name_len)
+            .ok_or_else(|| anyhow!("server_name length overflow"))?;
+        if name_end > list_end {
+            bail!("server_name entry exceeds list length");
+        }
+        if name_type == 0 {
+            return Ok(cursor..name_end);
+        }
+        cursor = name_end;
+    }
+
+    bail!("server_name extension did not contain a host_name entry")
+}
+
+fn read_u8_at(bytes: &[u8], offset: usize, context: &str) -> anyhow::Result<u8> {
+    ensure_len(bytes, offset, 1, context)?;
+    Ok(bytes[offset])
+}
+
+fn read_u16_at(bytes: &[u8], offset: usize, context: &str) -> anyhow::Result<usize> {
+    ensure_len(bytes, offset, 2, context)?;
+    Ok(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize)
+}
+
+fn read_u24_at(bytes: &[u8], offset: usize, context: &str) -> anyhow::Result<usize> {
+    ensure_len(bytes, offset, 3, context)?;
+    Ok(((bytes[offset] as usize) << 16)
+        | ((bytes[offset + 1] as usize) << 8)
+        | bytes[offset + 2] as usize)
+}
+
+fn ensure_len(bytes: &[u8], offset: usize, len: usize, context: &str) -> anyhow::Result<()> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("{context} offset overflow"))?;
+    if end > bytes.len() {
+        bail!("{context} is truncated");
+    }
     Ok(())
 }
 
@@ -2884,4 +3464,112 @@ fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
         bail!("no parsable certificates found in {}", path.display());
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_by_offsets_sorts_deduplicates_and_bounds_offsets() {
+        let chunks = chunk_by_offsets(b"abcdef", &[3, 0, 3, 9, 1]);
+        assert_eq!(chunks, vec![b"a".to_vec(), b"bc".to_vec(), b"def".to_vec()]);
+    }
+
+    #[test]
+    fn client_hello_view_finds_sni_name() {
+        let hello = synthetic_client_hello("example.test");
+        let view = client_hello_view(&hello).expect("parse ClientHello");
+        assert_eq!(&hello[view.sni_name], b"example.test");
+        assert_eq!(view.record.start, 0);
+        assert_eq!(view.payload.start, 5);
+    }
+
+    #[test]
+    fn split_first_tls_record_preserves_handshake_payload() {
+        let hello = synthetic_client_hello("example.test");
+        let view = client_hello_view(&hello).expect("parse ClientHello");
+        let split = split_first_tls_record(&hello, &[view.sni_name.start + 1])
+            .expect("split first TLS record");
+        assert_eq!(tls_record_count(&hello).expect("count original"), 1);
+        assert_eq!(tls_record_count(&split).expect("count split"), 2);
+        assert_eq!(
+            collect_tls_record_payloads(&split),
+            hello[view.payload].to_vec()
+        );
+    }
+
+    #[test]
+    fn dpi_tls_profile_names_round_trip() {
+        for name in [
+            "byedpi-split-sni",
+            "byedpi-tlsrec-sni",
+            "goodbyedpi-native-frag",
+            "goodbyedpi-frag-by-sni",
+            "dpibreak-segment-0-1",
+            "dpibreak-segment-0-5",
+        ] {
+            assert_eq!(DpiTlsProfile::parse(name).unwrap().label(), name);
+        }
+    }
+
+    fn synthetic_client_hello(server_name: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(1);
+        body.push(0);
+
+        let mut name_list = Vec::new();
+        name_list.push(0);
+        name_list.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+        name_list.extend_from_slice(server_name.as_bytes());
+
+        let mut sni_extension = Vec::new();
+        sni_extension.extend_from_slice(&(name_list.len() as u16).to_be_bytes());
+        sni_extension.extend_from_slice(&name_list);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni_extension.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni_extension);
+
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01);
+        push_u24(&mut handshake, body.len());
+        handshake.extend_from_slice(&body);
+
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&[0x03, 0x01]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    fn push_u24(output: &mut Vec<u8>, value: usize) {
+        assert!(value <= 0xFF_FFFF);
+        output.push(((value >> 16) & 0xFF) as u8);
+        output.push(((value >> 8) & 0xFF) as u8);
+        output.push((value & 0xFF) as u8);
+    }
+
+    fn collect_tls_record_payloads(records: &[u8]) -> Vec<u8> {
+        let mut cursor = 0usize;
+        let mut payloads = Vec::new();
+        while cursor < records.len() {
+            let len = u16::from_be_bytes([records[cursor + 3], records[cursor + 4]]) as usize;
+            let payload_start = cursor + 5;
+            let payload_end = payload_start + len;
+            payloads.extend_from_slice(&records[payload_start..payload_end]);
+            cursor = payload_end;
+        }
+        payloads
+    }
 }
