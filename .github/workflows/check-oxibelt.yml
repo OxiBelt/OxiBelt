@@ -150,6 +150,9 @@ jobs:
       - name: Cargo fmt
         run: cargo fmt --check
 
+      - name: Tests rustfmt
+        run: tests/scripts/check-tests-rustfmt.sh
+
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 

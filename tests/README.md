@@ -3,6 +3,7 @@
 - `rust/`: repository-root Cargo integration tests linked from `source/Cargo.toml`
 - `docker/`: mock upstream image assets for end-to-end proxy verification
 - `scripts/build-targets.sh`: adds the current Linux `gnu` and `musl` targets, then builds both
+- `scripts/check-tests-rustfmt.sh`: enforces `tests/rustfmt.toml` formatting for tracked Rust files under `tests/`, including Docker probe crates
 - `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes it as a loadable image tar artifact. AMD64 builds accept `amd64v2`, `amd64`, and `amd64v4`; the default `amd64` artifact name remains `oxibelt-alpine-musl-amd64-image` and targets `x86-64-v3`.
 - `scripts/build-docker-integration-helper-images-artifact.sh`: builds the Docker integration helper images once for CI and writes a loadable tar artifact containing the mock upstream, DNS, Kubernetes, PQ probe, protocol probe, PostgreSQL, and Valkey images.
 - `scripts/build-external-benchmark-image-artifact.sh`: builds the reusable h2load/oha/wrk external benchmark image as `oxibelt/external-benchmarks:ci` and writes `oxibelt-external-benchmark-image.tar` for CI.
