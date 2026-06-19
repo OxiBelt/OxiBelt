@@ -481,6 +481,14 @@ jobs:
             target_cpu: x86-64-v3
             artifact_name: oxibelt-performance-caddy-x86-64-v3-image
             image_tar: oxibelt-performance-caddy-x86-64-v3.tar
+          - comparator: openresty
+            target_cpu: x86-64-v2
+            artifact_name: oxibelt-performance-openresty-x86-64-v2-image
+            image_tar: oxibelt-performance-openresty-x86-64-v2.tar
+          - comparator: openresty
+            target_cpu: x86-64-v3
+            artifact_name: oxibelt-performance-openresty-x86-64-v3-image
+            image_tar: oxibelt-performance-openresty-x86-64-v3.tar
 
     steps:
       - name: Checkout
@@ -1638,6 +1646,12 @@ jobs:
           name: oxibelt-performance-caddy-x86-64-v2-image
           path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/caddy
 
+      - name: Download AMD64 v2 OpenResty comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-openresty-x86-64-v2-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/openresty
+
       - name: Download AMD64 v3 nginx comparator image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
@@ -1649,6 +1663,12 @@ jobs:
         with:
           name: oxibelt-performance-caddy-x86-64-v3-image
           path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/caddy
+
+      - name: Download AMD64 v3 OpenResty comparator image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-performance-openresty-x86-64-v3-image
+          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/openresty
 
       - name: Download performance probe image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -1678,8 +1698,10 @@ jobs:
         run: |
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v2/nginx/oxibelt-performance-nginx-x86-64-v2.tar"
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v2/caddy/oxibelt-performance-caddy-x86-64-v2.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v2/openresty/oxibelt-performance-openresty-x86-64-v2.tar"
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/nginx/oxibelt-performance-nginx-x86-64-v3.tar"
           docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/caddy/oxibelt-performance-caddy-x86-64-v3.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-comparator-image/x86-64-v3/openresty/oxibelt-performance-openresty-x86-64-v3.tar"
 
       - name: Load performance probe Docker image
         run: docker load --input "${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar"
@@ -1758,11 +1780,13 @@ jobs:
           AMD64_V2_MISSING_FEATURES: ${{ steps.select-amd64-v2.outputs.missing_features }}
           AMD64_V2_NGINX_IMAGE_TAG: oxibelt/performance-nginx:alpine-x86-64-v2
           AMD64_V2_CADDY_IMAGE_TAG: oxibelt/performance-caddy:alpine-x86-64-v2
+          AMD64_V2_OPENRESTY_IMAGE_TAG: oxibelt/performance-openresty:alpine-x86-64-v2
           AMD64_V3_SUPPORTED: ${{ steps.select-amd64-v3.outputs.supported }}
           AMD64_V3_IMAGE_TAG: ${{ steps.select-amd64-v3.outputs.image_tag }}
           AMD64_V3_MISSING_FEATURES: ${{ steps.select-amd64-v3.outputs.missing_features }}
           AMD64_V3_NGINX_IMAGE_TAG: oxibelt/performance-nginx:alpine-x86-64-v3
           AMD64_V3_CADDY_IMAGE_TAG: oxibelt/performance-caddy:alpine-x86-64-v3
+          AMD64_V3_OPENRESTY_IMAGE_TAG: oxibelt/performance-openresty:alpine-x86-64-v3
           PERFORMANCE_SHARD: ${{ matrix.shard }}
           OXIBELT_ACTIONS_VARS_JSON: ${{ toJSON(vars) }}
         run: |
@@ -1804,6 +1828,7 @@ jobs:
                 image_tag="${AMD64_V2_IMAGE_TAG}"
                 nginx_image_tag="${AMD64_V2_NGINX_IMAGE_TAG}"
                 caddy_image_tag="${AMD64_V2_CADDY_IMAGE_TAG}"
+                openresty_image_tag="${AMD64_V2_OPENRESTY_IMAGE_TAG}"
                 missing_features="${AMD64_V2_MISSING_FEATURES}"
                 ;;
               x86-64-v3)
@@ -1811,6 +1836,7 @@ jobs:
                 image_tag="${AMD64_V3_IMAGE_TAG}"
                 nginx_image_tag="${AMD64_V3_NGINX_IMAGE_TAG}"
                 caddy_image_tag="${AMD64_V3_CADDY_IMAGE_TAG}"
+                openresty_image_tag="${AMD64_V3_OPENRESTY_IMAGE_TAG}"
                 missing_features="${AMD64_V3_MISSING_FEATURES}"
                 ;;
             esac
@@ -1870,6 +1896,7 @@ jobs:
               OXIBELT_DOCKER_IMAGE="${image_tag}" \
               OXIBELT_NGINX_IMAGE="${nginx_image_tag}" \
               OXIBELT_CADDY_IMAGE="${caddy_image_tag}" \
+              OXIBELT_OPENRESTY_IMAGE="${openresty_image_tag}" \
               OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci \
               OXIBELT_EXTERNAL_BENCHMARK_IMAGE=oxibelt/external-benchmarks:ci \
               OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE="${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}" \
@@ -1877,7 +1904,7 @@ jobs:
               OXIBELT_NGINX_H3_MODE=required \
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
               OXIBELT_TEST_ARTIFACT_DIR="${run_dir}" \
-                tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy || status=$?
+                tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy,openresty || status=$?
               if [[ "${status}" == "0" ]]; then
                 iteration_status="ok"
                 iteration_reason="completed"

@@ -792,12 +792,21 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
                     load_row("oxibelt-h1-keepalive", "h1", 100.0 + sample, 1.0, 5.0),
                     load_row("nginx-h1-keepalive", "h1", 200.0 + sample, 2.0, 6.0),
                     load_row("caddy-h1-keepalive", "h1", 150.0 + sample, 3.0, 7.0),
+                    load_row("openresty-h1-keepalive", "h1", 175.0 + sample, 3.0, 7.0),
                     load_row("oxibelt-h2", "h2", 190.0 + sample, 1.0, 5.0),
                     load_row("nginx-h2", "h2", 200.0 + sample, 2.0, 6.0),
                     load_row("caddy-h2", "h2", 180.0 + sample, 3.0, 7.0),
+                    load_row("openresty-h2", "h2", 185.0 + sample, 3.0, 7.0),
                     handshake_row("oxibelt-tls-handshake-h2", "h2", 1000.0 + sample, 6.0, 10.0),
                     handshake_row("nginx-tls-handshake-h2", "h2", 1250.0 + sample, 7.0, 11.0),
                     handshake_row("caddy-tls-handshake-h2", "h2", 900.0 + sample, 8.0, 12.0),
+                    handshake_row(
+                        "openresty-tls-handshake-h2",
+                        "h2",
+                        950.0 + sample,
+                        8.0,
+                        12.0,
+                    ),
                     load_row("oxibelt-h3", "h3", 70.0 + sample, 4.0, 8.0),
                     skipped_row(
                         "nginx-h3",
@@ -805,6 +814,11 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
                         "HTTP/3 is not available for this comparator image",
                     ),
                     load_row("caddy-h3", "h3", 90.0 + sample, 5.0, 9.0),
+                    skipped_row(
+                        "openresty-h3",
+                        "h3",
+                        "HTTP/3 is not available for this comparator image",
+                    ),
                 ],
             );
 
@@ -816,6 +830,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
                     load_row("oxibelt-static-16k-h1c", "h1c", 300.0 + sample, 1.0, 4.0),
                     load_row("nginx-static-16k-h1c", "h1c", 600.0 + sample, 2.0, 5.0),
                     load_row("caddy-static-16k-h1c", "h1c", 250.0 + sample, 3.0, 6.0),
+                    load_row("openresty-static-16k-h1c", "h1c", 275.0 + sample, 3.0, 6.0),
                 ],
             );
         }
@@ -922,7 +937,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
     let report = run_aggregate(&input_dir, &output_dir);
 
-    assert_eq!(report["schema_version"], 19);
+    assert_eq!(report["schema_version"], 20);
     assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
     let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -962,6 +977,12 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .expect("caddy ratio should exist"),
         113.0 / 163.0,
     );
+    assert_close(
+        h1_comparison["oxibelt_vs_openresty"]["ratio"]
+            .as_f64()
+            .expect("openresty ratio should exist"),
+        113.0 / 188.0,
+    );
 
     let static_comparison = find_comparison(&report, "static_files", "static-16k-h1c");
     assert_close(
@@ -975,6 +996,12 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .as_f64()
             .expect("static caddy ratio should exist"),
         313.0 / 263.0,
+    );
+    assert_close(
+        static_comparison["oxibelt_vs_openresty"]["ratio"]
+            .as_f64()
+            .expect("static openresty ratio should exist"),
+        313.0 / 288.0,
     );
 
     let h3_comparison = find_comparison(&report, "reverse_proxy", "h3");
@@ -998,6 +1025,12 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             .as_f64()
             .expect("handshake caddy ratio should exist"),
         1013.0 / 913.0,
+    );
+    assert_close(
+        handshake_comparison["oxibelt_vs_openresty"]["ratio"]
+            .as_f64()
+            .expect("handshake openresty ratio should exist"),
+        1013.0 / 963.0,
     );
     assert_eq!(handshake_comparison["oxibelt"]["result_type"], "handshake");
 
@@ -1116,7 +1149,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
         ],
     );
 
-    assert_eq!(report["schema_version"], 19);
+    assert_eq!(report["schema_version"], 20);
     assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
     assert_eq!(report["sample_quality"]["ok_iterations"], 16);
     assert_eq!(report["sample_quality"]["failed_iterations"], 0);

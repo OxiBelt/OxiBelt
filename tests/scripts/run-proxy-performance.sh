@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -12,6 +12,7 @@ Environment:
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
+  OXIBELT_OPENRESTY_IMAGE          OpenResty comparator image (default: openresty/openresty:1.31.1.1-1-alpine)
   OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset
   OXIBELT_EXTERNAL_BENCHMARKS      run h2load/oha/wrk validation rows, 1 or 0 (default: 1)
   OXIBELT_EXTERNAL_BENCHMARK_TOOLS comma-separated h2load,oha,wrk subset (default: h2load,oha,wrk)
@@ -77,7 +78,7 @@ EOF
 
 profile="smoke"
 serving_type="all"
-comparators="oxibelt,nginx,caddy"
+comparators="oxibelt,nginx,caddy,openresty"
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -153,6 +154,7 @@ external_benchmark_image="${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-oxibelt/external-b
 oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
+openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-1-alpine}"
 nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_perf_probe_image=0
 remove_external_benchmark_image=0
@@ -468,9 +470,10 @@ DNS.1 = proxy
 DNS.2 = oxibelt
 DNS.3 = nginx
 DNS.4 = caddy
-DNS.5 = localhost
-DNS.6 = perf-upstream-h2
-DNS.7 = example.test
+DNS.5 = openresty
+DNS.6 = localhost
+DNS.7 = perf-upstream-h2
+DNS.8 = example.test
 IP.1 = 127.0.0.1
 EOF
 
@@ -650,6 +653,7 @@ diagnostic_profile_comparator_from_label() {
     oxibelt*) echo oxibelt ;;
     nginx*) echo nginx ;;
     caddy*) echo caddy ;;
+    openresty*) echo openresty ;;
     *) echo unknown ;;
   esac
 }
@@ -791,6 +795,7 @@ diagnostic_binary_path_for_comparator() {
     oxibelt) echo /usr/local/bin/oxibelt ;;
     nginx) echo /usr/sbin/nginx ;;
     caddy) echo /usr/bin/caddy ;;
+    openresty) echo /usr/local/openresty/nginx/sbin/nginx ;;
     *) echo "" ;;
   esac
 }
@@ -2680,6 +2685,30 @@ start_caddy() {
   fi
 }
 
+start_openresty() {
+  local container="openresty-perf-${run_id}"
+  stop_active_proxy
+  mkdir -p "${configs_dir}/openresty"
+  cp "${fixture_root}/openresty/default.conf" "${configs_dir}/openresty/default.conf"
+  cp -R "${tls_dir}" "${configs_dir}/openresty/cert"
+
+  docker create \
+    --name "${container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias openresty \
+    "${openresty_image}" >/dev/null
+  docker cp "${fixture_root}/openresty/default.conf" "${container}:/etc/nginx/conf.d/default.conf"
+  docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/nginx/fullchain.pem"
+  docker cp "${tls_dir}/privkey.pem" "${container}:/etc/nginx/privkey.pem"
+  docker cp "${static_dir}/." "${container}:/srv/static"
+  docker start "${container}" >/dev/null
+  active_proxy_container="${container}"
+  if ! wait_for_tls_proxy openresty; then
+    fail_with_diagnostics "OpenResty performance proxy did not become ready"
+  fi
+}
+
 detect_nginx_h3() {
   if docker run --rm "${nginx_image}" nginx -V 2>&1 | grep -F -- '--with-http_v3_module' >/dev/null; then
     nginx_h3_supported=1
@@ -2939,6 +2968,13 @@ run_reverse_proxy_group() {
     run_external_benchmarks_for_comparator caddy caddy required
     run_handshake "caddy-tls-handshake-h2" h2 caddy
   fi
+
+  if has_comparator openresty; then
+    start_openresty
+    run_common_loads openresty openresty disabled
+    run_external_benchmarks_for_comparator openresty openresty disabled
+    run_handshake "openresty-tls-handshake-h2" h2 openresty
+  fi
 }
 
 run_static_files_group() {
@@ -2956,6 +2992,11 @@ run_static_files_group() {
   if has_comparator caddy; then
     start_caddy
     run_static_loads caddy caddy required
+  fi
+
+  if has_comparator openresty; then
+    start_openresty
+    run_static_loads openresty openresty disabled
   fi
 
   assert_static_16k_h1c_caddy_ratio
@@ -3097,6 +3138,14 @@ run_all_serving_types() {
     run_external_benchmarks_for_comparator caddy caddy required
     run_handshake "caddy-tls-handshake-h2" h2 caddy
     run_static_loads caddy caddy required
+  fi
+
+  if has_comparator openresty; then
+    start_openresty
+    run_common_loads openresty openresty disabled
+    run_external_benchmarks_for_comparator openresty openresty disabled
+    run_handshake "openresty-tls-handshake-h2" h2 openresty
+    run_static_loads openresty openresty disabled
   fi
 
   assert_static_16k_h1c_caddy_ratio

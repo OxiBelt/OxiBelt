@@ -1132,6 +1132,7 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     let script = comparator_build_script_text();
     let nginx_dockerfile = comparator_dockerfile_text("nginx");
     let caddy_dockerfile = comparator_dockerfile_text("caddy");
+    let openresty_dockerfile = comparator_dockerfile_text("openresty");
 
     assert_eq!(
         comparator_job.needs,
@@ -1166,6 +1167,18 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
             "x86-64-v3",
             "oxibelt-performance-caddy-x86-64-v3-image",
             "oxibelt-performance-caddy-x86-64-v3.tar",
+        ),
+        (
+            "openresty",
+            "x86-64-v2",
+            "oxibelt-performance-openresty-x86-64-v2-image",
+            "oxibelt-performance-openresty-x86-64-v2.tar",
+        ),
+        (
+            "openresty",
+            "x86-64-v3",
+            "oxibelt-performance-openresty-x86-64-v3-image",
+            "oxibelt-performance-openresty-x86-64-v3.tar",
         ),
     ] {
         assert!(
@@ -1236,6 +1249,15 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
             && caddy_dockerfile.contains("export GOAMD64=v2")
             && caddy_dockerfile.contains("export GOAMD64=v3"),
         "Caddy comparator image should pin Caddy and map OxiBelt target CPUs to GOAMD64 levels"
+    );
+    assert!(
+        openresty_dockerfile.contains("ARG OPENRESTY_VERSION=1.31.1.1")
+            && openresty_dockerfile.contains(
+                "FROM openresty/openresty:${OPENRESTY_VERSION}-${OPENRESTY_IMAGE_VERSION}-alpine"
+            )
+            && openresty_dockerfile
+                .contains(r#"org.oxibelt.performance.amd64_target_cpu="${OPENRESTY_TARGET_CPU}""#),
+        "OpenResty comparator image should pin OpenResty, wrap the official Alpine image, and record target CPU metadata"
     );
 }
 
@@ -1609,8 +1631,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     for (comparator, target_cpu) in [
         ("nginx", "x86-64-v2"),
         ("caddy", "x86-64-v2"),
+        ("openresty", "x86-64-v2"),
         ("nginx", "x86-64-v3"),
         ("caddy", "x86-64-v3"),
+        ("openresty", "x86-64-v3"),
     ] {
         assert!(
             performance_job.contains(&format!(
@@ -1628,6 +1652,7 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     assert!(
         performance_job.contains("OXIBELT_NGINX_IMAGE=\"${nginx_image_tag}\"")
             && performance_job.contains("OXIBELT_CADDY_IMAGE=\"${caddy_image_tag}\"")
+            && performance_job.contains("OXIBELT_OPENRESTY_IMAGE=\"${openresty_image_tag}\"")
             && performance_job.contains("OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci")
             && performance_job
                 .contains("OXIBELT_EXTERNAL_BENCHMARK_IMAGE=oxibelt/external-benchmarks:ci")
@@ -1638,9 +1663,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
                 "OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""
             )
             && performance_job.contains("OXIBELT_NGINX_H3_MODE=required")
+            && performance_job.contains("--comparators oxibelt,nginx,caddy,openresty")
             && performance_job.contains("unset OXIBELT_ACTIONS_VARS_JSON")
             && performance_job.contains("env -u OXIBELT_ACTIONS_VARS_JSON"),
-        "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, require nginx HTTP/3 in CI, and keep the full vars JSON out of repository scripts"
+        "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, require nginx HTTP/3 in CI, include OpenResty, and keep the full vars JSON out of repository scripts"
     );
     assert!(
         performance_job.contains("name: Download performance probe image artifact")

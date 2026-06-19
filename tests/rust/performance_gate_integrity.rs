@@ -2127,8 +2127,8 @@ fn external_benchmark_layer_keeps_primary_results_separate() {
         "external benchmark image overrides should skip local builds and avoid deleting provided images"
     );
     assert!(
-        script.contains("DNS.7 = example.test"),
-        "generated TLS material should include the normal external benchmark authority"
+        script.contains("DNS.5 = openresty") && script.contains("DNS.8 = example.test"),
+        "generated TLS material should include OpenResty and the normal external benchmark authority"
     );
     assert!(
         script.contains("jq -s '.' \"${external_results_jsonl}\" >\"${external_results_json}\""),
@@ -2144,7 +2144,9 @@ fn external_benchmark_layer_keeps_primary_results_separate() {
             && script.contains(
                 "run_external_benchmarks_for_comparator nginx nginx \"${nginx_h3_mode}\""
             )
-            && script.contains("run_external_benchmarks_for_comparator caddy caddy required"),
+            && script.contains("run_external_benchmarks_for_comparator caddy caddy required")
+            && script
+                .contains("run_external_benchmarks_for_comparator openresty openresty disabled"),
         "reverse-proxy comparators should reuse active fixtures for external validation"
     );
 }
@@ -2379,6 +2381,7 @@ fn handshake_resumption_diagnostic_runs_without_replacing_cold_row() {
     let cold_call = r#"run_handshake "oxibelt-tls-handshake-h2" h2 oxibelt"#;
     let nginx_cold_call = r#"run_handshake "nginx-tls-handshake-h2" h2 nginx"#;
     let caddy_cold_call = r#"run_handshake "caddy-tls-handshake-h2" h2 caddy"#;
+    let openresty_cold_call = r#"run_handshake "openresty-tls-handshake-h2" h2 openresty"#;
     let diagnostic_call = r#"run_handshake_resumption_diagnostic "oxibelt-tls-handshake-h2-resumption-diagnostic" h2 oxibelt"#;
 
     assert_eq!(
@@ -2395,6 +2398,11 @@ fn handshake_resumption_diagnostic_runs_without_replacing_cold_row() {
         script.matches(caddy_cold_call).count(),
         2,
         "reverse-proxy and all serving types should add the Caddy cold handshake comparator row"
+    );
+    assert_eq!(
+        script.matches(openresty_cold_call).count(),
+        2,
+        "reverse-proxy and all serving types should add the OpenResty cold handshake comparator row"
     );
     assert_eq!(
         script.matches(diagnostic_call).count(),
@@ -2511,6 +2519,10 @@ fn mandatory_and_optional_call_sites_are_explicit() {
         "Caddy HTTP/3 performance coverage must be mandatory"
     );
     assert!(
+        script.contains("run_common_loads openresty openresty disabled"),
+        "OpenResty should be an H1/H2 comparator with explicit skipped HTTP/3 rows"
+    );
+    assert!(
         script.contains("OXIBELT_NGINX_H3_MODE")
             && script.contains("resolve_nginx_h3_mode")
             && script.contains("nginx_h3_mode=\"$(resolve_nginx_h3_mode)\""),
@@ -2534,8 +2546,13 @@ fn mandatory_and_optional_call_sites_are_explicit() {
         "nginx should use the resolved HTTP/3 mode"
     );
     assert!(
+        script.contains("OXIBELT_OPENRESTY_IMAGE"),
+        "OpenResty comparator image should be configurable"
+    );
+    assert!(
         !script.contains("run_common_loads oxibelt oxibelt 1")
-            && !script.contains("run_common_loads caddy caddy 1"),
+            && !script.contains("run_common_loads caddy caddy 1")
+            && !script.contains("run_common_loads openresty openresty 0"),
         "mandatory HTTP/3 comparators must not use the legacy boolean supports_h3 flag"
     );
 }

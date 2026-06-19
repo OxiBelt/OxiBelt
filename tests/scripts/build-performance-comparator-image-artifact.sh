@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/build-performance-comparator-image-artifact.sh nginx|caddy <docker-platform> x86-64-v2|x86-64-v3 <output-dir>
+usage: tests/scripts/build-performance-comparator-image-artifact.sh nginx|caddy|openresty <docker-platform> x86-64-v2|x86-64-v3 <output-dir>
 EOF
 }
 
@@ -49,6 +49,14 @@ case "${comparator}" in
     build_args=(
       --build-arg "CADDY_VERSION=2.11.2"
       --build-arg "CADDY_TARGET_CPU=${target_cpu}"
+    )
+    ;;
+  openresty)
+    dockerfile="${repo_root}/tests/docker/performance_comparators/Dockerfile.openresty"
+    build_args=(
+      --build-arg "OPENRESTY_VERSION=1.31.1.1"
+      --build-arg "OPENRESTY_IMAGE_VERSION=1"
+      --build-arg "OPENRESTY_TARGET_CPU=${target_cpu}"
     )
     ;;
   *)

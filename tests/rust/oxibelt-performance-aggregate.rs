@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 19;
+const COMPARISON_SCHEMA_VERSION: u32 = 20;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -95,6 +95,7 @@ enum Comparator {
     Oxibelt,
     Nginx,
     Caddy,
+    OpenResty,
 }
 
 impl Comparator {
@@ -103,6 +104,7 @@ impl Comparator {
             Self::Oxibelt => "oxibelt",
             Self::Nginx => "nginx",
             Self::Caddy => "caddy",
+            Self::OpenResty => "openresty",
         }
     }
 }
@@ -524,8 +526,10 @@ struct ScenarioComparison {
     oxibelt: Option<AggregateStats>,
     nginx: Option<AggregateStats>,
     caddy: Option<AggregateStats>,
+    openresty: Option<AggregateStats>,
     oxibelt_vs_nginx: RatioResult,
     oxibelt_vs_caddy: RatioResult,
+    oxibelt_vs_openresty: RatioResult,
 }
 
 #[derive(Serialize)]
@@ -587,6 +591,7 @@ struct GroupSummary {
     scenarios: usize,
     oxibelt_vs_nginx: RatioSummary,
     oxibelt_vs_caddy: RatioSummary,
+    oxibelt_vs_openresty: RatioSummary,
 }
 
 #[derive(Serialize)]
@@ -2698,7 +2703,7 @@ fn parse_external_result_value(
             "{source_file} external row {row_index} ({label}): unknown tool {tool:?}"
         ));
     }
-    if !matches!(comparator, "oxibelt" | "nginx" | "caddy") {
+    if !matches!(comparator, "oxibelt" | "nginx" | "caddy" | "openresty") {
         warnings.push(format!(
             "{source_file} external row {row_index} ({label}): unknown comparator {comparator:?}"
         ));
@@ -2852,7 +2857,10 @@ fn parse_profile_result_value(
         return None;
     };
 
-    if !matches!(comparator, "oxibelt" | "nginx" | "caddy" | "unknown") {
+    if !matches!(
+        comparator,
+        "oxibelt" | "nginx" | "caddy" | "openresty" | "unknown"
+    ) {
         warnings.push(format!(
             "{source_file} profile row {row_index} ({label}): unknown comparator {comparator:?}"
         ));
@@ -2973,7 +2981,7 @@ fn parse_result_value(
     };
     let Some((comparator, scenario)) = normalize_label(label) else {
         warnings.push(format!(
-            "{source_file} row {row_index}: label {label:?} does not start with oxibelt-, nginx-, or caddy-"
+            "{source_file} row {row_index}: label {label:?} does not start with oxibelt-, nginx-, caddy-, or openresty-"
         ));
         return None;
     };
@@ -3488,6 +3496,8 @@ fn normalize_label(label: &str) -> Option<(Comparator, &str)> {
         Some((Comparator::Nginx, scenario))
     } else if let Some(scenario) = label.strip_prefix("caddy-") {
         Some((Comparator::Caddy, scenario))
+    } else if let Some(scenario) = label.strip_prefix("openresty-") {
+        Some((Comparator::OpenResty, scenario))
     } else {
         None
     }
@@ -3610,10 +3620,15 @@ fn build_group_comparisons(
             let caddy = aggregates
                 .get(&(target.clone(), Comparator::Caddy, scenario.clone()))
                 .cloned();
+            let openresty = aggregates
+                .get(&(target.clone(), Comparator::OpenResty, scenario.clone()))
+                .cloned();
             let oxibelt_vs_nginx =
                 ratio_result(oxibelt.as_ref(), nginx.as_ref(), Comparator::Nginx);
             let oxibelt_vs_caddy =
                 ratio_result(oxibelt.as_ref(), caddy.as_ref(), Comparator::Caddy);
+            let oxibelt_vs_openresty =
+                ratio_result(oxibelt.as_ref(), openresty.as_ref(), Comparator::OpenResty);
 
             ScenarioComparison {
                 amd64_target_cpu: target,
@@ -3622,8 +3637,10 @@ fn build_group_comparisons(
                 oxibelt,
                 nginx,
                 caddy,
+                openresty,
                 oxibelt_vs_nginx,
                 oxibelt_vs_caddy,
+                oxibelt_vs_openresty,
             }
         })
         .collect()
@@ -6170,6 +6187,12 @@ fn summarize_group(comparisons: &[ScenarioComparison]) -> GroupSummary {
                 .filter_map(|comparison| comparison.oxibelt_vs_caddy.ratio),
             comparisons.len(),
         ),
+        oxibelt_vs_openresty: summarize_ratios(
+            comparisons
+                .iter()
+                .filter_map(|comparison| comparison.oxibelt_vs_openresty.ratio),
+            comparisons.len(),
+        ),
     }
 }
 
@@ -6241,6 +6264,12 @@ fn skipped_or_missing_rows(
             &comparison.oxibelt_vs_caddy,
             &mut rows,
         );
+        collect_missing_row(
+            comparison,
+            Comparator::OpenResty,
+            &comparison.oxibelt_vs_openresty,
+            &mut rows,
+        );
     }
     rows
 }
@@ -6308,6 +6337,15 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         &mut rows,
     );
     collect_delta_rows(
+        &current.comparisons.reverse_proxy,
+        &current.primary_target_cpu,
+        Comparator::OpenResty,
+        &baseline_map,
+        &current_map,
+        baseline_schema_version,
+        &mut rows,
+    );
+    collect_delta_rows(
         &current.comparisons.static_files,
         &current.primary_target_cpu,
         Comparator::Nginx,
@@ -6320,6 +6358,15 @@ fn build_delta_report(baseline_report: &Path, current: &Report) -> DeltaReport {
         &current.comparisons.static_files,
         &current.primary_target_cpu,
         Comparator::Caddy,
+        &baseline_map,
+        &current_map,
+        baseline_schema_version,
+        &mut rows,
+    );
+    collect_delta_rows(
+        &current.comparisons.static_files,
+        &current.primary_target_cpu,
+        Comparator::OpenResty,
         &baseline_map,
         &current_map,
         baseline_schema_version,
@@ -6632,6 +6679,15 @@ fn render_markdown(report: &Report) -> String {
     .unwrap();
     writeln!(
         markdown,
+        "- Reverse proxy vs OpenResty: {}",
+        format_ratio_summary(
+            &report.summary.reverse_proxy.oxibelt_vs_openresty,
+            "openresty"
+        )
+    )
+    .unwrap();
+    writeln!(
+        markdown,
         "- Static files vs nginx: {}",
         format_ratio_summary(&report.summary.static_files.oxibelt_vs_nginx, "nginx")
     )
@@ -6640,6 +6696,15 @@ fn render_markdown(report: &Report) -> String {
         markdown,
         "- Static files vs Caddy: {}",
         format_ratio_summary(&report.summary.static_files.oxibelt_vs_caddy, "caddy")
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "- Static files vs OpenResty: {}",
+        format_ratio_summary(
+            &report.summary.static_files.oxibelt_vs_openresty,
+            "openresty"
+        )
     )
     .unwrap();
     writeln!(
@@ -6767,19 +6832,19 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
 
     writeln!(
         markdown,
-        "| Target CPU | Scenario | OxiBelt median rate/sec | nginx median rate/sec | OxiBelt vs nginx | Caddy median rate/sec | OxiBelt vs Caddy | OxiBelt median p95 ms | OxiBelt median p99 ms |"
+        "| Target CPU | Scenario | OxiBelt median rate/sec | nginx median rate/sec | OxiBelt vs nginx | Caddy median rate/sec | OxiBelt vs Caddy | OpenResty median rate/sec | OxiBelt vs OpenResty | OxiBelt median p95 ms | OxiBelt median p99 ms |"
     )
     .unwrap();
     writeln!(
         markdown,
-        "| --- | --- | ---: | ---: | --- | ---: | --- | ---: | ---: |"
+        "| --- | --- | ---: | ---: | --- | ---: | --- | ---: | --- | ---: | ---: |"
     )
     .unwrap();
     for comparison in comparisons {
         let oxibelt = comparison.oxibelt.as_ref();
         writeln!(
             markdown,
-            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             comparison.amd64_target_cpu,
             comparison.scenario,
             format_number(oxibelt.and_then(|stats| stats.median_rps)),
@@ -6787,6 +6852,13 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
             comparison.oxibelt_vs_nginx.text,
             format_number(comparison.caddy.as_ref().and_then(|stats| stats.median_rps)),
             comparison.oxibelt_vs_caddy.text,
+            format_number(
+                comparison
+                    .openresty
+                    .as_ref()
+                    .and_then(|stats| stats.median_rps)
+            ),
+            comparison.oxibelt_vs_openresty.text,
             format_number(oxibelt.and_then(|stats| stats.median_p95_ms)),
             format_number(oxibelt.and_then(|stats| stats.median_p99_ms)),
         )

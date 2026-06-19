@@ -248,7 +248,7 @@ Docker and integration checks:
 ```sh
 tests/scripts/build-targets.sh
 tests/scripts/run-proxy-integration.sh
-tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy
+tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy,openresty
 ```
 
 `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for each run and cleans up test resources. The Docker matrix also covers reload behavior and browser-visible behavior where applicable.

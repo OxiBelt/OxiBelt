@@ -1,0 +1,14 @@
+ARG OPENRESTY_VERSION=1.31.1.1
+ARG OPENRESTY_IMAGE_VERSION=1
+FROM openresty/openresty:${OPENRESTY_VERSION}-${OPENRESTY_IMAGE_VERSION}-alpine
+
+ARG OPENRESTY_VERSION=1.31.1.1
+ARG OPENRESTY_IMAGE_VERSION=1
+ARG OPENRESTY_TARGET_CPU=x86-64-v3
+
+LABEL org.oxibelt.performance.comparator="openresty" \
+      org.oxibelt.performance.openresty_version="${OPENRESTY_VERSION}" \
+      org.oxibelt.performance.openresty_image_version="${OPENRESTY_IMAGE_VERSION}" \
+      org.oxibelt.performance.amd64_target_cpu="${OPENRESTY_TARGET_CPU}"
+
+CMD ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]
