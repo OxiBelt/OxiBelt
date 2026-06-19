@@ -11,7 +11,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use http::header::{CONNECTION, HOST};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
-use http_body_util::{BodyExt, Empty};
+use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
@@ -22,9 +22,9 @@ use url::{Position, Url};
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{BoxError, ProxyBody};
+use crate::proxy::http::body::{self, BoxError, ProxyBody};
 
-const DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
+const DIRECT_H1_MAX_SHARDS: usize = 16;
 #[derive(Clone, Default)]
 pub(crate) struct DirectH1Pools {
   pools: Vec<Option<Arc<DirectH1Pool>>>,
@@ -81,7 +81,7 @@ impl DirectH1Pool {
   fn new(upstream: &UpstreamConfig) -> Option<Self> {
     let origin = DirectH1Origin::from_url(&upstream.origin)?;
     let max_idle = upstream.pool_max_idle_per_host;
-    let shard_count = max_idle.clamp(1, 16);
+    let shard_count = max_idle.clamp(1, DIRECT_H1_MAX_SHARDS);
     Some(Self {
       origin,
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
@@ -108,8 +108,7 @@ impl DirectH1Pool {
     let mut locked_shards = 0;
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
     let shard_count = self.idle_shards.len();
-    let scan_limit = direct_h1_shard_scan_limit(shard_count, idle_count);
-    for offset in 0..scan_limit {
+    for offset in 0..shard_count {
       let shard_index = (start + offset) % self.idle_shards.len();
       let Ok(mut idle) = self.idle_shards[shard_index].try_lock() else {
         locked_shards += 1;
@@ -150,12 +149,10 @@ impl DirectH1Pool {
 
     let start = self.next_shard.fetch_add(1, Ordering::Relaxed);
     let shard_count = self.idle_shards.len();
-    let Some(mut idle) =
-      (0..direct_h1_shard_scan_limit(shard_count, idle_count)).find_map(|offset| {
-        let shard_index = (start + offset) % self.idle_shards.len();
-        self.idle_shards[shard_index].try_lock().ok()
-      })
-    else {
+    let Some(mut idle) = (0..shard_count).find_map(|offset| {
+      let shard_index = (start + offset) % self.idle_shards.len();
+      self.idle_shards[shard_index].try_lock().ok()
+    }) else {
       return Err(DirectH1PutError::Locked);
     };
 
@@ -180,14 +177,6 @@ impl DirectH1Pool {
       idle_since: Instant::now(),
     });
     Ok(())
-  }
-}
-
-fn direct_h1_shard_scan_limit(shard_count: usize, idle_count: usize) -> usize {
-  if idle_count <= DIRECT_H1_SHARD_SCAN_LIMIT {
-    shard_count
-  } else {
-    shard_count.min(DIRECT_H1_SHARD_SCAN_LIMIT)
   }
 }
 
@@ -586,9 +575,7 @@ fn ensure_host_header(
 }
 
 fn empty_body() -> ProxyBody {
-  Empty::<Bytes>::new()
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed()
+  body::empty()
 }
 
 fn h1_response_allows_reuse(headers: &HeaderMap) -> bool {

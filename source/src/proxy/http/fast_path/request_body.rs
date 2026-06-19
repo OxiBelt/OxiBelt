@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use http::{HeaderMap, Method};
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::Limited;
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::metrics::Metrics;
@@ -13,7 +13,7 @@ use crate::proxy::http::request_framing::{
 
 #[cfg(test)]
 pub(super) fn fast_path_empty_request_body() -> ProxyBody {
-  empty_body()
+  body::empty()
 }
 
 pub(super) struct FastPathRequestBody {
@@ -38,7 +38,7 @@ impl FastPathRequestBodyMetrics<'_> {
 impl FastPathRequestBody {
   pub(super) fn empty() -> Self {
     Self {
-      body: empty_body(),
+      body: body::empty(),
       proven_empty: true,
     }
   }
@@ -292,10 +292,4 @@ pub(super) fn fast_path_request_body_empty_probe_allowed(
   headers: &HeaderMap,
 ) -> bool {
   h2_or_h3_safe_method_empty_probe_allowed(method, version, headers)
-}
-
-fn empty_body() -> ProxyBody {
-  Empty::<bytes::Bytes>::new()
-    .map_err(|never| -> body::BoxError { match never {} })
-    .boxed()
 }

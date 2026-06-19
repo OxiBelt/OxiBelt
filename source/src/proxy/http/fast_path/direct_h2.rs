@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use bytes::Bytes;
 use http::{Method, Request, Response, Uri};
-use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -23,7 +21,7 @@ use url::Url;
 use crate::config::{HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{BoxError, ProxyBody};
+use crate::proxy::http::body::{self, ProxyBody};
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
 #[derive(Clone, Default)]
@@ -465,9 +463,7 @@ fn build_h2_tls_config(
 }
 
 fn empty_body() -> ProxyBody {
-  Empty::<Bytes>::new()
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed()
+  body::empty()
 }
 
 fn fast_path_metric_protocol(version: http::Version) -> &'static str {

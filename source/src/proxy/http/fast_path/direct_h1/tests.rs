@@ -8,6 +8,8 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
+
 #[test]
 fn guard_accepts_direct_empty_http11_get_to_plain_h1_upstream() {
   let upstream = upstream("http://backend.internal:18080");
@@ -276,11 +278,22 @@ async fn pool_take_skips_contended_shard() -> anyhow::Result<()> {
 #[tokio::test]
 async fn pool_take_scans_all_shards_before_missing() -> anyhow::Result<()> {
   let mut upstream = upstream("http://backend.internal:18080");
-  upstream.pool_max_idle_per_host = DIRECT_H1_SHARD_SCAN_LIMIT + 2;
+  upstream.pool_max_idle_per_host = DIRECT_H1_MAX_SHARDS;
+  upstream.idle_timeout_ms = 30_000;
   let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
-  let sender = closed_direct_h1_sender().await?;
-  let target_shard = DIRECT_H1_SHARD_SCAN_LIMIT + 1;
+  let target_shard = OLD_DIRECT_H1_SHARD_SCAN_LIMIT + 1;
+  for shard_index in 0..target_shard {
+    let sender = closed_direct_h1_sender().await?;
+    let mut shard = pool.idle_shards[shard_index]
+      .lock()
+      .expect("test idle shard should lock");
+    shard.push(DirectH1IdleConnection {
+      sender,
+      idle_since: Instant::now() - Duration::from_secs(60),
+    });
+  }
   {
+    let sender = closed_direct_h1_sender().await?;
     let mut shard = pool.idle_shards[target_shard]
       .lock()
       .expect("test idle shard should lock");
@@ -289,7 +302,7 @@ async fn pool_take_scans_all_shards_before_missing() -> anyhow::Result<()> {
       idle_since: Instant::now(),
     });
   }
-  pool.idle_count.store(1, Ordering::Release);
+  pool.idle_count.store(target_shard + 1, Ordering::Release);
   pool.next_shard.store(0, Ordering::Release);
 
   let taken = pool.take_sender();
@@ -298,6 +311,7 @@ async fn pool_take_scans_all_shards_before_missing() -> anyhow::Result<()> {
     taken.sender.is_some(),
     "take should not report a miss while a later shard has an idle sender"
   );
+  assert_eq!(taken.stale_pruned, target_shard);
   assert_eq!(taken.miss_reason, DirectH1TakeMissReason::None);
   assert_eq!(pool.idle_count.load(Ordering::Acquire), 0);
   Ok(())
@@ -334,10 +348,23 @@ async fn pool_take_reports_locked_miss_when_idle_sender_is_contended() -> anyhow
 #[tokio::test]
 async fn pool_put_scans_all_shards_before_dropping() -> anyhow::Result<()> {
   let mut upstream = upstream("http://backend.internal:18080");
-  upstream.pool_max_idle_per_host = DIRECT_H1_SHARD_SCAN_LIMIT + 2;
+  upstream.pool_max_idle_per_host = DIRECT_H1_MAX_SHARDS;
   let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
   let sender = closed_direct_h1_sender().await?;
-  let _locks = (0..DIRECT_H1_SHARD_SCAN_LIMIT)
+  for shard_index in OLD_DIRECT_H1_SHARD_SCAN_LIMIT + 1..=OLD_DIRECT_H1_SHARD_SCAN_LIMIT + 5 {
+    let idle_sender = closed_direct_h1_sender().await?;
+    let mut shard = pool.idle_shards[shard_index]
+      .lock()
+      .expect("test idle shard should lock");
+    shard.push(DirectH1IdleConnection {
+      sender: idle_sender,
+      idle_since: Instant::now(),
+    });
+  }
+  pool
+    .idle_count
+    .store(OLD_DIRECT_H1_SHARD_SCAN_LIMIT + 1, Ordering::Release);
+  let _locks = (0..OLD_DIRECT_H1_SHARD_SCAN_LIMIT)
     .map(|index| {
       pool.idle_shards[index]
         .lock()
@@ -350,7 +377,10 @@ async fn pool_put_scans_all_shards_before_dropping() -> anyhow::Result<()> {
     pool.put_sender(sender).is_ok(),
     "put should use a later available shard instead of dropping"
   );
-  assert_eq!(pool.idle_count.load(Ordering::Acquire), 1);
+  assert_eq!(
+    pool.idle_count.load(Ordering::Acquire),
+    OLD_DIRECT_H1_SHARD_SCAN_LIMIT + 2
+  );
   Ok(())
 }
 

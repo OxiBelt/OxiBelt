@@ -1517,6 +1517,33 @@ fn oxibelt_no_http3_fixture_keeps_metrics_gate_reachable() {
 }
 
 #[test]
+fn oxibelt_direct_h2_performance_fixtures_enable_fast_path_metrics() {
+  for scenario in [
+    "baseline-upstream-h2c",
+    "baseline-upstream-h2",
+    "baseline-h2-adaptive-window",
+  ] {
+    let path = oxibelt_performance_fixture_root()
+      .join(scenario)
+      .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+      .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let config: Config = toml::from_str(&config_text)
+      .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+    assert!(
+      config.metrics.enabled,
+      "{scenario} should expose /metrics for direct-H2 fast-path gate evidence"
+    );
+    assert_eq!(
+      config.metrics.detail,
+      MetricsDetail::Basic,
+      "{scenario} should avoid detailed metrics on the measured fast path"
+    );
+  }
+}
+
+#[test]
 fn static_16k_h1c_ratio_gate_passes_when_oxibelt_is_close_to_caddy() {
   let run = static_16k_ratio_harness(
     &[

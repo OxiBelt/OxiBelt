@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use http::header::CONTENT_LENGTH;
 use http::{HeaderMap, Response, StatusCode};
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Body;
 
 use crate::config::TrailerMode;
@@ -111,7 +111,7 @@ where
 
   let inlined = body::InlinedKnownSmallResponseBody::new(collected.bytes, trailers);
   SmallResponseDisposition::Inlined {
-    body: empty_body(),
+    body: body::empty(),
     inlined: Some(inlined),
   }
 }
@@ -282,12 +282,6 @@ where
 
 fn full_body(bytes: Bytes) -> ProxyBody {
   Full::new(bytes)
-    .map_err(|never| -> body::BoxError { match never {} })
-    .boxed()
-}
-
-fn empty_body() -> ProxyBody {
-  Empty::<Bytes>::new()
     .map_err(|never| -> body::BoxError { match never {} })
     .boxed()
 }
