@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use http::header::COOKIE;
@@ -24,10 +24,8 @@ use crate::proxy::http::request_framing::{
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
-use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics::{self, configured_error_response};
 use crate::proxy::http::upstream::select_request_upstream;
-use crate::proxy::http::uri::{self, UpstreamUriParts};
 use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -37,6 +35,7 @@ use crate::waf::{
   WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
+use super::flow_helpers::{elapsed_ms, tags_ref};
 use super::{
   EffectiveRetryPolicy, EffectiveTimeouts, apply_alt_svc_header, send_one_shot,
   send_pool_with_retry, send_with_retry,
@@ -62,85 +61,25 @@ pub(crate) use self::direct_h2::DirectH2Pools;
 use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{DirectFastPathTransport, direct_fast_path_transport};
 use self::helpers::{
-  apply_fast_path_priority_policy, fast_path_downstream_response_timeout,
-  fast_path_metric_protocol, fast_path_outbound_request_body,
+  apply_fast_path_priority_policy, fast_path_alt_svc_possible,
+  fast_path_downstream_response_timeout, fast_path_metric_protocol,
+  fast_path_outbound_request_body, fast_path_target_uri, fast_path_upstream_timing_required,
+  request_body_definitely_empty,
 };
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;
 #[cfg(test)]
 use self::request_body::fast_path_request_body;
+#[cfg(test)]
+use self::request_body::fast_path_request_body_is_definitely_empty;
 use self::request_body::{
   FastPathRequestBody, FastPathRequestBodyMetrics, fast_path_request_body_empty_probe_allowed,
-  fast_path_request_body_is_definitely_empty, fast_path_request_body_with_metrics,
+  fast_path_request_body_with_metrics,
 };
 use self::response_body::{
   FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
 };
 use self::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
-
-static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
-
-fn tags_ref(tags: &Option<HashMap<String, String>>) -> &HashMap<String, String> {
-  tags.as_ref().unwrap_or(&EMPTY_TAGS)
-}
-
-fn fast_path_upstream_timing_required(
-  state: &AppSnapshot,
-  response_waf_enabled: bool,
-  pool_selected: bool,
-) -> bool {
-  response_waf_enabled
-    || pool_selected
-    || state.request_path_features.system_access_log
-    || state.request_path_features.detailed_metrics
-    || state.request_path_features.telemetry
-}
-
-fn elapsed_ms(started_at: Instant) -> u64 {
-  started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn request_body_definitely_empty<B: hyper::body::Body>(request: &Request<B>) -> bool {
-  fast_path_request_body_is_definitely_empty(request.version(), request.headers())
-    || request.body().is_end_stream()
-    || request
-      .extensions()
-      .get::<VerifiedContentLengthZeroBody>()
-      .is_some()
-    || request
-      .extensions()
-      .get::<VerifiedEmptyRequestBody>()
-      .is_some()
-}
-
-fn fast_path_target_uri(
-  origin: &UpstreamUriParts,
-  resolved: &ResolvedRoute<'_>,
-  downstream_scheme: &str,
-  downstream_host: &str,
-  downstream_uri: &http::Uri,
-) -> anyhow::Result<http::Uri> {
-  if resolved.route.actions.rewrite.is_none() {
-    return uri::rewrite_uri(
-      origin,
-      resolved.route.effective_path_prefix(),
-      resolved.route.replace_prefix_with.as_deref(),
-      downstream_uri,
-    );
-  }
-
-  route_actions::build_upstream_uri(
-    origin,
-    resolved.route,
-    RouteActionRenderContext {
-      route_prefix: resolved.route.effective_path_prefix(),
-      path_captures: &resolved.path_captures,
-      downstream_scheme,
-      downstream_host,
-      downstream_uri,
-    },
-  )
-}
 
 pub(crate) struct PlainProxyFastPath;
 
@@ -762,19 +701,6 @@ where
     )
     .await,
   )
-}
-
-fn fast_path_alt_svc_possible(
-  state: &AppSnapshot,
-  downstream_scheme: &str,
-  request_version: http::Version,
-) -> bool {
-  state.alt_svc_header_value.is_some()
-    && downstream_scheme == "https"
-    && matches!(
-      request_version,
-      http::Version::HTTP_10 | http::Version::HTTP_11 | http::Version::HTTP_2
-    )
 }
 
 #[cfg(test)]
