@@ -18,7 +18,7 @@
 - `scripts/run-browser-webdriver-check.sh`: starts a mock upstream and validates that Chromium or Firefox WebDriver can reach OxiBelt through either a local release binary or an `OXIBELT_DOCKER_IMAGE` container. Pass a scenario name (`basic-navigation`, `waf-request`, `waf-response`, `person-proof`, or `hot-reload`) to run the corresponding browser-level check.
 - `rust/oxibelt-docker-integration-matrix.rs`: test-only Rust binary used by CI and scripts to list GitHub matrix entries and materialize Docker/WebDriver case manifests.
 - `rust/ci_workflow_integrity.rs`: Cargo integration test that guards CI job dependencies so structure-check failures cannot skip Rust, Docker image, Docker integration, or browser jobs.
-- `fixtures/oxibelt-docker-integration-matrix/docker/`: TOML fixture files copied by the matrix materializer for Docker integration cases.
+- `fixtures/oxibelt-docker-integration-matrix/docker/`: per-case shell checks and extra fixture files copied by the matrix materializer for Docker integration cases.
 - `fixtures/oxibelt-docker-performance/`: OxiBelt, nginx, Caddy, and OpenResty configuration fixtures used by the performance runner.
 - `docker/mock_upstream/client.py`: test-only HTTPS client used by the integration script. It connects through Docker-network endpoints and trusts generated test CAs instead of disabling certificate verification; SNI forwarding cases can set a distinct TLS server name.
 - `docker/mock_upstream/server.py`: test-only echo upstream. When TLS is enabled, it requires TLS 1.2 or newer.

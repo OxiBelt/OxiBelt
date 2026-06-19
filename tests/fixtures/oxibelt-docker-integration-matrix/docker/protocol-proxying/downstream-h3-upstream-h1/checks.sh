@@ -1,0 +1,11 @@
+
+run_case_checks() {
+  local response
+  response="$(protocol_probe_client "h3" "example.test" "/app/downstream-h3-upstream-h1" 200)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3"'
+  assert_body_jq "${response}" '.upstream == "http-upstream"
+    and .request_version == "HTTP/1.1"
+    and .path == "/origin/app/downstream-h3-upstream-h1"
+    and .headers["x-forwarded-proto"] == "https"
+    and .headers["x-forwarded-host"] == "example.test"'
+}
