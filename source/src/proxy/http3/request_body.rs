@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use ::http::Request;
 use bytes::{Buf, Bytes};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error};
@@ -211,8 +211,14 @@ fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {
   )))
 }
 
+fn empty_body() -> ProxyBody {
+  Empty::<Bytes>::new()
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
+}
+
 fn verified_empty_request(parts: http::request::Parts) -> Request<ProxyBody> {
-  let mut request = Request::from_parts(parts, crate::proxy::http::body::empty());
+  let mut request = Request::from_parts(parts, empty_body());
   request.extensions_mut().insert(VerifiedEmptyRequestBody);
   request
 }

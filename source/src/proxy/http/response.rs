@@ -4,7 +4,7 @@
 use bytes::Bytes;
 use http::header::HeaderMap;
 use http::{HeaderValue, Method, Response, StatusCode, Uri};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use tracing::warn;
 
 use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
@@ -18,8 +18,8 @@ use crate::waf::{
 
 use super::SystemAccessLogContext;
 use super::body::{
-  self, BodyTimeoutKind, BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody,
-  ProxyBody, error_is_body_length_limit, error_is_timeout, is_known_small_response_body_len,
+  BodyTimeoutKind, BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody,
+  error_is_body_length_limit, error_is_timeout, is_known_small_response_body_len,
 };
 use super::buffering;
 use super::semantics::{configured_error_response, grpc_upstream_error_response};
@@ -387,7 +387,10 @@ pub(super) fn upstream_error_response(
 
 #[allow(dead_code)]
 fn empty_response(status: StatusCode) -> Response<ProxyBody> {
-  let mut response = Response::new(body::empty());
+  let body = Empty::<Bytes>::new()
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed();
+  let mut response = Response::new(body);
   *response.status_mut() = status;
   response.extensions_mut().insert(KnownSmallResponseBody);
   response

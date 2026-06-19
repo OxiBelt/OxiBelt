@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::HeaderMap;
+use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
@@ -116,12 +116,6 @@ pub(crate) use super::body_capture::{capture_proxy_body_prefix, capture_proxy_re
 
 pub(crate) fn channel_body(capacity: usize) -> (mpsc::Sender<ProxyBodyFrame>, ProxyBody) {
   channel_body_with_size_hint(capacity, SizeHint::new())
-}
-
-pub(crate) fn empty() -> ProxyBody {
-  Empty::<Bytes>::new()
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed()
 }
 
 fn channel_body_with_size_hint(
@@ -365,22 +359,9 @@ mod tests {
   use std::time::Duration;
 
   use super::{
-    BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body, empty,
+    BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body,
     error_is_timeout, with_read_timeout, with_send_timeout,
   };
-
-  #[tokio::test]
-  async fn empty_body_collects_without_frames() {
-    let body = empty();
-
-    assert!(body.is_end_stream());
-    let bytes = body
-      .collect()
-      .await
-      .expect("empty body should collect")
-      .to_bytes();
-    assert!(bytes.is_empty());
-  }
 
   #[tokio::test]
   async fn capture_prefix_replays_full_body_after_truncation() {

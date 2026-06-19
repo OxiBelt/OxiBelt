@@ -16,7 +16,7 @@ use http::header::{
   ETAG, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, RANGE, VARY,
 };
 use http::{HeaderMap, Method, Response, StatusCode};
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, Empty, Full, StreamBody};
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
@@ -25,7 +25,7 @@ use tracing::warn;
 
 use super::{CachedStaticObject, StaticBodyPlan, StaticFileBodyPlan, StaticResponsePlan};
 use crate::proxy::http::body::{
-  self, BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error,
+  BoxError, InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error,
   is_known_small_response_body_len,
 };
 use crate::proxy::http::response::text_response;
@@ -351,7 +351,9 @@ fn full_body(bytes: Bytes) -> ProxyBody {
 }
 
 fn empty_body() -> ProxyBody {
-  body::empty()
+  Empty::<Bytes>::new()
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
 }
 
 struct ExactSizeBody<B> {

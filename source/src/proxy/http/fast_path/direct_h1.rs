@@ -11,7 +11,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use http::header::{CONNECTION, HOST};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
@@ -22,7 +22,7 @@ use url::{Position, Url};
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{self, BoxError, ProxyBody};
+use crate::proxy::http::body::{BoxError, ProxyBody};
 
 const DIRECT_H1_MAX_SHARDS: usize = 16;
 #[derive(Clone, Default)]
@@ -575,7 +575,9 @@ fn ensure_host_header(
 }
 
 fn empty_body() -> ProxyBody {
-  body::empty()
+  Empty::<Bytes>::new()
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
 }
 
 fn h1_response_allows_reuse(headers: &HeaderMap) -> bool {
