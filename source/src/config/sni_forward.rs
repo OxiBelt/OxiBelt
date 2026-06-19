@@ -16,6 +16,7 @@ const DEFAULT_QUIC_MAX_SESSIONS: usize = 8192;
 const DEFAULT_QUIC_LOCAL_QUEUE_CAPACITY: usize = 1024;
 pub(super) const SNI_FORWARD_CONFIG_KEYS: &[&str] = &[
   "client_hello_max_bytes",
+  "client_hello_parse_methods",
   "default_target",
   "enabled",
   "idle_timeout_ms",
@@ -61,6 +62,8 @@ pub struct SniForwardConfig {
   pub default_target: Option<String>,
   #[serde(default = "default_client_hello_max_bytes")]
   pub client_hello_max_bytes: usize,
+  #[serde(default = "default_client_hello_parse_methods")]
+  pub client_hello_parse_methods: Vec<SniForwardClientHelloParseMethod>,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub idle_timeout_ms: u64,
   #[serde(default = "default_quic_max_sessions")]
@@ -77,6 +80,7 @@ impl Default for SniForwardConfig {
       enabled: false,
       default_target: None,
       client_hello_max_bytes: default_client_hello_max_bytes(),
+      client_hello_parse_methods: default_client_hello_parse_methods(),
       idle_timeout_ms: default_client_idle_timeout_ms(),
       quic_max_sessions: default_quic_max_sessions(),
       quic_local_queue_capacity: default_quic_local_queue_capacity(),
@@ -115,6 +119,18 @@ impl SniForwardConfig {
   fn validate(&self) -> anyhow::Result<()> {
     if self.client_hello_max_bytes == 0 {
       bail!("sni_forward.client_hello_max_bytes must be greater than 0");
+    }
+    if self.client_hello_parse_methods.is_empty() {
+      bail!("sni_forward.client_hello_parse_methods must include at least one method");
+    }
+    let mut parse_methods = HashSet::new();
+    for method in &self.client_hello_parse_methods {
+      if !parse_methods.insert(*method) {
+        bail!(
+          "duplicate sni_forward.client_hello_parse_methods value: {}",
+          method.as_str()
+        );
+      }
     }
     if self.idle_timeout_ms == 0 {
       bail!("sni_forward.idle_timeout_ms must be greater than 0");
@@ -208,6 +224,25 @@ pub enum SniForwardProtocol {
 
 pub const SNI_FORWARD_PROTOCOL_WIRE_VALUES: &[&str] = &["tcp_tls", "quic"];
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SniForwardClientHelloParseMethod {
+  SingleRecord,
+  TlsRecordReassembly,
+}
+
+impl SniForwardClientHelloParseMethod {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::SingleRecord => "single_record",
+      Self::TlsRecordReassembly => "tls_record_reassembly",
+    }
+  }
+}
+
+pub const SNI_FORWARD_CLIENT_HELLO_PARSE_METHOD_WIRE_VALUES: &[&str] =
+  &["single_record", "tls_record_reassembly"];
+
 fn default_client_hello_max_bytes() -> usize {
   DEFAULT_CLIENT_HELLO_MAX_BYTES
 }
@@ -222,6 +257,10 @@ fn default_quic_local_queue_capacity() -> usize {
 
 fn default_sni_forward_protocols() -> Vec<SniForwardProtocol> {
   vec![SniForwardProtocol::TcpTls, SniForwardProtocol::Quic]
+}
+
+fn default_client_hello_parse_methods() -> Vec<SniForwardClientHelloParseMethod> {
+  vec![SniForwardClientHelloParseMethod::SingleRecord]
 }
 
 pub(crate) fn normalize_sni_pattern(pattern: &str) -> String {

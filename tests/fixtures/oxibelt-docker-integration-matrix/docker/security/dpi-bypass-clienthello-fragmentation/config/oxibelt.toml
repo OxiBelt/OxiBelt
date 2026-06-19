@@ -42,6 +42,7 @@ fail_policy = "closed"
 [sni_forward]
 enabled = true
 client_hello_max_bytes = 65536
+client_hello_parse_methods = ["single_record", "tls_record_reassembly"]
 idle_timeout_ms = 5000
 
 [[sni_forward.rules]]

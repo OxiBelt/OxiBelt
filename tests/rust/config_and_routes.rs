@@ -16,9 +16,9 @@ use oxibelt::config::{
     LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy,
     OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
     QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides,
-    SharedStateBackendKind, SniForwardProtocol, StaticFilesSendfileMode,
-    StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode,
-    TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+    SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+    StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup,
+    TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
     UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
@@ -81,6 +81,10 @@ fn protocol_operations_defaults_are_disabled() {
     assert!(config.stream_listeners.is_empty());
     assert!(!config.sni_forward.enabled);
     assert!(config.sni_forward.rules.is_empty());
+    assert_eq!(
+        config.sni_forward.client_hello_parse_methods,
+        vec![SniForwardClientHelloParseMethod::SingleRecord]
+    );
 }
 
 #[test]
@@ -783,6 +787,7 @@ fn sni_forward_tcp_rule_parses_and_validates() {
 [sni_forward]
 enabled = true
 client_hello_max_bytes = 8192
+client_hello_parse_methods = ["single_record", "tls_record_reassembly"]
 idle_timeout_ms = 60000
 quic_max_sessions = 128
 quic_local_queue_capacity = 32
@@ -802,6 +807,13 @@ tcp_proxy_protocol_egress = "v1"
 
     assert!(config.sni_forward.enabled);
     assert_eq!(config.sni_forward.client_hello_max_bytes, 8192);
+    assert_eq!(
+        config.sni_forward.client_hello_parse_methods,
+        vec![
+            SniForwardClientHelloParseMethod::SingleRecord,
+            SniForwardClientHelloParseMethod::TlsRecordReassembly,
+        ]
+    );
     assert_eq!(config.sni_forward.quic_max_sessions, 128);
     assert_eq!(config.sni_forward.quic_local_queue_capacity, 32);
     assert_eq!(
@@ -826,6 +838,10 @@ default_target = "127.0.0.1:9443"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert!(config.sni_forward.has_tcp_tls());
+    assert_eq!(
+        config.sni_forward.client_hello_parse_methods,
+        vec![SniForwardClientHelloParseMethod::SingleRecord]
+    );
     assert_eq!(config.sni_forward.quic_max_sessions, 8192);
     assert_eq!(config.sni_forward.quic_local_queue_capacity, 1024);
 }
@@ -875,6 +891,22 @@ fn sni_forward_rejects_invalid_rules() {
     let base = common::minimal_config_toml(&cert_path, &key_path);
 
     for (suffix, expected) in [
+        (
+            r#"
+[sni_forward]
+enabled = true
+client_hello_parse_methods = []
+"#,
+            "sni_forward.client_hello_parse_methods must include at least one method",
+        ),
+        (
+            r#"
+[sni_forward]
+enabled = true
+client_hello_parse_methods = ["single_record", "single_record"]
+"#,
+            "duplicate sni_forward.client_hello_parse_methods value: single_record",
+        ),
         (
             r#"
 [sni_forward]

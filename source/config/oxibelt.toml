@@ -182,6 +182,7 @@ max_lifetime_ms = 600000
 # [sni_forward]
 # enabled = true
 # client_hello_max_bytes = 65536
+# client_hello_parse_methods = ["single_record"]
 # idle_timeout_ms = 75000
 # quic_max_sessions = 8192
 # quic_local_queue_capacity = 1024

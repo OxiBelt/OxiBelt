@@ -38,7 +38,7 @@ Lifecycle states are intentionally limited:
 | `tls-mtls-client-auth` | `supported` | Config/TLS/routing | Optional and required downstream client certificate authentication are supported for TCP TLS, with route matchers for available certificate metadata. |
 | `upstream-ech` | `supported` | Config/upstream TLS | Upstream ECH supports `disabled`, GREASE, and configured `ECHConfigList` modes. |
 | `stream-listener-tcp` | `supported` | Config/data plane/Admin API | `[[stream_listeners]]` proxy raw TCP to a direct `host:port` target or `[[stream_upstream_pools]]`, with optional visible TLS ClientHello SNI rules. |
-| `sni-forward` | `supported` | Config/data plane | TCP TLS and same-port QUIC SNI forwarding are implemented. Protocol values: `tcp_tls`, `quic`. |
+| `sni-forward` | `supported` | Config/data plane | TCP TLS and same-port QUIC SNI forwarding are implemented. Protocol values: `tcp_tls`, `quic`. TCP ClientHello parse methods: `single_record`, `tls_record_reassembly`. |
 | `oxirule-request-response` | `supported` | WAF/data plane/Admin API | OxiRule request, response, and native stream-phase policy are implemented with bounded evaluation. |
 | `crs-request-response` | `supported` | WAF/data plane/Admin API | CRS-compatible request/response phases 1 through 4 are implemented for bounded body-prefix inspection. |
 | `person-proof` | `supported` | WAF/data plane | Built-in PoW, OpenAPI custom frontend mode, third-party provider adapters, and custom JSON provider mode are implemented. |

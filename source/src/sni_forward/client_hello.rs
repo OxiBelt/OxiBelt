@@ -3,7 +3,7 @@
 
 use anyhow::{Context, bail, ensure};
 
-use crate::config::normalize_sni_pattern;
+use crate::config::{SniForwardClientHelloParseMethod, normalize_sni_pattern};
 
 const TLS_RECORD_HEADER_LEN: usize = 5;
 const TLS_HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
@@ -16,7 +16,25 @@ pub(crate) enum ClientHelloSni {
   Incomplete,
 }
 
-pub(crate) fn tls_record_client_hello_sni(data: &[u8]) -> anyhow::Result<ClientHelloSni> {
+pub(crate) fn tls_record_client_hello_sni(
+  data: &[u8],
+  methods: &[SniForwardClientHelloParseMethod],
+) -> anyhow::Result<ClientHelloSni> {
+  if methods.contains(&SniForwardClientHelloParseMethod::TlsRecordReassembly) {
+    return reassembled_tls_record_client_hello_sni(data);
+  }
+  single_record_client_hello_sni(data)
+}
+
+fn single_record_client_hello_sni(data: &[u8]) -> anyhow::Result<ClientHelloSni> {
+  let Some((payload_start, record_end)) = tls_record_bounds(data, 0)? else {
+    return Ok(ClientHelloSni::Incomplete);
+  };
+  let sni = raw_client_hello_sni(&data[payload_start..record_end]).context("invalid TLS record")?;
+  Ok(ClientHelloSni::Complete(sni))
+}
+
+fn reassembled_tls_record_client_hello_sni(data: &[u8]) -> anyhow::Result<ClientHelloSni> {
   let mut cursor = 0usize;
   let mut handshake = Vec::new();
   let mut expected_handshake_len = None;
@@ -233,18 +251,21 @@ mod tests {
   #[test]
   fn tls_record_parser_waits_for_complete_record() {
     assert!(matches!(
-      tls_record_client_hello_sni(&[0x16, 0x03, 0x01, 0x00]),
+      tls_record_client_hello_sni(&[0x16, 0x03, 0x01, 0x00], &single_record_methods()),
       Ok(ClientHelloSni::Incomplete)
     ));
     assert!(matches!(
-      tls_record_client_hello_sni(&[0x16, 0x03, 0x01, 0x00, 0x10, 0x01]),
+      tls_record_client_hello_sni(
+        &[0x16, 0x03, 0x01, 0x00, 0x10, 0x01],
+        &single_record_methods()
+      ),
       Ok(ClientHelloSni::Incomplete)
     ));
   }
 
   #[test]
   fn tls_record_parser_rejects_non_tls() {
-    assert!(tls_record_client_hello_sni(b"GET / HTTP/1.1\r\n").is_err());
+    assert!(tls_record_client_hello_sni(b"GET / HTTP/1.1\r\n", &single_record_methods()).is_err());
   }
 
   #[test]
@@ -261,7 +282,7 @@ mod tests {
     let hello = client_hello_with_sni("app.example.test");
     let record = tls_record(&hello);
 
-    let sni = tls_record_client_hello_sni(&record).expect("parse");
+    let sni = tls_record_client_hello_sni(&record, &single_record_methods()).expect("parse");
 
     assert_eq!(
       sni,
@@ -270,7 +291,7 @@ mod tests {
   }
 
   #[test]
-  fn tls_record_parser_reassembles_fragmented_client_hello() {
+  fn tls_record_parser_rejects_fragmented_client_hello_without_reassembly() {
     let host = "split.example.test";
     let hello = client_hello_with_sni(host);
     let sni_offset = hello
@@ -279,7 +300,26 @@ mod tests {
       .expect("synthetic hello includes SNI");
     let record = fragmented_tls_records(&hello, sni_offset + 1);
 
-    let sni = tls_record_client_hello_sni(&record).expect("parse");
+    let error = tls_record_client_hello_sni(&record, &single_record_methods())
+      .expect_err("strict parser should reject fragmented ClientHello records");
+
+    assert!(
+      format!("{error:#}").contains("truncated TLS ClientHello"),
+      "{error:#}"
+    );
+  }
+
+  #[test]
+  fn tls_record_parser_reassembles_fragmented_client_hello_when_enabled() {
+    let host = "split.example.test";
+    let hello = client_hello_with_sni(host);
+    let sni_offset = hello
+      .windows(host.len())
+      .position(|window| window == host.as_bytes())
+      .expect("synthetic hello includes SNI");
+    let record = fragmented_tls_records(&hello, sni_offset + 1);
+
+    let sni = tls_record_client_hello_sni(&record, &reassembly_methods()).expect("parse");
 
     assert_eq!(sni, ClientHelloSni::Complete(Some(host.to_string())));
   }
@@ -366,6 +406,17 @@ mod tests {
     let mut records = tls_record(&payload[..split_at]);
     records.extend_from_slice(&tls_record(&payload[split_at..]));
     records
+  }
+
+  fn single_record_methods() -> [SniForwardClientHelloParseMethod; 1] {
+    [SniForwardClientHelloParseMethod::SingleRecord]
+  }
+
+  fn reassembly_methods() -> [SniForwardClientHelloParseMethod; 2] {
+    [
+      SniForwardClientHelloParseMethod::SingleRecord,
+      SniForwardClientHelloParseMethod::TlsRecordReassembly,
+    ]
   }
 
   fn client_hello_with_sni(sni: &str) -> Vec<u8> {

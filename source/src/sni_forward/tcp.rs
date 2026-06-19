@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::config::parse_stream_target;
+use crate::config::{SniForwardClientHelloParseMethod, parse_stream_target};
 use crate::lifecycle::ConnectionDrain;
 use crate::proxy_protocol_egress;
 use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
@@ -53,6 +53,7 @@ pub(crate) async fn classify_and_maybe_forward(
   let sni = match peek_sni(
     &stream,
     snapshot.config.sni_forward.client_hello_max_bytes,
+    &snapshot.config.sni_forward.client_hello_parse_methods,
     Duration::from_millis(snapshot.config.limits.tls_handshake_timeout_ms),
   )
   .await
@@ -106,14 +107,16 @@ pub(crate) async fn classify_and_maybe_forward(
 async fn peek_sni(
   stream: &TcpStream,
   max_bytes: usize,
+  methods: &[SniForwardClientHelloParseMethod],
   timeout: Duration,
 ) -> anyhow::Result<Option<String>> {
-  peek_sni_with_incomplete_observer(stream, max_bytes, timeout, || {}).await
+  peek_sni_with_incomplete_observer(stream, max_bytes, methods, timeout, || {}).await
 }
 
 async fn peek_sni_with_incomplete_observer(
   stream: &TcpStream,
   max_bytes: usize,
+  methods: &[SniForwardClientHelloParseMethod],
   timeout: Duration,
   mut on_incomplete: impl FnMut(),
 ) -> anyhow::Result<Option<String>> {
@@ -127,7 +130,7 @@ async fn peek_sni_with_incomplete_observer(
       if read == 0 {
         bail!("connection closed before TLS ClientHello");
       }
-      match tls_record_client_hello_sni(&buffer[..read])? {
+      match tls_record_client_hello_sni(&buffer[..read], methods)? {
         ClientHelloSni::Complete(sni) => return Ok(sni),
         ClientHelloSni::Incomplete if read >= max_bytes => {
           bail!("TLS ClientHello exceeded sni_forward.client_hello_max_bytes");
@@ -357,12 +360,17 @@ mod tests {
     let incomplete_attempts = Arc::new(AtomicUsize::new(0));
     let observed = incomplete_attempts.clone();
 
-    let error =
-      peek_sni_with_incomplete_observer(&stream, 4096, Duration::from_millis(45), move || {
+    let error = peek_sni_with_incomplete_observer(
+      &stream,
+      4096,
+      &[SniForwardClientHelloParseMethod::SingleRecord],
+      Duration::from_millis(45),
+      move || {
         observed.fetch_add(1, Ordering::Relaxed);
-      })
-      .await
-      .expect_err("partial ClientHello should time out");
+      },
+    )
+    .await
+    .expect_err("partial ClientHello should time out");
 
     assert!(
       error

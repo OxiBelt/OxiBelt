@@ -562,6 +562,7 @@ The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reu
 [sni_forward]
 enabled = true
 client_hello_max_bytes = 65536
+client_hello_parse_methods = ["single_record"]
 idle_timeout_ms = 75000
 quic_max_sessions = 8192
 quic_local_queue_capacity = 1024
@@ -580,6 +581,8 @@ tcp_proxy_protocol_egress = "off"
 Matching order is explicit `[[sni_forward.rules]]` first, then local `[[routes]].hosts`, then `sni_forward.default_target` when configured. A route host of `"*"` is not treated as a defined SNI name. Missing, malformed, or unparseable SNI fails closed when SNI forwarding is enabled. Exact SNI patterns and leftmost wildcard patterns such as `"*.example.com"` are accepted; duplicate rule names or duplicate SNI patterns across forwarding rules are rejected.
 
 For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the connection. Forwarded sessions are raw TCP tunnels, and the original ClientHello remains unread by OxiBelt because `peek` does not consume bytes. Local SNI matches continue through the normal HTTP/1.1 and HTTP/2 TLS termination path. Forwarded TCP sessions count against the same global connection limit as local TLS; when `limits.connection_limit_identity` uses a Real-IP mode, they also acquire the normal per-IP and named connection leases for the post-PROXY-protocol peer address because no HTTP request headers are available before forwarding.
+
+`client_hello_parse_methods` controls TCP TLS SNI inspection. The default is `["single_record"]`, which parses only a complete ClientHello contained in one TLS handshake record. Add `tls_record_reassembly` to accept a ClientHello split across consecutive TLS handshake records, for example `["single_record", "tls_record_reassembly"]`, when compatibility with DPI-bypass client fragmentation tools is required.
 
 For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 and therefore requires `listeners.http3 = true`. OxiBelt decrypts QUIC Initial packets, reassembles visible CRYPTO frames, extracts ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. Forwarded QUIC sessions acquire the same total, per-IP, and named downstream connection leases as local HTTP/3 connections. QUIC forwarding tracks connection IDs and expires idle sessions using the rule or global idle timeout.
 

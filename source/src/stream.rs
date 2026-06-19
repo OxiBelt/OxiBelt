@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{StreamListenerConfig, StreamNetwork};
+use crate::config::{SniForwardClientHelloParseMethod, StreamListenerConfig, StreamNetwork};
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
@@ -338,7 +338,10 @@ async fn peek_optional_tls_sni(
       if read == 0 {
         return Ok::<Option<String>, anyhow::Error>(None);
       }
-      match tls_record_client_hello_sni(&buffer[..read]) {
+      match tls_record_client_hello_sni(
+        &buffer[..read],
+        &[SniForwardClientHelloParseMethod::TlsRecordReassembly],
+      ) {
         Ok(ClientHelloSni::Complete(sni)) => return Ok(sni),
         Ok(ClientHelloSni::Incomplete) if read >= STREAM_TLS_CLIENT_HELLO_MAX_BYTES => {
           return Ok(None);

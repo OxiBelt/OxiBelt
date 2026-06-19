@@ -8,7 +8,8 @@ use md5::{Digest, Md5};
 use url::Url;
 
 use crate::config::{
-  ForwardedHeaderMode, HttpVersion, TurnAuthConfig, TurnAuthMode, TurnStaticCredentialConfig,
+  ForwardedHeaderMode, HttpVersion, SniForwardClientHelloParseMethod, TurnAuthConfig, TurnAuthMode,
+  TurnStaticCredentialConfig,
 };
 use crate::proxy::http::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, is_upgrade_request,
@@ -31,7 +32,17 @@ const TURN_PASSWORD: &str = "fuzz-password";
 
 pub fn exercise_tls_client_hello(data: &[u8]) {
   let data = bounded(data);
-  let _ = crate::sni_forward::client_hello::tls_record_client_hello_sni(data);
+  let _ = crate::sni_forward::client_hello::tls_record_client_hello_sni(
+    data,
+    &[SniForwardClientHelloParseMethod::SingleRecord],
+  );
+  let _ = crate::sni_forward::client_hello::tls_record_client_hello_sni(
+    data,
+    &[
+      SniForwardClientHelloParseMethod::SingleRecord,
+      SniForwardClientHelloParseMethod::TlsRecordReassembly,
+    ],
+  );
   let _ = crate::sni_forward::client_hello::raw_client_hello_sni(data);
 }
 
