@@ -1,8 +1,11 @@
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context as TaskContext, Poll};
 
 use http::Request;
 use hyper::service::service_fn;
+use tokio::io::ReadBuf;
 use tokio::sync::{Barrier, oneshot, watch};
 
 use super::*;
@@ -246,6 +249,200 @@ async fn sender_single_flights_cold_pool_connection_creation() {
       .expect("sender task should complete after the server handshake is released");
   }
   assert_eq!(connect_attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sender_timeout_bounds_single_flight_wait() {
+  let pool = Arc::new(direct_h2_test_pool(Duration::from_secs(5)));
+  let metrics = Metrics::new();
+  let (leader_started_tx, leader_started_rx) = oneshot::channel();
+  let leader_started_tx = Arc::new(Mutex::new(Some(leader_started_tx)));
+  let (release_tx, release_rx) = watch::channel(false);
+  let leader = {
+    let pool = pool.clone();
+    let metrics = metrics.clone();
+    let leader_started_tx = leader_started_tx.clone();
+    let release_rx = release_rx.clone();
+    tokio::spawn(async move {
+      pool
+        .sender_with(&metrics, move || async move {
+          if let Some(sender) = leader_started_tx.lock().unwrap().take() {
+            let _ = sender.send(());
+          }
+          let mut release_rx = release_rx;
+          while !*release_rx.borrow() {
+            if release_rx.changed().await.is_err() {
+              anyhow::bail!("test connector release channel closed");
+            }
+          }
+          successful_test_sender().await
+        })
+        .await
+    })
+  };
+
+  tokio::time::timeout(Duration::from_secs(1), leader_started_rx)
+    .await
+    .expect("leader should start the single-flight connector")
+    .expect("single-flight connector should signal startup");
+
+  let result = tokio::time::timeout(Duration::from_secs(1), {
+    let pool = pool.clone();
+    let metrics = metrics.clone();
+    async move {
+      sender_with_first_byte_timeout(
+        pool.sender_with(&metrics, successful_test_sender),
+        Duration::from_millis(100),
+      )
+      .await
+    }
+  })
+  .await
+  .expect("waiter should return within its first-byte budget");
+  let error = result.expect_err("waiter should time out while queued behind single-flight");
+  assert!(
+    error.to_string().contains("first-byte timed out"),
+    "unexpected waiter error: {error:#}"
+  );
+
+  let _ = release_tx.send(true);
+  leader
+    .await
+    .expect("leader task should not panic")
+    .expect("leader sender should complete after release");
+}
+
+#[tokio::test]
+async fn h2_handshake_uses_connect_timeout() {
+  let http2_config = ProxyHttp2Config::default();
+  let result = tokio::time::timeout(
+    Duration::from_secs(1),
+    h2_handshake_with_timeout(PendingIo, &http2_config, Duration::from_millis(100)),
+  )
+  .await
+  .expect("stalled H2 handshake should be bounded by connect timeout");
+  let error = result.expect_err("stalled H2 handshake should fail");
+  assert!(
+    error.to_string().contains("HTTP/2 handshake timed out"),
+    "unexpected handshake error: {error:#}"
+  );
+}
+
+#[tokio::test]
+async fn sender_acquisition_timeout_releases_pool_lock() {
+  let pool = Arc::new(direct_h2_test_pool(Duration::from_secs(5)));
+  let metrics = Metrics::new();
+  let (connector_started_tx, connector_started_rx) = oneshot::channel();
+  let connector_started_tx = Arc::new(Mutex::new(Some(connector_started_tx)));
+  let (_release_tx, release_rx) = watch::channel(false);
+
+  let result = tokio::time::timeout(Duration::from_secs(1), {
+    let pool = pool.clone();
+    let metrics = metrics.clone();
+    let connector_started_tx = connector_started_tx.clone();
+    let release_rx = release_rx.clone();
+    async move {
+      sender_with_first_byte_timeout(
+        pool.sender_with(&metrics, move || async move {
+          if let Some(sender) = connector_started_tx.lock().unwrap().take() {
+            let _ = sender.send(());
+          }
+          let mut release_rx = release_rx;
+          while !*release_rx.borrow() {
+            if release_rx.changed().await.is_err() {
+              anyhow::bail!("test connector release channel closed");
+            }
+          }
+          successful_test_sender().await
+        }),
+        Duration::from_millis(100),
+      )
+      .await
+    }
+  })
+  .await
+  .expect("sender acquisition timeout should complete promptly");
+  let error = result.expect_err("sender acquisition should time out");
+  assert!(
+    error.to_string().contains("first-byte timed out"),
+    "unexpected sender acquisition error: {error:#}"
+  );
+
+  tokio::time::timeout(Duration::from_secs(1), connector_started_rx)
+    .await
+    .expect("connector should have entered the write-locked section")
+    .expect("connector should signal startup");
+
+  let successful = tokio::time::timeout(Duration::from_secs(1), {
+    let pool = pool.clone();
+    let metrics = metrics.clone();
+    async move { pool.sender_with(&metrics, successful_test_sender).await }
+  })
+  .await
+  .expect("pool lock should be available after handshake timeout")
+  .expect("successful test sender should be stored in the pool");
+  assert!(!successful.1);
+}
+
+struct PendingIo;
+
+impl AsyncRead for PendingIo {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    _cx: &mut TaskContext<'_>,
+    _buf: &mut ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    Poll::Pending
+  }
+}
+
+impl AsyncWrite for PendingIo {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    _cx: &mut TaskContext<'_>,
+    _buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    Poll::Pending
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+    Poll::Pending
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+    Poll::Pending
+  }
+}
+
+async fn successful_test_sender() -> anyhow::Result<SendRequest<ProxyBody>> {
+  let (client_io, server_io) = tokio::io::duplex(1024 * 64);
+  tokio::spawn(async move {
+    let service = service_fn(|_request| async { Ok::<_, Infallible>(Response::new(empty_body())) });
+    let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+    let http2_config = ProxyHttp2Config::default();
+    crate::h2_tuning::apply_server_defaults(&mut builder, &http2_config);
+    let _ = builder
+      .serve_connection(TokioIo::new(server_io), service)
+      .await;
+  });
+  let http2_config = ProxyHttp2Config::default();
+  h2_handshake(client_io, &http2_config).await
+}
+
+fn direct_h2_test_pool(connect_timeout: Duration) -> DirectH2Pool {
+  let origin = DirectH2Origin {
+    scheme: "http",
+    host: "127.0.0.1".to_string(),
+    port: 80,
+  };
+  DirectH2Pool {
+    origin,
+    connect_timeout,
+    idle_timeout: Duration::from_secs(30),
+    http2_config: ProxyHttp2Config::default(),
+    tls_config: None,
+    entry: RwLock::new(None),
+  }
 }
 
 fn upstream(origin: &str) -> UpstreamConfig {

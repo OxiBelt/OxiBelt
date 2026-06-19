@@ -226,9 +226,9 @@ impl DirectH2Pool {
       .await
       .context("direct H2 upstream TLS handshake timed out")?
       .context("direct H2 upstream TLS handshake failed")?;
-      h2_handshake(tls, &self.http2_config).await?
+      h2_handshake_with_timeout(tls, &self.http2_config, self.connect_timeout).await?
     } else {
-      h2_handshake(stream, &self.http2_config).await?
+      h2_handshake_with_timeout(stream, &self.http2_config, self.connect_timeout).await?
     };
 
     metrics.record_http_upstream_client_connection_created(
@@ -336,7 +336,8 @@ async fn send_prepared_request(
 ) -> anyhow::Result<Response<Incoming>> {
   metrics.record_http_upstream_client_request(pool.metric_version(), pool.origin.scheme, "primary");
 
-  let (mut sender, reused) = pool.sender(metrics).await?;
+  let (mut sender, reused) =
+    sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
   let mut retry = reused.then(|| prepared.retry_request());
   match tokio::time::timeout(
     timeouts.upstream_first_byte,
@@ -348,7 +349,8 @@ async fn send_prepared_request(
     Ok(Err(error)) if reused => {
       debug!(error = %error, "direct H2 upstream sender failed; reconnecting once");
       pool.clear_sender().await;
-      let (mut sender, _) = pool.sender(metrics).await?;
+      let (mut sender, _) =
+        sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
       let retry = retry
         .take()
         .expect("reused direct H2 sends should retain one retry request");
@@ -366,6 +368,32 @@ async fn send_prepared_request(
     }
     Err(_) => anyhow::bail!("direct H2 upstream first-byte timed out"),
   }
+}
+
+async fn sender_with_first_byte_timeout<F>(
+  sender: F,
+  timeout: Duration,
+) -> anyhow::Result<(SendRequest<ProxyBody>, bool)>
+where
+  F: Future<Output = anyhow::Result<(SendRequest<ProxyBody>, bool)>>,
+{
+  match tokio::time::timeout(timeout, sender).await {
+    Ok(result) => result,
+    Err(_) => anyhow::bail!("direct H2 upstream first-byte timed out"),
+  }
+}
+
+async fn h2_handshake_with_timeout<I>(
+  io: I,
+  http2_config: &ProxyHttp2Config,
+  timeout: Duration,
+) -> anyhow::Result<SendRequest<ProxyBody>>
+where
+  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+  tokio::time::timeout(timeout, h2_handshake(io, http2_config))
+    .await
+    .context("direct H2 upstream HTTP/2 handshake timed out")?
 }
 
 async fn h2_handshake<I>(
