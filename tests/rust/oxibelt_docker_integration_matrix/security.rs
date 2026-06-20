@@ -40,7 +40,7 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     docker_case(
       "security",
       "static-openat2-blocking-isolated",
-      "blocking Linux static-file opens do not occupy Tokio runtime workers",
+      "blocking Linux static-file opens do not occupy async runtime workers",
       ExpectStart::Success,
       Needs {
         http_upstream: true,

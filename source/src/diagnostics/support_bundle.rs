@@ -10,12 +10,15 @@ use url::Url;
 
 use crate::cache::CacheStats;
 use crate::pools::PoolRuntimeSnapshot;
+use crate::runtime::backend::RuntimeBackendSnapshot;
 use crate::state::AppSnapshot;
 use crate::tls::TlsServerSessionStorageStats;
 
 use super::{DiagnosticReport, DoctorOptions, diagnose_config};
 
 mod process;
+#[cfg(test)]
+mod tests;
 mod tls;
 pub use process::ProcessSnapshot;
 use process::process_snapshot;
@@ -56,6 +59,7 @@ pub struct SupportBundleConfig {
 
 #[derive(Debug, Serialize)]
 pub struct RuntimeSnapshot {
+  pub runtime_backend: RuntimeBackendSnapshot,
   pub lifecycle: LifecycleSnapshot,
   pub listeners: ListenerSnapshot,
   pub admin: AdminRuntimeSnapshot,
@@ -300,6 +304,7 @@ pub async fn build_support_bundle(
 
 pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
   RuntimeSnapshot {
+    runtime_backend: crate::runtime::backend::runtime_backend_snapshot(),
     lifecycle: LifecycleSnapshot {
       draining: snapshot.lifecycle.is_draining(),
       reason: snapshot.lifecycle.reason().to_string(),
@@ -671,77 +676,5 @@ fn sanitize_url(raw: &str) -> String {
         },
         |(before_fragment, _)| before_fragment.to_string(),
       ),
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::config::Config;
-  use crate::state::AppSnapshot;
-
-  mod common {
-    include!(concat!(
-      env!("CARGO_MANIFEST_DIR"),
-      "/../tests/rust/common/mod.rs"
-    ));
-  }
-
-  #[test]
-  fn sanitize_url_removes_userinfo_query_and_fragment() {
-    let redacted = sanitize_url("https://user:secret@example.test/private?token=secret#frag");
-    assert_eq!(redacted, "https://example.test/private");
-  }
-
-  #[tokio::test]
-  async fn runtime_snapshot_redacts_upstream_origin_credentials_and_queries() {
-    let temp_dir = common::TempDir::new("support-bundle-redacted-upstream");
-    let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "support-bundle-redacted-upstream");
-    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-      "origin = \"https://app.internal.example\"",
-      "origin = \"https://user:secret@app.internal.example/private?token=secret#frag\"",
-    );
-    let config: Config = toml::from_str(&raw).expect("config should parse");
-    let snapshot = AppSnapshot::new(config)
-      .await
-      .expect("snapshot should initialize");
-    let value = serde_json::to_string(&build_runtime_snapshot(&snapshot))
-      .expect("runtime snapshot should serialize");
-
-    assert!(value.contains("https://app.internal.example/private"));
-    assert!(value.contains("\"failure_policy\":\"drop_stale\""));
-    assert!(!value.contains("user:secret"));
-    assert!(!value.contains("token=secret"));
-  }
-
-  #[test]
-  fn redacted_dynamic_policy_record_omits_subject_body_reason_and_signature_values() {
-    let record = RedactedDynamicPolicyRecord {
-      id: 7,
-      enabled: true,
-      priority: 100,
-      source: "automation".to_string(),
-      action: "reject".to_string(),
-      subject_type: "client_ip".to_string(),
-      subject_redacted: true,
-      mode: "enforce".to_string(),
-      rate_configured: false,
-      burst_configured: false,
-      status: Some(403),
-      body_configured: true,
-      reason_configured: true,
-      signature_present: true,
-      expires_at: Some("2026-05-25T00:00:00Z".to_string()),
-    };
-    let value = serde_json::to_string(&record).expect("record should serialize");
-
-    assert!(value.contains("\"subject_redacted\":true"));
-    assert!(value.contains("\"body_configured\":true"));
-    assert!(value.contains("\"signature_present\":true"));
-    assert!(!value.contains("203.0.113.10"));
-    assert!(!value.contains("row_signature"));
-    assert!(!value.contains("blocked because"));
-    assert!(!value.contains("secret response body"));
   }
 }

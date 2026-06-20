@@ -48,7 +48,7 @@ fn set_socket_hop_limit(
   let option_length: libc::socklen_t = std::mem::size_of_val(&value)
     .try_into()
     .context("socket option length does not fit socklen_t")?;
-  // SAFETY: `stream.as_raw_fd()` is a valid socket owned by Tokio for the duration of
+  // SAFETY: `stream.as_raw_fd()` is a valid socket owned by the async TCP stream for the duration of
   // this call, and `value` points to a properly aligned `c_int` with the exact length
   // passed to `setsockopt`.
   let result = unsafe {

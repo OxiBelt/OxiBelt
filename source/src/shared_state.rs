@@ -1645,7 +1645,8 @@ fn block_on_timeout<F, T>(timeout: Duration, future: F) -> anyhow::Result<T>
 where
   F: Future<Output = anyhow::Result<T>>,
 {
-  let handle = Handle::try_current().context("shared state operation requires a Tokio runtime")?;
+  let handle = Handle::try_current()
+    .context("shared state operation requires the Tokio compatibility runtime")?;
   tokio::task::block_in_place(|| {
     handle
       .block_on(tokio::time::timeout(timeout, future))

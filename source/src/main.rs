@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
-use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt")]
@@ -145,7 +144,16 @@ fn main() -> anyhow::Result<()> {
 
   config.log_worker_resolution();
   let worker_threads = config.runtime.worker_threads;
-  let runtime = build_runtime(worker_threads)?;
+  let runtime_backend = oxibelt::runtime::backend::runtime_backend_snapshot();
+  tracing::info!(
+    target_runtime = runtime_backend.target_runtime,
+    target_io_driver = runtime_backend.target_io_driver,
+    active_runtime = runtime_backend.active_runtime,
+    compatibility_runtime = runtime_backend.compatibility_runtime,
+    compatibility_island_count = runtime_backend.compatibility_island_count,
+    "resolved async runtime backend"
+  );
+  let runtime = oxibelt::runtime::tokio_compat::build_runtime(worker_threads)?;
   runtime.block_on(async move {
     let state = oxibelt::state::AppHandle::new(
       oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
@@ -365,11 +373,4 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn build_runtime(worker_threads: usize) -> anyhow::Result<Runtime> {
-  let mut builder = Builder::new_multi_thread();
-  builder.enable_all();
-  builder.worker_threads(worker_threads);
-  builder.build().context("failed to build Tokio runtime")
 }

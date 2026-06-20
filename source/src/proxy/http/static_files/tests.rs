@@ -228,7 +228,7 @@ async fn linux_openat2_fifo_open_does_not_block_runtime_worker() {
   let elapsed = started.elapsed();
   assert!(
     elapsed < Duration::from_millis(350),
-    "blocking FIFO open delayed the single Tokio worker for {elapsed:?}"
+    "blocking FIFO open delayed the single async runtime worker for {elapsed:?}"
   );
 
   let result = tokio::time::timeout(Duration::from_secs(2), open_task)
@@ -304,7 +304,7 @@ async fn linux_no_hot_cache_plan_fifo_open_does_not_block_runtime_worker() {
   let elapsed = started.elapsed();
   assert!(
     elapsed < Duration::from_millis(350),
-    "no-hot-cache FIFO planning delayed the single Tokio worker for {elapsed:?}"
+    "no-hot-cache FIFO planning delayed the single async runtime worker for {elapsed:?}"
   );
 
   let plan = tokio::time::timeout(Duration::from_secs(2), plan_task)

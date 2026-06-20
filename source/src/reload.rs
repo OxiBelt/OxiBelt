@@ -362,7 +362,7 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
 ) -> anyhow::Result<()> {
   if replacement.runtime.worker_threads != active.runtime.worker_threads {
     bail!(
-      "full hot reload rejected because runtime.worker_threads changed from {} to {}; restart OxiBelt to resize the Tokio runtime",
+      "full hot reload rejected because runtime.worker_threads changed from {} to {}; restart OxiBelt to resize the async runtime",
       active.runtime.worker_threads,
       replacement.runtime.worker_threads
     );

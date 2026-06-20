@@ -1,10 +1,13 @@
-//! Runtime initialization for tracing and telemetry resources.
+//! Runtime initialization for async execution, tracing, and telemetry resources.
 
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, LoggingConfig};
 use crate::telemetry::TelemetryRuntime;
+
+pub mod backend;
+pub mod tokio_compat;
 
 pub fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
   init_logging(config)

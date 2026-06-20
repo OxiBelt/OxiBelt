@@ -74,6 +74,7 @@ quic-parser = { version = "0.1.5", features = ["ring"] }
 x509-cert = "0.2.5"
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"
+monoio = { version = "0.2.4", default-features = false, features = ["async-cancel", "bytes", "iouring", "legacy", "macros", "utils"] }
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1.17.0", default-features = false, features = ["bindgen"] }
