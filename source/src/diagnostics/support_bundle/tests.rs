@@ -31,10 +31,29 @@ async fn runtime_snapshot_redacts_upstream_origin_credentials_and_queries() {
   let value = serde_json::to_string(&build_runtime_snapshot(&snapshot))
     .expect("runtime snapshot should serialize");
 
+  let runtime_backend = crate::runtime::backend::runtime_backend_snapshot();
   assert!(value.contains("https://app.internal.example/private"));
-  assert!(value.contains("\"target_runtime\":\"monoio\""));
-  assert!(value.contains("\"active_runtime\":\"tokio_compat\""));
-  assert!(value.contains("\"compatibility_runtime\":\"tokio\""));
+  assert!(
+    value.contains(&format!(
+      "\"target_runtime\":\"{}\"",
+      runtime_backend.target_runtime
+    )),
+    "runtime snapshot should include target runtime: {value}"
+  );
+  assert!(
+    value.contains(&format!(
+      "\"active_runtime\":\"{}\"",
+      runtime_backend.active_runtime
+    )),
+    "runtime snapshot should include active runtime: {value}"
+  );
+  assert!(
+    value.contains(&format!(
+      "\"compatibility_runtime\":\"{}\"",
+      runtime_backend.compatibility_runtime
+    )),
+    "runtime snapshot should include compatibility runtime: {value}"
+  );
   assert!(value.contains("\"failure_policy\":\"drop_stale\""));
   assert!(!value.contains("user:secret"));
   assert!(!value.contains("token=secret"));
