@@ -75,7 +75,7 @@ x509-cert = "0.2.5"
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"
 
-[target.'cfg(not(all(target_arch = "riscv64", target_os = "linux", target_env = "musl")))'.dependencies]
+[target.'cfg(not(all(target_os = "linux", target_env = "musl")))'.dependencies]
 monoio = { version = "0.2.4", git = "https://github.com/monoio-rs/monoio.git", rev = "2c05c4a257d7a145eb8befb7ae23d8a09b20c6de", default-features = false, features = ["async-cancel", "bytes", "iouring", "legacy", "macros", "utils"] }
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
