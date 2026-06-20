@@ -1908,11 +1908,18 @@ jobs:
               OXIBELT_AMD64_TARGET_CPU="${target_cpu}" \
               OXIBELT_TEST_ARTIFACT_DIR="${run_dir}" \
                 tests/scripts/run-proxy-performance.sh --profile "${PERFORMANCE_PROFILE}" --serving-type "${PERFORMANCE_SERVING_TYPE}" --comparators oxibelt,nginx,caddy,openresty || status=$?
-              if [[ "${status}" == "0" ]]; then
+              diagnostic_warning_count=0
+              if [[ -s "${run_dir}/results.json" ]]; then
+                diagnostic_warning_count="$(jq '[.[] | select((.diagnostic // false) == true and (.diagnostic_status // "") != "pass")] | length' "${run_dir}/results.json")"
+              fi
+              if [[ "${status}" == "0" && "${diagnostic_warning_count}" != "0" ]]; then
+                iteration_status="diagnostic_warning"
+                iteration_reason="completed with ${diagnostic_warning_count} diagnostic comparator warning(s)"
+              elif [[ "${status}" == "0" ]]; then
                 iteration_status="ok"
                 iteration_reason="completed"
               else
-                iteration_status="failed"
+                iteration_status="primary_failed"
                 iteration_reason="run-proxy-performance exited with status ${status}"
               fi
               jq -n \
@@ -1924,6 +1931,7 @@ jobs:
                 --argjson shard "${PERFORMANCE_SHARD}" \
                 --argjson iteration "${iteration}" \
                 --argjson exit_code "${status}" \
+                --argjson diagnostic_warnings "${diagnostic_warning_count}" \
                 '{
                   schema_version: 1,
                   profile: $profile,
@@ -1932,6 +1940,7 @@ jobs:
                   target_cpu: $target_cpu,
                   iteration: $iteration,
                   exit_code: $exit_code,
+                  diagnostic_warnings: $diagnostic_warnings,
                   status: $status,
                   reason: $reason
                 }' >"${run_dir}/iteration-status.json"

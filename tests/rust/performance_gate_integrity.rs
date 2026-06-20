@@ -174,7 +174,11 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
 fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun {
   let script = performance_script_text();
   let functions = format!(
-    "{}\n\n{}",
+    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+    extract_bash_function(&script, "load_errors_within_budget"),
+    extract_bash_function(&script, "diagnostic_comparator_label"),
+    extract_bash_function(&script, "result_failure_reason"),
+    extract_bash_function(&script, "normalize_diagnostic_comparator_result"),
     extract_bash_function(&script, "should_profile_load"),
     extract_bash_function(&script, "run_load")
   );
@@ -221,8 +225,9 @@ fn profile_pid_harness(
 
 fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) -> HarnessRun {
   let functions = format!(
-    "{}\n\n{}",
+    "{}\n\n{}\n\n{}",
     extract_bash_function(&performance_script_text(), "load_errors_within_budget"),
+    extract_bash_function(&performance_script_text(), "result_failure_reason"),
     extract_bash_function(&performance_script_text(), "assert_result")
   );
   let temp_dir = HarnessTempDir::new("oxibelt-performance-assert-");
@@ -235,6 +240,31 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
     .env("EVENTS_FILE", &events_path)
     .env("PROBE_JSON", probe_json)
     .env("MAX_LOAD_ERRORS_PER_MILLION", max_load_errors_per_million)
+    .output()
+    .expect("Bash harness should execute");
+  let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+  HarnessRun { output, events }
+}
+
+fn normalize_diagnostic_comparator_harness(probe_json: &str) -> HarnessRun {
+  let script = performance_script_text();
+  let functions = format!(
+    "{}\n\n{}\n\n{}\n\n{}",
+    extract_bash_function(&script, "load_errors_within_budget"),
+    extract_bash_function(&script, "diagnostic_comparator_label"),
+    extract_bash_function(&script, "result_failure_reason"),
+    extract_bash_function(&script, "normalize_diagnostic_comparator_result")
+  );
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-diagnostic-comparator-");
+  let harness_path = temp_dir.join("harness.sh");
+  let events_path = temp_dir.join("events.log");
+  write_normalize_diagnostic_comparator_harness(&harness_path, &functions);
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .env("EVENTS_FILE", &events_path)
+    .env("PROBE_JSON", probe_json)
     .output()
     .expect("Bash harness should execute");
   let events = fs::read_to_string(&events_path).unwrap_or_default();
@@ -843,6 +873,25 @@ fail_with_diagnostics() {{
 {functions}
 
 assert_result "${{json}}"
+"#
+  );
+  fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+fn write_normalize_diagnostic_comparator_harness(path: &Path, functions: &str) {
+  let harness = format!(
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+json="${{PROBE_JSON:?}}"
+max_p99_ms=10000
+max_load_errors_per_million=100
+
+{functions}
+
+normalized="$(normalize_diagnostic_comparator_result "${{json}}")"
+printf 'NORMALIZED %s\n' "${{normalized}}" >>"${{events}}"
 "#
   );
   fs::write(path, harness).expect("Bash harness should be writable");
@@ -1884,6 +1933,47 @@ fn high_volume_load_error_inside_budget_is_allowed() {
   assert!(
     !run.events.contains("FAIL"),
     "in-budget load errors should not trip the failure hook"
+  );
+}
+
+#[test]
+fn openresty_zero_request_rows_become_diagnostic_skips() {
+  let run = normalize_diagnostic_comparator_harness(
+    r#"{"type":"load","label":"openresty-h1-keepalive","requests":0,"rps":0,"p99_ms":0,"errors":0}"#,
+  );
+
+  assert!(
+    run.output.status.success(),
+    "diagnostic comparator normalization should not fail"
+  );
+  assert!(
+    run.events.contains(r#""label":"openresty-h1-keepalive""#)
+      && run.events.contains(r#""skipped":true"#)
+      && run.events.contains(r#""diagnostic":true"#)
+      && run.events.contains(r#""diagnostic_status":"fail""#)
+      && run
+        .events
+        .contains(r#""reason":"performance probe produced zero requests: openresty-h1-keepalive""#),
+    "OpenResty zero-request rows should be kept as explicit diagnostic skips; events:\n{}",
+    run.events
+  );
+}
+
+#[test]
+fn primary_zero_request_rows_still_fail() {
+  let run = assert_result_harness(
+    r#"{"type":"load","label":"nginx-h1-keepalive","requests":0,"rps":0,"p99_ms":0,"errors":0}"#,
+    "100",
+  );
+
+  assert!(
+    !run.output.status.success(),
+    "primary comparator zero-request rows should still fail"
+  );
+  assert!(
+    run
+      .events
+      .contains("FAIL performance probe produced zero requests: nginx-h1-keepalive")
   );
 }
 

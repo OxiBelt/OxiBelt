@@ -326,13 +326,17 @@ impl PlainProxyFastPath {
       .await
     };
     let request_body_proven_empty = request_body.proven_empty();
-    let outbound = Request::from_parts(parts, request_body.into_body()).map(|body| {
+    let outbound_body = if request_body_proven_empty {
+      request_body.into_body()
+    } else {
+      let body = request_body.into_body();
       fast_path_outbound_request_body(
         body,
         state.config.proxy.http.trailers,
         timeouts.upstream_send,
       )
-    });
+    };
+    let outbound = Request::from_parts(parts, outbound_body);
 
     let upstream_started_at = fast_path_upstream_timing_required(
       state.as_ref(),

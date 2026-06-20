@@ -633,6 +633,14 @@ handle_diagnostic_profile_failure() {
   fail_with_diagnostics "${message}"
 }
 
+diagnostic_comparator_label() {
+  local label="$1"
+  case "${label}" in
+    openresty-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 flush_diagnostic_profile_warnings() {
   if (( diagnostic_profile_warning_count > 0 )); then
     echo "Docker performance diagnostic profiling reported ${diagnostic_profile_warning_count} unavailable sample(s); see profile-results.json and profiles/" >&2
@@ -1423,11 +1431,12 @@ append_result() {
     "${label}" "${type}" "${protocol}" "${result_text}" "${errors}" >>"${summary_md}"
 }
 
-assert_result() {
+result_failure_reason() {
   local json="$1"
-  local type skipped errors requests p99
+  local type skipped errors requests p99 label
+  label="$(jq -r '.label // "unknown"' <<<"${json}")"
   skipped="$(jq -r '.skipped // false' <<<"${json}")"
-  [[ "${skipped}" == "true" ]] && return
+  [[ "${skipped}" == "true" ]] && return 1
 
   type="$(jq -r '.type // "unknown"' <<<"${json}")"
   errors="$(jq -r '.errors // 0' <<<"${json}")"
@@ -1435,12 +1444,14 @@ assert_result() {
   p99="$(jq -r '.p99_ms // 0' <<<"${json}")"
 
   if [[ "${requests}" == "0" ]]; then
-    fail_with_diagnostics "performance probe produced zero requests: $(jq -r '.label' <<<"${json}")"
+    printf 'performance probe produced zero requests: %s\n' "${label}"
+    return 0
   fi
 
   if [[ "${type}" != "stress" && "${errors}" != "0" ]]; then
     if [[ "${type}" != "load" ]] || ! load_errors_within_budget "${errors}" "${requests}"; then
-      fail_with_diagnostics "performance probe reported request errors: $(jq -r '.label' <<<"${json}")"
+      printf 'performance probe reported request errors: %s\n' "${label}"
+      return 0
     fi
   fi
 
@@ -1448,19 +1459,55 @@ assert_result() {
     local connections
     connections="$(jq -r '.connections // 0' <<<"${json}")"
     if [[ "${connections}" != "0" && "${errors}" == "${connections}" ]]; then
-      fail_with_diagnostics "stress probe could not establish any useful connections: $(jq -r '.label' <<<"${json}")"
+      printf 'stress probe could not establish any useful connections: %s\n' "${label}"
+      return 0
     fi
-    return
+    return 1
   fi
 
   if jq -e --argjson max "${max_p99_ms}" '(.p99_ms // 0) > $max' >/dev/null <<<"${json}"; then
-    fail_with_diagnostics "performance probe exceeded p99 sanity ceiling (${p99}ms > ${max_p99_ms}ms): $(jq -r '.label' <<<"${json}")"
+    printf 'performance probe exceeded p99 sanity ceiling (%sms > %sms): %s\n' \
+      "${p99}" "${max_p99_ms}" "${label}"
+    return 0
+  fi
+
+  return 1
+}
+
+normalize_diagnostic_comparator_result() {
+  local json="$1"
+  local label reason
+  label="$(jq -r '.label // "unknown"' <<<"${json}")"
+  if ! diagnostic_comparator_label "${label}"; then
+    printf '%s\n' "${json}"
+    return
+  fi
+  if ! reason="$(result_failure_reason "${json}")"; then
+    printf '%s\n' "${json}"
+    return
+  fi
+  jq -c --arg reason "${reason}" \
+    '. + {
+      skipped: true,
+      diagnostic: true,
+      diagnostic_status: "fail",
+      reason: $reason
+    }' <<<"${json}"
+}
+
+assert_result() {
+  local json="$1"
+  local reason
+  if reason="$(result_failure_reason "${json}")"; then
+    fail_with_diagnostics "${reason}"
   fi
 }
 
 assert_diagnostic_result() {
   local json="$1"
-  local requests
+  local requests skipped
+  skipped="$(jq -r '.skipped // false' <<<"${json}")"
+  [[ "${skipped}" == "true" ]] && return
   requests="$(jq -r '.requests // .handshakes // 0' <<<"${json}")"
   if [[ "${requests}" == "0" ]]; then
     fail_with_diagnostics "diagnostic performance probe produced zero requests: $(jq -r '.label' <<<"${json}")"
@@ -1891,7 +1938,30 @@ record_skip() {
     --arg type "${type}" \
     --arg protocol "${protocol}" \
     --arg reason "${reason}" \
-    '{label: $label, type: $type, protocol: $protocol, skipped: true, reason: $reason}')"
+      '{label: $label, type: $type, protocol: $protocol, skipped: true, reason: $reason}')"
+  append_result "${json}"
+}
+
+record_diagnostic_comparator_skip() {
+  local label="$1"
+  local type="$2"
+  local protocol="$3"
+  local reason="$4"
+  local json
+  json="$(jq -cn \
+    --arg label "${label}" \
+    --arg type "${type}" \
+    --arg protocol "${protocol}" \
+    --arg reason "${reason}" \
+    '{
+      label: $label,
+      type: $type,
+      protocol: $protocol,
+      skipped: true,
+      diagnostic: true,
+      diagnostic_status: "fail",
+      reason: $reason
+    }')"
   append_result "${json}"
 }
 
@@ -1938,9 +2008,23 @@ run_load() {
     "${extra_args[@]}"
   )
   if should_profile_load "${label}"; then
-    json="$(run_profiled_probe_json "${label}" "${duration}" "${probe_args[@]}")"
+    if ! json="$(run_profiled_probe_json "${label}" "${duration}" "${probe_args[@]}")"; then
+      if diagnostic_comparator_label "${label}"; then
+        record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
+        sample_stats "${label}"
+        return
+      fi
+      fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
+    fi
   else
-    json="$(run_probe_json "${probe_args[@]}")"
+    if ! json="$(run_probe_json "${probe_args[@]}")"; then
+      if diagnostic_comparator_label "${label}"; then
+        record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
+        sample_stats "${label}"
+        return
+      fi
+      fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
+    fi
   fi
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_after="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-after" "${fast_path_protocol}")"
@@ -1967,8 +2051,13 @@ run_load() {
     static_fast_path_delta="$(static_fast_path_delta "${static_fast_path_before}" "${static_fast_path_after}")"
     json="$(jq -c --argjson static_fast_path "${static_fast_path_delta}" '. + {fast_path: ((.fast_path // {}) + {static_responses: $static_fast_path})}' <<<"${json}")"
   fi
+  json="$(normalize_diagnostic_comparator_result "${json}")"
   append_result "${json}"
   assert_result "${json}"
+  if [[ "$(jq -r '.skipped // false' <<<"${json}")" == "true" ]]; then
+    sample_stats "${label}"
+    return
+  fi
   sample_stats "${label}"
   if [[ "${diagnostic_profiles:-0}" == "1" ]]; then
     run_diagnostic_profile_replay "${label}" "${duration}" "${protocol}" "${probe_args[@]}"
@@ -2050,7 +2139,7 @@ run_handshake_with_options() {
   if [[ "${diagnostics}" == "tls-storage" ]]; then
     before_metrics="$(server_session_storage_metrics "${host}" "${label}-metrics-before")"
   fi
-  json="$(run_probe_json handshake \
+  if ! json="$(run_probe_json handshake \
     --label "${label}" \
     --protocol "${protocol}" \
     --host "${host}" \
@@ -2060,17 +2149,29 @@ run_handshake_with_options() {
     --duration-seconds "${duration_seconds}" \
     --concurrency "${concurrency}" \
     --client-resumption "${client_resumption}" \
-    --post-handshake-observe-ms "${post_handshake_observe_ms}")"
+    --post-handshake-observe-ms "${post_handshake_observe_ms}")"; then
+    if diagnostic_comparator_label "${label}"; then
+      record_diagnostic_comparator_skip "${label}" handshake "${protocol}" "diagnostic comparator probe failed before producing a valid result"
+      sample_stats "${label}"
+      return
+    fi
+    fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
+  fi
   if [[ "${diagnostics}" == "tls-storage" ]]; then
     after_metrics="$(server_session_storage_metrics "${host}" "${label}-metrics-after")"
     storage_delta="$(server_session_storage_delta "${before_metrics}" "${after_metrics}")"
     json="$(jq -c --argjson storage "${storage_delta}" '. + {server_session_storage: $storage}' <<<"${json}")"
   fi
+  json="$(normalize_diagnostic_comparator_result "${json}")"
   append_result "${json}"
   if [[ "${result_mode}" == "strict" ]]; then
     assert_result "${json}"
   else
     assert_diagnostic_result "${json}"
+  fi
+  if [[ "$(jq -r '.skipped // false' <<<"${json}")" == "true" ]]; then
+    sample_stats "${label}"
+    return
   fi
   sample_stats "${label}"
   if [[ "${diagnostic_profiles:-0}" == "1" ]]; then

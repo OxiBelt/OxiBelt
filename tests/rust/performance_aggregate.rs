@@ -643,8 +643,9 @@ fn write_iteration_status(
         "target_cpu": "x86-64-v3",
         "iteration": iteration,
         "exit_code": exit_code,
+        "diagnostic_warnings": if status == "diagnostic_warning" { 1 } else { 0 },
         "status": status,
-        "reason": if exit_code == 0 { "completed" } else { "synthetic failure" }
+        "reason": if status == "diagnostic_warning" { "completed with 1 diagnostic comparator warning(s)" } else if exit_code == 0 { "completed" } else { "synthetic failure" }
     }))
     .expect("iteration status should serialize"),
   )
@@ -1177,6 +1178,43 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
       .expect("per-shard medians should be present")
       .len(),
     16
+  );
+}
+
+#[test]
+fn diagnostic_warning_iteration_status_is_not_failed_sample_quality() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+  write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
+  write_iteration_status(
+    &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+    "reverse-proxy",
+    1,
+    1,
+    0,
+    "diagnostic_warning",
+  );
+
+  let report = run_aggregate_with_args(
+    &input_dir,
+    &output_dir,
+    &[
+      "--profile".to_owned(),
+      "smoke".to_owned(),
+      "--expected-runs".to_owned(),
+      "1".to_owned(),
+      "--expected-shards".to_owned(),
+      "20".to_owned(),
+    ],
+  );
+
+  assert_eq!(report["sample_quality"]["ok_iterations"], 16);
+  assert_eq!(report["sample_quality"]["diagnostic_warning_iterations"], 1);
+  assert_eq!(report["sample_quality"]["failed_iterations"], 0);
+  assert_eq!(
+    report["sample_quality"]["diagnostic_warning_samples"][0]["diagnostic_warnings"],
+    1
   );
 }
 

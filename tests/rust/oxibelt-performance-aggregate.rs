@@ -766,7 +766,9 @@ struct StatBandReport {
 struct SampleQuality {
   iteration_status_files: usize,
   ok_iterations: usize,
+  diagnostic_warning_iterations: usize,
   failed_iterations: usize,
+  diagnostic_warning_samples: Vec<IterationStatusSummary>,
   failed_iteration_samples: Vec<IterationStatusSummary>,
 }
 
@@ -778,6 +780,7 @@ struct IterationStatusSummary {
   shard: Option<u64>,
   iteration: Option<u64>,
   exit_code: Option<i64>,
+  diagnostic_warnings: Option<u64>,
   status: Option<String>,
   reason: Option<String>,
 }
@@ -789,6 +792,7 @@ struct IterationStatusFile {
   shard: Option<u64>,
   iteration: Option<u64>,
   exit_code: Option<i64>,
+  diagnostic_warnings: Option<u64>,
   status: Option<String>,
   reason: Option<String>,
 }
@@ -2124,7 +2128,9 @@ fn build_sample_quality(
   let mut quality = SampleQuality {
     iteration_status_files: iteration_statuses.len(),
     ok_iterations: 0,
+    diagnostic_warning_iterations: 0,
     failed_iterations: 0,
+    diagnostic_warning_samples: Vec::new(),
     failed_iteration_samples: Vec::new(),
   };
 
@@ -2144,6 +2150,7 @@ fn build_sample_quality(
             shard: None,
             iteration: None,
             exit_code: None,
+            diagnostic_warnings: None,
             status: Some("unreadable".to_owned()),
             reason: Some(error.to_string()),
           });
@@ -2164,15 +2171,35 @@ fn build_sample_quality(
             shard: None,
             iteration: None,
             exit_code: None,
+            diagnostic_warnings: None,
             status: Some("invalid".to_owned()),
             reason: Some(error.to_string()),
           });
         continue;
       }
     };
-    let ok = status.status.as_deref() == Some("ok") && status.exit_code == Some(0);
+    let ok = matches!(
+      status.status.as_deref(),
+      Some("ok") | Some("diagnostic_warning")
+    ) && status.exit_code == Some(0);
     if ok {
       quality.ok_iterations += 1;
+      if status.status.as_deref() == Some("diagnostic_warning") {
+        quality.diagnostic_warning_iterations += 1;
+        quality
+          .diagnostic_warning_samples
+          .push(IterationStatusSummary {
+            source_file: rel_path,
+            target_cpu: status.target_cpu,
+            serving_type: status.serving_type,
+            shard: status.shard,
+            iteration: status.iteration,
+            exit_code: status.exit_code,
+            diagnostic_warnings: status.diagnostic_warnings,
+            status: status.status,
+            reason: status.reason,
+          });
+      }
       continue;
     }
     quality.failed_iterations += 1;
@@ -2185,6 +2212,7 @@ fn build_sample_quality(
         shard: status.shard,
         iteration: status.iteration,
         exit_code: status.exit_code,
+        diagnostic_warnings: status.diagnostic_warnings,
         status: status.status,
         reason: status.reason,
       });
@@ -6622,8 +6650,10 @@ fn render_markdown(report: &Report) -> String {
   }
   writeln!(
     markdown,
-    "- Iteration status files parsed: `{}` ({} failed)",
-    report.sample_quality.iteration_status_files, report.sample_quality.failed_iterations
+    "- Iteration status files parsed: `{}` ({} failed, {} diagnostic warnings)",
+    report.sample_quality.iteration_status_files,
+    report.sample_quality.failed_iterations,
+    report.sample_quality.diagnostic_warning_iterations
   )
   .unwrap();
   writeln!(
