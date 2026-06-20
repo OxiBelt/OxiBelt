@@ -1646,7 +1646,7 @@ where
   F: Future<Output = anyhow::Result<T>>,
 {
   let handle = Handle::try_current()
-    .context("shared state operation requires the Tokio compatibility runtime")?;
+    .context("shared state operation requires the Tokio compatibility island")?;
   tokio::task::block_in_place(|| {
     handle
       .block_on(tokio::time::timeout(timeout, future))

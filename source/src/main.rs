@@ -153,8 +153,8 @@ fn main() -> anyhow::Result<()> {
     compatibility_island_count = runtime_backend.compatibility_island_count,
     "resolved async runtime backend"
   );
-  let runtime = oxibelt::runtime::tokio_compat::build_runtime(worker_threads)?;
-  runtime.block_on(async move {
+  let runtime = oxibelt::runtime::compio::build_runtime(worker_threads)?;
+  runtime.block_on_tokio_island(async move {
     let state = oxibelt::state::AppHandle::new(
       oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
         .await
