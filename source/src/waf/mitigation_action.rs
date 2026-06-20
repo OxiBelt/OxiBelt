@@ -162,6 +162,8 @@ pub(super) fn validate_mitigation_action(
 pub(super) fn compile_mitigation_action(
   rule: &super::WafRuleConfig,
   action: &WafActionConfig,
+  global_functions: &FunctionMap,
+  route_functions: Option<&FunctionMap>,
 ) -> anyhow::Result<CompiledMitigationAction> {
   let WafActionConfig::EmitMitigation {
     intent,
@@ -190,7 +192,11 @@ pub(super) fn compile_mitigation_action(
     reason: reason.clone(),
     target: target
       .as_deref()
-      .map(|expression| Parser::new(expression).parse())
+      .map(|expression| {
+        Parser::new(expression).parse().and_then(|expression| {
+          expression.analyze_for_mitigation_field(rule.phase, global_functions, route_functions)
+        })
+      })
       .transpose()
       .with_context(|| {
         format!(
@@ -200,7 +206,11 @@ pub(super) fn compile_mitigation_action(
       })?,
     target_prefix: target_prefix
       .as_deref()
-      .map(|expression| Parser::new(expression).parse())
+      .map(|expression| {
+        Parser::new(expression).parse().and_then(|expression| {
+          expression.analyze_for_mitigation_field(rule.phase, global_functions, route_functions)
+        })
+      })
       .transpose()
       .with_context(|| {
         format!(
@@ -222,12 +232,17 @@ pub(super) fn compile_mitigation_action(
       .map(|field| {
         Ok(CompiledAccessLogField {
           name: field.name.clone(),
-          expression: Parser::new(&field.value).parse().with_context(|| {
-            format!(
-              "failed to compile WAF rule {} emit_mitigation field {}",
-              rule.name, field.name
-            )
-          })?,
+          expression: Parser::new(&field.value)
+            .parse()
+            .and_then(|expression| {
+              expression.analyze_for_mitigation_field(rule.phase, global_functions, route_functions)
+            })
+            .with_context(|| {
+              format!(
+                "failed to compile WAF rule {} emit_mitigation field {}",
+                rule.name, field.name
+              )
+            })?,
         })
       })
       .collect::<anyhow::Result<_>>()?,

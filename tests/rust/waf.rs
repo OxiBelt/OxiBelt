@@ -1253,7 +1253,7 @@ fields = [
   let config: Config = toml::from_str(&raw).expect("config should parse");
   let error = config.validate().expect_err("validation should fail");
   assert!(
-    format!("{error:#}").contains("unknown OxiRule function is_created"),
+    format!("{error:#}").contains("unknown function is_created"),
     "unexpected error: {error:#}"
   );
 }
@@ -1428,7 +1428,7 @@ fn udf_phase_validation_happens_at_call_site() {
       "response-calls-stream",
       "response",
       "stream_has_payload()",
-      "Stream is available only in stream-phase rules",
+      "Stream is available only in stream phase",
     ),
     (
       "stream-calls-request-body",
@@ -2404,13 +2404,9 @@ expression = "Stream != null"
 "#,
       "parameter Stream must be a valid OxiRule identifier",
     ),
-    (
-      "unknown-function",
-      "",
-      "unknown OxiRule function missing_fn",
-    ),
-    ("bad-call-token", "", "unexpected token RParen"),
-    ("reserved-call-token", "", "forbidden OxiRule construct if"),
+    ("unknown-function", "", "unknown function missing_fn"),
+    ("bad-call-token", "", "expected expression"),
+    ("reserved-call-token", "", "reserved identifier if"),
     (
       "arity-mismatch",
       r#"
@@ -2419,7 +2415,7 @@ name = "one_arg"
 params = ["value"]
 expression = "value != null"
 "#,
-      "expects 1 arguments but got 0",
+      "does not accept 0 arguments",
     ),
     (
       "recursive-function",
@@ -2442,7 +2438,7 @@ name = "route_only"
 params = ["path"]
 expression = "path.startsWith('/route')"
 "#,
-      "unknown OxiRule function route_only",
+      "unknown function route_only",
     ),
   ] {
     let temp_dir = common::TempDir::new(name);
@@ -2471,6 +2467,59 @@ name = "{name}"
 phase = "request"
 priority = 10
 when = "{when}"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    let error_chain = format!("{error:#}");
+    assert!(
+      error_chain.contains(expected),
+      "unexpected error for {name}: {error_chain}"
+    );
+  }
+}
+
+#[test]
+fn oxirule_v1_rejects_forge_only_syntax() {
+  for (name, expression, expected) in [
+    (
+      "double-quoted-string",
+      r#"Request.Http.Path == "/admin""#,
+      "single-quoted string literals only",
+    ),
+    ("array-literal", "[true]", "does not support array literals"),
+    ("float-literal", "1.5 > 1", "does not support float literal"),
+    (
+      "multiply-operator",
+      "2 * 3 == 6",
+      "does not support operator *",
+    ),
+    (
+      "line-comment",
+      "true // comment",
+      "does not support comments",
+    ),
+  ] {
+    let temp_dir = common::TempDir::new(name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+    let base_config = common::minimal_config_toml(&cert_path, &key_path);
+    let expression = format!("{expression:?}");
+    let raw = format!(
+      r#"{base_config}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "{name}"
+phase = "request"
+priority = 10
+when = {expression}
 
 [[waf.rules.actions]]
 type = "reject"

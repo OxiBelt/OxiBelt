@@ -107,20 +107,3 @@ pub(super) fn eval_body_call(
     _ => bail!("unknown BodyView method {method}"),
   }
 }
-
-pub(super) fn body_content_method(method: &str) -> bool {
-  matches!(
-    method,
-    "isFormat"
-      | "isBinaryFormat"
-      | "matchesFormat"
-      | "contains"
-      | "matches"
-      | "containsAny"
-      | "matchesAny"
-      | "scan"
-      | "anomalyScore"
-      | "malformedScore"
-      | "promptInjectionScore"
-  )
-}

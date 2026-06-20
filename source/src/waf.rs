@@ -2,6 +2,11 @@
 use anyhow::{Context, anyhow, bail};
 use http::header::{HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
+use online_dsl_forge::{
+  BinaryOp as ForgeBinaryOp, CompiledRegexCache as ForgeCompiledRegexCache,
+  RegexFlavor as ForgeRegexFlavor, UnaryOp as ForgeUnaryOp, VerifiedExprKindRef,
+  VerifiedExpression,
+};
 use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -59,17 +64,14 @@ use access_log_record::AccessLogJsonValue;
 pub use access_log_record::AccessLogRecord;
 use binary_format::bytes_match_format;
 use body_cache::{BodyTextCaches, BodyTextSlot};
-use body_eval::{body_content_method, eval_body_call};
+use body_eval::eval_body_call;
 pub use crs::{CrsCompatibilityMatrix, compatibility_matrix as crs_compatibility_matrix};
 use crs::{CrsDecision, CrsEngine, WafCrsConfig, validate_crs_config};
 use defaults::*;
 pub use devtools::*;
-use expression::Parser;
+use expression::{Expr, Parser};
 pub use functions::WafFunctionConfig;
-use functions::{
-  FunctionCallRef, FunctionKey, FunctionMap, compile_global_functions, compile_route_functions,
-  function_body_route_functions, resolve_function, validate_function_arity,
-};
+use functions::{FunctionMap, compile_global_functions, compile_route_functions};
 pub(crate) use http_body_compression::route_http_body_compression_transform_enabled;
 use http_body_compression::validate_http_body_compression_config;
 pub use http_body_compression::{
@@ -1317,8 +1319,8 @@ fn validate_access_log_field_configs_with_functions(
     let expression = Parser::new(&field.value)
       .parse()
       .with_context(|| format!("failed to parse {label} field {}", field.name))?;
-    expression
-      .validate_for_phase_with_functions(WafPhase::Response, global_functions, route_functions)
+    let expression = expression
+      .analyze_for_phase_with_functions(WafPhase::Response, global_functions, route_functions)
       .with_context(|| format!("invalid {label} field {}", field.name))?;
     if expression
       .request_body_need_with_functions(global_functions, route_functions)
@@ -1480,7 +1482,6 @@ pub struct WafEngine {
   duplicate_metadata_policy: WafDuplicateMetadataPolicy,
   limits: WafLimits,
   pattern_sets: HashMap<String, CompiledPatternSet>,
-  global_functions: Arc<FunctionMap>,
   global_rules: Vec<CompiledRule>,
   route_rules: HashMap<String, Vec<CompiledRule>>,
   default_route_plan: WafRoutePlan,
@@ -1615,7 +1616,6 @@ impl WafEngine {
       duplicate_metadata_policy: config.waf.duplicate_metadata_policy,
       limits: config.waf.limits.clone(),
       pattern_sets,
-      global_functions,
       global_rules,
       route_rules,
       default_route_plan,
@@ -1864,7 +1864,6 @@ impl WafEngine {
   ) -> anyhow::Result<AccessLogRecord> {
     let mut tx = TransactionBudget::new(&self.limits);
     let person_proof = self.person_proof.evaluate_request(input.request);
-    let empty_functions = FunctionMap::new();
     let body_text_caches = BodyTextCaches::default();
     let ctx = EvalContext {
       phase: WafPhase::Response,
@@ -1877,8 +1876,6 @@ impl WafEngine {
       stream: None,
       person_proof: &person_proof,
       pattern_sets: &self.pattern_sets,
-      global_functions: &empty_functions,
-      route_functions: None,
       regex_cache: None,
       locals: &[],
       limits: &self.limits,
@@ -1941,8 +1938,6 @@ impl WafEngine {
           stream: None,
           person_proof: &rule_person_proof,
           pattern_sets: &self.pattern_sets,
-          global_functions: self.global_functions.as_ref(),
-          route_functions: None,
           regex_cache: None,
           locals: &[],
           limits: &self.limits,
@@ -1983,8 +1978,6 @@ impl WafEngine {
           stream: None,
           person_proof: &rule_person_proof,
           pattern_sets: &self.pattern_sets,
-          global_functions: rule.global_functions.as_ref(),
-          route_functions: rule.route_functions.as_deref(),
           regex_cache: Some(&rule.regex_cache),
           locals: &[],
           limits: &self.limits,
@@ -2046,8 +2039,6 @@ impl WafEngine {
         stream: None,
         person_proof: &person_proof,
         pattern_sets: &self.pattern_sets,
-        global_functions: self.global_functions.as_ref(),
-        route_functions: None,
         regex_cache: None,
         locals: &[],
         limits: &self.limits,
@@ -2103,8 +2094,6 @@ impl WafEngine {
         stream: Some(input),
         person_proof: &person_proof,
         pattern_sets: &self.pattern_sets,
-        global_functions: self.global_functions.as_ref(),
-        route_functions: None,
         regex_cache: None,
         locals: &[],
         limits: &self.limits,
@@ -2156,8 +2145,6 @@ impl WafEngine {
       rule_name: &rule.name,
       rule_id: rule.id.as_deref(),
       rule_tags: &rule.tags,
-      global_functions: rule.global_functions.as_ref(),
-      route_functions: rule.route_functions.as_deref(),
       regex_cache: Some(&rule.regex_cache),
       locals: &[],
       ..*ctx
@@ -2209,12 +2196,21 @@ fn compile_rules(
         .with_context(|| format!("failed to resolve WAF rule {} groups", rule.name))?;
       let expression = Parser::new(&resolved.when)
         .parse()
+        .and_then(|expression| {
+          expression.analyze_for_phase_with_functions(
+            rule.phase,
+            global_functions.as_ref(),
+            route_functions.as_deref(),
+          )
+        })
         .with_context(|| format!("failed to compile WAF rule {}", rule.name))?;
       let actions = compile_actions(
         rule,
         &resolved.actions,
         scope.person_proof_scope(),
         person_proof_defaults,
+        global_functions.as_ref(),
+        route_functions.as_deref(),
       )
       .with_context(|| format!("failed to compile WAF rule {} actions", rule.name))?;
       let person_proof_policies = actions
@@ -2261,8 +2257,6 @@ fn compile_rules(
         response_body_need,
         regex_cache,
         expression,
-        global_functions: global_functions.clone(),
-        route_functions: route_functions.clone(),
         actions,
         person_proof_policies,
       })
@@ -2361,6 +2355,8 @@ fn compile_actions(
   actions: &[WafActionConfig],
   scope: &str,
   person_proof_defaults: &WafPersonProofConfig,
+  global_functions: &FunctionMap,
+  route_functions: Option<&FunctionMap>,
 ) -> anyhow::Result<Vec<CompiledAction>> {
   actions
     .iter()
@@ -2372,9 +2368,18 @@ fn compile_actions(
           .map(|field| {
             Ok(CompiledAccessLogField {
               name: field.name.clone(),
-              expression: Parser::new(&field.value).parse().with_context(|| {
-                format!("failed to compile emit_access_log field {}", field.name)
-              })?,
+              expression: Parser::new(&field.value)
+                .parse()
+                .and_then(|expression| {
+                  expression.analyze_for_phase_with_functions(
+                    WafPhase::Response,
+                    global_functions,
+                    route_functions,
+                  )
+                })
+                .with_context(|| {
+                  format!("failed to compile emit_access_log field {}", field.name)
+                })?,
             })
           })
           .collect::<anyhow::Result<Vec<_>>>()?,
@@ -2383,7 +2388,7 @@ fn compile_actions(
         person_proof_policy::from_action(rule, scope, action_index, action, person_proof_defaults),
       )),
       WafActionConfig::EmitMitigation { .. } => Ok(CompiledAction::EmitMitigation(
-        compile_mitigation_action(rule, action)?,
+        compile_mitigation_action(rule, action, global_functions, route_functions)?,
       )),
       WafActionConfig::SetRequestHeader { name, value, .. } if rule.phase == WafPhase::Request => {
         request_header_mutation::validate(
@@ -2413,6 +2418,7 @@ pub fn compile_access_log_fields(
   fields: &[AccessLogFieldConfig],
 ) -> anyhow::Result<CompiledAccessLogFields> {
   validate_access_log_field_configs(label, fields)?;
+  let empty_functions = FunctionMap::new();
   let fields = fields
     .iter()
     .map(|field| {
@@ -2420,6 +2426,9 @@ pub fn compile_access_log_fields(
         name: field.name.clone(),
         expression: Parser::new(&field.value)
           .parse()
+          .and_then(|expression| {
+            expression.analyze_for_phase_with_functions(WafPhase::Response, &empty_functions, None)
+          })
           .with_context(|| format!("failed to compile {label} field {}", field.name))?,
       })
     })
@@ -2530,8 +2539,6 @@ struct CompiledRule {
   response_body_need: BodyNeed,
   regex_cache: CompiledRegexCache,
   expression: Expr,
-  global_functions: Arc<FunctionMap>,
-  route_functions: Option<Arc<FunctionMap>>,
   actions: Vec<CompiledAction>,
   person_proof_policies: Vec<PersonProofPolicy>,
 }
@@ -2601,44 +2608,24 @@ struct CompiledAccessLogField {
 
 #[derive(Clone, Default)]
 struct CompiledRegexCache {
-  default: HashMap<String, Regex>,
-  header_name: HashMap<String, Regex>,
+  inner: ForgeCompiledRegexCache,
 }
 
 impl CompiledRegexCache {
   fn from_rule_expression(
     expression: &Expr,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
+    _global_functions: &FunctionMap,
+    _route_functions: Option<&FunctionMap>,
   ) -> Self {
-    let mut cache = Self::default();
-    expression.collect_literal_regexes_with_functions(
-      &mut cache,
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-    );
-    cache
-  }
-
-  fn insert(&mut self, flavor: RegexFlavor, pattern: &str) {
-    let target = match flavor {
-      RegexFlavor::Default => &mut self.default,
-      RegexFlavor::HeaderName => &mut self.header_name,
+    let inner = match expression.verified_program() {
+      Ok(program) => program.regex_cache().clone(),
+      Err(_) => ForgeCompiledRegexCache::default(),
     };
-    if target.contains_key(pattern) {
-      return;
-    }
-    if let Ok(regex) = compile_regex_flavor(flavor, pattern) {
-      target.insert(pattern.to_string(), regex);
-    }
+    Self { inner }
   }
 
   fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&Regex> {
-    match flavor {
-      RegexFlavor::Default => self.default.get(pattern),
-      RegexFlavor::HeaderName => self.header_name.get(pattern),
-    }
+    self.inner.get(forge_regex_flavor(flavor), pattern)
   }
 }
 
@@ -2648,10 +2635,10 @@ enum RegexFlavor {
   HeaderName,
 }
 
-fn compile_regex_flavor(flavor: RegexFlavor, pattern: &str) -> anyhow::Result<Regex> {
+fn forge_regex_flavor(flavor: RegexFlavor) -> ForgeRegexFlavor {
   match flavor {
-    RegexFlavor::Default => Ok(Regex::new(pattern)?),
-    RegexFlavor::HeaderName => header_name_regex(pattern),
+    RegexFlavor::Default => ForgeRegexFlavor::Default,
+    RegexFlavor::HeaderName => ForgeRegexFlavor::HeaderName,
   }
 }
 
@@ -3090,8 +3077,6 @@ fn apply_response_actions(
           rule_id: rule.id.as_deref(),
           rule_tags: &rule.tags,
           response: Some(input),
-          global_functions: rule.global_functions.as_ref(),
-          route_functions: rule.route_functions.as_deref(),
           locals: &[],
           ..*ctx
         };
@@ -3279,8 +3264,6 @@ struct EvalContext<'a> {
   stream: Option<WafStreamInput<'a>>,
   person_proof: &'a PersonProofRequestStatus,
   pattern_sets: &'a HashMap<String, CompiledPatternSet>,
-  global_functions: &'a FunctionMap,
-  route_functions: Option<&'a FunctionMap>,
   regex_cache: Option<&'a CompiledRegexCache>,
   locals: &'a [(&'a str, &'a Value)],
   limits: &'a WafLimits,
@@ -3288,287 +3271,138 @@ struct EvalContext<'a> {
   body_text_caches: &'a BodyTextCaches,
 }
 
-#[derive(Debug, Clone)]
-enum Expr {
-  Bool(bool),
-  Null,
-  Int(i64),
-  String(String),
-  Ident(String),
-  FunctionCall(String, Vec<Expr>),
-  Member(Box<Expr>, String),
-  Call(Box<Expr>, String, Vec<Expr>),
-  UnaryNot(Box<Expr>),
-  Binary(Box<Expr>, BinaryOp, Box<Expr>),
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BinaryOp {
-  Eq,
-  Ne,
-  Lt,
-  Le,
-  Gt,
-  Ge,
-  And,
-  Or,
-  Add,
-}
-
 impl Expr {
-  fn validate_for_phase(&self, phase: WafPhase) -> anyhow::Result<()> {
-    if phase == WafPhase::Request && self.references_ident("Response") {
-      bail!("Response is unavailable in request-phase rules");
-    }
-    if phase == WafPhase::Stream {
-      if self.references_ident("Response") {
-        bail!("Response is unavailable in stream-phase rules");
-      }
-      if self.references_request_body_object() {
-        bail!("Request.Body is unavailable in stream-phase rules");
-      }
-    } else if self.references_ident("Stream") {
-      bail!("Stream is available only in stream-phase rules");
-    }
-    Ok(())
-  }
-
-  fn validate_for_phase_with_functions(
-    &self,
-    phase: WafPhase,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-  ) -> anyhow::Result<()> {
-    self.validate_for_phase(phase)?;
-    self.validate_called_functions_for_phase(
-      phase,
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-    )
-  }
-
-  fn validate_called_functions_for_phase(
-    &self,
-    phase: WafPhase,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<()> {
-    for call in self.function_calls() {
-      let function = resolve_function(call.name, global_functions, route_functions)
-        .ok_or_else(|| anyhow!("unknown OxiRule function {}", call.name))?;
-      validate_function_arity(function, call.args.len())?;
-      let key = FunctionKey::from(function);
-      if active.insert(key.clone()) {
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        function.expression.validate_for_phase(phase)?;
-        function.expression.validate_called_functions_for_phase(
-          phase,
-          global_functions,
-          body_route_functions,
-          active,
-        )?;
-        active.remove(&key);
-      }
-    }
-    Ok(())
-  }
-
-  fn references_ident(&self, name: &str) -> bool {
-    match self {
-      Self::Ident(ident) => ident == name,
-      Self::FunctionCall(_, args) => args.iter().any(|arg| arg.references_ident(name)),
-      Self::Member(receiver, _) | Self::UnaryNot(receiver) => receiver.references_ident(name),
-      Self::Call(receiver, _, args) => {
-        receiver.references_ident(name) || args.iter().any(|arg| arg.references_ident(name))
-      }
-      Self::Binary(left, _, right) => left.references_ident(name) || right.references_ident(name),
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) => false,
-    }
-  }
-
-  fn references_request_body_object(&self) -> bool {
-    match self {
-      Self::Member(receiver, field) => {
-        (field == "Body" && (receiver.is_request_expr() || receiver.is_request_http_expr()))
-          || receiver.references_request_body_object()
-      }
-      Self::Call(receiver, _, args) => {
-        receiver.references_request_body_object()
-          || args.iter().any(Self::references_request_body_object)
-      }
-      Self::FunctionCall(_, args) => args.iter().any(Self::references_request_body_object),
-      Self::UnaryNot(expr) => expr.references_request_body_object(),
-      Self::Binary(left, _, right) => {
-        left.references_request_body_object() || right.references_request_body_object()
-      }
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => false,
-    }
-  }
-
-  fn is_request_expr(&self) -> bool {
-    matches!(self, Self::Ident(name) if name == "Request")
-  }
-
-  fn is_response_expr(&self) -> bool {
-    matches!(self, Self::Ident(name) if name == "Response")
-  }
-
-  fn is_request_http_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_request_expr())
-  }
-
-  fn is_response_http_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Http" && receiver.is_response_expr())
-  }
-
-  fn function_calls(&self) -> Vec<FunctionCallRef<'_>> {
-    let mut calls = Vec::new();
-    self.collect_function_calls(&mut calls);
-    calls
-  }
-
-  fn collect_function_calls<'a>(&'a self, calls: &mut Vec<FunctionCallRef<'a>>) {
-    match self {
-      Self::FunctionCall(name, args) => {
-        calls.push(FunctionCallRef { name, args });
-        for arg in args {
-          arg.collect_function_calls(calls);
-        }
-      }
-      Self::Member(receiver, _) | Self::UnaryNot(receiver) => {
-        receiver.collect_function_calls(calls)
-      }
-      Self::Call(receiver, _, args) => {
-        receiver.collect_function_calls(calls);
-        for arg in args {
-          arg.collect_function_calls(calls);
-        }
-      }
-      Self::Binary(left, _, right) => {
-        left.collect_function_calls(calls);
-        right.collect_function_calls(calls);
-      }
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {}
-    }
-  }
-
-  fn collect_literal_regexes(&self, cache: &mut CompiledRegexCache) {
-    match self {
-      Self::Call(receiver, method, args) => {
-        receiver.collect_literal_regexes(cache);
-        for arg in args {
-          arg.collect_literal_regexes(cache);
-        }
-        collect_call_literal_regexes(method, args, cache);
-      }
-      Self::FunctionCall(_, args) => {
-        for arg in args {
-          arg.collect_literal_regexes(cache);
-        }
-      }
-      Self::Member(receiver, _) | Self::UnaryNot(receiver) => {
-        receiver.collect_literal_regexes(cache)
-      }
-      Self::Binary(left, _, right) => {
-        left.collect_literal_regexes(cache);
-        right.collect_literal_regexes(cache);
-      }
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {}
-    }
-  }
-
-  fn collect_literal_regexes_with_functions(
-    &self,
-    cache: &mut CompiledRegexCache,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-  ) {
-    self.collect_literal_regexes(cache);
-    for call in self.function_calls() {
-      let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
-        continue;
-      };
-      let key = FunctionKey::from(function);
-      if active.insert(key.clone()) {
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        function.expression.collect_literal_regexes_with_functions(
-          cache,
-          global_functions,
-          body_route_functions,
-          active,
-        );
-        active.remove(&key);
-      }
-    }
-  }
-
   fn eval(&self, ctx: &EvalContext<'_>, tx: &mut TransactionBudget) -> anyhow::Result<Value> {
+    self.eval_verified(self.verified_root()?, ctx, tx)
+  }
+
+  fn eval_verified(
+    &self,
+    expression: &VerifiedExpression,
+    ctx: &EvalContext<'_>,
+    tx: &mut TransactionBudget,
+  ) -> anyhow::Result<Value> {
     tx.step()?;
-    match self {
-      Self::Bool(value) => Ok(Value::Bool(*value)),
-      Self::Null => Ok(Value::Null),
-      Self::Int(value) => Ok(Value::Int(*value)),
-      Self::String(value) => Ok(Value::String(value.clone())),
-      Self::Ident(name) => eval_ident(name, ctx),
-      Self::FunctionCall(name, args) => {
+    match expression.kind() {
+      VerifiedExprKindRef::Null => Ok(Value::Null),
+      VerifiedExprKindRef::Bool(value) => Ok(Value::Bool(value)),
+      VerifiedExprKindRef::Int(value) => Ok(Value::Int(value)),
+      VerifiedExprKindRef::Float(_) => bail!("OxiRule V1 does not support float values"),
+      VerifiedExprKindRef::String(value) => Ok(Value::String(value.to_string())),
+      VerifiedExprKindRef::Array(_) => bail!("OxiRule V1 does not support array values"),
+      VerifiedExprKindRef::Identifier(name) => eval_ident(name, ctx),
+      VerifiedExprKindRef::Member { receiver, name } => {
+        let value = self.eval_verified(receiver, ctx, tx)?;
+        eval_member(value, name, ctx)
+      }
+      VerifiedExprKindRef::FunctionCall { name, .. } => {
+        bail!("unknown OxiRule function {name}")
+      }
+      VerifiedExprKindRef::ExpressionFunctionCall {
+        params, args, body, ..
+      } => {
         let values = args
           .iter()
-          .map(|arg| arg.eval(ctx, tx))
+          .map(|arg| self.eval_verified(arg, ctx, tx))
           .collect::<anyhow::Result<Vec<_>>>()?;
-        eval_function_call(name, &values, ctx, tx)
+        let locals = params
+          .iter()
+          .zip(values.iter())
+          .map(|(param, value)| (param.as_str(), value))
+          .collect::<Vec<_>>();
+        let child_ctx = EvalContext {
+          locals: &locals,
+          ..*ctx
+        };
+        self.eval_verified(body, &child_ctx, tx)
       }
-      Self::Member(receiver, field) => {
-        let value = receiver.eval(ctx, tx)?;
-        eval_member(value, field, ctx)
-      }
-      Self::Call(receiver, method, args) => {
-        let value = receiver.eval(ctx, tx)?;
-        let regex_args = CachedRegexArgs::for_call(args, ctx.regex_cache);
+      VerifiedExprKindRef::MethodCall {
+        receiver,
+        name,
+        args,
+      } => {
+        let value = self.eval_verified(receiver, ctx, tx)?;
+        let regex_args = CachedRegexArgs::for_verified_args(args, ctx.regex_cache);
         let values = args
           .iter()
-          .map(|arg| arg.eval(ctx, tx))
+          .map(|arg| self.eval_verified(arg, ctx, tx))
           .collect::<anyhow::Result<Vec<_>>>()?;
-        eval_call(value, method, &values, ctx, tx, regex_args)
+        eval_call(value, name, &values, ctx, tx, regex_args)
       }
-      Self::UnaryNot(expr) => Ok(Value::Bool(!expr.eval(ctx, tx)?.as_bool()?)),
-      Self::Binary(left, op, right) => eval_binary(left, *op, right, ctx, tx),
+      VerifiedExprKindRef::Unary { op, expr } => match op {
+        ForgeUnaryOp::Not => Ok(Value::Bool(!self.eval_verified(expr, ctx, tx)?.as_bool()?)),
+        ForgeUnaryOp::Neg => bail!("OxiRule V1 does not support unary numeric negation"),
+      },
+      VerifiedExprKindRef::Binary { left, op, right } => {
+        eval_verified_binary(self, left, op, right, ctx, tx)
+      }
     }
   }
 }
 
-fn collect_call_literal_regexes(method: &str, args: &[Expr], cache: &mut CompiledRegexCache) {
-  match method {
-    "matches" | "anyValueMatches" | "anyKeyMatches" | "anyMatches" => {
-      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
+fn eval_verified_binary(
+  owner: &Expr,
+  left: &VerifiedExpression,
+  op: ForgeBinaryOp,
+  right: &VerifiedExpression,
+  ctx: &EvalContext<'_>,
+  tx: &mut TransactionBudget,
+) -> anyhow::Result<Value> {
+  match op {
+    ForgeBinaryOp::And => {
+      let left_value = owner.eval_verified(left, ctx, tx)?.as_bool()?;
+      if !left_value {
+        return Ok(Value::Bool(false));
+      }
+      Ok(Value::Bool(owner.eval_verified(right, ctx, tx)?.as_bool()?))
     }
-    "anyNameMatches" => {
-      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
-      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
+    ForgeBinaryOp::Or => {
+      let left_value = owner.eval_verified(left, ctx, tx)?.as_bool()?;
+      if left_value {
+        return Ok(Value::Bool(true));
+      }
+      Ok(Value::Bool(owner.eval_verified(right, ctx, tx)?.as_bool()?))
     }
-    "anyEntryMatches" => {
-      collect_literal_regex_arg(args, 0, RegexFlavor::Default, cache);
-      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
-      collect_literal_regex_arg(args, 1, RegexFlavor::Default, cache);
+    ForgeBinaryOp::Add => {
+      let left_value = owner.eval_verified(left, ctx, tx)?;
+      let right_value = owner.eval_verified(right, ctx, tx)?;
+      Ok(Value::String(format!(
+        "{}{}",
+        left_value.as_string()?,
+        right_value.as_string()?
+      )))
     }
-    "allEntriesMatch" => {
-      collect_literal_regex_arg(args, 0, RegexFlavor::HeaderName, cache);
-      collect_literal_regex_arg(args, 1, RegexFlavor::Default, cache);
+    ForgeBinaryOp::Eq | ForgeBinaryOp::Ne => {
+      let left_value = owner.eval_verified(left, ctx, tx)?;
+      let right_value = owner.eval_verified(right, ctx, tx)?;
+      let equal = values_equal(&left_value, &right_value)?;
+      Ok(Value::Bool(matches!(op, ForgeBinaryOp::Eq) == equal))
     }
-    _ => {}
-  }
-}
-
-fn collect_literal_regex_arg(
-  args: &[Expr],
-  index: usize,
-  flavor: RegexFlavor,
-  cache: &mut CompiledRegexCache,
-) {
-  if let Some(Expr::String(pattern)) = args.get(index) {
-    cache.insert(flavor, pattern);
+    ForgeBinaryOp::Lt | ForgeBinaryOp::Le | ForgeBinaryOp::Gt | ForgeBinaryOp::Ge => {
+      let left_value = owner.eval_verified(left, ctx, tx)?;
+      let right_value = owner.eval_verified(right, ctx, tx)?;
+      let result = match (&left_value, &right_value) {
+        (Value::Int(left), Value::Int(right)) => match op {
+          ForgeBinaryOp::Lt => left < right,
+          ForgeBinaryOp::Le => left <= right,
+          ForgeBinaryOp::Gt => left > right,
+          ForgeBinaryOp::Ge => left >= right,
+          _ => unreachable!(),
+        },
+        (Value::String(left), Value::String(right)) => match op {
+          ForgeBinaryOp::Lt => left < right,
+          ForgeBinaryOp::Le => left <= right,
+          ForgeBinaryOp::Gt => left > right,
+          ForgeBinaryOp::Ge => left >= right,
+          _ => unreachable!(),
+        },
+        _ => bail!("ordered comparison requires matching Int or String values"),
+      };
+      Ok(Value::Bool(result))
+    }
+    ForgeBinaryOp::Sub | ForgeBinaryOp::Mul | ForgeBinaryOp::Div | ForgeBinaryOp::Rem => {
+      bail!("OxiRule V1 does not support operator {}", op.as_str())
+    }
   }
 }
 
@@ -3617,13 +3451,13 @@ struct CachedRegexArgs<'a> {
 }
 
 impl<'a> CachedRegexArgs<'a> {
-  fn for_call(args: &[Expr], cache: Option<&'a CompiledRegexCache>) -> Self {
+  fn for_verified_args(args: &[VerifiedExpression], cache: Option<&'a CompiledRegexCache>) -> Self {
     let Some(cache) = cache else {
       return Self::default();
     };
     let mut regex_args = Self::default();
     for (index, arg) in args.iter().enumerate().take(regex_args.default.len()) {
-      if let Expr::String(pattern) = arg {
+      if let Some(pattern) = expression::verified_string_literal(arg) {
         regex_args.default[index] = cache.get(RegexFlavor::Default, pattern);
         regex_args.header_name[index] = cache.get(RegexFlavor::HeaderName, pattern);
       }
@@ -3739,29 +3573,6 @@ fn eval_ident(name: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
     "Stream" => bail!("Stream is available only in stream phase"),
     _ => bail!("unknown identifier {name}"),
   }
-}
-
-fn eval_function_call(
-  name: &str,
-  args: &[Value],
-  ctx: &EvalContext<'_>,
-  tx: &mut TransactionBudget,
-) -> anyhow::Result<Value> {
-  let function = resolve_function(name, ctx.global_functions, ctx.route_functions)
-    .ok_or_else(|| anyhow!("unknown OxiRule function {name}"))?;
-  validate_function_arity(function, args.len())?;
-  let locals = function
-    .params
-    .iter()
-    .zip(args.iter())
-    .map(|(param, value)| (param.as_str(), value))
-    .collect::<Vec<_>>();
-  let child_ctx = EvalContext {
-    route_functions: function_body_route_functions(function, ctx.route_functions),
-    locals: &locals,
-    ..*ctx
-  };
-  function.expression.eval(&child_ctx, tx)
 }
 
 fn eval_member(value: Value, field: &str, ctx: &EvalContext<'_>) -> anyhow::Result<Value> {
@@ -4916,75 +4727,6 @@ fn eval_pair_map_call(
       })))
     }
     _ => bail!("unknown bounded map method {method}"),
-  }
-}
-
-fn bytes_content_method(method: &str) -> bool {
-  matches!(
-    method,
-    "isFormat" | "isBinaryFormat" | "matchesFormat" | "size"
-  )
-}
-
-fn eval_binary(
-  left: &Expr,
-  op: BinaryOp,
-  right: &Expr,
-  ctx: &EvalContext<'_>,
-  tx: &mut TransactionBudget,
-) -> anyhow::Result<Value> {
-  match op {
-    BinaryOp::And => {
-      let left_value = left.eval(ctx, tx)?.as_bool()?;
-      if !left_value {
-        return Ok(Value::Bool(false));
-      }
-      Ok(Value::Bool(right.eval(ctx, tx)?.as_bool()?))
-    }
-    BinaryOp::Or => {
-      let left_value = left.eval(ctx, tx)?.as_bool()?;
-      if left_value {
-        return Ok(Value::Bool(true));
-      }
-      Ok(Value::Bool(right.eval(ctx, tx)?.as_bool()?))
-    }
-    BinaryOp::Add => {
-      let left_value = left.eval(ctx, tx)?;
-      let right_value = right.eval(ctx, tx)?;
-      Ok(Value::String(format!(
-        "{}{}",
-        left_value.as_string()?,
-        right_value.as_string()?
-      )))
-    }
-    BinaryOp::Eq | BinaryOp::Ne => {
-      let left_value = left.eval(ctx, tx)?;
-      let right_value = right.eval(ctx, tx)?;
-      let equal = values_equal(&left_value, &right_value)?;
-      Ok(Value::Bool(matches!(op, BinaryOp::Eq) == equal))
-    }
-    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-      let left_value = left.eval(ctx, tx)?;
-      let right_value = right.eval(ctx, tx)?;
-      let result = match (&left_value, &right_value) {
-        (Value::Int(left), Value::Int(right)) => match op {
-          BinaryOp::Lt => left < right,
-          BinaryOp::Le => left <= right,
-          BinaryOp::Gt => left > right,
-          BinaryOp::Ge => left >= right,
-          _ => unreachable!(),
-        },
-        (Value::String(left), Value::String(right)) => match op {
-          BinaryOp::Lt => left < right,
-          BinaryOp::Le => left <= right,
-          BinaryOp::Gt => left > right,
-          BinaryOp::Ge => left >= right,
-          _ => unreachable!(),
-        },
-        _ => bail!("ordered comparison requires matching Int or String values"),
-      };
-      Ok(Value::Bool(result))
-    }
   }
 }
 

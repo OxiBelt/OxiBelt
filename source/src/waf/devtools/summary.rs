@@ -35,8 +35,6 @@ pub(super) fn explain_steps(
     stream,
     person_proof: &person_proof,
     pattern_sets: &engine.pattern_sets,
-    global_functions: engine.global_functions.as_ref(),
-    route_functions: None,
     regex_cache: None,
     locals: &[],
     limits: &engine.limits,

@@ -1,14 +1,13 @@
 //! Per-route WAF execution planning.
 //! Plans make body-inspection needs explicit before proxy fast paths are chosen.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::functions::CompiledFunction;
-use super::{
-  CompiledAction, CompiledRule, Expr, FunctionKey, FunctionMap, WafActionConfig, WafPhase,
-  body_content_method, bytes_content_method, function_body_route_functions, resolve_function,
-};
+use std::collections::HashMap;
+
+use online_dsl_forge::{BodyAccess, BodyTarget, VerifiedExprKindRef, VerifiedExpression};
+
+use super::{CompiledAction, CompiledRule, Expr, FunctionMap, WafActionConfig, WafPhase};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BodyNeed {
@@ -169,218 +168,239 @@ pub(super) fn phase_plan(
   )
 }
 
-#[derive(Default)]
-struct BodyBindings(Vec<String>, Vec<String>);
-
-impl BodyBindings {
-  fn bind(function: &CompiledFunction, args: &[Expr], caller: &Self) -> Self {
-    let mut bindings = Self::default();
-    for (param, arg) in function.params.iter().zip(args) {
-      if arg.is_request_body_expr_with_bindings(caller) {
-        bindings.0.push(param.clone());
-      }
-      if arg.is_response_body_expr_with_bindings(caller) {
-        bindings.1.push(param.clone());
-      }
-    }
-    bindings
-  }
-}
-
 impl Expr {
-  fn request_body_need_with_bindings(&self, bindings: &BodyBindings) -> BodyNeed {
-    match self {
-      Self::Member(receiver, field) => {
-        let need = receiver.request_body_need_with_bindings(bindings);
-        if receiver.is_request_body_expr_with_bindings(bindings) {
-          need.merge(match field.as_str() {
-            "Size" => BodyNeed::SizeOnly,
-            "Bytes" | "Text" | "IsTruncated" => BodyNeed::PrefixBytes,
-            _ => BodyNeed::None,
-          })
-        } else {
-          need
-        }
-      }
-      Self::Call(receiver, method, args) => {
-        let need = args.iter().fold(
-          receiver.request_body_need_with_bindings(bindings),
-          |need, arg| need.merge(arg.request_body_need_with_bindings(bindings)),
-        );
-        if (receiver.is_request_body_expr_with_bindings(bindings) && body_content_method(method))
-          || (receiver.is_request_body_bytes_expr_with_bindings(bindings)
-            && bytes_content_method(method))
-        {
-          need.merge(BodyNeed::PrefixBytes)
-        } else {
-          need
-        }
-      }
-      Self::FunctionCall(_, args) => args.iter().fold(BodyNeed::None, |need, arg| {
-        need.merge(arg.request_body_need_with_bindings(bindings))
-      }),
-      Self::UnaryNot(expr) => expr.request_body_need_with_bindings(bindings),
-      Self::Binary(left, _, right) => left
-        .request_body_need_with_bindings(bindings)
-        .merge(right.request_body_need_with_bindings(bindings)),
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {
-        BodyNeed::None
-      }
-    }
-  }
-
-  fn response_body_need_with_bindings(&self, bindings: &BodyBindings) -> BodyNeed {
-    match self {
-      Self::Member(receiver, field) => {
-        let need = receiver.response_body_need_with_bindings(bindings);
-        if receiver.is_response_body_expr_with_bindings(bindings) {
-          need.merge(match field.as_str() {
-            "Size" => BodyNeed::SizeOnly,
-            "Bytes" | "Text" | "IsTruncated" => BodyNeed::PrefixBytes,
-            _ => BodyNeed::None,
-          })
-        } else {
-          need
-        }
-      }
-      Self::Call(receiver, method, args) => {
-        let need = args.iter().fold(
-          receiver.response_body_need_with_bindings(bindings),
-          |need, arg| need.merge(arg.response_body_need_with_bindings(bindings)),
-        );
-        if (receiver.is_response_body_expr_with_bindings(bindings) && body_content_method(method))
-          || (receiver.is_response_body_bytes_expr_with_bindings(bindings)
-            && bytes_content_method(method))
-        {
-          need.merge(BodyNeed::PrefixBytes)
-        } else {
-          need
-        }
-      }
-      Self::FunctionCall(_, args) => args.iter().fold(BodyNeed::None, |need, arg| {
-        need.merge(arg.response_body_need_with_bindings(bindings))
-      }),
-      Self::UnaryNot(expr) => expr.response_body_need_with_bindings(bindings),
-      Self::Binary(left, _, right) => left
-        .response_body_need_with_bindings(bindings)
-        .merge(right.response_body_need_with_bindings(bindings)),
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => {
-        BodyNeed::None
-      }
-    }
-  }
-
-  fn is_request_body_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Body" && (receiver.is_request_expr() || receiver.is_request_http_expr()))
-  }
-
-  fn is_request_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    self.is_request_body_expr()
-      || matches!(self, Self::Ident(name) if bindings.0.iter().any(|param| param == name))
-  }
-
-  fn is_request_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_request_body_expr_with_bindings(bindings))
-  }
-
-  fn is_response_body_expr(&self) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Body" && (receiver.is_response_expr() || receiver.is_response_http_expr()))
-  }
-
-  fn is_response_body_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    self.is_response_body_expr()
-      || matches!(self, Self::Ident(name) if bindings.1.iter().any(|param| param == name))
-  }
-
-  fn is_response_body_bytes_expr_with_bindings(&self, bindings: &BodyBindings) -> bool {
-    matches!(self, Self::Member(receiver, field) if field == "Bytes" && receiver.is_response_body_expr_with_bindings(bindings))
-  }
-
   pub(super) fn request_body_need_with_functions(
     &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
+    _global_functions: &FunctionMap,
+    _route_functions: Option<&FunctionMap>,
   ) -> BodyNeed {
-    self.request_body_need_with_functions_inner(
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-      &BodyBindings::default(),
-    )
-  }
-
-  fn request_body_need_with_functions_inner(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-    bindings: &BodyBindings,
-  ) -> BodyNeed {
-    self.function_calls().into_iter().fold(
-      self.request_body_need_with_bindings(bindings),
-      |need, call| {
-        let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
-          return need;
-        };
-        let key = FunctionKey::from(function);
-        if !active.insert(key.clone()) {
-          return need;
-        }
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        let body_bindings = BodyBindings::bind(function, call.args, bindings);
-        let result = function.expression.request_body_need_with_functions_inner(
-          global_functions,
-          body_route_functions,
-          active,
-          &body_bindings,
-        );
-        active.remove(&key);
-        need.merge(result)
-      },
-    )
+    self
+      .body_need()
+      .map(|need| {
+        body_need_for_target(need, BodyTarget::Request)
+          .merge(self.compat_body_need_for_target(BodyTarget::Request))
+      })
+      .unwrap_or(BodyNeed::None)
   }
 
   pub(super) fn response_body_need_with_functions(
     &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
+    _global_functions: &FunctionMap,
+    _route_functions: Option<&FunctionMap>,
   ) -> BodyNeed {
-    self.response_body_need_with_functions_inner(
-      global_functions,
-      route_functions,
-      &mut HashSet::new(),
-      &BodyBindings::default(),
-    )
+    self
+      .body_need()
+      .map(|need| {
+        body_need_for_target(need, BodyTarget::Response)
+          .merge(self.compat_body_need_for_target(BodyTarget::Response))
+      })
+      .unwrap_or(BodyNeed::None)
   }
 
-  fn response_body_need_with_functions_inner(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    active: &mut HashSet<FunctionKey>,
-    bindings: &BodyBindings,
-  ) -> BodyNeed {
-    self.function_calls().into_iter().fold(
-      self.response_body_need_with_bindings(bindings),
-      |need, call| {
-        let Some(function) = resolve_function(call.name, global_functions, route_functions) else {
-          return need;
-        };
-        let key = FunctionKey::from(function);
-        if !active.insert(key.clone()) {
-          return need;
-        }
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        let body_bindings = BodyBindings::bind(function, call.args, bindings);
-        let result = function.expression.response_body_need_with_functions_inner(
-          global_functions,
-          body_route_functions,
-          active,
-          &body_bindings,
-        );
-        active.remove(&key);
-        need.merge(result)
-      },
-    )
+  fn compat_body_need_for_target(&self, target: BodyTarget) -> BodyNeed {
+    self
+      .verified_root()
+      .map(|expression| body_need_for_verified_target(expression, target, &HashMap::new()))
+      .unwrap_or(BodyNeed::None)
   }
+}
+
+fn body_need_for_target(need: online_dsl_forge::BodyNeedSummary, target: BodyTarget) -> BodyNeed {
+  let access = match target {
+    BodyTarget::Request => need.request,
+    BodyTarget::Response => need.response,
+    BodyTarget::Stream => need.stream,
+  };
+  match access {
+    BodyAccess::None => BodyNeed::None,
+    BodyAccess::SizeOnly => BodyNeed::SizeOnly,
+    BodyAccess::PrefixBytes => BodyNeed::PrefixBytes,
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BodyObjectOrigin {
+  Request,
+  RequestHttp,
+  RequestBody,
+  RequestBodyBytes,
+  Response,
+  ResponseHttp,
+  ResponseBody,
+  ResponseBodyBytes,
+  Stream,
+  StreamPayload,
+}
+
+fn body_need_for_verified_target(
+  expression: &VerifiedExpression,
+  target: BodyTarget,
+  locals: &HashMap<&str, BodyObjectOrigin>,
+) -> BodyNeed {
+  match expression.kind() {
+    VerifiedExprKindRef::Member { receiver, name } => {
+      let need = body_need_for_verified_target(receiver, target, locals);
+      let member_need = match (body_object_origin(receiver, locals), name, target) {
+        (Some(BodyObjectOrigin::RequestBody), "Size", BodyTarget::Request)
+        | (Some(BodyObjectOrigin::ResponseBody), "Size", BodyTarget::Response) => {
+          BodyNeed::SizeOnly
+        }
+        (
+          Some(BodyObjectOrigin::RequestBody),
+          "Bytes" | "Text" | "IsTruncated",
+          BodyTarget::Request,
+        )
+        | (
+          Some(BodyObjectOrigin::ResponseBody),
+          "Bytes" | "Text" | "IsTruncated",
+          BodyTarget::Response,
+        ) => BodyNeed::PrefixBytes,
+        _ => BodyNeed::None,
+      };
+      need.merge(member_need)
+    }
+    VerifiedExprKindRef::MethodCall {
+      receiver,
+      name,
+      args,
+    } => {
+      let need = args.iter().fold(
+        body_need_for_verified_target(receiver, target, locals),
+        |need, arg| need.merge(body_need_for_verified_target(arg, target, locals)),
+      );
+      let method_need = match (body_object_origin(receiver, locals), target) {
+        (Some(BodyObjectOrigin::RequestBody), BodyTarget::Request) if body_content_method(name) => {
+          BodyNeed::PrefixBytes
+        }
+        (Some(BodyObjectOrigin::ResponseBody), BodyTarget::Response)
+          if body_content_method(name) =>
+        {
+          BodyNeed::PrefixBytes
+        }
+        (Some(BodyObjectOrigin::RequestBodyBytes), BodyTarget::Request)
+          if bytes_content_method(name) =>
+        {
+          BodyNeed::PrefixBytes
+        }
+        (Some(BodyObjectOrigin::ResponseBodyBytes), BodyTarget::Response)
+          if bytes_content_method(name) =>
+        {
+          BodyNeed::PrefixBytes
+        }
+        _ => BodyNeed::None,
+      };
+      need.merge(method_need)
+    }
+    VerifiedExprKindRef::ExpressionFunctionCall {
+      params, args, body, ..
+    } => {
+      let args_need = args.iter().fold(BodyNeed::None, |need, arg| {
+        need.merge(body_need_for_verified_target(arg, target, locals))
+      });
+      let body_locals = body_function_locals(params, args, locals);
+      args_need.merge(body_need_for_verified_target(body, target, &body_locals))
+    }
+    VerifiedExprKindRef::FunctionCall { args, .. } | VerifiedExprKindRef::Array(args) => {
+      args.iter().fold(BodyNeed::None, |need, arg| {
+        need.merge(body_need_for_verified_target(arg, target, locals))
+      })
+    }
+    VerifiedExprKindRef::Unary { expr, .. } => body_need_for_verified_target(expr, target, locals),
+    VerifiedExprKindRef::Binary { left, right, .. } => {
+      body_need_for_verified_target(left, target, locals)
+        .merge(body_need_for_verified_target(right, target, locals))
+    }
+    VerifiedExprKindRef::Null
+    | VerifiedExprKindRef::Bool(_)
+    | VerifiedExprKindRef::Int(_)
+    | VerifiedExprKindRef::Float(_)
+    | VerifiedExprKindRef::String(_)
+    | VerifiedExprKindRef::Identifier(_) => BodyNeed::None,
+  }
+}
+
+fn body_object_origin(
+  expression: &VerifiedExpression,
+  locals: &HashMap<&str, BodyObjectOrigin>,
+) -> Option<BodyObjectOrigin> {
+  match expression.kind() {
+    VerifiedExprKindRef::Identifier(name) => match name {
+      "Request" => Some(BodyObjectOrigin::Request),
+      "Response" => Some(BodyObjectOrigin::Response),
+      "Stream" => Some(BodyObjectOrigin::Stream),
+      _ => locals.get(name).copied(),
+    },
+    VerifiedExprKindRef::Member { receiver, name } => {
+      match (body_object_origin(receiver, locals), name) {
+        (Some(BodyObjectOrigin::Request), "Http") => Some(BodyObjectOrigin::RequestHttp),
+        (Some(BodyObjectOrigin::Request | BodyObjectOrigin::RequestHttp), "Body") => {
+          Some(BodyObjectOrigin::RequestBody)
+        }
+        (Some(BodyObjectOrigin::RequestBody), "Bytes") => Some(BodyObjectOrigin::RequestBodyBytes),
+        (Some(BodyObjectOrigin::Response), "Http") => Some(BodyObjectOrigin::ResponseHttp),
+        (Some(BodyObjectOrigin::Response | BodyObjectOrigin::ResponseHttp), "Body") => {
+          Some(BodyObjectOrigin::ResponseBody)
+        }
+        (Some(BodyObjectOrigin::ResponseBody), "Bytes") => {
+          Some(BodyObjectOrigin::ResponseBodyBytes)
+        }
+        (Some(BodyObjectOrigin::Stream), "Payload") => Some(BodyObjectOrigin::StreamPayload),
+        _ => None,
+      }
+    }
+    VerifiedExprKindRef::ExpressionFunctionCall {
+      params, args, body, ..
+    } => {
+      let body_locals = body_function_locals(params, args, locals);
+      body_object_origin(body, &body_locals)
+    }
+    VerifiedExprKindRef::Null
+    | VerifiedExprKindRef::Bool(_)
+    | VerifiedExprKindRef::Int(_)
+    | VerifiedExprKindRef::Float(_)
+    | VerifiedExprKindRef::String(_)
+    | VerifiedExprKindRef::Array(_)
+    | VerifiedExprKindRef::FunctionCall { .. }
+    | VerifiedExprKindRef::MethodCall { .. }
+    | VerifiedExprKindRef::Unary { .. }
+    | VerifiedExprKindRef::Binary { .. } => None,
+  }
+}
+
+fn body_function_locals<'a>(
+  params: &'a [String],
+  args: &'a [VerifiedExpression],
+  locals: &HashMap<&str, BodyObjectOrigin>,
+) -> HashMap<&'a str, BodyObjectOrigin> {
+  params
+    .iter()
+    .zip(args.iter())
+    .filter_map(|(param, arg)| {
+      body_object_origin(arg, locals).map(|origin| (param.as_str(), origin))
+    })
+    .collect()
+}
+
+fn body_content_method(method: &str) -> bool {
+  matches!(
+    method,
+    "isFormat"
+      | "isBinaryFormat"
+      | "matchesFormat"
+      | "contains"
+      | "matches"
+      | "containsAny"
+      | "matchesAny"
+      | "scan"
+      | "anomalyScore"
+      | "malformedScore"
+      | "promptInjectionScore"
+  )
+}
+
+fn bytes_content_method(method: &str) -> bool {
+  matches!(
+    method,
+    "isFormat" | "isBinaryFormat" | "matchesFormat" | "size"
+  )
 }

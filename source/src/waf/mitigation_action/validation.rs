@@ -1,14 +1,14 @@
 //! Validation helpers for WAF mitigation actions.
 //! Validation ensures response and stream actions are safe before compilation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::{Context, bail};
+use online_dsl_forge::{VerifiedExprKindRef, VerifiedExpression};
 
-use super::super::{
-  AccessLogFieldConfig, Expr, FunctionKey, FunctionMap, Parser, WafPhase,
-  function_body_route_functions, resolve_function, validate_function_arity,
-};
+use super::super::{AccessLogFieldConfig, FunctionMap, Parser, WafPhase};
+
+const MITIGATION_PAYLOAD_ERROR: &str = "cannot read request, response, or stream body bytes";
 
 pub(super) fn validate_mitigation_fields(
   label: &str,
@@ -44,16 +44,16 @@ pub(super) fn validate_mitigation_expression(
   let expression = Parser::new(expression)
     .parse()
     .with_context(|| format!("failed to parse {label}"))?;
-  expression
-    .validate_for_phase_with_functions(phase, global_functions, route_functions)
-    .with_context(|| format!("invalid {label}"))?;
-  if expression.references_mitigation_payload_with_functions(
-    global_functions,
-    route_functions,
-    &Default::default(),
-    &mut Default::default(),
-  )? {
-    bail!("{label} cannot read request, response, or stream body bytes");
+  let expression =
+    match expression.analyze_for_mitigation_field(phase, global_functions, route_functions) {
+      Ok(expression) => expression,
+      Err(error) if format!("{error:#}").contains(MITIGATION_PAYLOAD_ERROR) => {
+        bail!("{label} {MITIGATION_PAYLOAD_ERROR}");
+      }
+      Err(error) => return Err(error).with_context(|| format!("invalid {label}")),
+    };
+  if references_mitigation_payload(expression.verified_root()?, &HashMap::new()) {
+    bail!("{label} {MITIGATION_PAYLOAD_ERROR}");
   }
   Ok(())
 }
@@ -70,55 +70,15 @@ enum MitigationObjectOrigin {
   StreamPayload,
 }
 
-trait MitigationExpressionExt {
-  fn references_mitigation_payload_with_functions(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<bool>;
-
-  fn mitigation_object_origin(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<Option<MitigationObjectOrigin>>;
-
-  fn function_call_locals<'a>(
-    function_params: &'a [String],
-    args: &'a [Expr],
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<HashMap<&'a str, MitigationObjectOrigin>>;
-}
-
-impl MitigationExpressionExt for Expr {
-  fn references_mitigation_payload_with_functions(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<bool> {
-    match self {
-      Self::Member(receiver, field) => {
-        if receiver.references_mitigation_payload_with_functions(
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )? {
-          return Ok(true);
-        }
-        let receiver_origin =
-          receiver.mitigation_object_origin(global_functions, route_functions, locals, active)?;
-        Ok(matches!(
-          (receiver_origin, field.as_str()),
+fn references_mitigation_payload(
+  expression: &VerifiedExpression,
+  locals: &HashMap<&str, MitigationObjectOrigin>,
+) -> bool {
+  match expression.kind() {
+    VerifiedExprKindRef::Member { receiver, name } => {
+      references_mitigation_payload(receiver, locals)
+        || matches!(
+          (mitigation_object_origin(receiver, locals), name),
           (
             Some(MitigationObjectOrigin::Request | MitigationObjectOrigin::RequestHttp),
             "Body",
@@ -126,179 +86,102 @@ impl MitigationExpressionExt for Expr {
             Some(MitigationObjectOrigin::Response | MitigationObjectOrigin::ResponseHttp),
             "Body",
           ) | (Some(MitigationObjectOrigin::Stream), "Payload")
-        ))
-      }
-      Self::Call(receiver, _, args) => {
-        if receiver.references_mitigation_payload_with_functions(
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )? {
-          return Ok(true);
-        }
-        for arg in args {
-          if arg.references_mitigation_payload_with_functions(
-            global_functions,
-            route_functions,
-            locals,
-            active,
-          )? {
-            return Ok(true);
-          }
-        }
-        Ok(false)
-      }
-      Self::FunctionCall(name, args) => {
-        for arg in args {
-          if arg.references_mitigation_payload_with_functions(
-            global_functions,
-            route_functions,
-            locals,
-            active,
-          )? {
-            return Ok(true);
-          }
-        }
-        let Some(function) = resolve_function(name, global_functions, route_functions) else {
-          return Ok(false);
-        };
-        validate_function_arity(function, args.len())?;
-        let body_locals = Self::function_call_locals(
-          &function.params,
-          args,
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )?;
-        let key = FunctionKey::from(function);
-        if !active.insert(key.clone()) {
-          return Ok(false);
-        }
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        let result = function
-          .expression
-          .references_mitigation_payload_with_functions(
-            global_functions,
-            body_route_functions,
-            &body_locals,
-            active,
-          );
-        active.remove(&key);
-        result
-      }
-      Self::UnaryNot(expr) => expr.references_mitigation_payload_with_functions(
-        global_functions,
-        route_functions,
-        locals,
-        active,
-      ),
-      Self::Binary(left, _, right) => Ok(
-        left.references_mitigation_payload_with_functions(
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )? || right.references_mitigation_payload_with_functions(
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )?,
-      ),
-      Self::Bool(_) | Self::Null | Self::Int(_) | Self::String(_) | Self::Ident(_) => Ok(false),
+        )
     }
+    VerifiedExprKindRef::ExpressionFunctionCall {
+      params, args, body, ..
+    } => {
+      if args
+        .iter()
+        .any(|arg| references_mitigation_payload(arg, locals))
+      {
+        return true;
+      }
+      let body_locals = function_body_locals(params, args, locals);
+      references_mitigation_payload(body, &body_locals)
+    }
+    VerifiedExprKindRef::FunctionCall { args, .. } | VerifiedExprKindRef::Array(args) => args
+      .iter()
+      .any(|arg| references_mitigation_payload(arg, locals)),
+    VerifiedExprKindRef::MethodCall { receiver, args, .. } => {
+      references_mitigation_payload(receiver, locals)
+        || args
+          .iter()
+          .any(|arg| references_mitigation_payload(arg, locals))
+    }
+    VerifiedExprKindRef::Unary { expr, .. } => references_mitigation_payload(expr, locals),
+    VerifiedExprKindRef::Binary { left, right, .. } => {
+      references_mitigation_payload(left, locals) || references_mitigation_payload(right, locals)
+    }
+    VerifiedExprKindRef::Null
+    | VerifiedExprKindRef::Bool(_)
+    | VerifiedExprKindRef::Int(_)
+    | VerifiedExprKindRef::Float(_)
+    | VerifiedExprKindRef::String(_)
+    | VerifiedExprKindRef::Identifier(_) => false,
   }
+}
 
-  fn mitigation_object_origin(
-    &self,
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<Option<MitigationObjectOrigin>> {
-    match self {
-      Self::Ident(name) => Ok(match name.as_str() {
-        "Request" => Some(MitigationObjectOrigin::Request),
-        "Response" => Some(MitigationObjectOrigin::Response),
-        "Stream" => Some(MitigationObjectOrigin::Stream),
-        _ => locals.get(name.as_str()).copied(),
-      }),
-      Self::Member(receiver, field) => match (
-        receiver.mitigation_object_origin(global_functions, route_functions, locals, active)?,
-        field.as_str(),
-      ) {
+fn mitigation_object_origin(
+  expression: &VerifiedExpression,
+  locals: &HashMap<&str, MitigationObjectOrigin>,
+) -> Option<MitigationObjectOrigin> {
+  match expression.kind() {
+    VerifiedExprKindRef::Identifier(name) => match name {
+      "Request" => Some(MitigationObjectOrigin::Request),
+      "Response" => Some(MitigationObjectOrigin::Response),
+      "Stream" => Some(MitigationObjectOrigin::Stream),
+      _ => locals.get(name).copied(),
+    },
+    VerifiedExprKindRef::Member { receiver, name } => {
+      match (mitigation_object_origin(receiver, locals), name) {
         (Some(MitigationObjectOrigin::Request), "Http") => {
-          Ok(Some(MitigationObjectOrigin::RequestHttp))
+          Some(MitigationObjectOrigin::RequestHttp)
         }
         (Some(MitigationObjectOrigin::Request | MitigationObjectOrigin::RequestHttp), "Body") => {
-          Ok(Some(MitigationObjectOrigin::RequestBody))
+          Some(MitigationObjectOrigin::RequestBody)
         }
         (Some(MitigationObjectOrigin::Response), "Http") => {
-          Ok(Some(MitigationObjectOrigin::ResponseHttp))
+          Some(MitigationObjectOrigin::ResponseHttp)
         }
         (Some(MitigationObjectOrigin::Response | MitigationObjectOrigin::ResponseHttp), "Body") => {
-          Ok(Some(MitigationObjectOrigin::ResponseBody))
+          Some(MitigationObjectOrigin::ResponseBody)
         }
         (Some(MitigationObjectOrigin::Stream), "Payload") => {
-          Ok(Some(MitigationObjectOrigin::StreamPayload))
+          Some(MitigationObjectOrigin::StreamPayload)
         }
-        _ => Ok(None),
-      },
-      Self::FunctionCall(name, args) => {
-        let Some(function) = resolve_function(name, global_functions, route_functions) else {
-          return Ok(None);
-        };
-        validate_function_arity(function, args.len())?;
-        let body_locals = Self::function_call_locals(
-          &function.params,
-          args,
-          global_functions,
-          route_functions,
-          locals,
-          active,
-        )?;
-        let key = FunctionKey::from(function);
-        if !active.insert(key.clone()) {
-          return Ok(None);
-        }
-        let body_route_functions = function_body_route_functions(function, route_functions);
-        let result = function.expression.mitigation_object_origin(
-          global_functions,
-          body_route_functions,
-          &body_locals,
-          active,
-        );
-        active.remove(&key);
-        result
+        _ => None,
       }
-      Self::Bool(_)
-      | Self::Null
-      | Self::Int(_)
-      | Self::String(_)
-      | Self::Call(_, _, _)
-      | Self::UnaryNot(_)
-      | Self::Binary(_, _, _) => Ok(None),
     }
+    VerifiedExprKindRef::ExpressionFunctionCall {
+      params, args, body, ..
+    } => {
+      let body_locals = function_body_locals(params, args, locals);
+      mitigation_object_origin(body, &body_locals)
+    }
+    VerifiedExprKindRef::Null
+    | VerifiedExprKindRef::Bool(_)
+    | VerifiedExprKindRef::Int(_)
+    | VerifiedExprKindRef::Float(_)
+    | VerifiedExprKindRef::String(_)
+    | VerifiedExprKindRef::Array(_)
+    | VerifiedExprKindRef::FunctionCall { .. }
+    | VerifiedExprKindRef::MethodCall { .. }
+    | VerifiedExprKindRef::Unary { .. }
+    | VerifiedExprKindRef::Binary { .. } => None,
   }
+}
 
-  fn function_call_locals<'a>(
-    function_params: &'a [String],
-    args: &'a [Expr],
-    global_functions: &FunctionMap,
-    route_functions: Option<&FunctionMap>,
-    locals: &HashMap<&str, MitigationObjectOrigin>,
-    active: &mut HashSet<FunctionKey>,
-  ) -> anyhow::Result<HashMap<&'a str, MitigationObjectOrigin>> {
-    let mut body_locals = HashMap::new();
-    for (param, arg) in function_params.iter().zip(args.iter()) {
-      if let Some(origin) =
-        arg.mitigation_object_origin(global_functions, route_functions, locals, active)?
-      {
-        body_locals.insert(param.as_str(), origin);
-      }
-    }
-    Ok(body_locals)
-  }
+fn function_body_locals<'a>(
+  params: &'a [String],
+  args: &'a [VerifiedExpression],
+  locals: &HashMap<&str, MitigationObjectOrigin>,
+) -> HashMap<&'a str, MitigationObjectOrigin> {
+  params
+    .iter()
+    .zip(args.iter())
+    .filter_map(|(param, arg)| {
+      mitigation_object_origin(arg, locals).map(|origin| (param.as_str(), origin))
+    })
+    .collect()
 }
