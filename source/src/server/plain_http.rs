@@ -20,7 +20,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
 
-use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode, StaticFilesSendfileMode};
+use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode};
 use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http;
@@ -46,7 +46,10 @@ use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read
 use self::plain_io::PlainHttpIo;
 use self::response_head::response_head_bytes;
 use self::static_access_log::{StaticFastPathContext, emit_system_access_log};
-use self::static_helpers::{static_body_source_label, static_fast_path_request_has_body};
+use self::static_helpers::{
+  compiled_static_hot_object_response, sendfile_disabled_reason, static_body_source_label,
+  static_fast_path_request_has_body,
+};
 const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 struct TimedStaticResponsePlan {
@@ -316,38 +319,6 @@ async fn try_sendfile_fast_path_inner(
   }
 }
 
-fn sendfile_disabled_reason(
-  snapshot: &AppSnapshot,
-  kernel_sendfile_available: bool,
-) -> Option<&'static str> {
-  let config = &snapshot.config;
-  if config.listeners.http_mode != HttpListenerMode::Proxy {
-    return Some("plain listener is not proxy mode");
-  }
-  if config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto {
-    return Some("proxy.static_files.sendfile is not auto");
-  }
-  if !snapshot.route_table.has_static_sendfile_candidates() {
-    return Some("no static sendfile routes are configured");
-  }
-  if !kernel_sendfile_available {
-    return Some("Linux kernel sendfile is not available");
-  }
-  if snapshot.request_path_features.rate_limits {
-    return Some("rate limits are configured");
-  }
-  if snapshot.request_path_features.dynamic_policy {
-    return Some("dynamic policy is enabled");
-  }
-  if snapshot.request_path_features.compression {
-    return Some("compression is enabled");
-  }
-  if config.limits.connection_limit_identity != ConnectionLimitIdentityMode::ProxyProtocol {
-    return Some("Real-IP connection limit identity requires general path");
-  }
-  None
-}
-
 async fn eligible_static_plan(
   request: &ParsedPlainRequest,
   snapshot: &AppSnapshot,
@@ -431,7 +402,12 @@ async fn eligible_static_plan(
   {
     return None;
   }
-  let response_send_timeout = static_files::static_response_send_timeout(snapshot, resolved.route);
+  let compiled_static_response =
+    compiled_static_hot_object_response(&request, request_path, snapshot, &resolved);
+  let response_send_timeout = compiled_static_response.as_ref().map_or_else(
+    || static_files::static_response_send_timeout(snapshot, resolved.route),
+    |(_, timeout)| *timeout,
+  );
   let access_log_needed = snapshot.request_path_features.system_access_log
     || resolved.execution_plan.waf.request.enabled()
     || resolved.execution_plan.waf.response.enabled();
@@ -449,17 +425,22 @@ async fn eligible_static_plan(
   if let Some(access_log) = access_log.as_mut() {
     access_log.client_addr = client_addr;
   }
-  let mut plan = static_files::plan_response(
-    &request.method,
-    &request.headers,
-    request_path,
-    &resolved.route.name,
-    resolved.route.effective_path_prefix(),
-    static_root,
-    &resolved.route.static_files,
-    &snapshot.static_files,
-  )
-  .await;
+  let mut plan = match compiled_static_response {
+    Some((plan, _)) => plan,
+    None => {
+      static_files::plan_response(
+        &request.method,
+        &request.headers,
+        request_path,
+        &resolved.route.name,
+        resolved.route.effective_path_prefix(),
+        static_root,
+        &resolved.route.static_files,
+        &snapshot.static_files,
+      )
+      .await
+    }
+  };
   if !matches!(
     &plan.body,
     StaticBodyPlan::Empty | StaticBodyPlan::Bytes { .. } | StaticBodyPlan::File(_)

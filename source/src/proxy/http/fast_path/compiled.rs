@@ -1,7 +1,9 @@
 //! Reload-time fast-path action compilation.
 //! Stable route and upstream facts live here so request handling only checks dynamic guards.
 
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::uri::PathAndQuery;
 use http::{Method, Request, Uri};
@@ -9,7 +11,7 @@ use hyper::body::Body;
 
 use crate::config::{
   Config, ForwardedHeaderMode, HttpVersion, PriorityMode, ProxyProtocolEgressMode, RouteConfig,
-  UpstreamConfig,
+  RouteStaticFilesConfig, StaticFilesSendfileMode, UpstreamConfig,
 };
 use crate::proxy::http::uri::{self, UpstreamUriParts};
 use crate::proxy::http::version::select_upstream_http_version;
@@ -22,7 +24,6 @@ pub(crate) struct CompiledRouteFastPathActions {
   h1: Option<CompiledFastPathAction>,
   h2: Option<CompiledFastPathAction>,
   h3: Option<CompiledFastPathAction>,
-  #[allow(dead_code)]
   static_hot_bytes: Option<CompiledFastPathAction>,
 }
 
@@ -31,7 +32,6 @@ pub(crate) enum CompiledFastPathAction {
   ProxyH1DownstreamToH1Upstream(CompiledProxyAction),
   ProxyH2DownstreamToH1Upstream(CompiledProxyAction),
   ProxyH3DownstreamToH1Upstream(CompiledProxyAction),
-  #[allow(dead_code)]
   StaticHotBytes(CompiledStaticAction),
 }
 
@@ -50,11 +50,13 @@ pub(crate) struct CompiledProxyAction {
   pub(super) response_waf_enabled: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct CompiledStaticAction {
   route_name: Arc<str>,
   path_prefix: Arc<str>,
+  static_root: Arc<std::path::PathBuf>,
+  static_options: Arc<RouteStaticFilesConfig>,
+  response_send_timeout: Duration,
 }
 
 pub(super) struct SelectedCompiledProxyAction<'a> {
@@ -91,12 +93,33 @@ impl CompiledRouteFastPathActions {
     }
   }
 
-  #[cfg(test)]
-  fn static_hot_bytes(&self) -> Option<&CompiledStaticAction> {
+  pub(crate) fn static_hot_bytes(&self) -> Option<&CompiledStaticAction> {
     match self.static_hot_bytes.as_ref()? {
       CompiledFastPathAction::StaticHotBytes(action) => Some(action),
       _ => None,
     }
+  }
+}
+
+impl CompiledStaticAction {
+  pub(crate) fn route_name(&self) -> &str {
+    &self.route_name
+  }
+
+  pub(crate) fn path_prefix(&self) -> &str {
+    &self.path_prefix
+  }
+
+  pub(crate) fn static_root(&self) -> &Path {
+    self.static_root.as_path()
+  }
+
+  pub(crate) fn static_options(&self) -> &RouteStaticFilesConfig {
+    &self.static_options
+  }
+
+  pub(crate) fn response_send_timeout(&self) -> Duration {
+    self.response_send_timeout
   }
 }
 
@@ -218,10 +241,8 @@ fn compile_route_actions(
     upstreams,
     upstream_uri_parts_by_index,
   );
-  let static_hot_bytes = plan
-    .fast_path
-    .static_small_object
-    .then(|| CompiledFastPathAction::StaticHotBytes(compile_static_action(route)));
+  let static_hot_bytes =
+    compile_static_action(config, route, plan).map(CompiledFastPathAction::StaticHotBytes);
   CompiledRouteFastPathActions {
     h1: proxy.as_ref().and_then(|action| {
       plan
@@ -306,11 +327,42 @@ fn compile_proxy_action(
   })
 }
 
-fn compile_static_action(route: &RouteConfig) -> CompiledStaticAction {
-  CompiledStaticAction {
+fn compile_static_action(
+  config: &Config,
+  route: &RouteConfig,
+  plan: &RouteExecutionPlan,
+) -> Option<CompiledStaticAction> {
+  if !plan.fast_path.static_small_object
+    || config.proxy.static_files.sendfile != StaticFilesSendfileMode::Auto
+    || !config.rate_limits.is_empty()
+    || config.dynamic_policy.enabled
+    || config.compression.enabled
+    || route.external_auth.is_some()
+    || !static_hot_object_cache_enabled(config)
+    || route.static_files.has_convenience_options()
+  {
+    return None;
+  }
+  Some(CompiledStaticAction {
     route_name: Arc::from(route.name.as_str()),
     path_prefix: Arc::from(route.effective_path_prefix()),
-  }
+    static_root: Arc::new(route.static_root.clone()?),
+    static_options: Arc::new(route.static_files.clone()),
+    response_send_timeout: Duration::from_millis(
+      route
+        .timeouts
+        .response_send_timeout_ms
+        .unwrap_or(config.limits.response_send_timeout_ms),
+    ),
+  })
+}
+
+fn static_hot_object_cache_enabled(config: &Config) -> bool {
+  let static_files = config.proxy.static_files;
+  static_files.open_file_cache_max_entries > 0
+    && static_files.open_file_cache_ttl_ms > 0
+    && static_files.hot_object_cache_max_bytes > 0
+    && static_files.hot_object_cache_max_file_bytes > 0
 }
 
 #[cfg(test)]
@@ -452,7 +504,16 @@ origin = "http://pool.internal.example"
           "path_prefix = \"/assets\"\nstatic_root = \"{}\"",
           root.display()
         ),
-      );
+      )
+      + r#"
+
+[proxy.static_files]
+sendfile = "auto"
+open_file_cache_max_entries = 8
+open_file_cache_ttl_ms = 1000
+hot_object_cache_max_bytes = 65536
+hot_object_cache_max_file_bytes = 65536
+"#;
     let config = parse_config(&raw);
     let route_name = config.routes[0].name.clone();
     let actions = compiled(&config);
@@ -462,5 +523,46 @@ origin = "http://pool.internal.example"
 
     assert_eq!(static_action.route_name.as_ref(), route_name);
     assert_eq!(static_action.path_prefix.as_ref(), "/assets");
+  }
+
+  #[test]
+  fn disables_static_hot_bytes_without_hot_object_cache_or_for_convenience_options() {
+    let temp_dir = common::TempDir::new("compiled-fast-path-static-disabled");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "compiled-fast-path-static-disabled");
+    let root = temp_dir.path().join("public");
+    std::fs::create_dir_all(&root).expect("static root should exist");
+    let static_raw = common::minimal_config_toml(&cert_path, &key_path)
+      .replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      )
+      .replace(
+        "path_prefix = \"/\"\nupstream = \"app\"",
+        &format!(
+          "path_prefix = \"/assets\"\nstatic_root = \"{}\"",
+          root.display()
+        ),
+      );
+    let without_cache = compiled(&parse_config(&static_raw));
+    assert!(without_cache.static_hot_bytes().is_none());
+
+    let with_convenience = compiled(&parse_config(&format!(
+      "{}{}",
+      static_raw,
+      r#"
+
+[proxy.static_files]
+sendfile = "auto"
+open_file_cache_max_entries = 8
+open_file_cache_ttl_ms = 1000
+hot_object_cache_max_bytes = 65536
+hot_object_cache_max_file_bytes = 65536
+
+[routes.static_files]
+cache_control = "public, max-age=60"
+"#
+    )));
+    assert!(with_convenience.static_hot_bytes().is_none());
   }
 }

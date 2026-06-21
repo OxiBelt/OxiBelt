@@ -131,7 +131,7 @@ pub(crate) async fn response_from_plan(
   response
 }
 
-pub(super) fn cached_object_plan(
+pub(in crate::proxy::http::static_files) fn cached_object_plan(
   method: &Method,
   headers: &HeaderMap,
   cached: Arc<CachedStaticObject>,

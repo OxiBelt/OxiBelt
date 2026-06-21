@@ -72,7 +72,7 @@ pub(super) async fn select_precompressed_file(
   Ok((opened, None))
 }
 
-pub(super) fn response_metadata_for_path(
+pub(in crate::proxy::http::static_files) fn response_metadata_for_path(
   method: &Method,
   headers: &HeaderMap,
   logical_path: &Path,

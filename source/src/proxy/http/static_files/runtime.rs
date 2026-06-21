@@ -69,6 +69,7 @@ impl StaticFilesRuntime {
       .unwrap_or_else(|| StaticRootHandle::uncached(root))
   }
 
+  #[cfg(test)]
   pub(crate) fn cached_object(
     &self,
     root: &Path,
@@ -76,6 +77,15 @@ impl StaticFilesRuntime {
     response_metadata: &StaticResponseMetadata,
   ) -> Option<Arc<CachedStaticObject>> {
     self.hot_objects.get(root, path, response_metadata)
+  }
+
+  pub(crate) fn cached_object_lookup(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+  ) -> Option<CachedStaticObjectLookup> {
+    self.hot_objects.lookup(root, path, response_metadata)
   }
 
   pub(crate) fn refresh_cached_object(
@@ -227,6 +237,11 @@ pub(crate) struct CachedStaticObject {
   pub(crate) body: Bytes,
 }
 
+pub(crate) enum CachedStaticObjectLookup {
+  Fresh(Arc<CachedStaticObject>),
+  Expired(Arc<CachedStaticObject>),
+}
+
 #[derive(Debug)]
 struct StaticHotObjectCache {
   ttl: Duration,
@@ -278,12 +293,25 @@ impl StaticHotObjectCache {
         .is_some_and(|len| len <= self.max_file_bytes && len <= self.max_bytes)
   }
 
+  #[cfg(test)]
   fn get(
     &self,
     root: &Path,
     path: &Path,
     response_metadata: &StaticResponseMetadata,
   ) -> Option<Arc<CachedStaticObject>> {
+    match self.lookup(root, path, response_metadata)? {
+      CachedStaticObjectLookup::Fresh(object) => Some(object),
+      CachedStaticObjectLookup::Expired(_) => None,
+    }
+  }
+
+  fn lookup(
+    &self,
+    root: &Path,
+    path: &Path,
+    response_metadata: &StaticResponseMetadata,
+  ) -> Option<CachedStaticObjectLookup> {
     if !self.enabled() {
       return None;
     }
@@ -293,15 +321,14 @@ impl StaticHotObjectCache {
       response_metadata: response_metadata.clone(),
     };
     let now = Instant::now();
-    {
-      let inner = self.inner.read().expect("static file cache lock poisoned");
-      let entry = inner.entries.get(&key)?;
-      if entry.expires_at > now {
-        return Some(Arc::clone(&entry.object));
-      }
+    let inner = self.inner.read().expect("static file cache lock poisoned");
+    let entry = inner.entries.get(&key)?;
+    let object = Arc::clone(&entry.object);
+    if entry.expires_at > now {
+      Some(CachedStaticObjectLookup::Fresh(object))
+    } else {
+      Some(CachedStaticObjectLookup::Expired(object))
     }
-
-    None
   }
 
   fn refresh_if_current(
