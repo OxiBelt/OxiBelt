@@ -5064,6 +5064,8 @@ pub struct UpstreamConfig {
   pub send_timeout_ms: u64,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub idle_timeout_ms: u64,
+  #[serde(skip, default = "default_pool_keepalive_max_lifetime_ms")]
+  pub max_lifetime_ms: u64,
   #[serde(default = "default_upstream_pool_max_idle_per_host")]
   pub pool_max_idle_per_host: usize,
   #[serde(default)]

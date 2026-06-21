@@ -1,4 +1,8 @@
+use http::{Request, Response};
+use hyper::body::Incoming;
+
 use crate::config::HttpVersion;
+use crate::proxy::http::body::ProxyBody;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectFastPathTransport {
@@ -18,6 +22,11 @@ pub(super) fn direct_fast_path_transport(
     HttpVersion::H2 => Some(DirectFastPathTransport::H2),
     HttpVersion::H3 => None,
   }
+}
+
+pub(super) enum DirectTransportAttempt {
+  Sent(anyhow::Result<Response<Incoming>>),
+  Fallback(Request<ProxyBody>),
 }
 
 #[cfg(test)]

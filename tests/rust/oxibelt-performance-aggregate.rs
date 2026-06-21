@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 21;
+const COMPARISON_SCHEMA_VERSION: u32 = 22;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -211,6 +211,7 @@ struct BenchmarkRow {
   fast_path_transport_direct_h2_h2: Option<FastPathSample>,
   fast_path_transport_direct_h2_h3: Option<FastPathSample>,
   direct_h1_pool_events: Option<BTreeMap<String, u64>>,
+  direct_h2_pool_events: Option<BTreeMap<String, u64>>,
   static_fast_path_responses: Option<BTreeMap<String, BTreeMap<String, u64>>>,
   fast_path_stage_timing: Option<FastPathStageTimingSamples>,
 }
@@ -289,6 +290,7 @@ struct AggregateBuilder {
   fast_path_transport_direct_h2_h2: FastPathAggregateBuilder,
   fast_path_transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool_events: CounterMapAggregateBuilder,
+  direct_h2_pool_events: CounterMapAggregateBuilder,
   static_fast_path_responses: NestedCounterMapAggregateBuilder,
   fast_path_stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -304,6 +306,7 @@ struct AggregateFastPathInput {
   transport_direct_h2_h2: FastPathAggregateBuilder,
   transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool: CounterMapAggregateBuilder,
+  direct_h2_pool: CounterMapAggregateBuilder,
   static_responses: NestedCounterMapAggregateBuilder,
   stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -431,6 +434,8 @@ struct AggregateFastPathStats {
   transport_direct_h2_h3: Option<FastPathAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   direct_h1_pool: Option<CounterMapAggregateStats>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  direct_h2_pool: Option<CounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   static_responses: Option<NestedCounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1154,6 +1159,9 @@ impl AggregateBuilder {
     if let Some(events) = row.direct_h1_pool_events {
       self.direct_h1_pool_events.push(events);
     }
+    if let Some(events) = row.direct_h2_pool_events {
+      self.direct_h2_pool_events.push(events);
+    }
     if let Some(responses) = row.static_fast_path_responses {
       self.static_fast_path_responses.push(responses);
     }
@@ -1185,6 +1193,7 @@ impl AggregateBuilder {
       transport_direct_h2_h2: self.fast_path_transport_direct_h2_h2,
       transport_direct_h2_h3: self.fast_path_transport_direct_h2_h3,
       direct_h1_pool: self.direct_h1_pool_events,
+      direct_h2_pool: self.direct_h2_pool_events,
       static_responses: self.static_fast_path_responses,
       stage_timing: self.fast_path_stage_timing,
     });
@@ -1233,6 +1242,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
   let transport_direct_h2_h2 = input.transport_direct_h2_h2.finish();
   let transport_direct_h2_h3 = input.transport_direct_h2_h3.finish();
   let direct_h1_pool = input.direct_h1_pool.finish();
+  let direct_h2_pool = input.direct_h2_pool.finish();
   let static_responses = input.static_responses.finish();
   let stage_timing = input.stage_timing.finish();
   if plain_proxy_h1.is_none()
@@ -1245,6 +1255,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     && transport_direct_h2_h2.is_none()
     && transport_direct_h2_h3.is_none()
     && direct_h1_pool.is_none()
+    && direct_h2_pool.is_none()
     && static_responses.is_none()
     && stage_timing.is_none()
   {
@@ -1261,6 +1272,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     transport_direct_h2_h2,
     transport_direct_h2_h3,
     direct_h1_pool,
+    direct_h2_pool,
     static_responses,
     stage_timing,
   })
@@ -3275,6 +3287,13 @@ fn parse_result_value(
       label,
       warnings,
     ),
+    direct_h2_pool_events: parse_direct_h2_pool_events(
+      object,
+      source_file,
+      row_index,
+      label,
+      warnings,
+    ),
     static_fast_path_responses: parse_static_fast_path_responses(
       object,
       source_file,
@@ -3557,6 +3576,34 @@ fn parse_direct_h1_pool_events(
                 "{source_file} row {row_index} ({label}): fast_path.pool.direct_h1.{event} is not an unsigned integer"
             )),
         }
+  }
+  Some(parsed)
+}
+
+fn parse_direct_h2_pool_events(
+  object: &serde_json::Map<String, Value>,
+  source_file: &str,
+  row_index: usize,
+  label: &str,
+  warnings: &mut WarningBag,
+) -> Option<BTreeMap<String, u64>> {
+  let events = object
+    .get("fast_path")
+    .and_then(Value::as_object)
+    .and_then(|fast_path| fast_path.get("pool"))
+    .and_then(Value::as_object)
+    .and_then(|pool| pool.get("direct_h2"))
+    .and_then(Value::as_object)?;
+  let mut parsed = BTreeMap::new();
+  for (event, value) in events {
+    match value.as_u64() {
+      Some(count) => {
+        parsed.insert(event.clone(), count);
+      }
+      None => warnings.push(format!(
+        "{source_file} row {row_index} ({label}): fast_path.pool.direct_h2.{event} is not an unsigned integer"
+      )),
+    }
   }
   Some(parsed)
 }
@@ -6980,6 +7027,7 @@ fn render_markdown(report: &Report) -> String {
   write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
+  write_direct_h2_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
   write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
   write_diagnostic_profile_table(&mut markdown, &report.profiling);
@@ -7038,6 +7086,62 @@ fn write_direct_h1_pool_diagnostics_table(markdown: &mut String, report: &Report
       counter_map_value(pool, "drop"),
       counter_map_value(pool, "drop_full"),
       counter_map_value(pool, "drop_locked")
+    )
+    .unwrap();
+  }
+}
+
+fn write_direct_h2_pool_diagnostics_table(markdown: &mut String, report: &Report) {
+  let rows = report
+    .aggregates
+    .iter()
+    .filter(|aggregate| {
+      aggregate.amd64_target_cpu == report.primary_target_cpu
+        && aggregate.comparator == Comparator::Oxibelt.as_str()
+        && matches!(
+          aggregate.scenario.as_str(),
+          "h2-upstream-h2c" | "h2-upstream-h2"
+        )
+    })
+    .filter_map(|aggregate| {
+      aggregate
+        .fast_path
+        .as_ref()
+        .and_then(|fast_path| fast_path.direct_h2_pool.as_ref())
+        .map(|pool| (aggregate.scenario.as_str(), pool))
+    })
+    .collect::<Vec<_>>();
+  if rows.is_empty() {
+    return;
+  }
+
+  writeln!(markdown, "\n## Direct-H2 pool diagnostics\n").unwrap();
+  writeln!(
+    markdown,
+    "| Scenario | Samples | Hit | Miss | Miss % | Miss empty | Miss saturated | Miss locked | Connect | Connect error | Reconnect | Stale | Drop |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  )
+  .unwrap();
+  for (scenario, pool) in rows {
+    let hit = counter_map_value(pool, "hit");
+    let miss = counter_map_value(pool, "miss");
+    writeln!(
+      markdown,
+      "| `{scenario}` | `{}` | `{hit}` | `{miss}` | {} | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+      pool.sample_count,
+      format_pool_miss_percent(hit, miss),
+      counter_map_value(pool, "miss_empty"),
+      counter_map_value(pool, "miss_saturated"),
+      counter_map_value(pool, "miss_locked"),
+      counter_map_value(pool, "connect"),
+      counter_map_value(pool, "connect_error"),
+      counter_map_value(pool, "reconnect"),
+      counter_map_value(pool, "stale"),
+      counter_map_value(pool, "drop")
     )
     .unwrap();
   }
@@ -7831,6 +7935,7 @@ mod tests {
         transport_direct_h2_h2: None,
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
+        direct_h2_pool: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -7846,6 +7951,7 @@ mod tests {
         transport_direct_h2_h2: None,
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
+        direct_h2_pool: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -7861,6 +7967,7 @@ mod tests {
         transport_direct_h2_h2: None,
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
+        direct_h2_pool: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -8109,6 +8216,16 @@ mod tests {
                       "miss_reasons": {"send_error": 5}
                     }
                   }
+                },
+                "pool": {
+                  "direct_h2": {
+                    "hit": 88,
+                    "miss": 12,
+                    "miss_saturated": 3,
+                    "connect": 4,
+                    "reconnect": 1,
+                    "drop": 2
+                  }
                 }
               }
             }]"#,
@@ -8159,6 +8276,17 @@ mod tests {
     assert_eq!(direct_h2.misses, 5);
     assert_eq!(direct_h2.attempts, 100);
     assert_eq!(direct_h2.min_hit_rate, Some(0.95));
+    let pool = h2
+      .direct_h2_pool
+      .as_ref()
+      .expect("direct-H2 pool events should aggregate");
+    assert_eq!(pool.sample_count, 1);
+    assert_eq!(pool.values["hit"], 88);
+    assert_eq!(pool.values["miss"], 12);
+    assert_eq!(pool.values["miss_saturated"], 3);
+    assert_eq!(pool.values["connect"], 4);
+    assert_eq!(pool.values["reconnect"], 1);
+    assert_eq!(pool.values["drop"], 2);
   }
 
   #[test]
@@ -8426,6 +8554,7 @@ mod tests {
       transport_direct_h2_h2: None,
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
+      direct_h2_pool: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -8489,6 +8618,7 @@ mod tests {
       transport_direct_h2_h2: None,
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
+      direct_h2_pool: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -8551,6 +8681,7 @@ mod tests {
       }),
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
+      direct_h2_pool: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -8615,6 +8746,7 @@ mod tests {
       transport_direct_h2_h2: None,
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
+      direct_h2_pool: None,
       static_responses: None,
       stage_timing: None,
     });

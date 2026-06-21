@@ -1605,7 +1605,8 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
           "direct_h2": direct_h2
       },
       "pool": {
-          "direct_h1": direct_h1_pool_metrics_json(metrics)
+          "direct_h1": direct_h1_pool_metrics_json(metrics),
+          "direct_h2": direct_h2_pool_metrics_json(metrics)
       },
       "static_responses": static_fast_path_responses_json(metrics),
       "stage_timing": fast_path_stage_timing_json(metrics)
@@ -1725,6 +1726,20 @@ fn direct_h1_pool_metrics_json(metrics: &str) -> serde_json::Value {
   let mut events = BTreeMap::new();
   for (labels, value) in
     prometheus_labeled_u64_samples(metrics, "oxibelt_http_direct_h1_pool_events_total")
+  {
+    let event = labels
+      .get("event")
+      .cloned()
+      .unwrap_or_else(|| "unknown".to_owned());
+    *events.entry(event).or_insert(0) += value;
+  }
+  serde_json::json!(events)
+}
+
+fn direct_h2_pool_metrics_json(metrics: &str) -> serde_json::Value {
+  let mut events = BTreeMap::new();
+  for (labels, value) in
+    prometheus_labeled_u64_samples(metrics, "oxibelt_http_direct_h2_pool_events_total")
   {
     let event = labels
       .get("event")
@@ -2832,6 +2847,10 @@ oxibelt_http_fast_path_transports_total{transport=\"direct_h2\",protocol=\"h2\",
 oxibelt_http_direct_h1_pool_events_total{event=\"hit\"} 113
 # TYPE oxibelt_http_direct_h1_pool_events_total counter
 oxibelt_http_direct_h1_pool_events_total{event=\"reconnect\"} 2
+# TYPE oxibelt_http_direct_h2_pool_events_total counter
+oxibelt_http_direct_h2_pool_events_total{event=\"hit\"} 31
+# TYPE oxibelt_http_direct_h2_pool_events_total counter
+oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 5
 # TYPE oxibelt_http_static_fast_path_responses_total counter
 oxibelt_http_static_fast_path_responses_total{source=\"hot_object\",outcome=\"served\"} 41
 # TYPE oxibelt_http_static_fast_path_responses_total counter
@@ -2869,6 +2888,8 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\
     assert_eq!(parsed["transport"]["direct_h2"]["h2"]["hits"], 31);
     assert_eq!(parsed["pool"]["direct_h1"]["hit"], 113);
     assert_eq!(parsed["pool"]["direct_h1"]["reconnect"], 2);
+    assert_eq!(parsed["pool"]["direct_h2"]["hit"], 31);
+    assert_eq!(parsed["pool"]["direct_h2"]["miss_saturated"], 5);
     assert_eq!(parsed["static_responses"]["hot_object"]["served"], 41);
     assert_eq!(parsed["static_responses"]["sendfile"]["fallback"], 3);
     assert_eq!(

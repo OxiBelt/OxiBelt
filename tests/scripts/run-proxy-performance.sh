@@ -1975,7 +1975,7 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta direct_h2_pool_before direct_h2_pool_after direct_h2_pool_delta stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
@@ -1987,6 +1987,9 @@ run_load() {
     direct_h1_before="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-before" "${fast_path_protocol}")"
     direct_h2_before="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-before" "${fast_path_protocol}")"
     direct_h1_pool_before="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-before")"
+    if [[ "${direct_transport}" == "direct_h2" ]]; then
+      direct_h2_pool_before="$(direct_h2_pool_metrics "${host}" "${label}-direct-h2-pool-before")"
+    fi
     stage_timing_before="$(fast_path_stage_timing_metrics "${host}" "${label}-stage-timing-before")"
   fi
   if static_fast_path_gate_label "${label}" "${protocol}" "${host}"; then
@@ -2033,15 +2036,24 @@ run_load() {
     direct_h1_after="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-after" "${fast_path_protocol}")"
     direct_h2_after="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-after" "${fast_path_protocol}")"
     direct_h1_pool_after="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-after")"
+    if [[ "${direct_transport}" == "direct_h2" ]]; then
+      direct_h2_pool_after="$(direct_h2_pool_metrics "${host}" "${label}-direct-h2-pool-after")"
+    fi
     stage_timing_after="$(fast_path_stage_timing_metrics "${host}" "${label}-stage-timing-after")"
     fast_path_delta="$(plain_proxy_fast_path_delta "${fast_path_before}" "${fast_path_after}")"
     request_body_delta="$(counter_map_delta "${request_body_before}" "${request_body_after}")"
     direct_h1_delta="$(direct_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
     direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
+    if [[ "${direct_transport}" == "direct_h2" ]]; then
+      direct_h2_pool_delta="$(counter_map_delta "${direct_h2_pool_before}" "${direct_h2_pool_after}")"
+    fi
     stage_timing_delta_json="$(stage_timing_delta "${stage_timing_before}" "${stage_timing_after}")"
     assert_direct_h1_request_build_stage "${label}" "${fast_path_protocol}" "${stage_timing_delta_json}"
     json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
+    if [[ "${direct_transport}" == "direct_h2" ]]; then
+      json="$(jq -c --argjson direct_h2_pool "${direct_h2_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h2: $direct_h2_pool})})}' <<<"${json}")"
+    fi
     json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
     assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
     case "${direct_transport}" in
@@ -2312,6 +2324,25 @@ direct_h1_pool_metrics() {
       --authority ops.test \
       --path /metrics)"; then
       jq -c '.fast_path.pool.direct_h1 // {}' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+direct_h2_pool_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.fast_path.pool.direct_h2 // {}' <<<"${json}"
       return 0
     fi
     sleep 1

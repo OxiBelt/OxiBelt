@@ -59,6 +59,18 @@ const DIRECT_H1_POOL_EVENTS: [&str; 9] = [
   "drop_full",
   "drop_locked",
 ];
+const DIRECT_H2_POOL_EVENTS: [&str; 10] = [
+  "hit",
+  "miss",
+  "miss_empty",
+  "miss_saturated",
+  "miss_locked",
+  "connect",
+  "connect_error",
+  "reconnect",
+  "stale",
+  "drop",
+];
 const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", "text"];
 const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
 const STATIC_FAST_PATH_COUNTER_COUNT: usize =
@@ -71,6 +83,7 @@ pub(super) struct FastPathMetrics {
   request_body_counters: [StripedCounter; REQUEST_BODY_COUNTER_COUNT],
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
+  direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
   static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
   stage: stage::FastPathStageMetrics,
 }
@@ -83,6 +96,7 @@ impl Default for FastPathMetrics {
       request_body_counters: std::array::from_fn(|_| StripedCounter::default()),
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
+      direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
       stage: stage::FastPathStageMetrics::default(),
     }
@@ -165,6 +179,13 @@ impl FastPathMetrics {
       return;
     };
     self.direct_h1_pool_counters[index].increment();
+  }
+
+  pub(super) fn record_direct_h2_pool_event(&self, event: &str) {
+    let Some(index) = direct_h2_pool_event_index(event) else {
+      return;
+    };
+    self.direct_h2_pool_counters[index].increment();
   }
 
   pub(super) fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
@@ -273,6 +294,15 @@ impl FastPathMetrics {
         .load(),
       );
     }
+    for event in DIRECT_H2_POOL_EVENTS {
+      append_direct_h2_pool_counter(
+        output,
+        event,
+        self.direct_h2_pool_counters
+          [direct_h2_pool_event_index(event).expect("pool event counter exists")]
+        .load(),
+      );
+    }
     for source in STATIC_FAST_PATH_SOURCES {
       for outcome in STATIC_FAST_PATH_OUTCOMES {
         append_static_fast_path_counter(
@@ -376,6 +406,12 @@ fn direct_h1_pool_event_index(event: &str) -> Option<usize> {
     .position(|candidate| *candidate == event)
 }
 
+fn direct_h2_pool_event_index(event: &str) -> Option<usize> {
+  DIRECT_H2_POOL_EVENTS
+    .iter()
+    .position(|candidate| *candidate == event)
+}
+
 fn static_fast_path_counter_index(source: &str, outcome: &str) -> Option<usize> {
   let source_index = STATIC_FAST_PATH_SOURCES
     .iter()
@@ -462,6 +498,15 @@ fn append_request_body_counter(output: &mut String, protocol: &str, outcome: &st
 fn append_direct_h1_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("# TYPE oxibelt_http_direct_h1_pool_events_total counter\n");
   output.push_str("oxibelt_http_direct_h1_pool_events_total{event=\"");
+  output.push_str(event);
+  output.push_str("\"} ");
+  output.push_str(&value.to_string());
+  output.push('\n');
+}
+
+fn append_direct_h2_pool_counter(output: &mut String, event: &str, value: u64) {
+  output.push_str("# TYPE oxibelt_http_direct_h2_pool_events_total counter\n");
+  output.push_str("oxibelt_http_direct_h2_pool_events_total{event=\"");
   output.push_str(event);
   output.push_str("\"} ");
   output.push_str(&value.to_string());
@@ -624,6 +669,28 @@ mod tests {
     );
     assert_eq!(
       metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_full").unwrap()].load(),
+      1
+    );
+  }
+
+  #[test]
+  fn records_only_known_direct_h2_pool_events() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_direct_h2_pool_event("hit");
+    metrics.record_direct_h2_pool_event("miss_saturated");
+    metrics.record_direct_h2_pool_event("connect");
+    metrics.record_direct_h2_pool_event("unknown");
+
+    assert_eq!(
+      metrics.direct_h2_pool_counters[direct_h2_pool_event_index("hit").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h2_pool_counters[direct_h2_pool_event_index("miss_saturated").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h2_pool_counters[direct_h2_pool_event_index("connect").unwrap()].load(),
       1
     );
   }

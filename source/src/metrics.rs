@@ -197,6 +197,10 @@ impl Metrics {
     self.fast_path.record_direct_h1_pool_event(event);
   }
 
+  pub fn record_direct_h2_pool_event(&self, event: &str) {
+    self.fast_path.record_direct_h2_pool_event(event);
+  }
+
   pub fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
     self
       .fast_path

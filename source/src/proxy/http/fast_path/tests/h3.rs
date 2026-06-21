@@ -1,7 +1,6 @@
 use http::Request;
 
-use super::super::PlainProxyFastPath;
-use super::{PanicBody, common, parse_config, resolved_route};
+use super::{PanicBody, common, parse_config, plain_proxy_fast_path_eligible, resolved_route};
 use crate::state::AppSnapshot;
 
 #[tokio::test]
@@ -24,7 +23,7 @@ async fn plain_request_is_fast_path_eligible_when_optional_features_are_off() {
     .expect("request should build");
 
   assert!(resolved.execution_plan.fast_path.plain_proxy_h3);
-  assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
+  assert!(plain_proxy_fast_path_eligible(&request, &state, &resolved));
 }
 
 #[tokio::test]
@@ -69,5 +68,5 @@ status = 403
     crate::routes::WafExecutionPlan::PrefixBody
   );
   assert!(!resolved.execution_plan.fast_path.plain_proxy_h3);
-  assert!(!PlainProxyFastPath::eligible(&request, &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(&request, &state, &resolved));
 }

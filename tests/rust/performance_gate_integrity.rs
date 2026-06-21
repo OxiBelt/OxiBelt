@@ -2650,6 +2650,12 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
       && script.contains("direct_h2"),
     "split H2 upstream rows should gate direct-H2 transport evidence"
   );
+  assert!(
+    script.contains("direct_h2_pool_metrics")
+      && script.contains("fast_path.pool.direct_h2")
+      && script.contains("direct_h2_pool_delta"),
+    "split H2 upstream rows should attach direct-H2 pool diagnostics"
+  );
 }
 
 #[test]

@@ -62,8 +62,12 @@ use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
 use self::direct_h1::{DirectH1SendResult, recycle_response_body, try_send_direct_h1};
 pub(crate) use self::direct_h2::DirectH2Pools;
-use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
-use self::direct_transport::{DirectFastPathTransport, direct_fast_path_transport};
+use self::direct_h2::{
+  DirectH2SendResult, release_response_body as release_direct_h2_response_body, try_send_direct_h2,
+};
+use self::direct_transport::{
+  DirectFastPathTransport, DirectTransportAttempt, direct_fast_path_transport,
+};
 use self::downstream_direct_h1::{
   DownstreamDirectH1Preparation, DownstreamDirectH1RequestOptions,
   prepare_downstream_direct_h1_or_generic,
@@ -92,24 +96,7 @@ use self::stage_timing as timing;
 
 pub(crate) struct PlainProxyFastPath;
 
-enum DirectTransportAttempt {
-  Sent(anyhow::Result<Response<hyper::body::Incoming>>),
-  Fallback(Request<ProxyBody>),
-}
-
 impl PlainProxyFastPath {
-  #[cfg(test)]
-  pub(crate) fn eligible<B>(
-    request: &Request<B>,
-    state: &AppSnapshot,
-    resolved: &ResolvedRoute<'_>,
-  ) -> bool
-  where
-    B: Body,
-  {
-    plain_proxy_fast_path_decision(request, state, resolved).is_ok()
-  }
-
   #[allow(clippy::too_many_arguments)]
   pub(crate) async fn handle<B>(
     request: Request<B>,
@@ -434,6 +421,7 @@ impl PlainProxyFastPath {
     .then(Instant::now);
     let mut report_pool_success = false;
     let mut direct_h1_lease = None;
+    let mut direct_h2_lease = None;
     let direct_transport = direct_fast_path_transport(upstream_version, direct_candidate);
     let transport_started = timing::start(timing_enabled);
     let direct_attempt = match direct_transport {
@@ -474,7 +462,12 @@ impl PlainProxyFastPath {
       )
       .await
       {
-        DirectH2SendResult::Sent(result) => DirectTransportAttempt::Sent(result),
+        DirectH2SendResult::Sent(result) => {
+          DirectTransportAttempt::Sent(result.map(|mut direct| {
+            direct_h2_lease = direct.take_lease();
+            direct.response
+          }))
+        }
         DirectH2SendResult::Fallback(outbound) => DirectTransportAttempt::Fallback(outbound),
       },
       None => DirectTransportAttempt::Fallback(outbound),
@@ -628,6 +621,10 @@ impl PlainProxyFastPath {
     let response_finalize_started = timing::start(timing_enabled);
     if let Some(lease) = direct_h1_lease.take() {
       response_body = recycle_response_body(response_body, lease, known_small_response_body);
+    }
+    if let Some(lease) = direct_h2_lease.take() {
+      response_body =
+        release_direct_h2_response_body(response_body, lease, known_small_response_body);
     }
     strip_hop_by_hop_headers(&mut parts.headers);
     apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);

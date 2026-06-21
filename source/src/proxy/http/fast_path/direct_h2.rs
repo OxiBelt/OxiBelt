@@ -3,19 +3,18 @@
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use bytes::Bytes;
-use http::{Method, Request, Response, Uri};
-use http_body_util::{BodyExt, Empty};
+use http::{Method, Request, Response};
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 use url::Url;
@@ -23,8 +22,17 @@ use url::Url;
 use crate::config::{HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{BoxError, ProxyBody};
+use crate::proxy::http::body::{self, ProxyBody};
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
+
+mod request;
+
+use self::request::PreparedDirectH2Request;
+#[cfg(test)]
+use self::request::empty_body;
+
+const DIRECT_H2_MAX_SLOTS: usize = 16;
+const DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT: usize = 32;
 
 #[derive(Clone, Default)]
 pub(crate) struct DirectH2Pools {
@@ -70,27 +78,123 @@ struct DirectH2Pool {
   origin: DirectH2Origin,
   connect_timeout: Duration,
   idle_timeout: Duration,
+  max_lifetime: Duration,
+  target_streams_per_slot: usize,
+  max_streams_per_slot: usize,
   http2_config: ProxyHttp2Config,
   tls_config: Option<Arc<rustls::ClientConfig>>,
-  entry: RwLock<Option<Arc<DirectH2Connection>>>,
+  next_slot: AtomicUsize,
+  slots: Vec<DirectH2Slot>,
+}
+
+struct DirectH2Slot {
+  connection: AsyncMutex<Option<Arc<DirectH2Connection>>>,
 }
 
 struct DirectH2Connection {
   sender: SendRequest<ProxyBody>,
+  created_at: Instant,
   last_used: Mutex<Instant>,
+  active_streams: AtomicUsize,
+}
+
+struct DirectH2Sender {
+  sender: SendRequest<ProxyBody>,
+  lease: DirectH2Lease,
+  reused: bool,
+}
+
+pub(super) struct DirectH2Response {
+  pub(super) response: Response<Incoming>,
+  lease: Option<DirectH2Lease>,
+}
+
+pub(super) struct DirectH2Lease {
+  connection: Arc<DirectH2Connection>,
+}
+
+struct DirectH2TakeSender {
+  sender: Option<DirectH2Sender>,
+  empty_slot: Option<usize>,
+  miss_reason: DirectH2TakeMissReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectH2TakeMissReason {
+  None,
+  Empty,
+  Locked,
+  Saturated,
+}
+
+impl DirectH2Slot {
+  fn new() -> Self {
+    Self {
+      connection: AsyncMutex::new(None),
+    }
+  }
 }
 
 impl DirectH2Connection {
-  fn reusable_sender(&self, idle_timeout: Duration) -> Option<SendRequest<ProxyBody>> {
-    let mut last_used = self
+  fn stale(&self, idle_timeout: Duration, max_lifetime: Duration) -> bool {
+    if self.active_streams.load(Ordering::Acquire) > 0 {
+      return false;
+    }
+    if self.created_at.elapsed() > max_lifetime {
+      return true;
+    }
+    let last_used = self
       .last_used
       .lock()
       .expect("direct H2 last-used lock poisoned");
-    if last_used.elapsed() > idle_timeout {
-      return None;
+    last_used.elapsed() > idle_timeout
+  }
+
+  fn reserve(
+    connection: &Arc<Self>,
+    max_streams_per_slot: usize,
+  ) -> Option<(SendRequest<ProxyBody>, DirectH2Lease)> {
+    let mut active = connection.active_streams.load(Ordering::Acquire);
+    loop {
+      if active >= max_streams_per_slot {
+        return None;
+      }
+      match connection.active_streams.compare_exchange_weak(
+        active,
+        active + 1,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        Ok(_) => break,
+        Err(current) => active = current,
+      }
     }
+    let mut last_used = connection
+      .last_used
+      .lock()
+      .expect("direct H2 last-used lock poisoned");
     *last_used = Instant::now();
-    Some(self.sender.clone())
+    Some((
+      connection.sender.clone(),
+      DirectH2Lease {
+        connection: Arc::clone(connection),
+      },
+    ))
+  }
+}
+
+impl DirectH2Response {
+  pub(super) fn take_lease(&mut self) -> Option<DirectH2Lease> {
+    self.lease.take()
+  }
+}
+
+impl Drop for DirectH2Lease {
+  fn drop(&mut self) {
+    self
+      .connection
+      .active_streams
+      .fetch_sub(1, Ordering::AcqRel);
   }
 }
 
@@ -117,7 +221,7 @@ impl DirectH2Origin {
 
 pub(super) enum DirectH2SendResult {
   Fallback(Request<ProxyBody>),
-  Sent(Result<Response<Incoming>, anyhow::Error>),
+  Sent(Result<DirectH2Response, anyhow::Error>),
 }
 
 impl DirectH2Pool {
@@ -139,17 +243,28 @@ impl DirectH2Pool {
     } else {
       None
     };
+    if upstream.pool_max_idle_per_host == 0 {
+      return None;
+    }
+    let slot_count = upstream.pool_max_idle_per_host.min(DIRECT_H2_MAX_SLOTS);
+    let max_streams_per_slot = (http2_config.max_concurrent_streams as usize).max(1);
+    let target_streams_per_slot =
+      max_streams_per_slot.clamp(1, DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT);
     Some(tls_config.transpose().map(|tls_config| Self {
       origin,
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
+      max_lifetime: Duration::from_millis(upstream.max_lifetime_ms),
+      target_streams_per_slot,
+      max_streams_per_slot,
       http2_config: *http2_config,
       tls_config,
-      entry: RwLock::new(None),
+      next_slot: AtomicUsize::new(0),
+      slots: (0..slot_count).map(|_| DirectH2Slot::new()).collect(),
     }))
   }
 
-  async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<(SendRequest<ProxyBody>, bool)> {
+  async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<DirectH2Sender> {
     self
       .sender_with(metrics, || self.connect_sender(metrics))
       .await
@@ -159,26 +274,135 @@ impl DirectH2Pool {
     &self,
     metrics: &Arc<Metrics>,
     connect_sender: F,
-  ) -> anyhow::Result<(SendRequest<ProxyBody>, bool)>
+  ) -> anyhow::Result<DirectH2Sender>
   where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
   {
-    {
-      let entry = self.entry.read().await;
-      if let Some(connection) = entry.as_ref()
-        && let Some(sender) = connection.reusable_sender(self.idle_timeout)
-      {
-        return Ok((sender, true));
-      }
+    let reusable = self.take_reusable_sender(metrics);
+    if let Some(sender) = reusable.sender {
+      metrics.record_direct_h2_pool_event("hit");
+      return Ok(sender);
     }
 
-    let mut entry = self.entry.write().await;
-    if let Some(connection) = entry.as_ref() {
-      if let Some(sender) = connection.reusable_sender(self.idle_timeout) {
-        return Ok((sender, true));
+    metrics.record_direct_h2_pool_event("miss");
+    match reusable.miss_reason {
+      DirectH2TakeMissReason::None => {}
+      DirectH2TakeMissReason::Empty => metrics.record_direct_h2_pool_event("miss_empty"),
+      DirectH2TakeMissReason::Locked => metrics.record_direct_h2_pool_event("miss_locked"),
+      DirectH2TakeMissReason::Saturated => metrics.record_direct_h2_pool_event("miss_saturated"),
+    }
+
+    let slot_index = reusable
+      .empty_slot
+      .unwrap_or_else(|| self.next_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len());
+    self.connect_slot(metrics, slot_index, connect_sender).await
+  }
+
+  fn take_reusable_sender(&self, metrics: &Arc<Metrics>) -> DirectH2TakeSender {
+    let start = self.next_slot.fetch_add(1, Ordering::Relaxed);
+    let mut empty_slot = None;
+    let mut locked_slots = 0;
+    let mut saturated_slots = 0;
+    let mut best_under_target: Option<(usize, Arc<DirectH2Connection>)> = None;
+    let mut best_over_target: Option<(usize, Arc<DirectH2Connection>)> = None;
+    for offset in 0..self.slots.len() {
+      let slot_index = (start + offset) % self.slots.len();
+      let Ok(mut connection) = self.slots[slot_index].connection.try_lock() else {
+        locked_slots += 1;
+        continue;
+      };
+      let Some(candidate) = connection.as_ref() else {
+        empty_slot.get_or_insert(slot_index);
+        continue;
+      };
+      if candidate.stale(self.idle_timeout, self.max_lifetime) {
+        metrics.record_direct_h2_pool_event("stale");
+        metrics.record_direct_h2_pool_event("drop");
+        *connection = None;
+        empty_slot.get_or_insert(slot_index);
+        continue;
       }
-      *entry = None;
+      let active = candidate.active_streams.load(Ordering::Acquire);
+      if active >= self.max_streams_per_slot {
+        saturated_slots += 1;
+        continue;
+      }
+      if active < self.target_streams_per_slot {
+        if best_under_target
+          .as_ref()
+          .is_none_or(|(best_active, _)| active < *best_active)
+        {
+          best_under_target = Some((active, Arc::clone(candidate)));
+        }
+      } else if best_over_target
+        .as_ref()
+        .is_none_or(|(best_active, _)| active < *best_active)
+      {
+        best_over_target = Some((active, Arc::clone(candidate)));
+      }
+    }
+    let best = best_under_target.or_else(|| empty_slot.is_none().then_some(best_over_target)?);
+    if let Some((_, connection)) = best
+      && let Some((sender, lease)) =
+        DirectH2Connection::reserve(&connection, self.max_streams_per_slot)
+    {
+      return DirectH2TakeSender {
+        sender: Some(DirectH2Sender {
+          sender,
+          lease,
+          reused: true,
+        }),
+        empty_slot,
+        miss_reason: DirectH2TakeMissReason::None,
+      };
+    }
+    let miss_reason = if empty_slot.is_some() {
+      DirectH2TakeMissReason::Empty
+    } else if saturated_slots > 0 {
+      DirectH2TakeMissReason::Saturated
+    } else if locked_slots > 0 {
+      DirectH2TakeMissReason::Locked
+    } else {
+      DirectH2TakeMissReason::Empty
+    };
+    DirectH2TakeSender {
+      sender: None,
+      empty_slot,
+      miss_reason,
+    }
+  }
+
+  async fn connect_slot<F, Fut>(
+    &self,
+    metrics: &Arc<Metrics>,
+    slot_index: usize,
+    connect_sender: F,
+  ) -> anyhow::Result<DirectH2Sender>
+  where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
+  {
+    let slot = &self.slots[slot_index % self.slots.len()];
+    let mut slot_connection = slot.connection.lock().await;
+    if let Some(candidate) = slot_connection.as_ref() {
+      if candidate.stale(self.idle_timeout, self.max_lifetime) {
+        metrics.record_direct_h2_pool_event("stale");
+        metrics.record_direct_h2_pool_event("drop");
+        *slot_connection = None;
+      } else if let Some((sender, lease)) =
+        DirectH2Connection::reserve(candidate, self.max_streams_per_slot)
+      {
+        metrics.record_direct_h2_pool_event("hit");
+        return Ok(DirectH2Sender {
+          sender,
+          lease,
+          reused: true,
+        });
+      } else {
+        metrics.record_direct_h2_pool_event("miss_saturated");
+        anyhow::bail!("direct H2 upstream pool slot is saturated");
+      }
     }
 
     metrics.record_http_upstream_client_pool_miss(
@@ -186,17 +410,39 @@ impl DirectH2Pool {
       self.origin.scheme,
       "primary",
     );
-    let sender = connect_sender().await?;
+    metrics.record_direct_h2_pool_event("connect");
+    let sender = match connect_sender().await {
+      Ok(sender) => sender,
+      Err(error) => {
+        metrics.record_direct_h2_pool_event("connect_error");
+        return Err(error);
+      }
+    };
     let connection = Arc::new(DirectH2Connection {
       sender: sender.clone(),
+      created_at: Instant::now(),
       last_used: Mutex::new(Instant::now()),
+      active_streams: AtomicUsize::new(1),
     });
-    *entry = Some(connection);
-    Ok((sender, false))
+    *slot_connection = Some(Arc::clone(&connection));
+    Ok(DirectH2Sender {
+      sender,
+      lease: DirectH2Lease { connection },
+      reused: false,
+    })
   }
 
-  async fn clear_sender(&self) {
-    *self.entry.write().await = None;
+  async fn clear_connection(&self, target: &Arc<DirectH2Connection>) {
+    for slot in &self.slots {
+      let mut connection = slot.connection.lock().await;
+      if connection
+        .as_ref()
+        .is_some_and(|candidate| Arc::ptr_eq(candidate, target))
+      {
+        *connection = None;
+        return;
+      }
+    }
   }
 
   async fn connect_sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<SendRequest<ProxyBody>> {
@@ -333,49 +579,78 @@ async fn send_prepared_request(
   metrics: &Arc<Metrics>,
   prepared: PreparedDirectH2Request,
   timeouts: EffectiveTimeouts,
-) -> anyhow::Result<Response<Incoming>> {
+) -> anyhow::Result<DirectH2Response> {
   metrics.record_http_upstream_client_request(pool.metric_version(), pool.origin.scheme, "primary");
 
-  let (mut sender, reused) =
+  let direct_sender =
     sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
+  let reused = direct_sender.reused;
+  let mut sender = direct_sender.sender;
+  let lease = direct_sender.lease;
   let mut retry = reused.then(|| prepared.retry_request());
-  match tokio::time::timeout(
+  let send_result = tokio::time::timeout(
     timeouts.upstream_first_byte,
     sender.send_request(prepared.into_request()),
   )
-  .await
-  {
-    Ok(Ok(response)) => Ok(response),
+  .await;
+  match send_result {
+    Ok(Ok(response)) => Ok(DirectH2Response {
+      response,
+      lease: Some(lease),
+    }),
     Ok(Err(error)) if reused => {
       debug!(error = %error, "direct H2 upstream sender failed; reconnecting once");
-      pool.clear_sender().await;
-      let (mut sender, _) =
+      metrics.record_direct_h2_pool_event("reconnect");
+      pool.clear_connection(&lease.connection).await;
+      drop(lease);
+      let direct_sender =
         sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
+      let mut sender = direct_sender.sender;
+      let lease = direct_sender.lease;
       let retry = retry
         .take()
         .expect("reused direct H2 sends should retain one retry request");
-      tokio::time::timeout(
+      match tokio::time::timeout(
         timeouts.upstream_first_byte,
         sender.send_request(retry.into_request()),
       )
       .await
-      .context("direct H2 upstream first-byte timeout")?
-      .context("direct H2 upstream retry request failed")
+      {
+        Ok(Ok(response)) => Ok(DirectH2Response {
+          response,
+          lease: Some(lease),
+        }),
+        Ok(Err(error)) => {
+          pool.clear_connection(&lease.connection).await;
+          drop(lease);
+          Err(anyhow::Error::new(error).context("direct H2 upstream retry request failed"))
+        }
+        Err(_) => {
+          pool.clear_connection(&lease.connection).await;
+          drop(lease);
+          anyhow::bail!("direct H2 upstream first-byte timed out")
+        }
+      }
     }
     Ok(Err(error)) => {
-      pool.clear_sender().await;
+      pool.clear_connection(&lease.connection).await;
+      drop(lease);
       Err(error.into())
     }
-    Err(_) => anyhow::bail!("direct H2 upstream first-byte timed out"),
+    Err(_) => {
+      pool.clear_connection(&lease.connection).await;
+      drop(lease);
+      anyhow::bail!("direct H2 upstream first-byte timed out")
+    }
   }
 }
 
 async fn sender_with_first_byte_timeout<F>(
   sender: F,
   timeout: Duration,
-) -> anyhow::Result<(SendRequest<ProxyBody>, bool)>
+) -> anyhow::Result<DirectH2Sender>
 where
-  F: Future<Output = anyhow::Result<(SendRequest<ProxyBody>, bool)>>,
+  F: Future<Output = anyhow::Result<DirectH2Sender>>,
 {
   match tokio::time::timeout(timeout, sender).await {
     Ok(result) => result,
@@ -417,51 +692,6 @@ where
   Ok(sender)
 }
 
-struct PreparedDirectH2Request {
-  request: Request<ProxyBody>,
-}
-
-struct RetryDirectH2Request {
-  method: Method,
-  uri: Uri,
-  headers: http::HeaderMap,
-}
-
-impl PreparedDirectH2Request {
-  fn from_request(mut request: Request<ProxyBody>) -> anyhow::Result<Self> {
-    if request.uri().scheme().is_none() || request.uri().authority().is_none() {
-      anyhow::bail!("direct H2 request URI must be absolute-form");
-    }
-    *request.version_mut() = http::Version::HTTP_2;
-    Ok(Self { request })
-  }
-
-  fn retry_request(&self) -> RetryDirectH2Request {
-    RetryDirectH2Request {
-      method: self.request.method().clone(),
-      uri: self.request.uri().clone(),
-      headers: self.request.headers().clone(),
-    }
-  }
-
-  fn into_request(self) -> Request<ProxyBody> {
-    self.request
-  }
-}
-
-impl RetryDirectH2Request {
-  fn into_request(self) -> Request<ProxyBody> {
-    let mut request = Request::builder()
-      .method(self.method)
-      .version(http::Version::HTTP_2)
-      .uri(self.uri)
-      .body(empty_body())
-      .expect("direct H2 retry request parts should be valid");
-    *request.headers_mut() = self.headers;
-    request
-  }
-}
-
 fn build_h2_tls_config(
   upstream: &UpstreamConfig,
   extra_root_certs: &[PathBuf],
@@ -492,10 +722,16 @@ fn build_h2_tls_config(
   Ok(Arc::new(tls_config))
 }
 
-fn empty_body() -> ProxyBody {
-  Empty::<Bytes>::new()
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed()
+pub(super) fn release_response_body(
+  body: ProxyBody,
+  lease: DirectH2Lease,
+  body_consumed: bool,
+) -> ProxyBody {
+  if body_consumed {
+    drop(lease);
+    return body;
+  }
+  body::with_drop_guard(body, lease)
 }
 
 fn fast_path_metric_protocol(version: http::Version) -> &'static str {

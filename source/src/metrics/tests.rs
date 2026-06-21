@@ -112,6 +112,26 @@ fn prometheus_output_includes_direct_h1_pool_events() {
 }
 
 #[test]
+fn prometheus_output_includes_direct_h2_pool_events() {
+  let metrics = Metrics::new();
+  metrics.record_direct_h2_pool_event("hit");
+  metrics.record_direct_h2_pool_event("miss_saturated");
+  metrics.record_direct_h2_pool_event("connect");
+  metrics.record_direct_h2_pool_event("unknown");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"hit\"} 1"));
+  assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 1"));
+  assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"connect\"} 1"));
+  assert!(!body.contains("event=\"unknown\""));
+}
+
+#[test]
 fn prometheus_output_includes_static_fast_path_responses() {
   let metrics = Metrics::new();
   metrics.record_static_fast_path_response("hot_object", "served");

@@ -570,6 +570,7 @@ fn upstream(origin: &str) -> UpstreamConfig {
     read_timeout_ms: 100,
     send_timeout_ms: 100,
     idle_timeout_ms: 100,
+    max_lifetime_ms: 3_600_000,
     pool_max_idle_per_host: 1,
     preserve_host: false,
     websocket: false,

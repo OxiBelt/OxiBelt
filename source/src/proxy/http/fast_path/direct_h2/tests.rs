@@ -168,18 +168,7 @@ async fn sender_single_flights_cold_pool_connection_creation() {
   let first_connect_tx = Arc::new(Mutex::new(Some(first_connect_tx)));
   let (release_tx, release_rx) = watch::channel(false);
 
-  let pool = Arc::new(DirectH2Pool {
-    origin: DirectH2Origin {
-      scheme: "http",
-      host: "127.0.0.1".to_string(),
-      port: 80,
-    },
-    connect_timeout: Duration::from_secs(1),
-    idle_timeout: Duration::from_secs(30),
-    http2_config: ProxyHttp2Config::default(),
-    tls_config: None,
-    entry: RwLock::new(None),
-  });
+  let pool = Arc::new(direct_h2_test_pool_with_slots(Duration::from_secs(1), 1));
   let metrics = Metrics::new();
   let request_count = 8;
   let start = Arc::new(Barrier::new(request_count + 1));
@@ -252,6 +241,89 @@ async fn sender_single_flights_cold_pool_connection_creation() {
 }
 
 #[tokio::test]
+async fn sender_bounds_cold_pool_connection_creation_by_slots() {
+  let connect_attempts = Arc::new(AtomicUsize::new(0));
+  let (first_connect_tx, first_connect_rx) = oneshot::channel();
+  let first_connect_tx = Arc::new(Mutex::new(Some(first_connect_tx)));
+  let (release_tx, release_rx) = watch::channel(false);
+
+  let slot_count = 3;
+  let pool = Arc::new(direct_h2_test_pool_with_slots(
+    Duration::from_secs(1),
+    slot_count,
+  ));
+  let metrics = Metrics::new();
+  let request_count = 8;
+  let start = Arc::new(Barrier::new(request_count + 1));
+  let mut handles = Vec::with_capacity(request_count);
+  for _ in 0..request_count {
+    let pool = pool.clone();
+    let metrics = metrics.clone();
+    let start = start.clone();
+    let connect_attempts = connect_attempts.clone();
+    let first_connect_tx = first_connect_tx.clone();
+    let release_rx = release_rx.clone();
+    handles.push(tokio::spawn(async move {
+      start.wait().await;
+      pool
+        .sender_with(&metrics, move || async move {
+          let attempt = connect_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+          if attempt == 1
+            && let Some(sender) = first_connect_tx.lock().unwrap().take()
+          {
+            let _ = sender.send(());
+          }
+          let mut release_rx = release_rx;
+          while !*release_rx.borrow() {
+            if release_rx.changed().await.is_err() {
+              anyhow::bail!("test connector release channel closed");
+            }
+          }
+          successful_test_sender().await
+        })
+        .await
+    }));
+  }
+  start.wait().await;
+
+  tokio::time::timeout(Duration::from_secs(1), first_connect_rx)
+    .await
+    .expect("direct H2 pool should start an upstream connector")
+    .expect("connector should signal startup");
+  for _ in 0..10 {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(
+      connect_attempts.load(Ordering::SeqCst) <= slot_count,
+      "cold direct H2 pool must not exceed its slot cap"
+    );
+  }
+
+  release_tx.send(true).unwrap();
+  for handle in handles {
+    handle
+      .await
+      .expect("sender task should not panic")
+      .expect("sender task should complete after connector release");
+  }
+  assert!(connect_attempts.load(Ordering::SeqCst) <= slot_count);
+}
+
+#[tokio::test]
+async fn sender_lease_tracks_active_streams_until_drop() {
+  let pool = Arc::new(direct_h2_test_pool_with_slots(Duration::from_secs(1), 1));
+  let metrics = Metrics::new();
+
+  let sender = pool
+    .sender_with(&metrics, successful_test_sender)
+    .await
+    .expect("sender should be acquired");
+  let connection = sender.lease.connection.clone();
+  assert_eq!(connection.active_streams.load(Ordering::SeqCst), 1);
+  drop(sender);
+  assert_eq!(connection.active_streams.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn sender_timeout_bounds_single_flight_wait() {
   let pool = Arc::new(direct_h2_test_pool(Duration::from_secs(5)));
   let metrics = Metrics::new();
@@ -299,7 +371,10 @@ async fn sender_timeout_bounds_single_flight_wait() {
   })
   .await
   .expect("waiter should return within its first-byte budget");
-  let error = result.expect_err("waiter should time out while queued behind single-flight");
+  let error = match result {
+    Ok(_) => panic!("waiter should time out while queued behind single-flight"),
+    Err(error) => error,
+  };
   assert!(
     error.to_string().contains("first-byte timed out"),
     "unexpected waiter error: {error:#}"
@@ -362,7 +437,10 @@ async fn sender_acquisition_timeout_releases_pool_lock() {
   })
   .await
   .expect("sender acquisition timeout should complete promptly");
-  let error = result.expect_err("sender acquisition should time out");
+  let error = match result {
+    Ok(_) => panic!("sender acquisition should time out"),
+    Err(error) => error,
+  };
   assert!(
     error.to_string().contains("first-byte timed out"),
     "unexpected sender acquisition error: {error:#}"
@@ -381,7 +459,7 @@ async fn sender_acquisition_timeout_releases_pool_lock() {
   .await
   .expect("pool lock should be available after handshake timeout")
   .expect("successful test sender should be stored in the pool");
-  assert!(!successful.1);
+  assert!(!successful.reused);
 }
 
 struct PendingIo;
@@ -430,6 +508,10 @@ async fn successful_test_sender() -> anyhow::Result<SendRequest<ProxyBody>> {
 }
 
 fn direct_h2_test_pool(connect_timeout: Duration) -> DirectH2Pool {
+  direct_h2_test_pool_with_slots(connect_timeout, 1)
+}
+
+fn direct_h2_test_pool_with_slots(connect_timeout: Duration, slot_count: usize) -> DirectH2Pool {
   let origin = DirectH2Origin {
     scheme: "http",
     host: "127.0.0.1".to_string(),
@@ -439,9 +521,13 @@ fn direct_h2_test_pool(connect_timeout: Duration) -> DirectH2Pool {
     origin,
     connect_timeout,
     idle_timeout: Duration::from_secs(30),
+    max_lifetime: Duration::from_secs(60 * 60),
+    target_streams_per_slot: DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT,
+    max_streams_per_slot: DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT,
     http2_config: ProxyHttp2Config::default(),
     tls_config: None,
-    entry: RwLock::new(None),
+    next_slot: AtomicUsize::new(0),
+    slots: (0..slot_count).map(|_| DirectH2Slot::new()).collect(),
   }
 }
 
@@ -456,6 +542,7 @@ fn upstream(origin: &str) -> UpstreamConfig {
     read_timeout_ms: 100,
     send_timeout_ms: 100,
     idle_timeout_ms: 100,
+    max_lifetime_ms: 3_600_000,
     pool_max_idle_per_host: 1,
     preserve_host: false,
     websocket: false,

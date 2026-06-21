@@ -1,5 +1,4 @@
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -10,13 +9,12 @@ use hyper::body::{Body, Frame, SizeHint};
 
 use super::*;
 use crate::config::{Config, HttpVersion, ProxyProtocolEgressMode};
-use crate::lifecycle::ConnectionDrain;
-use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
 mod body_shortcuts;
 mod decision;
 mod direct_selection;
 mod h3;
+mod person_proof;
 mod response_body;
 
 mod common {
@@ -68,6 +66,17 @@ fn resolved_route(state: &AppSnapshot) -> ResolvedRoute<'_> {
     .expect("route should resolve")
 }
 
+fn plain_proxy_fast_path_eligible<B>(
+  request: &Request<B>,
+  state: &AppSnapshot,
+  resolved: &ResolvedRoute<'_>,
+) -> bool
+where
+  B: Body,
+{
+  plain_proxy_fast_path_decision(request, state, resolved).is_ok()
+}
+
 fn plain_fast_path_plan(config: &Config) -> bool {
   let waf = crate::waf::WafEngine::new(config).expect("WAF engine should build");
   let table = crate::routes::RouteTable::new_with_waf(config, &waf);
@@ -85,51 +94,6 @@ fn empty_proxy_body() -> ProxyBody {
     .boxed()
 }
 
-fn upstream_pool_person_proof_config(
-  cert_path: &std::path::Path,
-  key_path: &std::path::Path,
-  upstream_origin: &str,
-) -> String {
-  format!(
-    "{}{}",
-    common::minimal_config_toml(cert_path, key_path)
-      .replace(
-        "[compression]\nenabled = true",
-        "[compression]\nenabled = false"
-      )
-      .replace("upstream = \"app\"\n", "upstream_pool = \"app-pool\"\n"),
-    format_args!(
-      r#"
-
-[waf]
-enabled = true
-mode = "enforcing"
-fail_policy = "closed"
-
-[[waf.rules]]
-name = "require-person-proof"
-phase = "request"
-priority = 10
-when = "Request.Http.Path == '/protected'"
-
-[[waf.rules.actions]]
-type = "require_person_proof"
-difficulty = 4
-token_validity_seconds = 60
-clearance.cookie.key = "__test_person_proof"
-openapi_path = "/custom/person-proof/openapi.json"
-
-[[upstream_pools]]
-name = "app-pool"
-algorithm = "power_of_two_choices"
-
-[[upstream_pools.servers]]
-origin = "{upstream_origin}"
-"#
-    )
-  )
-}
-
 #[tokio::test]
 async fn plain_route_is_eligible_when_optional_features_are_off() {
   let temp_dir = common::TempDir::new("plain-fast-path");
@@ -144,7 +108,11 @@ async fn plain_route_is_eligible_when_optional_features_are_off() {
   let resolved = resolved_route(&state);
 
   assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 }
 
 #[tokio::test]
@@ -173,7 +141,7 @@ async fn h2_request_without_content_length_zero_is_fast_path_eligible_before_gua
     )
   );
   assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
-  assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
+  assert!(plain_proxy_fast_path_eligible(&request, &state, &resolved));
 }
 
 #[tokio::test]
@@ -267,7 +235,11 @@ permissions_policy = "geolocation=(), camera=()"
       .expect("snapshot should initialize");
     let resolved = resolved_route(&state);
     assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-    assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+    assert!(plain_proxy_fast_path_eligible(
+      &request(),
+      &state,
+      &resolved
+    ));
   }
 }
 
@@ -337,7 +309,11 @@ compression = "off"
   let resolved = resolved_route(&state);
 
   assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 }
 
 #[tokio::test]
@@ -377,7 +353,11 @@ status = 403
     crate::routes::WafExecutionPlan::HeaderOnly
   );
   assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 }
 
 #[tokio::test]
@@ -418,98 +398,7 @@ origin = "https://app.internal.example"
     .expect("request should build");
 
   assert!(resolved.execution_plan.fast_path.plain_proxy_h2);
-  assert!(PlainProxyFastPath::eligible(&request, &state, &resolved));
-}
-
-#[tokio::test]
-async fn person_proof_api_paths_skip_upstream_pool_plain_proxy_fast_path() {
-  let temp_dir = common::TempDir::new("plain-fast-path-person-proof-api");
-  let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-person-proof-api");
-  let raw =
-    upstream_pool_person_proof_config(&cert_path, &key_path, "https://app.internal.example");
-  let state = AppSnapshot::new(parse_config(&raw))
-    .await
-    .expect("snapshot should initialize");
-  let resolved = resolved_route(&state);
-
-  assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(
-    state
-      .waf
-      .has_person_proof_api_path("/.oxibelt/person-proof/verify")
-  );
-  assert!(
-    state
-      .waf
-      .has_person_proof_api_path("/custom/person-proof/openapi.json")
-  );
-
-  let protected = Request::builder()
-    .uri("https://example.com/protected")
-    .body(empty_proxy_body())
-    .expect("request should build");
-  assert!(PlainProxyFastPath::eligible(&protected, &state, &resolved));
-
-  for path in [
-    "/.oxibelt/person-proof/verify",
-    "/custom/person-proof/openapi.json",
-  ] {
-    let api_request = Request::builder()
-      .uri(format!("https://example.com{path}"))
-      .body(empty_proxy_body())
-      .expect("request should build");
-    assert!(!PlainProxyFastPath::eligible(
-      &api_request,
-      &state,
-      &resolved
-    ));
-  }
-}
-
-#[tokio::test]
-async fn person_proof_api_handler_wins_over_upstream_pool_fast_path() {
-  let temp_dir = common::TempDir::new("plain-fast-path-person-proof-handler");
-  let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-person-proof-handler");
-  let raw = upstream_pool_person_proof_config(&cert_path, &key_path, "http://127.0.0.1:9");
-  let state = Arc::new(
-    AppSnapshot::new(parse_config(&raw))
-      .await
-      .expect("snapshot should initialize"),
-  );
-  let request = Request::builder()
-    .uri("http://example.com/.oxibelt/person-proof/verify")
-    .body(empty_proxy_body())
-    .expect("request should build");
-  let peer_addr = "127.0.0.1:12345".parse().unwrap();
-  let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
-  let (_lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(false);
-  let response = super::super::handle_inner(
-    request,
-    peer_addr,
-    None,
-    WafTransportMetadataInput::default(),
-    Arc::new(WafTlsMetadata::default()),
-    None,
-    None,
-    state,
-    WafProtocol::Http,
-    WafTransportNetwork::Tcp,
-    true,
-    "http",
-    ConnectionDrain::new(listener_rx, lifecycle_rx, Duration::ZERO),
-  )
-  .await;
-
-  assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-  let body = response
-    .into_body()
-    .collect()
-    .await
-    .expect("response body should collect")
-    .to_bytes();
-  assert_eq!(&body[..], b"method not allowed");
+  assert!(plain_proxy_fast_path_eligible(&request, &state, &resolved));
 }
 
 #[test]
@@ -603,7 +492,11 @@ cache_methods = ["GET"]
     .expect("snapshot should initialize");
   let resolved = resolved_route(&state);
   assert!(resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 
   let buffered = format!(
     "{base}{}",
@@ -618,7 +511,11 @@ request = "memory"
     .expect("snapshot should initialize");
   let resolved = resolved_route(&state);
   assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 
   let response_buffered = format!(
     "{base}{}",
@@ -633,7 +530,11 @@ response = "memory"
     .expect("snapshot should initialize");
   let resolved = resolved_route(&state);
   assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 
   let json_errors = format!(
     "{base}{}",
@@ -648,7 +549,11 @@ mode = "json"
     .expect("snapshot should initialize");
   let resolved = resolved_route(&state);
   assert!(!resolved.execution_plan.fast_path.plain_proxy_h1);
-  assert!(!PlainProxyFastPath::eligible(&request(), &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(
+    &request(),
+    &state,
+    &resolved
+  ));
 
   let state = AppSnapshot::new(parse_config(&base))
     .await
@@ -665,7 +570,7 @@ mode = "json"
         .boxed(),
     )
     .expect("request should build");
-  assert!(!PlainProxyFastPath::eligible(&upgrade, &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(&upgrade, &state, &resolved));
   let connect = Request::builder()
     .method(Method::CONNECT)
     .uri("https://example.com/")
@@ -675,7 +580,7 @@ mode = "json"
         .boxed(),
     )
     .expect("request should build");
-  assert!(!PlainProxyFastPath::eligible(&connect, &state, &resolved));
+  assert!(!plain_proxy_fast_path_eligible(&connect, &state, &resolved));
 }
 
 #[tokio::test]
@@ -697,7 +602,7 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
   let h3_resolved = resolved_route(&h3_state);
   assert!(h3_resolved.execution_plan.fast_path.plain_proxy_h1);
   assert!(h3_resolved.execution_plan.fast_path.plain_proxy_h3);
-  assert!(!PlainProxyFastPath::eligible(
+  assert!(!plain_proxy_fast_path_eligible(
     &request(),
     &h3_state,
     &h3_resolved
@@ -707,7 +612,7 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
     .uri("https://example.com/perf/h3?body=ok")
     .body(PanicBody)
     .expect("request should build");
-  assert!(!PlainProxyFastPath::eligible(
+  assert!(!plain_proxy_fast_path_eligible(
     &h3_downstream_request,
     &h3_state,
     &h3_resolved
@@ -731,7 +636,7 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
       .fast_path
       .plain_proxy_h3
   );
-  assert!(!PlainProxyFastPath::eligible(
+  assert!(!plain_proxy_fast_path_eligible(
     &request(),
     &proxy_protocol_state,
     &proxy_protocol_resolved
@@ -741,7 +646,7 @@ async fn unsupported_upstream_modes_force_general_proxy_path_at_runtime() {
     .uri("https://example.com/perf/h3?body=ok")
     .body(PanicBody)
     .expect("request should build");
-  assert!(!PlainProxyFastPath::eligible(
+  assert!(!plain_proxy_fast_path_eligible(
     &h3_downstream_request,
     &proxy_protocol_state,
     &proxy_protocol_resolved
