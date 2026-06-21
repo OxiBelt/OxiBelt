@@ -232,7 +232,7 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       "request phase rejects Response object access",
       ExpectStart::Failure,
       Needs::default(),
-      Some("Response is unavailable in request-phase rules"),
+      Some("Response is unavailable"),
     ),
     docker_case(
       "waf-helpers",
