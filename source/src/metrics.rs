@@ -112,6 +112,14 @@ impl StripedCounter {
     });
   }
 
+  fn add(&self, value: u64) {
+    COUNTER_STRIPE.with(|stripe| {
+      self.stripes[*stripe]
+        .value
+        .fetch_add(value, Ordering::Relaxed);
+    });
+  }
+
   fn load(&self) -> u64 {
     self
       .stripes
@@ -193,6 +201,19 @@ impl Metrics {
     self
       .fast_path
       .record_static_fast_path_response(source, outcome);
+  }
+
+  pub fn record_fast_path_stage_duration_ns(
+    &self,
+    path: &str,
+    protocol: &str,
+    stage: &str,
+    outcome: &str,
+    duration_ns: u64,
+  ) {
+    self
+      .fast_path
+      .record_stage_duration_ns(path, protocol, stage, outcome, duration_ns);
   }
 
   pub fn record_http_upstream_client_request(&self, version: &str, scheme: &str, pool: &str) {

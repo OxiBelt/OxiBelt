@@ -50,6 +50,7 @@ mod helpers;
 mod request_body;
 mod response_body;
 mod small_response;
+pub(crate) mod stage_timing;
 mod waf;
 #[cfg(test)]
 use self::decision::PlainProxyFastPathMissReason;
@@ -79,6 +80,7 @@ use self::request_body::{
 use self::response_body::{
   FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
 };
+use self::stage_timing as timing;
 use self::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
 
 pub(crate) struct PlainProxyFastPath;
@@ -147,14 +149,14 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
   {
+    let metric_protocol = fast_path_metric_protocol(request_version);
+    let snapshot = state.as_ref();
+    let timing_enabled = snapshot.request_path_features.hot_path_metrics;
+    let prepare_started = timing::start(timing_enabled);
     let direct_retry_enabled =
-      direct_http_retry_enabled(state.as_ref(), resolved.route, request.method());
-    let direct_selection = select_direct_fast_path_upstream(
-      state.as_ref(),
-      resolved,
-      &request_waf,
-      direct_retry_enabled,
-    );
+      direct_http_retry_enabled(snapshot, resolved.route, request.method());
+    let direct_selection =
+      select_direct_fast_path_upstream(snapshot, resolved, &request_waf, direct_retry_enabled);
     let direct_candidate = direct_selection.is_some();
     let (
       mut upstream,
@@ -285,7 +287,8 @@ impl PlainProxyFastPath {
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
-    let request_body_protocol = fast_path_metric_protocol(request_version);
+    timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+    let request_body_started = timing::start(timing_enabled);
     let request_body = if request_body_definitely_empty {
       if state.request_path_features.hot_path_metrics {
         let outcome = if parts
@@ -300,7 +303,7 @@ impl PlainProxyFastPath {
         };
         state
           .metrics
-          .record_fast_path_request_body(request_body_protocol, outcome);
+          .record_fast_path_request_body(metric_protocol, outcome);
       }
       FastPathRequestBody::empty()
     } else {
@@ -313,7 +316,7 @@ impl PlainProxyFastPath {
           .hot_path_metrics
           .then_some(FastPathRequestBodyMetrics {
             metrics: state.metrics.as_ref(),
-            protocol: request_body_protocol,
+            protocol: metric_protocol,
           });
       fast_path_request_body_with_metrics(
         body,
@@ -325,6 +328,7 @@ impl PlainProxyFastPath {
       )
       .await
     };
+    timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
     let request_body_proven_empty = request_body.proven_empty();
     let outbound_body = if request_body_proven_empty {
       request_body.into_body()
@@ -346,7 +350,9 @@ impl PlainProxyFastPath {
     .then(Instant::now);
     let mut report_pool_success = false;
     let mut direct_h1_lease = None;
-    let direct_attempt = match direct_fast_path_transport(upstream_version, direct_candidate) {
+    let direct_transport = direct_fast_path_transport(upstream_version, direct_candidate);
+    let transport_started = timing::start(timing_enabled);
+    let direct_attempt = match direct_transport {
       Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
         &state.direct_h1_pools,
         &state.metrics,
@@ -389,17 +395,34 @@ impl PlainProxyFastPath {
       None => DirectTransportAttempt::Fallback(outbound),
     };
     let upstream_response_result = match direct_attempt {
-      DirectTransportAttempt::Sent(result) => result,
+      DirectTransportAttempt::Sent(result) => {
+        timing::transport_result(
+          snapshot,
+          metric_protocol,
+          direct_transport,
+          result.is_ok(),
+          transport_started,
+        );
+        result
+      }
       DirectTransportAttempt::Fallback(outbound) => {
+        let general_started = timing::general_start(
+          snapshot,
+          metric_protocol,
+          direct_transport,
+          transport_started,
+          timing_enabled,
+        );
         let Some(client) = state.clients.for_upstream_index(
           upstream_index,
           upstream.origin.scheme(),
           upstream_version,
         ) else {
+          timing::general_result(snapshot, metric_protocol, false, general_started);
           warn!(upstream = %upstream.name, "missing upstream client pool");
           return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
         };
-        if let Some(selection) = pool_selection.take() {
+        let result = if let Some(selection) = pool_selection.take() {
           let (original_uri, pool_retry_cookie) = pool_retry_context
             .as_ref()
             .expect("pool retry context should exist for pool selections");
@@ -433,7 +456,9 @@ impl PlainProxyFastPath {
           send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
         } else {
           send_one_shot(client, outbound, timeouts).await
-        }
+        };
+        timing::general_result(snapshot, metric_protocol, result.is_ok(), general_started);
+        result
       }
     };
     let upstream_response = match upstream_response_result {
@@ -475,6 +500,7 @@ impl PlainProxyFastPath {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
     }
     let (mut parts, response_body) = upstream_response.into_parts();
+    let response_body_started = timing::start(timing_enabled);
     let FastPathResponseBody {
       body: mut response_body,
       known_small_response_body,
@@ -491,14 +517,16 @@ impl PlainProxyFastPath {
     )
     .await
     {
-      Ok(response_body) => response_body,
+      Ok(response_body) => {
+        timing::response_body_result(snapshot, metric_protocol, true, response_body_started);
+        response_body
+      }
       Err(error) => {
+        timing::response_body_result(snapshot, metric_protocol, false, response_body_started);
         if state.request_path_features.hot_path_metrics {
-          state.metrics.record_fast_path_response_body(
-            fast_path_metric_protocol(request_version),
-            "error",
-            error.reason,
-          );
+          state
+            .metrics
+            .record_fast_path_response_body(metric_protocol, "error", error.reason);
         }
         let response = error.response;
         state.record_hot_path_response(response.status());
@@ -507,11 +535,12 @@ impl PlainProxyFastPath {
     };
     if state.request_path_features.hot_path_metrics {
       state.metrics.record_fast_path_response_body(
-        fast_path_metric_protocol(request_version),
+        metric_protocol,
         response_body_disposition,
         response_body_reason,
       );
     }
+    let response_finalize_started = timing::start(timing_enabled);
     if let Some(lease) = direct_h1_lease.take() {
       response_body = recycle_response_body(response_body, lease, known_small_response_body);
     }
@@ -624,6 +653,7 @@ impl PlainProxyFastPath {
     apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
     state.record_hot_path_response(response.status());
     drop(pool_selection);
+    timing::record_response_finalize(snapshot, metric_protocol, response_finalize_started);
     response
   }
 }

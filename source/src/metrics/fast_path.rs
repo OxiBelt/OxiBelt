@@ -2,6 +2,8 @@
 
 use super::StripedCounter;
 
+mod stage;
+
 const PATH_PLAIN_PROXY: &str = "plain_proxy";
 const HIT_REASON: &str = "eligible";
 const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
@@ -70,6 +72,7 @@ pub(super) struct FastPathMetrics {
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
   static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
+  stage: stage::FastPathStageMetrics,
 }
 
 impl Default for FastPathMetrics {
@@ -81,6 +84,7 @@ impl Default for FastPathMetrics {
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
+      stage: stage::FastPathStageMetrics::default(),
     }
   }
 }
@@ -168,6 +172,19 @@ impl FastPathMetrics {
       return;
     };
     self.static_fast_path_counters[index].increment();
+  }
+
+  pub(super) fn record_stage_duration_ns(
+    &self,
+    path: &str,
+    protocol: &str,
+    stage: &str,
+    outcome: &str,
+    duration_ns: u64,
+  ) {
+    self
+      .stage
+      .record_duration_ns(path, protocol, stage, outcome, duration_ns);
   }
 
   pub(super) fn append_prometheus(&self, output: &mut String) {
@@ -268,6 +285,7 @@ impl FastPathMetrics {
         );
       }
     }
+    self.stage.append_prometheus(output);
   }
 }
 

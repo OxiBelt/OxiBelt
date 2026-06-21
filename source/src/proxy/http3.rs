@@ -24,6 +24,7 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{
   InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES, KnownSmallResponseBody, ProxyBody,
 };
+use crate::proxy::http::fast_path::stage_timing as timing;
 use crate::proxy::http::response::text_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::server::downstream_quic_tls_metadata;
@@ -620,7 +621,19 @@ async fn handle_h3_request(
   context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
   let (send_stream, recv_stream) = stream.split();
+  let state = context.state.clone();
+  let metric_protocol = timing::protocol(::http::Version::HTTP_3);
+  let timing_enabled = state.request_path_features.hot_path_metrics;
+  let ingress_started = timing::start(timing_enabled);
   let request = request_body::prepare_h3_request_body(request, recv_stream).await;
+  timing::record(
+    state.as_ref(),
+    timing::PATH_H3_DOWNSTREAM,
+    metric_protocol,
+    timing::STAGE_H3_INGRESS_PREPARE,
+    timing::OUTCOME_OK,
+    ingress_started,
+  );
   let response = http_proxy::handle_http3(
     request,
     context.peer_addr,
@@ -632,7 +645,21 @@ async fn handle_h3_request(
   )
   .await;
   let status = response.status();
-  respond_to_h3_request(send_stream, response).await?;
+  let send_started = timing::start(timing_enabled);
+  let send_result = respond_to_h3_request(send_stream, response).await;
+  timing::record(
+    state.as_ref(),
+    timing::PATH_H3_DOWNSTREAM,
+    metric_protocol,
+    timing::STAGE_H3_DOWNSTREAM_SEND,
+    if send_result.is_ok() {
+      timing::OUTCOME_OK
+    } else {
+      timing::OUTCOME_ERROR
+    },
+    send_started,
+  );
+  send_result?;
   Ok(status)
 }
 

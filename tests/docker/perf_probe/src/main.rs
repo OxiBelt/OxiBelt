@@ -1607,8 +1607,15 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
       "pool": {
           "direct_h1": direct_h1_pool_metrics_json(metrics)
       },
-      "static_responses": static_fast_path_responses_json(metrics)
+      "static_responses": static_fast_path_responses_json(metrics),
+      "stage_timing": fast_path_stage_timing_json(metrics)
   })
+}
+
+#[derive(Default)]
+struct StageTimingCounters {
+  count: u64,
+  total_ns: u64,
 }
 
 fn fast_path_request_body_metrics_json(metrics: &str) -> serde_json::Value {
@@ -1751,6 +1758,74 @@ fn static_fast_path_responses_json(metrics: &str) -> serde_json::Value {
     }
   }
   serde_json::Value::Object(responses)
+}
+
+fn fast_path_stage_timing_json(metrics: &str) -> serde_json::Value {
+  let mut samples: BTreeMap<(String, String, String, String), StageTimingCounters> =
+    BTreeMap::new();
+  for (labels, value) in prometheus_labeled_u64_samples(
+    metrics,
+    "oxibelt_http_fast_path_stage_observations_total",
+  ) {
+    if let Some(key) = stage_timing_key(labels) {
+      samples.entry(key).or_default().count += value;
+    }
+  }
+  for (labels, value) in prometheus_labeled_u64_samples(
+    metrics,
+    "oxibelt_http_fast_path_stage_duration_ns_total",
+  ) {
+    if let Some(key) = stage_timing_key(labels) {
+      samples.entry(key).or_default().total_ns += value;
+    }
+  }
+
+  let mut paths = serde_json::Map::new();
+  for ((path, protocol, stage, outcome), counters) in samples {
+    if counters.count == 0 && counters.total_ns == 0 {
+      continue;
+    }
+    let protocol_entry = paths
+      .entry(path)
+      .or_insert_with(|| serde_json::json!({}));
+    let Some(protocols) = protocol_entry.as_object_mut() else {
+      continue;
+    };
+    let stage_entry = protocols
+      .entry(protocol)
+      .or_insert_with(|| serde_json::json!({}));
+    let Some(stages) = stage_entry.as_object_mut() else {
+      continue;
+    };
+    let outcome_entry = stages
+      .entry(stage)
+      .or_insert_with(|| serde_json::json!({}));
+    let Some(outcomes) = outcome_entry.as_object_mut() else {
+      continue;
+    };
+    outcomes.insert(
+      outcome,
+      serde_json::json!({
+          "count": counters.count,
+          "total_ns": counters.total_ns,
+          "avg_ns": if counters.count == 0 {
+              serde_json::Value::Null
+          } else {
+              serde_json::json!(counters.total_ns as f64 / counters.count as f64)
+          },
+      }),
+    );
+  }
+  serde_json::Value::Object(paths)
+}
+
+fn stage_timing_key(labels: BTreeMap<String, String>) -> Option<(String, String, String, String)> {
+  Some((
+    labels.get("path")?.clone(),
+    labels.get("protocol")?.clone(),
+    labels.get("stage")?.clone(),
+    labels.get("outcome")?.clone(),
+  ))
 }
 
 fn prometheus_labeled_u64_samples(
@@ -2767,6 +2842,14 @@ oxibelt_http_direct_h1_pool_events_total{event=\"reconnect\"} 2
 oxibelt_http_static_fast_path_responses_total{source=\"hot_object\",outcome=\"served\"} 41
 # TYPE oxibelt_http_static_fast_path_responses_total counter
 oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fallback\"} 3
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"transport_direct_h1\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"transport_direct_h1\",outcome=\"ok\"} 100
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_downstream_send\",outcome=\"error\"} 2
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_downstream_send\",outcome=\"error\"} 90
 ";
 
     let parsed = fast_path_metrics_json(metrics);
@@ -2794,6 +2877,22 @@ oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fall
     assert_eq!(parsed["pool"]["direct_h1"]["reconnect"], 2);
     assert_eq!(parsed["static_responses"]["hot_object"]["served"], 41);
     assert_eq!(parsed["static_responses"]["sendfile"]["fallback"], 3);
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["transport_direct_h1"]["ok"]["count"],
+      4
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["transport_direct_h1"]["ok"]["total_ns"],
+      100
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["transport_direct_h1"]["ok"]["avg_ns"],
+      25.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["h3_downstream"]["h3"]["h3_downstream_send"]["error"]["avg_ns"],
+      45.0
+    );
   }
 
   #[test]

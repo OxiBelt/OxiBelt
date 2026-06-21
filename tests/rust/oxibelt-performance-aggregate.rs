@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 20;
+const COMPARISON_SCHEMA_VERSION: u32 = 21;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -212,6 +212,7 @@ struct BenchmarkRow {
   fast_path_transport_direct_h2_h3: Option<FastPathSample>,
   direct_h1_pool_events: Option<BTreeMap<String, u64>>,
   static_fast_path_responses: Option<BTreeMap<String, BTreeMap<String, u64>>>,
+  fast_path_stage_timing: Option<FastPathStageTimingSamples>,
 }
 
 #[derive(Clone)]
@@ -289,6 +290,7 @@ struct AggregateBuilder {
   fast_path_transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool_events: CounterMapAggregateBuilder,
   static_fast_path_responses: NestedCounterMapAggregateBuilder,
+  fast_path_stage_timing: FastPathStageTimingAggregateBuilder,
 }
 
 struct AggregateFastPathInput {
@@ -303,6 +305,7 @@ struct AggregateFastPathInput {
   transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool: CounterMapAggregateBuilder,
   static_responses: NestedCounterMapAggregateBuilder,
+  stage_timing: FastPathStageTimingAggregateBuilder,
 }
 
 #[derive(Clone)]
@@ -311,6 +314,16 @@ struct FastPathSample {
   misses: u64,
   attempts: u64,
   hit_rate: Option<f64>,
+}
+
+type FastPathStageTimingSamples =
+  BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, FastPathStageTimingSample>>>>;
+
+#[derive(Clone)]
+struct FastPathStageTimingSample {
+  count: u64,
+  total_ns: u64,
+  avg_ns: Option<f64>,
 }
 
 #[derive(Default)]
@@ -332,6 +345,19 @@ struct CounterMapAggregateBuilder {
 struct NestedCounterMapAggregateBuilder {
   sample_count: usize,
   values: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+#[derive(Default)]
+struct FastPathStageTimingAggregateBuilder {
+  samples: BTreeMap<(String, String, String, String), FastPathStageTimingSampleAggregateBuilder>,
+}
+
+#[derive(Default)]
+struct FastPathStageTimingSampleAggregateBuilder {
+  sample_count: usize,
+  count: u64,
+  total_ns: u64,
+  avg_ns_values: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -407,6 +433,22 @@ struct AggregateFastPathStats {
   direct_h1_pool: Option<CounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   static_responses: Option<NestedCounterMapAggregateStats>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  stage_timing: Option<FastPathStageTimingAggregateStats>,
+}
+
+type FastPathStageTimingAggregateStats = BTreeMap<
+  String,
+  BTreeMap<String, BTreeMap<String, BTreeMap<String, FastPathStageTimingAggregateSampleStats>>>,
+>;
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct FastPathStageTimingAggregateSampleStats {
+  sample_count: usize,
+  count: u64,
+  total_ns: u64,
+  median_avg_ns: Option<f64>,
+  max_avg_ns: Option<f64>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -1115,6 +1157,9 @@ impl AggregateBuilder {
     if let Some(responses) = row.static_fast_path_responses {
       self.static_fast_path_responses.push(responses);
     }
+    if let Some(stage_timing) = row.fast_path_stage_timing {
+      self.fast_path_stage_timing.push(stage_timing);
+    }
     self.source_files.insert(source_file);
   }
 
@@ -1141,6 +1186,7 @@ impl AggregateBuilder {
       transport_direct_h2_h3: self.fast_path_transport_direct_h2_h3,
       direct_h1_pool: self.direct_h1_pool_events,
       static_responses: self.static_fast_path_responses,
+      stage_timing: self.fast_path_stage_timing,
     });
 
     AggregateStats {
@@ -1188,6 +1234,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
   let transport_direct_h2_h3 = input.transport_direct_h2_h3.finish();
   let direct_h1_pool = input.direct_h1_pool.finish();
   let static_responses = input.static_responses.finish();
+  let stage_timing = input.stage_timing.finish();
   if plain_proxy_h1.is_none()
     && plain_proxy_h2.is_none()
     && plain_proxy_h3.is_none()
@@ -1199,6 +1246,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     && transport_direct_h2_h3.is_none()
     && direct_h1_pool.is_none()
     && static_responses.is_none()
+    && stage_timing.is_none()
   {
     return None;
   }
@@ -1214,6 +1262,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     transport_direct_h2_h3,
     direct_h1_pool,
     static_responses,
+    stage_timing,
   })
 }
 
@@ -1284,6 +1333,69 @@ impl NestedCounterMapAggregateBuilder {
       sample_count: self.sample_count,
       values: self.values,
     })
+  }
+}
+
+impl FastPathStageTimingAggregateBuilder {
+  fn push(&mut self, samples: FastPathStageTimingSamples) {
+    for (path, protocols) in samples {
+      for (protocol, stages) in protocols {
+        for (stage, outcomes) in stages {
+          for (outcome, sample) in outcomes {
+            self
+              .samples
+              .entry((path.clone(), protocol.clone(), stage.clone(), outcome))
+              .or_default()
+              .push(sample);
+          }
+        }
+      }
+    }
+  }
+
+  fn finish(self) -> Option<FastPathStageTimingAggregateStats> {
+    if self.samples.is_empty() {
+      return None;
+    }
+    let mut aggregate = BTreeMap::new();
+    for ((path, protocol, stage, outcome), builder) in self.samples {
+      aggregate
+        .entry(path)
+        .or_insert_with(BTreeMap::new)
+        .entry(protocol)
+        .or_insert_with(BTreeMap::new)
+        .entry(stage)
+        .or_insert_with(BTreeMap::new)
+        .insert(outcome, builder.finish());
+    }
+    Some(aggregate)
+  }
+}
+
+impl FastPathStageTimingSampleAggregateBuilder {
+  fn push(&mut self, sample: FastPathStageTimingSample) {
+    self.sample_count += 1;
+    self.count = self.count.saturating_add(sample.count);
+    self.total_ns = self.total_ns.saturating_add(sample.total_ns);
+    if let Some(avg_ns) = sample.avg_ns {
+      self.avg_ns_values.push(avg_ns);
+    } else if sample.count > 0 {
+      self
+        .avg_ns_values
+        .push(sample.total_ns as f64 / sample.count as f64);
+    }
+  }
+
+  fn finish(self) -> FastPathStageTimingAggregateSampleStats {
+    let mut avg_ns_values = self.avg_ns_values;
+    let max_avg_ns = max_value(&avg_ns_values);
+    FastPathStageTimingAggregateSampleStats {
+      sample_count: self.sample_count,
+      count: self.count,
+      total_ns: self.total_ns,
+      median_avg_ns: percentile(&mut avg_ns_values, 50.0),
+      max_avg_ns,
+    }
   }
 }
 
@@ -3170,6 +3282,13 @@ fn parse_result_value(
       label,
       warnings,
     ),
+    fast_path_stage_timing: parse_fast_path_stage_timing(
+      object,
+      source_file,
+      row_index,
+      label,
+      warnings,
+    ),
   })
 }
 
@@ -3474,6 +3593,93 @@ fn parse_static_fast_path_responses(
             }
     }
     parsed.insert(source.clone(), parsed_outcomes);
+  }
+  Some(parsed)
+}
+
+fn parse_fast_path_stage_timing(
+  object: &serde_json::Map<String, Value>,
+  source_file: &str,
+  row_index: usize,
+  label: &str,
+  warnings: &mut WarningBag,
+) -> Option<FastPathStageTimingSamples> {
+  let stage_timing = object
+    .get("fast_path")
+    .and_then(Value::as_object)
+    .and_then(|fast_path| fast_path.get("stage_timing"))
+    .and_then(Value::as_object)?;
+  let mut parsed = BTreeMap::new();
+  for (path, protocols) in stage_timing {
+    let Some(protocols) = protocols.as_object() else {
+      warnings.push(format!(
+        "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path} is not an object"
+      ));
+      continue;
+    };
+    for (protocol, stages) in protocols {
+      let Some(stages) = stages.as_object() else {
+        warnings.push(format!(
+          "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol} is not an object"
+        ));
+        continue;
+      };
+      for (stage, outcomes) in stages {
+        let Some(outcomes) = outcomes.as_object() else {
+          warnings.push(format!(
+            "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol}.{stage} is not an object"
+          ));
+          continue;
+        };
+        for (outcome, sample) in outcomes {
+          let Some(sample) = sample.as_object() else {
+            warnings.push(format!(
+              "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol}.{stage}.{outcome} is not an object"
+            ));
+            continue;
+          };
+          let Some(count) = sample.get("count").and_then(Value::as_u64) else {
+            warnings.push(format!(
+              "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol}.{stage}.{outcome}.count is not an unsigned integer"
+            ));
+            continue;
+          };
+          let Some(total_ns) = sample.get("total_ns").and_then(Value::as_u64) else {
+            warnings.push(format!(
+              "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol}.{stage}.{outcome}.total_ns is not an unsigned integer"
+            ));
+            continue;
+          };
+          let avg_ns = match sample.get("avg_ns") {
+            Some(Value::Null) | None => None,
+            Some(value) => match value.as_f64() {
+              Some(value) => Some(value),
+              None => {
+                warnings.push(format!(
+                  "{source_file} row {row_index} ({label}): fast_path.stage_timing.{path}.{protocol}.{stage}.{outcome}.avg_ns is not numeric"
+                ));
+                None
+              }
+            },
+          };
+          parsed
+            .entry(path.clone())
+            .or_insert_with(BTreeMap::new)
+            .entry(protocol.clone())
+            .or_insert_with(BTreeMap::new)
+            .entry(stage.clone())
+            .or_insert_with(BTreeMap::new)
+            .insert(
+              outcome.clone(),
+              FastPathStageTimingSample {
+                count,
+                total_ns,
+                avg_ns,
+              },
+            );
+        }
+      }
+    }
   }
   Some(parsed)
 }
@@ -6773,6 +6979,7 @@ fn render_markdown(report: &Report) -> String {
   write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
   write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
+  write_fast_path_stage_timing_table(&mut markdown, report);
   write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
   write_diagnostic_profile_table(&mut markdown, &report.profiling);
   write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
@@ -6781,6 +6988,64 @@ fn render_markdown(report: &Report) -> String {
   write_regression_gate_table(&mut markdown, &report.regression_gates);
   write_warnings(&mut markdown, report);
   markdown
+}
+
+fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
+  let rows = report
+    .aggregates
+    .iter()
+    .filter(|aggregate| {
+      aggregate.amd64_target_cpu == report.primary_target_cpu
+        && aggregate.comparator == Comparator::Oxibelt.as_str()
+        && matches!(aggregate.scenario.as_str(), "h2" | "h3")
+    })
+    .filter_map(|aggregate| {
+      aggregate
+        .fast_path
+        .as_ref()
+        .and_then(|fast_path| fast_path.stage_timing.as_ref())
+        .map(|stage_timing| (aggregate.scenario.as_str(), stage_timing))
+    })
+    .collect::<Vec<_>>();
+  if rows.is_empty() {
+    return;
+  }
+
+  writeln!(markdown, "\n## Fast-path stage timing diagnostics\n").unwrap();
+  writeln!(
+    markdown,
+    "| Scenario | Path | Protocol | Stage | Outcome | Count | Median avg ns | Max avg ns |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | --- | --- | --- | ---: | ---: | ---: |"
+  )
+  .unwrap();
+  for (scenario, stage_timing) in rows {
+    for (path, protocols) in stage_timing {
+      for (protocol, stages) in protocols {
+        for (stage, outcomes) in stages {
+          for (outcome, sample) in outcomes {
+            writeln!(
+              markdown,
+              "| `{scenario}` | `{path}` | `{protocol}` | `{stage}` | `{outcome}` | `{}` | {} | {} |",
+              sample.count,
+              format_optional_ns(sample.median_avg_ns),
+              format_optional_ns(sample.max_avg_ns)
+            )
+            .unwrap();
+          }
+        }
+      }
+    }
+  }
+}
+
+fn format_optional_ns(value: Option<f64>) -> String {
+  value
+    .map(|value| format!("`{value:.1}`"))
+    .unwrap_or_else(|| "`n/a`".to_owned())
 }
 
 fn format_ratio_summary(summary: &RatioSummary, comparator: &str) -> String {
@@ -7502,6 +7767,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         static_responses: None,
+        stage_timing: None,
       })
     } else if comparator == Comparator::Oxibelt && scenario == "h2" {
       Some(AggregateFastPathStats {
@@ -7516,6 +7782,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         static_responses: None,
+        stage_timing: None,
       })
     } else if comparator == Comparator::Oxibelt && scenario == "h3" {
       Some(AggregateFastPathStats {
@@ -7530,6 +7797,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         static_responses: None,
+        stage_timing: None,
       })
     } else {
       None
@@ -7925,6 +8193,69 @@ mod tests {
   }
 
   #[test]
+  fn aggregate_parses_fast_path_stage_timing_from_result_rows() {
+    let input_dir = temp_dir("fast-path-stage-timing-parse");
+    let run_dir = input_dir.path().join("run-1");
+    std::fs::create_dir_all(&run_dir).expect("run dir should be created");
+    std::fs::write(
+      run_dir.join("results.json"),
+      r#"[{
+              "type": "load",
+              "label": "oxibelt-h2",
+              "protocol": "h2",
+              "requests": 100,
+              "rps": 1000.0,
+              "p99_ms": 1.0,
+              "errors": 0,
+              "fast_path": {
+                "stage_timing": {
+                  "plain_proxy": {
+                    "h2": {
+                      "transport_direct_h1": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 100,
+                          "avg_ns": 25.0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }]"#,
+    )
+    .expect("results should be written");
+
+    let report = aggregate(
+      input_dir.path(),
+      AggregateOptions {
+        profile: None,
+        expected_runs: None,
+        expected_shards: None,
+        expected_target_cpus: Vec::new(),
+        primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+        baseline_report: None,
+        baseline_context: None,
+        accepted_regression_reason: None,
+      },
+    );
+    let stage_timing = report
+      .aggregates
+      .iter()
+      .find(|aggregate| aggregate.comparator == "oxibelt" && aggregate.scenario == "h2")
+      .and_then(|aggregate| aggregate.fast_path.as_ref())
+      .and_then(|fast_path| fast_path.stage_timing.as_ref())
+      .expect("stage timing aggregate should exist");
+    let sample = &stage_timing["plain_proxy"]["h2"]["transport_direct_h1"]["ok"];
+
+    assert_eq!(sample.sample_count, 1);
+    assert_eq!(sample.count, 4);
+    assert_eq!(sample.total_ns, 100);
+    assert_eq!(sample.median_avg_ns, Some(25.0));
+    assert_eq!(sample.max_avg_ns, Some(25.0));
+  }
+
+  #[test]
   fn aggregate_parses_static_fast_path_evidence_from_result_rows() {
     let input_dir = temp_dir("static-fast-path-parse");
     let run_dir = input_dir.path().join("run-1");
@@ -8018,6 +8349,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       static_responses: None,
+      stage_timing: None,
     });
 
     let gates = build_regression_gate_report(
@@ -8080,6 +8412,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       static_responses: None,
+      stage_timing: None,
     });
 
     let gates = build_regression_gate_report(
@@ -8141,6 +8474,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       static_responses: None,
+      stage_timing: None,
     });
 
     let gates = build_regression_gate_report(
@@ -8204,6 +8538,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       static_responses: None,
+      stage_timing: None,
     });
 
     let gates = build_regression_gate_report(

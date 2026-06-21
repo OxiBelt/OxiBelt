@@ -157,6 +157,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                         "hit_rate": 1.0
                     }
                 }
+            },
+            "stage_timing": {
+                "plain_proxy": {
+                    "h1": {
+                        "transport_direct_h1": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 100,
+                                "avg_ns": 25.0
+                            }
+                        }
+                    }
+                }
             }
         }),
       );
@@ -184,6 +197,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                         "hit_rate": 1.0
                     }
                 }
+            },
+            "stage_timing": {
+                "plain_proxy": {
+                    "h2": {
+                        "transport_direct_h1": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 100,
+                                "avg_ns": 25.0
+                            }
+                        }
+                    }
+                }
             }
         }),
       );
@@ -209,6 +235,30 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                         "misses": 0,
                         "attempts": 1000,
                         "hit_rate": 1.0
+                    }
+                }
+            },
+            "stage_timing": {
+                "plain_proxy": {
+                    "h3": {
+                        "transport_direct_h1": {
+                            "ok": {
+                                "count": 2,
+                                "total_ns": 80,
+                                "avg_ns": 40.0
+                            }
+                        }
+                    }
+                },
+                "h3_downstream": {
+                    "h3": {
+                        "h3_downstream_send": {
+                            "ok": {
+                                "count": 2,
+                                "total_ns": 120,
+                                "avg_ns": 60.0
+                            }
+                        }
                     }
                 }
             }
@@ -942,7 +992,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 20);
+  assert_eq!(report["schema_version"], 21);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -968,6 +1018,28 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
       .expect("median p95 should exist"),
     3.0,
   );
+
+  let oxibelt_h2 = find_aggregate(&report, "oxibelt", "h2");
+  let h2_transport_timing =
+    &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["transport_direct_h1"]["ok"];
+  assert_eq!(h2_transport_timing["sample_count"], 25);
+  assert_eq!(h2_transport_timing["count"], 100);
+  assert_eq!(h2_transport_timing["total_ns"], 2500);
+  assert_eq!(h2_transport_timing["median_avg_ns"], json!(25.0));
+  assert_eq!(h2_transport_timing["max_avg_ns"], json!(25.0));
+
+  let oxibelt_h3 = find_aggregate(&report, "oxibelt", "h3");
+  let h3_downstream_timing =
+    &oxibelt_h3["fast_path"]["stage_timing"]["h3_downstream"]["h3"]["h3_downstream_send"]["ok"];
+  assert_eq!(h3_downstream_timing["sample_count"], 25);
+  assert_eq!(h3_downstream_timing["count"], 50);
+  assert_eq!(h3_downstream_timing["total_ns"], 3000);
+  assert_eq!(h3_downstream_timing["median_avg_ns"], json!(60.0));
+
+  let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+    .expect("markdown report should be readable");
+  assert!(markdown.contains("## Fast-path stage timing diagnostics"));
+  assert!(markdown.contains("`h3_downstream_send`"));
 
   let h1_comparison = find_comparison(&report, "reverse_proxy", "h1-keepalive");
   assert_close(
@@ -1154,7 +1226,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 20);
+  assert_eq!(report["schema_version"], 21);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

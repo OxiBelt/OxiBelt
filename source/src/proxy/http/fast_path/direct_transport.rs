@@ -1,7 +1,7 @@
 use crate::config::HttpVersion;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DirectFastPathTransport {
+pub(crate) enum DirectFastPathTransport {
   H1,
   H2,
 }
