@@ -3,11 +3,17 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
+use crate::cache::CacheStats;
+use crate::config::MetricsConfig;
+use crate::tls::TlsServerSessionStorageStats;
 use http::Request;
 use hyper::service::service_fn;
-use tokio::io::ReadBuf;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Barrier, oneshot, watch};
+use url::Url;
 
+use super::connection::h2_handshake;
 use super::*;
 
 #[test]
@@ -152,6 +158,8 @@ fn prepared_request_requires_absolute_uri_and_sets_h2_version() {
     prepared.request.uri().to_string(),
     "http://backend.internal/perf/h2c?body=ok"
   );
+  let fallback = prepared.into_fallback_request();
+  assert_eq!(fallback.version(), http::Version::HTTP_11);
 
   let relative = Request::builder()
     .method(Method::GET)
@@ -235,7 +243,8 @@ async fn sender_single_flights_cold_pool_connection_creation() {
     handle
       .await
       .expect("sender task should not panic")
-      .expect("sender task should complete after the server handshake is released");
+      .expect("sender task should complete after the server handshake is released")
+      .expect("sender task should acquire direct H2 sender");
   }
   assert_eq!(connect_attempts.load(Ordering::SeqCst), 1);
 }
@@ -303,7 +312,8 @@ async fn sender_bounds_cold_pool_connection_creation_by_slots() {
     handle
       .await
       .expect("sender task should not panic")
-      .expect("sender task should complete after connector release");
+      .expect("sender task should complete after connector release")
+      .expect("sender task should acquire direct H2 sender");
   }
   assert!(connect_attempts.load(Ordering::SeqCst) <= slot_count);
 }
@@ -316,11 +326,78 @@ async fn sender_lease_tracks_active_streams_until_drop() {
   let sender = pool
     .sender_with(&metrics, successful_test_sender)
     .await
+    .expect("sender acquisition should succeed")
     .expect("sender should be acquired");
   let connection = sender.lease.connection.clone();
   assert_eq!(connection.active_streams.load(Ordering::SeqCst), 1);
   drop(sender);
   assert_eq!(connection.active_streams.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn saturated_pool_falls_back_instead_of_failing_request() {
+  let mut pool = direct_h2_test_pool_with_slots(Duration::from_secs(1), 1);
+  pool.target_streams_per_slot = 1;
+  pool.max_streams_per_slot = 1;
+  let pools = DirectH2Pools {
+    pools: vec![Some(Arc::new(pool))],
+  };
+  let pool = pools.pools[0]
+    .as_ref()
+    .expect("test pool should exist")
+    .clone();
+  let metrics = Metrics::new();
+  let held = pool
+    .sender_with(&metrics, successful_test_sender)
+    .await
+    .expect("initial sender acquisition should succeed")
+    .expect("initial sender should reserve the only stream slot");
+  assert_eq!(
+    held.lease.connection.active_streams.load(Ordering::SeqCst),
+    1
+  );
+
+  let upstream = upstream("http://backend.internal:18082");
+  let request = Request::builder()
+    .method(Method::GET)
+    .version(http::Version::HTTP_2)
+    .uri("http://backend.internal/perf/h2c?body=ok")
+    .body(empty_body())
+    .unwrap();
+  let result = try_send_direct_h2(
+    &pools,
+    &metrics,
+    0,
+    &upstream,
+    HttpVersion::H2,
+    http::Version::HTTP_2,
+    true,
+    true,
+    request,
+    direct_h2_test_timeouts(),
+  )
+  .await;
+
+  let fallback = match result {
+    DirectH2SendResult::Fallback(request) => request,
+    DirectH2SendResult::Sent(Ok(_)) => panic!("saturated pool should not use direct H2"),
+    DirectH2SendResult::Sent(Err(error)) => {
+      panic!("saturated pool should fall back instead of failing: {error:#}")
+    }
+  };
+  assert_eq!(fallback.version(), http::Version::HTTP_2);
+  let metrics_body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+  assert!(
+    metrics_body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 1")
+  );
+  assert!(metrics_body.contains(
+    "oxibelt_http_fast_path_transports_total{transport=\"direct_h2\",protocol=\"h2\",outcome=\"miss\",reason=\"pool_full\"} 1"
+  ));
+  drop(held);
 }
 
 #[tokio::test]
@@ -384,7 +461,8 @@ async fn sender_timeout_bounds_single_flight_wait() {
   leader
     .await
     .expect("leader task should not panic")
-    .expect("leader sender should complete after release");
+    .expect("leader sender should complete after release")
+    .expect("leader should acquire direct H2 sender");
 }
 
 #[tokio::test]
@@ -458,7 +536,8 @@ async fn sender_acquisition_timeout_releases_pool_lock() {
   })
   .await
   .expect("pool lock should be available after handshake timeout")
-  .expect("successful test sender should be stored in the pool");
+  .expect("successful test sender should be stored in the pool")
+  .expect("successful acquisition should return a direct H2 sender");
   assert!(!successful.reused);
 }
 
@@ -528,6 +607,19 @@ fn direct_h2_test_pool_with_slots(connect_timeout: Duration, slot_count: usize) 
     tls_config: None,
     next_slot: AtomicUsize::new(0),
     slots: (0..slot_count).map(|_| DirectH2Slot::new()).collect(),
+  }
+}
+
+fn direct_h2_test_timeouts() -> EffectiveTimeouts {
+  let timeout = Duration::from_secs(1);
+  EffectiveTimeouts {
+    response_send: timeout,
+    websocket_idle: timeout,
+    webtransport_idle: timeout,
+    upstream_connect: timeout,
+    upstream_first_byte: timeout,
+    upstream_read: timeout,
+    upstream_send: timeout,
   }
 }
 

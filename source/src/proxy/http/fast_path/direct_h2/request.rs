@@ -6,12 +6,14 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 
 pub(super) struct PreparedDirectH2Request {
   pub(super) request: Request<ProxyBody>,
+  fallback_version: http::Version,
 }
 
 pub(super) struct RetryDirectH2Request {
   method: Method,
   uri: Uri,
   headers: http::HeaderMap,
+  fallback_version: http::Version,
 }
 
 impl PreparedDirectH2Request {
@@ -19,8 +21,12 @@ impl PreparedDirectH2Request {
     if request.uri().scheme().is_none() || request.uri().authority().is_none() {
       anyhow::bail!("direct H2 request URI must be absolute-form");
     }
+    let fallback_version = request.version();
     *request.version_mut() = http::Version::HTTP_2;
-    Ok(Self { request })
+    Ok(Self {
+      request,
+      fallback_version,
+    })
   }
 
   pub(super) fn retry_request(&self) -> RetryDirectH2Request {
@@ -28,10 +34,16 @@ impl PreparedDirectH2Request {
       method: self.request.method().clone(),
       uri: self.request.uri().clone(),
       headers: self.request.headers().clone(),
+      fallback_version: self.fallback_version,
     }
   }
 
   pub(super) fn into_request(self) -> Request<ProxyBody> {
+    self.request
+  }
+
+  pub(super) fn into_fallback_request(mut self) -> Request<ProxyBody> {
+    *self.request.version_mut() = self.fallback_version;
     self.request
   }
 }
@@ -44,6 +56,17 @@ impl RetryDirectH2Request {
       .uri(self.uri)
       .body(empty_body())
       .expect("direct H2 retry request parts should be valid");
+    *request.headers_mut() = self.headers;
+    request
+  }
+
+  pub(super) fn into_fallback_request(self) -> Request<ProxyBody> {
+    let mut request = Request::builder()
+      .method(self.method)
+      .version(self.fallback_version)
+      .uri(self.uri)
+      .body(empty_body())
+      .expect("direct H2 fallback request parts should be valid");
     *request.headers_mut() = self.headers;
     request
   }

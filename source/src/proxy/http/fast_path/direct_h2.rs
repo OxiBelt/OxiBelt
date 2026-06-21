@@ -11,13 +11,9 @@ use anyhow::Context;
 use http::{Method, Request, Response};
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::http2::SendRequest;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio_rustls::TlsConnector;
-use tracing::{debug, warn};
-use url::Url;
+use tracing::debug;
 
 use crate::config::{HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
@@ -25,11 +21,16 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
+mod connection;
 mod request;
 
+use self::connection::{
+  DirectH2Origin, build_h2_tls_config, connect_tls_h2, h2_handshake_with_timeout,
+};
 use self::request::PreparedDirectH2Request;
 #[cfg(test)]
 use self::request::empty_body;
+use super::helpers::fast_path_metric_protocol;
 
 const DIRECT_H2_MAX_SLOTS: usize = 16;
 const DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT: usize = 32;
@@ -198,27 +199,6 @@ impl Drop for DirectH2Lease {
   }
 }
 
-struct DirectH2Origin {
-  scheme: &'static str,
-  host: String,
-  port: u16,
-}
-
-impl DirectH2Origin {
-  fn from_url(origin: &Url) -> Option<Self> {
-    let scheme = match origin.scheme() {
-      "http" => "http",
-      "https" => "https",
-      _ => return None,
-    };
-    Some(Self {
-      scheme,
-      host: origin.host_str()?.to_owned(),
-      port: origin.port_or_known_default()?,
-    })
-  }
-}
-
 pub(super) enum DirectH2SendResult {
   Fallback(Request<ProxyBody>),
   Sent(Result<DirectH2Response, anyhow::Error>),
@@ -264,7 +244,7 @@ impl DirectH2Pool {
     }))
   }
 
-  async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<DirectH2Sender> {
+  async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<Option<DirectH2Sender>> {
     self
       .sender_with(metrics, || self.connect_sender(metrics))
       .await
@@ -274,7 +254,7 @@ impl DirectH2Pool {
     &self,
     metrics: &Arc<Metrics>,
     connect_sender: F,
-  ) -> anyhow::Result<DirectH2Sender>
+  ) -> anyhow::Result<Option<DirectH2Sender>>
   where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
@@ -282,7 +262,7 @@ impl DirectH2Pool {
     let reusable = self.take_reusable_sender(metrics);
     if let Some(sender) = reusable.sender {
       metrics.record_direct_h2_pool_event("hit");
-      return Ok(sender);
+      return Ok(Some(sender));
     }
 
     metrics.record_direct_h2_pool_event("miss");
@@ -291,6 +271,9 @@ impl DirectH2Pool {
       DirectH2TakeMissReason::Empty => metrics.record_direct_h2_pool_event("miss_empty"),
       DirectH2TakeMissReason::Locked => metrics.record_direct_h2_pool_event("miss_locked"),
       DirectH2TakeMissReason::Saturated => metrics.record_direct_h2_pool_event("miss_saturated"),
+    }
+    if reusable.miss_reason == DirectH2TakeMissReason::Saturated && reusable.empty_slot.is_none() {
+      return Ok(None);
     }
 
     let slot_index = reusable
@@ -378,7 +361,7 @@ impl DirectH2Pool {
     metrics: &Arc<Metrics>,
     slot_index: usize,
     connect_sender: F,
-  ) -> anyhow::Result<DirectH2Sender>
+  ) -> anyhow::Result<Option<DirectH2Sender>>
   where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
@@ -394,14 +377,14 @@ impl DirectH2Pool {
         DirectH2Connection::reserve(candidate, self.max_streams_per_slot)
       {
         metrics.record_direct_h2_pool_event("hit");
-        return Ok(DirectH2Sender {
+        return Ok(Some(DirectH2Sender {
           sender,
           lease,
           reused: true,
-        });
+        }));
       } else {
         metrics.record_direct_h2_pool_event("miss_saturated");
-        anyhow::bail!("direct H2 upstream pool slot is saturated");
+        return Ok(None);
       }
     }
 
@@ -425,11 +408,11 @@ impl DirectH2Pool {
       active_streams: AtomicUsize::new(1),
     });
     *slot_connection = Some(Arc::clone(&connection));
-    Ok(DirectH2Sender {
+    Ok(Some(DirectH2Sender {
       sender,
       lease: DirectH2Lease { connection },
       reused: false,
-    })
+    }))
   }
 
   async fn clear_connection(&self, target: &Arc<DirectH2Connection>) {
@@ -463,16 +446,14 @@ impl DirectH2Pool {
       .context("failed to enable TCP_NODELAY for direct H2 upstream")?;
 
     let sender = if let Some(tls_config) = &self.tls_config {
-      let server_name = rustls::pki_types::ServerName::try_from(self.origin.host.clone())
-        .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
-      let tls = tokio::time::timeout(
+      connect_tls_h2(
+        tls_config.clone(),
+        self.origin.host.clone(),
+        stream,
+        &self.http2_config,
         self.connect_timeout,
-        TlsConnector::from(tls_config.clone()).connect(server_name, stream),
       )
-      .await
-      .context("direct H2 upstream TLS handshake timed out")?
-      .context("direct H2 upstream TLS handshake failed")?;
-      h2_handshake_with_timeout(tls, &self.http2_config, self.connect_timeout).await?
+      .await?
     } else {
       h2_handshake_with_timeout(stream, &self.http2_config, self.connect_timeout).await?
     };
@@ -533,17 +514,7 @@ pub(super) async fn try_send_direct_h2(
     }
   };
 
-  let result = send_prepared_request(pool, metrics, prepared, timeouts).await;
-  match &result {
-    Ok(_) => metrics.record_direct_h2_transport_hit(protocol),
-    Err(error) if error.to_string().contains("timed out") => {
-      metrics.record_direct_h2_transport_miss(protocol, "connect_error");
-    }
-    Err(_) => {
-      metrics.record_direct_h2_transport_miss(protocol, "send_error");
-    }
-  }
-  DirectH2SendResult::Sent(result)
+  send_prepared_request(pool, metrics, protocol, prepared, timeouts).await
 }
 
 fn direct_h2_guard_miss(
@@ -577,13 +548,22 @@ fn direct_h2_guard_miss(
 async fn send_prepared_request(
   pool: Arc<DirectH2Pool>,
   metrics: &Arc<Metrics>,
+  protocol: &'static str,
   prepared: PreparedDirectH2Request,
   timeouts: EffectiveTimeouts,
-) -> anyhow::Result<DirectH2Response> {
+) -> DirectH2SendResult {
   metrics.record_http_upstream_client_request(pool.metric_version(), pool.origin.scheme, "primary");
 
-  let direct_sender =
-    sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
+  let direct_sender = match sender_with_first_byte_timeout(
+    pool.sender(metrics),
+    timeouts.upstream_first_byte,
+  )
+  .await
+  {
+    Ok(Some(direct_sender)) => direct_sender,
+    Ok(None) => return saturated_fallback(metrics, protocol, prepared.into_fallback_request()),
+    Err(error) => return direct_h2_send_error(metrics, protocol, error),
+  };
   let reused = direct_sender.reused;
   let mut sender = direct_sender.sender;
   let lease = direct_sender.lease;
@@ -594,17 +574,35 @@ async fn send_prepared_request(
   )
   .await;
   match send_result {
-    Ok(Ok(response)) => Ok(DirectH2Response {
-      response,
-      lease: Some(lease),
-    }),
+    Ok(Ok(response)) => {
+      metrics.record_direct_h2_transport_hit(protocol);
+      DirectH2SendResult::Sent(Ok(DirectH2Response {
+        response,
+        lease: Some(lease),
+      }))
+    }
     Ok(Err(error)) if reused => {
       debug!(error = %error, "direct H2 upstream sender failed; reconnecting once");
       metrics.record_direct_h2_pool_event("reconnect");
       pool.clear_connection(&lease.connection).await;
       drop(lease);
       let direct_sender =
-        sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte).await?;
+        match sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte)
+          .await
+        {
+          Ok(Some(direct_sender)) => direct_sender,
+          Ok(None) => {
+            return saturated_fallback(
+              metrics,
+              protocol,
+              retry
+                .take()
+                .expect("reused direct H2 sends should retain one retry request")
+                .into_fallback_request(),
+            );
+          }
+          Err(error) => return direct_h2_send_error(metrics, protocol, error),
+        };
       let mut sender = direct_sender.sender;
       let lease = direct_sender.lease;
       let retry = retry
@@ -616,110 +614,84 @@ async fn send_prepared_request(
       )
       .await
       {
-        Ok(Ok(response)) => Ok(DirectH2Response {
-          response,
-          lease: Some(lease),
-        }),
+        Ok(Ok(response)) => {
+          metrics.record_direct_h2_transport_hit(protocol);
+          DirectH2SendResult::Sent(Ok(DirectH2Response {
+            response,
+            lease: Some(lease),
+          }))
+        }
         Ok(Err(error)) => {
           pool.clear_connection(&lease.connection).await;
           drop(lease);
-          Err(anyhow::Error::new(error).context("direct H2 upstream retry request failed"))
+          direct_h2_send_error(
+            metrics,
+            protocol,
+            anyhow::Error::new(error).context("direct H2 upstream retry request failed"),
+          )
         }
         Err(_) => {
           pool.clear_connection(&lease.connection).await;
           drop(lease);
-          anyhow::bail!("direct H2 upstream first-byte timed out")
+          direct_h2_send_error(
+            metrics,
+            protocol,
+            anyhow::anyhow!("direct H2 upstream first-byte timed out"),
+          )
         }
       }
     }
     Ok(Err(error)) => {
       pool.clear_connection(&lease.connection).await;
       drop(lease);
-      Err(error.into())
+      direct_h2_send_error(metrics, protocol, error.into())
     }
     Err(_) => {
       pool.clear_connection(&lease.connection).await;
       drop(lease);
-      anyhow::bail!("direct H2 upstream first-byte timed out")
+      direct_h2_send_error(
+        metrics,
+        protocol,
+        anyhow::anyhow!("direct H2 upstream first-byte timed out"),
+      )
     }
   }
+}
+
+fn saturated_fallback(
+  metrics: &Metrics,
+  protocol: &str,
+  outbound: Request<ProxyBody>,
+) -> DirectH2SendResult {
+  metrics.record_direct_h2_transport_miss(protocol, "pool_full");
+  DirectH2SendResult::Fallback(outbound)
+}
+
+fn direct_h2_send_error(
+  metrics: &Metrics,
+  protocol: &str,
+  error: anyhow::Error,
+) -> DirectH2SendResult {
+  let reason = if error.to_string().contains("timed out") {
+    "connect_error"
+  } else {
+    "send_error"
+  };
+  metrics.record_direct_h2_transport_miss(protocol, reason);
+  DirectH2SendResult::Sent(Err(error))
 }
 
 async fn sender_with_first_byte_timeout<F>(
   sender: F,
   timeout: Duration,
-) -> anyhow::Result<DirectH2Sender>
+) -> anyhow::Result<Option<DirectH2Sender>>
 where
-  F: Future<Output = anyhow::Result<DirectH2Sender>>,
+  F: Future<Output = anyhow::Result<Option<DirectH2Sender>>>,
 {
   match tokio::time::timeout(timeout, sender).await {
     Ok(result) => result,
     Err(_) => anyhow::bail!("direct H2 upstream first-byte timed out"),
   }
-}
-
-async fn h2_handshake_with_timeout<I>(
-  io: I,
-  http2_config: &ProxyHttp2Config,
-  timeout: Duration,
-) -> anyhow::Result<SendRequest<ProxyBody>>
-where
-  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  tokio::time::timeout(timeout, h2_handshake(io, http2_config))
-    .await
-    .context("direct H2 upstream HTTP/2 handshake timed out")?
-}
-
-async fn h2_handshake<I>(
-  io: I,
-  http2_config: &ProxyHttp2Config,
-) -> anyhow::Result<SendRequest<ProxyBody>>
-where
-  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
-  crate::h2_tuning::apply_client_conn_defaults(&mut builder, http2_config);
-  let (sender, connection) = builder
-    .handshake(TokioIo::new(io))
-    .await
-    .context("failed to establish direct HTTP/2 upstream connection")?;
-  tokio::spawn(async move {
-    if let Err(error) = connection.await {
-      warn!(error = %error, "direct HTTP/2 upstream connection closed with error");
-    }
-  });
-  Ok(sender)
-}
-
-fn build_h2_tls_config(
-  upstream: &UpstreamConfig,
-  extra_root_certs: &[PathBuf],
-  tls_resumption: &TlsResumptionState,
-  outbound_revocation: &OutboundRevocationRuntime,
-) -> anyhow::Result<Arc<rustls::ClientConfig>> {
-  let root_certs;
-  let extra_root_certs = if upstream.extra_trusted_ca_certs.is_empty() {
-    extra_root_certs
-  } else {
-    root_certs = extra_root_certs
-      .iter()
-      .chain(upstream.extra_trusted_ca_certs.iter())
-      .cloned()
-      .collect::<Vec<PathBuf>>();
-    &root_certs
-  };
-  let revocation_policy = outbound_revocation.policy_for_upstream(upstream);
-  let mut tls_config = crate::tls::build_upstream_client_config_with_resumption_and_revocation(
-    extra_root_certs,
-    &upstream.tls.ech,
-    &upstream.tls.resumption,
-    Some(tls_resumption),
-    &upstream.name,
-    Some((outbound_revocation, revocation_policy)),
-  )?;
-  tls_config.alpn_protocols = vec![b"h2".to_vec()];
-  Ok(Arc::new(tls_config))
 }
 
 pub(super) fn release_response_body(
@@ -732,15 +704,6 @@ pub(super) fn release_response_body(
     return body;
   }
   body::with_drop_guard(body, lease)
-}
-
-fn fast_path_metric_protocol(version: http::Version) -> &'static str {
-  match version {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
-    http::Version::HTTP_2 => "h2",
-    http::Version::HTTP_3 => "h3",
-    _ => "other",
-  }
 }
 
 #[cfg(test)]
