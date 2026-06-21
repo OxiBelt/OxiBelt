@@ -2534,7 +2534,7 @@ assert_direct_h1_request_build_stage() {
   local protocol="$2"
   local stage_timing="$3"
   local summary attempts hit_rate
-  if [[ "${label}:${protocol}" != "oxibelt-h3:h3" ]]; then
+  if [[ "${label}:${protocol}" != "oxibelt-h1-keepalive:h1" && "${label}:${protocol}" != "oxibelt-h3:h3" ]]; then
     return
   fi
   summary="$(jq -c --arg protocol "${protocol}" --argjson threshold "${h1_fast_path_min_hit_rate}" '

@@ -35,9 +35,9 @@ use crate::state::AppSnapshot;
 use crate::tcp_hop;
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
 
-mod parse;
+pub(in crate::server) mod parse;
 mod plain_io;
-mod response_head;
+pub(in crate::server) mod response_head;
 mod sendfile;
 mod static_access_log;
 mod static_helpers;

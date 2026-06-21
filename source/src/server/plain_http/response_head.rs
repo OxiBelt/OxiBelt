@@ -1,6 +1,6 @@
 use http::{HeaderMap, StatusCode};
 
-pub(super) fn response_head_bytes(
+pub(in crate::server) fn response_head_bytes(
   status: StatusCode,
   headers: &HeaderMap,
   keep_alive: bool,

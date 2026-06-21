@@ -2727,7 +2727,7 @@ pub(super) fn is_idempotent(method: &Method) -> bool {
   )
 }
 
-fn validate_request_limits<B>(
+pub(crate) fn validate_request_limits<B>(
   request: &Request<B>,
   limits: &crate::config::LimitsConfig,
 ) -> Result<(), (StatusCode, &'static str)> {

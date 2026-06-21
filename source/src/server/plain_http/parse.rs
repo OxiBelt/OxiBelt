@@ -6,14 +6,13 @@ use std::time::Duration;
 use ::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use anyhow::{Context as AnyhowContext, bail};
 use httparse::Status;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 
 const READ_CHUNK_BYTES: usize = 4096;
 const STACK_HEADER_CAPACITY: usize = 128;
 
-pub(super) enum ReadRequestOutcome {
+pub(in crate::server) enum ReadRequestOutcome {
   Closed,
   Fallback {
     prefix: Vec<u8>,
@@ -22,24 +21,24 @@ pub(super) enum ReadRequestOutcome {
   Request(ParsedPlainRequest),
 }
 
-pub(super) struct ParsedPlainRequest {
-  pub(super) method: Method,
-  pub(super) target: String,
-  pub(super) version: u8,
-  pub(super) headers: HeaderMap,
-  pub(super) raw: Vec<u8>,
-  pub(super) remaining: Vec<u8>,
+pub(in crate::server) struct ParsedPlainRequest {
+  pub(in crate::server) method: Method,
+  pub(in crate::server) target: String,
+  pub(in crate::server) version: u8,
+  pub(in crate::server) headers: HeaderMap,
+  pub(in crate::server) raw: Vec<u8>,
+  pub(in crate::server) remaining: Vec<u8>,
 }
 
 impl ParsedPlainRequest {
-  pub(super) fn header_count(&self, name: HeaderName) -> usize {
+  pub(in crate::server) fn header_count(&self, name: HeaderName) -> usize {
     self.headers.get_all(name).iter().count()
   }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn read_request(
-  stream: &mut TcpStream,
+pub(in crate::server) async fn read_request<I>(
+  stream: &mut I,
   mut buffer: Vec<u8>,
   max_header_bytes: usize,
   max_headers: usize,
@@ -47,7 +46,10 @@ pub(super) async fn read_request(
   target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
   shutdown: &mut watch::Receiver<bool>,
   data_plane_drain: &mut watch::Receiver<bool>,
-) -> anyhow::Result<ReadRequestOutcome> {
+) -> anyhow::Result<ReadRequestOutcome>
+where
+  I: AsyncRead + Unpin,
+{
   let started = tokio::time::Instant::now();
   let mut chunk = [0_u8; READ_CHUNK_BYTES];
   loop {
@@ -158,7 +160,7 @@ fn request_line(buffer: &[u8]) -> Option<&[u8]> {
     .map(|end| &buffer[..end])
 }
 
-pub(super) enum ParseResult {
+pub(in crate::server) enum ParseResult {
   Complete {
     header_len: usize,
     request: ParsedPlainRequestSeed,
@@ -167,11 +169,11 @@ pub(super) enum ParseResult {
   Fallback(&'static str),
 }
 
-pub(super) struct ParsedPlainRequestSeed {
-  pub(super) method: Method,
-  pub(super) target: String,
-  pub(super) version: u8,
-  pub(super) headers: HeaderMap,
+pub(in crate::server) struct ParsedPlainRequestSeed {
+  pub(in crate::server) method: Method,
+  pub(in crate::server) target: String,
+  pub(in crate::server) version: u8,
+  pub(in crate::server) headers: HeaderMap,
 }
 
 #[cfg(test)]
@@ -179,7 +181,7 @@ pub(super) fn parse_buffered_request(buffer: &[u8], max_headers: usize) -> Parse
   parse_buffered_request_with_static_target_filter(buffer, max_headers, &|_| true)
 }
 
-pub(super) fn parse_buffered_request_with_static_target_filter(
+pub(in crate::server) fn parse_buffered_request_with_static_target_filter(
   buffer: &[u8],
   max_headers: usize,
   target_can_match_static: &(dyn Fn(&str) -> bool + Sync),
@@ -253,7 +255,11 @@ fn origin_form_target_path(target: &str) -> Option<&str> {
   Some(target.split_once('?').map_or(target, |(path, _)| path))
 }
 
-pub(super) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+pub(in crate::server) fn header_has_token(
+  headers: &HeaderMap,
+  name: HeaderName,
+  token: &str,
+) -> bool {
   headers.get_all(name).iter().any(|value| {
     value.to_str().ok().is_some_and(|value| {
       value

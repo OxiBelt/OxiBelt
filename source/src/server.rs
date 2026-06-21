@@ -73,8 +73,10 @@ mod admin_stream_pools;
 mod admin_upstream_pools;
 mod connection_errors;
 mod file_sync_path;
+mod h1_fast_proxy;
 mod http_io;
 mod plain_http;
+mod prefixed_io;
 #[cfg(test)]
 mod reload_tests;
 use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
@@ -82,7 +84,6 @@ use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
 use admin_stream_pools::admin_stream_pools_response;
 use admin_upstream_pools::admin_upstream_pools_response;
-
 pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "config_load",
   "file_sync",
@@ -2136,6 +2137,9 @@ async fn handle_connection(
     &handshake_state.config.proxy.forwarded_headers,
     &handshake_state.config.proxy.real_ip,
   );
+  let h1_forwarded_header_cache = forwarded_header_cache.clone();
+  let h1_tls_metadata = tls_metadata.clone();
+  let h1_request_count = request_count.clone();
   let request_state = handshake_state.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
@@ -2194,6 +2198,22 @@ async fn handle_connection(
   } else {
     let _http1_connection_guard =
       handshake_state.runtime_introspection_guard(RuntimeCounter::Http1Connection);
+    let Some((io, served_requests)) = h1_fast_proxy::try_handle_connection(
+      tls_stream,
+      peer_addr,
+      &handshake_state,
+      tcp_max_hop,
+      h1_tls_metadata,
+      transport_metadata,
+      h1_forwarded_header_cache.as_ref(),
+      &mut shutdown,
+      &mut data_plane_drain,
+    )
+    .await?
+    .into_continue() else {
+      return Ok(());
+    };
+    h1_request_count.store(served_requests, Ordering::Relaxed);
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
       .timer(TokioTimer::new())
@@ -2209,12 +2229,8 @@ async fn handle_connection(
           .max(8192),
       )
       .keep_alive(true);
-    let io = http_io::InstrumentedDownstreamIo::new(
-      tls_stream,
-      handshake_state.metrics.clone(),
-      "h1",
-      "tls",
-    );
+    let io =
+      http_io::InstrumentedDownstreamIo::new(io, handshake_state.metrics.clone(), "h1", "tls");
     let connection = builder.serve_connection(TokioIo::new(io), service);
     let result = if handshake_state.http1_upgrades_possible {
       let connection = connection.with_upgrades();

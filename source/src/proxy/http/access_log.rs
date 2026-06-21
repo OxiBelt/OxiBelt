@@ -55,7 +55,7 @@ pub(crate) struct SystemAccessLogContext<'a> {
 
 impl<'a> SystemAccessLogContext<'a> {
   #[allow(clippy::too_many_arguments)]
-  pub(super) fn new<B>(
+  pub(crate) fn new<B>(
     request: &Request<B>,
     peer_addr: std::net::SocketAddr,
     tcp_max_hop: Option<u8>,

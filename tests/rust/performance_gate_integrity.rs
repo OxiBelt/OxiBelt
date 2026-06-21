@@ -21,6 +21,11 @@ fn performance_script_text() -> String {
   fs::read_to_string(performance_script_path()).expect("performance script should be readable")
 }
 
+fn workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/check-oxibelt.yml"))
+    .expect("workflow should be readable")
+}
+
 fn perf_probe_source_text() -> String {
   fs::read_to_string(repo_root().join("tests/docker/perf_probe/src/main.rs"))
     .expect("perf probe source should be readable")
@@ -2631,13 +2636,41 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
   );
   assert!(
     script.contains("assert_direct_h1_request_build_stage"),
-    "performance script should gate H3 direct-H1 request-build evidence"
+    "performance script should gate H1/H3 direct-H1 request-build evidence"
+  );
+  assert!(
+    script.contains(
+      r#"${label}:${protocol}" != "oxibelt-h1-keepalive:h1" && "${label}:${protocol}" != "oxibelt-h3:h3""#
+    ),
+    "H1 keep-alive and H3 rows should both require direct-H1 request-build stage evidence"
   );
   assert!(
     script.contains("oxibelt-h2-upstream-h2c:h2")
       && script.contains("oxibelt-h2-upstream-h2:h2")
       && script.contains("direct_h2"),
     "split H2 upstream rows should gate direct-H2 transport evidence"
+  );
+}
+
+#[test]
+fn workflow_dispatch_profile_label_includes_h1_h2_and_h3_rows() {
+  let workflow = workflow_text();
+
+  assert!(
+    workflow.contains("- oxibelt-h1-keepalive")
+      && workflow.contains("- oxibelt-h2")
+      && workflow.contains("- oxibelt-h3"),
+    "manual profiling choices should include H1 keep-alive, H2, and H3 rows"
+  );
+  assert!(
+    workflow.contains("none|oxibelt-h1-keepalive|oxibelt-h2|oxibelt-h3"),
+    "workflow validation should accept the same exact labels shown in the input choices"
+  );
+  assert!(
+    workflow.contains(
+      "performance_profile_label must be none, oxibelt-h1-keepalive, oxibelt-h2, or oxibelt-h3"
+    ),
+    "workflow validation error should list every supported profile label"
   );
 }
 

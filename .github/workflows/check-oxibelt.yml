@@ -35,6 +35,7 @@ on:
         type: choice
         options:
           - none
+          - oxibelt-h1-keepalive
           - oxibelt-h2
           - oxibelt-h3
       performance_accepted_regression_reason:
@@ -1816,9 +1817,9 @@ jobs:
             fi
           fi
           case "${selected_profile_label}" in
-            none|oxibelt-h2|oxibelt-h3) ;;
+            none|oxibelt-h1-keepalive|oxibelt-h2|oxibelt-h3) ;;
             *)
-              echo "performance_profile_label must be none, oxibelt-h2, or oxibelt-h3; got '${selected_profile_label}'" >&2
+              echo "performance_profile_label must be none, oxibelt-h1-keepalive, oxibelt-h2, or oxibelt-h3; got '${selected_profile_label}'" >&2
               exit 2
               ;;
           esac
