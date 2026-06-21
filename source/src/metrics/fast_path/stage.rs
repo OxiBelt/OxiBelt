@@ -4,7 +4,8 @@ use super::super::StripedCounter;
 
 const PATHS: [&str; 2] = ["plain_proxy", "h3_downstream"];
 const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
-const STAGES: [&str; 9] = [
+const STAGES: [&str; 10] = [
+  "direct_h1_request_build",
   "fast_path_prepare",
   "request_body_prepare",
   "transport_direct_h1",

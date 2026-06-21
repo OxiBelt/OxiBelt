@@ -2040,6 +2040,7 @@ run_load() {
     direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
     stage_timing_delta_json="$(stage_timing_delta "${stage_timing_before}" "${stage_timing_after}")"
+    assert_direct_h1_request_build_stage "${label}" "${fast_path_protocol}" "${stage_timing_delta_json}"
     json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
     json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
     assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
@@ -2525,6 +2526,40 @@ assert_direct_transport_hit_rate() {
   fi
   if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
     handle_regression_gate_violation "OxiBelt ${label} ${transport_name} transport gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${fast_path}"
+  fi
+}
+
+assert_direct_h1_request_build_stage() {
+  local label="$1"
+  local protocol="$2"
+  local stage_timing="$3"
+  local summary attempts hit_rate
+  if [[ "${label}:${protocol}" != "oxibelt-h3:h3" ]]; then
+    return
+  fi
+  summary="$(jq -c --arg protocol "${protocol}" --argjson threshold "${h1_fast_path_min_hit_rate}" '
+    (((.plain_proxy // {})[$protocol] // {}).direct_h1_request_build // {}) as $stage
+    | (($stage.ok.count // 0) + ($stage.fallback.count // 0) + ($stage.error.count // 0)) as $attempts
+    | {
+        ok: ($stage.ok.count // 0),
+        fallback: ($stage.fallback.count // 0),
+        error: ($stage.error.count // 0),
+        attempts: $attempts,
+        hit_rate: (if $attempts == 0 then null else (($stage.ok.count // 0) / $attempts) end),
+        threshold: $threshold
+      }' <<<"${stage_timing}")"
+  attempts="$(jq -r '.attempts // 0' <<<"${summary}")"
+  if [[ "${attempts}" == "0" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 request-build gate failed: no ${protocol^^} specialized request-build samples were recorded"
+    return
+  fi
+  hit_rate="$(jq -r '.hit_rate // empty' <<<"${summary}")"
+  if [[ -z "${hit_rate}" ]]; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 request-build gate failed: missing ${protocol^^} specialized request-build hit-rate evidence"
+    return
+  fi
+  if jq -e --argjson hit_rate "${hit_rate}" --argjson min "${h1_fast_path_min_hit_rate}" '$hit_rate < $min' >/dev/null; then
+    handle_regression_gate_violation "OxiBelt ${label} direct-H1 request-build gate failed: hit rate ${hit_rate} < ${h1_fast_path_min_hit_rate}; details: ${summary}"
   fi
 }
 

@@ -2630,6 +2630,10 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
     "performance script should gate expected direct transport hit rates"
   );
   assert!(
+    script.contains("assert_direct_h1_request_build_stage"),
+    "performance script should gate H3 direct-H1 request-build evidence"
+  );
+  assert!(
     script.contains("oxibelt-h2-upstream-h2c:h2")
       && script.contains("oxibelt-h2-upstream-h2:h2")
       && script.contains("direct_h2"),

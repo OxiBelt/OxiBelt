@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ::http::{Request, Response, StatusCode};
 use anyhow::Context;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
@@ -63,6 +63,13 @@ impl RequestTaskSet {
     async move { permits.acquire_owned().await }
   }
 
+  pub(super) fn try_acquire_permit(&self) -> Option<OwnedSemaphorePermit> {
+    match self.permits.clone().try_acquire_owned() {
+      Ok(permit) => Some(permit),
+      Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => None,
+    }
+  }
+
   pub(super) fn spawn(
     &mut self,
     request: Request<()>,
@@ -80,6 +87,12 @@ impl RequestTaskSet {
   pub(super) async fn join_next(&mut self) {
     let completed = self.tasks.join_next().await;
     log_result(completed);
+  }
+
+  pub(super) fn reap_completed(&mut self) {
+    while let Some(completed) = self.tasks.try_join_next() {
+      log_result(Some(completed));
+    }
   }
 
   pub(super) async fn wait_all(&mut self) {
@@ -255,6 +268,36 @@ mod tests {
       .expect("second permit should become available")
       .expect("semaphore should remain open");
     drop(second);
+  }
+
+  #[test]
+  fn try_acquire_permit_observes_saturation() {
+    let tasks = RequestTaskSet::with_active_limit(1);
+    let first = tasks
+      .try_acquire_permit()
+      .expect("first permit should be available immediately");
+
+    assert!(
+      tasks.try_acquire_permit().is_none(),
+      "second immediate acquire should observe saturation"
+    );
+
+    drop(first);
+    assert!(
+      tasks.try_acquire_permit().is_some(),
+      "released permit should become immediately available"
+    );
+  }
+
+  #[tokio::test]
+  async fn reap_completed_drains_ready_tasks_without_waiting() {
+    let mut tasks = RequestTaskSet::with_active_limit(2);
+
+    tasks.spawn_task(async {});
+    tokio::task::yield_now().await;
+    tasks.reap_completed();
+
+    assert!(tasks.is_empty());
   }
 
   #[tokio::test]

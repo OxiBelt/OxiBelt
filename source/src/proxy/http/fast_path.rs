@@ -44,8 +44,8 @@ mod direct;
 pub(crate) mod direct_h1;
 pub(crate) mod direct_h2;
 mod direct_transport;
+mod downstream_direct_h1;
 mod entry;
-mod h2_direct_h1;
 mod helpers;
 mod request_body;
 mod response_body;
@@ -64,10 +64,11 @@ use self::direct_h1::{DirectH1SendResult, recycle_response_body, try_send_direct
 pub(crate) use self::direct_h2::DirectH2Pools;
 use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{DirectFastPathTransport, direct_fast_path_transport};
-pub(crate) use self::entry::try_handle_plain_proxy;
-use self::h2_direct_h1::{
-  H2DirectH1Preparation, H2DirectH1RequestOptions, prepare_h2_direct_h1_or_generic,
+use self::downstream_direct_h1::{
+  DownstreamDirectH1Preparation, DownstreamDirectH1RequestOptions,
+  prepare_downstream_direct_h1_or_generic,
 };
+pub(crate) use self::entry::try_handle_plain_proxy;
 use self::helpers::{
   apply_fast_path_priority_policy, fast_path_alt_svc_possible,
   fast_path_downstream_response_timeout, fast_path_metric_protocol,
@@ -285,13 +286,15 @@ impl PlainProxyFastPath {
     let request_body_definitely_empty = request_body_definitely_empty(&request);
     let (parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
-    let preparation = match prepare_h2_direct_h1_or_generic(
+    let direct_h1_build_started = timing::start(timing_enabled);
+    let preparation = match prepare_downstream_direct_h1_or_generic(
       parts,
       body,
       compiled_proxy
         .as_ref()
-        .map(|compiled| H2DirectH1RequestOptions {
+        .map(|compiled| DownstreamDirectH1RequestOptions {
           selected: compiled,
+          downstream_version: request_version,
           forwarded_client_addr,
           downstream_scheme,
           downstream_host: host,
@@ -312,7 +315,8 @@ impl PlainProxyFastPath {
     };
 
     let (outbound, request_body_proven_empty) = match preparation {
-      H2DirectH1Preparation::H2DirectH1(mut outbound) => {
+      DownstreamDirectH1Preparation::DirectH1(mut outbound) => {
+        timing::direct_h1_build_ok(snapshot, metric_protocol, direct_h1_build_started);
         state
           .telemetry
           .inject_trace_context(outbound.headers_mut(), trace_context);
@@ -322,7 +326,8 @@ impl PlainProxyFastPath {
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
         (outbound, true)
       }
-      H2DirectH1Preparation::Generic(mut parts, body) => {
+      DownstreamDirectH1Preparation::Generic(mut parts, body) => {
+        timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
         let target_uri = if let Some(compiled) = compiled_proxy.as_ref() {
           match compiled.target_uri(&parts.uri) {
             Ok(uri) => uri,

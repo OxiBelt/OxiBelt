@@ -306,6 +306,32 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn get_and_head_without_framing_headers_end_stream_mark_verified_empty_without_polling() {
+    for method in [Method::GET, Method::HEAD] {
+      let request = request(method);
+      let stream = FakeRequestStream::new([FakeStreamEvent::End]);
+      let poll_count = stream.poll_count();
+
+      let request = prepare_h3_request_body_inner(request, stream).await;
+
+      assert_eq!(poll_count.load(Ordering::SeqCst), 0);
+      assert!(
+        request
+          .extensions()
+          .get::<VerifiedEmptyRequestBody>()
+          .is_some()
+      );
+      let body = request
+        .into_body()
+        .collect()
+        .await
+        .expect("ended H3 stream should collect")
+        .to_bytes();
+      assert!(body.is_empty());
+    }
+  }
+
+  #[tokio::test]
   async fn get_and_head_without_framing_headers_shortcut_pending_marked_end() {
     for method in [Method::GET, Method::HEAD] {
       let request = request(method);
@@ -315,6 +341,12 @@ mod tests {
       let request = prepare_h3_request_body_inner(request, stream).await;
 
       assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+      assert!(
+        request
+          .extensions()
+          .get::<VerifiedEmptyRequestBody>()
+          .is_some()
+      );
       let body = request
         .into_body()
         .collect()
@@ -350,6 +382,12 @@ mod tests {
     let request = prepare_h3_request_body_inner(request, stream).await;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert!(
+      request
+        .extensions()
+        .get::<VerifiedEmptyRequestBody>()
+        .is_none()
+    );
     let body = request
       .into_body()
       .collect()

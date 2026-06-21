@@ -1,4 +1,4 @@
-//! Downstream HTTP/2 to upstream HTTP/1.1 direct request preparation.
+//! Downstream HTTP/2 or HTTP/3 to upstream HTTP/1.1 direct request preparation.
 //! This keeps the benchmark-safe empty-body path out of the generic rebuild helper.
 
 use std::net::SocketAddr;
@@ -21,18 +21,19 @@ use crate::waf::RequestWafDecision;
 use super::compiled::SelectedCompiledProxyAction;
 use super::helpers::apply_fast_path_priority_policy;
 
-pub(super) enum H2DirectH1RequestBuild {
+pub(super) enum DownstreamDirectH1RequestBuild {
   Built(Request<ProxyBody>),
   Fallback(request::Parts),
 }
 
-pub(super) enum H2DirectH1Preparation<B> {
-  H2DirectH1(Request<ProxyBody>),
+pub(super) enum DownstreamDirectH1Preparation<B> {
+  DirectH1(Request<ProxyBody>),
   Generic(request::Parts, B),
 }
 
-pub(super) struct H2DirectH1RequestOptions<'a, 'state> {
+pub(super) struct DownstreamDirectH1RequestOptions<'a, 'state> {
   pub(super) selected: &'a SelectedCompiledProxyAction<'state>,
+  pub(super) downstream_version: http::Version,
   pub(super) forwarded_client_addr: SocketAddr,
   pub(super) downstream_scheme: &'static str,
   pub(super) downstream_host: &'a str,
@@ -45,33 +46,37 @@ pub(super) struct H2DirectH1RequestOptions<'a, 'state> {
   pub(super) request_waf: &'a RequestWafDecision,
 }
 
-pub(super) fn prepare_h2_direct_h1_or_generic<B>(
+pub(super) fn prepare_downstream_direct_h1_or_generic<B>(
   parts: request::Parts,
   body: B,
-  options: Option<H2DirectH1RequestOptions<'_, '_>>,
-) -> anyhow::Result<H2DirectH1Preparation<B>> {
+  options: Option<DownstreamDirectH1RequestOptions<'_, '_>>,
+) -> anyhow::Result<DownstreamDirectH1Preparation<B>> {
   let Some(options) = options else {
-    return Ok(H2DirectH1Preparation::Generic(parts, body));
+    return Ok(DownstreamDirectH1Preparation::Generic(parts, body));
   };
-  match try_build_h2_direct_h1_request(parts, options)? {
-    H2DirectH1RequestBuild::Built(outbound) => Ok(H2DirectH1Preparation::H2DirectH1(outbound)),
-    H2DirectH1RequestBuild::Fallback(parts) => Ok(H2DirectH1Preparation::Generic(parts, body)),
+  match try_build_downstream_direct_h1_request(parts, options)? {
+    DownstreamDirectH1RequestBuild::Built(outbound) => {
+      Ok(DownstreamDirectH1Preparation::DirectH1(outbound))
+    }
+    DownstreamDirectH1RequestBuild::Fallback(parts) => {
+      Ok(DownstreamDirectH1Preparation::Generic(parts, body))
+    }
   }
 }
 
-pub(super) fn try_build_h2_direct_h1_request(
+pub(super) fn try_build_downstream_direct_h1_request(
   mut parts: request::Parts,
-  options: H2DirectH1RequestOptions<'_, '_>,
-) -> anyhow::Result<H2DirectH1RequestBuild> {
+  options: DownstreamDirectH1RequestOptions<'_, '_>,
+) -> anyhow::Result<DownstreamDirectH1RequestBuild> {
   if !eligible(&parts, &options) {
-    return Ok(H2DirectH1RequestBuild::Fallback(parts));
+    return Ok(DownstreamDirectH1RequestBuild::Fallback(parts));
   }
 
   let path_and_query = options.selected.target_path_and_query(&parts.uri)?;
   let mut uri_parts = http::uri::Parts::default();
   uri_parts.path_and_query = Some(path_and_query);
-  parts.uri =
-    Uri::from_parts(uri_parts).context("failed to build direct H2-to-H1 origin-form URI")?;
+  parts.uri = Uri::from_parts(uri_parts)
+    .context("failed to build direct downstream-to-H1 origin-form URI")?;
   parts.version = http::Version::HTTP_11;
 
   strip_hop_by_hop_headers(&mut parts.headers);
@@ -102,14 +107,17 @@ pub(super) fn try_build_h2_direct_h1_request(
   semantics::strip_accepted_expect(&mut parts.headers);
   apply_fast_path_priority_policy(&mut parts.headers, options.selected.priority);
 
-  Ok(H2DirectH1RequestBuild::Built(Request::from_parts(
+  Ok(DownstreamDirectH1RequestBuild::Built(Request::from_parts(
     parts,
     empty_body(),
   )))
 }
 
-fn eligible(parts: &request::Parts, options: &H2DirectH1RequestOptions<'_, '_>) -> bool {
-  parts.version == http::Version::HTTP_2
+fn eligible(parts: &request::Parts, options: &DownstreamDirectH1RequestOptions<'_, '_>) -> bool {
+  matches!(
+    options.downstream_version,
+    http::Version::HTTP_2 | http::Version::HTTP_3
+  ) && parts.version == options.downstream_version
     && matches!(parts.method, Method::GET | Method::HEAD)
     && options.request_body_definitely_empty
     && options.request_waf_context_disabled
@@ -158,9 +166,9 @@ mod tests {
   }
 
   async fn state_with_preserve_host(extra: &str, preserve_host: bool) -> AppSnapshot {
-    let temp_dir = common::TempDir::new("h2-direct-h1-request");
+    let temp_dir = common::TempDir::new("downstream-direct-h1-request");
     let (cert_path, key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "h2-direct-h1-request");
+      common::create_self_signed_cert(temp_dir.path(), "downstream-direct-h1-request");
     let mut raw = common::minimal_config_toml(&cert_path, &key_path)
       .replace(
         "[compression]\nenabled = true",
@@ -181,11 +189,12 @@ mod tests {
 
   async fn build(
     state: &AppSnapshot,
+    request_version: http::Version,
     mut request: Request<ProxyBody>,
     request_body_definitely_empty: bool,
     request_waf: &RequestWafDecision,
-  ) -> anyhow::Result<H2DirectH1RequestBuild> {
-    *request.version_mut() = http::Version::HTTP_2;
+  ) -> anyhow::Result<DownstreamDirectH1RequestBuild> {
+    *request.version_mut() = request_version;
     let resolved = state
       .route_table
       .resolve("example.com", request.uri().path(), &state.upstreams)
@@ -194,17 +203,18 @@ mod tests {
       .compiled_fast_path_actions(resolved.route_index)
       .expect("compiled actions should exist");
     let Some(selected) =
-      select_compiled_proxy_action(state, Some(actions), &request, http::Version::HTTP_2, false)?
+      select_compiled_proxy_action(state, Some(actions), &request, request_version, false)?
     else {
       let (parts, _) = request.into_parts();
-      return Ok(H2DirectH1RequestBuild::Fallback(parts));
+      return Ok(DownstreamDirectH1RequestBuild::Fallback(parts));
     };
     let (parts, _) = request.into_parts();
     let forwarded_values = ForwardedRequestHeaderValues::new("example.com", 443);
-    try_build_h2_direct_h1_request(
+    try_build_downstream_direct_h1_request(
       parts,
-      H2DirectH1RequestOptions {
+      DownstreamDirectH1RequestOptions {
         selected: &selected,
+        downstream_version: request_version,
         forwarded_client_addr: "203.0.113.10:5443".parse().unwrap(),
         downstream_scheme: "https",
         downstream_host: "example.com",
@@ -256,28 +266,49 @@ mod tests {
   #[test]
   fn builds_origin_form_h1_request_for_empty_h2_get() {
     run_async_on_larger_stack("h2-direct-h1-origin-form", || async {
-      builds_origin_form_h1_request_for_empty_h2_get_inner()
+      builds_origin_form_h1_request_for_empty_h2_get_inner(http::Version::HTTP_2, "h2")
         .await
         .expect("H2 direct-H1 request should build");
     });
   }
 
-  async fn builds_origin_form_h1_request_for_empty_h2_get_inner() -> anyhow::Result<()> {
+  #[test]
+  fn builds_origin_form_h1_request_for_empty_h3_get() {
+    run_async_on_larger_stack("h3-direct-h1-origin-form", || async {
+      builds_origin_form_h1_request_for_empty_h2_get_inner(http::Version::HTTP_3, "h3")
+        .await
+        .expect("H3 direct-H1 request should build");
+    });
+  }
+
+  async fn builds_origin_form_h1_request_for_empty_h2_get_inner(
+    request_version: http::Version,
+    path_protocol: &str,
+  ) -> anyhow::Result<()> {
     let state = state("").await;
     let built = match build(
       &state,
-      request(Method::GET, "https://example.com/perf/h2?body=ok"),
+      request_version,
+      request(
+        Method::GET,
+        &format!("https://example.com/perf/{path_protocol}?body=ok"),
+      ),
       true,
       &RequestWafDecision::default(),
     )
     .await?
     {
-      H2DirectH1RequestBuild::Built(request) => request,
-      H2DirectH1RequestBuild::Fallback(_) => panic!("request should use H2 direct-H1 build"),
+      DownstreamDirectH1RequestBuild::Built(request) => request,
+      DownstreamDirectH1RequestBuild::Fallback(_) => {
+        panic!("request should use downstream direct-H1 build")
+      }
     };
 
     assert_eq!(built.version(), http::Version::HTTP_11);
-    assert_eq!(built.uri().to_string(), "/perf/h2?body=ok");
+    assert_eq!(
+      built.uri().to_string(),
+      format!("/perf/{path_protocol}?body=ok")
+    );
     assert!(!built.headers().contains_key(CONNECTION));
     assert!(!built.headers().contains_key(HOST));
     assert_eq!(
@@ -305,14 +336,17 @@ mod tests {
     let state = state_with_preserve_host("", true).await;
     let built = match build(
       &state,
+      http::Version::HTTP_2,
       request(Method::HEAD, "https://example.com/preserve"),
       true,
       &RequestWafDecision::default(),
     )
     .await?
     {
-      H2DirectH1RequestBuild::Built(request) => request,
-      H2DirectH1RequestBuild::Fallback(_) => panic!("request should use H2 direct-H1 build"),
+      DownstreamDirectH1RequestBuild::Built(request) => request,
+      DownstreamDirectH1RequestBuild::Fallback(_) => {
+        panic!("request should use downstream direct-H1 build")
+      }
     };
 
     assert_eq!(
@@ -336,12 +370,13 @@ mod tests {
     assert!(matches!(
       build(
         &state,
+        http::Version::HTTP_3,
         request(Method::GET, "https://example.com/streaming"),
         false,
         &RequestWafDecision::default(),
       )
       .await?,
-      H2DirectH1RequestBuild::Fallback(_)
+      DownstreamDirectH1RequestBuild::Fallback(_)
     ));
 
     let waf = RequestWafDecision {
@@ -354,12 +389,13 @@ mod tests {
     assert!(matches!(
       build(
         &state,
+        http::Version::HTTP_3,
         request(Method::GET, "https://example.com/mutated"),
         true,
         &waf,
       )
       .await?,
-      H2DirectH1RequestBuild::Fallback(_)
+      DownstreamDirectH1RequestBuild::Fallback(_)
     ));
     Ok(())
   }
@@ -378,12 +414,13 @@ mod tests {
     assert!(matches!(
       build(
         &state,
+        http::Version::HTTP_3,
         request(Method::POST, "https://example.com/post"),
         true,
         &RequestWafDecision::default(),
       )
       .await?,
-      H2DirectH1RequestBuild::Fallback(_)
+      DownstreamDirectH1RequestBuild::Fallback(_)
     ));
     Ok(())
   }

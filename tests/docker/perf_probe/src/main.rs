@@ -1763,18 +1763,16 @@ fn static_fast_path_responses_json(metrics: &str) -> serde_json::Value {
 fn fast_path_stage_timing_json(metrics: &str) -> serde_json::Value {
   let mut samples: BTreeMap<(String, String, String, String), StageTimingCounters> =
     BTreeMap::new();
-  for (labels, value) in prometheus_labeled_u64_samples(
-    metrics,
-    "oxibelt_http_fast_path_stage_observations_total",
-  ) {
+  for (labels, value) in
+    prometheus_labeled_u64_samples(metrics, "oxibelt_http_fast_path_stage_observations_total")
+  {
     if let Some(key) = stage_timing_key(labels) {
       samples.entry(key).or_default().count += value;
     }
   }
-  for (labels, value) in prometheus_labeled_u64_samples(
-    metrics,
-    "oxibelt_http_fast_path_stage_duration_ns_total",
-  ) {
+  for (labels, value) in
+    prometheus_labeled_u64_samples(metrics, "oxibelt_http_fast_path_stage_duration_ns_total")
+  {
     if let Some(key) = stage_timing_key(labels) {
       samples.entry(key).or_default().total_ns += value;
     }
@@ -1785,9 +1783,7 @@ fn fast_path_stage_timing_json(metrics: &str) -> serde_json::Value {
     if counters.count == 0 && counters.total_ns == 0 {
       continue;
     }
-    let protocol_entry = paths
-      .entry(path)
-      .or_insert_with(|| serde_json::json!({}));
+    let protocol_entry = paths.entry(path).or_insert_with(|| serde_json::json!({}));
     let Some(protocols) = protocol_entry.as_object_mut() else {
       continue;
     };
@@ -1797,9 +1793,7 @@ fn fast_path_stage_timing_json(metrics: &str) -> serde_json::Value {
     let Some(stages) = stage_entry.as_object_mut() else {
       continue;
     };
-    let outcome_entry = stages
-      .entry(stage)
-      .or_insert_with(|| serde_json::json!({}));
+    let outcome_entry = stages.entry(stage).or_insert_with(|| serde_json::json!({}));
     let Some(outcomes) = outcome_entry.as_object_mut() else {
       continue;
     };

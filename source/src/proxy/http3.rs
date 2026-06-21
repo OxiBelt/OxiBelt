@@ -368,6 +368,7 @@ pub(crate) async fn handle_downstream_connection(
     .context("failed to establish downstream HTTP/3 connection")?;
 
   loop {
+    request_tasks.reap_completed();
     if *shutdown.borrow() || *data_plane_drain.borrow() {
       request_tasks.abort_all().await;
       return Ok(());
@@ -386,9 +387,6 @@ pub(crate) async fn handle_downstream_connection(
           request_tasks.abort_all().await;
           return Ok(());
         }
-        continue;
-      }
-      _ = request_tasks.join_next(), if !request_tasks.is_empty() => {
         continue;
       }
       accepted = h3_connection.accept() => {
@@ -449,14 +447,19 @@ pub(crate) async fn handle_downstream_connection(
       continue;
     }
 
-    let Some(request_task_permit) = request_tasks::acquire_permit_or_stop(
-      &mut request_tasks,
-      &mut shutdown,
-      &mut data_plane_drain,
-    )
-    .await?
-    else {
-      return Ok(());
+    let request_task_permit = if let Some(permit) = request_tasks.try_acquire_permit() {
+      permit
+    } else {
+      let Some(permit) = request_tasks::acquire_permit_or_stop(
+        &mut request_tasks,
+        &mut shutdown,
+        &mut data_plane_drain,
+      )
+      .await?
+      else {
+        return Ok(());
+      };
+      permit
     };
 
     let context = H3DownstreamRequestContext {

@@ -8,6 +8,7 @@ use super::direct_transport::DirectFastPathTransport;
 
 pub(crate) const PATH_H3_DOWNSTREAM: &str = "h3_downstream";
 pub(crate) const PATH_PLAIN_PROXY: &str = "plain_proxy";
+pub(crate) const STAGE_DIRECT_H1_REQUEST_BUILD: &str = "direct_h1_request_build";
 pub(crate) const STAGE_FAST_PATH_PREPARE: &str = "fast_path_prepare";
 pub(crate) const STAGE_H3_DOWNSTREAM_SEND: &str = "h3_downstream_send";
 pub(crate) const STAGE_H3_INGRESS_PREPARE: &str = "h3_ingress_prepare";
@@ -91,6 +92,38 @@ pub(crate) fn record_request_body_prepare(
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_REQUEST_BODY_PREPARE, started_at);
+}
+
+pub(crate) fn direct_h1_build_ok(
+  state: &AppSnapshot,
+  protocol: &'static str,
+  started_at: Option<Instant>,
+) {
+  record_direct_h1_request_build(state, protocol, OUTCOME_OK, started_at);
+}
+
+pub(crate) fn direct_h1_build_fallback(
+  state: &AppSnapshot,
+  protocol: &'static str,
+  started_at: Option<Instant>,
+) {
+  record_direct_h1_request_build(state, protocol, OUTCOME_FALLBACK, started_at);
+}
+
+fn record_direct_h1_request_build(
+  state: &AppSnapshot,
+  protocol: &'static str,
+  outcome: &'static str,
+  started_at: Option<Instant>,
+) {
+  record(
+    state,
+    PATH_PLAIN_PROXY,
+    protocol,
+    STAGE_DIRECT_H1_REQUEST_BUILD,
+    outcome,
+    started_at,
+  );
 }
 
 pub(crate) fn record_response_body_prepare(
