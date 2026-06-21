@@ -8,7 +8,10 @@ use super::direct_transport::DirectFastPathTransport;
 
 pub(crate) const PATH_H3_DOWNSTREAM: &str = "h3_downstream";
 pub(crate) const PATH_PLAIN_PROXY: &str = "plain_proxy";
+pub(crate) const STAGE_DIRECT_H1_CONNECT: &str = "direct_h1_connect";
+pub(crate) const STAGE_DIRECT_H1_POOL_TAKE: &str = "direct_h1_pool_take";
 pub(crate) const STAGE_DIRECT_H1_REQUEST_BUILD: &str = "direct_h1_request_build";
+pub(crate) const STAGE_DIRECT_H1_SEND_REQUEST: &str = "direct_h1_send_request";
 pub(crate) const STAGE_FAST_PATH_PREPARE: &str = "fast_path_prepare";
 pub(crate) const STAGE_H3_DOWNSTREAM_SEND: &str = "h3_downstream_send";
 pub(crate) const STAGE_H3_INGRESS_PREPARE: &str = "h3_ingress_prepare";

@@ -448,6 +448,7 @@ impl PlainProxyFastPath {
         request_body_proven_empty,
         outbound,
         timeouts,
+        timing_enabled,
       )
       .await
       {

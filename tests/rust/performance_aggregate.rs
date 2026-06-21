@@ -158,6 +158,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                     }
                 }
             },
+            "pool": {
+                "direct_h1": {
+                    "hit": 990,
+                    "miss": 10,
+                    "miss_empty": 8,
+                    "miss_locked": 2,
+                    "reconnect": 1,
+                    "stale": 3,
+                    "drop": 4,
+                    "drop_full": 1,
+                    "drop_locked": 1
+                }
+            },
             "stage_timing": {
                 "plain_proxy": {
                     "h1": {
@@ -198,6 +211,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                     }
                 }
             },
+            "pool": {
+                "direct_h1": {
+                    "hit": 990,
+                    "miss": 10,
+                    "miss_empty": 8,
+                    "miss_locked": 2,
+                    "reconnect": 1,
+                    "stale": 3,
+                    "drop": 4,
+                    "drop_full": 1,
+                    "drop_locked": 1
+                }
+            },
             "stage_timing": {
                 "plain_proxy": {
                     "h2": {
@@ -236,6 +262,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                         "attempts": 1000,
                         "hit_rate": 1.0
                     }
+                }
+            },
+            "pool": {
+                "direct_h1": {
+                    "hit": 990,
+                    "miss": 10,
+                    "miss_empty": 8,
+                    "miss_locked": 2,
+                    "reconnect": 1,
+                    "stale": 3,
+                    "drop": 4,
+                    "drop_full": 1,
+                    "drop_locked": 1
                 }
             },
             "stage_timing": {
@@ -1038,6 +1077,8 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
     .expect("markdown report should be readable");
+  assert!(markdown.contains("## Direct-H1 pool diagnostics"));
+  assert!(markdown.contains("| `h2` | `25` | `24750` | `250` | `1.000%`"));
   assert!(markdown.contains("## Fast-path stage timing diagnostics"));
   assert!(markdown.contains("`h3_downstream_send`"));
 

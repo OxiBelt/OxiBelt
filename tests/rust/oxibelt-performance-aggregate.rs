@@ -6979,6 +6979,7 @@ fn render_markdown(report: &Report) -> String {
   write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
   write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
+  write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
   write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
   write_diagnostic_profile_table(&mut markdown, &report.profiling);
@@ -6988,6 +6989,70 @@ fn render_markdown(report: &Report) -> String {
   write_regression_gate_table(&mut markdown, &report.regression_gates);
   write_warnings(&mut markdown, report);
   markdown
+}
+
+fn write_direct_h1_pool_diagnostics_table(markdown: &mut String, report: &Report) {
+  let rows = report
+    .aggregates
+    .iter()
+    .filter(|aggregate| {
+      aggregate.amd64_target_cpu == report.primary_target_cpu
+        && aggregate.comparator == Comparator::Oxibelt.as_str()
+        && matches!(aggregate.scenario.as_str(), "h1-keepalive" | "h2" | "h3")
+    })
+    .filter_map(|aggregate| {
+      aggregate
+        .fast_path
+        .as_ref()
+        .and_then(|fast_path| fast_path.direct_h1_pool.as_ref())
+        .map(|pool| (aggregate.scenario.as_str(), pool))
+    })
+    .collect::<Vec<_>>();
+  if rows.is_empty() {
+    return;
+  }
+
+  writeln!(markdown, "\n## Direct-H1 pool diagnostics\n").unwrap();
+  writeln!(
+    markdown,
+    "| Scenario | Samples | Hit | Miss | Miss % | Miss empty | Miss locked | Reconnect | Stale | Drop | Drop full | Drop locked |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  )
+  .unwrap();
+  for (scenario, pool) in rows {
+    let hit = counter_map_value(pool, "hit");
+    let miss = counter_map_value(pool, "miss");
+    writeln!(
+      markdown,
+      "| `{scenario}` | `{}` | `{hit}` | `{miss}` | {} | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+      pool.sample_count,
+      format_pool_miss_percent(hit, miss),
+      counter_map_value(pool, "miss_empty"),
+      counter_map_value(pool, "miss_locked"),
+      counter_map_value(pool, "reconnect"),
+      counter_map_value(pool, "stale"),
+      counter_map_value(pool, "drop"),
+      counter_map_value(pool, "drop_full"),
+      counter_map_value(pool, "drop_locked")
+    )
+    .unwrap();
+  }
+}
+
+fn counter_map_value(stats: &CounterMapAggregateStats, name: &str) -> u64 {
+  stats.values.get(name).copied().unwrap_or(0)
+}
+
+fn format_pool_miss_percent(hit: u64, miss: u64) -> String {
+  let attempts = hit.saturating_add(miss);
+  if attempts == 0 {
+    return "`n/a`".to_owned();
+  }
+  format!("`{:.3}%`", (miss as f64) * 100.0 / (attempts as f64))
 }
 
 fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
@@ -8217,6 +8282,13 @@ mod tests {
                           "total_ns": 100,
                           "avg_ns": 25.0
                         }
+                      },
+                      "direct_h1_pool_take": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 40,
+                          "avg_ns": 10.0
+                        }
                       }
                     }
                   }
@@ -8253,6 +8325,12 @@ mod tests {
     assert_eq!(sample.total_ns, 100);
     assert_eq!(sample.median_avg_ns, Some(25.0));
     assert_eq!(sample.max_avg_ns, Some(25.0));
+    let pool_take_sample = &stage_timing["plain_proxy"]["h2"]["direct_h1_pool_take"]["ok"];
+    assert_eq!(pool_take_sample.sample_count, 1);
+    assert_eq!(pool_take_sample.count, 4);
+    assert_eq!(pool_take_sample.total_ns, 40);
+    assert_eq!(pool_take_sample.median_avg_ns, Some(10.0));
+    assert_eq!(pool_take_sample.max_avg_ns, Some(10.0));
   }
 
   #[test]

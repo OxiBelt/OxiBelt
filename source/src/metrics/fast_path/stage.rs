@@ -4,8 +4,11 @@ use super::super::StripedCounter;
 
 const PATHS: [&str; 2] = ["plain_proxy", "h3_downstream"];
 const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
-const STAGES: [&str; 10] = [
+const STAGES: [&str; 13] = [
+  "direct_h1_connect",
+  "direct_h1_pool_take",
   "direct_h1_request_build",
+  "direct_h1_send_request",
   "fast_path_prepare",
   "request_body_prepare",
   "transport_direct_h1",
@@ -21,17 +24,23 @@ const STAGE_COUNTER_COUNT: usize = PATHS.len() * PROTOCOLS.len() * STAGES.len() 
 
 #[derive(Debug)]
 pub(super) struct FastPathStageMetrics {
-  observations: [StripedCounter; STAGE_COUNTER_COUNT],
-  duration_ns: [StripedCounter; STAGE_COUNTER_COUNT],
+  observations: Box<[StripedCounter]>,
+  duration_ns: Box<[StripedCounter]>,
 }
 
 impl Default for FastPathStageMetrics {
   fn default() -> Self {
     Self {
-      observations: std::array::from_fn(|_| StripedCounter::default()),
-      duration_ns: std::array::from_fn(|_| StripedCounter::default()),
+      observations: striped_counters(),
+      duration_ns: striped_counters(),
     }
   }
+}
+
+fn striped_counters() -> Box<[StripedCounter]> {
+  (0..STAGE_COUNTER_COUNT)
+    .map(|_| StripedCounter::default())
+    .collect()
 }
 
 impl FastPathStageMetrics {
@@ -133,6 +142,7 @@ mod tests {
     let metrics = FastPathStageMetrics::default();
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "ok", 37);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "ok", 5);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h1_pool_take", "ok", 7);
     metrics.record_duration_ns("plain_proxy", "h2", "unknown", "ok", 11);
     metrics.record_duration_ns("plain_proxy", "h9", "transport_direct_h1", "ok", 13);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "weird", 17);
@@ -140,5 +150,9 @@ mod tests {
     let index = stage_counter_index("plain_proxy", "h2", "transport_direct_h1", "ok").unwrap();
     assert_eq!(metrics.observations[index].load(), 2);
     assert_eq!(metrics.duration_ns[index].load(), 42);
+    let pool_take_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h1_pool_take", "ok").unwrap();
+    assert_eq!(metrics.observations[pool_take_index].load(), 1);
+    assert_eq!(metrics.duration_ns[pool_take_index].load(), 7);
   }
 }
