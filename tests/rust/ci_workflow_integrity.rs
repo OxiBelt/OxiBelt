@@ -1449,9 +1449,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
   );
   assert!(
     workflow.contains("performance_profile_label:")
+      && workflow.contains("- oxibelt-h1-keepalive")
       && workflow.contains("- oxibelt-h2")
       && workflow.contains("- oxibelt-h3"),
-    "workflow_dispatch should expose exact H2/H3 profiling labels"
+    "workflow_dispatch should expose exact H1/H2/H3 profiling labels"
   );
   assert!(
         workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_iterations'] || '5' }}"),
@@ -1492,7 +1493,7 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
   assert!(
     performance_job.contains("selected_profile_label=\"${PERFORMANCE_PROFILE_LABEL}\"")
       && performance_job.contains("selected_profile_label=\"oxibelt-h2\"")
-      && performance_job.contains("none|oxibelt-h2|oxibelt-h3")
+      && performance_job.contains("none|oxibelt-h1-keepalive|oxibelt-h2|oxibelt-h3")
       && performance_job.contains("OXIBELT_PERF_PROFILE_LABEL=\"${selected_profile_label}\"")
       && performance_job.contains(r#"&& "${target_cpu}" == "x86-64-v3""#)
       && performance_job.contains(r#"&& "${iteration}" == "1""#),
