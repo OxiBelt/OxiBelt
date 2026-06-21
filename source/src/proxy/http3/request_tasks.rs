@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ::http::{Request, Response, StatusCode};
 use anyhow::Context;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
@@ -64,10 +64,7 @@ impl RequestTaskSet {
   }
 
   pub(super) fn try_acquire_permit(&self) -> Option<OwnedSemaphorePermit> {
-    match self.permits.clone().try_acquire_owned() {
-      Ok(permit) => Some(permit),
-      Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => None,
-    }
+    self.permits.clone().try_acquire_owned().ok()
   }
 
   pub(super) fn spawn(
