@@ -403,7 +403,7 @@ async fn eligible_static_plan(
     return None;
   }
   let compiled_static_response =
-    compiled_static_hot_object_response(&request, request_path, snapshot, &resolved);
+    compiled_static_hot_object_response(request, request_path, snapshot, &resolved);
   let response_send_timeout = compiled_static_response.as_ref().map_or_else(
     || static_files::static_response_send_timeout(snapshot, resolved.route),
     |(_, timeout)| *timeout,

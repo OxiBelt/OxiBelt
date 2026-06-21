@@ -42,7 +42,7 @@ use super::prefixed_io::PrefixedIo;
 pub(super) enum H1FastProxyPreflight {
   Done,
   Continue {
-    io: PrefixedIo<TlsStream<TcpStream>>,
+    io: Box<PrefixedIo<TlsStream<TcpStream>>>,
     served_requests: usize,
   },
 }
@@ -54,7 +54,7 @@ impl H1FastProxyPreflight {
       Self::Continue {
         io,
         served_requests,
-      } => Some((io, served_requests)),
+      } => Some((*io, served_requests)),
     }
   }
 }
@@ -74,7 +74,7 @@ pub(super) async fn try_handle_connection(
   if let Some(reason) = fast_proxy_preflight_disabled_reason(snapshot.as_ref()) {
     trace!(reason, "TLS H1 pre-Hyper proxy fast path skipped");
     return Ok(H1FastProxyPreflight::Continue {
-      io: PrefixedIo::new(stream, Vec::new()),
+      io: Box::new(PrefixedIo::new(stream, Vec::new())),
       served_requests: 0,
     });
   }
@@ -86,7 +86,7 @@ pub(super) async fn try_handle_connection(
     if served_requests >= snapshot.config.limits.max_requests_per_connection {
       trace!("TLS H1 pre-Hyper proxy fast path reached request limit");
       return Ok(H1FastProxyPreflight::Continue {
-        io: PrefixedIo::new(stream, buffer),
+        io: Box::new(PrefixedIo::new(stream, buffer)),
         served_requests,
       });
     }
@@ -110,7 +110,7 @@ pub(super) async fn try_handle_connection(
       ReadRequestOutcome::Fallback { prefix, reason } => {
         trace!(reason, "TLS H1 pre-Hyper proxy parser fell back");
         return Ok(H1FastProxyPreflight::Continue {
-          io: PrefixedIo::new(stream, prefix),
+          io: Box::new(PrefixedIo::new(stream, prefix)),
           served_requests,
         });
       }
@@ -120,13 +120,13 @@ pub(super) async fn try_handle_connection(
     let Some(prepared) = prepare_fast_proxy_request(&parsed, snapshot.as_ref(), peer_addr) else {
       trace!("TLS H1 pre-Hyper proxy request fell back");
       return Ok(H1FastProxyPreflight::Continue {
-        io: PrefixedIo::new(stream, replay_prefix(parsed)),
+        io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
         served_requests,
       });
     };
     if snapshot.lifecycle.is_draining() {
       return Ok(H1FastProxyPreflight::Continue {
-        io: PrefixedIo::new(stream, replay_prefix(parsed)),
+        io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
         served_requests,
       });
     }
@@ -176,7 +176,7 @@ pub(super) async fn try_handle_connection(
       Err(_) => {
         trace!("TLS H1 pre-Hyper proxy fast-path decision fell back");
         return Ok(H1FastProxyPreflight::Continue {
-          io: PrefixedIo::new(stream, fallback_prefix),
+          io: Box::new(PrefixedIo::new(stream, fallback_prefix)),
           served_requests,
         });
       }

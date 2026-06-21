@@ -20,14 +20,14 @@ use super::{StaticResponsePlan, text_plan};
 use crate::config::RouteStaticFilesConfig;
 
 pub(crate) enum CachedHotObjectPlan {
-  Hit(StaticResponsePlan),
+  Hit(Box<StaticResponsePlan>),
   Miss,
 }
 
 impl CachedHotObjectPlan {
   pub(crate) fn into_hit(self) -> Option<StaticResponsePlan> {
     match self {
-      Self::Hit(plan) => Some(plan),
+      Self::Hit(plan) => Some(*plan),
       Self::Miss => None,
     }
   }
@@ -102,7 +102,7 @@ pub(in crate::proxy::http::static_files) fn cached_hot_object_plan_for_path(
   };
   match lookup {
     CachedStaticObjectLookup::Fresh(cached) => {
-      CachedHotObjectPlan::Hit(cached_object_plan(method, headers, cached))
+      CachedHotObjectPlan::Hit(Box::new(cached_object_plan(method, headers, cached)))
     }
     CachedStaticObjectLookup::Expired(cached) => revalidate_expired_cached_object(
       method,
@@ -143,7 +143,7 @@ fn revalidate_expired_cached_object(
     Ok(None) => return CachedHotObjectPlan::Miss,
     Err(StaticOpenError::Forbidden(error)) => {
       warn!(error = %error, path = %path.display(), "cached static file revalidation failed");
-      return CachedHotObjectPlan::Hit(text_plan(StatusCode::FORBIDDEN, "forbidden"));
+      return CachedHotObjectPlan::Hit(Box::new(text_plan(StatusCode::FORBIDDEN, "forbidden")));
     }
     Err(StaticOpenError::IsDirectory | StaticOpenError::NotFound) => {
       return CachedHotObjectPlan::Miss;
@@ -155,7 +155,7 @@ fn revalidate_expired_cached_object(
     let cached = runtime
       .refresh_cached_object(root, path, response_metadata, &etag, modified)
       .unwrap_or(cached);
-    return CachedHotObjectPlan::Hit(cached_object_plan(method, headers, cached));
+    return CachedHotObjectPlan::Hit(Box::new(cached_object_plan(method, headers, cached)));
   }
   CachedHotObjectPlan::Miss
 }
