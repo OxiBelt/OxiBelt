@@ -41,26 +41,32 @@ use super::{
   send_pool_with_retry, send_with_retry,
 };
 
+mod compiled;
 mod decision;
 mod direct;
 pub(crate) mod direct_h1;
 pub(crate) mod direct_h2;
 mod direct_transport;
+mod entry;
 mod helpers;
 mod request_body;
 mod response_body;
 mod small_response;
 pub(crate) mod stage_timing;
 mod waf;
+use self::compiled::select_compiled_proxy_action;
+pub(crate) use self::compiled::{CompiledRouteFastPathActions, build_compiled_fast_path_actions};
 #[cfg(test)]
 use self::decision::PlainProxyFastPathMissReason;
-use self::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_path_decision};
+#[cfg(test)]
+use self::decision::plain_proxy_fast_path_decision;
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
 use self::direct_h1::{DirectH1SendResult, recycle_response_body, try_send_direct_h1};
 pub(crate) use self::direct_h2::DirectH2Pools;
 use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{DirectFastPathTransport, direct_fast_path_transport};
+pub(crate) use self::entry::try_handle_plain_proxy;
 use self::helpers::{
   apply_fast_path_priority_policy, fast_path_alt_svc_possible,
   fast_path_downstream_response_timeout, fast_path_metric_protocol,
@@ -81,7 +87,6 @@ use self::response_body::{
   FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
 };
 use self::stage_timing as timing;
-use self::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
 
 pub(crate) struct PlainProxyFastPath;
 
@@ -142,6 +147,7 @@ impl PlainProxyFastPath {
     request_waf: RequestWafDecision,
     request_headers: Option<HeaderMap>,
     tags: Option<HashMap<String, String>>,
+    compiled_actions: Option<&CompiledRouteFastPathActions>,
     access_log: &mut SystemAccessLogContext<'_>,
     trace_context: Option<TraceContext>,
   ) -> Response<ProxyBody>
@@ -153,11 +159,32 @@ impl PlainProxyFastPath {
     let snapshot = state.as_ref();
     let timing_enabled = snapshot.request_path_features.hot_path_metrics;
     let prepare_started = timing::start(timing_enabled);
-    let direct_retry_enabled =
-      direct_http_retry_enabled(snapshot, resolved.route, request.method());
-    let direct_selection =
-      select_direct_fast_path_upstream(snapshot, resolved, &request_waf, direct_retry_enabled);
-    let direct_candidate = direct_selection.is_some();
+    let request_waf_has_upstream_override =
+      request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some();
+    let compiled_proxy = match select_compiled_proxy_action(
+      snapshot,
+      compiled_actions,
+      &request,
+      request_version,
+      request_waf_has_upstream_override,
+    ) {
+      Ok(selection) => selection,
+      Err(error) => {
+        warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+        return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+      }
+    };
+    let direct_retry_enabled = if compiled_proxy.is_none() {
+      direct_http_retry_enabled(snapshot, resolved.route, request.method())
+    } else {
+      false
+    };
+    let direct_selection = if compiled_proxy.is_none() {
+      select_direct_fast_path_upstream(snapshot, resolved, &request_waf, direct_retry_enabled)
+    } else {
+      None
+    };
+    let direct_candidate = compiled_proxy.is_some() || direct_selection.is_some();
     let (
       mut upstream,
       mut upstream_index,
@@ -166,7 +193,30 @@ impl PlainProxyFastPath {
       pool_retry_context,
       mut sticky_cookie,
       mut pool_selection,
-    ) = if let Some(selected) = direct_selection {
+      compiled_target_uri,
+      preserve_host,
+      forwarded_header_mode,
+      priority_mode,
+      timeouts,
+      response_waf_enabled,
+    ) = if let Some(compiled) = compiled_proxy {
+      (
+        compiled.upstream,
+        compiled.upstream_index,
+        compiled.upstream_version,
+        EffectiveRetryPolicy::disabled_direct(),
+        None,
+        None,
+        None,
+        Some(compiled.target_uri),
+        compiled.preserve_host,
+        compiled.forwarded_header_mode,
+        compiled.priority,
+        compiled.timeouts,
+        compiled.response_waf_enabled,
+      )
+    } else if let Some(selected) = direct_selection {
+      let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, selected.upstream);
       (
         selected.upstream,
         selected.upstream_index,
@@ -175,6 +225,12 @@ impl PlainProxyFastPath {
         None,
         None,
         None,
+        None,
+        selected.upstream.preserve_host,
+        state.config.proxy.forwarded_headers.mode,
+        state.config.proxy.http.priority,
+        timeouts,
+        resolved.execution_plan.waf.response.enabled(),
       )
     } else {
       let pool_cookie_header = if request_waf.upstream_override.is_none()
@@ -232,6 +288,12 @@ impl PlainProxyFastPath {
         pool_retry_context,
         sticky_cookie,
         pool_selection,
+        None,
+        upstream.preserve_host,
+        state.config.proxy.forwarded_headers.mode,
+        state.config.proxy.http.priority,
+        EffectiveTimeouts::new(&state.config, resolved.route, upstream),
+        resolved.execution_plan.waf.response.enabled(),
       )
     };
     if upstream_version == HttpVersion::H3
@@ -240,30 +302,31 @@ impl PlainProxyFastPath {
       return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
     }
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
-    let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
-    let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
     let (mut parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
 
-    let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
-      warn!(
-        upstream = %upstream.name,
-        upstream_index,
-        "missing precomputed upstream URI parts"
-      );
-      return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
-    };
-    let target_uri =
+    let target_uri = if let Some(target_uri) = compiled_target_uri {
+      target_uri
+    } else {
+      let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
+        warn!(
+          upstream = %upstream.name,
+          upstream_index,
+          "missing precomputed upstream URI parts"
+        );
+        return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
+      };
       match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
         Ok(uri) => uri,
         Err(error) => {
           warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
           return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
         }
-      };
+      }
+    };
 
     let rebuild = RebuildRequestOptions {
       target_uri,
@@ -272,10 +335,10 @@ impl PlainProxyFastPath {
       downstream_scheme,
       downstream_host: host,
       downstream_port,
-      forwarded_header_mode: state.config.proxy.forwarded_headers.mode,
+      forwarded_header_mode,
       forwarded_header_cache,
       forwarded_request_header_values: Some(&forwarded_request_header_values),
-      preserve_host: upstream.preserve_host,
+      preserve_host,
       upstream_version,
       waf_mutations: &request_waf.request_header_mutations,
       route_mutations: &[],
@@ -283,7 +346,7 @@ impl PlainProxyFastPath {
     };
     rebuild_request_parts(&mut parts, rebuild);
     semantics::strip_accepted_expect(&mut parts.headers);
-    apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
     state
       .telemetry
       .inject_trace_context(&mut parts.headers, trace_context);
@@ -656,85 +719,6 @@ impl PlainProxyFastPath {
     timing::record_response_finalize(snapshot, metric_protocol, response_finalize_started);
     response
   }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn try_handle_plain_proxy<B>(
-  request: Request<B>,
-  state: &Arc<AppSnapshot>,
-  resolved: &ResolvedRoute<'_>,
-  forwarded_client_addr: SocketAddr,
-  forwarded_header_cache: Option<&ForwardedHeaderCache>,
-  client_addr: SocketAddr,
-  host: &str,
-  downstream_port: u16,
-  tcp_max_hop: Option<u8>,
-  tls: &WafTlsMetadata,
-  protocol: WafProtocol,
-  downstream_scheme: &'static str,
-  request_version: http::Version,
-  transport_network: WafTransportNetwork,
-  transport_metadata: WafTransportMetadataInput<'_>,
-  access_log: &mut SystemAccessLogContext<'_>,
-  trace_context: Option<TraceContext>,
-) -> Result<Response<ProxyBody>, Request<B>>
-where
-  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
-  B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
-{
-  match plain_proxy_fast_path_decision(&request, state.as_ref(), resolved) {
-    Ok(()) => record_plain_proxy_fast_path_decision(state.as_ref(), request_version, None),
-    Err(reason) => {
-      record_plain_proxy_fast_path_decision(state.as_ref(), request_version, Some(reason));
-      return Err(request);
-    }
-  }
-  let fast_path_waf = if plain_fast_path_waf_required(resolved) {
-    match prepare_plain_fast_path_waf(
-      &request,
-      state.as_ref(),
-      resolved,
-      client_addr,
-      host,
-      tcp_max_hop,
-      tls,
-      protocol,
-      transport_network,
-      transport_metadata,
-      downstream_scheme,
-      access_log,
-    ) {
-      Ok(waf) => waf,
-      Err(response) => return Ok(*response),
-    }
-  } else {
-    PlainFastPathWaf::disabled()
-  };
-  Ok(
-    PlainProxyFastPath::handle(
-      request,
-      state,
-      resolved,
-      forwarded_client_addr,
-      forwarded_header_cache,
-      client_addr,
-      host,
-      downstream_port,
-      tcp_max_hop,
-      tls,
-      protocol,
-      downstream_scheme,
-      request_version,
-      transport_network,
-      transport_metadata,
-      fast_path_waf.request,
-      fast_path_waf.request_headers,
-      fast_path_waf.tags,
-      access_log,
-      trace_context,
-    )
-    .await,
-  )
 }
 
 #[cfg(test)]

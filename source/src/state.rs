@@ -23,7 +23,9 @@ use crate::mitigation::MitigationSink;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
-use crate::proxy::http::fast_path::{DirectH1Pools, DirectH2Pools};
+use crate::proxy::http::fast_path::{
+  CompiledRouteFastPathActions, DirectH1Pools, DirectH2Pools, build_compiled_fast_path_actions,
+};
 use crate::proxy::http::static_files::StaticFilesRuntime;
 use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
@@ -62,6 +64,7 @@ pub struct AppSnapshot {
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
+  pub(crate) compiled_fast_path_actions: Arc<Vec<CompiledRouteFastPathActions>>,
   pub clients: UpstreamClientPools,
   pub(crate) direct_h1_pools: DirectH1Pools,
   pub(crate) direct_h2_pools: DirectH2Pools,
@@ -119,6 +122,13 @@ impl AppSnapshot {
     if self.request_path_features.hot_path_metrics {
       self.metrics.record_response(status);
     }
+  }
+
+  pub(crate) fn compiled_fast_path_actions(
+    &self,
+    route_index: usize,
+  ) -> Option<&CompiledRouteFastPathActions> {
+    self.compiled_fast_path_actions.get(route_index)
   }
 
   #[inline]
@@ -353,6 +363,12 @@ impl AppSnapshot {
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
     let stream_pool_generation = next_stream_pool_generation(&config, previous);
+    let compiled_fast_path_actions = build_compiled_fast_path_actions(
+      &config,
+      &route_table,
+      &upstreams,
+      &upstream_uri_parts_by_index,
+    );
 
     Ok(Self {
       config,
@@ -361,6 +377,7 @@ impl AppSnapshot {
       upstreams,
       upstream_uri_parts,
       upstream_uri_parts_by_index,
+      compiled_fast_path_actions,
       clients,
       direct_h1_pools,
       direct_h2_pools,
@@ -496,6 +513,12 @@ impl AppSnapshot {
       previous.system_access_log.enabled(),
       previous.waf.has_person_proof_api_paths(),
     );
+    let compiled_fast_path_actions = build_compiled_fast_path_actions(
+      &config,
+      &route_table,
+      &upstreams,
+      &upstream_uri_parts_by_index,
+    );
 
     Ok(Self {
       config,
@@ -504,6 +527,7 @@ impl AppSnapshot {
       upstreams,
       upstream_uri_parts,
       upstream_uri_parts_by_index,
+      compiled_fast_path_actions,
       clients,
       direct_h1_pools,
       direct_h2_pools,

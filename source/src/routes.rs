@@ -91,6 +91,7 @@ impl WildcardHostTrie {
 /// Borrowed route resolution result used by request handlers.
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute<'a> {
+  pub route_index: usize,
   pub route: &'a RouteConfig,
   pub upstream: Option<&'a UpstreamConfig>,
   pub upstream_index: Option<usize>,
@@ -222,6 +223,19 @@ impl RouteTable {
     !self.static_sendfile_prefixes.is_empty()
   }
 
+  pub(crate) fn route_execution_entries(
+    &self,
+  ) -> impl Iterator<Item = (usize, &RouteConfig, Option<usize>, &RouteExecutionPlan)> + '_ {
+    self.routes.iter().enumerate().map(|(index, entry)| {
+      (
+        index,
+        &entry.route,
+        entry.upstream_index,
+        &entry.execution_plan,
+      )
+    })
+  }
+
   pub(crate) fn static_sendfile_target_can_match(&self, target: &str) -> bool {
     let Some(path) = origin_form_target_path(target) else {
       return true;
@@ -350,6 +364,7 @@ impl RouteTable {
       (None, None) => (None, None),
     };
     ResolvedRoute {
+      route_index: route_match.route_index,
       route,
       upstream,
       upstream_index,

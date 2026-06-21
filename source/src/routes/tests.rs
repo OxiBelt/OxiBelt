@@ -137,6 +137,27 @@ fn normalized_host_resolve_matches_raw_resolve() {
 }
 
 #[test]
+fn simple_exact_host_resolution_keeps_full_resolution_route_index() {
+  let routes = vec![
+    route("root", &["example.com"], "/", "root"),
+    route("api", &["example.com"], "/api", "api"),
+  ];
+  let upstreams = vec![upstream("root"), upstream("api")];
+  let table = RouteTable::from_routes_for_tests(routes);
+
+  let simple = table
+    .try_resolve_simple_exact_host("example.com", "/api/users", &upstreams)
+    .expect("simple exact host should resolve");
+  let full = table
+    .resolve_normalized_host("example.com", "/api/users", &upstreams)
+    .expect("full route lookup should resolve");
+
+  assert_eq!(simple.route.name, "api");
+  assert_eq!(simple.route_index, full.route_index);
+  assert_eq!(simple.upstream.unwrap().name, full.upstream.unwrap().name);
+}
+
+#[test]
 fn longer_path_prefix_wins() {
   let routes = vec![
     RouteConfig {

@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::config::{Config, RuntimeOverrides};
 use crate::proxy::http::body::ProxyBody;
+use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::proxy::http::response::text_response;
 use crate::reload::{reload_downstream_tls_paths, validate_full_reload_runtime_compatibility};
 use crate::routes::RouteTable;
@@ -609,6 +610,12 @@ fn build_oxirule_reload_snapshot(
   );
   let mut snapshot = active.clone();
   snapshot.config = config;
+  snapshot.compiled_fast_path_actions = build_compiled_fast_path_actions(
+    &snapshot.config,
+    &route_table,
+    &snapshot.upstreams,
+    &snapshot.upstream_uri_parts_by_index,
+  );
   snapshot.route_table = route_table;
   snapshot.waf = waf;
   snapshot.request_path_features = request_path_features;

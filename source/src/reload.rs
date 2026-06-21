@@ -9,6 +9,7 @@ use anyhow::{Context, bail};
 use tracing::{info, warn};
 
 use crate::config::{Config, HotReloadMode, RuntimeOverrides, TlsConfig};
+use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::routes::RouteTable;
 use crate::server::ListenerSupervisor;
 use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
@@ -109,6 +110,12 @@ impl ReloadManager {
     )
     .context("failed to rebuild WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
+    let compiled_fast_path_actions = build_compiled_fast_path_actions(
+      &config,
+      &route_table,
+      &active.upstreams,
+      &active.upstream_uri_parts_by_index,
+    );
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
@@ -140,6 +147,7 @@ impl ReloadManager {
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: active.upstream_uri_parts_by_index.clone(),
+      compiled_fast_path_actions,
       config,
       clients: active.clients.clone(),
       direct_h1_pools: active.direct_h1_pools.clone(),
@@ -293,6 +301,7 @@ impl ReloadManager {
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: active.upstream_uri_parts_by_index.clone(),
+      compiled_fast_path_actions: active.compiled_fast_path_actions.clone(),
       config,
       clients: active.clients.clone(),
       direct_h1_pools: active.direct_h1_pools.clone(),

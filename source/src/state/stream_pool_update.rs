@@ -18,6 +18,7 @@ impl AppSnapshot {
       upstreams: previous.upstreams.clone(),
       upstream_uri_parts: previous.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: previous.upstream_uri_parts_by_index.clone(),
+      compiled_fast_path_actions: previous.compiled_fast_path_actions.clone(),
       clients: previous.clients.clone(),
       direct_h1_pools: previous.direct_h1_pools.clone(),
       direct_h2_pools: previous.direct_h2_pools.clone(),
