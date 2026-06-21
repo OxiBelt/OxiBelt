@@ -9128,7 +9128,7 @@ patterns = ["/blocked"]
 name = "block-matrix"
 phase = "request"
 priority = 10
-when = "PatternSets.contains('blocked-paths', Request.Http.Path)"
+when = "Request.Http.Path.containsAny('blocked-paths')"
 
 [[waf.rules.actions]]
 type = "reject"
@@ -9315,7 +9315,7 @@ patterns = ["blocked"]
 name = "inline-global"
 phase = "request"
 priority = 10
-when = "PatternSets.contains('blocked-keywords', Request.Http.Path)"
+when = "Request.Http.Path.containsAny('blocked-keywords')"
 
 [[waf.rules.actions]]
 type = "reject"
