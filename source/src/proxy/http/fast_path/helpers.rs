@@ -1,7 +1,7 @@
-use http::{HeaderMap, Request, Response};
+use http::{Extensions, HeaderMap, Request, Response};
 use hyper::body::Body;
 
-use crate::config::{PriorityMode, TrailerMode};
+use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
@@ -9,6 +9,7 @@ use crate::proxy::http::request_framing::{
 use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics;
 use crate::proxy::http::uri::{self, UpstreamUriParts};
+use crate::proxy::http::version::select_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::waf::WafTransportNetwork;
@@ -82,6 +83,47 @@ pub(super) fn request_body_definitely_empty<B: Body>(request: &Request<B>) -> bo
       .extensions()
       .get::<VerifiedEmptyRequestBody>()
       .is_some()
+}
+
+pub(super) fn plain_proxy_fast_path_supported_route(
+  state: &AppSnapshot,
+  resolved: &ResolvedRoute<'_>,
+) -> bool {
+  if resolved.route.upstream_pool.is_some() {
+    return resolved.route.upstream_http_version != Some(HttpVersion::H3);
+  }
+
+  let Some(upstream) = resolved.upstream else {
+    return false;
+  };
+  let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
+    select_upstream_http_version(
+      state.config.proxy.auto_upgrade.enabled,
+      state.config.proxy.auto_upgrade.max_http_version,
+      upstream.max_http_version,
+    )
+  });
+  upstream_version != HttpVersion::H3
+    && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
+}
+
+pub(super) fn record_empty_request_body(
+  state: &AppSnapshot,
+  protocol: &'static str,
+  extensions: &Extensions,
+) {
+  if state.request_path_features.hot_path_metrics {
+    let outcome = if extensions.get::<VerifiedContentLengthZeroBody>().is_some()
+      || extensions.get::<VerifiedEmptyRequestBody>().is_some()
+    {
+      "verified_empty"
+    } else {
+      "already_empty"
+    };
+    state
+      .metrics
+      .record_fast_path_request_body(protocol, outcome);
+  }
 }
 
 pub(super) fn fast_path_target_uri(

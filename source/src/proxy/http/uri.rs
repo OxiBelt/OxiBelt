@@ -74,12 +74,25 @@ pub(crate) fn rewrite_uri(
   replace_prefix_with: Option<&str>,
   downstream_uri: &Uri,
 ) -> anyhow::Result<Uri> {
+  build_uri(
+    origin,
+    rewrite_path_and_query(origin, route_prefix, replace_prefix_with, downstream_uri)?,
+  )
+}
+
+pub(crate) fn rewrite_path_and_query(
+  origin: &UpstreamUriParts,
+  route_prefix: &str,
+  replace_prefix_with: Option<&str>,
+  downstream_uri: &Uri,
+) -> anyhow::Result<PathAndQuery> {
   if replace_prefix_with.is_none() && origin.base_path_is_root {
-    let path_and_query = downstream_uri
-      .path_and_query()
-      .cloned()
-      .unwrap_or_else(|| PathAndQuery::from_static("/"));
-    return build_uri(origin, path_and_query);
+    return Ok(
+      downstream_uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| PathAndQuery::from_static("/")),
+    );
   }
 
   let incoming_path = downstream_uri.path();
@@ -108,9 +121,8 @@ pub(crate) fn rewrite_uri(
     None => upstream_path,
   };
 
-  let path_and_query = PathAndQuery::from_str(path_and_query.as_str())
-    .map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))?;
-  build_uri(origin, path_and_query)
+  PathAndQuery::from_str(path_and_query.as_str())
+    .map_err(|error| anyhow::anyhow!("failed to build rewritten URI: {error}"))
 }
 
 pub(crate) fn build_uri(

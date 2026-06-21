@@ -13,7 +13,7 @@ where
 {
   std::thread::Builder::new()
     .name(name.to_owned())
-    .stack_size(16 * 1024 * 1024)
+    .stack_size(32 * 1024 * 1024)
     .spawn(move || {
       tokio::runtime::Builder::new_current_thread()
         .enable_all()

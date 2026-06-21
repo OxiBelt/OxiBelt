@@ -8,7 +8,7 @@ use crate::proxy::http::semantics;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 
-use super::PlainProxyFastPath;
+use super::helpers::plain_proxy_fast_path_supported_route;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PlainProxyFastPathMissReason {
@@ -56,7 +56,7 @@ where
   if !plan_enabled {
     return Err(PlainProxyFastPathMissReason::PlanDisabled);
   }
-  if !PlainProxyFastPath::supported_route(state, resolved) {
+  if !plain_proxy_fast_path_supported_route(state, resolved) {
     return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
   }
   if state.request_path_features.person_proof_api

@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use http::uri::PathAndQuery;
 use http::{Method, Request, Uri};
 use hyper::body::Body;
 
@@ -57,10 +58,10 @@ pub(crate) struct CompiledStaticAction {
 }
 
 pub(super) struct SelectedCompiledProxyAction<'a> {
+  action: &'a CompiledProxyAction,
   pub(super) upstream: &'a UpstreamConfig,
   pub(super) upstream_index: usize,
   pub(super) upstream_version: HttpVersion,
-  pub(super) target_uri: Uri,
   pub(super) preserve_host: bool,
   pub(super) forwarded_header_mode: ForwardedHeaderMode,
   pub(super) priority: PriorityMode,
@@ -109,6 +110,15 @@ impl CompiledProxyAction {
     )
   }
 
+  pub(super) fn target_path_and_query(&self, downstream_uri: &Uri) -> anyhow::Result<PathAndQuery> {
+    uri::rewrite_path_and_query(
+      &self.upstream_uri_parts,
+      &self.route_prefix,
+      self.replace_prefix_with.as_deref().map(AsRef::as_ref),
+      downstream_uri,
+    )
+  }
+
   pub(super) fn supports_direct_request(
     &self,
     method: &Method,
@@ -119,6 +129,16 @@ impl CompiledProxyAction {
       return false;
     }
     state_upstream.is_some_and(|upstream| upstream.name == self.upstream_name.as_ref())
+  }
+}
+
+impl SelectedCompiledProxyAction<'_> {
+  pub(super) fn target_uri(&self, downstream_uri: &Uri) -> anyhow::Result<Uri> {
+    self.action.target_uri(downstream_uri)
+  }
+
+  pub(super) fn target_path_and_query(&self, downstream_uri: &Uri) -> anyhow::Result<PathAndQuery> {
+    self.action.target_path_and_query(downstream_uri)
   }
 }
 
@@ -146,12 +166,11 @@ where
   let Some(upstream) = state.upstreams.get(action.upstream_index) else {
     return Ok(None);
   };
-  let target_uri = action.target_uri(request.uri())?;
   Ok(Some(SelectedCompiledProxyAction {
+    action,
     upstream,
     upstream_index: action.upstream_index,
     upstream_version: action.upstream_version,
-    target_uri,
     preserve_host: action.preserve_host,
     forwarded_header_mode: action.forwarded_header_mode,
     priority: action.priority,

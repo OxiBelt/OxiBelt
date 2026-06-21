@@ -18,9 +18,6 @@ use crate::proxy::http::headers::{
   ForwardedHeaderCache, ForwardedRequestHeaderValues, strip_hop_by_hop_headers,
 };
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
-use crate::proxy::http::request_framing::{
-  VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
-};
 use crate::proxy::http::response::{
   apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
 };
@@ -48,6 +45,7 @@ pub(crate) mod direct_h1;
 pub(crate) mod direct_h2;
 mod direct_transport;
 mod entry;
+mod h2_direct_h1;
 mod helpers;
 mod request_body;
 mod response_body;
@@ -67,11 +65,14 @@ pub(crate) use self::direct_h2::DirectH2Pools;
 use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{DirectFastPathTransport, direct_fast_path_transport};
 pub(crate) use self::entry::try_handle_plain_proxy;
+use self::h2_direct_h1::{
+  H2DirectH1Preparation, H2DirectH1RequestOptions, prepare_h2_direct_h1_or_generic,
+};
 use self::helpers::{
   apply_fast_path_priority_policy, fast_path_alt_svc_possible,
   fast_path_downstream_response_timeout, fast_path_metric_protocol,
   fast_path_outbound_request_body, fast_path_target_uri, fast_path_upstream_timing_required,
-  request_body_definitely_empty,
+  record_empty_request_body, request_body_definitely_empty,
 };
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;
@@ -106,25 +107,6 @@ impl PlainProxyFastPath {
     B: Body,
   {
     plain_proxy_fast_path_decision(request, state, resolved).is_ok()
-  }
-
-  fn supported_route(state: &AppSnapshot, resolved: &ResolvedRoute<'_>) -> bool {
-    if resolved.route.upstream_pool.is_some() {
-      return resolved.route.upstream_http_version != Some(HttpVersion::H3);
-    }
-
-    let Some(upstream) = resolved.upstream else {
-      return false;
-    };
-    let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-      select_upstream_http_version(
-        state.config.proxy.auto_upgrade.enabled,
-        state.config.proxy.auto_upgrade.max_http_version,
-        upstream.max_http_version,
-      )
-    });
-    upstream_version != HttpVersion::H3
-      && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -193,13 +175,12 @@ impl PlainProxyFastPath {
       pool_retry_context,
       mut sticky_cookie,
       mut pool_selection,
-      compiled_target_uri,
       preserve_host,
       forwarded_header_mode,
       priority_mode,
       timeouts,
       response_waf_enabled,
-    ) = if let Some(compiled) = compiled_proxy {
+    ) = if let Some(compiled) = compiled_proxy.as_ref() {
       (
         compiled.upstream,
         compiled.upstream_index,
@@ -208,7 +189,6 @@ impl PlainProxyFastPath {
         None,
         None,
         None,
-        Some(compiled.target_uri),
         compiled.preserve_host,
         compiled.forwarded_header_mode,
         compiled.priority,
@@ -222,7 +202,6 @@ impl PlainProxyFastPath {
         selected.upstream_index,
         selected.upstream_version,
         EffectiveRetryPolicy::disabled_direct(),
-        None,
         None,
         None,
         None,
@@ -288,7 +267,6 @@ impl PlainProxyFastPath {
         pool_retry_context,
         sticky_cookie,
         pool_selection,
-        None,
         upstream.preserve_host,
         state.config.proxy.forwarded_headers.mode,
         state.config.proxy.http.priority,
@@ -305,105 +283,143 @@ impl PlainProxyFastPath {
     let request_context =
       response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
-    let (mut parts, body) = request.into_parts();
+    let (parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
-
-    let target_uri = if let Some(target_uri) = compiled_target_uri {
-      target_uri
-    } else {
-      let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
-        warn!(
-          upstream = %upstream.name,
-          upstream_index,
-          "missing precomputed upstream URI parts"
-        );
-        return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
-      };
-      match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
-        Ok(uri) => uri,
-        Err(error) => {
-          warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-          return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
-        }
+    let preparation = match prepare_h2_direct_h1_or_generic(
+      parts,
+      body,
+      compiled_proxy
+        .as_ref()
+        .map(|compiled| H2DirectH1RequestOptions {
+          selected: compiled,
+          forwarded_client_addr,
+          downstream_scheme,
+          downstream_host: host,
+          downstream_port,
+          forwarded_header_cache,
+          forwarded_request_header_values: &forwarded_request_header_values,
+          compression_enabled: state.config.compression.enabled,
+          request_body_definitely_empty,
+          request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
+          request_waf: &request_waf,
+        }),
+    ) {
+      Ok(preparation) => preparation,
+      Err(error) => {
+        warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+        return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
       }
     };
 
-    let rebuild = RebuildRequestOptions {
-      target_uri,
-      compression: &state.config.compression,
-      forwarded_client_addr,
-      downstream_scheme,
-      downstream_host: host,
-      downstream_port,
-      forwarded_header_mode,
-      forwarded_header_cache,
-      forwarded_request_header_values: Some(&forwarded_request_header_values),
-      preserve_host,
-      upstream_version,
-      waf_mutations: &request_waf.request_header_mutations,
-      route_mutations: &[],
-      remove_accept_encoding: false,
-    };
-    rebuild_request_parts(&mut parts, rebuild);
-    semantics::strip_accepted_expect(&mut parts.headers);
-    apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
-    state
-      .telemetry
-      .inject_trace_context(&mut parts.headers, trace_context);
-    timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
-    let request_body_started = timing::start(timing_enabled);
-    let request_body = if request_body_definitely_empty {
-      if state.request_path_features.hot_path_metrics {
-        let outcome = if parts
-          .extensions
-          .get::<VerifiedContentLengthZeroBody>()
-          .is_some()
-          || parts.extensions.get::<VerifiedEmptyRequestBody>().is_some()
-        {
-          "verified_empty"
+    let (outbound, request_body_proven_empty) = match preparation {
+      H2DirectH1Preparation::H2DirectH1(mut outbound) => {
+        state
+          .telemetry
+          .inject_trace_context(outbound.headers_mut(), trace_context);
+        timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+        let request_body_started = timing::start(timing_enabled);
+        record_empty_request_body(snapshot, metric_protocol, outbound.extensions());
+        timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
+        (outbound, true)
+      }
+      H2DirectH1Preparation::Generic(mut parts, body) => {
+        let target_uri = if let Some(compiled) = compiled_proxy.as_ref() {
+          match compiled.target_uri(&parts.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+              warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+              return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+            }
+          }
         } else {
-          "already_empty"
+          let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
+            warn!(
+              upstream = %upstream.name,
+              upstream_index,
+              "missing precomputed upstream URI parts"
+            );
+            return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
+          };
+          match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
+            Ok(uri) => uri,
+            Err(error) => {
+              warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+              return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+            }
+          }
         };
+
+        let rebuild = RebuildRequestOptions {
+          target_uri,
+          compression: &state.config.compression,
+          forwarded_client_addr,
+          downstream_scheme,
+          downstream_host: host,
+          downstream_port,
+          forwarded_header_mode,
+          forwarded_header_cache,
+          forwarded_request_header_values: Some(&forwarded_request_header_values),
+          preserve_host,
+          upstream_version,
+          waf_mutations: &request_waf.request_header_mutations,
+          route_mutations: &[],
+          remove_accept_encoding: false,
+        };
+        rebuild_request_parts(&mut parts, rebuild);
+        semantics::strip_accepted_expect(&mut parts.headers);
+        apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
         state
-          .metrics
-          .record_fast_path_request_body(metric_protocol, outcome);
+          .telemetry
+          .inject_trace_context(&mut parts.headers, trace_context);
+        timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+        let request_body_started = timing::start(timing_enabled);
+        let request_body = if request_body_definitely_empty {
+          record_empty_request_body(snapshot, metric_protocol, &parts.extensions);
+          FastPathRequestBody::empty()
+        } else {
+          let client_body_timeout =
+            EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+          let request_body_empty_probe_allowed = fast_path_request_body_empty_probe_allowed(
+            &parts.method,
+            request_version,
+            &parts.headers,
+          );
+          let metrics =
+            state
+              .request_path_features
+              .hot_path_metrics
+              .then_some(FastPathRequestBodyMetrics {
+                metrics: state.metrics.as_ref(),
+                protocol: metric_protocol,
+              });
+          fast_path_request_body_with_metrics(
+            body,
+            state.config.limits.max_request_body_bytes as usize,
+            client_body_timeout,
+            false,
+            request_body_empty_probe_allowed,
+            metrics,
+          )
+          .await
+        };
+        timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
+        let request_body_proven_empty = request_body.proven_empty();
+        let outbound_body = if request_body_proven_empty {
+          request_body.into_body()
+        } else {
+          let body = request_body.into_body();
+          fast_path_outbound_request_body(
+            body,
+            state.config.proxy.http.trailers,
+            timeouts.upstream_send,
+          )
+        };
+        (
+          Request::from_parts(parts, outbound_body),
+          request_body_proven_empty,
+        )
       }
-      FastPathRequestBody::empty()
-    } else {
-      let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-      let request_body_empty_probe_allowed =
-        fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers);
-      let metrics =
-        state
-          .request_path_features
-          .hot_path_metrics
-          .then_some(FastPathRequestBodyMetrics {
-            metrics: state.metrics.as_ref(),
-            protocol: metric_protocol,
-          });
-      fast_path_request_body_with_metrics(
-        body,
-        state.config.limits.max_request_body_bytes as usize,
-        client_body_timeout,
-        false,
-        request_body_empty_probe_allowed,
-        metrics,
-      )
-      .await
     };
-    timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
-    let request_body_proven_empty = request_body.proven_empty();
-    let outbound_body = if request_body_proven_empty {
-      request_body.into_body()
-    } else {
-      let body = request_body.into_body();
-      fast_path_outbound_request_body(
-        body,
-        state.config.proxy.http.trailers,
-        timeouts.upstream_send,
-      )
-    };
-    let outbound = Request::from_parts(parts, outbound_body);
 
     let upstream_started_at = fast_path_upstream_timing_required(
       state.as_ref(),
