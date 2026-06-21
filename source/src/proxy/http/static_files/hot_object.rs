@@ -1,5 +1,5 @@
 //! Hot-object cache planning for static files.
-//! Fresh cached bytes avoid per-request file opens while expired entries revalidate before refresh.
+//! Cached bytes are served only after the current file metadata is verified.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -101,19 +101,18 @@ pub(in crate::proxy::http::static_files) fn cached_hot_object_plan_for_path(
     return CachedHotObjectPlan::Miss;
   };
   match lookup {
-    CachedStaticObjectLookup::Fresh(cached) => {
-      CachedHotObjectPlan::Hit(Box::new(cached_object_plan(method, headers, cached)))
+    CachedStaticObjectLookup::Fresh(cached) | CachedStaticObjectLookup::Expired(cached) => {
+      revalidate_cached_object(
+        method,
+        headers,
+        root,
+        root_handle,
+        path,
+        runtime,
+        &response_metadata,
+        cached,
+      )
     }
-    CachedStaticObjectLookup::Expired(cached) => revalidate_expired_cached_object(
-      method,
-      headers,
-      root,
-      root_handle,
-      path,
-      runtime,
-      &response_metadata,
-      cached,
-    ),
   }
 }
 
@@ -128,7 +127,7 @@ fn cached_hot_object_request_supported(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn revalidate_expired_cached_object(
+fn revalidate_cached_object(
   method: &Method,
   headers: &HeaderMap,
   root: &Path,

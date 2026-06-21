@@ -182,7 +182,7 @@ async fn hot_object_cache_returns_empty_head_body_with_cached_headers() {
 }
 
 #[tokio::test]
-async fn hot_object_cache_serves_cached_file_before_ttl_when_replaced() {
+async fn hot_object_cache_revalidates_replaced_file_before_ttl() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-refresh-replaced");
   let root = temp_dir.path().join("public");
   tokio::fs::create_dir_all(&root).await.unwrap();
@@ -222,12 +222,12 @@ async fn hot_object_cache_serves_cached_file_before_ttl_when_replaced() {
   assert_eq!(refreshed.status(), StatusCode::OK);
   assert_eq!(
     collect_response_body(refreshed).await,
-    Bytes::from_static(b"safe body")
+    Bytes::from_static(b"updated body")
   );
 }
 
 #[tokio::test]
-async fn hot_object_cache_serves_cached_file_before_ttl_when_deleted() {
+async fn hot_object_cache_revalidates_deleted_file_before_ttl() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-deleted-revalidate");
   let root = temp_dir.path().join("public");
   tokio::fs::create_dir_all(&root).await.unwrap();
@@ -261,9 +261,9 @@ async fn hot_object_cache_serves_cached_file_before_ttl_when_deleted() {
     16 * 1024,
   )
   .await;
-  assert_eq!(revalidated.status(), StatusCode::OK);
+  assert_eq!(revalidated.status(), StatusCode::NOT_FOUND);
   let body = collect_response_body(revalidated).await;
-  assert_eq!(body, Bytes::from_static(b"safe body"));
+  assert_eq!(body, Bytes::from_static(b"not found"));
 }
 
 #[tokio::test]
@@ -312,7 +312,7 @@ async fn hot_object_cache_revalidates_after_ttl() {
 }
 
 #[tokio::test]
-async fn hot_object_cache_serves_cached_file_before_ttl_when_path_becomes_symlink() {
+async fn hot_object_cache_fails_closed_on_symlink_escape_before_ttl() {
   let temp_dir = common::TempDir::new("static-hot-object-cache-symlink");
   let root = temp_dir.path().join("public");
   let outside = temp_dir.path().join("outside-secret.txt");
@@ -350,9 +350,9 @@ async fn hot_object_cache_serves_cached_file_before_ttl_when_path_becomes_symlin
   )
   .await;
 
-  assert_eq!(escaped.status(), StatusCode::OK);
+  assert_eq!(escaped.status(), StatusCode::FORBIDDEN);
   let body = collect_response_body(escaped).await;
-  assert_eq!(body, Bytes::from_static(b"safe body"));
+  assert_eq!(body, Bytes::from_static(b"forbidden"));
   assert_ne!(body, Bytes::from_static(b"outside secret"));
 }
 
