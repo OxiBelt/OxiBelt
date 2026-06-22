@@ -210,7 +210,7 @@ async fn unknown_size_hint_still_collects_bounded_small_body() {
   )
   .await;
 
-  let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+  let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
     panic!("expected inline body");
   };
   assert!(inlined.is_none());

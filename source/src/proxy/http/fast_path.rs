@@ -14,13 +14,9 @@ use tracing::warn;
 use crate::config::{HttpVersion, ProxyProtocolEgressMode};
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
-use crate::proxy::http::headers::{
-  ForwardedHeaderCache, ForwardedRequestHeaderValues, strip_hop_by_hop_headers,
-};
+use crate::proxy::http::headers::{ForwardedHeaderCache, ForwardedRequestHeaderValues};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
-use crate::proxy::http::response::{
-  apply_security_headers, apply_sticky_cookie, text_response, waf_terminal_response,
-};
+use crate::proxy::http::response::text_response;
 use crate::proxy::http::semantics::{self, configured_error_response};
 use crate::proxy::http::upstream::select_request_upstream;
 use crate::proxy::http::version::select_upstream_http_version;
@@ -28,14 +24,12 @@ use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::telemetry::TraceContext;
 use crate::waf::{
-  RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
+  RequestWafDecision, WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
 };
 
-use super::flow_helpers::{elapsed_ms, tags_ref};
+use super::flow_helpers::elapsed_ms;
 use super::{
-  EffectiveRetryPolicy, EffectiveTimeouts, apply_alt_svc_header, send_one_shot,
-  send_pool_with_retry, send_with_retry,
+  EffectiveRetryPolicy, EffectiveTimeouts, send_one_shot, send_pool_with_retry, send_with_retry,
 };
 
 mod compiled;
@@ -46,6 +40,7 @@ pub(crate) mod direct_h2;
 mod direct_transport;
 mod downstream_direct_h1;
 mod entry;
+mod finalize;
 mod helpers;
 mod request_body;
 mod response_body;
@@ -60,11 +55,9 @@ use self::decision::PlainProxyFastPathMissReason;
 use self::decision::plain_proxy_fast_path_decision;
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
-use self::direct_h1::{DirectH1SendResult, recycle_response_body, try_send_direct_h1};
+use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};
 pub(crate) use self::direct_h2::DirectH2Pools;
-use self::direct_h2::{
-  DirectH2SendResult, release_response_body as release_direct_h2_response_body, try_send_direct_h2,
-};
+use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{
   DirectFastPathTransport, DirectTransportAttempt, direct_fast_path_transport,
 };
@@ -73,11 +66,13 @@ use self::downstream_direct_h1::{
   prepare_downstream_direct_h1_or_generic,
 };
 pub(crate) use self::entry::try_handle_plain_proxy;
+use self::finalize::finalize_response;
+#[cfg(test)]
+use self::helpers::fast_path_downstream_response_timeout;
 use self::helpers::{
-  apply_fast_path_priority_policy, fast_path_alt_svc_possible,
-  fast_path_downstream_response_timeout, fast_path_metric_protocol,
-  fast_path_outbound_request_body, fast_path_target_uri, fast_path_upstream_timing_required,
-  record_empty_request_body, request_body_definitely_empty,
+  apply_fast_path_priority_policy, fast_path_metric_protocol, fast_path_outbound_request_body,
+  fast_path_target_uri, fast_path_upstream_timing_required, record_empty_request_body,
+  request_body_definitely_empty,
 };
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;
@@ -89,9 +84,7 @@ use self::request_body::{
   FastPathRequestBody, FastPathRequestBodyMetrics, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_with_metrics,
 };
-use self::response_body::{
-  FastPathResponseBody, fast_path_filter_trailers, fast_path_response_body,
-};
+use self::response_body::{FastPathResponseBody, fast_path_response_body};
 use self::stage_timing as timing;
 
 pub(crate) struct PlainProxyFastPath;
@@ -577,12 +570,13 @@ impl PlainProxyFastPath {
     if let Some(upstream_first_byte_time_ms) = upstream_first_byte_time_ms {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
     }
-    let (mut parts, response_body) = upstream_response.into_parts();
+    let (parts, response_body) = upstream_response.into_parts();
     let response_body_started = timing::start(timing_enabled);
     let FastPathResponseBody {
-      body: mut response_body,
+      body: response_body,
       known_small_response_body,
       inlined_known_small_body,
+      known_no_trailers,
       trailers_handled,
       disposition: response_body_disposition,
       reason: response_body_reason,
@@ -623,124 +617,42 @@ impl PlainProxyFastPath {
       );
     }
     let finalize_started = timing::start(timing_enabled);
-    if let Some(lease) = direct_h1_lease.take() {
-      response_body = recycle_response_body(response_body, lease, known_small_response_body);
-    }
-    if let Some(lease) = direct_h2_lease.take() {
-      response_body =
-        release_direct_h2_response_body(response_body, lease, known_small_response_body);
-    }
-    strip_hop_by_hop_headers(&mut parts.headers);
-    apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-    if state.request_path_features.security_response_headers {
-      apply_security_headers(&mut parts.headers, &state.config.security.headers);
-    }
-    if !request_waf.response_header_mutations.is_empty() {
-      apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
-    }
-    if response_waf_enabled {
-      let (request_method, request_uri) = request_context
-        .as_ref()
-        .expect("response WAF context should be captured when response WAF is enabled");
-      let request_headers = request_headers
-        .as_ref()
-        .expect("request headers should be captured when response WAF is enabled");
-      access_log.ensure_response_ids();
-      access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
-      let request_input = WafRequestInput {
-        request_id: access_log.request_id(),
-        transaction_id: access_log.transaction_id(),
-        received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: request_method,
-        uri: request_uri,
-        version: request_version,
-        headers: request_headers,
-        body: None,
-        peer_addr: client_addr,
-        client_asn: state.client_identity.asn.lookup(client_addr.ip()),
-        downstream_host: host,
-        downstream_scheme,
-        route_name: &resolved.route.name,
-        tcp_max_hop,
-        tls,
-        protocol,
-        transport_network,
-        transport_metadata,
-        tags: tags_ref(&tags),
-        dynamic_policy: &access_log.dynamic_policy,
-      };
-      let response_waf = state.waf.evaluate_response(WafResponseInput {
-        request: request_input,
-        response_id: access_log.response_id(),
-        received_at_unix_ms: access_log.response_received_at_unix_ms,
-        version: parts.version,
-        status: parts.status,
-        headers: &parts.headers,
-        body: None,
-        upstream_name: &upstream.name,
-        upstream_pool: pool_selection
-          .as_ref()
-          .map(|selection| selection.pool_name.as_str()),
-        upstream_scheme: upstream.origin.scheme(),
-        upstream_connect_time_ms: access_log.upstream_connect_time_ms,
-        upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
-        upstream_error: None,
-      });
-      for access_log in &response_waf.access_logs {
-        state.access_logs.emit(access_log);
-      }
-      if let Some(terminal) = response_waf.terminal {
-        let mut mutations = request_waf.response_header_mutations.clone();
-        mutations.extend(response_waf.response_header_mutations);
-        let response = waf_terminal_response(terminal, &mutations);
-        state.record_hot_path_response(response.status());
-        return response;
-      }
-      if !response_waf.response_header_mutations.is_empty() {
-        apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
-      }
-    }
-    if fast_path_alt_svc_possible(state.as_ref(), downstream_scheme, request_version) {
-      apply_alt_svc_header(
-        &mut parts.headers,
-        parts.status,
-        state.as_ref(),
-        downstream_scheme,
-        request_version,
-      );
-    }
-    tracing::debug!(
-      upstream_first_byte_time_ms,
-      route = %resolved.route.name,
-      upstream = %upstream.name,
-      "fast-path proxy response received"
-    );
-
-    let response_body = if trailers_handled {
-      response_body
-    } else {
-      fast_path_filter_trailers(response_body, state.config.proxy.http.trailers)
-    };
-    let mut response = Response::from_parts(parts, response_body);
-    if known_small_response_body {
-      response
-        .extensions_mut()
-        .insert(body::KnownSmallResponseBody);
-    }
-    if let Some(inlined) = inlined_known_small_body {
-      response.extensions_mut().insert(inlined);
-    }
-    let mut response = fast_path_downstream_response_timeout(
-      response,
-      known_small_response_body,
-      timeouts.response_send,
+    finalize_response(
+      snapshot,
+      resolved,
+      request_version,
       transport_network,
-    );
-    apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
-    state.record_hot_path_response(response.status());
-    drop(pool_selection);
-    timing::record_finalize(snapshot, metric_protocol, request_version, finalize_started);
-    response
+      downstream_scheme,
+      client_addr,
+      host,
+      tcp_max_hop,
+      tls,
+      protocol,
+      transport_metadata,
+      upstream,
+      upstream_first_byte_time_ms,
+      &request_waf,
+      response_waf_enabled,
+      request_context.as_ref(),
+      request_headers.as_ref(),
+      &tags,
+      pool_selection.as_ref(),
+      sticky_cookie.as_ref(),
+      access_log,
+      compiled_proxy.as_ref(),
+      metric_protocol,
+      finalize_started,
+      direct_h1_lease.take(),
+      direct_h2_lease.take(),
+      parts,
+      response_body,
+      request_body_proven_empty,
+      known_small_response_body,
+      known_no_trailers,
+      inlined_known_small_body,
+      trailers_handled,
+      timeouts.response_send,
+    )
   }
 }
 

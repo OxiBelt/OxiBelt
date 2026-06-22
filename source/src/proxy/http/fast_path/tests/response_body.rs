@@ -50,6 +50,7 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
 
     assert!(prepared.inlined_known_small_body.is_none());
     assert!(prepared.known_small_response_body);
+    assert!(prepared.known_no_trailers);
     assert!(prepared.trailers_handled);
     assert_eq!(prepared.disposition, "inlined");
     assert_eq!(prepared.reason, "known_small");
@@ -86,6 +87,7 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
     .inlined_known_small_body
     .expect("H3 response should keep inlined small body metadata");
   assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
   assert_eq!(prepared.disposition, "inlined");
   assert_eq!(prepared.reason, "known_small");
   assert_eq!(inlined.data.as_ref(), b"ok");
@@ -118,6 +120,7 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
   };
 
   assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
   assert!(prepared.trailers_handled);
   assert!(prepared.inlined_known_small_body.is_none());
   assert_eq!(prepared.disposition, "inlined");
@@ -151,6 +154,7 @@ async fn unknown_length_fast_path_response_body_keeps_streaming_metadata() {
   };
 
   assert!(!prepared.known_small_response_body);
+  assert!(!prepared.known_no_trailers);
   assert!(!prepared.trailers_handled);
   assert!(prepared.inlined_known_small_body.is_none());
   assert_eq!(prepared.disposition, "streamed");
@@ -208,6 +212,35 @@ fn known_small_tcp_fast_path_response_skips_downstream_timeout_metadata() {
       .get::<DownstreamResponseSendTimeout>()
       .is_none()
   );
+}
+
+#[tokio::test]
+async fn known_small_response_body_reports_trailer_presence() {
+  let mut trailers = HeaderMap::new();
+  trailers.insert("x-trailer", "kept".parse().unwrap());
+  let body = Full::new(Bytes::from_static(b"ok"))
+    .with_trailers(std::future::ready(Some(Ok::<_, std::convert::Infallible>(
+      trailers,
+    ))))
+    .map_err(|never| -> body::BoxError { match never {} });
+
+  let prepared = match fast_path_response_body(
+    &response_headers_with_content_length("2"),
+    body,
+    Duration::from_secs(1),
+    TrailerMode::Pass,
+    http::Version::HTTP_2,
+    None,
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  assert!(prepared.known_small_response_body);
+  assert!(!prepared.known_no_trailers);
+  assert!(prepared.trailers_handled);
 }
 
 fn metrics_prometheus(metrics: &Metrics) -> String {

@@ -18,6 +18,7 @@ pub(super) struct FastPathResponseBody {
   pub(super) body: ProxyBody,
   pub(super) known_small_response_body: bool,
   pub(super) inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  pub(super) known_no_trailers: bool,
   pub(super) trailers_handled: bool,
   pub(super) disposition: &'static str,
   pub(super) reason: &'static str,
@@ -80,10 +81,15 @@ where
   )
   .await
   {
-    SmallResponseDisposition::Inlined { body, inlined } => Ok(FastPathResponseBody {
+    SmallResponseDisposition::Inlined {
+      body,
+      inlined,
+      trailers_present,
+    } => Ok(FastPathResponseBody {
       body,
       known_small_response_body: true,
       inlined_known_small_body: inlined,
+      known_no_trailers: !trailers_present,
       trailers_handled: true,
       disposition: "inlined",
       reason: "known_small",
@@ -93,6 +99,7 @@ where
         body,
         known_small_response_body: true,
         inlined_known_small_body: None,
+        known_no_trailers: true,
         trailers_handled: true,
         disposition: "inlined",
         reason: "empty",
@@ -106,6 +113,7 @@ where
       ),
       known_small_response_body: false,
       inlined_known_small_body: None,
+      known_no_trailers: false,
       trailers_handled: false,
       disposition: "streamed",
       reason: reason.as_str(),

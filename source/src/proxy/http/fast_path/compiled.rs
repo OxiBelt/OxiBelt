@@ -48,6 +48,22 @@ pub(crate) struct CompiledProxyAction {
   pub(super) priority: PriorityMode,
   pub(super) timeouts: EffectiveTimeouts,
   pub(super) response_waf_enabled: bool,
+  pub(super) finalize_fast_path: Option<CompiledResponseFinalizeFastPath>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CompiledResponseFinalizeFastPath {
+  pub(super) request_body_proven_empty_for_safe_methods: bool,
+  pub(super) response_waf_disabled: bool,
+  pub(super) request_header_mutations_empty: bool,
+  pub(super) response_header_mutations_empty: bool,
+  pub(super) security_response_headers_noop: bool,
+  pub(super) alt_svc_noop: bool,
+  pub(super) sticky_cookie_noop: bool,
+  pub(super) downstream_timeout_wrapper_noop_for_known_small: bool,
+  pub(super) trailers_noop_for_known_small: bool,
+  pub(super) compression_noop: bool,
+  pub(super) priority_noop: bool,
 }
 
 #[derive(Clone)]
@@ -69,6 +85,7 @@ pub(super) struct SelectedCompiledProxyAction<'a> {
   pub(super) priority: PriorityMode,
   pub(super) timeouts: EffectiveTimeouts,
   pub(super) response_waf_enabled: bool,
+  pub(super) finalize_fast_path: Option<CompiledResponseFinalizeFastPath>,
 }
 
 impl CompiledRouteFastPathActions {
@@ -199,6 +216,7 @@ where
     priority: action.priority,
     timeouts: action.timeouts,
     response_waf_enabled: action.response_waf_enabled,
+    finalize_fast_path: action.finalize_fast_path,
   }))
 }
 
@@ -312,6 +330,7 @@ fn compile_proxy_action(
   }
 
   let upstream_uri_parts = upstream_uri_parts_by_index.get(upstream_index)?.clone();
+  let finalize_fast_path = compile_response_finalize_fast_path(config, route, plan);
   Some(CompiledProxyAction {
     upstream_index,
     upstream_name: Arc::from(upstream.name.as_str()),
@@ -324,7 +343,47 @@ fn compile_proxy_action(
     priority: config.proxy.http.priority,
     timeouts: EffectiveTimeouts::new(config, route, upstream),
     response_waf_enabled: plan.waf.response.enabled(),
+    finalize_fast_path,
   })
+}
+
+fn compile_response_finalize_fast_path(
+  config: &Config,
+  route: &RouteConfig,
+  plan: &RouteExecutionPlan,
+) -> Option<CompiledResponseFinalizeFastPath> {
+  let candidate = CompiledResponseFinalizeFastPath {
+    request_body_proven_empty_for_safe_methods: true,
+    response_waf_disabled: !plan.waf.response.enabled(),
+    request_header_mutations_empty: !route.actions.request_headers.has_actions(),
+    response_header_mutations_empty: !route.actions.response_headers.has_actions()
+      && route.actions.cors.is_none(),
+    security_response_headers_noop: !config.security.headers.enabled(),
+    alt_svc_noop: !config.listeners.http3 || !config.quic.alt_svc.enabled,
+    sticky_cookie_noop: route.upstream_pool.is_none(),
+    downstream_timeout_wrapper_noop_for_known_small: true,
+    trailers_noop_for_known_small: true,
+    compression_noop: !config.compression.enabled || route.compression.as_deref() == Some("off"),
+    priority_noop: config.proxy.http.priority == PriorityMode::Pass,
+  };
+  candidate
+    .can_skip_known_small_noop_work()
+    .then_some(candidate)
+}
+
+impl CompiledResponseFinalizeFastPath {
+  pub(super) fn can_skip_known_small_noop_work(self) -> bool {
+    self.request_body_proven_empty_for_safe_methods
+      && self.response_waf_disabled
+      && self.request_header_mutations_empty
+      && self.response_header_mutations_empty
+      && self.security_response_headers_noop
+      && self.sticky_cookie_noop
+      && self.downstream_timeout_wrapper_noop_for_known_small
+      && self.trailers_noop_for_known_small
+      && self.compression_noop
+      && self.priority_noop
+  }
 }
 
 fn compile_static_action(
@@ -387,6 +446,10 @@ mod tests {
   }
 
   fn proxy_config(extra: &str) -> Config {
+    proxy_config_with_raw(|raw| raw + extra)
+  }
+
+  fn proxy_config_with_raw(modify: impl FnOnce(String) -> String) -> Config {
     let temp_dir = common::TempDir::new("compiled-fast-path-proxy");
     let (cert_path, key_path) =
       common::create_self_signed_cert(temp_dir.path(), "compiled-fast-path-proxy");
@@ -398,9 +461,8 @@ mod tests {
       .replace(
         "origin = \"https://app.internal.example\"\nmax_http_version = \"h2\"",
         "origin = \"http://app.internal.example\"\nmax_http_version = \"h1\"",
-      )
-      + extra;
-    parse_config(&raw)
+      );
+    parse_config(&modify(raw))
   }
 
   fn compiled(config: &Config) -> CompiledRouteFastPathActions {
@@ -449,6 +511,68 @@ mod tests {
     assert!(!action.supports_direct_request(&Method::POST, false, config.upstreams.first()));
     assert!(!action.supports_direct_request(&Method::GET, true, config.upstreams.first()));
     assert!(!action.supports_direct_request(&Method::GET, false, None));
+  }
+
+  #[test]
+  fn compiled_proxy_action_carries_noop_finalize_plan() {
+    let config = proxy_config("");
+    let actions = compiled(&config);
+
+    for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+      let action = actions
+        .proxy_for_version(version)
+        .expect("downstream action should compile");
+      let plan = action
+        .finalize_fast_path
+        .expect("plain proxy action should carry no-op finalization proofs");
+
+      assert!(plan.can_skip_known_small_noop_work());
+      assert!(plan.response_waf_disabled);
+      assert!(plan.request_header_mutations_empty);
+      assert!(plan.response_header_mutations_empty);
+      assert!(plan.security_response_headers_noop);
+      assert!(plan.alt_svc_noop);
+      assert!(plan.sticky_cookie_noop);
+      assert!(plan.trailers_noop_for_known_small);
+      assert!(plan.compression_noop);
+      assert!(plan.priority_noop);
+    }
+  }
+
+  #[test]
+  fn enabled_security_headers_disable_noop_finalize_plan_only() {
+    let config = proxy_config_with_raw(|raw| {
+      format!(
+        "{raw}{}",
+        r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+"#
+      )
+    });
+    let actions = compiled(&config);
+    let action = actions
+      .proxy_for_version(http::Version::HTTP_2)
+      .expect("proxy action itself should still compile");
+
+    assert!(config.security.headers.enabled());
+    assert!(action.finalize_fast_path.is_none());
+  }
+
+  #[test]
+  fn alt_svc_finalize_fact_remains_a_runtime_guard() {
+    let mut config = proxy_config("");
+    config.listeners.http3 = true;
+    let actions = compiled(&config);
+    let plan = actions
+      .proxy_for_version(http::Version::HTTP_3)
+      .expect("H3 downstream action should compile")
+      .finalize_fast_path
+      .expect("H3 can still use runtime Alt-Svc guard");
+
+    assert!(!plan.alt_svc_noop);
+    assert!(plan.can_skip_known_small_noop_work());
   }
 
   #[test]

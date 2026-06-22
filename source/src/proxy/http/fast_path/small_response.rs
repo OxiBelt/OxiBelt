@@ -17,6 +17,7 @@ pub(super) enum SmallResponseDisposition {
   Inlined {
     body: ProxyBody,
     inlined: Option<body::InlinedKnownSmallResponseBody>,
+    trailers_present: bool,
   },
   Streaming {
     body: ProxyBody,
@@ -101,11 +102,13 @@ where
   } else {
     None
   };
+  let trailers_present = trailers.is_some();
   if materialize_body {
     let body = inline_body(collected.bytes, trailers);
     return SmallResponseDisposition::Inlined {
       body,
       inlined: None,
+      trailers_present,
     };
   }
 
@@ -113,6 +116,7 @@ where
   SmallResponseDisposition::Inlined {
     body: empty_body(),
     inlined: Some(inlined),
+    trailers_present,
   }
 }
 
@@ -391,7 +395,7 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
       panic!("expected inline body");
     };
     assert!(inlined.is_none());
@@ -416,7 +420,7 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
       panic!("expected inline body");
     };
     let inlined = inlined.expect("skipped materialized body should preserve metadata");
@@ -446,7 +450,7 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
       panic!("expected inline body");
     };
     let inlined = inlined.expect("skipped materialized body should preserve metadata");
@@ -472,7 +476,7 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
       panic!("expected inline body");
     };
     assert!(inlined.is_none());
@@ -497,7 +501,7 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined { body, inlined, .. } = disposition else {
       panic!("expected inline body");
     };
     assert!(inlined.is_none());
@@ -530,9 +534,15 @@ mod tests {
     )
     .await;
 
-    let SmallResponseDisposition::Inlined { body, inlined } = disposition else {
+    let SmallResponseDisposition::Inlined {
+      body,
+      inlined,
+      trailers_present,
+    } = disposition
+    else {
       panic!("expected inline body");
     };
+    assert!(trailers_present);
     assert!(inlined.is_none());
     let collected = body.collect().await.expect("inline body should collect");
     assert_eq!(
