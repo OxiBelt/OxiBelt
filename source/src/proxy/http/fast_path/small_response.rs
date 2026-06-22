@@ -30,6 +30,13 @@ pub(super) enum SmallResponseDisposition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SmallResponseMaterialization {
+  Boxed,
+  MetadataOnly,
+  H2KnownSmallNoTrailers,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SmallResponseReason {
   UnknownLength,
   ReadTimeout,
@@ -53,7 +60,7 @@ pub(super) async fn try_inline_response_body<B>(
   body: B,
   timeout: Duration,
   trailer_mode: TrailerMode,
-  materialize_body: bool,
+  materialization: SmallResponseMaterialization,
 ) -> SmallResponseDisposition
 where
   B: Body<Data = Bytes> + Send + Sync + Unpin + 'static,
@@ -103,20 +110,38 @@ where
     None
   };
   let trailers_present = trailers.is_some();
-  if materialize_body {
-    let body = inline_body(collected.bytes, trailers);
-    return SmallResponseDisposition::Inlined {
-      body,
-      inlined: None,
-      trailers_present,
-    };
-  }
-
-  let inlined = body::InlinedKnownSmallResponseBody::new(collected.bytes, trailers);
-  SmallResponseDisposition::Inlined {
-    body: empty_body(),
-    inlined: Some(inlined),
-    trailers_present,
+  match materialization {
+    SmallResponseMaterialization::Boxed => {
+      let body = inline_body(collected.bytes, trailers);
+      SmallResponseDisposition::Inlined {
+        body,
+        inlined: None,
+        trailers_present,
+      }
+    }
+    SmallResponseMaterialization::MetadataOnly => {
+      let inlined = body::InlinedKnownSmallResponseBody::new(collected.bytes, trailers);
+      SmallResponseDisposition::Inlined {
+        body: empty_body(),
+        inlined: Some(inlined),
+        trailers_present,
+      }
+    }
+    SmallResponseMaterialization::H2KnownSmallNoTrailers if !trailers_present => {
+      SmallResponseDisposition::Inlined {
+        body: body::known_small_no_trailers_body(collected.bytes),
+        inlined: None,
+        trailers_present,
+      }
+    }
+    SmallResponseMaterialization::H2KnownSmallNoTrailers => {
+      let body = inline_body(collected.bytes, trailers);
+      SmallResponseDisposition::Inlined {
+        body,
+        inlined: None,
+        trailers_present,
+      }
+    }
   }
 }
 
@@ -391,7 +416,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
-      true,
+      SmallResponseMaterialization::Boxed,
     )
     .await;
 
@@ -416,7 +441,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
-      false,
+      SmallResponseMaterialization::MetadataOnly,
     )
     .await;
 
@@ -434,6 +459,39 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn exact_small_content_length_uses_h2_known_small_body_without_trailers() {
+    let body = full_body(Bytes::from_static(b"ok"));
+
+    let disposition = try_inline_response_body(
+      &headers(&["2"]),
+      body,
+      Duration::from_secs(1),
+      TrailerMode::Drop,
+      SmallResponseMaterialization::H2KnownSmallNoTrailers,
+    )
+    .await;
+
+    let SmallResponseDisposition::Inlined {
+      body,
+      inlined,
+      trailers_present,
+    } = disposition
+    else {
+      panic!("expected inline body");
+    };
+    assert!(inlined.is_none());
+    assert!(!trailers_present);
+    assert_eq!(body.size_hint().upper(), Some(2));
+    assert!(!body.is_end_stream());
+    let bytes = body
+      .collect()
+      .await
+      .expect("H2 known-small body should collect")
+      .to_bytes();
+    assert_eq!(bytes.as_ref(), b"ok");
+  }
+
+  #[tokio::test]
   async fn exact_small_content_length_collects_unboxed_body_before_boxing() {
     let body = FramesBody {
       frames: vec![Frame::data(Bytes::from_static(b"ok"))].into(),
@@ -446,7 +504,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
-      false,
+      SmallResponseMaterialization::MetadataOnly,
     )
     .await;
 
@@ -472,7 +530,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
-      true,
+      SmallResponseMaterialization::Boxed,
     )
     .await;
 
@@ -497,7 +555,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Drop,
-      true,
+      SmallResponseMaterialization::Boxed,
     )
     .await;
 
@@ -530,7 +588,7 @@ mod tests {
       body,
       Duration::from_secs(1),
       TrailerMode::Pass,
-      true,
+      SmallResponseMaterialization::Boxed,
     )
     .await;
 

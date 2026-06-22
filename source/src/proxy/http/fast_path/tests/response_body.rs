@@ -241,6 +241,18 @@ async fn known_small_response_body_reports_trailer_presence() {
   assert!(prepared.known_small_response_body);
   assert!(!prepared.known_no_trailers);
   assert!(prepared.trailers_handled);
+  let collected = prepared
+    .body
+    .collect()
+    .await
+    .expect("known-small body with trailers should collect");
+  assert_eq!(
+    collected
+      .trailers()
+      .expect("trailers should remain available")["x-trailer"],
+    "kept"
+  );
+  assert_eq!(collected.to_bytes().as_ref(), b"ok");
 }
 
 fn metrics_prometheus(metrics: &Metrics) -> String {

@@ -45,6 +45,10 @@ pub(crate) fn is_known_small_response_body_len(len: usize) -> bool {
   len <= KNOWN_SMALL_BODY_MAX_BYTES
 }
 
+pub(crate) fn known_small_no_trailers_body(bytes: Bytes) -> ProxyBody {
+  KnownSmallNoTrailersBody::new(bytes).boxed()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedBody {
   pub(crate) bytes: Bytes,
@@ -258,6 +262,18 @@ struct DropGuardBody<T> {
   _guard: T,
 }
 
+struct KnownSmallNoTrailersBody {
+  data: Option<Bytes>,
+}
+
+impl KnownSmallNoTrailersBody {
+  fn new(bytes: Bytes) -> Self {
+    Self {
+      data: (!bytes.is_empty()).then_some(bytes),
+    }
+  }
+}
+
 impl ChannelBody {
   fn take_terminal_error(&self) -> Option<BoxError> {
     let terminal_error = self.terminal_error.as_ref()?;
@@ -350,6 +366,29 @@ where
   }
 }
 
+impl Body for KnownSmallNoTrailersBody {
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Poll::Ready(self.data.take().map(|data| Ok(Frame::data(data))))
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.data.is_none()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    match self.data.as_ref() {
+      Some(data) => SizeHint::with_exact(data.len() as u64),
+      None => SizeHint::with_exact(0),
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use bytes::Bytes;
@@ -360,7 +399,7 @@ mod tests {
 
   use super::{
     BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body,
-    error_is_timeout, with_read_timeout, with_send_timeout,
+    error_is_timeout, known_small_no_trailers_body, with_read_timeout, with_send_timeout,
   };
 
   #[tokio::test]
@@ -386,6 +425,37 @@ mod tests {
       .expect("replayed body should collect")
       .to_bytes();
     assert_eq!(replayed.as_ref(), b"abcdef");
+  }
+
+  #[tokio::test]
+  async fn known_small_no_trailers_body_yields_one_exact_data_frame() {
+    let mut body = known_small_no_trailers_body(Bytes::from_static(b"ok"));
+    assert_eq!(body.size_hint().exact(), Some(2));
+    assert!(!body.is_end_stream());
+
+    let frame = body
+      .frame()
+      .await
+      .expect("body should yield one frame")
+      .expect("known-small body should not fail");
+    assert_eq!(
+      frame
+        .into_data()
+        .expect("frame should contain data")
+        .as_ref(),
+      b"ok"
+    );
+    assert!(body.is_end_stream());
+    assert_eq!(body.size_hint().exact(), Some(0));
+    assert!(body.frame().await.is_none());
+  }
+
+  #[tokio::test]
+  async fn known_small_no_trailers_body_preserves_empty_end_stream() {
+    let mut body = known_small_no_trailers_body(Bytes::new());
+    assert!(body.is_end_stream());
+    assert_eq!(body.size_hint().exact(), Some(0));
+    assert!(body.frame().await.is_none());
   }
 
   #[tokio::test]

@@ -128,7 +128,7 @@ async fn exact_small_content_length_rejects_short_body() {
     body,
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -148,7 +148,7 @@ async fn exact_small_content_length_rejects_long_body() {
     body,
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -166,7 +166,7 @@ async fn duplicate_content_length_keeps_streaming_without_polling() {
     panic_body_with_upper(Some(2)),
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -186,7 +186,7 @@ async fn invalid_content_length_keeps_streaming_without_polling() {
     panic_body_with_upper(Some(2)),
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -206,7 +206,7 @@ async fn unknown_size_hint_still_collects_bounded_small_body() {
     frames_body_without_size_hint(vec![Frame::data(Bytes::from_static(b"ok"))], 2),
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -229,7 +229,7 @@ async fn conflicting_size_hint_keeps_streaming_without_polling() {
     panic_body_with_upper(Some(3)),
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -249,7 +249,7 @@ async fn ineligible_unboxed_body_is_boxed_without_polling() {
     PanicBody { upper: Some(3) },
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -269,7 +269,7 @@ async fn large_content_length_keeps_streaming_without_polling() {
     panic_body_with_upper(Some(length as u64)),
     Duration::from_secs(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 
@@ -291,7 +291,7 @@ async fn upstream_read_timeout_still_applies_to_inline_collect() {
     body,
     Duration::from_millis(1),
     TrailerMode::Drop,
-    true,
+    SmallResponseMaterialization::Boxed,
   )
   .await;
 

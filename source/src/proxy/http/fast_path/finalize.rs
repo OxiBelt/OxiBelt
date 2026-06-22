@@ -292,3 +292,179 @@ fn mark_known_small_response_extensions(
     response.extensions_mut().insert(inlined);
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use bytes::Bytes;
+  use http::header::HeaderName;
+  use http::{HeaderValue, Request};
+  use http_body_util::{BodyExt, Full};
+
+  use crate::config::Config;
+  use crate::proxy::http::body::{self, ProxyBody};
+  use crate::state::AppSnapshot;
+  use crate::waf::{HeaderMutation, RequestWafDecision};
+
+  use super::super::compiled::select_compiled_proxy_action;
+  use super::*;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  fn parse_config(raw: &str) -> Config {
+    let config: Config = toml::from_str(raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  async fn h2_direct_h1_state(extra: &str) -> AppSnapshot {
+    let temp_dir = common::TempDir::new("h2-known-small-finalize");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "h2-known-small-finalize");
+    let mut raw = common::minimal_config_toml(&cert_path, &key_path)
+      .replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      )
+      .replace(
+        "origin = \"https://app.internal.example\"\nmax_http_version = \"h2\"",
+        "origin = \"http://app.internal.example\"\nmax_http_version = \"h1\"",
+      );
+    raw.push_str(extra);
+    AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize")
+  }
+
+  fn h2_request() -> Request<ProxyBody> {
+    Request::builder()
+      .method(http::Method::GET)
+      .version(http::Version::HTTP_2)
+      .uri("https://example.com/perf/h2?body=ok")
+      .body(
+        Full::new(Bytes::new())
+          .map_err(|never| -> body::BoxError { match never {} })
+          .boxed(),
+      )
+      .expect("request should build")
+  }
+
+  fn can_use_h2_known_small_noop(
+    state: &AppSnapshot,
+    request_waf: &RequestWafDecision,
+    request_body_proven_empty: bool,
+    known_small_response_body: bool,
+    known_no_trailers: bool,
+    trailers_handled: bool,
+  ) -> bool {
+    let request = h2_request();
+    let resolved = state
+      .route_table
+      .resolve("example.com", request.uri().path(), &state.upstreams)
+      .expect("route should resolve");
+    let actions = state
+      .compiled_fast_path_actions(resolved.route_index)
+      .expect("compiled actions should exist");
+    let selected =
+      select_compiled_proxy_action(state, Some(actions), &request, http::Version::HTTP_2, false)
+        .expect("compiled selection should not fail")
+        .expect("H2 compiled action should be selected");
+
+    can_use_compiled_known_small_noop_response(
+      state,
+      Some(&selected),
+      http::Version::HTTP_2,
+      "https",
+      WafTransportNetwork::Tcp,
+      request_waf,
+      None,
+      None,
+      request_body_proven_empty,
+      known_small_response_body,
+      known_no_trailers,
+      trailers_handled,
+    )
+  }
+
+  #[tokio::test]
+  async fn h2_known_small_noop_guard_accepts_compiled_safe_case() {
+    let state = h2_direct_h1_state("").await;
+
+    assert!(can_use_h2_known_small_noop(
+      &state,
+      &RequestWafDecision::default(),
+      true,
+      true,
+      true,
+      true,
+    ));
+  }
+
+  #[tokio::test]
+  async fn h2_known_small_noop_guard_rejects_uncertain_runtime_facts() {
+    let state = h2_direct_h1_state("").await;
+    let request_waf = RequestWafDecision::default();
+
+    for (request_empty, known_small, no_trailers, trailers_handled) in [
+      (false, true, true, true),
+      (true, false, true, true),
+      (true, true, false, true),
+      (true, true, true, false),
+    ] {
+      assert!(!can_use_h2_known_small_noop(
+        &state,
+        &request_waf,
+        request_empty,
+        known_small,
+        no_trailers,
+        trailers_handled,
+      ));
+    }
+  }
+
+  #[tokio::test]
+  async fn h2_known_small_noop_guard_rejects_response_mutations() {
+    let state = h2_direct_h1_state("").await;
+    let request_waf = RequestWafDecision {
+      response_header_mutations: vec![HeaderMutation::Set {
+        name: HeaderName::from_static("x-test"),
+        value: HeaderValue::from_static("1"),
+      }],
+      ..RequestWafDecision::default()
+    };
+
+    assert!(!can_use_h2_known_small_noop(
+      &state,
+      &request_waf,
+      true,
+      true,
+      true,
+      true,
+    ));
+  }
+
+  #[tokio::test]
+  async fn h2_known_small_noop_guard_rejects_security_header_config() {
+    let state = h2_direct_h1_state(
+      r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+"#,
+    )
+    .await;
+
+    assert!(!can_use_h2_known_small_noop(
+      &state,
+      &RequestWafDecision::default(),
+      true,
+      true,
+      true,
+      true,
+    ));
+  }
+}

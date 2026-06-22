@@ -11,7 +11,9 @@ use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::semantics::filter_trailers;
 
-use super::small_response::{SmallResponseDisposition, try_inline_response_body};
+use super::small_response::{
+  SmallResponseDisposition, SmallResponseMaterialization, try_inline_response_body,
+};
 use super::stage_timing as timing;
 
 pub(super) struct FastPathResponseBody {
@@ -77,7 +79,7 @@ where
     response_body,
     upstream_read_timeout,
     trailer_mode,
-    request_version != http::Version::HTTP_3,
+    response_materialization(request_version),
   )
   .await
   {
@@ -122,6 +124,14 @@ where
       response,
       reason: reason.as_str(),
     }),
+  }
+}
+
+fn response_materialization(request_version: http::Version) -> SmallResponseMaterialization {
+  match request_version {
+    http::Version::HTTP_2 => SmallResponseMaterialization::H2KnownSmallNoTrailers,
+    http::Version::HTTP_3 => SmallResponseMaterialization::MetadataOnly,
+    _ => SmallResponseMaterialization::Boxed,
   }
 }
 
