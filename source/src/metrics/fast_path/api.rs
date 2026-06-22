@@ -2,8 +2,8 @@
 
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
-  DirectH1PoolEvent, FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol,
-  FastPathMetricStage, FastPathTransportMissReason,
+  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
+  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathTransportMissReason,
 };
 
 impl Metrics {
@@ -50,5 +50,16 @@ impl Metrics {
 
   pub(crate) fn record_direct_h1_pool_event_id(&self, event: DirectH1PoolEvent) {
     self.fast_path.record_direct_h1_pool_event_id(event);
+  }
+
+  pub(crate) fn record_direct_h1_io_backend_id(
+    &self,
+    backend: DirectH1IoBackend,
+    protocol: FastPathMetricProtocol,
+    outcome: DirectH1IoBackendOutcome,
+  ) {
+    self
+      .fast_path
+      .record_direct_h1_io_backend_id(backend, protocol, outcome);
   }
 }

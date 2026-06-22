@@ -985,7 +985,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -998,11 +998,33 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "accept-multipliers",
     "remote-signer",
     "pool-concurrency",
+    "runtime-direct-h1",
     "oxibelt-aggressive-long-run",
   ] {
     assert!(
       script.contains(serving_type),
       "performance script should recognize serving type {serving_type}"
+    );
+  }
+}
+
+#[test]
+fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
+  let script = performance_script_text();
+
+  for expected in [
+    "run_runtime_direct_h1_group()",
+    "runtime-direct-h1)",
+    "oxibelt-runtime-direct-h1-control-h2",
+    "oxibelt-runtime-direct-h1-experiment-h2",
+    "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio",
+    "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only",
+    "direct_h1_io_backend_metrics",
+    "fast_path.io_backend.direct_h1",
+  ] {
+    assert!(
+      script.contains(expected),
+      "performance script should include runtime-direct-h1 experiment evidence: {expected}"
     );
   }
 }
@@ -2710,10 +2732,8 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
     "performance script should gate H1/H3 direct-H1 request-build evidence"
   );
   assert!(
-    script.contains(
-      r#"${label}:${protocol}" != "oxibelt-h1-keepalive:h1" && "${label}:${protocol}" != "oxibelt-h3:h3""#
-    ),
-    "H1 keep-alive and H3 rows should both require direct-H1 request-build stage evidence"
+    script.contains("oxibelt-h1-keepalive:h1|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h3:h3"),
+    "H1 keep-alive, H3, and runtime-direct-H1 rows should require direct-H1 request-build stage evidence"
   );
   assert!(
     script.contains("oxibelt-h2-upstream-h2c:h2")
@@ -2728,6 +2748,12 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
       && script.contains("fast_path.pool.direct_h2")
       && script.contains("direct_h2_pool_delta"),
     "split upstream-H2 rows should attach direct-H2 pool diagnostics"
+  );
+  assert!(
+    script.contains("direct_h1_io_backend_metrics")
+      && script.contains("fast_path.io_backend.direct_h1")
+      && script.contains("direct_h1_io_backend_delta_json"),
+    "gated rows should attach direct-H1 runtime backend diagnostics"
   );
   assert!(
     script.contains("direct_h2) ;;"),

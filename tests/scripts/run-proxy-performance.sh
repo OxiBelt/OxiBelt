@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -117,7 +117,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -2011,7 +2011,7 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta direct_h2_pool_before direct_h2_pool_after direct_h2_pool_delta stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta direct_h2_pool_before direct_h2_pool_after direct_h2_pool_delta direct_h1_io_backend_before direct_h1_io_backend_after direct_h1_io_backend_delta_json stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
@@ -2023,6 +2023,7 @@ run_load() {
     direct_h1_before="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-before" "${fast_path_protocol}")"
     direct_h2_before="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-before" "${fast_path_protocol}")"
     direct_h1_pool_before="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-before")"
+    direct_h1_io_backend_before="$(direct_h1_io_backend_metrics "${host}" "${label}-direct-h1-io-before")"
     if [[ "${direct_transport}" == "direct_h2" ]]; then
       direct_h2_pool_before="$(direct_h2_pool_metrics "${host}" "${label}-direct-h2-pool-before")"
     fi
@@ -2080,6 +2081,7 @@ run_load() {
     direct_h1_after="$(direct_h1_transport_metrics "${host}" "${label}-direct-h1-after" "${fast_path_protocol}")"
     direct_h2_after="$(direct_h2_transport_metrics "${host}" "${label}-direct-h2-after" "${fast_path_protocol}")"
     direct_h1_pool_after="$(direct_h1_pool_metrics "${host}" "${label}-direct-h1-pool-after")"
+    direct_h1_io_backend_after="$(direct_h1_io_backend_metrics "${host}" "${label}-direct-h1-io-after")"
     if [[ "${direct_transport}" == "direct_h2" ]]; then
       direct_h2_pool_after="$(direct_h2_pool_metrics "${host}" "${label}-direct-h2-pool-after")"
     fi
@@ -2089,12 +2091,13 @@ run_load() {
     direct_h1_delta="$(direct_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
     direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
+    direct_h1_io_backend_delta_json="$(nested_counter_map_delta "${direct_h1_io_backend_before}" "${direct_h1_io_backend_after}")"
     if [[ "${direct_transport}" == "direct_h2" ]]; then
       direct_h2_pool_delta="$(counter_map_delta "${direct_h2_pool_before}" "${direct_h2_pool_after}")"
     fi
     stage_timing_delta_json="$(stage_timing_delta "${stage_timing_before}" "${stage_timing_after}")"
     assert_direct_h1_request_build_stage "${label}" "${fast_path_protocol}" "${stage_timing_delta_json}"
-    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}}}' <<<"${json}")"
+    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" --argjson direct_h1_io_backend "${direct_h1_io_backend_delta_json}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}, io_backend: {direct_h1: $direct_h1_io_backend}}}' <<<"${json}")"
     if [[ "${direct_transport}" == "direct_h2" ]]; then
       json="$(jq -c --argjson direct_h2_pool "${direct_h2_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h2: $direct_h2_pool})})}' <<<"${json}")"
     fi
@@ -2400,6 +2403,25 @@ direct_h2_pool_metrics() {
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
 }
 
+direct_h1_io_backend_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.fast_path.io_backend.direct_h1 // {}' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
 static_fast_path_metrics() {
   local host="$1"
   local label="$2"
@@ -2491,6 +2513,20 @@ counter_map_delta() {
      | reduce $names[] as $name ({}; .[$name] = positive_delta($name))'
 }
 
+nested_counter_map_delta() {
+  local before="$1"
+  local after="$2"
+  jq -n -c \
+    --argjson before "${before}" \
+    --argjson after "${after}" \
+    'def sample($root; $path): ($root | getpath($path)) // 0;
+     def positive_delta($path):
+       ((sample($after; $path) - sample($before; $path)) as $value
+        | if $value < 0 then 0 else $value end);
+     ([($before | paths(scalars)), ($after | paths(scalars))] | unique) as $paths
+     | reduce $paths[] as $path ({}; setpath($path; positive_delta($path)))'
+}
+
 stage_timing_delta() {
   local before="$1"
   local after="$2"
@@ -2548,6 +2584,9 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-h1-keepalive:h1) printf 'h1' ;;
     oxibelt-h2:h2) printf 'h2' ;;
     oxibelt-h3:h3) printf 'h3' ;;
+    oxibelt-runtime-direct-h1-*-h1:h1) printf 'h1' ;;
+    oxibelt-runtime-direct-h1-*-h2:h2) printf 'h2' ;;
+    oxibelt-runtime-direct-h1-*-h3:h3) printf 'h3' ;;
     oxibelt-pool*-conc*-h2:h2) printf 'h2' ;;
     oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
     oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
@@ -2565,7 +2604,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
@@ -2619,9 +2658,10 @@ assert_direct_h1_request_build_stage() {
   local protocol="$2"
   local stage_timing="$3"
   local summary attempts hit_rate
-  if [[ "${label}:${protocol}" != "oxibelt-h1-keepalive:h1" && "${label}:${protocol}" != "oxibelt-h3:h3" ]]; then
-    return
-  fi
+  case "${label}:${protocol}" in
+    oxibelt-h1-keepalive:h1|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h3:h3) ;;
+    *) return ;;
+  esac
   summary="$(jq -c --arg protocol "${protocol}" --argjson threshold "${h1_fast_path_min_hit_rate}" '
     (((.plain_proxy // {})[$protocol] // {}).direct_h1_request_build // {}) as $stage
     | (($stage.ok.count // 0) + ($stage.fallback.count // 0) + ($stage.error.count // 0)) as $attempts
@@ -2820,6 +2860,7 @@ assert_active_proxy_container_running() {
 start_oxibelt() {
   local scenario="$1"
   local alias_name="$2"
+  shift 2
   local fixture_dir="${fixture_root}/oxibelt/${scenario}"
   local container="oxibelt-perf-${scenario}-${run_id}"
   local remote_signer=0
@@ -2828,6 +2869,7 @@ start_oxibelt() {
   local remote_signer_volume="oxibelt-perf-keysigner-sock-${scenario}-${run_id}"
   local remote_signer_cert_volume="oxibelt-perf-keysigner-cert-${scenario}-${run_id}"
   local remote_signer_cert_seed_container="oxibelt-perf-keysigner-cert-seed-${scenario}-${run_id}"
+  local -a oxibelt_env_args=("$@")
   local -a remote_signer_args=()
   stop_active_proxy
   if [[ ! -d "${fixture_dir}/config" ]]; then
@@ -2918,6 +2960,7 @@ start_oxibelt() {
     --network "${network_name}" \
     --network-alias "${alias_name}" \
     -e OXIBELT_INSTANCE_ID="perf-${scenario}" \
+    "${oxibelt_env_args[@]}" \
     "${remote_signer_args[@]}" \
     "${oxibelt_image}" >/dev/null
   docker cp "${fixture_dir}/config/." "${container}:/etc/oxibelt/config"
@@ -3493,6 +3536,32 @@ run_pool_concurrency_group() {
   run_pool_concurrency_experiments_group
 }
 
+run_runtime_direct_h1_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+  run_load "oxibelt-runtime-direct-h1-control-h1" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-runtime-direct-h1-control-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-runtime-direct-h1-control-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for direct-H1 runtime control rows"
+  fi
+
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
+    -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio \
+    -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only
+  run_load "oxibelt-runtime-direct-h1-experiment-h1" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-runtime-direct-h1-experiment-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-runtime-direct-h1-experiment-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for direct-H1 runtime experiment rows"
+  fi
+}
+
 run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
@@ -3665,6 +3734,9 @@ case "${serving_type}" in
     ;;
   pool-concurrency)
     run_pool_concurrency_group
+    ;;
+  runtime-direct-h1)
+    run_runtime_direct_h1_group
     ;;
   oxibelt-aggressive-long-run)
     run_oxibelt_aggressive_long_run

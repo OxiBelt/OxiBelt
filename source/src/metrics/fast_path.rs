@@ -4,10 +4,10 @@ use self::labels::{DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportM
 use super::StripedCounter;
 
 mod api;
+mod direct_h1_io;
 pub(crate) mod labels;
 mod stage;
 mod typed;
-
 const PATH_PLAIN_PROXY: &str = "plain_proxy";
 const HIT_REASON: &str = "eligible";
 const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
@@ -79,7 +79,6 @@ const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", 
 const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
 const STATIC_FAST_PATH_COUNTER_COUNT: usize =
   STATIC_FAST_PATH_SOURCES.len() * STATIC_FAST_PATH_OUTCOMES.len();
-
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
@@ -88,6 +87,7 @@ pub(super) struct FastPathMetrics {
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
   direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
+  direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
   static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
   stage: stage::FastPathStageMetrics,
 }
@@ -101,6 +101,7 @@ impl Default for FastPathMetrics {
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
+      direct_h1_io_backend_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
       stage: stage::FastPathStageMetrics::default(),
     }
@@ -188,6 +189,10 @@ impl FastPathMetrics {
       return;
     };
     self.direct_h2_pool_counters[index].increment();
+  }
+
+  pub(super) fn record_direct_h1_io_backend(&self, backend: &str, protocol: &str, outcome: &str) {
+    direct_h1_io::record(self, backend, protocol, outcome);
   }
 
   pub(super) fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
@@ -305,6 +310,7 @@ impl FastPathMetrics {
         .load(),
       );
     }
+    direct_h1_io::append_prometheus(self, output);
     for source in STATIC_FAST_PATH_SOURCES {
       for outcome in STATIC_FAST_PATH_OUTCOMES {
         append_static_fast_path_counter(

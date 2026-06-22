@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 24;
+const COMPARISON_SCHEMA_VERSION: u32 = 25;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -49,7 +49,7 @@ const SERVING_TYPES: [&str; 6] = [
   "accept-multipliers",
   "remote-signer",
 ];
-const RECOGNIZED_SERVING_TYPES: [&str; 7] = [
+const RECOGNIZED_SERVING_TYPES: [&str; 8] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
@@ -57,11 +57,13 @@ const RECOGNIZED_SERVING_TYPES: [&str; 7] = [
   "accept-multipliers",
   "remote-signer",
   "pool-concurrency",
+  "runtime-direct-h1",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type AggregateMap = BTreeMap<(String, Comparator, String), AggregateStats>;
 type PrimaryAggregateMap = BTreeMap<(Comparator, String), AggregateStats>;
+type TripleCounterMapValues = BTreeMap<String, BTreeMap<String, BTreeMap<String, u64>>>;
 
 #[derive(Parser)]
 #[command(about = "Aggregate OxiBelt Docker performance artifacts")]
@@ -221,6 +223,7 @@ struct BenchmarkRow {
   fast_path_transport_direct_h2_h3: Option<FastPathSample>,
   direct_h1_pool_events: Option<BTreeMap<String, u64>>,
   direct_h2_pool_events: Option<BTreeMap<String, u64>>,
+  direct_h1_io_backend: Option<TripleCounterMapValues>,
   static_fast_path_responses: Option<BTreeMap<String, BTreeMap<String, u64>>>,
   fast_path_stage_timing: Option<FastPathStageTimingSamples>,
 }
@@ -300,6 +303,7 @@ struct AggregateBuilder {
   fast_path_transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool_events: CounterMapAggregateBuilder,
   direct_h2_pool_events: CounterMapAggregateBuilder,
+  direct_h1_io_backend: TripleCounterMapAggregateBuilder,
   static_fast_path_responses: NestedCounterMapAggregateBuilder,
   fast_path_stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -316,6 +320,7 @@ struct AggregateFastPathInput {
   transport_direct_h2_h3: FastPathAggregateBuilder,
   direct_h1_pool: CounterMapAggregateBuilder,
   direct_h2_pool: CounterMapAggregateBuilder,
+  direct_h1_io_backend: TripleCounterMapAggregateBuilder,
   static_responses: NestedCounterMapAggregateBuilder,
   stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -357,6 +362,12 @@ struct CounterMapAggregateBuilder {
 struct NestedCounterMapAggregateBuilder {
   sample_count: usize,
   values: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+#[derive(Default)]
+struct TripleCounterMapAggregateBuilder {
+  sample_count: usize,
+  values: TripleCounterMapValues,
 }
 
 #[derive(Default)]
@@ -446,6 +457,8 @@ struct AggregateFastPathStats {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   direct_h2_pool: Option<CounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  direct_h1_io_backend: Option<TripleCounterMapAggregateStats>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   static_responses: Option<NestedCounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   stage_timing: Option<FastPathStageTimingAggregateStats>,
@@ -475,6 +488,12 @@ struct CounterMapAggregateStats {
 struct NestedCounterMapAggregateStats {
   sample_count: usize,
   values: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct TripleCounterMapAggregateStats {
+  sample_count: usize,
+  values: TripleCounterMapValues,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -1235,6 +1254,9 @@ impl AggregateBuilder {
     if let Some(events) = row.direct_h2_pool_events {
       self.direct_h2_pool_events.push(events);
     }
+    if let Some(io_backend) = row.direct_h1_io_backend {
+      self.direct_h1_io_backend.push(io_backend);
+    }
     if let Some(responses) = row.static_fast_path_responses {
       self.static_fast_path_responses.push(responses);
     }
@@ -1267,6 +1289,7 @@ impl AggregateBuilder {
       transport_direct_h2_h3: self.fast_path_transport_direct_h2_h3,
       direct_h1_pool: self.direct_h1_pool_events,
       direct_h2_pool: self.direct_h2_pool_events,
+      direct_h1_io_backend: self.direct_h1_io_backend,
       static_responses: self.static_fast_path_responses,
       stage_timing: self.fast_path_stage_timing,
     });
@@ -1316,6 +1339,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
   let transport_direct_h2_h3 = input.transport_direct_h2_h3.finish();
   let direct_h1_pool = input.direct_h1_pool.finish();
   let direct_h2_pool = input.direct_h2_pool.finish();
+  let direct_h1_io_backend = input.direct_h1_io_backend.finish();
   let static_responses = input.static_responses.finish();
   let stage_timing = input.stage_timing.finish();
   if plain_proxy_h1.is_none()
@@ -1329,6 +1353,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     && transport_direct_h2_h3.is_none()
     && direct_h1_pool.is_none()
     && direct_h2_pool.is_none()
+    && direct_h1_io_backend.is_none()
     && static_responses.is_none()
     && stage_timing.is_none()
   {
@@ -1346,6 +1371,7 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     transport_direct_h2_h3,
     direct_h1_pool,
     direct_h2_pool,
+    direct_h1_io_backend,
     static_responses,
     stage_timing,
   })
@@ -1415,6 +1441,32 @@ impl NestedCounterMapAggregateBuilder {
       return None;
     }
     Some(NestedCounterMapAggregateStats {
+      sample_count: self.sample_count,
+      values: self.values,
+    })
+  }
+}
+
+impl TripleCounterMapAggregateBuilder {
+  fn push(&mut self, values: TripleCounterMapValues) {
+    self.sample_count += 1;
+    for (outer, middle_values) in values {
+      let middle = self.values.entry(outer).or_default();
+      for (middle_name, inner_values) in middle_values {
+        let inner = middle.entry(middle_name).or_default();
+        for (name, value) in inner_values {
+          let entry = inner.entry(name).or_insert(0);
+          *entry = entry.saturating_add(value);
+        }
+      }
+    }
+  }
+
+  fn finish(self) -> Option<TripleCounterMapAggregateStats> {
+    if self.sample_count == 0 {
+      return None;
+    }
+    Some(TripleCounterMapAggregateStats {
       sample_count: self.sample_count,
       values: self.values,
     })
@@ -3376,6 +3428,13 @@ fn parse_result_value(
       label,
       warnings,
     ),
+    direct_h1_io_backend: parse_direct_h1_io_backend(
+      object,
+      source_file,
+      row_index,
+      label,
+      warnings,
+    ),
     static_fast_path_responses: parse_static_fast_path_responses(
       object,
       source_file,
@@ -3686,6 +3745,54 @@ fn parse_direct_h2_pool_events(
         "{source_file} row {row_index} ({label}): fast_path.pool.direct_h2.{event} is not an unsigned integer"
       )),
     }
+  }
+  Some(parsed)
+}
+
+fn parse_direct_h1_io_backend(
+  object: &serde_json::Map<String, Value>,
+  source_file: &str,
+  row_index: usize,
+  label: &str,
+  warnings: &mut WarningBag,
+) -> Option<TripleCounterMapValues> {
+  let protocols = object
+    .get("fast_path")
+    .and_then(Value::as_object)
+    .and_then(|fast_path| fast_path.get("io_backend"))
+    .and_then(Value::as_object)
+    .and_then(|io_backend| io_backend.get("direct_h1"))
+    .and_then(Value::as_object)?;
+  let mut parsed = BTreeMap::new();
+  for (protocol, backends) in protocols {
+    let Some(backends) = backends.as_object() else {
+      warnings.push(format!(
+        "{source_file} row {row_index} ({label}): fast_path.io_backend.direct_h1.{protocol} is not an object"
+      ));
+      continue;
+    };
+    let mut parsed_backends = BTreeMap::new();
+    for (backend, outcomes) in backends {
+      let Some(outcomes) = outcomes.as_object() else {
+        warnings.push(format!(
+          "{source_file} row {row_index} ({label}): fast_path.io_backend.direct_h1.{protocol}.{backend} is not an object"
+        ));
+        continue;
+      };
+      let mut parsed_outcomes = BTreeMap::new();
+      for (outcome, value) in outcomes {
+        match value.as_u64() {
+          Some(count) => {
+            parsed_outcomes.insert(outcome.clone(), count);
+          }
+          None => warnings.push(format!(
+            "{source_file} row {row_index} ({label}): fast_path.io_backend.direct_h1.{protocol}.{backend}.{outcome} is not an unsigned integer"
+          )),
+        }
+      }
+      parsed_backends.insert(backend.clone(), parsed_outcomes);
+    }
+    parsed.insert(protocol.clone(), parsed_backends);
   }
   Some(parsed)
 }
@@ -8571,6 +8678,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         direct_h2_pool: None,
+        direct_h1_io_backend: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -8587,6 +8695,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         direct_h2_pool: None,
+        direct_h1_io_backend: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -8603,6 +8712,7 @@ mod tests {
         transport_direct_h2_h3: None,
         direct_h1_pool: None,
         direct_h2_pool: None,
+        direct_h1_io_backend: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -8861,6 +8971,18 @@ mod tests {
                     "reconnect": 1,
                     "drop": 2
                   }
+                },
+                "io_backend": {
+                  "direct_h1": {
+                    "h2": {
+                      "tokio_hyper": {
+                        "selected": 96
+                      },
+                      "compio_experiment": {
+                        "fallback": 96
+                      }
+                    }
+                  }
                 }
               }
             }]"#,
@@ -8922,6 +9044,13 @@ mod tests {
     assert_eq!(pool.values["connect"], 4);
     assert_eq!(pool.values["reconnect"], 1);
     assert_eq!(pool.values["drop"], 2);
+    let io_backend = h2
+      .direct_h1_io_backend
+      .as_ref()
+      .expect("direct-H1 I/O backend diagnostics should aggregate");
+    assert_eq!(io_backend.sample_count, 1);
+    assert_eq!(io_backend.values["h2"]["tokio_hyper"]["selected"], 96);
+    assert_eq!(io_backend.values["h2"]["compio_experiment"]["fallback"], 96);
   }
 
   #[test]
@@ -9248,6 +9377,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       direct_h2_pool: None,
+      direct_h1_io_backend: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -9312,6 +9442,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       direct_h2_pool: None,
+      direct_h1_io_backend: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -9375,6 +9506,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       direct_h2_pool: None,
+      direct_h1_io_backend: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -9447,6 +9579,7 @@ mod tests {
       transport_direct_h2_h3: None,
       direct_h1_pool: None,
       direct_h2_pool: None,
+      direct_h1_io_backend: None,
       static_responses: None,
       stage_timing: None,
     });

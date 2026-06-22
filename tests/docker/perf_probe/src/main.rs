@@ -1700,6 +1700,9 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
           "direct_h1": direct_h1_pool_metrics_json(metrics),
           "direct_h2": direct_h2_pool_metrics_json(metrics)
       },
+      "io_backend": {
+          "direct_h1": direct_h1_io_backend_metrics_json(metrics)
+      },
       "static_responses": static_fast_path_responses_json(metrics),
       "stage_timing": fast_path_stage_timing_json(metrics)
   })
@@ -1840,6 +1843,41 @@ fn direct_h2_pool_metrics_json(metrics: &str) -> serde_json::Value {
     *events.entry(event).or_insert(0) += value;
   }
   serde_json::json!(events)
+}
+
+fn direct_h1_io_backend_metrics_json(metrics: &str) -> serde_json::Value {
+  let mut protocols = serde_json::Map::new();
+  for (labels, value) in
+    prometheus_labeled_u64_samples(metrics, "oxibelt_http_direct_h1_io_backend_total")
+  {
+    let Some(protocol) = labels.get("protocol") else {
+      continue;
+    };
+    let Some(backend) = labels.get("backend") else {
+      continue;
+    };
+    let Some(outcome) = labels.get("outcome") else {
+      continue;
+    };
+    let protocol_entry = protocols
+      .entry(protocol.clone())
+      .or_insert_with(|| serde_json::json!({}));
+    let Some(protocol_object) = protocol_entry.as_object_mut() else {
+      continue;
+    };
+    let backend_entry = protocol_object
+      .entry(backend.clone())
+      .or_insert_with(|| serde_json::json!({}));
+    let Some(backend_object) = backend_entry.as_object_mut() else {
+      continue;
+    };
+    let current = backend_object
+      .get(outcome)
+      .and_then(serde_json::Value::as_u64)
+      .unwrap_or(0);
+    backend_object.insert(outcome.clone(), serde_json::json!(current + value));
+  }
+  serde_json::Value::Object(protocols)
 }
 
 fn static_fast_path_responses_json(metrics: &str) -> serde_json::Value {
@@ -2993,6 +3031,12 @@ oxibelt_http_direct_h1_pool_events_total{event=\"reconnect\"} 2
 oxibelt_http_direct_h2_pool_events_total{event=\"hit\"} 31
 # TYPE oxibelt_http_direct_h2_pool_events_total counter
 oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 5
+# TYPE oxibelt_http_direct_h1_io_backend_total counter
+oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 19
+# TYPE oxibelt_http_direct_h1_io_backend_total counter
+oxibelt_http_direct_h1_io_backend_total{backend=\"compio_experiment\",protocol=\"h2\",outcome=\"fallback\"} 19
+# TYPE oxibelt_http_direct_h1_io_backend_total counter
+oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h3\",outcome=\"selected\"} 29
 # TYPE oxibelt_http_static_fast_path_responses_total counter
 oxibelt_http_static_fast_path_responses_total{source=\"hot_object\",outcome=\"served\"} 41
 # TYPE oxibelt_http_static_fast_path_responses_total counter
@@ -3048,6 +3092,18 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
     assert_eq!(parsed["pool"]["direct_h1"]["reconnect"], 2);
     assert_eq!(parsed["pool"]["direct_h2"]["hit"], 31);
     assert_eq!(parsed["pool"]["direct_h2"]["miss_saturated"], 5);
+    assert_eq!(
+      parsed["io_backend"]["direct_h1"]["h2"]["tokio_hyper"]["selected"],
+      19
+    );
+    assert_eq!(
+      parsed["io_backend"]["direct_h1"]["h2"]["compio_experiment"]["fallback"],
+      19
+    );
+    assert_eq!(
+      parsed["io_backend"]["direct_h1"]["h3"]["tokio_hyper"]["selected"],
+      29
+    );
     assert_eq!(parsed["static_responses"]["hot_object"]["served"], 41);
     assert_eq!(parsed["static_responses"]["sendfile"]["fallback"], 3);
     assert_eq!(

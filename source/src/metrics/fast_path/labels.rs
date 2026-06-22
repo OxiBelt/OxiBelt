@@ -242,6 +242,71 @@ impl FastPathMetricTransport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
+pub(crate) enum DirectH1IoBackend {
+  TokioHyper = 0,
+  CompioExperiment = 1,
+}
+
+impl DirectH1IoBackend {
+  pub(crate) const ALL: [Self; 2] = [Self::TokioHyper, Self::CompioExperiment];
+  pub(crate) const COUNT: usize = Self::ALL.len();
+
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::TokioHyper => "tokio_hyper",
+      Self::CompioExperiment => "compio_experiment",
+    }
+  }
+
+  pub(crate) fn from_str(value: &str) -> Option<Self> {
+    match value {
+      "tokio_hyper" => Some(Self::TokioHyper),
+      "compio_experiment" => Some(Self::CompioExperiment),
+      _ => None,
+    }
+  }
+
+  pub(crate) fn index(self) -> usize {
+    self as usize
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(crate) enum DirectH1IoBackendOutcome {
+  Selected = 0,
+  Fallback = 1,
+  Error = 2,
+}
+
+impl DirectH1IoBackendOutcome {
+  pub(crate) const ALL: [Self; 3] = [Self::Selected, Self::Fallback, Self::Error];
+  pub(crate) const COUNT: usize = Self::ALL.len();
+
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Selected => "selected",
+      Self::Fallback => "fallback",
+      Self::Error => "error",
+    }
+  }
+
+  pub(crate) fn from_str(value: &str) -> Option<Self> {
+    match value {
+      "selected" => Some(Self::Selected),
+      "fallback" => Some(Self::Fallback),
+      "error" => Some(Self::Error),
+      _ => None,
+    }
+  }
+
+  pub(crate) fn index(self) -> usize {
+    self as usize
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 pub(crate) enum FastPathTransportMissReason {
   UnsupportedRequest = 0,
   UnsupportedUpstream = 1,

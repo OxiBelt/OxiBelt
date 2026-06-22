@@ -132,6 +132,28 @@ fn prometheus_output_includes_direct_h2_pool_events() {
 }
 
 #[test]
+fn prometheus_output_includes_direct_h1_io_backend_evidence() {
+  let metrics = Metrics::new();
+  metrics.record_direct_h1_io_backend("tokio_hyper", "h2", "selected");
+  metrics.record_direct_h1_io_backend("compio_experiment", "h2", "fallback");
+  metrics.record_direct_h1_io_backend("unknown", "h2", "selected");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_direct_h1_io_backend_total{backend=\"compio_experiment\",protocol=\"h2\",outcome=\"fallback\"} 1"
+  ));
+  assert!(!body.contains("backend=\"unknown\""));
+}
+
+#[test]
 fn prometheus_output_includes_static_fast_path_responses() {
   let metrics = Metrics::new();
   metrics.record_static_fast_path_response("hot_object", "served");

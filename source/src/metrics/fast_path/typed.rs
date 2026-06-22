@@ -1,10 +1,11 @@
 //! Typed fast-path metric recorders used by hot call sites.
 
 use super::labels::{
-  DirectH1PoolEvent, FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol,
-  FastPathMetricStage, FastPathMetricTransport, FastPathTransportMissReason,
+  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
+  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathMetricTransport,
+  FastPathTransportMissReason,
 };
-use super::{FastPathMetrics, transport_counter_index_by_parts};
+use super::{FastPathMetrics, direct_h1_io, transport_counter_index_by_parts};
 
 impl FastPathMetrics {
   pub(super) fn record_direct_h1_transport_hit_id(&self, protocol: FastPathMetricProtocol) {
@@ -33,6 +34,16 @@ impl FastPathMetrics {
 
   pub(super) fn record_direct_h1_pool_event_id(&self, event: DirectH1PoolEvent) {
     self.direct_h1_pool_counters[event.index()].increment();
+  }
+
+  pub(super) fn record_direct_h1_io_backend_id(
+    &self,
+    backend: DirectH1IoBackend,
+    protocol: FastPathMetricProtocol,
+    outcome: DirectH1IoBackendOutcome,
+  ) {
+    let index = direct_h1_io::counter_index_id(backend, protocol, outcome);
+    self.direct_h1_io_backend_counters[index].increment();
   }
 
   pub(super) fn record_stage_duration_ns_id(

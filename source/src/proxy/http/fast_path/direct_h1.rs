@@ -29,7 +29,9 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 
 use super::stage_timing as timing;
 
+mod runtime_backend;
 mod send_attempt;
+use self::runtime_backend::DirectH1RuntimeBackend;
 use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
 
 const DIRECT_H1_MAX_SHARDS: usize = 16;
@@ -432,6 +434,7 @@ async fn send_prepared_request(
   timing_enabled: bool,
 ) -> anyhow::Result<DirectH1Response> {
   metrics.record_http_upstream_client_request("h1", "http", "primary");
+  DirectH1RuntimeBackend::current().record_attempt(metrics, protocol);
 
   let pool_take_started = timing::start(timing_enabled);
   let reused_sender = pool.take_sender();
