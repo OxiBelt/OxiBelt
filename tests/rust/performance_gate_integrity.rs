@@ -252,31 +252,6 @@ fn assert_result_harness(probe_json: &str, max_load_errors_per_million: &str) ->
   HarnessRun { output, events }
 }
 
-fn normalize_diagnostic_comparator_harness(probe_json: &str) -> HarnessRun {
-  let script = performance_script_text();
-  let functions = format!(
-    "{}\n\n{}\n\n{}\n\n{}",
-    extract_bash_function(&script, "load_errors_within_budget"),
-    extract_bash_function(&script, "diagnostic_comparator_label"),
-    extract_bash_function(&script, "result_failure_reason"),
-    extract_bash_function(&script, "normalize_diagnostic_comparator_result")
-  );
-  let temp_dir = HarnessTempDir::new("oxibelt-performance-diagnostic-comparator-");
-  let harness_path = temp_dir.join("harness.sh");
-  let events_path = temp_dir.join("events.log");
-  write_normalize_diagnostic_comparator_harness(&harness_path, &functions);
-
-  let output = Command::new("bash")
-    .arg(&harness_path)
-    .env("EVENTS_FILE", &events_path)
-    .env("PROBE_JSON", probe_json)
-    .output()
-    .expect("Bash harness should execute");
-  let events = fs::read_to_string(&events_path).unwrap_or_default();
-
-  HarnessRun { output, events }
-}
-
 fn resource_drift_harness(
   before: &str,
   after: &str,
@@ -883,25 +858,6 @@ assert_result "${{json}}"
   fs::write(path, harness).expect("Bash harness should be writable");
 }
 
-fn write_normalize_diagnostic_comparator_harness(path: &Path, functions: &str) {
-  let harness = format!(
-    r#"#!/usr/bin/env bash
-set -euo pipefail
-
-events="${{EVENTS_FILE:?}}"
-json="${{PROBE_JSON:?}}"
-max_p99_ms=10000
-max_load_errors_per_million=100
-
-{functions}
-
-normalized="$(normalize_diagnostic_comparator_result "${{json}}")"
-printf 'NORMALIZED %s\n' "${{normalized}}" >>"${{events}}"
-"#
-  );
-  fs::write(path, harness).expect("Bash harness should be writable");
-}
-
 fn write_resource_drift_harness(path: &Path, functions: &str) {
   let harness = format!(
     r#"#!/usr/bin/env bash
@@ -1159,6 +1115,21 @@ fn oxibelt_aggressive_long_run_fixture_pins_connect_stability_profile() {
       .and_then(toml::Value::as_integer),
     Some(256),
     "{} should keep enough idle H1 upstream connections for long-run concurrency without exceeding the FD drift gate",
+    path.display()
+  );
+}
+
+#[test]
+fn openresty_performance_fixture_avoids_duplicate_base_directives() {
+  let path = repo_root().join("tests/fixtures/oxibelt-docker-performance/openresty/default.conf");
+  let config_text = fs::read_to_string(&path)
+    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+
+  assert!(
+    !config_text
+      .lines()
+      .any(|line| line.trim_start().starts_with("sendfile ")),
+    "{} should not redeclare sendfile in conf.d because the OpenResty base image already sets it",
     path.display()
   );
 }
@@ -1942,35 +1913,25 @@ fn high_volume_load_error_inside_budget_is_allowed() {
 }
 
 #[test]
-fn openresty_zero_request_rows_become_diagnostic_skips() {
-  let run = normalize_diagnostic_comparator_harness(
+fn comparator_zero_request_rows_fail_closed() {
+  let openresty = assert_result_harness(
     r#"{"type":"load","label":"openresty-h1-keepalive","requests":0,"rps":0,"p99_ms":0,"errors":0}"#,
+    "100",
   );
-
-  assert!(
-    run.output.status.success(),
-    "diagnostic comparator normalization should not fail"
-  );
-  assert!(
-    run.events.contains(r#""label":"openresty-h1-keepalive""#)
-      && run.events.contains(r#""skipped":true"#)
-      && run.events.contains(r#""diagnostic":true"#)
-      && run.events.contains(r#""diagnostic_status":"fail""#)
-      && run
-        .events
-        .contains(r#""reason":"performance probe produced zero requests: openresty-h1-keepalive""#),
-    "OpenResty zero-request rows should be kept as explicit diagnostic skips; events:\n{}",
-    run.events
-  );
-}
-
-#[test]
-fn primary_zero_request_rows_still_fail() {
   let run = assert_result_harness(
     r#"{"type":"load","label":"nginx-h1-keepalive","requests":0,"rps":0,"p99_ms":0,"errors":0}"#,
     "100",
   );
 
+  assert!(
+    !openresty.output.status.success(),
+    "OpenResty zero-request rows should fail instead of becoming diagnostic skips"
+  );
+  assert!(
+    openresty
+      .events
+      .contains("FAIL performance probe produced zero requests: openresty-h1-keepalive")
+  );
   assert!(
     !run.output.status.success(),
     "primary comparator zero-request rows should still fail"
@@ -2683,6 +2644,7 @@ fn workflow_dispatch_profile_label_includes_h1_h2_and_h3_rows() {
 #[test]
 fn mandatory_and_optional_call_sites_are_explicit() {
   let script = performance_script_text();
+  let wait_for_tls_proxy = extract_bash_function(&script, "wait_for_tls_proxy");
 
   assert!(
     script.contains("run_common_loads oxibelt oxibelt required"),
@@ -2724,10 +2686,50 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     "OpenResty comparator image should be configurable"
   );
   assert!(
+    script.contains("assert_active_proxy_container_running \"OpenResty performance proxy\""),
+    "OpenResty readiness should be followed by a container liveness check"
+  );
+  assert!(
+    wait_for_tls_proxy.contains("docker inspect -f '{{.State.Running}}'")
+      && wait_for_tls_proxy.contains("(.requests // 0) > 0 and (.errors // 0) == 0"),
+    "TLS readiness should require a running container plus at least one successful probe request"
+  );
+  assert!(
+    !script.contains("openresty-*) return 0"),
+    "OpenResty H1/H2/static/TLS rows should not be downgraded to diagnostic skips"
+  );
+  assert!(
     !script.contains("run_common_loads oxibelt oxibelt 1")
       && !script.contains("run_common_loads caddy caddy 1")
       && !script.contains("run_common_loads openresty openresty 0"),
     "mandatory HTTP/3 comparators must not use the legacy boolean supports_h3 flag"
+  );
+}
+
+#[test]
+fn perf_probe_resolves_tcp_load_and_handshake_targets_once_per_phase() {
+  let source = perf_probe_source_text();
+
+  assert_eq!(
+    source
+      .matches("Some(resolve_remote_addr(&args.host, args.port).await?)")
+      .count(),
+    2,
+    "perf-probe should resolve TCP load and handshake targets before worker fan-out"
+  );
+  assert!(
+    source.contains("fn uses_tcp(self) -> bool")
+      && source.contains("h1_load_worker(\n            args,\n            remote_addr.expect(\"H1 should resolve TCP target\")")
+      && source.contains("h2_load_worker(\n            args,\n            remote_addr.expect(\"H2 should resolve TCP target\")")
+      && source.contains("tcp_handshake(\n        args,\n        remote_addr.expect(\"TLS handshake should resolve TCP target\")"),
+    "perf-probe should pass the resolved TCP target into H1/H2 load and handshake workers"
+  );
+  assert!(
+    source.contains("connect_tcp_addr(")
+      && source.contains("TCP_CONNECT_TIMEOUT")
+      && source.contains("tls_connect_to_addr(")
+      && source.contains("tls_connect_with_config_to_addr("),
+    "perf-probe TCP clients should use bounded connects to the resolved SocketAddr while preserving TLS SNI separately"
   );
 }
 

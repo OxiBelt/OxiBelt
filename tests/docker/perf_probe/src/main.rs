@@ -28,6 +28,8 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const MAX_ERROR_SAMPLES: usize = 8;
+const REMOTE_ADDR_RESOLVE_ATTEMPTS: usize = 10;
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Protocol {
@@ -63,6 +65,10 @@ impl Protocol {
       Self::H2 => b"h2",
       Self::H3 => b"h3",
     }
+  }
+
+  fn uses_tcp(self) -> bool {
+    !matches!(self, Self::H3)
   }
 }
 
@@ -944,15 +950,48 @@ async fn run_load_phase(
 ) -> anyhow::Result<SharedStats> {
   let deadline = Instant::now() + duration;
   let stats = SharedStats::new()?;
+  let remote_addr = if args.protocol.uses_tcp() {
+    Some(resolve_remote_addr(&args.host, args.port).await?)
+  } else {
+    None
+  };
   let mut tasks = Vec::with_capacity(args.concurrency);
   for _ in 0..args.concurrency {
     let args = args.clone();
     let stats = stats.clone();
+    let remote_addr = remote_addr;
     tasks.push(tokio::spawn(async move {
       match args.protocol {
-        Protocol::H1 => h1_load_worker(args, deadline, stats, record).await,
-        Protocol::H1c => h1c_load_worker(args, deadline, stats, record).await,
-        Protocol::H2 => h2_load_worker(args, deadline, stats, record).await,
+        Protocol::H1 => {
+          h1_load_worker(
+            args,
+            remote_addr.expect("H1 should resolve TCP target"),
+            deadline,
+            stats,
+            record,
+          )
+          .await
+        }
+        Protocol::H1c => {
+          h1c_load_worker(
+            args,
+            remote_addr.expect("H1C should resolve TCP target"),
+            deadline,
+            stats,
+            record,
+          )
+          .await
+        }
+        Protocol::H2 => {
+          h2_load_worker(
+            args,
+            remote_addr.expect("H2 should resolve TCP target"),
+            deadline,
+            stats,
+            record,
+          )
+          .await
+        }
         Protocol::H3 => h3_load_worker(args, deadline, stats, record).await,
       }
     }));
@@ -963,9 +1002,15 @@ async fn run_load_phase(
   Ok(stats)
 }
 
-async fn h1_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
+async fn h1_load_worker(
+  args: LoadArgs,
+  remote_addr: SocketAddr,
+  deadline: Instant,
+  stats: SharedStats,
+  record: bool,
+) {
   while Instant::now() < deadline {
-    if let Err(error) = h1_connection_loop(&args, deadline, &stats, record).await {
+    if let Err(error) = h1_connection_loop(&args, remote_addr, deadline, &stats, record).await {
       if record_worker_error("h1", &error, deadline, &stats, record) {
         tokio::time::sleep(Duration::from_millis(50)).await;
       }
@@ -999,9 +1044,15 @@ fn record_worker_error(
   }
 }
 
-async fn h1c_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
+async fn h1c_load_worker(
+  args: LoadArgs,
+  remote_addr: SocketAddr,
+  deadline: Instant,
+  stats: SharedStats,
+  record: bool,
+) {
   while Instant::now() < deadline {
-    if let Err(error) = h1c_connection_loop(&args, deadline, &stats, record).await {
+    if let Err(error) = h1c_connection_loop(&args, remote_addr, deadline, &stats, record).await {
       if record_worker_error("h1c", &error, deadline, &stats, record) {
         tokio::time::sleep(Duration::from_millis(50)).await;
       }
@@ -1011,13 +1062,18 @@ async fn h1c_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, 
 
 async fn h1c_connection_loop(
   args: &LoadArgs,
+  remote_addr: SocketAddr,
   deadline: Instant,
   stats: &SharedStats,
   record: bool,
 ) -> anyhow::Result<()> {
-  let stream = TcpStream::connect((args.host.as_str(), args.port))
-    .await
-    .context("failed to connect cleartext HTTP/1.1 socket")?;
+  let stream = connect_tcp_addr(
+    remote_addr,
+    &args.host,
+    args.port,
+    "connecting cleartext HTTP/1.1 socket",
+  )
+  .await?;
   let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
     .await
     .context("failed to establish cleartext HTTP/1.1 client")?;
@@ -1049,11 +1105,13 @@ async fn h1c_connection_loop(
 
 async fn h1_connection_loop(
   args: &LoadArgs,
+  remote_addr: SocketAddr,
   deadline: Instant,
   stats: &SharedStats,
   record: bool,
 ) -> anyhow::Result<()> {
-  let tls_stream = tls_connect(
+  let tls_stream = tls_connect_to_addr(
+    remote_addr,
     &args.host,
     args.port,
     &args.server_name,
@@ -1090,9 +1148,15 @@ async fn h1_connection_loop(
   Ok(())
 }
 
-async fn h2_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
+async fn h2_load_worker(
+  args: LoadArgs,
+  remote_addr: SocketAddr,
+  deadline: Instant,
+  stats: SharedStats,
+  record: bool,
+) {
   while Instant::now() < deadline {
-    if let Err(error) = h2_connection_loop(&args, deadline, &stats, record).await {
+    if let Err(error) = h2_connection_loop(&args, remote_addr, deadline, &stats, record).await {
       if record_worker_error("h2", &error, deadline, &stats, record) {
         tokio::time::sleep(Duration::from_millis(50)).await;
       }
@@ -1102,11 +1166,13 @@ async fn h2_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, r
 
 async fn h2_connection_loop(
   args: &LoadArgs,
+  remote_addr: SocketAddr,
   deadline: Instant,
   stats: &SharedStats,
   record: bool,
 ) -> anyhow::Result<()> {
-  let tls_stream = tls_connect(
+  let tls_stream = tls_connect_to_addr(
+    remote_addr,
     &args.host,
     args.port,
     &args.server_name,
@@ -1247,10 +1313,16 @@ fn request_path(args: &LoadArgs) -> String {
 async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
   let deadline = Instant::now() + args.duration;
   let stats = SharedStats::new()?;
+  let remote_addr = if args.protocol.uses_tcp() {
+    Some(resolve_remote_addr(&args.host, args.port).await?)
+  } else {
+    None
+  };
   let mut tasks = Vec::with_capacity(args.concurrency);
   for _ in 0..args.concurrency {
     let args = args.clone();
     let stats = stats.clone();
+    let remote_addr = remote_addr;
     tasks.push(tokio::spawn(async move {
       let worker_tls_config = match worker_tls_config(&args) {
         Ok(config) => config,
@@ -1263,7 +1335,7 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
       };
       while Instant::now() < deadline {
         let started = Instant::now();
-        let result = run_single_handshake(&args, worker_tls_config.clone()).await;
+        let result = run_single_handshake(&args, remote_addr, worker_tls_config.clone()).await;
         match result {
           Ok(observation) => stats.record_handshake_success(started.elapsed(), observation),
           Err(error) => {
@@ -1317,14 +1389,27 @@ fn worker_tls_config(args: &HandshakeArgs) -> anyhow::Result<Option<Arc<ClientCo
 
 async fn run_single_handshake(
   args: &HandshakeArgs,
+  remote_addr: Option<SocketAddr>,
   worker_tls_config: Option<Arc<ClientConfig>>,
 ) -> anyhow::Result<HandshakeObservation> {
   match args.protocol {
-    Protocol::H1 | Protocol::H2 => tcp_handshake(args, worker_tls_config).await,
+    Protocol::H1 | Protocol::H2 => {
+      tcp_handshake(
+        args,
+        remote_addr.expect("TLS handshake should resolve TCP target"),
+        worker_tls_config,
+      )
+      .await
+    }
     Protocol::H1c => {
-      TcpStream::connect((args.host.as_str(), args.port))
-        .await
-        .context("failed to connect cleartext HTTP/1.1 socket")?;
+      let remote_addr = remote_addr.expect("cleartext handshake should resolve TCP target");
+      connect_tcp_addr(
+        remote_addr,
+        &args.host,
+        args.port,
+        "connecting cleartext HTTP/1.1 socket",
+      )
+      .await?;
       Ok(HandshakeObservation::default())
     }
     Protocol::H3 => {
@@ -1348,14 +1433,21 @@ async fn run_single_handshake(
 
 async fn tcp_handshake(
   args: &HandshakeArgs,
+  remote_addr: SocketAddr,
   worker_tls_config: Option<Arc<ClientConfig>>,
 ) -> anyhow::Result<HandshakeObservation> {
   let config = match worker_tls_config {
     Some(config) => config,
     None => tcp_tls_config(&args.ca_cert, args.protocol.alpn())?,
   };
-  let mut stream =
-    tls_connect_with_config(&args.host, args.port, &args.server_name, config).await?;
+  let mut stream = tls_connect_with_config_to_addr(
+    remote_addr,
+    &args.host,
+    args.port,
+    &args.server_name,
+    config,
+  )
+  .await?;
   observe_post_handshake(&mut stream, args.post_handshake_observe).await;
   Ok(tcp_handshake_observation(&stream))
 }
@@ -2292,8 +2384,20 @@ async fn tls_connect(
   ca_cert: &str,
   alpn: &[u8],
 ) -> anyhow::Result<TlsStream<TcpStream>> {
+  let remote_addr = resolve_remote_addr(host, port).await?;
+  tls_connect_to_addr(remote_addr, host, port, server_name, ca_cert, alpn).await
+}
+
+async fn tls_connect_to_addr(
+  remote_addr: SocketAddr,
+  host: &str,
+  port: u16,
+  server_name: &str,
+  ca_cert: &str,
+  alpn: &[u8],
+) -> anyhow::Result<TlsStream<TcpStream>> {
   let config = tcp_tls_config(ca_cert, alpn)?;
-  tls_connect_with_config(host, port, server_name, config).await
+  tls_connect_with_config_to_addr(remote_addr, host, port, server_name, config).await
 }
 
 fn tcp_tls_config(ca_cert: &str, alpn: &[u8]) -> anyhow::Result<Arc<ClientConfig>> {
@@ -2302,16 +2406,15 @@ fn tcp_tls_config(ca_cert: &str, alpn: &[u8]) -> anyhow::Result<Arc<ClientConfig
   Ok(Arc::new(config))
 }
 
-async fn tls_connect_with_config(
+async fn tls_connect_with_config_to_addr(
+  remote_addr: SocketAddr,
   host: &str,
   port: u16,
   server_name: &str,
   config: Arc<ClientConfig>,
 ) -> anyhow::Result<TlsStream<TcpStream>> {
   let connector = TlsConnector::from(config);
-  let stream = TcpStream::connect((host, port))
-    .await
-    .with_context(|| format!("failed to connect to {host}:{port}"))?;
+  let stream = connect_tcp_addr(remote_addr, host, port, "connecting TLS socket").await?;
   let server_name = ServerName::try_from(server_name.to_owned())
     .map_err(|_| anyhow!("invalid server name: {server_name}"))?;
   connector
@@ -2357,11 +2460,50 @@ fn tls_config(path: &Path, alpn: &[u8]) -> anyhow::Result<ClientConfig> {
 }
 
 async fn resolve_remote_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+  let mut last_error = None;
+  for attempt in 1..=REMOTE_ADDR_RESOLVE_ATTEMPTS {
+    match resolve_remote_addr_once(host, port).await {
+      Ok(remote_addr) => return Ok(remote_addr),
+      Err(error) => {
+        last_error = Some(error);
+        if attempt < REMOTE_ADDR_RESOLVE_ATTEMPTS {
+          tokio::time::sleep(resolve_retry_delay(attempt)).await;
+        }
+      }
+    }
+  }
+  Err(last_error.unwrap_or_else(|| anyhow!("resolver was not attempted"))).with_context(|| {
+    format!("failed to resolve {host}:{port} after {REMOTE_ADDR_RESOLVE_ATTEMPTS} attempts")
+  })
+}
+
+async fn resolve_remote_addr_once(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
   lookup_host((host, port))
     .await
     .with_context(|| format!("failed to resolve {host}:{port}"))?
     .next()
     .ok_or_else(|| anyhow!("host resolved no addresses: {host}:{port}"))
+}
+
+fn resolve_retry_delay(attempt: usize) -> Duration {
+  Duration::from_millis((attempt.min(10) as u64) * 50)
+}
+
+async fn connect_tcp_addr(
+  remote_addr: SocketAddr,
+  host: &str,
+  port: u16,
+  context: &str,
+) -> anyhow::Result<TcpStream> {
+  tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(remote_addr))
+    .await
+    .with_context(|| {
+      format!(
+        "timed out after {}ms {context} to {host}:{port} ({remote_addr})",
+        TCP_CONNECT_TIMEOUT.as_millis()
+      )
+    })?
+    .with_context(|| format!("{context} to {host}:{port} ({remote_addr})"))
 }
 
 fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
@@ -2932,6 +3074,23 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\
     let body = decode_http_response_body(response).expect("chunked body should decode");
 
     assert_eq!(body, "hello world");
+  }
+
+  #[test]
+  fn tcp_protocol_detection_excludes_h3() {
+    assert!(Protocol::H1.uses_tcp());
+    assert!(Protocol::H1c.uses_tcp());
+    assert!(Protocol::H2.uses_tcp());
+    assert!(!Protocol::H3.uses_tcp());
+  }
+
+  #[test]
+  fn resolve_retry_delay_is_bounded() {
+    assert_eq!(resolve_retry_delay(1), Duration::from_millis(50));
+    assert_eq!(resolve_retry_delay(5), Duration::from_millis(250));
+    assert_eq!(resolve_retry_delay(10), Duration::from_millis(500));
+    assert_eq!(resolve_retry_delay(20), Duration::from_millis(500));
+    assert_eq!(TCP_CONNECT_TIMEOUT, Duration::from_secs(5));
   }
 
   #[test]

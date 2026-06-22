@@ -634,11 +634,7 @@ handle_diagnostic_profile_failure() {
 }
 
 diagnostic_comparator_label() {
-  local label="$1"
-  case "${label}" in
-    openresty-*) return 0 ;;
-    *) return 1 ;;
-  esac
+  return 1
 }
 
 flush_diagnostic_profile_warnings() {
@@ -2705,9 +2701,12 @@ warm_oxibelt_aggressive_resource_baseline() {
 
 wait_for_tls_proxy() {
   local host="$1"
-  local attempt
+  local attempt json
   for attempt in $(seq 1 30); do
-    if run_probe_json load \
+    if [[ -n "${active_proxy_container}" && "$(docker inspect -f '{{.State.Running}}' "${active_proxy_container}" 2>/dev/null || echo false)" != "true" ]]; then
+      return 1
+    fi
+    if json="$(run_probe_json load \
       --label "ready-${host}" \
       --protocol h1 \
       --host "${host}" \
@@ -2719,8 +2718,10 @@ wait_for_tls_proxy() {
       --duration-seconds 1 \
       --warmup-seconds 0 \
       --concurrency 1 \
-      --expect-status 200 >/dev/null 2>&1; then
-      return 0
+      --expect-status 200 2>/dev/null)"; then
+      if jq -e '(.requests // 0) > 0 and (.errors // 0) == 0' >/dev/null <<<"${json}"; then
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -2745,6 +2746,16 @@ stop_active_proxy() {
   if [[ -n "${active_remote_signer_cert_volume}" ]]; then
     docker volume rm "${active_remote_signer_cert_volume}" >/dev/null 2>&1 || true
     active_remote_signer_cert_volume=""
+  fi
+}
+
+assert_active_proxy_container_running() {
+  local description="$1"
+  if [[ -z "${active_proxy_container}" ]]; then
+    fail_with_diagnostics "${description} was not started before benchmark data collection"
+  fi
+  if [[ "$(docker inspect -f '{{.State.Running}}' "${active_proxy_container}" 2>/dev/null || echo false)" != "true" ]]; then
+    fail_with_diagnostics "${description} exited before benchmark data collection"
   fi
 }
 
@@ -2944,6 +2955,7 @@ start_openresty() {
   if ! wait_for_tls_proxy openresty; then
     fail_with_diagnostics "OpenResty performance proxy did not become ready"
   fi
+  assert_active_proxy_container_running "OpenResty performance proxy"
 }
 
 detect_nginx_h3() {
