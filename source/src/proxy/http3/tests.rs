@@ -129,6 +129,76 @@ fn h3_known_small_path_requires_marker_and_small_upper_bound() {
   assert!(!use_h3_known_small_body_path(true, &large));
 }
 
+#[test]
+fn h3_known_small_plan_selects_compiled_noop_no_trailer_branch() {
+  let mut extensions = http::Extensions::new();
+  extensions.insert(crate::proxy::http::body::CompiledKnownSmallNoopResponse);
+  extensions.insert(InlinedKnownSmallResponseBody::new(
+    Bytes::from_static(b"ok"),
+    None,
+  ));
+
+  match take_h3_known_small_body_plan(&mut extensions) {
+    H3KnownSmallBodyPlan::CompiledNoopNoTrailers(data) => {
+      assert_eq!(data, Bytes::from_static(b"ok"));
+    }
+    plan => panic!("expected compiled no-trailer branch, got {plan:?}"),
+  }
+}
+
+#[test]
+fn h3_known_small_plan_keeps_unmarked_inlined_body_on_fallback_branch() {
+  let mut extensions = http::Extensions::new();
+  extensions.insert(InlinedKnownSmallResponseBody::new(
+    Bytes::from_static(b"ok"),
+    None,
+  ));
+
+  match take_h3_known_small_body_plan(&mut extensions) {
+    H3KnownSmallBodyPlan::Inlined(inlined) => {
+      let (data, trailers) = inlined.into_parts();
+      assert_eq!(data, Bytes::from_static(b"ok"));
+      assert!(trailers.is_none());
+    }
+    plan => panic!("expected generic inlined branch, got {plan:?}"),
+  }
+}
+
+#[test]
+fn h3_known_small_plan_keeps_trailer_body_on_fallback_branch() {
+  let mut trailers = http::HeaderMap::new();
+  trailers.insert("x-trailer", "kept".parse().unwrap());
+  let mut extensions = http::Extensions::new();
+  extensions.insert(crate::proxy::http::body::CompiledKnownSmallNoopResponse);
+  extensions.insert(InlinedKnownSmallResponseBody::new(
+    Bytes::from_static(b"ok"),
+    Some(trailers),
+  ));
+
+  match take_h3_known_small_body_plan(&mut extensions) {
+    H3KnownSmallBodyPlan::Inlined(inlined) => {
+      let (data, trailers) = inlined.into_parts();
+      assert_eq!(data, Bytes::from_static(b"ok"));
+      assert_eq!(
+        trailers.expect("trailers should remain available")["x-trailer"],
+        "kept"
+      );
+    }
+    plan => panic!("expected generic inlined branch, got {plan:?}"),
+  }
+}
+
+#[test]
+fn h3_known_small_plan_ignores_marker_without_inlined_body() {
+  let mut extensions = http::Extensions::new();
+  extensions.insert(crate::proxy::http::body::CompiledKnownSmallNoopResponse);
+
+  match take_h3_known_small_body_plan(&mut extensions) {
+    H3KnownSmallBodyPlan::None => {}
+    plan => panic!("expected no known-small body plan, got {plan:?}"),
+  }
+}
+
 #[tokio::test]
 async fn h3_known_small_collect_rejects_body_over_limit() {
   let body = full_test_body(Bytes::from(vec![0; KNOWN_SMALL_BODY_MAX_BYTES + 1]));

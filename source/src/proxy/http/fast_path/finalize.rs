@@ -112,6 +112,7 @@ pub(super) fn finalize_response(
       parts,
       response_body,
       inlined_known_small_body,
+      request_version,
       response_send_timeout,
       transport_network,
     );
@@ -270,11 +271,21 @@ fn finalize_known_small_noop_response(
   parts: Parts,
   response_body: ProxyBody,
   inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  request_version: http::Version,
   response_send_timeout: Duration,
   transport_network: WafTransportNetwork,
 ) -> Response<ProxyBody> {
+  let compiled_h3_noop = request_version == http::Version::HTTP_3
+    && inlined_known_small_body
+      .as_ref()
+      .is_some_and(|inlined| inlined.trailers.is_none());
   let mut response = Response::from_parts(parts, response_body);
   mark_known_small_response_extensions(&mut response, true, inlined_known_small_body);
+  if compiled_h3_noop {
+    response
+      .extensions_mut()
+      .insert(body::CompiledKnownSmallNoopResponse);
+  }
   fast_path_downstream_response_timeout(response, true, response_send_timeout, transport_network)
 }
 
@@ -297,10 +308,11 @@ fn mark_known_small_response_extensions(
 mod tests {
   use bytes::Bytes;
   use http::header::HeaderName;
-  use http::{HeaderValue, Request};
+  use http::{HeaderValue, Request, Response, StatusCode};
   use http_body_util::{BodyExt, Full};
 
   use crate::config::Config;
+  use crate::proxy::http::DownstreamResponseSendTimeout;
   use crate::proxy::http::body::{self, ProxyBody};
   use crate::state::AppSnapshot;
   use crate::waf::{HeaderMutation, RequestWafDecision};
@@ -351,6 +363,22 @@ mod tests {
           .boxed(),
       )
       .expect("request should build")
+  }
+
+  fn empty_proxy_body() -> ProxyBody {
+    Full::new(Bytes::new())
+      .map_err(|never| -> body::BoxError { match never {} })
+      .boxed()
+  }
+
+  fn response_parts(version: http::Version) -> http::response::Parts {
+    Response::builder()
+      .status(StatusCode::OK)
+      .version(version)
+      .body(())
+      .expect("response should build")
+      .into_parts()
+      .0
   }
 
   fn can_use_h2_known_small_noop(
@@ -466,5 +494,102 @@ x_content_type_options = "nosniff"
       true,
       true,
     ));
+  }
+
+  #[test]
+  fn h3_known_small_noop_response_carries_direct_responder_marker() {
+    let response = finalize_known_small_noop_response(
+      response_parts(http::Version::HTTP_3),
+      empty_proxy_body(),
+      Some(body::InlinedKnownSmallResponseBody::new(
+        Bytes::from_static(b"ok"),
+        None,
+      )),
+      http::Version::HTTP_3,
+      std::time::Duration::from_millis(10),
+      WafTransportNetwork::Udp,
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_some()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::KnownSmallResponseBody>()
+        .is_some()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::InlinedKnownSmallResponseBody>()
+        .is_some()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<DownstreamResponseSendTimeout>()
+        .is_some(),
+      "H3/UDP known-small responses should keep downstream send timeout metadata"
+    );
+  }
+
+  #[test]
+  fn non_h3_known_small_noop_response_does_not_mark_h3_direct_responder() {
+    let response = finalize_known_small_noop_response(
+      response_parts(http::Version::HTTP_2),
+      empty_proxy_body(),
+      None,
+      http::Version::HTTP_2,
+      std::time::Duration::from_millis(10),
+      WafTransportNetwork::Tcp,
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<DownstreamResponseSendTimeout>()
+        .is_none(),
+      "TCP known-small responses should still skip downstream timeout wrapping"
+    );
+  }
+
+  #[test]
+  fn h3_known_small_noop_response_with_trailers_does_not_mark_direct_responder() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-trailer", HeaderValue::from_static("kept"));
+    let response = finalize_known_small_noop_response(
+      response_parts(http::Version::HTTP_3),
+      empty_proxy_body(),
+      Some(body::InlinedKnownSmallResponseBody::new(
+        Bytes::from_static(b"ok"),
+        Some(trailers),
+      )),
+      http::Version::HTTP_3,
+      std::time::Duration::from_millis(10),
+      WafTransportNetwork::Udp,
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::InlinedKnownSmallResponseBody>()
+        .is_some()
+    );
   }
 }

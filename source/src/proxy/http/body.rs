@@ -25,6 +25,9 @@ type TerminalBodyError = Arc<Mutex<Option<BoxError>>>;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KnownSmallResponseBody;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CompiledKnownSmallNoopResponse;
+
 #[derive(Debug, Clone)]
 pub(crate) struct InlinedKnownSmallResponseBody {
   pub(crate) data: Bytes,
