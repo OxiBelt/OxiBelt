@@ -94,7 +94,7 @@ fn guard_rejects_http2_when_empty_body_is_not_proven() {
       false,
       &request,
     ),
-    Some("request_body")
+    Some(FastPathTransportMissReason::RequestBody)
   );
 }
 
@@ -116,7 +116,7 @@ fn guard_rejects_http3_when_empty_body_is_not_proven() {
       false,
       &request,
     ),
-    Some("request_body")
+    Some(FastPathTransportMissReason::RequestBody)
   );
 }
 
@@ -137,7 +137,7 @@ fn guard_rejects_non_get_head_or_non_plain_upstream() {
       true,
       &post,
     ),
-    Some("unsupported_request")
+    Some(FastPathTransportMissReason::UnsupportedRequest)
   );
 
   let https = upstream("https://backend.internal:18443");
@@ -155,7 +155,7 @@ fn guard_rejects_non_get_head_or_non_plain_upstream() {
       true,
       &get,
     ),
-    Some("unsupported_upstream")
+    Some(FastPathTransportMissReason::UnsupportedUpstream)
   );
 }
 
@@ -481,7 +481,15 @@ async fn send_and_recycle_direct_get(
     .body(empty_body())
     .expect("test request should be valid");
   let prepared = PreparedDirectH1Request::from_request(request, &pool.origin)?;
-  let mut direct = send_prepared_request(pool, metrics, "h1", prepared, timeouts, false).await?;
+  let mut direct = send_prepared_request(
+    pool,
+    metrics,
+    FastPathMetricProtocol::H1,
+    prepared,
+    timeouts,
+    false,
+  )
+  .await?;
   let lease = direct
     .take_lease()
     .expect("direct H1 response should retain its lease");

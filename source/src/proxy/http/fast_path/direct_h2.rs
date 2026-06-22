@@ -17,6 +17,7 @@ use tracing::debug;
 
 use crate::config::{HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
+use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathTransportMissReason};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
@@ -497,19 +498,25 @@ pub(super) async fn try_send_direct_h2(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_direct_h2_transport_miss(protocol, reason);
+    metrics.record_direct_h2_transport_miss_id(protocol, reason);
     return DirectH2SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_direct_h2_transport_miss(protocol, "unsupported_upstream");
+    metrics.record_direct_h2_transport_miss_id(
+      protocol,
+      FastPathTransportMissReason::UnsupportedUpstream,
+    );
     return DirectH2SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH2Request::from_request(outbound) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_direct_h2_transport_miss(protocol, "unsupported_request");
+      metrics.record_direct_h2_transport_miss_id(
+        protocol,
+        FastPathTransportMissReason::UnsupportedRequest,
+      );
       return DirectH2SendResult::Sent(Err(error));
     }
   };
@@ -524,23 +531,23 @@ fn direct_h2_guard_miss(
   direct_selection_used: bool,
   request_body_proven_empty: bool,
   outbound: &Request<ProxyBody>,
-) -> Option<&'static str> {
+) -> Option<FastPathTransportMissReason> {
   if !matches!(
     request_version,
     http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
   ) || !direct_selection_used
     || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
   {
-    return Some("unsupported_request");
+    return Some(FastPathTransportMissReason::UnsupportedRequest);
   }
   if upstream_version != HttpVersion::H2
     || !matches!(upstream.origin.scheme(), "http" | "https")
     || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
   {
-    return Some("unsupported_upstream");
+    return Some(FastPathTransportMissReason::UnsupportedUpstream);
   }
   if !request_body_proven_empty || !outbound.body().is_end_stream() {
-    return Some("request_body");
+    return Some(FastPathTransportMissReason::RequestBody);
   }
   None
 }
@@ -548,7 +555,7 @@ fn direct_h2_guard_miss(
 async fn send_prepared_request(
   pool: Arc<DirectH2Pool>,
   metrics: &Arc<Metrics>,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH2Request,
   timeouts: EffectiveTimeouts,
 ) -> DirectH2SendResult {
@@ -575,7 +582,7 @@ async fn send_prepared_request(
   .await;
   match send_result {
     Ok(Ok(response)) => {
-      metrics.record_direct_h2_transport_hit(protocol);
+      metrics.record_direct_h2_transport_hit_id(protocol);
       DirectH2SendResult::Sent(Ok(DirectH2Response {
         response,
         lease: Some(lease),
@@ -615,7 +622,7 @@ async fn send_prepared_request(
       .await
       {
         Ok(Ok(response)) => {
-          metrics.record_direct_h2_transport_hit(protocol);
+          metrics.record_direct_h2_transport_hit_id(protocol);
           DirectH2SendResult::Sent(Ok(DirectH2Response {
             response,
             lease: Some(lease),
@@ -660,24 +667,24 @@ async fn send_prepared_request(
 
 fn saturated_fallback(
   metrics: &Metrics,
-  protocol: &str,
+  protocol: FastPathMetricProtocol,
   outbound: Request<ProxyBody>,
 ) -> DirectH2SendResult {
-  metrics.record_direct_h2_transport_miss(protocol, "pool_full");
+  metrics.record_direct_h2_transport_miss_id(protocol, FastPathTransportMissReason::PoolFull);
   DirectH2SendResult::Fallback(outbound)
 }
 
 fn direct_h2_send_error(
   metrics: &Metrics,
-  protocol: &str,
+  protocol: FastPathMetricProtocol,
   error: anyhow::Error,
 ) -> DirectH2SendResult {
   let reason = if error.to_string().contains("timed out") {
-    "connect_error"
+    FastPathTransportMissReason::ConnectError
   } else {
-    "send_error"
+    FastPathTransportMissReason::SendError
   };
-  metrics.record_direct_h2_transport_miss(protocol, reason);
+  metrics.record_direct_h2_transport_miss_id(protocol, reason);
   DirectH2SendResult::Sent(Err(error))
 }
 

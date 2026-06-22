@@ -13,7 +13,7 @@ use crate::tls::TlsServerSessionStorageStats;
 mod auth;
 mod crlite;
 mod detail;
-mod fast_path;
+pub(crate) mod fast_path;
 mod http_io;
 mod ocsp;
 mod outbound_revocation;
@@ -109,14 +109,6 @@ impl StripedCounter {
   fn increment(&self) {
     COUNTER_STRIPE.with(|stripe| {
       self.stripes[*stripe].value.fetch_add(1, Ordering::Relaxed);
-    });
-  }
-
-  fn add(&self, value: u64) {
-    COUNTER_STRIPE.with(|stripe| {
-      self.stripes[*stripe]
-        .value
-        .fetch_add(value, Ordering::Relaxed);
     });
   }
 

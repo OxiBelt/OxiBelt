@@ -2,6 +2,7 @@ use http::{Extensions, HeaderMap, Request, Response};
 use hyper::body::Body;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
+use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
@@ -24,12 +25,12 @@ pub(super) fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: Pri
   }
 }
 
-pub(super) fn fast_path_metric_protocol(version: http::Version) -> &'static str {
+pub(super) fn fast_path_metric_protocol(version: http::Version) -> FastPathMetricProtocol {
   match version {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
-    http::Version::HTTP_2 => "h2",
-    http::Version::HTTP_3 => "h3",
-    _ => "other",
+    http::Version::HTTP_10 | http::Version::HTTP_11 => FastPathMetricProtocol::H1,
+    http::Version::HTTP_2 => FastPathMetricProtocol::H2,
+    http::Version::HTTP_3 => FastPathMetricProtocol::H3,
+    _ => FastPathMetricProtocol::Other,
   }
 }
 
@@ -109,7 +110,7 @@ pub(super) fn plain_proxy_fast_path_supported_route(
 
 pub(super) fn record_empty_request_body(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   extensions: &Extensions,
 ) {
   if state.request_path_features.hot_path_metrics {
@@ -122,7 +123,7 @@ pub(super) fn record_empty_request_body(
     };
     state
       .metrics
-      .record_fast_path_request_body(protocol, outcome);
+      .record_fast_path_request_body(protocol.as_str(), outcome);
   }
 }
 

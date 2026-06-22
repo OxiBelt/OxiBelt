@@ -602,9 +602,11 @@ impl PlainProxyFastPath {
       Err(error) => {
         timing::response_body_result(snapshot, metric_protocol, false, response_body_started);
         if state.request_path_features.hot_path_metrics {
-          state
-            .metrics
-            .record_fast_path_response_body(metric_protocol, "error", error.reason);
+          state.metrics.record_fast_path_response_body(
+            metric_protocol.as_str(),
+            "error",
+            error.reason,
+          );
         }
         let response = error.response;
         state.record_hot_path_response(response.status());
@@ -613,7 +615,7 @@ impl PlainProxyFastPath {
     };
     if state.request_path_features.hot_path_metrics {
       state.metrics.record_fast_path_response_body(
-        metric_protocol,
+        metric_protocol.as_str(),
         response_body_disposition,
         response_body_reason,
       );

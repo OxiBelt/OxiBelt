@@ -78,7 +78,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       true,
       &request,
     ),
-    Some("unsupported_upstream")
+    Some(FastPathTransportMissReason::UnsupportedUpstream)
   );
   assert_eq!(
     direct_h2_guard_miss(
@@ -89,7 +89,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       false,
       &request,
     ),
-    Some("request_body")
+    Some(FastPathTransportMissReason::RequestBody)
   );
 
   upstream.proxy_protocol_egress = ProxyProtocolEgressMode::V1;
@@ -102,7 +102,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       true,
       &request,
     ),
-    Some("unsupported_upstream")
+    Some(FastPathTransportMissReason::UnsupportedUpstream)
   );
 }
 
@@ -123,7 +123,7 @@ fn guard_rejects_method_or_non_direct_selection() {
       true,
       &post,
     ),
-    Some("unsupported_request")
+    Some(FastPathTransportMissReason::UnsupportedRequest)
   );
 
   let get = Request::builder()
@@ -140,7 +140,7 @@ fn guard_rejects_method_or_non_direct_selection() {
       true,
       &get,
     ),
-    Some("unsupported_request")
+    Some(FastPathTransportMissReason::UnsupportedRequest)
   );
 }
 

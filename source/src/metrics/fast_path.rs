@@ -1,8 +1,12 @@
 //! Fast-path decision counters with fixed low-cardinality labels.
 
+use self::labels::{DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason};
 use super::StripedCounter;
 
+mod api;
+pub(crate) mod labels;
 mod stage;
+mod typed;
 
 const PATH_PLAIN_PROXY: &str = "plain_proxy";
 const HIT_REASON: &str = "eligible";
@@ -139,46 +143,44 @@ impl FastPathMetrics {
   }
 
   pub(super) fn record_direct_h1_transport_hit(&self, protocol: &str) {
-    let Some(protocol_index) = protocol_index(protocol) else {
+    let Some(protocol) = FastPathMetricProtocol::from_str(protocol) else {
       return;
     };
-    self.transport_counters[transport_counter_index_by_parts(0, protocol_index, 0)].increment();
+    self.record_direct_h1_transport_hit_id(protocol);
   }
 
   pub(super) fn record_direct_h1_transport_miss(&self, protocol: &str, reason: &str) {
-    let Some(protocol_index) = protocol_index(protocol) else {
+    let Some(protocol) = FastPathMetricProtocol::from_str(protocol) else {
       return;
     };
-    let Some(reason_index) = transport_miss_reason_index(reason) else {
+    let Some(reason) = FastPathTransportMissReason::from_str(reason) else {
       return;
     };
-    self.transport_counters[transport_counter_index_by_parts(0, protocol_index, 1 + reason_index)]
-      .increment();
+    self.record_direct_h1_transport_miss_id(protocol, reason);
   }
 
   pub(super) fn record_direct_h2_transport_hit(&self, protocol: &str) {
-    let Some(protocol_index) = protocol_index(protocol) else {
+    let Some(protocol) = FastPathMetricProtocol::from_str(protocol) else {
       return;
     };
-    self.transport_counters[transport_counter_index_by_parts(1, protocol_index, 0)].increment();
+    self.record_direct_h2_transport_hit_id(protocol);
   }
 
   pub(super) fn record_direct_h2_transport_miss(&self, protocol: &str, reason: &str) {
-    let Some(protocol_index) = protocol_index(protocol) else {
+    let Some(protocol) = FastPathMetricProtocol::from_str(protocol) else {
       return;
     };
-    let Some(reason_index) = transport_miss_reason_index(reason) else {
+    let Some(reason) = FastPathTransportMissReason::from_str(reason) else {
       return;
     };
-    self.transport_counters[transport_counter_index_by_parts(1, protocol_index, 1 + reason_index)]
-      .increment();
+    self.record_direct_h2_transport_miss_id(protocol, reason);
   }
 
   pub(super) fn record_direct_h1_pool_event(&self, event: &str) {
-    let Some(index) = direct_h1_pool_event_index(event) else {
+    let Some(event) = DirectH1PoolEvent::from_str(event) else {
       return;
     };
-    self.direct_h1_pool_counters[index].increment();
+    self.record_direct_h1_pool_event_id(event);
   }
 
   pub(super) fn record_direct_h2_pool_event(&self, event: &str) {
@@ -619,6 +621,11 @@ mod tests {
     metrics.record_direct_h2_transport_miss("h3", "connect_error");
     metrics.record_direct_h1_transport_hit("h9");
     metrics.record_direct_h1_transport_miss("h1", "unknown");
+    metrics.record_direct_h1_transport_hit_id(FastPathMetricProtocol::H3);
+    metrics.record_direct_h2_transport_miss_id(
+      FastPathMetricProtocol::H1,
+      FastPathTransportMissReason::PoolFull,
+    );
 
     assert_eq!(
       metrics.transport_counters
@@ -644,6 +651,18 @@ mod tests {
       .load(),
       1
     );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h1", "h3", "hit", "used").unwrap()]
+      .load(),
+      1
+    );
+    assert_eq!(
+      metrics.transport_counters
+        [transport_counter_index("direct_h2", "h1", "miss", "pool_full").unwrap()]
+      .load(),
+      1
+    );
   }
 
   #[test]
@@ -654,6 +673,7 @@ mod tests {
     metrics.record_direct_h1_pool_event("reconnect");
     metrics.record_direct_h1_pool_event("drop_full");
     metrics.record_direct_h1_pool_event("unknown");
+    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked);
 
     assert_eq!(
       metrics.direct_h1_pool_counters[direct_h1_pool_event_index("hit").unwrap()].load(),
@@ -669,6 +689,10 @@ mod tests {
     );
     assert_eq!(
       metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_full").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_locked").unwrap()].load(),
       1
     );
   }

@@ -1,26 +1,16 @@
 //! Fixed-label fast-path stage timing counters.
 
-use super::super::StripedCounter;
+use std::sync::atomic::Ordering;
 
-const PATHS: [&str; 2] = ["plain_proxy", "h3_downstream"];
-const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
-const STAGES: [&str; 13] = [
-  "direct_h1_connect",
-  "direct_h1_pool_take",
-  "direct_h1_request_build",
-  "direct_h1_send_request",
-  "fast_path_prepare",
-  "request_body_prepare",
-  "transport_direct_h1",
-  "transport_direct_h2",
-  "transport_general",
-  "response_body_prepare",
-  "response_finalize",
-  "h3_ingress_prepare",
-  "h3_downstream_send",
-];
-const OUTCOMES: [&str; 3] = ["ok", "fallback", "error"];
-const STAGE_COUNTER_COUNT: usize = PATHS.len() * PROTOCOLS.len() * STAGES.len() * OUTCOMES.len();
+use super::super::{COUNTER_STRIPE, StripedCounter};
+use super::labels::{
+  FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage,
+};
+
+const STAGE_COUNTER_COUNT: usize = FastPathMetricPath::COUNT
+  * FastPathMetricProtocol::COUNT
+  * FastPathMetricStage::COUNT
+  * FastPathMetricOutcome::COUNT;
 
 #[derive(Debug)]
 pub(super) struct FastPathStageMetrics {
@@ -55,33 +45,51 @@ impl FastPathStageMetrics {
     let Some(index) = stage_counter_index(path, protocol, stage, outcome) else {
       return;
     };
-    self.observations[index].increment();
-    self.duration_ns[index].add(duration_ns);
+    increment_observation_and_duration(
+      &self.observations[index],
+      &self.duration_ns[index],
+      duration_ns,
+    );
+  }
+
+  pub(super) fn record_duration_ns_id(
+    &self,
+    path: FastPathMetricPath,
+    protocol: FastPathMetricProtocol,
+    stage: FastPathMetricStage,
+    outcome: FastPathMetricOutcome,
+    duration_ns: u64,
+  ) {
+    let index = stage_counter_index_id(path, protocol, stage, outcome);
+    increment_observation_and_duration(
+      &self.observations[index],
+      &self.duration_ns[index],
+      duration_ns,
+    );
   }
 
   pub(super) fn append_prometheus(&self, output: &mut String) {
-    for path in PATHS {
-      for protocol in PROTOCOLS {
-        for stage in STAGES {
-          for outcome in OUTCOMES {
-            let index =
-              stage_counter_index(path, protocol, stage, outcome).expect("stage counter exists");
+    for path in FastPathMetricPath::ALL {
+      for protocol in FastPathMetricProtocol::ALL {
+        for stage in FastPathMetricStage::ALL {
+          for outcome in FastPathMetricOutcome::ALL {
+            let index = stage_counter_index_id(path, protocol, stage, outcome);
             append_stage_counter(
               output,
               "oxibelt_http_fast_path_stage_observations_total",
-              path,
-              protocol,
-              stage,
-              outcome,
+              path.as_str(),
+              protocol.as_str(),
+              stage.as_str(),
+              outcome.as_str(),
               self.observations[index].load(),
             );
             append_stage_counter(
               output,
               "oxibelt_http_fast_path_stage_duration_ns_total",
-              path,
-              protocol,
-              stage,
-              outcome,
+              path.as_str(),
+              protocol.as_str(),
+              stage.as_str(),
+              outcome.as_str(),
               self.duration_ns[index].load(),
             );
           }
@@ -92,19 +100,39 @@ impl FastPathStageMetrics {
 }
 
 fn stage_counter_index(path: &str, protocol: &str, stage: &str, outcome: &str) -> Option<usize> {
-  let path_index = PATHS.iter().position(|candidate| *candidate == path)?;
-  let protocol_index = PROTOCOLS
-    .iter()
-    .position(|candidate| *candidate == protocol)?;
-  let stage_index = STAGES.iter().position(|candidate| *candidate == stage)?;
-  let outcome_index = OUTCOMES
-    .iter()
-    .position(|candidate| *candidate == outcome)?;
-  Some(
-    (((path_index * PROTOCOLS.len()) + protocol_index) * STAGES.len() + stage_index)
-      * OUTCOMES.len()
-      + outcome_index,
-  )
+  Some(stage_counter_index_id(
+    FastPathMetricPath::from_str(path)?,
+    FastPathMetricProtocol::from_str(protocol)?,
+    FastPathMetricStage::from_str(stage)?,
+    FastPathMetricOutcome::from_str(outcome)?,
+  ))
+}
+
+fn stage_counter_index_id(
+  path: FastPathMetricPath,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
+  outcome: FastPathMetricOutcome,
+) -> usize {
+  (((path.index() * FastPathMetricProtocol::COUNT) + protocol.index()) * FastPathMetricStage::COUNT
+    + stage.index())
+    * FastPathMetricOutcome::COUNT
+    + outcome.index()
+}
+
+fn increment_observation_and_duration(
+  observations: &StripedCounter,
+  duration_ns_counter: &StripedCounter,
+  duration_ns: u64,
+) {
+  COUNTER_STRIPE.with(|stripe| {
+    observations.stripes[*stripe]
+      .value
+      .fetch_add(1, Ordering::Relaxed);
+    duration_ns_counter.stripes[*stripe]
+      .value
+      .fetch_add(duration_ns, Ordering::Relaxed);
+  });
 }
 
 fn append_stage_counter(
@@ -146,6 +174,13 @@ mod tests {
     metrics.record_duration_ns("plain_proxy", "h2", "unknown", "ok", 11);
     metrics.record_duration_ns("plain_proxy", "h9", "transport_direct_h1", "ok", 13);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "weird", 17);
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3DownstreamSend,
+      FastPathMetricOutcome::Error,
+      19,
+    );
 
     let index = stage_counter_index("plain_proxy", "h2", "transport_direct_h1", "ok").unwrap();
     assert_eq!(metrics.observations[index].load(), 2);
@@ -154,5 +189,9 @@ mod tests {
       stage_counter_index("plain_proxy", "h2", "direct_h1_pool_take", "ok").unwrap();
     assert_eq!(metrics.observations[pool_take_index].load(), 1);
     assert_eq!(metrics.duration_ns[pool_take_index].load(), 7);
+    let h3_index =
+      stage_counter_index("h3_downstream", "h3", "h3_downstream_send", "error").unwrap();
+    assert_eq!(metrics.observations[h3_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_index].load(), 19);
   }
 }

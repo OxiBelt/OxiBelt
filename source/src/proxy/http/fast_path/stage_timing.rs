@@ -2,29 +2,39 @@
 
 use std::time::Instant;
 
+use crate::metrics::fast_path::labels::{
+  FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage,
+};
 use crate::state::AppSnapshot;
 
 use super::direct_transport::DirectFastPathTransport;
 
-pub(crate) const PATH_H3_DOWNSTREAM: &str = "h3_downstream";
-pub(crate) const PATH_PLAIN_PROXY: &str = "plain_proxy";
-pub(crate) const STAGE_DIRECT_H1_CONNECT: &str = "direct_h1_connect";
-pub(crate) const STAGE_DIRECT_H1_POOL_TAKE: &str = "direct_h1_pool_take";
-pub(crate) const STAGE_DIRECT_H1_REQUEST_BUILD: &str = "direct_h1_request_build";
-pub(crate) const STAGE_DIRECT_H1_SEND_REQUEST: &str = "direct_h1_send_request";
-pub(crate) const STAGE_FAST_PATH_PREPARE: &str = "fast_path_prepare";
-pub(crate) const STAGE_H3_DOWNSTREAM_SEND: &str = "h3_downstream_send";
-pub(crate) const STAGE_H3_INGRESS_PREPARE: &str = "h3_ingress_prepare";
-pub(crate) const STAGE_REQUEST_BODY_PREPARE: &str = "request_body_prepare";
-pub(crate) const STAGE_RESPONSE_BODY_PREPARE: &str = "response_body_prepare";
-pub(crate) const STAGE_RESPONSE_FINALIZE: &str = "response_finalize";
-pub(crate) const STAGE_TRANSPORT_DIRECT_H1: &str = "transport_direct_h1";
-pub(crate) const STAGE_TRANSPORT_DIRECT_H2: &str = "transport_direct_h2";
-pub(crate) const STAGE_TRANSPORT_GENERAL: &str = "transport_general";
+pub(crate) const PATH_H3_DOWNSTREAM: FastPathMetricPath = FastPathMetricPath::H3Downstream;
+pub(crate) const PATH_PLAIN_PROXY: FastPathMetricPath = FastPathMetricPath::PlainProxy;
+pub(crate) const STAGE_DIRECT_H1_CONNECT: FastPathMetricStage =
+  FastPathMetricStage::DirectH1Connect;
+pub(crate) const STAGE_DIRECT_H1_POOL_TAKE: FastPathMetricStage =
+  FastPathMetricStage::DirectH1PoolTake;
+pub(crate) const STAGE_DIRECT_H1_REQUEST_BUILD: FastPathMetricStage =
+  FastPathMetricStage::DirectH1RequestBuild;
+pub(crate) const STAGE_DIRECT_H1_SEND_REQUEST: FastPathMetricStage =
+  FastPathMetricStage::DirectH1SendRequest;
+pub(crate) const STAGE_FAST_PATH_PREPARE: FastPathMetricStage =
+  FastPathMetricStage::FastPathPrepare;
+pub(crate) const STAGE_H3_DOWNSTREAM_SEND: FastPathMetricStage =
+  FastPathMetricStage::H3DownstreamSend;
+pub(crate) const STAGE_H3_INGRESS_PREPARE: FastPathMetricStage =
+  FastPathMetricStage::H3IngressPrepare;
+pub(crate) const STAGE_REQUEST_BODY_PREPARE: FastPathMetricStage =
+  FastPathMetricStage::RequestBodyPrepare;
+pub(crate) const STAGE_RESPONSE_BODY_PREPARE: FastPathMetricStage =
+  FastPathMetricStage::ResponseBodyPrepare;
+pub(crate) const STAGE_RESPONSE_FINALIZE: FastPathMetricStage =
+  FastPathMetricStage::ResponseFinalize;
 
-pub(crate) const OUTCOME_ERROR: &str = "error";
-pub(crate) const OUTCOME_FALLBACK: &str = "fallback";
-pub(crate) const OUTCOME_OK: &str = "ok";
+pub(crate) const OUTCOME_ERROR: FastPathMetricOutcome = FastPathMetricOutcome::Error;
+pub(crate) const OUTCOME_FALLBACK: FastPathMetricOutcome = FastPathMetricOutcome::Fallback;
+pub(crate) const OUTCOME_OK: FastPathMetricOutcome = FastPathMetricOutcome::Ok;
 
 pub(crate) fn start(enabled: bool) -> Option<Instant> {
   enabled.then(Instant::now)
@@ -32,10 +42,10 @@ pub(crate) fn start(enabled: bool) -> Option<Instant> {
 
 pub(crate) fn record(
   state: &AppSnapshot,
-  path: &'static str,
-  protocol: &'static str,
-  stage: &'static str,
-  outcome: &'static str,
+  path: FastPathMetricPath,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
+  outcome: FastPathMetricOutcome,
   started_at: Option<Instant>,
 ) {
   let Some(started_at) = started_at else {
@@ -44,13 +54,13 @@ pub(crate) fn record(
   let duration_ns = started_at.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
   state
     .metrics
-    .record_fast_path_stage_duration_ns(path, protocol, stage, outcome, duration_ns);
+    .record_fast_path_stage_duration_ns_id(path, protocol, stage, outcome, duration_ns);
 }
 
 pub(crate) fn record_plain_ok(
   state: &AppSnapshot,
-  protocol: &'static str,
-  stage: &'static str,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
   started_at: Option<Instant>,
 ) {
   record(
@@ -65,8 +75,8 @@ pub(crate) fn record_plain_ok(
 
 pub(crate) fn record_plain_result(
   state: &AppSnapshot,
-  protocol: &'static str,
-  stage: &'static str,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
   success: bool,
   started_at: Option<Instant>,
 ) {
@@ -83,7 +93,7 @@ pub(crate) fn record_plain_result(
 
 pub(crate) fn record_fast_path_prepare(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_FAST_PATH_PREPARE, started_at);
@@ -91,7 +101,7 @@ pub(crate) fn record_fast_path_prepare(
 
 pub(crate) fn record_request_body_prepare(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_REQUEST_BODY_PREPARE, started_at);
@@ -99,7 +109,7 @@ pub(crate) fn record_request_body_prepare(
 
 pub(crate) fn direct_h1_build_ok(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   started_at: Option<Instant>,
 ) {
   record_direct_h1_request_build(state, protocol, OUTCOME_OK, started_at);
@@ -107,7 +117,7 @@ pub(crate) fn direct_h1_build_ok(
 
 pub(crate) fn direct_h1_build_fallback(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   started_at: Option<Instant>,
 ) {
   record_direct_h1_request_build(state, protocol, OUTCOME_FALLBACK, started_at);
@@ -115,8 +125,8 @@ pub(crate) fn direct_h1_build_fallback(
 
 fn record_direct_h1_request_build(
   state: &AppSnapshot,
-  protocol: &'static str,
-  outcome: &'static str,
+  protocol: FastPathMetricProtocol,
+  outcome: FastPathMetricOutcome,
   started_at: Option<Instant>,
 ) {
   record(
@@ -131,7 +141,7 @@ fn record_direct_h1_request_build(
 
 pub(crate) fn record_response_body_prepare(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   success: bool,
   started_at: Option<Instant>,
 ) {
@@ -146,7 +156,7 @@ pub(crate) fn record_response_body_prepare(
 
 pub(crate) fn response_body_result(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   success: bool,
   started_at: Option<Instant>,
 ) {
@@ -155,7 +165,7 @@ pub(crate) fn response_body_result(
 
 pub(crate) fn record_response_finalize(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_RESPONSE_FINALIZE, started_at);
@@ -163,7 +173,7 @@ pub(crate) fn record_response_finalize(
 
 pub(crate) fn record_transport_result(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
   success: bool,
   started_at: Option<Instant>,
@@ -174,7 +184,7 @@ pub(crate) fn record_transport_result(
 
 pub(crate) fn transport_result(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
   success: bool,
   started_at: Option<Instant>,
@@ -184,7 +194,7 @@ pub(crate) fn transport_result(
 
 pub(crate) fn record_transport_fallback(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
   started_at: Option<Instant>,
 ) {
@@ -193,7 +203,7 @@ pub(crate) fn record_transport_fallback(
 
 pub(crate) fn transport_fallback(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
   started_at: Option<Instant>,
 ) {
@@ -202,7 +212,7 @@ pub(crate) fn transport_fallback(
 
 pub(crate) fn general_start(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
   started_at: Option<Instant>,
   timing_enabled: bool,
@@ -217,7 +227,7 @@ pub(crate) fn general_start(
 
 pub(crate) fn general_result(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   success: bool,
   started_at: Option<Instant>,
 ) {
@@ -226,15 +236,15 @@ pub(crate) fn general_result(
 
 fn record_transport(
   state: &AppSnapshot,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   transport: Option<DirectFastPathTransport>,
-  outcome: &'static str,
+  outcome: FastPathMetricOutcome,
   started_at: Option<Instant>,
 ) {
   let stage = match transport {
-    Some(DirectFastPathTransport::H1) => STAGE_TRANSPORT_DIRECT_H1,
-    Some(DirectFastPathTransport::H2) => STAGE_TRANSPORT_DIRECT_H2,
-    None => STAGE_TRANSPORT_GENERAL,
+    Some(DirectFastPathTransport::H1) => FastPathMetricStage::TransportDirectH1,
+    Some(DirectFastPathTransport::H2) => FastPathMetricStage::TransportDirectH2,
+    None => FastPathMetricStage::TransportGeneral,
   };
   record(
     state,
@@ -246,11 +256,11 @@ fn record_transport(
   );
 }
 
-pub(crate) fn protocol(version: http::Version) -> &'static str {
+pub(crate) fn protocol(version: http::Version) -> FastPathMetricProtocol {
   match version {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
-    http::Version::HTTP_2 => "h2",
-    http::Version::HTTP_3 => "h3",
-    _ => "other",
+    http::Version::HTTP_10 | http::Version::HTTP_11 => FastPathMetricProtocol::H1,
+    http::Version::HTTP_2 => FastPathMetricProtocol::H2,
+    http::Version::HTTP_3 => FastPathMetricProtocol::H3,
+    _ => FastPathMetricProtocol::Other,
   }
 }

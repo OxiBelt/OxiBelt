@@ -6,6 +6,7 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::metrics::Metrics;
+use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   h2_or_h3_safe_method_empty_probe_allowed, http1_request_body_is_definitely_empty,
@@ -24,14 +25,14 @@ pub(super) struct FastPathRequestBody {
 #[derive(Clone, Copy)]
 pub(super) struct FastPathRequestBodyMetrics<'a> {
   pub(super) metrics: &'a Metrics,
-  pub(super) protocol: &'static str,
+  pub(super) protocol: FastPathMetricProtocol,
 }
 
 impl FastPathRequestBodyMetrics<'_> {
   fn record(self, outcome: &str) {
     self
       .metrics
-      .record_fast_path_request_body(self.protocol, outcome);
+      .record_fast_path_request_body(self.protocol.as_str(), outcome);
   }
 }
 

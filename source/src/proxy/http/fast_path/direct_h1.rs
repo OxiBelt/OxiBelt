@@ -21,6 +21,9 @@ use url::{Position, Url};
 
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
+use crate::metrics::fast_path::labels::{
+  DirectH1PoolEvent, FastPathMetricProtocol, FastPathMetricStage, FastPathTransportMissReason,
+};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
@@ -239,14 +242,22 @@ impl DirectH1Lease {
   pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
     if body_consumed && self.reusable_by_headers {
       if let Err(error) = self.pool.put_sender(self.sender) {
-        self.metrics.record_direct_h1_pool_event("drop");
+        self
+          .metrics
+          .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
         match error {
-          DirectH1PutError::Full => self.metrics.record_direct_h1_pool_event("drop_full"),
-          DirectH1PutError::Locked => self.metrics.record_direct_h1_pool_event("drop_locked"),
+          DirectH1PutError::Full => self
+            .metrics
+            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
+          DirectH1PutError::Locked => self
+            .metrics
+            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
         }
       }
     } else {
-      self.metrics.record_direct_h1_pool_event("drop");
+      self
+        .metrics
+        .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
     }
   }
 }
@@ -343,19 +354,25 @@ pub(super) async fn try_send_direct_h1(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_direct_h1_transport_miss(protocol, reason);
+    metrics.record_direct_h1_transport_miss_id(protocol, reason);
     return DirectH1SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_direct_h1_transport_miss(protocol, "unsupported_upstream");
+    metrics.record_direct_h1_transport_miss_id(
+      protocol,
+      FastPathTransportMissReason::UnsupportedUpstream,
+    );
     return DirectH1SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH1Request::from_request(outbound, &pool.origin) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_direct_h1_transport_miss(protocol, "unsupported_request");
+      metrics.record_direct_h1_transport_miss_id(
+        protocol,
+        FastPathTransportMissReason::UnsupportedRequest,
+      );
       return DirectH1SendResult::Sent(Err(error));
     }
   };
@@ -363,12 +380,13 @@ pub(super) async fn try_send_direct_h1(
   let result =
     send_prepared_request(pool, metrics, protocol, prepared, timeouts, timing_enabled).await;
   match &result {
-    Ok(_) => metrics.record_direct_h1_transport_hit(protocol),
+    Ok(_) => metrics.record_direct_h1_transport_hit_id(protocol),
     Err(error) if error.to_string().contains("timed out") => {
-      metrics.record_direct_h1_transport_miss(protocol, "connect_error");
+      metrics
+        .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::ConnectError);
     }
     Err(_) => {
-      metrics.record_direct_h1_transport_miss(protocol, "send_error");
+      metrics.record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::SendError);
     }
   }
   DirectH1SendResult::Sent(result)
@@ -381,23 +399,23 @@ fn direct_h1_guard_miss(
   direct_selection_used: bool,
   request_body_proven_empty: bool,
   outbound: &Request<ProxyBody>,
-) -> Option<&'static str> {
+) -> Option<FastPathTransportMissReason> {
   if !matches!(
     request_version,
     http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
   ) || !direct_selection_used
     || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
   {
-    return Some("unsupported_request");
+    return Some(FastPathTransportMissReason::UnsupportedRequest);
   }
   if upstream_version != HttpVersion::H1
     || upstream.origin.scheme() != "http"
     || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
   {
-    return Some("unsupported_upstream");
+    return Some(FastPathTransportMissReason::UnsupportedUpstream);
   }
   if !request_body_proven_empty || !outbound.body().is_end_stream() {
-    return Some("request_body");
+    return Some(FastPathTransportMissReason::RequestBody);
   }
   None
 }
@@ -405,7 +423,7 @@ fn direct_h1_guard_miss(
 async fn send_prepared_request(
   pool: Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
   timing_enabled: bool,
@@ -424,13 +442,17 @@ async fn send_prepared_request(
   record_stale_direct_h1_senders(metrics, reused_sender.stale_pruned);
   let reused = reused_sender.sender.is_some();
   if reused {
-    metrics.record_direct_h1_pool_event("hit");
+    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Hit);
   } else {
-    metrics.record_direct_h1_pool_event("miss");
+    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Miss);
     match reused_sender.miss_reason {
       DirectH1TakeMissReason::None => {}
-      DirectH1TakeMissReason::Empty => metrics.record_direct_h1_pool_event("miss_empty"),
-      DirectH1TakeMissReason::Locked => metrics.record_direct_h1_pool_event("miss_locked"),
+      DirectH1TakeMissReason::Empty => {
+        metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissEmpty);
+      }
+      DirectH1TakeMissReason::Locked => {
+        metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissLocked);
+      }
     }
   }
   let mut sender = match reused_sender.sender {
@@ -456,7 +478,7 @@ async fn send_prepared_request(
     Ok(Ok(response)) => response,
     Ok(Err(error)) if reused => {
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
-      metrics.record_direct_h1_pool_event("reconnect");
+      metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
       sender = connect_sender(&pool, metrics, protocol, timing_enabled).await?;
       let retry = retry
         .take()
@@ -494,14 +516,14 @@ async fn send_prepared_request(
 
 fn record_stale_direct_h1_senders(metrics: &Metrics, stale_pruned: usize) {
   for _ in 0..stale_pruned {
-    metrics.record_direct_h1_pool_event("stale");
+    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Stale);
   }
 }
 
 async fn connect_sender(
   pool: &Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
-  protocol: &'static str,
+  protocol: FastPathMetricProtocol,
   timing_enabled: bool,
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
   let connect_started = timing::start(timing_enabled);
@@ -550,8 +572,8 @@ async fn connect_sender_inner(
 
 fn record_direct_h1_stage(
   metrics: &Metrics,
-  protocol: &'static str,
-  stage: &'static str,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
   success: bool,
   started_at: Option<Instant>,
 ) {
@@ -564,7 +586,7 @@ fn record_direct_h1_stage(
     timing::OUTCOME_ERROR
   };
   let duration_ns = started_at.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-  metrics.record_fast_path_stage_duration_ns(
+  metrics.record_fast_path_stage_duration_ns_id(
     timing::PATH_PLAIN_PROXY,
     protocol,
     stage,
@@ -667,12 +689,12 @@ fn connection_header_contains(headers: &HeaderMap, token: &str) -> bool {
   })
 }
 
-fn fast_path_metric_protocol(version: http::Version) -> &'static str {
+fn fast_path_metric_protocol(version: http::Version) -> FastPathMetricProtocol {
   match version {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
-    http::Version::HTTP_2 => "h2",
-    http::Version::HTTP_3 => "h3",
-    _ => "other",
+    http::Version::HTTP_10 | http::Version::HTTP_11 => FastPathMetricProtocol::H1,
+    http::Version::HTTP_2 => FastPathMetricProtocol::H2,
+    http::Version::HTTP_3 => FastPathMetricProtocol::H3,
+    _ => FastPathMetricProtocol::Other,
   }
 }
 
