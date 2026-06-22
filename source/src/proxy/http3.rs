@@ -9,10 +9,9 @@ use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use h3::ext::Protocol;
 use http_body_util::BodyExt;
-use hyper::body::Body as _;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -21,10 +20,7 @@ use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{
-  CompiledKnownSmallNoopResponse, InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES,
-  KnownSmallResponseBody, ProxyBody,
-};
+use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::stage_timing as timing;
 use crate::proxy::http::response::text_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
@@ -39,12 +35,21 @@ type H3RequestRecvStream =
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
+mod fast_response;
 mod request_body;
 mod request_tasks;
 mod response_body;
 #[cfg(test)]
 mod tests;
 mod webtransport_bridge;
+
+#[cfg(test)]
+use crate::proxy::http::body::{InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES};
+#[cfg(test)]
+use fast_response::{
+  H3KnownSmallBodyPlan, collect_h3_known_small_body, take_h3_known_small_body_plan,
+  use_h3_known_small_body_path,
+};
 
 #[derive(Clone)]
 pub(super) struct H3DownstreamRequestContext {
@@ -359,6 +364,14 @@ pub(crate) async fn handle_downstream_connection(
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
+  let downstream_request_context = H3DownstreamRequestContext {
+    peer_addr,
+    udp_connection_id: udp_connection_id.clone(),
+    tls_metadata: tls_metadata.clone(),
+    connection_limit_context: connection_limit_context.clone(),
+    state: snapshot.clone(),
+    drain: drain.clone(),
+  };
   let mut h3_connection = h3::server::builder()
     .enable_extended_connect(true)
     .enable_datagram(true)
@@ -463,15 +476,12 @@ pub(crate) async fn handle_downstream_connection(
       permit
     };
 
-    let context = H3DownstreamRequestContext {
-      peer_addr,
-      udp_connection_id: udp_connection_id.clone(),
-      tls_metadata: tls_metadata.clone(),
-      connection_limit_context: connection_limit_context.clone(),
-      state: snapshot.clone(),
-      drain: drain.clone(),
-    };
-    request_tasks.spawn(request, stream, context, request_task_permit);
+    request_tasks.spawn(
+      request,
+      stream,
+      downstream_request_context.clone(),
+      request_task_permit,
+    );
   }
 }
 
@@ -668,270 +678,13 @@ async fn handle_h3_request(
 }
 
 pub(crate) async fn respond_to_h3_request<S>(
-  mut stream: h3::server::RequestStream<S, Bytes>,
+  stream: h3::server::RequestStream<S, Bytes>,
   response: Response<ProxyBody>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
 {
-  let response_send_timeout = http_proxy::downstream_response_send_timeout(&response);
-  let (parts, mut body) = response.into_parts();
-  let mut parts = parts;
-  if let Some(interim) = parts
-    .extensions
-    .remove::<crate::proxy::http::semantics::InterimResponses>()
-  {
-    for response in interim.responses {
-      let head = Response::builder()
-        .status(response.status)
-        .body(())
-        .context("failed to build downstream HTTP/3 interim response")?;
-      let (mut interim_parts, _) = head.into_parts();
-      interim_parts.headers = response.headers;
-      stream
-        .send_response(Response::from_parts(interim_parts, ()))
-        .await
-        .context("failed to send downstream HTTP/3 interim response")?;
-    }
-  }
-  let known_small_body_plan = take_h3_known_small_body_plan(&mut parts.extensions);
-  let use_known_small_response_body = matches!(known_small_body_plan, H3KnownSmallBodyPlan::None)
-    && use_h3_known_small_body_path(
-      parts.extensions.get::<KnownSmallResponseBody>().is_some(),
-      &body,
-    );
-  let head = Response::from_parts(parts, ());
-  stream
-    .send_response(head)
-    .await
-    .context("failed to send downstream HTTP/3 response headers")?;
-
-  match known_small_body_plan {
-    H3KnownSmallBodyPlan::CompiledNoopNoTrailers(data) => {
-      return respond_to_h3_compiled_known_small_no_trailers(stream, data, response_send_timeout)
-        .await;
-    }
-    H3KnownSmallBodyPlan::Inlined(inlined) => {
-      return respond_to_h3_inlined_known_small_body(stream, inlined, response_send_timeout).await;
-    }
-    H3KnownSmallBodyPlan::None => {}
-  }
-
-  if use_known_small_response_body {
-    return respond_to_h3_known_small_body(stream, body, response_send_timeout).await;
-  }
-
-  while let Some(frame) = body.frame().await {
-    let frame = frame.map_err(|error| {
-      anyhow::anyhow!("failed to read downstream HTTP/3 response body: {error}")
-    })?;
-    match frame.into_data() {
-      Ok(data) => {
-        maybe_timeout(response_send_timeout, stream.send_data(data))
-          .await
-          .context("failed to send downstream HTTP/3 response data")?;
-      }
-      Err(frame) => {
-        if let Ok(trailers) = frame.into_trailers() {
-          maybe_timeout(response_send_timeout, stream.send_trailers(trailers))
-            .await
-            .context("failed to send downstream HTTP/3 response trailers")?;
-        }
-      }
-    }
-  }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
-
-  Ok(())
-}
-
-fn use_h3_known_small_body_path(marked_known_small: bool, body: &ProxyBody) -> bool {
-  marked_known_small
-    && body
-      .size_hint()
-      .upper()
-      .is_some_and(|upper| upper <= KNOWN_SMALL_BODY_MAX_BYTES as u64)
-}
-
-#[derive(Debug)]
-enum H3KnownSmallBodyPlan {
-  CompiledNoopNoTrailers(Bytes),
-  Inlined(InlinedKnownSmallResponseBody),
-  None,
-}
-
-fn take_h3_known_small_body_plan(extensions: &mut http::Extensions) -> H3KnownSmallBodyPlan {
-  let compiled_noop = extensions
-    .remove::<CompiledKnownSmallNoopResponse>()
-    .is_some();
-  let Some(inlined) = extensions.remove::<InlinedKnownSmallResponseBody>() else {
-    return H3KnownSmallBodyPlan::None;
-  };
-
-  if compiled_noop && inlined.trailers.is_none() {
-    return H3KnownSmallBodyPlan::CompiledNoopNoTrailers(inlined.data);
-  }
-
-  H3KnownSmallBodyPlan::Inlined(inlined)
-}
-
-async fn respond_to_h3_compiled_known_small_no_trailers<S>(
-  mut stream: h3::server::RequestStream<S, Bytes>,
-  data: Bytes,
-  response_send_timeout: Option<Duration>,
-) -> anyhow::Result<()>
-where
-  S: h3::quic::SendStream<Bytes>,
-{
-  if data.len() > KNOWN_SMALL_BODY_MAX_BYTES {
-    anyhow::bail!(
-      "downstream HTTP/3 compiled known-small response body exceeded {} bytes",
-      KNOWN_SMALL_BODY_MAX_BYTES
-    );
-  }
-  if !data.is_empty() {
-    maybe_timeout(response_send_timeout, stream.send_data(data))
-      .await
-      .context("failed to send downstream HTTP/3 response data")?;
-  }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
-  Ok(())
-}
-
-async fn respond_to_h3_known_small_body<S>(
-  mut stream: h3::server::RequestStream<S, Bytes>,
-  body: ProxyBody,
-  response_send_timeout: Option<Duration>,
-) -> anyhow::Result<()>
-where
-  S: h3::quic::SendStream<Bytes>,
-{
-  let collected = collect_h3_known_small_body(body).await?;
-  let trailers = collected.trailers;
-  let data = collected.data;
-  if !data.is_empty() {
-    maybe_timeout(response_send_timeout, stream.send_data(data))
-      .await
-      .context("failed to send downstream HTTP/3 response data")?;
-  }
-  if let Some(trailers) = trailers {
-    maybe_timeout(response_send_timeout, stream.send_trailers(trailers))
-      .await
-      .context("failed to send downstream HTTP/3 response trailers")?;
-  }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
-  Ok(())
-}
-
-async fn respond_to_h3_inlined_known_small_body<S>(
-  mut stream: h3::server::RequestStream<S, Bytes>,
-  inlined: InlinedKnownSmallResponseBody,
-  response_send_timeout: Option<Duration>,
-) -> anyhow::Result<()>
-where
-  S: h3::quic::SendStream<Bytes>,
-{
-  let (data, trailers) = inlined.into_parts();
-  if data.len() > KNOWN_SMALL_BODY_MAX_BYTES {
-    anyhow::bail!(
-      "downstream HTTP/3 inlined known-small response body exceeded {} bytes",
-      KNOWN_SMALL_BODY_MAX_BYTES
-    );
-  }
-  if !data.is_empty() {
-    maybe_timeout(response_send_timeout, stream.send_data(data))
-      .await
-      .context("failed to send downstream HTTP/3 response data")?;
-  }
-  if let Some(trailers) = trailers {
-    maybe_timeout(response_send_timeout, stream.send_trailers(trailers))
-      .await
-      .context("failed to send downstream HTTP/3 response trailers")?;
-  }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
-  Ok(())
-}
-
-#[derive(Debug)]
-struct H3KnownSmallBody {
-  data: Bytes,
-  trailers: Option<http::HeaderMap>,
-}
-
-async fn collect_h3_known_small_body(mut body: ProxyBody) -> anyhow::Result<H3KnownSmallBody> {
-  let mut first_chunk = None;
-  let mut buffered = BytesMut::new();
-  let mut total = 0usize;
-  let mut trailers = None;
-
-  while let Some(frame) = body.frame().await {
-    let frame = frame.map_err(|error| {
-      anyhow::anyhow!("failed to read downstream HTTP/3 response body: {error}")
-    })?;
-    match frame.into_data() {
-      Ok(data) => {
-        if data.is_empty() {
-          continue;
-        }
-        total = total
-          .checked_add(data.len())
-          .context("downstream HTTP/3 known-small response body length overflow")?;
-        if total > KNOWN_SMALL_BODY_MAX_BYTES {
-          anyhow::bail!(
-            "downstream HTTP/3 known-small response body exceeded {} bytes",
-            KNOWN_SMALL_BODY_MAX_BYTES
-          );
-        }
-        if first_chunk.is_none() && buffered.is_empty() {
-          first_chunk = Some(data);
-        } else {
-          if let Some(first) = first_chunk.take() {
-            buffered.reserve(total);
-            buffered.extend_from_slice(&first);
-          }
-          buffered.extend_from_slice(&data);
-        }
-      }
-      Err(frame) => {
-        if let Ok(frame_trailers) = frame.into_trailers() {
-          trailers = Some(frame_trailers);
-          break;
-        }
-      }
-    }
-  }
-
-  let data = if let Some(chunk) = first_chunk {
-    chunk
-  } else if buffered.is_empty() {
-    Bytes::new()
-  } else {
-    buffered.freeze()
-  };
-
-  Ok(H3KnownSmallBody { data, trailers })
-}
-
-async fn maybe_timeout<F, T, E>(timeout: Option<Duration>, future: F) -> anyhow::Result<T>
-where
-  F: std::future::Future<Output = Result<T, E>>,
-  E: std::error::Error + Send + Sync + 'static,
-{
-  match timeout {
-    Some(timeout) => tokio::time::timeout(timeout, future)
-      .await
-      .context("downstream HTTP/3 response send timed out")?
-      .map_err(Into::into),
-    None => future.await.map_err(Into::into),
-  }
+  fast_response::respond_to_h3_request(stream, response).await
 }
 
 async fn connect_upstream_webtransport(
