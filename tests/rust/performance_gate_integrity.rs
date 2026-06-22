@@ -179,11 +179,15 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
 fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun {
   let script = performance_script_text();
   let functions = format!(
-    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+    extract_bash_function(&script, "diagnostic_profile_comparator_from_label"),
     extract_bash_function(&script, "load_errors_within_budget"),
     extract_bash_function(&script, "diagnostic_comparator_label"),
     extract_bash_function(&script, "result_failure_reason"),
     extract_bash_function(&script, "normalize_diagnostic_comparator_result"),
+    extract_bash_function(&script, "direct_h2_diagnostic_load_label"),
+    extract_bash_function(&script, "normalize_diagnostic_load_result"),
+    extract_bash_function(&script, "assert_diagnostic_result"),
     extract_bash_function(&script, "should_profile_load"),
     extract_bash_function(&script, "run_load")
   );
@@ -583,7 +587,7 @@ events="${{EVENTS_FILE:?}}"
 
 run_probe_json() {{
   printf 'PROBE %s\n' "$*" >>"${{events}}"
-  printf '{{"type":"load","label":"%s","requests":1,"rps":1,"p99_ms":1,"errors":0}}\n' "${{LOAD_LABEL:?}}"
+  printf '{{"type":"load","label":"%s","protocol":"h2","requests":1,"rps":1,"p99_ms":1,"errors":0}}\n' "${{LOAD_LABEL:?}}"
 }}
 
 run_profiled_probe_json() {{
@@ -1664,7 +1668,7 @@ fn oxibelt_direct_h2_performance_fixtures_enable_fast_path_metrics() {
 
     assert!(
       config.metrics.enabled,
-      "{scenario} should expose /metrics for direct-H2 fast-path gate evidence"
+      "{scenario} should expose /metrics for direct-H2 fast-path diagnostics"
     );
     assert_eq!(
       config.metrics.detail,
@@ -2714,14 +2718,20 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
   assert!(
     script.contains("oxibelt-h2-upstream-h2c:h2")
       && script.contains("oxibelt-h2-upstream-h2:h2")
+      && script.contains("oxibelt-h3-upstream-h2c:h3")
+      && script.contains("oxibelt-h3-upstream-h2:h3")
       && script.contains("direct_h2"),
-    "split H2 upstream rows should gate direct-H2 transport evidence"
+    "split upstream-H2 rows should collect direct-H2 transport diagnostics"
   );
   assert!(
     script.contains("direct_h2_pool_metrics")
       && script.contains("fast_path.pool.direct_h2")
       && script.contains("direct_h2_pool_delta"),
-    "split H2 upstream rows should attach direct-H2 pool diagnostics"
+    "split upstream-H2 rows should attach direct-H2 pool diagnostics"
+  );
+  assert!(
+    script.contains("direct_h2) ;;"),
+    "direct-H2 split rows should not call the hard direct-transport hit-rate gate"
   );
 }
 

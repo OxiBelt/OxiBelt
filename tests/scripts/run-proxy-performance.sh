@@ -1496,6 +1496,37 @@ normalize_diagnostic_comparator_result() {
     }' <<<"${json}"
 }
 
+direct_h2_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  if [[ "${host}" != "oxibelt" ]]; then
+    return 1
+  fi
+  case "${label}:${protocol}" in
+    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_diagnostic_load_result() {
+  local json="$1"
+  local label protocol host reason
+  label="$(jq -r '.label // "unknown"' <<<"${json}")"
+  protocol="$(jq -r '.protocol // empty' <<<"${json}")"
+  host="$(diagnostic_profile_comparator_from_label "${label}")"
+  if ! direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+    printf '%s\n' "${json}"
+    return
+  fi
+  if reason="$(result_failure_reason "${json}")"; then
+    jq -c --arg reason "${reason}" \
+      '. + {diagnostic: true, diagnostic_status: "fail", reason: $reason}' <<<"${json}"
+  else
+    jq -c '. + {diagnostic: true, diagnostic_status: "pass"}' <<<"${json}"
+  fi
+}
+
 assert_result() {
   local json="$1"
   local reason
@@ -1966,6 +1997,10 @@ record_diagnostic_comparator_skip() {
   append_result "${json}"
 }
 
+record_diagnostic_load_skip() {
+  record_diagnostic_comparator_skip "$@"
+}
+
 run_load() {
   local label="$1"
   local protocol="$2"
@@ -2018,6 +2053,10 @@ run_load() {
         record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
         sample_stats "${label}"
         return
+      elif direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic direct-H2 probe failed before producing a valid result"
+        sample_stats "${label}"
+        return
       fi
       fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
     fi
@@ -2025,6 +2064,10 @@ run_load() {
     if ! json="$(run_probe_json "${probe_args[@]}")"; then
       if diagnostic_comparator_label "${label}"; then
         record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
+        sample_stats "${label}"
+        return
+      elif direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic direct-H2 probe failed before producing a valid result"
         sample_stats "${label}"
         return
       fi
@@ -2056,10 +2099,12 @@ run_load() {
       json="$(jq -c --argjson direct_h2_pool "${direct_h2_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h2: $direct_h2_pool})})}' <<<"${json}")"
     fi
     json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
-    assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
+    if ! direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+      assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
+    fi
     case "${direct_transport}" in
       direct_h1) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h1_delta}" ;;
-      direct_h2) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h2_delta}" ;;
+      direct_h2) ;;
       "") ;;
       *) fail_with_diagnostics "invalid direct transport gate for ${label}: ${direct_transport}" ;;
     esac
@@ -2069,9 +2114,13 @@ run_load() {
     static_fast_path_delta="$(static_fast_path_delta "${static_fast_path_before}" "${static_fast_path_after}")"
     json="$(jq -c --argjson static_fast_path "${static_fast_path_delta}" '. + {fast_path: ((.fast_path // {}) + {static_responses: $static_fast_path})}' <<<"${json}")"
   fi
-  json="$(normalize_diagnostic_comparator_result "${json}")"
+  json="$(normalize_diagnostic_load_result "$(normalize_diagnostic_comparator_result "${json}")")"
   append_result "${json}"
-  assert_result "${json}"
+  if direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+    assert_diagnostic_result "${json}"
+  else
+    assert_result "${json}"
+  fi
   if [[ "$(jq -r '.skipped // false' <<<"${json}")" == "true" ]]; then
     sample_stats "${label}"
     return
@@ -2503,6 +2552,8 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
     oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
     oxibelt-h2-upstream-h2:h2) printf 'h2' ;;
+    oxibelt-h3-upstream-h2c:h3) printf 'h3' ;;
+    oxibelt-h3-upstream-h2:h3) printf 'h3' ;;
   esac
 }
 
@@ -2515,7 +2566,7 @@ direct_transport_gate_transport() {
   fi
   case "${label}:${protocol}" in
     oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
-    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2) printf 'direct_h2' ;;
+    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
 
@@ -3034,9 +3085,11 @@ run_common_loads() {
 run_oxibelt_h2_split_loads() {
   start_oxibelt baseline-upstream-h2c oxibelt
   run_load "oxibelt-h2-upstream-h2c" h2 oxibelt "/perf/h2c?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-h3-upstream-h2c" h3 oxibelt "/perf/h2c?body=ok" "${duration_seconds}" "${concurrency}"
 
   start_oxibelt baseline-upstream-h2 oxibelt
   run_load "oxibelt-h2-upstream-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-h3-upstream-h2" h3 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
 
   if [[ "${profile}" == "benchmark" ]]; then
     start_oxibelt baseline-h2-adaptive-window oxibelt

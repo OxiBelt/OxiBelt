@@ -322,17 +322,19 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
   row
 }
 
-fn pool_concurrency_row(
-  label: &str,
-  protocol: &str,
+struct PoolConcurrencyRowInput<'a> {
+  label: &'a str,
+  protocol: &'a str,
   rps: f64,
   p99_ms: f64,
   pool_hit: u64,
   pool_miss: u64,
   transport_ns: u64,
   downstream_ns: u64,
-) -> Value {
-  let mut row = load_row(label, protocol, rps, 1.0, p99_ms);
+}
+
+fn pool_concurrency_row(input: PoolConcurrencyRowInput<'_>) -> Value {
+  let mut row = load_row(input.label, input.protocol, input.rps, 1.0, input.p99_ms);
   let mut protocol_stage_timing = json!({
       "direct_h1_pool_take": {
           "ok": {
@@ -365,12 +367,12 @@ fn pool_concurrency_row(
       "transport_direct_h1": {
           "ok": {
               "count": 4,
-              "total_ns": transport_ns * 4,
-              "avg_ns": transport_ns as f64
+              "total_ns": input.transport_ns * 4,
+              "avg_ns": input.transport_ns as f64
           }
       }
   });
-  let stage_timing = if protocol == "h2" {
+  let stage_timing = if input.protocol == "h2" {
     protocol_stage_timing
       .as_object_mut()
       .expect("stage timing should be an object")
@@ -379,8 +381,8 @@ fn pool_concurrency_row(
         json!({
             "ok": {
                 "count": 4,
-                "total_ns": downstream_ns * 4,
-                "avg_ns": downstream_ns as f64
+                "total_ns": input.downstream_ns * 4,
+                "avg_ns": input.downstream_ns as f64
             }
         }),
       );
@@ -399,8 +401,8 @@ fn pool_concurrency_row(
                 "h3_downstream_send": {
                         "ok": {
                             "count": 4,
-                            "total_ns": downstream_ns * 4,
-                            "avg_ns": downstream_ns as f64
+                            "total_ns": input.downstream_ns * 4,
+                            "avg_ns": input.downstream_ns as f64
                         }
                 }
             }
@@ -413,7 +415,7 @@ fn pool_concurrency_row(
       "attempts": 1000,
       "hit_rate": 1.0
   });
-  let protocol_fast_path = if protocol == "h2" {
+  let protocol_fast_path = if input.protocol == "h2" {
     json!({
         "plain_proxy": {
             "h2": protocol_decision.clone()
@@ -446,9 +448,9 @@ fn pool_concurrency_row(
           "transport": protocol_fast_path["transport"].clone(),
           "pool": {
               "direct_h1": {
-                  "hit": pool_hit,
-                  "miss": pool_miss,
-                  "miss_empty": pool_miss,
+                  "hit": input.pool_hit,
+                  "miss": input.pool_miss,
+                  "miss_empty": input.pool_miss,
                   "miss_locked": 0,
                   "reconnect": 0,
                   "stale": 0,
@@ -458,6 +460,87 @@ fn pool_concurrency_row(
               }
           },
           "stage_timing": stage_timing
+      }),
+    );
+  row
+}
+
+fn direct_h2_diagnostic_row(
+  label: &str,
+  protocol: &str,
+  rps: f64,
+  p99_ms: f64,
+  direct_h2_hits: u64,
+  direct_h2_misses: u64,
+) -> Value {
+  let mut row = load_row(label, protocol, rps, 1.0, p99_ms);
+  let attempts = direct_h2_hits + direct_h2_misses;
+  let hit_rate = if attempts == 0 {
+    0.0
+  } else {
+    direct_h2_hits as f64 / attempts as f64
+  };
+  let fast_path = if protocol == "h2" {
+    json!({
+        "plain_proxy": {
+            "h2": {
+                "hits": 1000,
+                "misses": 0,
+                "attempts": 1000,
+                "hit_rate": 1.0
+            }
+        },
+        "transport": {
+            "direct_h2": {
+                "h2": {
+                    "hits": direct_h2_hits,
+                    "misses": direct_h2_misses,
+                    "attempts": attempts,
+                    "hit_rate": hit_rate
+                }
+            }
+        }
+    })
+  } else {
+    json!({
+        "plain_proxy": {
+            "h3": {
+                "hits": 1000,
+                "misses": 0,
+                "attempts": 1000,
+                "hit_rate": 1.0
+            }
+        },
+        "transport": {
+            "direct_h2": {
+                "h3": {
+                    "hits": direct_h2_hits,
+                    "misses": direct_h2_misses,
+                    "attempts": attempts,
+                    "hit_rate": hit_rate
+                }
+            }
+        }
+    })
+  };
+  row
+    .as_object_mut()
+    .expect("load row should be an object")
+    .insert(
+      "fast_path".to_owned(),
+      json!({
+          "plain_proxy": fast_path["plain_proxy"].clone(),
+          "transport": fast_path["transport"].clone(),
+          "pool": {
+              "direct_h2": {
+                  "hit": direct_h2_hits,
+                  "miss": direct_h2_misses,
+                  "miss_saturated": direct_h2_misses,
+                  "connect": 2,
+                  "connect_error": 1,
+                  "reconnect": 3
+              }
+          }
       }),
     );
   row
@@ -981,6 +1064,21 @@ fn find_pool_concurrency_experiment<'a>(
     })
 }
 
+fn find_direct_h2_promotion_evidence<'a>(
+  report: &'a Value,
+  protocol: &str,
+  upstream_variant: &str,
+) -> &'a Value {
+  report["direct_h2_promotion_evidence"]
+    .as_array()
+    .expect("direct-H2 promotion evidence should be an array")
+    .iter()
+    .find(|row| row["protocol"] == protocol && row["upstream_variant"] == upstream_variant)
+    .unwrap_or_else(|| {
+      panic!("missing direct-H2 promotion evidence for {protocol}/{upstream_variant}")
+    })
+}
+
 fn find_delta<'a>(report: &'a Value, group: &str, scenario: &str, comparator: &str) -> &'a Value {
   report["rows"]
     .as_array()
@@ -1207,7 +1305,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 23);
+  assert_eq!(report["schema_version"], 24);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1442,46 +1540,46 @@ fn pool_concurrency_experiments_record_control_and_nginx_ratios() {
   write_results_array(
     &input_dir.join("oxibelt-docker-performance-smoke-pool-concurrency-shard-1/run-1"),
     vec![
-      pool_concurrency_row(
-        "oxibelt-pool128-conc64-h2",
-        "h2",
-        1000.0,
-        10.0,
-        990,
-        10,
-        600,
-        40,
-      ),
-      pool_concurrency_row(
-        "oxibelt-pool256-conc64-h2",
-        "h2",
-        1100.0,
-        9.0,
-        995,
-        5,
-        540,
-        35,
-      ),
-      pool_concurrency_row(
-        "oxibelt-pool128-conc64-h3",
-        "h3",
-        800.0,
-        12.0,
-        792,
-        8,
-        700,
-        60,
-      ),
-      pool_concurrency_row(
-        "oxibelt-pool512-conc64-h3",
-        "h3",
-        880.0,
-        11.0,
-        798,
-        2,
-        640,
-        55,
-      ),
+      pool_concurrency_row(PoolConcurrencyRowInput {
+        label: "oxibelt-pool128-conc64-h2",
+        protocol: "h2",
+        rps: 1000.0,
+        p99_ms: 10.0,
+        pool_hit: 990,
+        pool_miss: 10,
+        transport_ns: 600,
+        downstream_ns: 40,
+      }),
+      pool_concurrency_row(PoolConcurrencyRowInput {
+        label: "oxibelt-pool256-conc64-h2",
+        protocol: "h2",
+        rps: 1100.0,
+        p99_ms: 9.0,
+        pool_hit: 995,
+        pool_miss: 5,
+        transport_ns: 540,
+        downstream_ns: 35,
+      }),
+      pool_concurrency_row(PoolConcurrencyRowInput {
+        label: "oxibelt-pool128-conc64-h3",
+        protocol: "h3",
+        rps: 800.0,
+        p99_ms: 12.0,
+        pool_hit: 792,
+        pool_miss: 8,
+        transport_ns: 700,
+        downstream_ns: 60,
+      }),
+      pool_concurrency_row(PoolConcurrencyRowInput {
+        label: "oxibelt-pool512-conc64-h3",
+        protocol: "h3",
+        rps: 880.0,
+        p99_ms: 11.0,
+        pool_hit: 798,
+        pool_miss: 2,
+        transport_ns: 640,
+        downstream_ns: 55,
+      }),
     ],
   );
   write_results_array(
@@ -1559,6 +1657,76 @@ fn pool_concurrency_experiments_record_control_and_nginx_ratios() {
 }
 
 #[test]
+fn direct_h2_diagnostics_record_promotion_evidence_without_blocking_gates() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+    vec![
+      load_row("oxibelt-h2", "h2", 1000.0, 1.0, 10.0),
+      load_row("nginx-h2", "h2", 1200.0, 1.0, 9.0),
+      load_row("oxibelt-h3", "h3", 900.0, 1.0, 12.0),
+      load_row("nginx-h3", "h3", 1100.0, 1.0, 11.0),
+      direct_h2_diagnostic_row("oxibelt-h2-upstream-h2", "h2", 1100.0, 8.0, 995, 5),
+      direct_h2_diagnostic_row("oxibelt-h3-upstream-h2", "h3", 850.0, 13.0, 995, 5),
+    ],
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let h2_evidence = find_direct_h2_promotion_evidence(&report, "h2", "h2");
+  assert_eq!(h2_evidence["diagnostic_scenario"], "h2-upstream-h2");
+  assert_eq!(h2_evidence["status"], "eligible");
+  assert_close(
+    h2_evidence["rps_ratio_vs_upstream_h1"]
+      .as_f64()
+      .expect("H2 direct-H2 promotion RPS ratio should exist"),
+    1.1,
+  );
+  assert_close(
+    h2_evidence["p99_ratio_vs_upstream_h1"]
+      .as_f64()
+      .expect("H2 direct-H2 promotion p99 ratio should exist"),
+    0.8,
+  );
+  assert_eq!(h2_evidence["direct_h2_pool_miss_saturated"], 5);
+
+  let h3_evidence = find_direct_h2_promotion_evidence(&report, "h3", "h2");
+  assert_eq!(h3_evidence["diagnostic_scenario"], "h3-upstream-h2");
+  assert_eq!(h3_evidence["status"], "not_eligible");
+  assert!(
+    h3_evidence["reason"]
+      .as_str()
+      .expect("H3 direct-H2 reason should exist")
+      .contains("RPS ratio")
+  );
+
+  assert!(
+    !report["regression_gates"]["violations"]
+      .as_array()
+      .expect("violations should be an array")
+      .iter()
+      .any(|violation| violation["gate"] == "direct_h2_diagnostic_min_hit_rate"),
+    "direct-H2 diagnostics should not create blocking gate violations"
+  );
+  assert!(
+    !report["regression_gates"]["advisories"]
+      .as_array()
+      .expect("advisories should be an array")
+      .iter()
+      .any(|advisory| advisory["gate"] == "direct_h2_diagnostic_min_hit_rate"),
+    "passing direct-H2 diagnostic hit rates should not create advisories"
+  );
+
+  let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+    .expect("markdown report should be readable");
+  assert!(markdown.contains("## Direct-H2 promotion evidence"));
+  assert!(markdown.contains("| `h2` | `h2` | `h2-upstream-h2`"));
+  assert!(markdown.contains("| `h3` | `h2` | `h3-upstream-h2`"));
+}
+
+#[test]
 fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
   let temp_dir = TempDir::new();
   let input_dir = temp_dir.path().join("input");
@@ -1578,7 +1746,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 23);
+  assert_eq!(report["schema_version"], 24);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 23;
+const COMPARISON_SCHEMA_VERSION: u32 = 24;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -661,6 +661,32 @@ struct PoolConcurrencyExperiment {
   downstream_response_median_avg_ns: Option<f64>,
 }
 
+#[derive(Clone, Serialize)]
+struct DirectH2PromotionEvidence {
+  amd64_target_cpu: String,
+  protocol: String,
+  upstream_variant: String,
+  primary_scenario: String,
+  diagnostic_scenario: String,
+  sample_count: usize,
+  shard_count: usize,
+  primary_median_rps: Option<f64>,
+  diagnostic_median_rps: Option<f64>,
+  rps_ratio_vs_upstream_h1: Option<f64>,
+  primary_median_p99_ms: Option<f64>,
+  diagnostic_median_p99_ms: Option<f64>,
+  p99_ratio_vs_upstream_h1: Option<f64>,
+  direct_h2_min_hit_rate: Option<f64>,
+  direct_h2_pool_hit: u64,
+  direct_h2_pool_miss: u64,
+  direct_h2_pool_miss_saturated: u64,
+  direct_h2_pool_connect: u64,
+  direct_h2_pool_connect_error: u64,
+  direct_h2_pool_reconnect: u64,
+  status: String,
+  reason: String,
+}
+
 #[derive(Serialize)]
 struct RatioSummary {
   scenario_count: usize,
@@ -785,6 +811,15 @@ impl GateDisposition {
 
   fn evidence_blocking(reason: impl Into<String>) -> Self {
     Self::Blocking {
+      reason: reason.into(),
+      evaluation_mode: "evidence".to_owned(),
+      stat_band: None,
+      baseline_source: None,
+    }
+  }
+
+  fn evidence_advisory(reason: impl Into<String>) -> Self {
+    Self::Advisory {
       reason: reason.into(),
       evaluation_mode: "evidence".to_owned(),
       stat_band: None,
@@ -1058,6 +1093,7 @@ struct Report {
   accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
   remote_signer_comparisons: Vec<RemoteSignerComparison>,
   pool_concurrency_experiments: Vec<PoolConcurrencyExperiment>,
+  direct_h2_promotion_evidence: Vec<DirectH2PromotionEvidence>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
   external_benchmarks: Vec<ExternalBenchmarkStats>,
   profiling: Vec<DiagnosticProfileStats>,
@@ -1942,6 +1978,12 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
   let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
   let remote_signer_comparisons = build_remote_signer_comparisons(&aggregate_map);
   let pool_concurrency_experiments = build_pool_concurrency_experiments(&aggregate_map);
+  let direct_h2_promotion_evidence = build_direct_h2_promotion_evidence(
+    &aggregate_map,
+    &primary_target_cpu,
+    expected_shards,
+    regression_gate_thresholds.h1_fast_path_min_hit_rate,
+  );
   let primary_reverse_proxy = primary_scenario_comparisons(&reverse_proxy, &primary_target_cpu);
   let primary_static_files = primary_scenario_comparisons(&static_files, &primary_target_cpu);
   let primary_accept_multiplier_comparisons =
@@ -2014,6 +2056,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     accept_multiplier_comparisons,
     remote_signer_comparisons,
     pool_concurrency_experiments,
+    direct_h2_promotion_evidence,
     amd64_isa_comparisons,
     external_benchmarks,
     profiling,
@@ -4171,6 +4214,173 @@ fn pool_concurrency_scenario_parts(scenario: &str) -> Option<(u64, u64, &str)> {
   Some((pool_cap.parse().ok()?, concurrency.parse().ok()?, protocol))
 }
 
+fn build_direct_h2_promotion_evidence(
+  aggregates: &AggregateMap,
+  primary_target_cpu: &str,
+  expected_shards: Option<usize>,
+  min_hit_rate: f64,
+) -> Vec<DirectH2PromotionEvidence> {
+  let required_shards =
+    expected_shards.map(|shards| ((shards as f64) * QUORUM_SHARD_PERCENT).ceil() as usize);
+  let scenarios = [
+    ("h2", "h2c", "h2", "h2-upstream-h2c"),
+    ("h2", "h2", "h2", "h2-upstream-h2"),
+    ("h3", "h2c", "h3", "h3-upstream-h2c"),
+    ("h3", "h2", "h3", "h3-upstream-h2"),
+  ];
+
+  let mut rows = Vec::new();
+  for (protocol, upstream_variant, primary_scenario, diagnostic_scenario) in scenarios {
+    let Some(diagnostic) = aggregates.get(&(
+      primary_target_cpu.to_owned(),
+      Comparator::Oxibelt,
+      diagnostic_scenario.to_owned(),
+    )) else {
+      continue;
+    };
+    let primary = aggregates.get(&(
+      primary_target_cpu.to_owned(),
+      Comparator::Oxibelt,
+      primary_scenario.to_owned(),
+    ));
+    let transport = direct_h2_transport_stats(diagnostic, protocol);
+    let pool = diagnostic
+      .fast_path
+      .as_ref()
+      .and_then(|fast_path| fast_path.direct_h2_pool.as_ref());
+    let shard_count = aggregate_shard_count(diagnostic);
+    let direct_h2_min_hit_rate = transport.and_then(|stats| stats.min_hit_rate);
+    let rps_ratio_vs_upstream_h1 =
+      primary.and_then(|primary| ratio(diagnostic.median_rps, primary.median_rps));
+    let p99_ratio_vs_upstream_h1 =
+      primary.and_then(|primary| ratio(diagnostic.median_p99_ms, primary.median_p99_ms));
+    let (status, reason) = direct_h2_promotion_status(
+      primary,
+      diagnostic,
+      required_shards,
+      direct_h2_min_hit_rate,
+      min_hit_rate,
+      rps_ratio_vs_upstream_h1,
+      p99_ratio_vs_upstream_h1,
+    );
+
+    rows.push(DirectH2PromotionEvidence {
+      amd64_target_cpu: primary_target_cpu.to_owned(),
+      protocol: protocol.to_owned(),
+      upstream_variant: upstream_variant.to_owned(),
+      primary_scenario: primary_scenario.to_owned(),
+      diagnostic_scenario: diagnostic_scenario.to_owned(),
+      sample_count: diagnostic.sample_count,
+      shard_count,
+      primary_median_rps: primary.and_then(|primary| primary.median_rps),
+      diagnostic_median_rps: diagnostic.median_rps,
+      rps_ratio_vs_upstream_h1,
+      primary_median_p99_ms: primary.and_then(|primary| primary.median_p99_ms),
+      diagnostic_median_p99_ms: diagnostic.median_p99_ms,
+      p99_ratio_vs_upstream_h1,
+      direct_h2_min_hit_rate,
+      direct_h2_pool_hit: counter_map_value_optional(pool, "hit"),
+      direct_h2_pool_miss: counter_map_value_optional(pool, "miss"),
+      direct_h2_pool_miss_saturated: counter_map_value_optional(pool, "miss_saturated"),
+      direct_h2_pool_connect: counter_map_value_optional(pool, "connect"),
+      direct_h2_pool_connect_error: counter_map_value_optional(pool, "connect_error"),
+      direct_h2_pool_reconnect: counter_map_value_optional(pool, "reconnect"),
+      status,
+      reason,
+    });
+  }
+
+  rows.sort_by(|left, right| {
+    (&left.protocol, &left.upstream_variant).cmp(&(&right.protocol, &right.upstream_variant))
+  });
+  rows
+}
+
+fn direct_h2_promotion_status(
+  primary: Option<&AggregateStats>,
+  diagnostic: &AggregateStats,
+  required_shards: Option<usize>,
+  direct_h2_min_hit_rate: Option<f64>,
+  min_hit_rate: f64,
+  rps_ratio_vs_upstream_h1: Option<f64>,
+  p99_ratio_vs_upstream_h1: Option<f64>,
+) -> (String, String) {
+  let Some(_primary) = primary else {
+    return (
+      "not_eligible".to_owned(),
+      "matching upstream-H1 primary row is missing".to_owned(),
+    );
+  };
+  if diagnostic.sample_count == 0 {
+    return (
+      "not_eligible".to_owned(),
+      "direct-H2 diagnostic row has zero valid samples".to_owned(),
+    );
+  }
+  if let Some(required) = required_shards {
+    let shard_count = aggregate_shard_count(diagnostic);
+    if shard_count < required {
+      return (
+        "not_eligible".to_owned(),
+        format!("direct-H2 diagnostic row has {shard_count} valid shards < quorum {required}"),
+      );
+    }
+  }
+  match direct_h2_min_hit_rate {
+    Some(hit_rate) if hit_rate >= min_hit_rate => {}
+    Some(hit_rate) => {
+      return (
+        "not_eligible".to_owned(),
+        format!("direct-H2 transport hit rate {hit_rate:.4} < {min_hit_rate:.4}"),
+      );
+    }
+    None => {
+      return (
+        "not_eligible".to_owned(),
+        "direct-H2 transport hit-rate evidence is missing".to_owned(),
+      );
+    }
+  }
+  let Some(rps_ratio) = rps_ratio_vs_upstream_h1 else {
+    return (
+      "not_eligible".to_owned(),
+      "direct-H2 versus upstream-H1 RPS ratio is unavailable".to_owned(),
+    );
+  };
+  let Some(p99_ratio) = p99_ratio_vs_upstream_h1 else {
+    return (
+      "not_eligible".to_owned(),
+      "direct-H2 versus upstream-H1 p99 ratio is unavailable".to_owned(),
+    );
+  };
+  if rps_ratio > 1.0 && p99_ratio <= 1.0 {
+    (
+      "eligible".to_owned(),
+      "direct-H2 beats upstream-H1 median RPS without median p99 regression".to_owned(),
+    )
+  } else {
+    (
+      "not_eligible".to_owned(),
+      format!(
+        "direct-H2 did not beat upstream-H1 with no p99 regression: RPS ratio {rps_ratio:.4}, p99 ratio {p99_ratio:.4}"
+      ),
+    )
+  }
+}
+
+fn direct_h2_transport_stats<'a>(
+  aggregate: &'a AggregateStats,
+  protocol: &str,
+) -> Option<&'a FastPathAggregateStats> {
+  let fast_path = aggregate.fast_path.as_ref()?;
+  match protocol {
+    "h1" => fast_path.transport_direct_h2_h1.as_ref(),
+    "h2" => fast_path.transport_direct_h2_h2.as_ref(),
+    "h3" => fast_path.transport_direct_h2_h3.as_ref(),
+    _ => None,
+  }
+}
+
 fn direct_h1_pool_counts(aggregate: &AggregateStats) -> (u64, u64, Option<f64>) {
   let Some(pool) = aggregate
     .fast_path
@@ -4769,7 +4979,7 @@ fn build_regression_gate_report(
     thresholds.h1_fast_path_min_hit_rate,
     &mut findings,
   );
-  collect_h2_upstream_direct_h2_regression_gate(
+  collect_direct_h2_diagnostic_advisories(
     aggregates,
     primary_target_cpu,
     thresholds.h1_fast_path_min_hit_rate,
@@ -5383,14 +5593,19 @@ fn collect_h2_fast_path_regression_gate(
   );
 }
 
-fn collect_h2_upstream_direct_h2_regression_gate(
+fn collect_direct_h2_diagnostic_advisories(
   aggregates: &PrimaryAggregateMap,
   primary_target_cpu: &str,
   threshold: f64,
   findings: &mut RegressionGateFindings,
 ) {
-  let gate = "h2_upstream_direct_h2_min_hit_rate";
-  for scenario in ["h2-upstream-h2c", "h2-upstream-h2"] {
+  let gate = "direct_h2_diagnostic_min_hit_rate";
+  for (scenario, protocol, metric_prefix) in [
+    ("h2-upstream-h2c", "H2", "transport_direct_h2_h2"),
+    ("h2-upstream-h2", "H2", "transport_direct_h2_h2"),
+    ("h3-upstream-h2c", "H3", "transport_direct_h2_h3"),
+    ("h3-upstream-h2", "H3", "transport_direct_h2_h3"),
+  ] {
     let Some(aggregate) = aggregates.get(&(Comparator::Oxibelt, scenario.to_owned())) else {
       continue;
     };
@@ -5401,28 +5616,105 @@ fn collect_h2_upstream_direct_h2_regression_gate(
       scenario,
       threshold,
     };
+    let min_hit_rate_metric = format!("{metric_prefix}_min_hit_rate");
     let Some(fast_path) = aggregate.fast_path.as_ref() else {
-      push_missing_regression_gate_metric(
+      push_diagnostic_advisory_metric(
         findings,
         context,
-        "transport_direct_h2_h2_min_hit_rate",
+        &min_hit_rate_metric,
+        None,
         Some("oxibelt"),
-        "missing OxiBelt split H2 upstream direct-H2 transport evidence; cannot evaluate direct-H2 transport hit-rate gate",
+        format!(
+          "missing OxiBelt split {protocol} upstream direct-H2 transport evidence; direct-H2 remains diagnostic"
+        ),
       );
       continue;
     };
-    collect_fast_path_sample_gate(
-      fast_path.transport_direct_h2_h2.as_ref(),
-      FastPathSampleGateInput {
-        context,
-        metric_prefix: "transport_direct_h2_h2",
-        evidence_name: "split H2 upstream direct-H2 transport",
-        missing_message: "missing OxiBelt split H2 upstream direct-H2 transport evidence; cannot evaluate direct-H2 transport hit-rate gate",
-        zero_message: "OxiBelt split H2 upstream direct-H2 transport evidence recorded zero attempts",
-        missing_rate_message: "missing OxiBelt split H2 upstream direct-H2 transport hit-rate value",
-        failure_reason: "minimum split H2 upstream direct-H2 transport evidence must meet the configured threshold",
-      },
+    let sample = match protocol {
+      "H2" => fast_path.transport_direct_h2_h2.as_ref(),
+      "H3" => fast_path.transport_direct_h2_h3.as_ref(),
+      _ => None,
+    };
+    collect_direct_h2_diagnostic_sample(
+      sample,
+      context,
+      metric_prefix,
+      protocol,
+      threshold,
       findings,
+    );
+  }
+}
+
+fn collect_direct_h2_diagnostic_sample(
+  fast_path: Option<&FastPathAggregateStats>,
+  context: RegressionGateContext<'_>,
+  metric_prefix: &str,
+  protocol: &str,
+  threshold: f64,
+  findings: &mut RegressionGateFindings,
+) {
+  let attempts_metric = format!("{metric_prefix}_attempts");
+  let min_hit_rate_metric = format!("{metric_prefix}_min_hit_rate");
+  let Some(fast_path) = fast_path else {
+    push_diagnostic_advisory_metric(
+      findings,
+      context,
+      &min_hit_rate_metric,
+      None,
+      Some("oxibelt"),
+      format!(
+        "missing OxiBelt split {protocol} upstream direct-H2 transport evidence; direct-H2 remains diagnostic"
+      ),
+    );
+    return;
+  };
+  if fast_path.attempts == 0 {
+    push_diagnostic_advisory_metric(
+      findings,
+      context,
+      &attempts_metric,
+      Some(0.0),
+      Some("oxibelt"),
+      format!(
+        "OxiBelt split {protocol} upstream direct-H2 transport evidence recorded zero attempts; direct-H2 remains diagnostic"
+      ),
+    );
+    return;
+  }
+  let Some(min_hit_rate) = fast_path.min_hit_rate else {
+    push_diagnostic_advisory_metric(
+      findings,
+      context,
+      &min_hit_rate_metric,
+      None,
+      Some("oxibelt"),
+      format!(
+        "missing OxiBelt split {protocol} upstream direct-H2 transport hit-rate value; direct-H2 remains diagnostic"
+      ),
+    );
+    return;
+  };
+  if min_hit_rate < threshold {
+    push_threshold_regression_gate_metric(
+      findings,
+      RegressionGateFindingInput {
+        amd64_target_cpu: context.amd64_target_cpu,
+        gate: context.gate,
+        group: context.group,
+        scenario: context.scenario,
+        metric: &min_hit_rate_metric,
+        observed: Some(min_hit_rate),
+        threshold,
+        comparator: None,
+        message: format!(
+          "OxiBelt {} split {protocol} upstream direct-H2 transport hit rate {:.4} < {:.4} ({} hits, {} misses)",
+          context.scenario, min_hit_rate, threshold, fast_path.hits, fast_path.misses
+        ),
+      },
+      GateDisposition::evidence_advisory(
+        "direct-H2 upstream transport is diagnostic and does not decide the primary nginx gate",
+      ),
     );
   }
 }
@@ -5777,6 +6069,31 @@ fn push_invalid_regression_gate_metric(
     scenario: context.scenario.to_owned(),
     metric: metric.to_owned(),
     observed: Some(observed),
+    threshold: context.threshold,
+    comparator: comparator.map(str::to_owned),
+    evaluation_mode: "evidence".to_owned(),
+    stat_band: None,
+    baseline_source: None,
+    message: message.into(),
+  });
+}
+
+fn push_diagnostic_advisory_metric(
+  findings: &mut RegressionGateFindings,
+  context: RegressionGateContext<'_>,
+  metric: &str,
+  observed: Option<f64>,
+  comparator: Option<&str>,
+  message: impl Into<String>,
+) {
+  findings.advisories.push(RegressionGateViolation {
+    amd64_target_cpu: context.amd64_target_cpu.to_owned(),
+    disposition: "advisory".to_owned(),
+    gate: context.gate.to_owned(),
+    group: context.group.to_owned(),
+    scenario: context.scenario.to_owned(),
+    metric: metric.to_owned(),
+    observed,
     threshold: context.threshold,
     comparator: comparator.map(str::to_owned),
     evaluation_mode: "evidence".to_owned(),
@@ -7224,6 +7541,7 @@ fn render_markdown(report: &Report) -> String {
   write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
   write_pool_concurrency_experiment_table(&mut markdown, &report.pool_concurrency_experiments);
+  write_direct_h2_promotion_evidence_table(&mut markdown, &report.direct_h2_promotion_evidence);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
@@ -7350,7 +7668,7 @@ fn write_direct_h2_pool_diagnostics_table(markdown: &mut String, report: &Report
         && aggregate.comparator == Comparator::Oxibelt.as_str()
         && matches!(
           aggregate.scenario.as_str(),
-          "h2-upstream-h2c" | "h2-upstream-h2"
+          "h2-upstream-h2c" | "h2-upstream-h2" | "h3-upstream-h2c" | "h3-upstream-h2"
         )
     })
     .filter_map(|aggregate| {
@@ -7397,8 +7715,64 @@ fn write_direct_h2_pool_diagnostics_table(markdown: &mut String, report: &Report
   }
 }
 
+fn write_direct_h2_promotion_evidence_table(
+  markdown: &mut String,
+  rows: &[DirectH2PromotionEvidence],
+) {
+  writeln!(markdown, "\n## Direct-H2 promotion evidence\n").unwrap();
+  if rows.is_empty() {
+    writeln!(
+      markdown,
+      "No direct-H2 promotion evidence rows were found.\n"
+    )
+    .unwrap();
+    return;
+  }
+
+  writeln!(
+    markdown,
+    "| Protocol | Upstream | Diagnostic scenario | Samples | Shards | RPS / upstream-H1 | p99 / upstream-H1 | Direct-H2 hit rate | Miss saturated | Connect | Connect error | Reconnect | Status | Reason |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+  )
+  .unwrap();
+  for row in rows {
+    writeln!(
+      markdown,
+      "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | `{}` | `{}` | `{}` | `{}` | `{}` | {} |",
+      row.protocol,
+      row.upstream_variant,
+      row.diagnostic_scenario,
+      row.sample_count,
+      row.shard_count,
+      format_ratio_value(row.rps_ratio_vs_upstream_h1),
+      format_ratio_value(row.p99_ratio_vs_upstream_h1),
+      format_ratio_value(row.direct_h2_min_hit_rate),
+      row.direct_h2_pool_miss_saturated,
+      row.direct_h2_pool_connect,
+      row.direct_h2_pool_connect_error,
+      row.direct_h2_pool_reconnect,
+      row.status,
+      markdown_escape_cell(&row.reason)
+    )
+    .unwrap();
+  }
+  writeln!(markdown).unwrap();
+}
+
 fn counter_map_value(stats: &CounterMapAggregateStats, name: &str) -> u64 {
   stats.values.get(name).copied().unwrap_or(0)
+}
+
+fn counter_map_value_optional(stats: Option<&CounterMapAggregateStats>, name: &str) -> u64 {
+  stats.map_or(0, |stats| counter_map_value(stats, name))
+}
+
+fn markdown_escape_cell(value: &str) -> String {
+  value.replace('|', "\\|")
 }
 
 fn format_pool_miss_percent(hit: u64, miss: u64) -> String {
@@ -8930,7 +9304,7 @@ mod tests {
   }
 
   #[test]
-  fn h2_upstream_direct_h2_fast_path_hit_rate_gate_fails_below_threshold() {
+  fn h2_upstream_direct_h2_fast_path_hit_rate_is_advisory_below_threshold() {
     let mut aggregates = PrimaryAggregateMap::new();
     insert_primary_aggregate(
       &mut aggregates,
@@ -8984,12 +9358,19 @@ mod tests {
       None,
     );
 
-    assert!(gates.violations.iter().any(|violation| {
-      violation.gate == "h2_upstream_direct_h2_min_hit_rate"
+    assert!(gates.advisories.iter().any(|violation| {
+      violation.gate == "direct_h2_diagnostic_min_hit_rate"
         && violation.metric == "transport_direct_h2_h2_min_hit_rate"
         && violation.observed == Some(0.98)
         && violation.evaluation_mode == "evidence"
+        && violation.disposition == "advisory"
     }));
+    assert!(
+      !gates
+        .violations
+        .iter()
+        .any(|violation| { violation.gate == "direct_h2_diagnostic_min_hit_rate" })
+    );
   }
 
   #[test]
