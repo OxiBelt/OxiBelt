@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -61,6 +61,9 @@ Environment:
                                       test-only OxiBelt aggressive long-run fixture override
   OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO
                                       test-only OxiBelt TLS handshake fixture override
+  OXIBELT_PERF_POOL_CAPS             comma-separated direct-H1 idle pool caps for pool-concurrency rows
+  OXIBELT_PERF_POOL_CONCURRENCY_PRESETS
+                                      comma-separated probe concurrency values for pool-concurrency rows
   OXIBELT_PERF_PROFILE_LABEL         exact load label to record with host perf, for diagnostics only
   OXIBELT_PERF_PROFILE_FREQUENCY     perf sampling frequency for diagnostic profiling (default: 99)
   OXIBELT_PERF_PROFILE_CALL_GRAPH    perf call graph mode for diagnostic profiling (default: dwarf,8192)
@@ -114,7 +117,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -213,6 +216,8 @@ amd64_target_cpu="${OXIBELT_AMD64_TARGET_CPU:-unspecified}"
 oxibelt_baseline_scenario="${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline}"
 oxibelt_aggressive_scenario="${OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO:-baseline-aggressive-long-run}"
 oxibelt_handshake_scenario="${OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO:-baseline-accept-1}"
+pool_experiment_caps="${OXIBELT_PERF_POOL_CAPS:-128,256,512}"
+pool_experiment_concurrency_presets="${OXIBELT_PERF_POOL_CONCURRENCY_PRESETS:-16,64,256}"
 resource_max_memory_delta_bytes="${OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:-268435456}"
 resource_max_fd_delta="${OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:-256}"
 resource_max_task_delta="${OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA:-64}"
@@ -2494,6 +2499,8 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-h1-keepalive:h1) printf 'h1' ;;
     oxibelt-h2:h2) printf 'h2' ;;
     oxibelt-h3:h3) printf 'h3' ;;
+    oxibelt-pool*-conc*-h2:h2) printf 'h2' ;;
+    oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
     oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
     oxibelt-h2-upstream-h2:h2) printf 'h2' ;;
   esac
@@ -2507,7 +2514,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2) printf 'direct_h2' ;;
   esac
 }
@@ -3135,6 +3142,55 @@ run_manual_soak_presets() {
   done
 }
 
+pool_experiment_scenario_for_cap() {
+  local cap="$1"
+  case "${cap}" in
+    128) printf 'baseline' ;;
+    256) printf 'baseline-pool-256' ;;
+    512) printf 'baseline-pool-512' ;;
+  esac
+}
+
+run_pool_concurrency_experiments_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  local -a pool_caps concurrency_presets
+  IFS=',' read -r -a pool_caps <<<"${pool_experiment_caps}"
+  IFS=',' read -r -a concurrency_presets <<<"${pool_experiment_concurrency_presets}"
+
+  local pool_cap scenario preset
+  for pool_cap in "${pool_caps[@]}"; do
+    if ! [[ "${pool_cap}" =~ ^[0-9]+$ ]]; then
+      record_skip "oxibelt-pool${pool_cap}-invalid-h2" load h2 "invalid pool cap preset"
+      record_skip "oxibelt-pool${pool_cap}-invalid-h3" load h3 "invalid pool cap preset"
+      continue
+    fi
+    scenario="$(pool_experiment_scenario_for_cap "${pool_cap}")"
+    if [[ -z "${scenario}" ]]; then
+      record_skip "oxibelt-pool${pool_cap}-unsupported-h2" load h2 "unsupported pool cap preset"
+      record_skip "oxibelt-pool${pool_cap}-unsupported-h3" load h3 "unsupported pool cap preset"
+      continue
+    fi
+
+    start_oxibelt "${scenario}" oxibelt
+    for preset in "${concurrency_presets[@]}"; do
+      if ! [[ "${preset}" =~ ^[1-9][0-9]*$ ]]; then
+        record_skip "oxibelt-pool${pool_cap}-conc${preset}-h2" load h2 "invalid pool-concurrency preset"
+        record_skip "oxibelt-pool${pool_cap}-conc${preset}-h3" load h3 "invalid pool-concurrency preset"
+        continue
+      fi
+      run_load "oxibelt-pool${pool_cap}-conc${preset}-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${preset}"
+      if h3_probe_succeeds oxibelt; then
+        run_load "oxibelt-pool${pool_cap}-conc${preset}-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${preset}"
+      else
+        fail_with_diagnostics "mandatory HTTP/3 probe failed for pool cap ${pool_cap} concurrency ${preset}: functional QUIC probe did not complete"
+      fi
+    done
+  done
+}
+
 run_oxibelt_aggressive_long_run() {
   local h1_soak h2_soak h3_soak stress_duration
   h1_soak=$(( soak_seconds / 3 ))
@@ -3380,6 +3436,10 @@ run_remote_signer_group() {
   append_remote_signer_overhead_summary
 }
 
+run_pool_concurrency_group() {
+  run_pool_concurrency_experiments_group
+}
+
 run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
@@ -3484,6 +3544,8 @@ cat >"${summary_md}" <<EOF
 - OxiBelt baseline fixture: \`${oxibelt_baseline_scenario}\`
 - OxiBelt aggressive fixture: \`${oxibelt_aggressive_scenario}\`
 - OxiBelt handshake fixture: \`${oxibelt_handshake_scenario}\`
+- Pool experiment caps: \`${pool_experiment_caps}\`
+- Pool experiment concurrency presets: \`${pool_experiment_concurrency_presets}\`
 - Docker command: \`${docker_command}\`
 - OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
 - Perf probe image: \`${perf_probe_image}\`
@@ -3547,6 +3609,9 @@ case "${serving_type}" in
     ;;
   remote-signer)
     run_remote_signer_group
+    ;;
+  pool-concurrency)
+    run_pool_concurrency_group
     ;;
   oxibelt-aggressive-long-run)
     run_oxibelt_aggressive_long_run

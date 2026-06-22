@@ -981,7 +981,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -993,11 +993,58 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "oxibelt-soak-stress",
     "accept-multipliers",
     "remote-signer",
+    "pool-concurrency",
     "oxibelt-aggressive-long-run",
   ] {
     assert!(
       script.contains(serving_type),
       "performance script should recognize serving type {serving_type}"
+    );
+  }
+}
+
+#[test]
+fn pool_concurrency_serving_type_runs_controlled_diagnostic_matrix() {
+  let script = performance_script_text();
+  let scenario_function = extract_bash_function(&script, "pool_experiment_scenario_for_cap");
+  let experiment_function =
+    extract_bash_function(&script, "run_pool_concurrency_experiments_group");
+
+  for expected in [
+    "OXIBELT_PERF_POOL_CAPS",
+    "OXIBELT_PERF_POOL_CONCURRENCY_PRESETS",
+    "pool_experiment_caps=\"${OXIBELT_PERF_POOL_CAPS:-128,256,512}\"",
+    "pool_experiment_concurrency_presets=\"${OXIBELT_PERF_POOL_CONCURRENCY_PRESETS:-16,64,256}\"",
+    "pool-concurrency)",
+  ] {
+    assert!(
+      script.contains(expected),
+      "pool/concurrency serving type should contain {expected:?}"
+    );
+  }
+
+  for expected in [
+    "128) printf 'baseline'",
+    "256) printf 'baseline-pool-256'",
+    "512) printf 'baseline-pool-512'",
+  ] {
+    assert!(
+      scenario_function.contains(expected),
+      "pool cap fixture mapping should contain {expected:?}"
+    );
+  }
+
+  for expected in [
+    "IFS=',' read -r -a pool_caps <<<\"${pool_experiment_caps}\"",
+    "IFS=',' read -r -a concurrency_presets <<<\"${pool_experiment_concurrency_presets}\"",
+    "start_oxibelt \"${scenario}\" oxibelt",
+    "run_load \"oxibelt-pool${pool_cap}-conc${preset}-h2\" h2 oxibelt \"/perf/h2?body=ok\" \"${duration_seconds}\" \"${preset}\"",
+    "run_load \"oxibelt-pool${pool_cap}-conc${preset}-h3\" h3 oxibelt \"/perf/h3?body=ok\" \"${duration_seconds}\" \"${preset}\"",
+    "mandatory HTTP/3 probe failed for pool cap ${pool_cap} concurrency ${preset}",
+  ] {
+    assert!(
+      experiment_function.contains(expected),
+      "pool/concurrency experiment should contain {expected:?}"
     );
   }
 }
@@ -1254,6 +1301,8 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
     ("baseline-aggressive-long-run", 0.5),
     ("baseline-no-http3", 0.5),
     ("baseline-h2-adaptive-window", 0.5),
+    ("baseline-pool-256", 0.5),
+    ("baseline-pool-512", 0.5),
     ("baseline-upstream-h2", 0.5),
     ("baseline-upstream-h2c", 0.5),
     ("cache", 0.5),
@@ -1314,6 +1363,60 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
       Some(1.0),
       "{} should pin QUIC socket worker multiplier",
       path.display()
+    );
+  }
+}
+
+#[test]
+fn oxibelt_pool_concurrency_fixtures_only_change_idle_pool_cap() {
+  fn load_fixture(name: &str) -> toml::Value {
+    let path = oxibelt_performance_fixture_root()
+      .join(name)
+      .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+      .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    toml::from_str(&config_text)
+      .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()))
+  }
+
+  fn first_upstream_pool_cap(value: &toml::Value) -> Option<i64> {
+    value
+      .get("upstreams")
+      .and_then(toml::Value::as_array)
+      .and_then(|upstreams| upstreams.first())
+      .and_then(toml::Value::as_table)
+      .and_then(|upstream| upstream.get("pool_max_idle_per_host"))
+      .and_then(toml::Value::as_integer)
+  }
+
+  fn normalize_first_upstream_pool_cap(mut value: toml::Value) -> toml::Value {
+    let upstream = value
+      .get_mut("upstreams")
+      .and_then(toml::Value::as_array_mut)
+      .and_then(|upstreams| upstreams.first_mut())
+      .and_then(toml::Value::as_table_mut)
+      .expect("fixture should contain a first upstream table");
+    upstream.insert(
+      "pool_max_idle_per_host".to_owned(),
+      toml::Value::Integer(128),
+    );
+    value
+  }
+
+  let baseline = load_fixture("baseline");
+  assert_eq!(first_upstream_pool_cap(&baseline), Some(128));
+
+  for (scenario, expected_cap) in [("baseline-pool-256", 256), ("baseline-pool-512", 512)] {
+    let fixture = load_fixture(scenario);
+    assert_eq!(
+      first_upstream_pool_cap(&fixture),
+      Some(expected_cap),
+      "{scenario} should pin the requested direct-H1 idle pool cap"
+    );
+    assert_eq!(
+      normalize_first_upstream_pool_cap(fixture),
+      normalize_first_upstream_pool_cap(baseline.clone()),
+      "{scenario} should differ from baseline only by pool_max_idle_per_host"
     );
   }
 }
@@ -1396,7 +1499,10 @@ fn oxibelt_performance_fixtures_pin_h2_window_profile() {
         http2
           .get("max_frame_size_bytes")
           .and_then(toml::Value::as_integer),
-        if scenario == "baseline" {
+        if matches!(
+          scenario.as_str(),
+          "baseline" | "baseline-pool-256" | "baseline-pool-512"
+        ) {
           Some(131_072)
         } else {
           Some(65_535)

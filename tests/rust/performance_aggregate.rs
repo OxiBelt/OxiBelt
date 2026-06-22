@@ -73,6 +73,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
     "## AMD64 ISA comparison",
     "## External benchmark validation",
     "## Diagnostic profiling",
+    "## Pool/concurrency experiments",
     "## OxiBelt-only results",
     "## Skipped/missing comparator rows",
     "## Sample quorum",
@@ -318,6 +319,147 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
         }),
       );
   }
+  row
+}
+
+fn pool_concurrency_row(
+  label: &str,
+  protocol: &str,
+  rps: f64,
+  p99_ms: f64,
+  pool_hit: u64,
+  pool_miss: u64,
+  transport_ns: u64,
+  downstream_ns: u64,
+) -> Value {
+  let mut row = load_row(label, protocol, rps, 1.0, p99_ms);
+  let mut protocol_stage_timing = json!({
+      "direct_h1_pool_take": {
+          "ok": {
+              "count": 4,
+              "total_ns": 800,
+              "avg_ns": 200.0
+          }
+      },
+      "direct_h1_sender_ready": {
+          "ok": {
+              "count": 4,
+              "total_ns": 1200,
+              "avg_ns": 300.0
+          }
+      },
+      "direct_h1_request_submit": {
+          "ok": {
+              "count": 4,
+              "total_ns": 1600,
+              "avg_ns": 400.0
+          }
+      },
+      "direct_h1_response_head": {
+          "ok": {
+              "count": 4,
+              "total_ns": 2000,
+              "avg_ns": 500.0
+          }
+      },
+      "transport_direct_h1": {
+          "ok": {
+              "count": 4,
+              "total_ns": transport_ns * 4,
+              "avg_ns": transport_ns as f64
+          }
+      }
+  });
+  let stage_timing = if protocol == "h2" {
+    protocol_stage_timing
+      .as_object_mut()
+      .expect("stage timing should be an object")
+      .insert(
+        "h2_downstream_response_return".to_owned(),
+        json!({
+            "ok": {
+                "count": 4,
+                "total_ns": downstream_ns * 4,
+                "avg_ns": downstream_ns as f64
+            }
+        }),
+      );
+    json!({
+        "plain_proxy": {
+            "h2": protocol_stage_timing
+        }
+    })
+  } else {
+    json!({
+        "plain_proxy": {
+            "h3": protocol_stage_timing
+        },
+        "h3_downstream": {
+            "h3": {
+                "h3_downstream_send": {
+                        "ok": {
+                            "count": 4,
+                            "total_ns": downstream_ns * 4,
+                            "avg_ns": downstream_ns as f64
+                        }
+                }
+            }
+        }
+    })
+  };
+  let protocol_decision = json!({
+      "hits": 1000,
+      "misses": 0,
+      "attempts": 1000,
+      "hit_rate": 1.0
+  });
+  let protocol_fast_path = if protocol == "h2" {
+    json!({
+        "plain_proxy": {
+            "h2": protocol_decision.clone()
+        },
+        "transport": {
+            "direct_h1": {
+                "h2": protocol_decision
+            }
+        }
+    })
+  } else {
+    json!({
+        "plain_proxy": {
+            "h3": protocol_decision.clone()
+        },
+        "transport": {
+            "direct_h1": {
+                "h3": protocol_decision
+            }
+        }
+    })
+  };
+  row
+    .as_object_mut()
+    .expect("load row should be an object")
+    .insert(
+      "fast_path".to_owned(),
+      json!({
+          "plain_proxy": protocol_fast_path["plain_proxy"].clone(),
+          "transport": protocol_fast_path["transport"].clone(),
+          "pool": {
+              "direct_h1": {
+                  "hit": pool_hit,
+                  "miss": pool_miss,
+                  "miss_empty": pool_miss,
+                  "miss_locked": 0,
+                  "reconnect": 0,
+                  "stale": 0,
+                  "drop": 0,
+                  "drop_full": 0,
+                  "drop_locked": 0
+              }
+          },
+          "stage_timing": stage_timing
+      }),
+    );
   row
 }
 
@@ -819,6 +961,26 @@ fn find_isa_comparison<'a>(report: &'a Value, scenario: &str) -> &'a Value {
     .unwrap_or_else(|| panic!("missing AMD64 ISA comparison for {scenario}"))
 }
 
+fn find_pool_concurrency_experiment<'a>(
+  report: &'a Value,
+  protocol: &str,
+  pool_cap: u64,
+  concurrency: u64,
+) -> &'a Value {
+  report["pool_concurrency_experiments"]
+    .as_array()
+    .expect("pool/concurrency experiments should be an array")
+    .iter()
+    .find(|row| {
+      row["protocol"] == protocol
+        && row["pool_max_idle_per_host"] == pool_cap
+        && row["concurrency"] == concurrency
+    })
+    .unwrap_or_else(|| {
+      panic!("missing pool/concurrency experiment for {protocol} cap {pool_cap} concurrency {concurrency}")
+    })
+}
+
 fn find_delta<'a>(report: &'a Value, group: &str, scenario: &str, comparator: &str) -> &'a Value {
   report["rows"]
     .as_array()
@@ -1045,7 +1207,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 22);
+  assert_eq!(report["schema_version"], 23);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1272,6 +1434,131 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 }
 
 #[test]
+fn pool_concurrency_experiments_record_control_and_nginx_ratios() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-pool-concurrency-shard-1/run-1"),
+    vec![
+      pool_concurrency_row(
+        "oxibelt-pool128-conc64-h2",
+        "h2",
+        1000.0,
+        10.0,
+        990,
+        10,
+        600,
+        40,
+      ),
+      pool_concurrency_row(
+        "oxibelt-pool256-conc64-h2",
+        "h2",
+        1100.0,
+        9.0,
+        995,
+        5,
+        540,
+        35,
+      ),
+      pool_concurrency_row(
+        "oxibelt-pool128-conc64-h3",
+        "h3",
+        800.0,
+        12.0,
+        792,
+        8,
+        700,
+        60,
+      ),
+      pool_concurrency_row(
+        "oxibelt-pool512-conc64-h3",
+        "h3",
+        880.0,
+        11.0,
+        798,
+        2,
+        640,
+        55,
+      ),
+    ],
+  );
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
+    vec![
+      load_row("nginx-h2", "h2", 2000.0, 1.0, 8.0),
+      load_row("nginx-h3", "h3", 1600.0, 1.0, 10.0),
+    ],
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let h2_cap_256 = find_pool_concurrency_experiment(&report, "h2", 256, 64);
+  assert_eq!(h2_cap_256["scenario"], "pool256-conc64-h2");
+  assert_close(
+    h2_cap_256["rps_ratio_vs_pool_128"]
+      .as_f64()
+      .expect("pool-control ratio should exist"),
+    1.1,
+  );
+  assert_close(
+    h2_cap_256["rps_ratio_vs_nginx"]
+      .as_f64()
+      .expect("nginx ratio should exist"),
+    0.55,
+  );
+  assert_close(
+    h2_cap_256["p99_ratio_vs_pool_128"]
+      .as_f64()
+      .expect("pool-control p99 ratio should exist"),
+    0.9,
+  );
+  assert_close(
+    h2_cap_256["direct_h1_pool_miss_percent"]
+      .as_f64()
+      .expect("pool miss percent should exist"),
+    0.5,
+  );
+  assert_eq!(
+    h2_cap_256["direct_h1_pool_take_median_avg_ns"],
+    json!(200.0)
+  );
+  assert_eq!(
+    h2_cap_256["direct_h1_sender_ready_median_avg_ns"],
+    json!(300.0)
+  );
+  assert_eq!(
+    h2_cap_256["direct_h1_request_submit_median_avg_ns"],
+    json!(400.0)
+  );
+  assert_eq!(
+    h2_cap_256["direct_h1_response_head_median_avg_ns"],
+    json!(500.0)
+  );
+  assert_eq!(
+    h2_cap_256["transport_direct_h1_median_avg_ns"],
+    json!(540.0)
+  );
+  assert_eq!(h2_cap_256["downstream_response_median_avg_ns"], json!(35.0));
+
+  let h3_cap_512 = find_pool_concurrency_experiment(&report, "h3", 512, 64);
+  assert_close(
+    h3_cap_512["rps_ratio_vs_nginx"]
+      .as_f64()
+      .expect("h3 nginx ratio should exist"),
+    0.55,
+  );
+  assert_eq!(h3_cap_512["downstream_response_median_avg_ns"], json!(55.0));
+
+  let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+    .expect("markdown report should be readable");
+  assert!(markdown.contains("## Pool/concurrency experiments"));
+  assert!(markdown.contains("| `x86-64-v3` | `h2` | `256` | `64`"));
+  assert!(markdown.contains("`0.550x`"));
+  assert!(markdown.contains("`1.100x`"));
+}
+
+#[test]
 fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
   let temp_dir = TempDir::new();
   let input_dir = temp_dir.path().join("input");
@@ -1291,7 +1578,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 22);
+  assert_eq!(report["schema_version"], 23);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

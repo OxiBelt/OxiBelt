@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 22;
+const COMPARISON_SCHEMA_VERSION: u32 = 23;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -48,6 +48,15 @@ const SERVING_TYPES: [&str; 6] = [
   "oxibelt-soak-stress",
   "accept-multipliers",
   "remote-signer",
+];
+const RECOGNIZED_SERVING_TYPES: [&str; 7] = [
+  "reverse-proxy",
+  "static-files",
+  "oxibelt-features",
+  "oxibelt-soak-stress",
+  "accept-multipliers",
+  "remote-signer",
+  "pool-concurrency",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -625,6 +634,33 @@ struct RemoteSignerComparison {
   remote_signer_vs_local_key: RemoteSignerRatio,
 }
 
+#[derive(Clone, Serialize)]
+struct PoolConcurrencyExperiment {
+  amd64_target_cpu: String,
+  scenario: String,
+  protocol: String,
+  pool_max_idle_per_host: u64,
+  concurrency: u64,
+  sample_count: usize,
+  median_rps: Option<f64>,
+  median_p95_ms: Option<f64>,
+  median_p99_ms: Option<f64>,
+  total_errors: u64,
+  rps_ratio_vs_nginx: Option<f64>,
+  p99_ratio_vs_nginx: Option<f64>,
+  rps_ratio_vs_pool_128: Option<f64>,
+  p99_ratio_vs_pool_128: Option<f64>,
+  direct_h1_pool_hit: u64,
+  direct_h1_pool_miss: u64,
+  direct_h1_pool_miss_percent: Option<f64>,
+  direct_h1_pool_take_median_avg_ns: Option<f64>,
+  direct_h1_sender_ready_median_avg_ns: Option<f64>,
+  direct_h1_request_submit_median_avg_ns: Option<f64>,
+  direct_h1_response_head_median_avg_ns: Option<f64>,
+  transport_direct_h1_median_avg_ns: Option<f64>,
+  downstream_response_median_avg_ns: Option<f64>,
+}
+
 #[derive(Serialize)]
 struct RatioSummary {
   scenario_count: usize,
@@ -1021,6 +1057,7 @@ struct Report {
   comparisons: ComparisonGroups,
   accept_multiplier_comparisons: Vec<AcceptMultiplierComparison>,
   remote_signer_comparisons: Vec<RemoteSignerComparison>,
+  pool_concurrency_experiments: Vec<PoolConcurrencyExperiment>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
   external_benchmarks: Vec<ExternalBenchmarkStats>,
   profiling: Vec<DiagnosticProfileStats>,
@@ -1904,6 +1941,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
   let static_files = build_group_comparisons(ScenarioGroup::StaticFiles, &aggregate_map);
   let accept_multiplier_comparisons = build_accept_multiplier_comparisons(&aggregate_map);
   let remote_signer_comparisons = build_remote_signer_comparisons(&aggregate_map);
+  let pool_concurrency_experiments = build_pool_concurrency_experiments(&aggregate_map);
   let primary_reverse_proxy = primary_scenario_comparisons(&reverse_proxy, &primary_target_cpu);
   let primary_static_files = primary_scenario_comparisons(&static_files, &primary_target_cpu);
   let primary_accept_multiplier_comparisons =
@@ -1975,6 +2013,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     },
     accept_multiplier_comparisons,
     remote_signer_comparisons,
+    pool_concurrency_experiments,
     amd64_isa_comparisons,
     external_benchmarks,
     profiling,
@@ -3754,7 +3793,7 @@ fn infer_serving_type_from_path(path: &str) -> Option<String> {
       let Some((serving_type, _shard)) = remainder.rsplit_once("-shard-") else {
         continue;
       };
-      if SERVING_TYPES.contains(&serving_type) {
+      if RECOGNIZED_SERVING_TYPES.contains(&serving_type) {
         return Some(serving_type.to_owned());
       }
     }
@@ -4008,6 +4047,164 @@ fn build_remote_signer_comparisons(aggregates: &AggregateMap) -> Vec<RemoteSigne
       }
     })
     .collect()
+}
+
+fn build_pool_concurrency_experiments(aggregates: &AggregateMap) -> Vec<PoolConcurrencyExperiment> {
+  let mut controls: BTreeMap<(String, String, u64), &AggregateStats> = BTreeMap::new();
+  for ((target, comparator, scenario), aggregate) in aggregates {
+    if *comparator != Comparator::Oxibelt {
+      continue;
+    }
+    let Some((pool_cap, concurrency, protocol)) = pool_concurrency_scenario_parts(scenario) else {
+      continue;
+    };
+    if pool_cap == 128 {
+      controls.insert(
+        (target.clone(), protocol.to_owned(), concurrency),
+        aggregate,
+      );
+    }
+  }
+
+  let mut rows = Vec::new();
+  for ((target, comparator, scenario), aggregate) in aggregates {
+    if *comparator != Comparator::Oxibelt {
+      continue;
+    }
+    let Some((pool_cap, concurrency, protocol)) = pool_concurrency_scenario_parts(scenario) else {
+      continue;
+    };
+    let control = controls
+      .get(&(target.clone(), protocol.to_owned(), concurrency))
+      .copied();
+    let nginx_reference = aggregates.get(&(target.clone(), Comparator::Nginx, protocol.to_owned()));
+    let (pool_hit, pool_miss, pool_miss_percent) = direct_h1_pool_counts(aggregate);
+    let downstream_response_median_avg_ns = match protocol {
+      "h2" => stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "h2_downstream_response_return",
+      ),
+      "h3" => stage_median_avg_ns(aggregate, "h3_downstream", protocol, "h3_downstream_send"),
+      _ => None,
+    };
+    rows.push(PoolConcurrencyExperiment {
+      amd64_target_cpu: target.clone(),
+      scenario: scenario.clone(),
+      protocol: protocol.to_owned(),
+      pool_max_idle_per_host: pool_cap,
+      concurrency,
+      sample_count: aggregate.sample_count,
+      median_rps: aggregate.median_rps,
+      median_p95_ms: aggregate.median_p95_ms,
+      median_p99_ms: aggregate.median_p99_ms,
+      total_errors: aggregate.total_errors,
+      rps_ratio_vs_nginx: nginx_reference
+        .and_then(|nginx| ratio(aggregate.median_rps, nginx.median_rps)),
+      p99_ratio_vs_nginx: nginx_reference
+        .and_then(|nginx| ratio(aggregate.median_p99_ms, nginx.median_p99_ms)),
+      rps_ratio_vs_pool_128: control
+        .and_then(|control| ratio(aggregate.median_rps, control.median_rps)),
+      p99_ratio_vs_pool_128: control
+        .and_then(|control| ratio(aggregate.median_p99_ms, control.median_p99_ms)),
+      direct_h1_pool_hit: pool_hit,
+      direct_h1_pool_miss: pool_miss,
+      direct_h1_pool_miss_percent: pool_miss_percent,
+      direct_h1_pool_take_median_avg_ns: stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "direct_h1_pool_take",
+      ),
+      direct_h1_sender_ready_median_avg_ns: stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "direct_h1_sender_ready",
+      ),
+      direct_h1_request_submit_median_avg_ns: stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "direct_h1_request_submit",
+      ),
+      direct_h1_response_head_median_avg_ns: stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "direct_h1_response_head",
+      ),
+      transport_direct_h1_median_avg_ns: stage_median_avg_ns(
+        aggregate,
+        "plain_proxy",
+        protocol,
+        "transport_direct_h1",
+      ),
+      downstream_response_median_avg_ns,
+    });
+  }
+  rows.sort_by(|left, right| {
+    (
+      &left.amd64_target_cpu,
+      &left.protocol,
+      left.concurrency,
+      left.pool_max_idle_per_host,
+    )
+      .cmp(&(
+        &right.amd64_target_cpu,
+        &right.protocol,
+        right.concurrency,
+        right.pool_max_idle_per_host,
+      ))
+  });
+  rows
+}
+
+fn pool_concurrency_scenario_parts(scenario: &str) -> Option<(u64, u64, &str)> {
+  let rest = scenario.strip_prefix("pool")?;
+  let (pool_cap, rest) = rest.split_once("-conc")?;
+  let (concurrency, protocol) = rest.rsplit_once('-')?;
+  if !matches!(protocol, "h2" | "h3") {
+    return None;
+  }
+  Some((pool_cap.parse().ok()?, concurrency.parse().ok()?, protocol))
+}
+
+fn direct_h1_pool_counts(aggregate: &AggregateStats) -> (u64, u64, Option<f64>) {
+  let Some(pool) = aggregate
+    .fast_path
+    .as_ref()
+    .and_then(|fast_path| fast_path.direct_h1_pool.as_ref())
+  else {
+    return (0, 0, None);
+  };
+  let hit = counter_map_value(pool, "hit");
+  let miss = counter_map_value(pool, "miss");
+  let attempts = hit.saturating_add(miss);
+  let miss_percent = if attempts == 0 {
+    None
+  } else {
+    Some((miss as f64) * 100.0 / (attempts as f64))
+  };
+  (hit, miss, miss_percent)
+}
+
+fn stage_median_avg_ns(
+  aggregate: &AggregateStats,
+  path: &str,
+  protocol: &str,
+  stage: &str,
+) -> Option<f64> {
+  aggregate
+    .fast_path
+    .as_ref()
+    .and_then(|fast_path| fast_path.stage_timing.as_ref())
+    .and_then(|stage_timing| stage_timing.get(path))
+    .and_then(|protocols| protocols.get(protocol))
+    .and_then(|stages| stages.get(stage))
+    .and_then(|outcomes| outcomes.get("ok"))
+    .and_then(|sample| sample.median_avg_ns)
 }
 
 fn build_amd64_isa_comparisons(
@@ -7026,6 +7223,7 @@ fn render_markdown(report: &Report) -> String {
   write_accept_multiplier_table(&mut markdown, &report.accept_multiplier_comparisons);
   write_remote_signer_table(&mut markdown, &report.remote_signer_comparisons);
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
+  write_pool_concurrency_experiment_table(&mut markdown, &report.pool_concurrency_experiments);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
@@ -7089,6 +7287,58 @@ fn write_direct_h1_pool_diagnostics_table(markdown: &mut String, report: &Report
     )
     .unwrap();
   }
+}
+
+fn write_pool_concurrency_experiment_table(
+  markdown: &mut String,
+  rows: &[PoolConcurrencyExperiment],
+) {
+  writeln!(markdown, "\n## Pool/concurrency experiments\n").unwrap();
+  if rows.is_empty() {
+    writeln!(
+      markdown,
+      "No pool/concurrency experiment rows were found.\n"
+    )
+    .unwrap();
+    return;
+  }
+
+  writeln!(
+    markdown,
+    "| Target CPU | Protocol | Pool cap | Concurrency | Samples | Median RPS | RPS / nginx | RPS / pool 128 | Median p99 ms | p99 / nginx | p99 / pool 128 | Pool miss % | Pool take ns | Ready ns | Submit ns | Response head ns | Transport ns | Downstream ns |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  )
+  .unwrap();
+  for row in rows {
+    writeln!(
+      markdown,
+      "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+      row.amd64_target_cpu,
+      row.protocol,
+      row.pool_max_idle_per_host,
+      row.concurrency,
+      row.sample_count,
+      format_number(row.median_rps),
+      format_ratio_value(row.rps_ratio_vs_nginx),
+      format_ratio_value(row.rps_ratio_vs_pool_128),
+      format_number(row.median_p99_ms),
+      format_ratio_value(row.p99_ratio_vs_nginx),
+      format_ratio_value(row.p99_ratio_vs_pool_128),
+      format_percent(row.direct_h1_pool_miss_percent),
+      format_optional_ns(row.direct_h1_pool_take_median_avg_ns),
+      format_optional_ns(row.direct_h1_sender_ready_median_avg_ns),
+      format_optional_ns(row.direct_h1_request_submit_median_avg_ns),
+      format_optional_ns(row.direct_h1_response_head_median_avg_ns),
+      format_optional_ns(row.transport_direct_h1_median_avg_ns),
+      format_optional_ns(row.downstream_response_median_avg_ns),
+    )
+    .unwrap();
+  }
+  writeln!(markdown).unwrap();
 }
 
 fn write_direct_h2_pool_diagnostics_table(markdown: &mut String, report: &Report) {
@@ -7214,6 +7464,12 @@ fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
 fn format_optional_ns(value: Option<f64>) -> String {
   value
     .map(|value| format!("`{value:.1}`"))
+    .unwrap_or_else(|| "`n/a`".to_owned())
+}
+
+fn format_ratio_value(value: Option<f64>) -> String {
+  value
+    .map(|value| format!("`{value:.3}x`"))
     .unwrap_or_else(|| "`n/a`".to_owned())
 }
 
