@@ -189,6 +189,15 @@ mod tests {
       FastPathMetricOutcome::Error,
       19,
     );
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::StaticFiles,
+      FastPathMetricProtocol::H1,
+      FastPathMetricStage::StaticWriteBody,
+      FastPathMetricOutcome::Ok,
+      23,
+    );
+    metrics.record_duration_ns("static_files", "h1", "static_head_prepare", "ok", 29);
+    metrics.record_duration_ns("static_files", "h1", "static_mystery", "ok", 31);
 
     let index = stage_counter_index("plain_proxy", "h2", "transport_direct_h1", "ok").unwrap();
     assert_eq!(metrics.observations[index].load(), 2);
@@ -209,5 +218,13 @@ mod tests {
       stage_counter_index("h3_downstream", "h3", "h3_downstream_send", "error").unwrap();
     assert_eq!(metrics.observations[h3_index].load(), 1);
     assert_eq!(metrics.duration_ns[h3_index].load(), 19);
+    let static_write_body_index =
+      stage_counter_index("static_files", "h1", "static_write_body", "ok").unwrap();
+    assert_eq!(metrics.observations[static_write_body_index].load(), 1);
+    assert_eq!(metrics.duration_ns[static_write_body_index].load(), 23);
+    let static_head_prepare_index =
+      stage_counter_index("static_files", "h1", "static_head_prepare", "ok").unwrap();
+    assert_eq!(metrics.observations[static_head_prepare_index].load(), 1);
+    assert_eq!(metrics.duration_ns[static_head_prepare_index].load(), 29);
   }
 }

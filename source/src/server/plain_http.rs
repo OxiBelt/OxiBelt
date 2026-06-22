@@ -2,20 +2,16 @@
 //! This path parses enough HTTP/1 to enforce configured proxy and WAF policy before forwarding.
 
 use std::convert::Infallible;
-use std::future::Future;
-use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ::http::header::{CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
-use ::http::{HeaderMap, Method, StatusCode, Uri};
-use anyhow::{Context as AnyhowContext, bail};
+use ::http::{Method, StatusCode, Uri};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use tokio::io::{AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
@@ -23,8 +19,9 @@ use tracing::{debug, trace, warn};
 use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode};
 use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
 use crate::limits::ConnectionLimitContext;
+use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http;
-use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
+use crate::proxy::http::fast_path::stage_timing;
 use crate::proxy::http::response::{apply_security_headers, text_response};
 use crate::proxy::http::static_files::{
   self, StaticBodyPlan, StaticResponseHeadBytes, StaticResponsePlan,
@@ -42,15 +39,17 @@ mod sendfile;
 mod static_access_log;
 mod static_helpers;
 mod static_waf;
+mod static_write;
 use self::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token, read_request};
 use self::plain_io::PlainHttpIo;
-use self::response_head::response_head_bytes;
 use self::static_access_log::{StaticFastPathContext, emit_system_access_log};
 use self::static_helpers::{
   compiled_static_hot_object_response, sendfile_disabled_reason, static_body_source_label,
   static_fast_path_request_has_body,
 };
-const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
+use self::static_write::advance_vectored_write;
+use self::static_write::write_static_plan;
 
 struct TimedStaticResponsePlan {
   response: StaticResponsePlan,
@@ -280,9 +279,22 @@ async fn try_sendfile_fast_path_inner(
       }
       ReadRequestOutcome::Request(request) => request,
     };
-    let Some(mut plan) =
-      eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await
-    else {
+    let plan_started_at = stage_timing::start(snapshot.request_path_features.hot_path_metrics);
+    let plan =
+      eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await;
+    stage_timing::record_metrics(
+      &snapshot.metrics,
+      stage_timing::PATH_STATIC_FILES,
+      FastPathMetricProtocol::H1,
+      stage_timing::STAGE_STATIC_PLAN,
+      if plan.is_some() {
+        stage_timing::OUTCOME_OK
+      } else {
+        stage_timing::OUTCOME_FALLBACK
+      },
+      plan_started_at,
+    );
+    let Some(mut plan) = plan else {
       let mut prefix = request.raw;
       prefix.extend_from_slice(&request.remaining);
       trace!("plain HTTP static sendfile request fell back");
@@ -302,6 +314,7 @@ async fn try_sendfile_fast_path_inner(
       &plan,
       !close_after_response,
       &mut response_head_buffer,
+      snapshot.as_ref(),
     )
     .await
     {
@@ -402,8 +415,21 @@ async fn eligible_static_plan(
   {
     return None;
   }
+  let hot_object_started_at = stage_timing::start(snapshot.request_path_features.hot_path_metrics);
   let compiled_static_response =
     compiled_static_hot_object_response(request, request_path, snapshot, &resolved);
+  stage_timing::record_metrics(
+    &snapshot.metrics,
+    stage_timing::PATH_STATIC_FILES,
+    FastPathMetricProtocol::H1,
+    stage_timing::STAGE_STATIC_HOT_OBJECT_REVALIDATE,
+    if compiled_static_response.is_some() {
+      stage_timing::OUTCOME_OK
+    } else {
+      stage_timing::OUTCOME_FALLBACK
+    },
+    hot_object_started_at,
+  );
   let response_send_timeout = compiled_static_response.as_ref().map_or_else(
     || static_files::static_response_send_timeout(snapshot, resolved.route),
     |(_, timeout)| *timeout,
@@ -447,17 +473,19 @@ async fn eligible_static_plan(
   ) {
     return None;
   }
+  let security_headers_enabled = snapshot.config.security.headers.enabled();
   apply_security_headers(&mut plan.headers, &snapshot.config.security.headers);
   if !resolved.execution_plan.waf.request.enabled()
     && !resolved.execution_plan.waf.response.enabled()
   {
-    attach_cached_static_response_heads(&mut plan);
+    attach_cached_static_response_heads(&mut plan, security_headers_enabled);
     return Some(TimedStaticResponsePlan {
       response: plan,
       response_send_timeout,
       access_log,
     });
   }
+  clear_cached_static_response_heads(&mut plan);
   Some(
     static_waf::apply_static_waf(
       request,
@@ -473,7 +501,10 @@ async fn eligible_static_plan(
   )
 }
 
-fn attach_cached_static_response_heads(plan: &mut StaticResponsePlan) {
+fn attach_cached_static_response_heads(plan: &mut StaticResponsePlan, force_recompute: bool) {
+  if plan.response_heads.is_some() && !force_recompute {
+    return;
+  }
   let cached_heads = StaticResponseHeadBytes::new(plan.status, &plan.headers);
   plan.response_heads = Some(cached_heads.clone());
   if let StaticBodyPlan::Bytes { response_heads, .. } = &mut plan.body {
@@ -481,245 +512,10 @@ fn attach_cached_static_response_heads(plan: &mut StaticResponsePlan) {
   }
 }
 
-async fn write_static_plan(
-  stream: &mut TcpStream,
-  plan: &TimedStaticResponsePlan,
-  keep_alive: bool,
-  head_buffer: &mut Vec<u8>,
-) -> anyhow::Result<()> {
-  let TimedStaticResponsePlan {
-    response,
-    response_send_timeout,
-    ..
-  } = plan;
-  let StaticResponsePlan {
-    status,
-    headers,
-    body,
-    response_heads,
-  } = response;
-  let response_send_timeout = *response_send_timeout;
-  match body {
-    StaticBodyPlan::Empty => {
-      let head = cached_or_rendered_response_head(
-        response_heads.as_ref(),
-        *status,
-        headers,
-        keep_alive,
-        head_buffer,
-      );
-      write_all_tcp(
-        stream,
-        head,
-        response_send_timeout,
-        "static sendfile response head write failed",
-      )
-      .await?;
-    }
-    StaticBodyPlan::Text(message) => {
-      let head = cached_or_rendered_response_head(
-        response_heads.as_ref(),
-        *status,
-        headers,
-        keep_alive,
-        head_buffer,
-      );
-      write_all_tcp_vectored(
-        stream,
-        head,
-        message.as_bytes(),
-        response_send_timeout,
-        "static fast-path text response write failed",
-      )
-      .await?;
-    }
-    StaticBodyPlan::Bytes {
-      bytes,
-      response_heads: body_response_heads,
-      ..
-    } => {
-      let head = match response_heads.as_ref().or(body_response_heads.as_ref()) {
-        Some(response_heads) => response_heads.get(keep_alive).as_ref(),
-        None => {
-          response_head_bytes(*status, headers, keep_alive, head_buffer);
-          head_buffer.as_slice()
-        }
-      };
-      write_all_tcp_vectored(
-        stream,
-        head,
-        bytes.as_ref(),
-        response_send_timeout,
-        "static fast-path bytes response write failed",
-      )
-      .await?;
-    }
-    StaticBodyPlan::File(file) => {
-      let head = cached_or_rendered_response_head(
-        response_heads.as_ref(),
-        *status,
-        headers,
-        keep_alive,
-        head_buffer,
-      );
-      write_all_tcp(
-        stream,
-        head,
-        response_send_timeout,
-        "static sendfile response head write failed",
-      )
-      .await?;
-      sendfile_all(
-        stream,
-        &file.file,
-        file.offset,
-        file.len,
-        response_send_timeout,
-      )
-      .await?;
-      debug!(
-        path = %file.path.display(),
-        bytes = file.len,
-        "plain HTTP static fast-path response sent"
-      );
-    }
-  }
-  if !keep_alive {
-    downstream_send_timeout(
-      response_send_timeout,
-      stream.shutdown(),
-      "static sendfile response shutdown failed",
-    )
-    .await?;
-  }
-  Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn sendfile_all(
-  stream: &mut TcpStream,
-  file: &tokio::fs::File,
-  offset: u64,
-  len: u64,
-  response_send_timeout: Duration,
-) -> anyhow::Result<()> {
-  let mut remaining = len;
-  let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
-  while remaining > 0 {
-    let count = remaining.min(SENDFILE_CHUNK_BYTES as u64) as usize;
-    let stream_ref: &TcpStream = &*stream;
-    match sendfile::sendfile_once(stream_ref, file, &mut offset, count) {
-      Ok(0) => bail!("static sendfile wrote zero bytes"),
-      Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-        downstream_send_timeout(
-          response_send_timeout,
-          stream.writable(),
-          "static sendfile socket wait failed",
-        )
-        .await?;
-        let stream_ref: &TcpStream = &*stream;
-        match stream_ref.try_io(Interest::WRITABLE, || {
-          sendfile::sendfile_once(stream_ref, file, &mut offset, count)
-        }) {
-          Ok(0) => bail!("static sendfile wrote zero bytes"),
-          Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-          Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-          Err(error) => return Err(error).context("static sendfile syscall failed"),
-        }
-      }
-      Err(error) => return Err(error).context("static sendfile syscall failed"),
-    }
-  }
-  Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn sendfile_all(
-  _stream: &mut TcpStream,
-  _file: &tokio::fs::File,
-  _offset: u64,
-  _len: u64,
-  _response_send_timeout: Duration,
-) -> anyhow::Result<()> {
-  bail!("kernel sendfile is not available on this platform")
-}
-
-async fn write_all_tcp(
-  stream: &mut TcpStream,
-  mut bytes: &[u8],
-  response_send_timeout: Duration,
-  context: &'static str,
-) -> anyhow::Result<()> {
-  while !bytes.is_empty() {
-    match stream.try_write(bytes) {
-      Ok(0) => bail!("{context}"),
-      Ok(written) => bytes = &bytes[written..],
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-        downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
-      }
-      Err(error) => return Err(error).context(context),
-    }
-  }
-  Ok(())
-}
-
-async fn write_all_tcp_vectored(
-  stream: &mut TcpStream,
-  mut head: &[u8],
-  mut body: &[u8],
-  response_send_timeout: Duration,
-  context: &'static str,
-) -> anyhow::Result<()> {
-  while !head.is_empty() || !body.is_empty() {
-    let written = match stream.try_write_vectored(&[IoSlice::new(head), IoSlice::new(body)]) {
-      Ok(0) => bail!("{context}"),
-      Ok(written) => written,
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-        downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
-        continue;
-      }
-      Err(error) => return Err(error).context(context),
-    };
-    advance_vectored_write(&mut head, &mut body, written);
-  }
-  Ok(())
-}
-
-fn advance_vectored_write<'a>(head: &mut &'a [u8], body: &mut &'a [u8], written: usize) {
-  if written < head.len() {
-    *head = &head[written..];
-    return;
-  }
-  let body_written = written.saturating_sub(head.len());
-  *head = &[];
-  *body = &body[body_written.min(body.len())..];
-}
-
-async fn downstream_send_timeout<T>(
-  timeout: Duration,
-  operation: impl Future<Output = io::Result<T>>,
-  context: &'static str,
-) -> anyhow::Result<T> {
-  match tokio::time::timeout(timeout, operation).await {
-    Ok(result) => result.context(context),
-    Err(_) => Err(BodyTimeoutError::new(BodyTimeoutKind::DownstreamResponseSend).into()),
-  }
-}
-
-fn cached_or_rendered_response_head<'a>(
-  response_heads: Option<&'a StaticResponseHeadBytes>,
-  status: StatusCode,
-  headers: &HeaderMap,
-  keep_alive: bool,
-  head_buffer: &'a mut Vec<u8>,
-) -> &'a [u8] {
-  match response_heads {
-    Some(response_heads) => response_heads.get(keep_alive).as_ref(),
-    None => {
-      response_head_bytes(status, headers, keep_alive, head_buffer);
-      head_buffer.as_slice()
-    }
+fn clear_cached_static_response_heads(plan: &mut StaticResponsePlan) {
+  plan.response_heads = None;
+  if let StaticBodyPlan::Bytes { response_heads, .. } = &mut plan.body {
+    *response_heads = None;
   }
 }
 

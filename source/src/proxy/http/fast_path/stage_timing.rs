@@ -11,6 +11,7 @@ use super::direct_transport::DirectFastPathTransport;
 
 pub(crate) const PATH_H3_DOWNSTREAM: FastPathMetricPath = FastPathMetricPath::H3Downstream;
 pub(crate) const PATH_PLAIN_PROXY: FastPathMetricPath = FastPathMetricPath::PlainProxy;
+pub(crate) const PATH_STATIC_FILES: FastPathMetricPath = FastPathMetricPath::StaticFiles;
 pub(crate) const STAGE_DIRECT_H1_CONNECT: FastPathMetricStage =
   FastPathMetricStage::DirectH1Connect;
 pub(crate) const STAGE_DIRECT_H1_POOL_TAKE: FastPathMetricStage =
@@ -41,6 +42,17 @@ pub(crate) const STAGE_RESPONSE_BODY_PREPARE: FastPathMetricStage =
   FastPathMetricStage::ResponseBodyPrepare;
 pub(crate) const STAGE_RESPONSE_FINALIZE: FastPathMetricStage =
   FastPathMetricStage::ResponseFinalize;
+pub(crate) const STAGE_STATIC_HEAD_PREPARE: FastPathMetricStage =
+  FastPathMetricStage::StaticHeadPrepare;
+pub(crate) const STAGE_STATIC_HOT_OBJECT_REVALIDATE: FastPathMetricStage =
+  FastPathMetricStage::StaticHotObjectRevalidate;
+pub(crate) const STAGE_STATIC_PLAN: FastPathMetricStage = FastPathMetricStage::StaticPlan;
+pub(crate) const STAGE_STATIC_SENDFILE_BODY: FastPathMetricStage =
+  FastPathMetricStage::StaticSendfileBody;
+pub(crate) const STAGE_STATIC_WRITE_BODY: FastPathMetricStage =
+  FastPathMetricStage::StaticWriteBody;
+pub(crate) const STAGE_STATIC_WRITE_HEAD: FastPathMetricStage =
+  FastPathMetricStage::StaticWriteHead;
 
 pub(crate) const OUTCOME_ERROR: FastPathMetricOutcome = FastPathMetricOutcome::Error;
 pub(crate) const OUTCOME_FALLBACK: FastPathMetricOutcome = FastPathMetricOutcome::Fallback;

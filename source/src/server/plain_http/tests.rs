@@ -407,6 +407,82 @@ hsts_preload = true
 }
 
 #[tokio::test]
+async fn hot_object_cache_clears_cached_heads_before_waf_header_mutation() {
+  let temp_dir = common::TempDir::new("plain-sendfile-hot-cache-waf");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-sendfile-hot-cache-waf");
+  let root = temp_dir.path().join("public");
+  tokio::fs::create_dir_all(&root).await.unwrap();
+  tokio::fs::write(root.join("app.txt"), "cached waf")
+    .await
+    .unwrap();
+  let raw = static_sendfile_config_toml(
+    &cert_path,
+    &key_path,
+    &root,
+    r#"
+open_file_cache_max_entries = 8
+open_file_cache_ttl_ms = 10000
+hot_object_cache_max_bytes = 65536
+hot_object_cache_max_file_bytes = 65536
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "mark-response"
+phase = "response"
+priority = 10
+when = "Response.Http.Status == 200"
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "x-static-waf"
+value = "yes"
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  let request = parsed(b"GET /static/app.txt HTTP/1.1\r\nHost: example.com\r\n\r\n");
+
+  let plan = eligible_static_plan(
+    &request,
+    &snapshot,
+    "127.0.0.1:12345".parse().unwrap(),
+    WafTransportMetadataInput::default(),
+  )
+  .await
+  .expect("plain static request should be eligible");
+
+  assert_eq!(
+    plan.response.headers.get("x-static-waf").unwrap(),
+    "yes",
+    "response WAF mutation should apply to the final static plan",
+  );
+  assert!(
+    plan.response.response_heads.is_none(),
+    "cached response heads must not survive WAF header mutation",
+  );
+  match plan.response.body {
+    StaticBodyPlan::Bytes {
+      source,
+      response_heads,
+      ..
+    } => {
+      assert_eq!(source.metric_label(), "hot_object");
+      assert!(
+        response_heads.is_none(),
+        "body-local cached heads must be cleared before WAF mutation",
+      );
+    }
+    other => panic!("expected cached bytes body, got {other:?}"),
+  }
+}
+
+#[tokio::test]
 async fn security_headers_are_preserved_on_plain_static_sendfile_path() {
   if !kernel_sendfile_available_or_skip() {
     return;

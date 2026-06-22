@@ -318,6 +318,40 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
             }
         }),
       );
+  } else if label == "oxibelt-static-16k-h1c" {
+    row
+      .as_object_mut()
+      .expect("load row should be an object")
+      .insert(
+        "fast_path".to_owned(),
+        json!({
+            "static_responses": {
+                "hot_object": {
+                    "served": 1000
+                }
+            },
+            "stage_timing": {
+                "static_files": {
+                    "h1": {
+                        "static_head_prepare": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 80,
+                                "avg_ns": 20.0
+                            }
+                        },
+                        "static_write_body": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 160,
+                                "avg_ns": 40.0
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+      );
   }
   row
 }
@@ -1356,6 +1390,13 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
   assert_eq!(h3_downstream_timing["count"], 50);
   assert_eq!(h3_downstream_timing["total_ns"], 3000);
   assert_eq!(h3_downstream_timing["median_avg_ns"], json!(60.0));
+  let oxibelt_static = find_aggregate(&report, "oxibelt", "static-16k-h1c");
+  let static_write_timing =
+    &oxibelt_static["fast_path"]["stage_timing"]["static_files"]["h1"]["static_write_body"]["ok"];
+  assert_eq!(static_write_timing["sample_count"], 25);
+  assert_eq!(static_write_timing["count"], 100);
+  assert_eq!(static_write_timing["total_ns"], 4000);
+  assert_eq!(static_write_timing["median_avg_ns"], json!(40.0));
 
   let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
     .expect("markdown report should be readable");
@@ -1363,6 +1404,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
   assert!(markdown.contains("| `h2` | `25` | `24750` | `250` | `1.000%`"));
   assert!(markdown.contains("## Fast-path stage timing diagnostics"));
   assert!(markdown.contains("`direct_h1_response_head`"));
+  assert!(markdown.contains("`static_write_body`"));
   assert!(markdown.contains("`h2_downstream_response_return`"));
   assert!(markdown.contains("`h3_downstream_send`"));
 

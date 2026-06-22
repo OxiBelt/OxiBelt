@@ -137,6 +137,7 @@ fn prometheus_output_includes_static_fast_path_responses() {
   metrics.record_static_fast_path_response("hot_object", "served");
   metrics.record_static_fast_path_response("sendfile", "fallback");
   metrics.record_static_fast_path_response("bytes", "served");
+  metrics.record_fast_path_stage_duration_ns("static_files", "h1", "static_write_body", "ok", 37);
 
   let body = metrics.prometheus(
     &MetricsConfig::default(),
@@ -149,6 +150,9 @@ fn prometheus_output_includes_static_fast_path_responses() {
   ));
   assert!(body.contains(
     "oxibelt_http_static_fast_path_responses_total{source=\"sendfile\",outcome=\"fallback\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"h1\",stage=\"static_write_body\",outcome=\"ok\"} 37"
   ));
   assert!(!body.contains("source=\"bytes\""));
 }

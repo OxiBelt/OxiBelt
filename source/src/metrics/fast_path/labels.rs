@@ -5,16 +5,18 @@
 pub(crate) enum FastPathMetricPath {
   PlainProxy = 0,
   H3Downstream = 1,
+  StaticFiles = 2,
 }
 
 impl FastPathMetricPath {
-  pub(crate) const ALL: [Self; 2] = [Self::PlainProxy, Self::H3Downstream];
+  pub(crate) const ALL: [Self; 3] = [Self::PlainProxy, Self::H3Downstream, Self::StaticFiles];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
   pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::PlainProxy => "plain_proxy",
       Self::H3Downstream => "h3_downstream",
+      Self::StaticFiles => "static_files",
     }
   }
 
@@ -22,6 +24,7 @@ impl FastPathMetricPath {
     match value {
       "plain_proxy" => Some(Self::PlainProxy),
       "h3_downstream" => Some(Self::H3Downstream),
+      "static_files" => Some(Self::StaticFiles),
       _ => None,
     }
   }
@@ -89,10 +92,16 @@ pub(crate) enum FastPathMetricStage {
   DirectH1ResponseHead = 15,
   DirectH1ResponseBodyFirstFrame = 16,
   H2DownstreamResponseReturn = 17,
+  StaticPlan = 18,
+  StaticHotObjectRevalidate = 19,
+  StaticHeadPrepare = 20,
+  StaticWriteHead = 21,
+  StaticWriteBody = 22,
+  StaticSendfileBody = 23,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 18] = [
+  pub(crate) const ALL: [Self; 24] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -111,6 +120,12 @@ impl FastPathMetricStage {
     Self::DirectH1ResponseHead,
     Self::DirectH1ResponseBodyFirstFrame,
     Self::H2DownstreamResponseReturn,
+    Self::StaticPlan,
+    Self::StaticHotObjectRevalidate,
+    Self::StaticHeadPrepare,
+    Self::StaticWriteHead,
+    Self::StaticWriteBody,
+    Self::StaticSendfileBody,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -134,6 +149,12 @@ impl FastPathMetricStage {
       Self::DirectH1ResponseHead => "direct_h1_response_head",
       Self::DirectH1ResponseBodyFirstFrame => "direct_h1_response_body_first_frame",
       Self::H2DownstreamResponseReturn => "h2_downstream_response_return",
+      Self::StaticPlan => "static_plan",
+      Self::StaticHotObjectRevalidate => "static_hot_object_revalidate",
+      Self::StaticHeadPrepare => "static_head_prepare",
+      Self::StaticWriteHead => "static_write_head",
+      Self::StaticWriteBody => "static_write_body",
+      Self::StaticSendfileBody => "static_sendfile_body",
     }
   }
 
@@ -157,6 +178,12 @@ impl FastPathMetricStage {
       "direct_h1_response_head" => Some(Self::DirectH1ResponseHead),
       "direct_h1_response_body_first_frame" => Some(Self::DirectH1ResponseBodyFirstFrame),
       "h2_downstream_response_return" => Some(Self::H2DownstreamResponseReturn),
+      "static_plan" => Some(Self::StaticPlan),
+      "static_hot_object_revalidate" => Some(Self::StaticHotObjectRevalidate),
+      "static_head_prepare" => Some(Self::StaticHeadPrepare),
+      "static_write_head" => Some(Self::StaticWriteHead),
+      "static_write_body" => Some(Self::StaticWriteBody),
+      "static_sendfile_body" => Some(Self::StaticSendfileBody),
       _ => None,
     }
   }

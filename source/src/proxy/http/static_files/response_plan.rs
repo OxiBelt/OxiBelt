@@ -171,20 +171,21 @@ pub(in crate::proxy::http::static_files) fn cached_object_plan(
 
 fn cached_full_bytes_plan(method: &Method, cached: Arc<CachedStaticObject>) -> StaticResponsePlan {
   let headers = cached.full_headers.clone();
+  let response_heads = Some(cached.response_heads.clone());
   let body = if method == Method::HEAD || cached.body.is_empty() {
     StaticBodyPlan::Empty
   } else {
     StaticBodyPlan::Bytes {
       bytes: cached.body.clone(),
       source: StaticBodySource::HotObject,
-      response_heads: None,
+      response_heads: response_heads.clone(),
     }
   };
   StaticResponsePlan {
     status: StatusCode::OK,
     headers,
     body,
-    response_heads: None,
+    response_heads,
   }
 }
 

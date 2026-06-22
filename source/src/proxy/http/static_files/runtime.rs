@@ -20,6 +20,7 @@ use http::header::{
 
 use crate::config::{Config, ProxyStaticFilesConfig};
 
+use super::StaticResponseHeadBytes;
 use super::response_plan::StaticResponseMetadata;
 
 #[derive(Clone)]
@@ -234,6 +235,7 @@ pub(crate) struct CachedStaticObject {
   pub(crate) modified: Option<SystemTime>,
   pub(crate) response_metadata: StaticResponseMetadata,
   pub(crate) full_headers: HeaderMap,
+  pub(crate) response_heads: StaticResponseHeadBytes,
   pub(crate) body: Bytes,
 }
 
@@ -408,12 +410,15 @@ impl CachedStaticObject {
     response_metadata: StaticResponseMetadata,
     body: Bytes,
   ) -> Self {
+    let full_headers = cached_full_headers(&etag, modified, &response_metadata, body.len() as u64);
+    let response_heads = StaticResponseHeadBytes::new(http::StatusCode::OK, &full_headers);
     Self {
-      full_headers: cached_full_headers(&etag, modified, &response_metadata, body.len() as u64),
       path,
       etag,
       modified,
       response_metadata,
+      full_headers,
+      response_heads,
       body,
     }
   }

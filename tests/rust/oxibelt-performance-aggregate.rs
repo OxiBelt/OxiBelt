@@ -7787,17 +7787,22 @@ fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
   let rows = report
     .aggregates
     .iter()
-    .filter(|aggregate| {
-      aggregate.amd64_target_cpu == report.primary_target_cpu
-        && aggregate.comparator == Comparator::Oxibelt.as_str()
-        && matches!(aggregate.scenario.as_str(), "h2" | "h3")
-    })
     .filter_map(|aggregate| {
-      aggregate
+      if aggregate.amd64_target_cpu != report.primary_target_cpu
+        || aggregate.comparator != Comparator::Oxibelt.as_str()
+      {
+        return None;
+      }
+      let stage_timing = aggregate
         .fast_path
         .as_ref()
-        .and_then(|fast_path| fast_path.stage_timing.as_ref())
-        .map(|stage_timing| (aggregate.scenario.as_str(), stage_timing))
+        .and_then(|fast_path| fast_path.stage_timing.as_ref())?;
+      if !matches!(aggregate.scenario.as_str(), "h2" | "h3")
+        && !stage_timing.contains_key("static_files")
+      {
+        return None;
+      }
+      Some((aggregate.scenario.as_str(), stage_timing))
     })
     .collect::<Vec<_>>();
   if rows.is_empty() {
@@ -9137,6 +9142,26 @@ mod tests {
                   "sendfile": {
                     "fallback": 3
                   }
+                },
+                "stage_timing": {
+                  "static_files": {
+                    "h1": {
+                      "static_head_prepare": {
+                        "ok": {
+                          "count": 3,
+                          "total_ns": 45,
+                          "avg_ns": 15.0
+                        }
+                      },
+                      "static_write_body": {
+                        "ok": {
+                          "count": 3,
+                          "total_ns": 120,
+                          "avg_ns": 40.0
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }]"#,
@@ -9167,6 +9192,21 @@ mod tests {
     assert_eq!(static_fast_path.sample_count, 1);
     assert_eq!(static_fast_path.values["hot_object"]["served"], 97);
     assert_eq!(static_fast_path.values["sendfile"]["fallback"], 3);
+    let stage_timing = report
+      .aggregates
+      .iter()
+      .find(|aggregate| aggregate.comparator == "oxibelt" && aggregate.scenario == "static-16k-h1c")
+      .and_then(|aggregate| aggregate.fast_path.as_ref())
+      .and_then(|fast_path| fast_path.stage_timing.as_ref())
+      .expect("static stage timing aggregate should exist");
+    assert_eq!(
+      stage_timing["static_files"]["h1"]["static_head_prepare"]["ok"].median_avg_ns,
+      Some(15.0)
+    );
+    assert_eq!(
+      stage_timing["static_files"]["h1"]["static_write_body"]["ok"].total_ns,
+      120
+    );
   }
 
   #[test]
