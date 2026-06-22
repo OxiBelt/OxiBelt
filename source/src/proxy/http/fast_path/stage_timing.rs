@@ -19,8 +19,18 @@ pub(crate) const STAGE_DIRECT_H1_REQUEST_BUILD: FastPathMetricStage =
   FastPathMetricStage::DirectH1RequestBuild;
 pub(crate) const STAGE_DIRECT_H1_SEND_REQUEST: FastPathMetricStage =
   FastPathMetricStage::DirectH1SendRequest;
+pub(crate) const STAGE_DIRECT_H1_SENDER_READY: FastPathMetricStage =
+  FastPathMetricStage::DirectH1SenderReady;
+pub(crate) const STAGE_DIRECT_H1_REQUEST_SUBMIT: FastPathMetricStage =
+  FastPathMetricStage::DirectH1RequestSubmit;
+pub(crate) const STAGE_DIRECT_H1_RESPONSE_HEAD: FastPathMetricStage =
+  FastPathMetricStage::DirectH1ResponseHead;
+pub(crate) const STAGE_DIRECT_H1_RESPONSE_BODY_FIRST_FRAME: FastPathMetricStage =
+  FastPathMetricStage::DirectH1ResponseBodyFirstFrame;
 pub(crate) const STAGE_FAST_PATH_PREPARE: FastPathMetricStage =
   FastPathMetricStage::FastPathPrepare;
+pub(crate) const STAGE_H2_DOWNSTREAM_RESPONSE_RETURN: FastPathMetricStage =
+  FastPathMetricStage::H2DownstreamResponseReturn;
 pub(crate) const STAGE_H3_DOWNSTREAM_SEND: FastPathMetricStage =
   FastPathMetricStage::H3DownstreamSend;
 pub(crate) const STAGE_H3_INGRESS_PREPARE: FastPathMetricStage =
@@ -55,6 +65,39 @@ pub(crate) fn record(
   state
     .metrics
     .record_fast_path_stage_duration_ns_id(path, protocol, stage, outcome, duration_ns);
+}
+
+pub(crate) fn record_metrics(
+  metrics: &crate::metrics::Metrics,
+  path: FastPathMetricPath,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
+  outcome: FastPathMetricOutcome,
+  started_at: Option<Instant>,
+) {
+  let Some(started_at) = started_at else {
+    return;
+  };
+  let duration_ns = started_at.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+  metrics.record_fast_path_stage_duration_ns_id(path, protocol, stage, outcome, duration_ns);
+}
+
+pub(crate) fn record_metrics_plain_result(
+  metrics: &crate::metrics::Metrics,
+  protocol: FastPathMetricProtocol,
+  stage: FastPathMetricStage,
+  success: bool,
+  started_at: Option<Instant>,
+) {
+  let outcome = if success { OUTCOME_OK } else { OUTCOME_ERROR };
+  record_metrics(
+    metrics,
+    PATH_PLAIN_PROXY,
+    protocol,
+    stage,
+    outcome,
+    started_at,
+  );
 }
 
 pub(crate) fn record_plain_ok(
@@ -163,12 +206,21 @@ pub(crate) fn response_body_result(
   record_response_body_prepare(state, protocol, success, started_at);
 }
 
-pub(crate) fn record_response_finalize(
+pub(crate) fn record_finalize(
   state: &AppSnapshot,
   protocol: FastPathMetricProtocol,
+  request_version: http::Version,
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_RESPONSE_FINALIZE, started_at);
+  if request_version == http::Version::HTTP_2 {
+    record_plain_ok(
+      state,
+      protocol,
+      STAGE_H2_DOWNSTREAM_RESPONSE_RETURN,
+      started_at,
+    );
+  }
 }
 
 pub(crate) fn record_transport_result(

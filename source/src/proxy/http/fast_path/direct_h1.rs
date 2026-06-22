@@ -22,12 +22,15 @@ use url::{Position, Url};
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
-  DirectH1PoolEvent, FastPathMetricProtocol, FastPathMetricStage, FastPathTransportMissReason,
+  DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
 };
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
 use super::stage_timing as timing;
+
+mod send_attempt;
+use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
 
 const DIRECT_H1_MAX_SHARDS: usize = 16;
 #[derive(Clone, Default)]
@@ -432,7 +435,7 @@ async fn send_prepared_request(
 
   let pool_take_started = timing::start(timing_enabled);
   let reused_sender = pool.take_sender();
-  record_direct_h1_stage(
+  timing::record_metrics_plain_result(
     metrics,
     protocol,
     timing::STAGE_DIRECT_H1_POOL_TAKE,
@@ -461,45 +464,45 @@ async fn send_prepared_request(
   };
 
   let mut retry = reused.then(|| prepared.retry_request());
-  let send_started = timing::start(timing_enabled);
-  let send_result = tokio::time::timeout(
-    timeouts.upstream_first_byte,
-    sender.send_request(prepared.into_request()),
-  )
-  .await;
-  record_direct_h1_stage(
+  let send_result = send_request_with_timing(
+    &mut sender,
+    prepared.into_request(),
     metrics,
     protocol,
-    timing::STAGE_DIRECT_H1_SEND_REQUEST,
-    matches!(&send_result, Ok(Ok(_))),
-    send_started,
-  );
+    timeouts.upstream_first_byte,
+    timing_enabled,
+  )
+  .await;
   let response = match send_result {
-    Ok(Ok(response)) => response,
-    Ok(Err(error)) if reused => {
+    Ok(response) => response,
+    Err(DirectH1SendAttemptError::Hyper(error)) if reused => {
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
       metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
       sender = connect_sender(&pool, metrics, protocol, timing_enabled).await?;
       let retry = retry
         .take()
         .expect("reused direct H1 sends should retain one retry request");
-      let retry_send_started = timing::start(timing_enabled);
-      let retry_result = tokio::time::timeout(
-        timeouts.upstream_first_byte,
-        sender.send_request(retry.into_request()),
-      )
-      .await;
-      record_direct_h1_stage(
+      let retry_result = send_request_with_timing(
+        &mut sender,
+        retry.into_request(),
         metrics,
         protocol,
-        timing::STAGE_DIRECT_H1_SEND_REQUEST,
-        matches!(&retry_result, Ok(Ok(_))),
-        retry_send_started,
-      );
-      retry_result.context("direct H1 upstream first-byte timeout")??
+        timeouts.upstream_first_byte,
+        timing_enabled,
+      )
+      .await;
+      match retry_result {
+        Ok(response) => response,
+        Err(DirectH1SendAttemptError::Hyper(error)) => return Err(error.into()),
+        Err(DirectH1SendAttemptError::Timeout) => {
+          anyhow::bail!("direct H1 upstream first-byte timed out");
+        }
+      }
     }
-    Ok(Err(error)) => return Err(error.into()),
-    Err(_) => anyhow::bail!("direct H1 upstream first-byte timed out"),
+    Err(DirectH1SendAttemptError::Hyper(error)) => return Err(error.into()),
+    Err(DirectH1SendAttemptError::Timeout) => {
+      anyhow::bail!("direct H1 upstream first-byte timed out");
+    }
   };
 
   let reusable_by_headers = h1_response_allows_reuse(response.headers());
@@ -528,7 +531,7 @@ async fn connect_sender(
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
   let connect_started = timing::start(timing_enabled);
   let result = connect_sender_inner(pool, metrics).await;
-  record_direct_h1_stage(
+  timing::record_metrics_plain_result(
     metrics,
     protocol,
     timing::STAGE_DIRECT_H1_CONNECT,
@@ -568,31 +571,6 @@ async fn connect_sender_inner(
     }
   });
   Ok(sender)
-}
-
-fn record_direct_h1_stage(
-  metrics: &Metrics,
-  protocol: FastPathMetricProtocol,
-  stage: FastPathMetricStage,
-  success: bool,
-  started_at: Option<Instant>,
-) {
-  let Some(started_at) = started_at else {
-    return;
-  };
-  let outcome = if success {
-    timing::OUTCOME_OK
-  } else {
-    timing::OUTCOME_ERROR
-  };
-  let duration_ns = started_at.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-  metrics.record_fast_path_stage_duration_ns_id(
-    timing::PATH_PLAIN_PROXY,
-    protocol,
-    stage,
-    outcome,
-    duration_ns,
-  );
 }
 
 struct PreparedDirectH1Request {

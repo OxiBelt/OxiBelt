@@ -457,8 +457,22 @@ async fn reconnect_recycles_replacement_sender_after_stale_reuse() -> anyhow::Re
 
   let metrics = Metrics::new();
   let timeouts = direct_h1_test_timeouts();
-  send_and_recycle_direct_get(pool.clone(), &metrics, "/after-stale-reconnect", timeouts).await?;
-  send_and_recycle_direct_get(pool, &metrics, "/replacement-should-be-reused", timeouts).await?;
+  send_and_recycle_direct_get(
+    pool.clone(),
+    &metrics,
+    "/after-stale-reconnect",
+    timeouts,
+    false,
+  )
+  .await?;
+  send_and_recycle_direct_get(
+    pool,
+    &metrics,
+    "/replacement-should-be-reused",
+    timeouts,
+    false,
+  )
+  .await?;
 
   assert_eq!(
     accepted_connections.load(Ordering::SeqCst),
@@ -469,11 +483,46 @@ async fn reconnect_recycles_replacement_sender_after_stale_reuse() -> anyhow::Re
   Ok(())
 }
 
+#[tokio::test]
+async fn successful_send_records_direct_h1_split_stage_timing() -> anyhow::Result<()> {
+  let listener = TcpListener::bind("127.0.0.1:0").await?;
+  let origin = format!("http://{}", listener.local_addr()?);
+  let accepted_connections = Arc::new(AtomicUsize::new(0));
+  let server = tokio::spawn(serve_keepalive_listener(
+    listener,
+    accepted_connections.clone(),
+  ));
+
+  let mut upstream = upstream(&origin);
+  upstream.connect_timeout_ms = 1_000;
+  upstream.first_byte_timeout_ms = 1_000;
+  let pool = Arc::new(DirectH1Pool::new(&upstream).expect("loopback origin should be eligible"));
+  let metrics = Metrics::new();
+
+  send_and_recycle_direct_get(
+    pool,
+    &metrics,
+    "/split-stage-timing",
+    direct_h1_test_timeouts(),
+    true,
+  )
+  .await?;
+
+  let body = metrics_prometheus(&metrics);
+  assert!(body.contains("stage=\"direct_h1_sender_ready\",outcome=\"ok\"} 1"));
+  assert!(body.contains("stage=\"direct_h1_request_submit\",outcome=\"ok\"} 1"));
+  assert!(body.contains("stage=\"direct_h1_response_head\",outcome=\"ok\"} 1"));
+  assert!(body.contains("stage=\"direct_h1_send_request\",outcome=\"ok\"} 1"));
+  server.abort();
+  Ok(())
+}
+
 async fn send_and_recycle_direct_get(
   pool: Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
   path: &str,
   timeouts: EffectiveTimeouts,
+  timing_enabled: bool,
 ) -> anyhow::Result<()> {
   let request = Request::builder()
     .method(Method::GET)
@@ -487,7 +536,7 @@ async fn send_and_recycle_direct_get(
     FastPathMetricProtocol::H1,
     prepared,
     timeouts,
-    false,
+    timing_enabled,
   )
   .await?;
   let lease = direct
@@ -496,6 +545,14 @@ async fn send_and_recycle_direct_get(
   direct.response.into_body().collect().await?;
   lease.recycle_if_reusable(true);
   Ok(())
+}
+
+fn metrics_prometheus(metrics: &Metrics) -> String {
+  metrics.prometheus(
+    &crate::config::MetricsConfig::default(),
+    crate::cache::CacheStats::default(),
+    crate::tls::TlsServerSessionStorageStats::default(),
+  )
 }
 
 async fn closed_direct_h1_sender() -> anyhow::Result<SendRequest<ProxyBody>> {

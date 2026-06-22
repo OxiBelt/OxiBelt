@@ -233,6 +233,20 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                                 "total_ns": 100,
                                 "avg_ns": 25.0
                             }
+                        },
+                        "direct_h1_response_head": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 80,
+                                "avg_ns": 20.0
+                            }
+                        },
+                        "h2_downstream_response_return": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 12,
+                                "avg_ns": 3.0
+                            }
                         }
                     }
                 }
@@ -1066,6 +1080,14 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
   assert_eq!(h2_transport_timing["total_ns"], 2500);
   assert_eq!(h2_transport_timing["median_avg_ns"], json!(25.0));
   assert_eq!(h2_transport_timing["max_avg_ns"], json!(25.0));
+  let h2_response_head_timing =
+    &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["direct_h1_response_head"]["ok"];
+  assert_eq!(h2_response_head_timing["sample_count"], 25);
+  assert_eq!(h2_response_head_timing["median_avg_ns"], json!(20.0));
+  let h2_return_timing = &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["h2_downstream_response_return"]
+    ["ok"];
+  assert_eq!(h2_return_timing["sample_count"], 25);
+  assert_eq!(h2_return_timing["median_avg_ns"], json!(3.0));
 
   let oxibelt_h3 = find_aggregate(&report, "oxibelt", "h3");
   let h3_downstream_timing =
@@ -1080,6 +1102,8 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
   assert!(markdown.contains("## Direct-H1 pool diagnostics"));
   assert!(markdown.contains("| `h2` | `25` | `24750` | `250` | `1.000%`"));
   assert!(markdown.contains("## Fast-path stage timing diagnostics"));
+  assert!(markdown.contains("`direct_h1_response_head`"));
+  assert!(markdown.contains("`h2_downstream_response_return`"));
   assert!(markdown.contains("`h3_downstream_send`"));
 
   let h1_comparison = find_comparison(&report, "reverse_proxy", "h1-keepalive");

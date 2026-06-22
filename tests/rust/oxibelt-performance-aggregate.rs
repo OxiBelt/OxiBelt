@@ -8417,6 +8417,20 @@ mod tests {
                           "total_ns": 40,
                           "avg_ns": 10.0
                         }
+                      },
+                      "direct_h1_response_head": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 80,
+                          "avg_ns": 20.0
+                        }
+                      },
+                      "h2_downstream_response_return": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 12,
+                          "avg_ns": 3.0
+                        }
                       }
                     }
                   }
@@ -8459,6 +8473,15 @@ mod tests {
     assert_eq!(pool_take_sample.total_ns, 40);
     assert_eq!(pool_take_sample.median_avg_ns, Some(10.0));
     assert_eq!(pool_take_sample.max_avg_ns, Some(10.0));
+    let response_head_sample = &stage_timing["plain_proxy"]["h2"]["direct_h1_response_head"]["ok"];
+    assert_eq!(response_head_sample.sample_count, 1);
+    assert_eq!(response_head_sample.total_ns, 80);
+    assert_eq!(response_head_sample.median_avg_ns, Some(20.0));
+    let h2_return_sample =
+      &stage_timing["plain_proxy"]["h2"]["h2_downstream_response_return"]["ok"];
+    assert_eq!(h2_return_sample.sample_count, 1);
+    assert_eq!(h2_return_sample.total_ns, 12);
+    assert_eq!(h2_return_sample.median_avg_ns, Some(3.0));
   }
 
   #[test]

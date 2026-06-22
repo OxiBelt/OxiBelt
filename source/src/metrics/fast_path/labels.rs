@@ -84,10 +84,15 @@ pub(crate) enum FastPathMetricStage {
   ResponseFinalize = 10,
   H3IngressPrepare = 11,
   H3DownstreamSend = 12,
+  DirectH1SenderReady = 13,
+  DirectH1RequestSubmit = 14,
+  DirectH1ResponseHead = 15,
+  DirectH1ResponseBodyFirstFrame = 16,
+  H2DownstreamResponseReturn = 17,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 13] = [
+  pub(crate) const ALL: [Self; 18] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -101,6 +106,11 @@ impl FastPathMetricStage {
     Self::ResponseFinalize,
     Self::H3IngressPrepare,
     Self::H3DownstreamSend,
+    Self::DirectH1SenderReady,
+    Self::DirectH1RequestSubmit,
+    Self::DirectH1ResponseHead,
+    Self::DirectH1ResponseBodyFirstFrame,
+    Self::H2DownstreamResponseReturn,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -119,6 +129,11 @@ impl FastPathMetricStage {
       Self::ResponseFinalize => "response_finalize",
       Self::H3IngressPrepare => "h3_ingress_prepare",
       Self::H3DownstreamSend => "h3_downstream_send",
+      Self::DirectH1SenderReady => "direct_h1_sender_ready",
+      Self::DirectH1RequestSubmit => "direct_h1_request_submit",
+      Self::DirectH1ResponseHead => "direct_h1_response_head",
+      Self::DirectH1ResponseBodyFirstFrame => "direct_h1_response_body_first_frame",
+      Self::H2DownstreamResponseReturn => "h2_downstream_response_return",
     }
   }
 
@@ -137,6 +152,11 @@ impl FastPathMetricStage {
       "response_finalize" => Some(Self::ResponseFinalize),
       "h3_ingress_prepare" => Some(Self::H3IngressPrepare),
       "h3_downstream_send" => Some(Self::H3DownstreamSend),
+      "direct_h1_sender_ready" => Some(Self::DirectH1SenderReady),
+      "direct_h1_request_submit" => Some(Self::DirectH1RequestSubmit),
+      "direct_h1_response_head" => Some(Self::DirectH1ResponseHead),
+      "direct_h1_response_body_first_frame" => Some(Self::DirectH1ResponseBodyFirstFrame),
+      "h2_downstream_response_return" => Some(Self::H2DownstreamResponseReturn),
       _ => None,
     }
   }

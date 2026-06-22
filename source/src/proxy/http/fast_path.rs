@@ -592,6 +592,8 @@ impl PlainProxyFastPath {
       timeouts.upstream_read,
       state.config.proxy.http.trailers,
       request_version,
+      (direct_h1_lease.is_some() && timing_enabled)
+        .then(|| (state.metrics.clone(), metric_protocol)),
     )
     .await
     {
@@ -620,7 +622,7 @@ impl PlainProxyFastPath {
         response_body_reason,
       );
     }
-    let response_finalize_started = timing::start(timing_enabled);
+    let finalize_started = timing::start(timing_enabled);
     if let Some(lease) = direct_h1_lease.take() {
       response_body = recycle_response_body(response_body, lease, known_small_response_body);
     }
@@ -737,7 +739,7 @@ impl PlainProxyFastPath {
     apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
     state.record_hot_path_response(response.status());
     drop(pool_selection);
-    timing::record_response_finalize(snapshot, metric_protocol, response_finalize_started);
+    timing::record_finalize(snapshot, metric_protocol, request_version, finalize_started);
     response
   }
 }

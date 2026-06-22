@@ -2860,6 +2860,14 @@ oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
 oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"transport_direct_h1\",outcome=\"ok\"} 100
 # TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"direct_h1_response_head\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"direct_h1_response_head\",outcome=\"ok\"} 80
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_downstream_response_return\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_downstream_response_return\",outcome=\"ok\"} 12
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
 oxibelt_http_fast_path_stage_observations_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_downstream_send\",outcome=\"error\"} 2
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
 oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_downstream_send\",outcome=\"error\"} 90
@@ -2903,6 +2911,14 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\
     assert_eq!(
       parsed["stage_timing"]["plain_proxy"]["h2"]["transport_direct_h1"]["ok"]["avg_ns"],
       25.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["direct_h1_response_head"]["ok"]["avg_ns"],
+      20.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["h2_downstream_response_return"]["ok"]["avg_ns"],
+      3.0
     );
     assert_eq!(
       parsed["stage_timing"]["h3_downstream"]["h3"]["h3_downstream_send"]["error"]["avg_ns"],

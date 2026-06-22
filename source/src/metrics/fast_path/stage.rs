@@ -171,6 +171,14 @@ mod tests {
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "ok", 37);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "ok", 5);
     metrics.record_duration_ns("plain_proxy", "h2", "direct_h1_pool_take", "ok", 7);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h1_response_head", "ok", 3);
+    metrics.record_duration_ns(
+      "plain_proxy",
+      "h2",
+      "h2_downstream_response_return",
+      "ok",
+      2,
+    );
     metrics.record_duration_ns("plain_proxy", "h2", "unknown", "ok", 11);
     metrics.record_duration_ns("plain_proxy", "h9", "transport_direct_h1", "ok", 13);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "weird", 17);
@@ -189,6 +197,14 @@ mod tests {
       stage_counter_index("plain_proxy", "h2", "direct_h1_pool_take", "ok").unwrap();
     assert_eq!(metrics.observations[pool_take_index].load(), 1);
     assert_eq!(metrics.duration_ns[pool_take_index].load(), 7);
+    let response_head_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h1_response_head", "ok").unwrap();
+    assert_eq!(metrics.observations[response_head_index].load(), 1);
+    assert_eq!(metrics.duration_ns[response_head_index].load(), 3);
+    let h2_return_index =
+      stage_counter_index("plain_proxy", "h2", "h2_downstream_response_return", "ok").unwrap();
+    assert_eq!(metrics.observations[h2_return_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h2_return_index].load(), 2);
     let h3_index =
       stage_counter_index("h3_downstream", "h3", "h3_downstream_send", "error").unwrap();
     assert_eq!(metrics.observations[h3_index].load(), 1);
