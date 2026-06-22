@@ -258,7 +258,7 @@ Release builds use thin LTO, one codegen unit, and stripped debuginfo. `panic = 
 
 ## Current Non-Goals
 
-OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-01, out of scope and expects external certificate automation to provision TLS material. Use an ACME client such as Certbot, including the `certbot/certbot` Docker image when containerized renewal fits your deployment, then point OxiBelt at the generated certificate and key files.
+OxiBelt intentionally keeps ACME challenge handling, including HTTP-01 and DNS-01, out of scope and expects external certificate automation to provision TLS material. Use an ACME client such as Certbot or Lego, including the `certbot/certbot` or `goacme/lego` Docker images when containerized renewal fits your deployment, then point OxiBelt at the generated certificate and key files.
 
 This keeps ACME account keys, DNS provider API tokens, challenge credentials, and optionally TLS private keys outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised process should not also contain the credentials needed to issue arbitrary new TLS certificates or export configured private keys, especially through DNS-01 provider tokens.
 

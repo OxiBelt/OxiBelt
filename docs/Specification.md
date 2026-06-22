@@ -278,7 +278,7 @@ OxiBelt intentionally leaves these out of scope by design:
 - ACME challenge handling, including HTTP-01 and DNS-01.
 - General-purpose scripting, imports, loops, callbacks, and unbounded comprehensions.
 
-Provision and renew public TLS certificates outside OxiBelt with an ACME client such as Certbot. Containerized deployments may use the `certbot/certbot` Docker image and mount the generated certificate material into OxiBelt's cert directory.
+Provision and renew public TLS certificates outside OxiBelt with an ACME client such as Certbot or Lego. Containerized deployments may use the `certbot/certbot` or `goacme/lego` Docker images and mount the generated certificate material into OxiBelt's cert directory.
 
 Security rationale: ACME account keys, DNS provider API tokens, and challenge credentials should live outside the OxiBelt process and container trust boundary. If a proxy vulnerability ever allowed remote code execution, memory disclosure, or a logic error that exposed OxiBelt process state, the compromised proxy should not also hold credentials that can issue arbitrary new TLS certificates. DNS-01 credentials are especially sensitive because a stolen DNS provider token can affect certificate issuance for every zone or name that token can modify.
 
