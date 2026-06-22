@@ -276,7 +276,7 @@ pub(crate) fn accepted_encoding_quality(headers: &HeaderMap, encoding: &str) -> 
     };
     for item in value.split(',') {
       let mut parts = item.split(';').map(str::trim);
-      let token = parts.next().unwrap_or_default().to_ascii_lowercase();
+      let token = parts.next().unwrap_or_default();
       if token.is_empty() {
         continue;
       }
@@ -289,7 +289,7 @@ pub(crate) fn accepted_encoding_quality(headers: &HeaderMap, encoding: &str) -> 
           q = value.trim().parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0);
         }
       }
-      if token == encoding {
+      if token.eq_ignore_ascii_case(encoding) {
         exact = Some(q);
       } else if token == "*" {
         wildcard = Some(q);

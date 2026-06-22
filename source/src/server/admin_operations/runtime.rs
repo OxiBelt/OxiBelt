@@ -1,7 +1,7 @@
 //! Runtime store for long-running admin operations.
 //! Final events are retained briefly so reconnecting clients can observe completion.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -278,7 +278,7 @@ impl AdminOperationRuntime {
   }
 
   async fn succeed(&self, id: &str, result: Value) {
-    let result_len = serde_json::to_vec(&result).map(|bytes| bytes.len());
+    let result_len = encoded_json_len(&result);
     match result_len {
       Ok(len) if len <= self.inner.config.result_max_bytes => {
         self
@@ -361,11 +361,7 @@ impl AdminOperationRuntime {
       let Some(record) = store.operations.get_mut(id) else {
         continue;
       };
-      if record
-        .snapshot
-        .finished_at_unix_ms
-        .is_some_and(|finished| record.snapshot.state.is_terminal() && finished < cutoff)
-      {
+      if operation_is_expired(record, cutoff) {
         record.snapshot.state = AdminOperationState::Expired;
       }
     }
@@ -373,13 +369,39 @@ impl AdminOperationRuntime {
       let Some(record) = store.operations.get(id) else {
         return false;
       };
-      !record
-        .snapshot
-        .finished_at_unix_ms
-        .is_some_and(|finished| record.snapshot.state.is_terminal() && finished < cutoff)
+      !operation_is_expired(record, cutoff)
     });
-    let keep = store.order.iter().cloned().collect::<HashSet<_>>();
-    store.operations.retain(|id, _| keep.contains(id));
+    store
+      .operations
+      .retain(|_, record| !operation_is_expired(record, cutoff));
+  }
+}
+
+fn operation_is_expired(record: &AdminOperationRecord, cutoff: u64) -> bool {
+  record
+    .snapshot
+    .finished_at_unix_ms
+    .is_some_and(|finished| record.snapshot.state.is_terminal() && finished < cutoff)
+}
+
+fn encoded_json_len(value: &Value) -> serde_json::Result<usize> {
+  let mut writer = JsonLenWriter { len: 0 };
+  serde_json::to_writer(&mut writer, value)?;
+  Ok(writer.len)
+}
+
+struct JsonLenWriter {
+  len: usize,
+}
+
+impl std::io::Write for JsonLenWriter {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    self.len = self.len.saturating_add(buf.len());
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
   }
 }
 

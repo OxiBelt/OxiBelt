@@ -1,5 +1,7 @@
 //! Fast-path decision counters with fixed low-cardinality labels.
 
+use std::fmt::Write as _;
+
 use self::labels::{DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason};
 use super::StripedCounter;
 
@@ -447,7 +449,7 @@ fn append_labeled_counter(
   output.push_str("\",reason=\"");
   output.push_str(reason);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -469,7 +471,7 @@ fn append_transport_counter(
   output.push_str("\",reason=\"");
   output.push_str(reason);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -488,7 +490,7 @@ fn append_response_body_counter(
   output.push_str("\",reason=\"");
   output.push_str(reason);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -499,7 +501,7 @@ fn append_request_body_counter(output: &mut String, protocol: &str, outcome: &st
   output.push_str("\",outcome=\"");
   output.push_str(outcome);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -508,7 +510,7 @@ fn append_direct_h1_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("oxibelt_http_direct_h1_pool_events_total{event=\"");
   output.push_str(event);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -517,7 +519,7 @@ fn append_direct_h2_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("oxibelt_http_direct_h2_pool_events_total{event=\"");
   output.push_str(event);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
 }
 
@@ -528,13 +530,21 @@ fn append_static_fast_path_counter(output: &mut String, source: &str, outcome: &
   output.push_str("\",outcome=\"");
   output.push_str(outcome);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  append_u64(output, value);
   output.push('\n');
+}
+
+fn append_u64(output: &mut String, value: u64) {
+  let _ = write!(output, "{value}");
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn direct_h1_pool_count(metrics: &FastPathMetrics, event: &str) -> u64 {
+    metrics.direct_h1_pool_counters[direct_h1_pool_event_index(event).unwrap()].load()
+  }
 
   #[test]
   fn records_only_known_fast_path_label_sets() {
@@ -681,26 +691,11 @@ mod tests {
     metrics.record_direct_h1_pool_event("unknown");
     metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked);
 
-    assert_eq!(
-      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("hit").unwrap()].load(),
-      1
-    );
-    assert_eq!(
-      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("miss_locked").unwrap()].load(),
-      1
-    );
-    assert_eq!(
-      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("reconnect").unwrap()].load(),
-      1
-    );
-    assert_eq!(
-      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_full").unwrap()].load(),
-      1
-    );
-    assert_eq!(
-      metrics.direct_h1_pool_counters[direct_h1_pool_event_index("drop_locked").unwrap()].load(),
-      1
-    );
+    assert_eq!(direct_h1_pool_count(&metrics, "hit"), 1);
+    assert_eq!(direct_h1_pool_count(&metrics, "miss_locked"), 1);
+    assert_eq!(direct_h1_pool_count(&metrics, "reconnect"), 1);
+    assert_eq!(direct_h1_pool_count(&metrics, "drop_full"), 1);
+    assert_eq!(direct_h1_pool_count(&metrics, "drop_locked"), 1);
   }
 
   #[test]

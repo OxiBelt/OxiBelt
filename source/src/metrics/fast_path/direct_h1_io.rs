@@ -1,5 +1,7 @@
 //! Direct-H1 runtime backend diagnostics.
 
+use std::fmt::Write as _;
+
 use super::labels::{DirectH1IoBackend, DirectH1IoBackendOutcome, FastPathMetricProtocol};
 use super::{FastPathMetrics, PROTOCOLS};
 
@@ -54,7 +56,7 @@ fn append_counter(output: &mut String, backend: &str, protocol: &str, outcome: &
   output.push_str("\",outcome=\"");
   output.push_str(outcome);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

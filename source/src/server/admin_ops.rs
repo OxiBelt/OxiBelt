@@ -390,11 +390,6 @@ pub(super) async fn admin_files_response(
     .into_http()
 }
 
-struct RequiredIpmPermission {
-  action: &'static str,
-  resource_name: String,
-}
-
 #[derive(Debug, Eq, PartialEq)]
 enum FileSyncPermissionError {
   Denied(&'static str),
@@ -406,43 +401,36 @@ fn check_file_sync_permissions(
   payload: &admin_control::AdminFilesSyncRequest,
 ) -> Result<(), FileSyncPermissionError> {
   for operation in &payload.operations {
-    for permission in file_sync_operation_permissions(operation)? {
-      require_ipm_permission(authorization, permission)?;
-    }
+    check_file_sync_operation_permission(authorization, operation)?;
   }
-  if let Some(permission) = file_sync_apply_permission(payload.apply) {
-    require_ipm_permission(authorization, permission)?;
-  }
+  check_file_sync_apply_permission(authorization, payload.apply)?;
   Ok(())
 }
 
-fn file_sync_operation_permissions(
+fn check_file_sync_operation_permission(
+  authorization: &AdminAuthorization<'_>,
   operation: &admin_control::AdminFileOperation,
-) -> Result<Vec<RequiredIpmPermission>, FileSyncPermissionError> {
+) -> Result<(), FileSyncPermissionError> {
   match (operation.root, operation.op) {
     (admin_control::AdminFileRoot::Config, admin_control::AdminFileOperationKind::Put) => {
-      Ok(vec![RequiredIpmPermission {
-        action: "config:SyncFiles",
-        resource_name: "*".to_string(),
-      }])
+      require_ipm_permission(authorization, "config:SyncFiles", "*")
     }
     (admin_control::AdminFileRoot::Config, admin_control::AdminFileOperationKind::Delete) => {
-      Ok(vec![
-        RequiredIpmPermission {
-          action: "config:SyncFiles",
-          resource_name: "*".to_string(),
-        },
-        RequiredIpmPermission {
-          action: "config:SyncFiles",
-          resource_name: "delete".to_string(),
-        },
-      ])
+      require_ipm_permission(authorization, "config:SyncFiles", "*")?;
+      require_ipm_permission(authorization, "config:SyncFiles", "delete")
     }
     (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Put) => {
-      waf_file_permission(operation.root, "waf:PutOxiRule", "oxirule", &operation.path)
+      require_waf_file_permission(
+        authorization,
+        operation.root,
+        "waf:PutOxiRule",
+        "oxirule",
+        &operation.path,
+      )
     }
     (admin_control::AdminFileRoot::OxiRule, admin_control::AdminFileOperationKind::Delete) => {
-      waf_file_permission(
+      require_waf_file_permission(
+        authorization,
         operation.root,
         "waf:DeleteOxiRule",
         "oxirule",
@@ -450,7 +438,8 @@ fn file_sync_operation_permissions(
       )
     }
     (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Put) => {
-      waf_file_permission(
+      require_waf_file_permission(
+        authorization,
         operation.root,
         "waf:PutOxiRuleGroup",
         "oxirule-group",
@@ -458,7 +447,8 @@ fn file_sync_operation_permissions(
       )
     }
     (admin_control::AdminFileRoot::OxiRuleGroup, admin_control::AdminFileOperationKind::Delete) => {
-      waf_file_permission(
+      require_waf_file_permission(
+        authorization,
         operation.root,
         "waf:DeleteOxiRuleGroup",
         "oxirule-group",
@@ -466,7 +456,8 @@ fn file_sync_operation_permissions(
       )
     }
     (admin_control::AdminFileRoot::OxiRuleRulepack, admin_control::AdminFileOperationKind::Put) => {
-      waf_file_permission(
+      require_waf_file_permission(
+        authorization,
         operation.root,
         "waf:PutOxiRulePack",
         "oxirule-rulepack",
@@ -476,7 +467,8 @@ fn file_sync_operation_permissions(
     (
       admin_control::AdminFileRoot::OxiRuleRulepack,
       admin_control::AdminFileOperationKind::Delete,
-    ) => waf_file_permission(
+    ) => require_waf_file_permission(
+      authorization,
       operation.root,
       "waf:DeleteOxiRulePack",
       "oxirule-rulepack",
@@ -485,7 +477,8 @@ fn file_sync_operation_permissions(
     (
       admin_control::AdminFileRoot::OxiRuleRulepackInstall,
       admin_control::AdminFileOperationKind::Put,
-    ) => waf_file_permission(
+    ) => require_waf_file_permission(
+      authorization,
       operation.root,
       "waf:PutOxiRulePack",
       "oxirule-rulepack-install",
@@ -494,7 +487,8 @@ fn file_sync_operation_permissions(
     (
       admin_control::AdminFileRoot::OxiRuleRulepackInstall,
       admin_control::AdminFileOperationKind::Delete,
-    ) => waf_file_permission(
+    ) => require_waf_file_permission(
+      authorization,
       operation.root,
       "waf:DeleteOxiRulePack",
       "oxirule-rulepack-install",
@@ -503,49 +497,46 @@ fn file_sync_operation_permissions(
   }
 }
 
-fn waf_file_permission(
+fn require_waf_file_permission(
+  authorization: &AdminAuthorization<'_>,
   root: admin_control::AdminFileRoot,
   action: &'static str,
   resource_prefix: &str,
   path: &str,
-) -> Result<Vec<RequiredIpmPermission>, FileSyncPermissionError> {
+) -> Result<(), FileSyncPermissionError> {
   let path =
     file_sync_path::normalized_relative_path(path).map_err(FileSyncPermissionError::InvalidPath)?;
   file_sync_path::validate_root_path(root, &path).map_err(FileSyncPermissionError::InvalidPath)?;
-  Ok(vec![RequiredIpmPermission {
-    action,
-    resource_name: format!("{resource_prefix}/{path}"),
-  }])
+  require_ipm_permission(authorization, action, &format!("{resource_prefix}/{path}"))
 }
 
-fn file_sync_apply_permission(
+fn check_file_sync_apply_permission(
+  authorization: &AdminAuthorization<'_>,
   apply: admin_control::AdminApplyMode,
-) -> Option<RequiredIpmPermission> {
+) -> Result<(), FileSyncPermissionError> {
   match apply {
-    admin_control::AdminApplyMode::None => None,
-    admin_control::AdminApplyMode::Full => Some(RequiredIpmPermission {
-      action: "config:Load",
-      resource_name: "*".to_string(),
-    }),
-    admin_control::AdminApplyMode::DownstreamTls => Some(RequiredIpmPermission {
-      action: "config:ReloadDownstreamTls",
-      resource_name: "*".to_string(),
-    }),
-    admin_control::AdminApplyMode::OxiRule => Some(RequiredIpmPermission {
-      action: "waf:ReloadOxiRule",
-      resource_name: "*".to_string(),
-    }),
+    admin_control::AdminApplyMode::None => Ok(()),
+    admin_control::AdminApplyMode::Full => {
+      require_ipm_permission(authorization, "config:Load", "*")
+    }
+    admin_control::AdminApplyMode::DownstreamTls => {
+      require_ipm_permission(authorization, "config:ReloadDownstreamTls", "*")
+    }
+    admin_control::AdminApplyMode::OxiRule => {
+      require_ipm_permission(authorization, "waf:ReloadOxiRule", "*")
+    }
   }
 }
 
 fn require_ipm_permission(
   authorization: &AdminAuthorization<'_>,
-  permission: RequiredIpmPermission,
+  action: &'static str,
+  resource_name: &str,
 ) -> Result<(), FileSyncPermissionError> {
-  if authorization.is_allowed(permission.action, &permission.resource_name) {
+  if authorization.is_allowed(action, resource_name) {
     Ok(())
   } else {
-    Err(FileSyncPermissionError::Denied(permission.action))
+    Err(FileSyncPermissionError::Denied(action))
   }
 }
 

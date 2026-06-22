@@ -2,6 +2,7 @@
 //! Detail metrics are opt-in because high-cardinality labels can be expensive.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard};
 
 use http::StatusCode;
@@ -544,7 +545,7 @@ fn append_labeled_metric(
   output.push_str(name);
   append_labels(output, labels);
   output.push(' ');
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 
@@ -565,7 +566,7 @@ fn append_histogram(
     output.push_str("_bucket");
     append_labels(output, &bucket_labels);
     output.push(' ');
-    output.push_str(&count.to_string());
+    let _ = write!(output, "{count}");
     output.push('\n');
   }
   let mut inf_labels = labels.to_vec();
@@ -574,19 +575,19 @@ fn append_histogram(
   output.push_str("_bucket");
   append_labels(output, &inf_labels);
   output.push(' ');
-  output.push_str(&series.count.to_string());
+  let _ = write!(output, "{}", series.count);
   output.push('\n');
   output.push_str(name);
   output.push_str("_sum");
   append_labels(output, labels);
   output.push(' ');
-  output.push_str(&series.sum_ms.to_string());
+  let _ = write!(output, "{}", series.sum_ms);
   output.push('\n');
   output.push_str(name);
   output.push_str("_count");
   append_labels(output, labels);
   output.push(' ');
-  output.push_str(&series.count.to_string());
+  let _ = write!(output, "{}", series.count);
   output.push('\n');
 }
 

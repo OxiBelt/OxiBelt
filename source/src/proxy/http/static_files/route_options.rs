@@ -198,8 +198,10 @@ fn accepts_html(headers: &HeaderMap) -> bool {
     value.to_str().ok().is_some_and(|value| {
       value.split(',').any(|item| {
         let mut parts = item.split(';').map(str::trim);
-        let media_type = parts.next().unwrap_or_default().to_ascii_lowercase();
-        if media_type != "text/html" && media_type != "application/xhtml+xml" {
+        let media_type = parts.next().unwrap_or_default();
+        if !media_type.eq_ignore_ascii_case("text/html")
+          && !media_type.eq_ignore_ascii_case("application/xhtml+xml")
+        {
           return false;
         }
         let mut q = 1.0f32;

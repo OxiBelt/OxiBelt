@@ -142,11 +142,11 @@ impl<'a> SystemAccessLogContext<'a> {
     self.route_name.push_str(route_name);
   }
 
-  pub(super) fn set_tags(&mut self, tags: Option<HashMap<String, String>>) {
+  pub(super) fn set_tags(&mut self, tags: &Option<HashMap<String, String>>) {
     if self.request.is_none() {
       return;
     }
-    self.tags = tags;
+    self.tags = tags.clone();
   }
 
   pub(super) fn set_upstream(&mut self, upstream_name: &str, upstream_scheme: &str) {
@@ -159,11 +159,11 @@ impl<'a> SystemAccessLogContext<'a> {
     self.upstream_scheme.push_str(upstream_scheme);
   }
 
-  pub(super) fn set_upstream_pool(&mut self, upstream_pool: String) {
+  pub(super) fn set_upstream_pool(&mut self, upstream_pool: &str) {
     if !self.metadata_enabled {
       return;
     }
-    self.upstream_pool = Some(upstream_pool);
+    self.upstream_pool = Some(upstream_pool.to_string());
   }
 
   pub(super) fn set_upstream_first_byte_time_ms(&mut self, elapsed_ms: u64) {
@@ -407,7 +407,7 @@ mod tests {
     assert!(context.tags().is_empty());
 
     context.set_downstream_host("example.com");
-    context.set_tags(Some(HashMap::from([(
+    context.set_tags(&Some(HashMap::from([(
       "role".to_string(),
       "api".to_string(),
     )])));
@@ -437,7 +437,7 @@ mod tests {
 
     context.set_route_name("app");
     context.set_upstream("backend", "http");
-    context.set_upstream_pool("pool".to_string());
+    context.set_upstream_pool("pool");
     context.record_upstream_error("connect_error", "upstream request failed");
 
     assert!(context.method.is_none());

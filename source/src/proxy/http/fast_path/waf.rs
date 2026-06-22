@@ -96,7 +96,7 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
       active_tags.insert(key.clone(), value.clone());
     }
   }
-  access_log.set_tags(tags.clone());
+  access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal.take() {
     return Err(Box::new(waf_terminal_response(

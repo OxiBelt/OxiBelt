@@ -1,5 +1,7 @@
 //! Upstream HTTP client diagnostics with fixed low-cardinality labels.
 
+use std::fmt::Write as _;
+
 use super::StripedCounter;
 
 const VERSIONS: [&str; 5] = ["h1", "h2", "h2c", "h3", "other"];
@@ -131,7 +133,7 @@ fn append_labeled_gauge(
     version,
     scheme,
     pool,
-    format!("{value:.6}"),
+    format_args!("{value:.6}"),
   );
 }
 
@@ -157,7 +159,7 @@ fn append_labeled_metric(
   output.push_str("\",pool=\"");
   output.push_str(pool);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

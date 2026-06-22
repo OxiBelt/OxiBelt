@@ -432,14 +432,14 @@ struct AdminCertResolver {
 
 impl rustls::server::ResolvesServerCert for AdminCertResolver {
   fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-    let Some(server_name) = client_hello.server_name().map(str::to_ascii_lowercase) else {
+    let Some(server_name) = client_hello.server_name() else {
       return (!self.require_sni).then(|| self.default.clone()).flatten();
     };
     for certificate in &self.certificates {
       if certificate
         .server_names
         .iter()
-        .any(|pattern| admin_sni_matches(pattern, &server_name))
+        .any(|pattern| admin_sni_matches(pattern, server_name))
       {
         return Some(certificate.certified_key.clone());
       }
@@ -454,13 +454,24 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
 
 fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
   if let Some(suffix) = pattern.strip_prefix("*.") {
-    let suffix = format!(".{suffix}");
-    let Some(prefix) = server_name.strip_suffix(&suffix) else {
+    let Some(prefix_len) = server_name.len().checked_sub(suffix.len() + 1) else {
       return false;
     };
+    if server_name.as_bytes().get(prefix_len) != Some(&b'.') {
+      return false;
+    }
+    let Some(prefix) = server_name.get(..prefix_len) else {
+      return false;
+    };
+    let Some(server_suffix) = server_name.get(prefix_len + 1..) else {
+      return false;
+    };
+    if !server_suffix.eq_ignore_ascii_case(suffix) {
+      return false;
+    }
     return !prefix.is_empty() && !prefix.contains('.');
   }
-  pattern == server_name
+  pattern.eq_ignore_ascii_case(server_name)
 }
 
 pub(super) fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
@@ -574,5 +585,24 @@ fn tls_protocol_versions(
     }
     (TlsVersion::Tls13, TlsVersion::Tls13) => vec![&rustls::version::TLS13],
     (TlsVersion::Tls13, TlsVersion::Tls12) => vec![&rustls::version::TLS13],
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::admin_sni_matches;
+
+  #[test]
+  fn admin_sni_matches_without_lowercase_allocation() {
+    assert!(admin_sni_matches(
+      "admin.example.test",
+      "Admin.Example.Test"
+    ));
+    assert!(admin_sni_matches("*.example.test", "Admin.Example.Test"));
+    assert!(!admin_sni_matches(
+      "*.example.test",
+      "deep.admin.example.test"
+    ));
+    assert!(!admin_sni_matches("*.example.test", "example.test"));
   }
 }

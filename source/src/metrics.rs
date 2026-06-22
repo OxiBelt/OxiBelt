@@ -1,6 +1,7 @@
 //! Prometheus metrics registration and update helpers.
 //! Label values are constrained at call sites so exported series remain low-cardinality.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -739,7 +740,7 @@ fn append_metric(output: &mut String, name: &str, kind: &str, value: impl std::f
   output.push('\n');
   output.push_str(name);
   output.push(' ');
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

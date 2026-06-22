@@ -65,105 +65,114 @@ pub(super) async fn admin_stream_pools_response(
   }
 
   let rest = path.strip_prefix("/admin/v1/stream-pools/")?;
-  let segments = rest.split('/').collect::<Vec<_>>();
-  if segments.len() == 1 {
-    if !authorization.is_allowed("stream-pool:Get", segments[0]) {
-      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-    }
-    if *method != ::http::Method::GET {
-      return Some(text_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        "method not allowed",
-      ));
-    }
-    let Some(pool) = snapshot.stream_pools.snapshot(segments[0]) else {
-      return Some(text_response(StatusCode::NOT_FOUND, "not found"));
-    };
-    return Some(json_response(StatusCode::OK, &pool));
-  }
-
-  if segments.len() == 2 && segments[1] == "servers" {
-    if *method != ::http::Method::POST {
-      return Some(text_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        "method not allowed",
-      ));
-    }
-    let if_match = request_if_match(&request);
-    let body = match collect_admin_json::<AdminAddStreamPoolServerRequest>(request).await {
-      Ok(body) => body,
-      Err(response) => {
-        admin_audit(
-          peer_addr,
-          authorization.actor,
-          "stream_server_add",
-          Some(segments[0]),
-          None,
-          AdminAuditOutcome::Rejected,
-          Some("invalid request body"),
-        );
-        return Some(response);
+  let mut segments = rest.split('/');
+  match (
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+  ) {
+    (Some(pool_name), None, None, None) => {
+      if !authorization.is_allowed("stream-pool:Get", pool_name) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
-    };
-    let resource = admin_resource::stream_pool_server(segments[0], &body.id);
-    if !authorization.is_allowed("stream-pool:AddServer", &resource) {
-      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
-    }
-    return Some(
-      admin_add_stream_pool_server(
-        body,
-        &state,
-        peer_addr,
-        authorization.actor,
-        segments[0].to_string(),
-        if_match.as_deref(),
-      )
-      .await,
-    );
-  }
-
-  if segments.len() == 3 && segments[1] == "servers" {
-    let action = match *method {
-      ::http::Method::PATCH => "stream-pool:UpdateServer",
-      ::http::Method::DELETE => "stream-pool:RemoveServer",
-      _ => {
+      if *method != ::http::Method::GET {
         return Some(text_response(
           StatusCode::METHOD_NOT_ALLOWED,
           "method not allowed",
         ));
       }
-    };
-    let resource = admin_resource::stream_pool_server(segments[0], segments[2]);
-    if !authorization.is_allowed(action, &resource) {
-      return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      let Some(pool) = snapshot.stream_pools.snapshot(pool_name) else {
+        return Some(text_response(StatusCode::NOT_FOUND, "not found"));
+      };
+      return Some(json_response(StatusCode::OK, &pool));
     }
-    let if_match = request_if_match(&request);
-    return Some(match *method {
-      ::http::Method::PATCH => {
-        admin_patch_stream_pool_server(
-          request,
+
+    (Some(pool_name), Some("servers"), None, None) => {
+      if *method != ::http::Method::POST {
+        return Some(text_response(
+          StatusCode::METHOD_NOT_ALLOWED,
+          "method not allowed",
+        ));
+      }
+      let if_match = request_if_match(&request);
+      let body = match collect_admin_json::<AdminAddStreamPoolServerRequest>(request).await {
+        Ok(body) => body,
+        Err(response) => {
+          admin_audit(
+            peer_addr,
+            authorization.actor,
+            "stream_server_add",
+            Some(pool_name),
+            None,
+            AdminAuditOutcome::Rejected,
+            Some("invalid request body"),
+          );
+          return Some(response);
+        }
+      };
+      let resource = admin_resource::stream_pool_server(pool_name, &body.id);
+      if !authorization.is_allowed("stream-pool:AddServer", &resource) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
+      }
+      return Some(
+        admin_add_stream_pool_server(
+          body,
           &state,
           peer_addr,
           authorization.actor,
-          segments[0].to_string(),
-          segments[2].to_string(),
+          pool_name.to_string(),
           if_match.as_deref(),
         )
-        .await
+        .await,
+      );
+    }
+
+    (Some(pool_name), Some("servers"), Some(server_id), None) => {
+      let action = match *method {
+        ::http::Method::PATCH => "stream-pool:UpdateServer",
+        ::http::Method::DELETE => "stream-pool:RemoveServer",
+        _ => {
+          return Some(text_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method not allowed",
+          ));
+        }
+      };
+      let resource = admin_resource::stream_pool_server(pool_name, server_id);
+      if !authorization.is_allowed(action, &resource) {
+        return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
-      ::http::Method::DELETE => {
-        admin_delete_stream_pool_server(
-          &state,
-          peer_addr,
-          authorization.actor,
-          segments[0].to_string(),
-          segments[2].to_string(),
-          if_match.as_deref(),
-        )
-        .await
-      }
-      _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
-    });
+      let if_match = request_if_match(&request);
+      return Some(match *method {
+        ::http::Method::PATCH => {
+          admin_patch_stream_pool_server(
+            request,
+            &state,
+            peer_addr,
+            authorization.actor,
+            pool_name.to_string(),
+            server_id.to_string(),
+            if_match.as_deref(),
+          )
+          .await
+        }
+        ::http::Method::DELETE => {
+          admin_delete_stream_pool_server(
+            &state,
+            peer_addr,
+            authorization.actor,
+            pool_name.to_string(),
+            server_id.to_string(),
+            if_match.as_deref(),
+          )
+          .await
+        }
+        _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+      });
+    }
+
+    _ => {}
   }
 
   Some(text_response(StatusCode::NOT_FOUND, "not found"))

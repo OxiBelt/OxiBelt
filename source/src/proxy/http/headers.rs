@@ -288,15 +288,17 @@ fn write_u8_decimal(value: u8, output: &mut [u8]) -> usize {
 }
 
 fn append_csv_header(headers: &mut HeaderMap, header_name: HeaderName, value: &str) {
-  let next_value = match headers
+  let header_value = match headers
     .get(&header_name)
     .and_then(|item| item.to_str().ok())
   {
-    Some(existing) if !existing.is_empty() => format!("{existing}, {value}"),
-    _ => value.to_string(),
+    Some(existing) if !existing.is_empty() => {
+      HeaderValue::from_str(&format!("{existing}, {value}"))
+    }
+    _ => HeaderValue::from_str(value),
   };
 
-  if let Ok(header_value) = HeaderValue::from_str(&next_value) {
+  if let Ok(header_value) = header_value {
     headers.insert(header_name, header_value);
   }
 }

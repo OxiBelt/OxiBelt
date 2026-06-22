@@ -56,9 +56,14 @@ pub(in crate::server) async fn admin_operations_response(
   }
 
   let rest = path.strip_prefix("/admin/v1/operations/")?;
-  let segments = rest.split('/').collect::<Vec<_>>();
-  match segments.as_slice() {
-    [id] => {
+  let mut segments = rest.split('/');
+  match (
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+  ) {
+    (Some(id), None, None, None) => {
       let id = match parse_operation_id(id) {
         Ok(id) => id,
         Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
@@ -69,7 +74,7 @@ pub(in crate::server) async fn admin_operations_response(
         _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
       })
     }
-    [id, "events"] => {
+    (Some(id), Some("events"), None, None) => {
       let id = match parse_operation_id(id) {
         Ok(id) => id,
         Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
@@ -81,7 +86,7 @@ pub(in crate::server) async fn admin_operations_response(
         _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
       })
     }
-    [id, "events", "ws"] => {
+    (Some(id), Some("events"), Some("ws"), None) => {
       let id = match parse_operation_id(id) {
         Ok(id) => id,
         Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),

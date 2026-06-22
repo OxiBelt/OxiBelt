@@ -222,7 +222,7 @@ impl PlainProxyFastPath {
         )
       });
       let pool_retry_context = if let Some(pool_name) = selected.pool_name() {
-        access_log.set_upstream_pool(pool_name.to_string());
+        access_log.set_upstream_pool(pool_name);
         Some((request.uri().clone(), pool_cookie_header.cloned()))
       } else {
         None

@@ -587,26 +587,22 @@ struct RetryDirectH1Request {
 }
 
 impl PreparedDirectH1Request {
-  fn from_request(
-    mut request: Request<ProxyBody>,
-    origin: &DirectH1Origin,
-  ) -> anyhow::Result<Self> {
-    let upstream_authority = request
-      .uri()
-      .authority()
-      .map(|authority| authority.as_str().to_owned());
-    ensure_host_header(request.headers_mut(), upstream_authority.as_deref(), origin)?;
-    let path_and_query = request
-      .uri()
+  fn from_request(request: Request<ProxyBody>, origin: &DirectH1Origin) -> anyhow::Result<Self> {
+    let (mut parts, body) = request.into_parts();
+    let upstream_authority = parts.uri.authority().map(|authority| authority.as_str());
+    ensure_host_header(&mut parts.headers, upstream_authority, origin)?;
+    let path_and_query = parts
+      .uri
       .path_and_query()
       .cloned()
       .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
     let mut uri_parts = http::uri::Parts::default();
     uri_parts.path_and_query = Some(path_and_query);
-    *request.uri_mut() =
-      Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
-    *request.version_mut() = http::Version::HTTP_11;
-    Ok(Self { request })
+    parts.uri = Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
+    parts.version = http::Version::HTTP_11;
+    Ok(Self {
+      request: Request::from_parts(parts, body),
+    })
   }
 
   fn retry_request(&self) -> RetryDirectH1Request {

@@ -918,7 +918,7 @@ where
       tags.insert(key.clone(), value.clone());
     }
   }
-  access_log.set_tags(tags.clone());
+  access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal {
     return waf_terminal_response(terminal, &request_waf.response_header_mutations);
@@ -1077,7 +1077,7 @@ where
     if response_waf_enabled {
       access_log.upstream_pool = Some(pool_name.to_string());
     } else {
-      access_log.set_upstream_pool(pool_name.to_string());
+      access_log.set_upstream_pool(pool_name);
     }
   }
   let mut sticky_cookie = selected.sticky_cookie();
@@ -2037,7 +2037,7 @@ async fn handle_connect_request(
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, &upstream);
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   if let Some(pool_name) = selected.pool_name() {
-    access_log.set_upstream_pool(pool_name.to_string());
+    access_log.set_upstream_pool(pool_name);
   }
   let sticky_cookie = selected.sticky_cookie();
   let pool_report = state.pools.clone();
@@ -2340,7 +2340,7 @@ async fn handle_upgrade_request(
   };
   let upstream = selected.upstream;
   if let Some(pool_name) = selected.pool_name() {
-    access_log.set_upstream_pool(pool_name.to_string());
+    access_log.set_upstream_pool(pool_name);
   }
   let sticky_cookie = selected.sticky_cookie();
   let pool_selection = selected.into_pool_selection();
@@ -3484,7 +3484,7 @@ async fn collect_cache_response_body(
 fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
   for (name, value) in not_modified {
     if matches!(
-      name.as_str().to_ascii_lowercase().as_str(),
+      name.as_str(),
       "cache-control" | "expires" | "etag" | "last-modified" | "vary"
     ) {
       headers.insert(name.clone(), value.clone());

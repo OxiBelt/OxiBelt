@@ -76,27 +76,44 @@ fn operation_for_path(method: &Method, path: &str) -> String {
 
 fn target_for_path(path: &str) -> (Option<String>, Option<String>) {
   let rest = path.strip_prefix("/admin/v1/").unwrap_or(path);
-  let segments = rest.split('/').collect::<Vec<_>>();
-  match segments.as_slice() {
-    ["ipm", "principals", id] => (Some("ipm-principal".to_string()), Some((*id).to_string())),
-    ["ipm", "credentials", id] | ["ipm", "credentials", id, _] => {
-      (Some("ipm-credential".to_string()), Some((*id).to_string()))
+  let mut segments = rest.split('/');
+  match (
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+  ) {
+    (Some("ipm"), Some("principals"), Some(id), None, None) => {
+      (Some("ipm-principal".to_string()), Some(id.to_string()))
     }
-    ["ipm", "policies", id] => (Some("ipm-policy".to_string()), Some((*id).to_string())),
-    ["ipm", "bindings", id] => (Some("ipm-binding".to_string()), Some((*id).to_string())),
-    ["dynamic-policies", id] if id.parse::<i64>().is_ok() => {
-      (Some("dynamic-policy".to_string()), Some((*id).to_string()))
+    (Some("ipm"), Some("credentials"), Some(id), None, None)
+    | (Some("ipm"), Some("credentials"), Some(id), Some(_), None) => {
+      (Some("ipm-credential".to_string()), Some(id.to_string()))
     }
-    ["upstream-pools", pool, "servers", server] => (
+    (Some("ipm"), Some("policies"), Some(id), None, None) => {
+      (Some("ipm-policy".to_string()), Some(id.to_string()))
+    }
+    (Some("ipm"), Some("bindings"), Some(id), None, None) => {
+      (Some("ipm-binding".to_string()), Some(id.to_string()))
+    }
+    (Some("dynamic-policies"), Some(id), None, None, None) if id.parse::<i64>().is_ok() => {
+      (Some("dynamic-policy".to_string()), Some(id.to_string()))
+    }
+    (Some("upstream-pools"), Some(pool), Some("servers"), Some(server), None) => (
       Some("upstream-pool-server".to_string()),
       Some(format!("{pool}/{server}")),
     ),
-    ["upstream-pools", pool] => (Some("upstream-pool".to_string()), Some((*pool).to_string())),
-    ["stream-pools", pool, "servers", server] => (
+    (Some("upstream-pools"), Some(pool), None, None, None) => {
+      (Some("upstream-pool".to_string()), Some(pool.to_string()))
+    }
+    (Some("stream-pools"), Some(pool), Some("servers"), Some(server), None) => (
       Some("stream-pool-server".to_string()),
       Some(format!("{pool}/{server}")),
     ),
-    ["stream-pools", pool] => (Some("stream-pool".to_string()), Some((*pool).to_string())),
+    (Some("stream-pools"), Some(pool), None, None, None) => {
+      (Some("stream-pool".to_string()), Some(pool.to_string()))
+    }
     _ => (None, None),
   }
 }

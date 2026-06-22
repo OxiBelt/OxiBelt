@@ -22,11 +22,10 @@ pub(crate) enum GrpcWebMode {
 pub(crate) fn request_mode(headers: &HeaderMap) -> Option<GrpcWebMode> {
   let content_type = headers
     .get(header::CONTENT_TYPE)
-    .and_then(|value| value.to_str().ok())?
-    .to_ascii_lowercase();
-  if content_type.starts_with("application/grpc-web-text") {
+    .and_then(|value| value.to_str().ok())?;
+  if strip_ascii_prefix(content_type, "application/grpc-web-text").is_some() {
     Some(GrpcWebMode::Text)
-  } else if content_type.starts_with("application/grpc-web") {
+  } else if strip_ascii_prefix(content_type, "application/grpc-web").is_some() {
     Some(GrpcWebMode::Binary)
   } else {
     None
@@ -46,17 +45,24 @@ fn grpc_content_type(headers: &HeaderMap, mode: GrpcWebMode) -> HeaderValue {
     .get(header::CONTENT_TYPE)
     .and_then(|value| value.to_str().ok())
     .and_then(|value| {
-      let lower = value.to_ascii_lowercase();
-      lower
-        .strip_prefix(match mode {
+      strip_ascii_prefix(
+        value,
+        match mode {
           GrpcWebMode::Binary => "application/grpc-web",
           GrpcWebMode::Text => "application/grpc-web-text",
-        })
-        .map(str::to_string)
+        },
+      )
     })
     .unwrap_or_default();
   HeaderValue::from_str(&format!("application/grpc{suffix}"))
     .unwrap_or_else(|_| HeaderValue::from_static("application/grpc"))
+}
+
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+  let head = value.get(..prefix.len())?;
+  head
+    .eq_ignore_ascii_case(prefix)
+    .then(|| &value[prefix.len()..])
 }
 
 pub(crate) async fn decode_request_body(

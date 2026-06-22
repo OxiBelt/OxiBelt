@@ -1,5 +1,7 @@
 //! HTTP transport I/O diagnostics with fixed low-cardinality labels.
 
+use std::fmt::Write as _;
+
 use super::StripedCounter;
 
 const PROTOCOLS: [&str; 2] = ["h1", "other"];
@@ -59,7 +61,7 @@ fn append_labeled_counter(output: &mut String, protocol: &str, transport: &str, 
   output.push_str("\",transport=\"");
   output.push_str(transport);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

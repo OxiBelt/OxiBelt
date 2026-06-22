@@ -410,20 +410,24 @@ async fn write_response<I>(
 where
   I: AsyncWrite + Unpin,
 {
-  let body_is_end_stream = response.body().is_end_stream();
-  let mut headers = response.headers().clone();
-  headers.remove(CONNECTION);
-  headers.remove(TRANSFER_ENCODING);
-  let content_length = single_content_length(&headers);
+  let (mut parts, body) = response.into_parts();
+  let body_is_end_stream = body.is_end_stream();
+  parts.headers.remove(CONNECTION);
+  parts.headers.remove(TRANSFER_ENCODING);
+  let content_length = single_content_length(&parts.headers);
   let chunked = !skip_body && !body_is_end_stream && content_length.is_none();
   if chunked {
-    headers.remove(CONTENT_LENGTH);
-    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    parts.headers.remove(CONTENT_LENGTH);
+    parts
+      .headers
+      .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
   } else if !skip_body && body_is_end_stream && content_length.is_none() {
-    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+    parts
+      .headers
+      .insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
   }
 
-  response_head_bytes(response.status(), &headers, keep_alive, head_buffer);
+  response_head_bytes(parts.status, &parts.headers, keep_alive, head_buffer);
   write_all_timeout(
     stream,
     head_buffer.as_slice(),
@@ -439,15 +443,9 @@ where
   }
 
   if chunked {
-    write_chunked_body(stream, response.into_body(), response_send_timeout).await?;
+    write_chunked_body(stream, body, response_send_timeout).await?;
   } else {
-    write_content_length_body(
-      stream,
-      response.into_body(),
-      content_length,
-      response_send_timeout,
-    )
-    .await?;
+    write_content_length_body(stream, body, content_length, response_send_timeout).await?;
   }
   if !keep_alive {
     shutdown_timeout(stream, response_send_timeout).await?;

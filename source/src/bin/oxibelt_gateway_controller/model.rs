@@ -50,13 +50,16 @@ impl KubernetesObject {
       return Ok(Vec::new());
     }
     if value.get("kind").and_then(Value::as_str) == Some("List") {
-      let mut objects = Vec::new();
-      for item in value
-        .get("items")
-        .and_then(Value::as_array)
-        .context("List object must contain items array")?
-      {
-        objects.extend(Self::from_value(item.clone())?);
+      let items = match value {
+        Value::Object(mut object) => match object.remove("items") {
+          Some(Value::Array(items)) => items,
+          _ => bail!("List object must contain items array"),
+        },
+        _ => bail!("List object must contain items array"),
+      };
+      let mut objects = Vec::with_capacity(items.len());
+      for item in items {
+        objects.extend(Self::from_value(item)?);
       }
       return Ok(objects);
     }

@@ -612,9 +612,14 @@ fn operation_id_from_webtransport_path(path: &str) -> anyhow::Result<&str> {
   let Some(rest) = path.strip_prefix("/admin/v1/operations/") else {
     anyhow::bail!("not an operation event WebTransport endpoint");
   };
-  let segments = rest.split('/').collect::<Vec<_>>();
-  match segments.as_slice() {
-    [id, "events", "wt"] => parse_operation_id(id),
+  let mut segments = rest.split('/');
+  match (
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+  ) {
+    (Some(id), Some("events"), Some("wt"), None) => parse_operation_id(id),
     _ => anyhow::bail!("not an operation event WebTransport endpoint"),
   }
 }

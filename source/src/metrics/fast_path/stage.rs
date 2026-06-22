@@ -1,5 +1,6 @@
 //! Fixed-label fast-path stage timing counters.
 
+use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 
 use super::super::{COUNTER_STRIPE, StripedCounter};
@@ -157,7 +158,7 @@ fn append_stage_counter(
   output.push_str("\",outcome=\"");
   output.push_str(outcome);
   output.push_str("\"} ");
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

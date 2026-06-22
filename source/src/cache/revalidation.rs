@@ -10,7 +10,7 @@ pub(super) fn update_from_not_modified(
   let mut headers = cached_entry.headers.clone();
   for (name, value) in not_modified_headers {
     if matches!(
-      name.as_str().to_ascii_lowercase().as_str(),
+      name.as_str(),
       "cache-control" | "expires" | "etag" | "last-modified" | "vary"
     ) {
       headers.insert(name.clone(), value.clone());

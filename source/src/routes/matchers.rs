@@ -244,19 +244,6 @@ impl CompiledRouteMatcher {
     {
       return None;
     }
-    let path_captures = if let Some(regex) = &self.path_regex {
-      let captures = regex.captures(context.path)?;
-      captures
-        .iter()
-        .map(|capture| {
-          capture
-            .map(|item| item.as_str().to_string())
-            .unwrap_or_default()
-        })
-        .collect()
-    } else {
-      Vec::new()
-    };
     if !self.source_cidrs.is_empty()
       && !context
         .source_ip
@@ -277,6 +264,19 @@ impl CompiledRouteMatcher {
     if !self.client_cert.matches(context.tls, context.protocol) {
       return None;
     }
+    let path_captures = if let Some(regex) = &self.path_regex {
+      let captures = regex.captures(context.path)?;
+      captures
+        .iter()
+        .map(|capture| {
+          capture
+            .map(|item| item.as_str().to_string())
+            .unwrap_or_default()
+        })
+        .collect()
+    } else {
+      Vec::new()
+    };
     Some(RouteMatcherResult { path_captures })
   }
 
@@ -322,10 +322,16 @@ impl CompiledNamedValueMatcher {
   }
 
   fn matches_query(&self, query: &str) -> bool {
-    let values = url::form_urlencoded::parse(query.as_bytes())
-      .filter_map(|(name, value)| (name == self.name).then_some(value.into_owned()))
-      .collect::<Vec<_>>();
-    self.value.matches(values.iter().map(String::as_str))
+    let mut saw_value = false;
+    let mut matched = false;
+    for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+      if name.as_ref() != self.name.as_str() {
+        continue;
+      }
+      saw_value = true;
+      matched |= self.value.matches_value(value.as_ref());
+    }
+    self.value.matches_result(saw_value, matched)
   }
 }
 
@@ -363,15 +369,23 @@ impl CompiledValueMatcher {
     let mut matched = false;
     for value in values {
       saw_value = true;
-      matched |= match self {
-        Self::Present(_) => false,
-        Self::Exact(expected) => value == expected,
-        Self::Prefix(prefix) => value.starts_with(prefix),
-        Self::Suffix(suffix) => value.ends_with(suffix),
-        Self::Contains(needle) => value.contains(needle),
-        Self::Regex(regex) => regex.is_match(value),
-      };
+      matched |= self.matches_value(value);
     }
+    self.matches_result(saw_value, matched)
+  }
+
+  fn matches_value(&self, value: &str) -> bool {
+    match self {
+      Self::Present(_) => false,
+      Self::Exact(expected) => value == expected,
+      Self::Prefix(prefix) => value.starts_with(prefix),
+      Self::Suffix(suffix) => value.ends_with(suffix),
+      Self::Contains(needle) => value.contains(needle),
+      Self::Regex(regex) => regex.is_match(value),
+    }
+  }
+
+  fn matches_result(&self, saw_value: bool, matched: bool) -> bool {
     match self {
       Self::Present(true) => saw_value,
       Self::Present(false) => !saw_value,

@@ -183,7 +183,10 @@ fn selected_content_encoding(
   headers: &HeaderMap,
   config: &WafHttpBodyCompressionConfig,
 ) -> Result<Option<WafHttpBodyEncoding>, WafBodyCodingError> {
-  let mut tokens = Vec::new();
+  let mut token_count = 0_usize;
+  let mut encoding = None;
+  let mut saw_identity = false;
+  let mut saw_unsupported = false;
   for value in headers.get_all(CONTENT_ENCODING) {
     let value = value.to_str().map_err(|_| {
       WafBodyCodingError::new(
@@ -193,31 +196,43 @@ fn selected_content_encoding(
     })?;
     for item in value.split(',') {
       let token = item.trim();
-      if !token.is_empty() {
-        tokens.push(token.to_ascii_lowercase());
+      if token.is_empty() {
+        continue;
+      }
+      token_count += 1;
+      if token_count > 1 {
+        continue;
+      }
+      if token.eq_ignore_ascii_case("identity") {
+        saw_identity = true;
+      } else if token.eq_ignore_ascii_case("gzip") {
+        encoding = Some(WafHttpBodyEncoding::Gzip);
+      } else if token.eq_ignore_ascii_case("deflate") {
+        encoding = Some(WafHttpBodyEncoding::Deflate);
+      } else if token.eq_ignore_ascii_case("br") {
+        encoding = Some(WafHttpBodyEncoding::Br);
+      } else if token.eq_ignore_ascii_case("zstd") {
+        encoding = Some(WafHttpBodyEncoding::Zstd);
+      } else {
+        saw_unsupported = true;
       }
     }
   }
-  if tokens.is_empty() || (tokens.len() == 1 && tokens[0].eq_ignore_ascii_case("identity")) {
+  if token_count == 0 || (token_count == 1 && saw_identity) {
     return Ok(None);
   }
-  if tokens.len() != 1 || tokens[0].eq_ignore_ascii_case("identity") {
+  if token_count != 1 {
     return Err(WafBodyCodingError::new(
       WafBodyCodingErrorKind::Unsupported,
       "multiple Content-Encoding values are not supported for WAF body transform",
     ));
   }
-  let encoding = match tokens[0].as_str() {
-    "gzip" => WafHttpBodyEncoding::Gzip,
-    "deflate" => WafHttpBodyEncoding::Deflate,
-    "br" => WafHttpBodyEncoding::Br,
-    "zstd" => WafHttpBodyEncoding::Zstd,
-    _ => {
-      return Err(WafBodyCodingError::new(
-        WafBodyCodingErrorKind::Unsupported,
-        "unsupported Content-Encoding for WAF body transform",
-      ));
-    }
+  let Some(encoding) = encoding else {
+    debug_assert!(saw_unsupported);
+    return Err(WafBodyCodingError::new(
+      WafBodyCodingErrorKind::Unsupported,
+      "unsupported Content-Encoding for WAF body transform",
+    ));
   };
   if !config.allows_encoding(encoding.as_content_encoding()) {
     return Err(WafBodyCodingError::new(

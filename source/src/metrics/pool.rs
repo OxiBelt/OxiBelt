@@ -2,6 +2,7 @@
 //! Pool labels are generated from configured names and health sources only.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard};
 
 const MAX_LABEL_VALUE_CHARS: usize = 128;
@@ -150,7 +151,7 @@ fn append_labeled_metric(
   output.push_str(name);
   append_labels(output, labels);
   output.push(' ');
-  output.push_str(&value.to_string());
+  let _ = write!(output, "{value}");
   output.push('\n');
 }
 

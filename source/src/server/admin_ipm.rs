@@ -324,22 +324,29 @@ pub(super) async fn ipm_response(
   }
 
   let rest = path.strip_prefix("/admin/v1/ipm/")?;
-  let segments = rest.split('/').collect::<Vec<_>>();
-  match segments.as_slice() {
-    ["principals", id] => {
+  let mut segments = rest.split('/');
+  match (
+    segments.next(),
+    segments.next(),
+    segments.next(),
+    segments.next(),
+  ) {
+    (Some("principals"), Some(id), None, None) => {
       Some(principal_item_response(request, state, authorization, method, id).await)
     }
-    ["credentials", id] => {
+    (Some("credentials"), Some(id), None, None) => {
       Some(credential_item_response(request, state, authorization, method, id).await)
     }
-    ["credentials", id, "rotate"] => {
+    (Some("credentials"), Some(id), Some("rotate"), None) => {
       Some(credential_rotate_response(request, state, authorization, method, id).await)
     }
-    ["credentials", id, "revoke"] => {
+    (Some("credentials"), Some(id), Some("revoke"), None) => {
       Some(credential_revoke_response(request, state, authorization, method, id).await)
     }
-    ["policies", id] => Some(policy_item_response(request, state, authorization, method, id).await),
-    ["bindings", id] => {
+    (Some("policies"), Some(id), None, None) => {
+      Some(policy_item_response(request, state, authorization, method, id).await)
+    }
+    (Some("bindings"), Some(id), None, None) => {
       Some(binding_item_response(request, state, authorization, method, id).await)
     }
     _ => Some(text_response(StatusCode::NOT_FOUND, "not found")),
