@@ -12,6 +12,8 @@ use crate::proxy::http::body::ProxyBody;
 
 use super::timing;
 
+const FAR_FUTURE_DEADLINE: Duration = Duration::from_secs(86_400 * 365 * 30);
+
 #[derive(Debug)]
 pub(super) enum DirectH1SendAttemptError {
   Timeout,
@@ -44,7 +46,7 @@ pub(super) async fn send_request_with_timing(
   timeout: Duration,
   timing_enabled: bool,
 ) -> Result<Response<Incoming>, DirectH1SendAttemptError> {
-  let deadline = TokioInstant::now() + timeout;
+  let deadline = direct_h1_deadline(timeout);
   let attempt_started = timing::start(timing_enabled);
 
   let ready_started = timing::start(timing_enabled);
@@ -135,4 +137,12 @@ fn record_stage(
   started_at: Option<std::time::Instant>,
 ) {
   timing::record_metrics_plain_result(metrics, protocol, stage, success, started_at);
+}
+
+fn direct_h1_deadline(timeout: Duration) -> TokioInstant {
+  let now = TokioInstant::now();
+  now
+    .checked_add(timeout)
+    .or_else(|| now.checked_add(FAR_FUTURE_DEADLINE))
+    .unwrap_or(now)
 }

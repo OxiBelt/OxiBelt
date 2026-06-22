@@ -517,6 +517,33 @@ async fn successful_send_records_direct_h1_split_stage_timing() -> anyhow::Resul
   Ok(())
 }
 
+#[tokio::test]
+async fn huge_first_byte_timeout_does_not_panic_before_sender_error() -> anyhow::Result<()> {
+  let mut sender = closed_direct_h1_sender().await?;
+  let request = Request::builder()
+    .method(Method::GET)
+    .uri("/huge-timeout")
+    .body(empty_body())
+    .expect("test request should be valid");
+  let metrics = Metrics::new();
+
+  let result = send_request_with_timing(
+    &mut sender,
+    request,
+    &metrics,
+    FastPathMetricProtocol::H1,
+    Duration::from_millis(u64::MAX),
+    false,
+  )
+  .await;
+
+  assert!(
+    matches!(result, Err(DirectH1SendAttemptError::Hyper(_))),
+    "huge timeout should reach sender error without panicking"
+  );
+  Ok(())
+}
+
 async fn send_and_recycle_direct_get(
   pool: Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
