@@ -1205,6 +1205,14 @@ fn openresty_performance_fixture_avoids_duplicate_base_directives() {
     "{} should not redeclare sendfile in conf.d because the OpenResty base image already sets it",
     path.display()
   );
+  assert!(
+    config_text.contains("listen 8443 quic reuseport;")
+      && config_text.contains("http3 on;")
+      && config_text.contains("ssl_protocols TLSv1.3;")
+      && config_text.contains("add_header Alt-Svc 'h3=\":8443\"; ma=60' always;"),
+    "{} should expose downstream HTTP/3 for the OpenResty comparator rows",
+    path.display()
+  );
 }
 
 #[test]
@@ -2373,7 +2381,7 @@ fn external_benchmark_layer_keeps_primary_results_separate() {
     script.contains("run_external_benchmarks_for_comparator oxibelt oxibelt required")
       && script.contains("run_external_benchmarks_for_comparator nginx nginx \"${nginx_h3_mode}\"")
       && script.contains("run_external_benchmarks_for_comparator caddy caddy required")
-      && script.contains("run_external_benchmarks_for_comparator openresty openresty disabled"),
+      && script.contains("run_external_benchmarks_for_comparator openresty openresty required"),
     "reverse-proxy comparators should reuse active fixtures for external validation"
   );
 }
@@ -2797,8 +2805,12 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     "Caddy HTTP/3 performance coverage must be mandatory"
   );
   assert!(
-    script.contains("run_common_loads openresty openresty disabled"),
-    "OpenResty should be an H1/H2 comparator with explicit skipped HTTP/3 rows"
+    script.contains("run_common_loads openresty openresty required"),
+    "OpenResty HTTP/3 performance coverage must be mandatory"
+  );
+  assert!(
+    script.contains("run_static_loads openresty openresty required"),
+    "OpenResty static HTTP/3 performance coverage must be mandatory"
   );
   assert!(
     script.contains("OXIBELT_NGINX_H3_MODE")

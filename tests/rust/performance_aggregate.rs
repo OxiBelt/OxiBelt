@@ -1216,11 +1216,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
             "HTTP/3 is not available for this comparator image",
           ),
           load_row("caddy-h3", "h3", 90.0 + sample, 5.0, 9.0),
-          skipped_row(
-            "openresty-h3",
-            "h3",
-            "HTTP/3 is not available for this comparator image",
-          ),
+          load_row("openresty-h3", "h3", 85.0 + sample, 5.0, 9.0),
         ],
       );
 
@@ -1455,6 +1451,12 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
       .as_str()
       .expect("skip reason should be present")
       .contains("HTTP/3 is not available")
+  );
+  assert_close(
+    h3_comparison["oxibelt_vs_openresty"]["ratio"]
+      .as_f64()
+      .expect("OpenResty H3 ratio should exist"),
+    83.0 / 98.0,
   );
 
   let handshake_comparison = find_comparison(&report, "reverse_proxy", "tls-handshake-h2");

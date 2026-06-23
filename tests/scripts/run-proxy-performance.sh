@@ -3369,7 +3369,7 @@ run_reverse_proxy_group() {
 
   if has_comparator openresty; then
     start_openresty
-    run_common_loads openresty openresty disabled
+    run_common_loads openresty openresty required
     ran_openresty=1
   fi
 
@@ -3398,7 +3398,7 @@ run_reverse_proxy_group() {
 
   if (( ran_openresty )); then
     start_openresty
-    run_external_benchmarks_for_comparator openresty openresty disabled
+    run_external_benchmarks_for_comparator openresty openresty required
     run_handshake "openresty-tls-handshake-h2" h2 openresty
   fi
 }
@@ -3422,7 +3422,7 @@ run_static_files_group() {
 
   if has_comparator openresty; then
     start_openresty
-    run_static_loads openresty openresty disabled
+    run_static_loads openresty openresty required
   fi
 
   assert_static_16k_h1c_caddy_ratio
@@ -3598,10 +3598,10 @@ run_all_serving_types() {
 
   if has_comparator openresty; then
     start_openresty
-    run_common_loads openresty openresty disabled
-    run_external_benchmarks_for_comparator openresty openresty disabled
+    run_common_loads openresty openresty required
+    run_external_benchmarks_for_comparator openresty openresty required
     run_handshake "openresty-tls-handshake-h2" h2 openresty
-    run_static_loads openresty openresty disabled
+    run_static_loads openresty openresty required
   fi
 
   assert_static_16k_h1c_caddy_ratio

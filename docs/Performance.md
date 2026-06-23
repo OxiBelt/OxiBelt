@@ -10,16 +10,16 @@ Build or provide an OxiBelt image, then run:
 tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy,openresty
 ```
 
-OpenResty rows are retained as strict comparator evidence for supported
-HTTP/1.1, HTTP/2, static-file, and cold TLS handshake scenarios. OpenResty
-HTTP/3 rows are recorded as skipped because the pinned OpenResty image does not
-expose the nginx QUIC module in this harness; malformed, zero-request, DNS,
-connect, or TLS failures in supported OpenResty rows fail the iteration like
-nginx and Caddy rows.
+OpenResty rows are retained as strict comparator evidence for HTTP/1.1,
+HTTP/2, HTTP/3, static-file, and cold TLS handshake scenarios. The pinned
+OpenResty image is new enough to expose downstream HTTP/3 in this harness, so
+OpenResty H3 probe failures fail closed instead of being recorded as skipped.
+Malformed, zero-request, DNS, connect, or TLS failures in supported OpenResty
+rows fail the iteration like nginx and Caddy rows.
 
 Profiles:
 
-- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy HTTP/3, optional nginx HTTP/3 where available, OpenResty H3 skipped rows, cold TLS handshake comparison, and a short OxiBelt soak.
+- `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy/OpenResty HTTP/3, optional nginx HTTP/3 where available, cold TLS handshake comparison, and a short OxiBelt soak.
 - `benchmark`: longer comparator runs, cold TLS handshake comparison, plus OxiBelt WAF, CRS, cache, and stress scenarios.
 - `soak`: long OxiBelt-focused concurrency presets and stress scenarios. This is intended for manual or scheduled runs, not every pull request.
 
