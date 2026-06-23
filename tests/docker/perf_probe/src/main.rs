@@ -959,7 +959,6 @@ async fn run_load_phase(
   for _ in 0..args.concurrency {
     let args = args.clone();
     let stats = stats.clone();
-    let remote_addr = remote_addr;
     tasks.push(tokio::spawn(async move {
       match args.protocol {
         Protocol::H1 => {
@@ -1322,7 +1321,6 @@ async fn run_handshake(args: HandshakeArgs) -> anyhow::Result<()> {
   for _ in 0..args.concurrency {
     let args = args.clone();
     let stats = stats.clone();
-    let remote_addr = remote_addr;
     tasks.push(tokio::spawn(async move {
       let worker_tls_config = match worker_tls_config(&args) {
         Ok(config) => config,

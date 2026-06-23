@@ -47,7 +47,7 @@ md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "zerocopy"] }
 regex = "1.12.4"
 ring = "0.17.14"
-rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
+rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "std"] }
 sequoia-openpgp = { version = "2.3.0", default-features = false, features = ["crypto-openssl"] }
 webpki = { package = "rustls-webpki", version = "0.103.13" }
