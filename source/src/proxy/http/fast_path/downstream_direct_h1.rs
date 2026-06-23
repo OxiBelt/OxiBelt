@@ -19,6 +19,7 @@ use crate::proxy::http::semantics;
 use crate::waf::RequestWafDecision;
 
 use super::compiled::SelectedCompiledProxyAction;
+use super::direct_h1::mark_prevalidated_direct_h1_request;
 use super::helpers::apply_fast_path_priority_policy;
 
 pub(super) enum DownstreamDirectH1RequestBuild {
@@ -107,10 +108,9 @@ pub(super) fn try_build_downstream_direct_h1_request(
   semantics::strip_accepted_expect(&mut parts.headers);
   apply_fast_path_priority_policy(&mut parts.headers, options.selected.priority);
 
-  Ok(DownstreamDirectH1RequestBuild::Built(Request::from_parts(
-    parts,
-    empty_body(),
-  )))
+  let mut request = Request::from_parts(parts, empty_body());
+  mark_prevalidated_direct_h1_request(&mut request);
+  Ok(DownstreamDirectH1RequestBuild::Built(request))
 }
 
 fn eligible(parts: &request::Parts, options: &DownstreamDirectH1RequestOptions<'_, '_>) -> bool {

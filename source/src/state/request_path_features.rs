@@ -14,6 +14,7 @@ pub(crate) struct RequestPathFeaturePlan {
   pub(crate) rate_limits: bool,
   pub(crate) runtime_introspection: bool,
   pub(crate) security_response_headers: bool,
+  pub(crate) stage_timing_metrics: bool,
   pub(crate) system_access_log: bool,
   pub(crate) telemetry: bool,
 }
@@ -37,6 +38,8 @@ impl RequestPathFeaturePlan {
       rate_limits: !config.rate_limits.is_empty(),
       runtime_introspection: config.admin.enabled,
       security_response_headers: config.security.headers.enabled(),
+      stage_timing_metrics: config.metrics.enabled
+        && config.metrics.detail == MetricsDetail::Detailed,
       system_access_log: system_access_log_enabled,
       telemetry: telemetry_enabled,
     }
@@ -112,6 +115,7 @@ detail = "detailed"
     assert!(plan.hot_path_metrics);
     assert!(plan.person_proof_api);
     assert!(plan.rate_limits);
+    assert!(plan.stage_timing_metrics);
     assert!(plan.system_access_log);
     assert!(plan.telemetry);
   }
@@ -154,6 +158,7 @@ x_content_type_options = "nosniff"
     assert!(plan.hot_path_metrics);
     assert!(plan.runtime_introspection);
     assert!(!plan.detailed_metrics);
+    assert!(!plan.stage_timing_metrics);
   }
 
   #[tokio::test]

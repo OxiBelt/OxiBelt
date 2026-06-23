@@ -40,10 +40,10 @@ pub(super) async fn write_static_plan(
     response_heads,
   } = response;
   let response_send_timeout = *response_send_timeout;
-  let hot_path_metrics = snapshot.request_path_features.hot_path_metrics;
+  let stage_timing_metrics = snapshot.request_path_features.stage_timing_metrics;
   match body {
     StaticBodyPlan::Empty => {
-      let head_started_at = stage_timing::start(hot_path_metrics);
+      let head_started_at = stage_timing::start(stage_timing_metrics);
       let head = cached_or_rendered_response_head(
         response_heads.as_ref(),
         *status,
@@ -59,7 +59,7 @@ pub(super) async fn write_static_plan(
         stage_timing::OUTCOME_OK,
         head_started_at,
       );
-      let write_started_at = stage_timing::start(hot_path_metrics);
+      let write_started_at = stage_timing::start(stage_timing_metrics);
       let result = write_all_tcp(
         stream,
         head,
@@ -82,7 +82,7 @@ pub(super) async fn write_static_plan(
       result?;
     }
     StaticBodyPlan::Text(message) => {
-      let head_started_at = stage_timing::start(hot_path_metrics);
+      let head_started_at = stage_timing::start(stage_timing_metrics);
       let head = cached_or_rendered_response_head(
         response_heads.as_ref(),
         *status,
@@ -98,7 +98,7 @@ pub(super) async fn write_static_plan(
         stage_timing::OUTCOME_OK,
         head_started_at,
       );
-      let write_started_at = stage_timing::start(hot_path_metrics);
+      let write_started_at = stage_timing::start(stage_timing_metrics);
       let result = write_all_tcp_vectored(
         stream,
         head,
@@ -126,7 +126,7 @@ pub(super) async fn write_static_plan(
       response_heads: body_response_heads,
       ..
     } => {
-      let head_started_at = stage_timing::start(hot_path_metrics);
+      let head_started_at = stage_timing::start(stage_timing_metrics);
       let head = match response_heads.as_ref().or(body_response_heads.as_ref()) {
         Some(response_heads) => response_heads.get(keep_alive).as_ref(),
         None => {
@@ -142,7 +142,7 @@ pub(super) async fn write_static_plan(
         stage_timing::OUTCOME_OK,
         head_started_at,
       );
-      let write_started_at = stage_timing::start(hot_path_metrics);
+      let write_started_at = stage_timing::start(stage_timing_metrics);
       let result = write_all_tcp_vectored(
         stream,
         head,
@@ -166,7 +166,7 @@ pub(super) async fn write_static_plan(
       result?;
     }
     StaticBodyPlan::File(file) => {
-      let head_started_at = stage_timing::start(hot_path_metrics);
+      let head_started_at = stage_timing::start(stage_timing_metrics);
       let head = cached_or_rendered_response_head(
         response_heads.as_ref(),
         *status,
@@ -182,7 +182,7 @@ pub(super) async fn write_static_plan(
         stage_timing::OUTCOME_OK,
         head_started_at,
       );
-      let head_write_started_at = stage_timing::start(hot_path_metrics);
+      let head_write_started_at = stage_timing::start(stage_timing_metrics);
       let head_result = write_all_tcp(
         stream,
         head,
@@ -203,7 +203,7 @@ pub(super) async fn write_static_plan(
         head_write_started_at,
       );
       head_result?;
-      let sendfile_started_at = stage_timing::start(hot_path_metrics);
+      let sendfile_started_at = stage_timing::start(stage_timing_metrics);
       let sendfile_result = sendfile_all(
         stream,
         &file.file,

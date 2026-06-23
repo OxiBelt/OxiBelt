@@ -580,25 +580,43 @@ struct PreparedDirectH1Request {
   request: Request<ProxyBody>,
 }
 
+#[derive(Clone)]
+struct PrevalidatedDirectH1Request;
+
 struct RetryDirectH1Request {
   method: Method,
   uri: Uri,
   headers: HeaderMap,
 }
 
+pub(super) fn mark_prevalidated_direct_h1_request(request: &mut Request<ProxyBody>) {
+  request.extensions_mut().insert(PrevalidatedDirectH1Request);
+}
+
 impl PreparedDirectH1Request {
   fn from_request(request: Request<ProxyBody>, origin: &DirectH1Origin) -> anyhow::Result<Self> {
     let (mut parts, body) = request.into_parts();
-    let upstream_authority = parts.uri.authority().map(|authority| authority.as_str());
+    let prevalidated = parts
+      .extensions
+      .remove::<PrevalidatedDirectH1Request>()
+      .is_some();
+    let upstream_authority = if prevalidated {
+      None
+    } else {
+      parts.uri.authority().map(|authority| authority.as_str())
+    };
     ensure_host_header(&mut parts.headers, upstream_authority, origin)?;
-    let path_and_query = parts
-      .uri
-      .path_and_query()
-      .cloned()
-      .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
-    let mut uri_parts = http::uri::Parts::default();
-    uri_parts.path_and_query = Some(path_and_query);
-    parts.uri = Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
+    if !prevalidated {
+      let path_and_query = parts
+        .uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+      let mut uri_parts = http::uri::Parts::default();
+      uri_parts.path_and_query = Some(path_and_query);
+      parts.uri =
+        Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
+    }
     parts.version = http::Version::HTTP_11;
     Ok(Self {
       request: Request::from_parts(parts, body),

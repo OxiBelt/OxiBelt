@@ -193,6 +193,32 @@ fn prepared_request_preserves_existing_host() {
   assert_eq!(request.headers()[HOST], "public.example");
 }
 
+#[test]
+fn prevalidated_prepared_request_preserves_origin_form_and_synthesizes_host() {
+  let origin = DirectH1Origin::from_url(&Url::parse("http://backend.internal:18080").unwrap())
+    .expect("origin should be direct-H1 eligible");
+  let mut request = Request::builder()
+    .method(Method::GET)
+    .version(http::Version::HTTP_11)
+    .uri("/perf/h2?body=ok")
+    .body(empty_body())
+    .unwrap();
+  mark_prevalidated_direct_h1_request(&mut request);
+
+  let prepared = PreparedDirectH1Request::from_request(request, &origin).unwrap();
+  let request = prepared.into_request();
+
+  assert_eq!(request.uri().to_string(), "/perf/h2?body=ok");
+  assert_eq!(request.version(), http::Version::HTTP_11);
+  assert_eq!(request.headers()[HOST], "backend.internal:18080");
+  assert!(
+    request
+      .extensions()
+      .get::<PrevalidatedDirectH1Request>()
+      .is_none()
+  );
+}
+
 #[tokio::test]
 async fn pool_keeps_exact_max_idle_across_shards() -> anyhow::Result<()> {
   let mut upstream = upstream("http://backend.internal:18080");

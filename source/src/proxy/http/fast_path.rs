@@ -120,7 +120,7 @@ impl PlainProxyFastPath {
   {
     let metric_protocol = fast_path_metric_protocol(request_version);
     let snapshot = state.as_ref();
-    let timing_enabled = snapshot.request_path_features.hot_path_metrics;
+    let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
     let prepare_started = timing::start(timing_enabled);
     let request_waf_has_upstream_override =
       request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some();

@@ -279,7 +279,7 @@ async fn try_sendfile_fast_path_inner(
       }
       ReadRequestOutcome::Request(request) => request,
     };
-    let plan_started_at = stage_timing::start(snapshot.request_path_features.hot_path_metrics);
+    let plan_started_at = stage_timing::start(snapshot.request_path_features.stage_timing_metrics);
     let plan =
       eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await;
     stage_timing::record_metrics(
@@ -415,7 +415,8 @@ async fn eligible_static_plan(
   {
     return None;
   }
-  let hot_object_started_at = stage_timing::start(snapshot.request_path_features.hot_path_metrics);
+  let hot_object_started_at =
+    stage_timing::start(snapshot.request_path_features.stage_timing_metrics);
   let compiled_static_response =
     compiled_static_hot_object_response(request, request_path, snapshot, &resolved);
   stage_timing::record_metrics(

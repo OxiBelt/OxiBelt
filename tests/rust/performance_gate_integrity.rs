@@ -2736,12 +2736,9 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
     "performance script should gate expected direct transport hit rates"
   );
   assert!(
-    script.contains("assert_direct_h1_request_build_stage"),
-    "performance script should gate H1/H3 direct-H1 request-build evidence"
-  );
-  assert!(
-    script.contains("oxibelt-h1-keepalive:h1|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h3:h3"),
-    "H1 keep-alive, H3, and runtime-direct-H1 rows should require direct-H1 request-build stage evidence"
+    script.contains("fast_path_stage_timing_metrics")
+      && script.contains("{stage_timing: $stage_timing}"),
+    "performance script should attach optional stage-timing diagnostics without gating primary rows on them"
   );
   assert!(
     script.contains("oxibelt-h2-upstream-h2c:h2")

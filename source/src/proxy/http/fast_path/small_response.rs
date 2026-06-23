@@ -55,12 +55,36 @@ impl SmallResponseReason {
   }
 }
 
+#[cfg(test)]
 pub(super) async fn try_inline_response_body<B>(
   headers: &HeaderMap,
   body: B,
   timeout: Duration,
   trailer_mode: TrailerMode,
   materialization: SmallResponseMaterialization,
+) -> SmallResponseDisposition
+where
+  B: Body<Data = Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<body::BoxError> + Send + Sync + 'static,
+{
+  try_inline_response_body_with_first_frame_recorder(
+    headers,
+    body,
+    timeout,
+    trailer_mode,
+    materialization,
+    None,
+  )
+  .await
+}
+
+pub(super) async fn try_inline_response_body_with_first_frame_recorder<B>(
+  headers: &HeaderMap,
+  body: B,
+  timeout: Duration,
+  trailer_mode: TrailerMode,
+  materialization: SmallResponseMaterialization,
+  first_frame_recorder: Option<&mut dyn SmallResponseFirstFrameRecorder>,
 ) -> SmallResponseDisposition
 where
   B: Body<Data = Bytes> + Send + Sync + Unpin + 'static,
@@ -73,36 +97,37 @@ where
     };
   };
 
-  let collected = match collect_exact_small_response_body(body, length, timeout).await {
-    Ok(collected) => collected,
-    Err(SmallResponseReadError::Timeout) => {
-      return SmallResponseDisposition::Error {
-        response: text_response(
-          StatusCode::GATEWAY_TIMEOUT,
-          "upstream response body timed out",
-        ),
-        reason: SmallResponseReason::ReadTimeout,
-      };
-    }
-    Err(SmallResponseReadError::LengthMismatch) => {
-      return SmallResponseDisposition::Error {
-        response: text_response(
-          StatusCode::BAD_GATEWAY,
-          "upstream response body length mismatch",
-        ),
-        reason: SmallResponseReason::LengthMismatch,
-      };
-    }
-    Err(SmallResponseReadError::Body(error)) => {
-      return SmallResponseDisposition::Error {
-        response: text_response(
-          StatusCode::BAD_GATEWAY,
-          &format!("failed to read upstream response body: {error}"),
-        ),
-        reason: SmallResponseReason::BodyError,
-      };
-    }
-  };
+  let collected =
+    match collect_exact_small_response_body(body, length, timeout, first_frame_recorder).await {
+      Ok(collected) => collected,
+      Err(SmallResponseReadError::Timeout) => {
+        return SmallResponseDisposition::Error {
+          response: text_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream response body timed out",
+          ),
+          reason: SmallResponseReason::ReadTimeout,
+        };
+      }
+      Err(SmallResponseReadError::LengthMismatch) => {
+        return SmallResponseDisposition::Error {
+          response: text_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream response body length mismatch",
+          ),
+          reason: SmallResponseReason::LengthMismatch,
+        };
+      }
+      Err(SmallResponseReadError::Body(error)) => {
+        return SmallResponseDisposition::Error {
+          response: text_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("failed to read upstream response body: {error}"),
+          ),
+          reason: SmallResponseReason::BodyError,
+        };
+      }
+    };
 
   let trailers = if trailer_mode == TrailerMode::Pass {
     collected.trailers
@@ -145,6 +170,10 @@ where
   }
 }
 
+pub(super) trait SmallResponseFirstFrameRecorder: Send {
+  fn record_first_frame(&mut self, success: bool);
+}
+
 struct CollectedSmallResponse {
   bytes: Bytes,
   trailers: Option<HeaderMap>,
@@ -160,6 +189,7 @@ async fn collect_exact_small_response_body<B>(
   mut body: B,
   length: usize,
   timeout: Duration,
+  mut first_frame_recorder: Option<&mut dyn SmallResponseFirstFrameRecorder>,
 ) -> Result<CollectedSmallResponse, SmallResponseReadError>
 where
   B: Body<Data = Bytes> + Unpin,
@@ -172,6 +202,7 @@ where
 
   loop {
     if total == length && body.is_end_stream() {
+      record_first_frame(&mut first_frame_recorder, true);
       break;
     }
 
@@ -182,6 +213,10 @@ where
         .map_err(|_| SmallResponseReadError::Timeout)?
         .map(|frame| frame.map_err(Into::into)),
     };
+    match &frame {
+      Some(Ok(_)) | None => record_first_frame(&mut first_frame_recorder, true),
+      Some(Err(_)) => record_first_frame(&mut first_frame_recorder, false),
+    }
     let Some(frame) = frame else {
       break;
     };
@@ -228,6 +263,15 @@ where
     buffered.freeze()
   };
   Ok(CollectedSmallResponse { bytes, trailers })
+}
+
+fn record_first_frame(
+  recorder: &mut Option<&mut dyn SmallResponseFirstFrameRecorder>,
+  success: bool,
+) {
+  if let Some(recorder) = recorder.as_deref_mut() {
+    recorder.record_first_frame(success);
+  }
 }
 
 fn poll_response_body_once<B>(

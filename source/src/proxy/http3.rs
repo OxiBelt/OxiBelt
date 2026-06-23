@@ -637,7 +637,7 @@ async fn handle_h3_request(
   let (send_stream, recv_stream) = stream.split();
   let state = context.state.clone();
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
-  let timing_enabled = state.request_path_features.hot_path_metrics;
+  let timing_enabled = state.request_path_features.stage_timing_metrics;
   let ingress_started = timing::start(timing_enabled);
   let request = request_body::prepare_h3_request_body(request, recv_stream).await;
   timing::record(
