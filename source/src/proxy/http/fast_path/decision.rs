@@ -10,32 +10,7 @@ use crate::state::AppSnapshot;
 
 use super::helpers::plain_proxy_fast_path_supported_route;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PlainProxyFastPathMissReason {
-  PlanDisabled,
-  UnsupportedVersion,
-  UnsupportedRoute,
-  PersonProofApi,
-  CachePolicy,
-  NativeGrpc,
-  Upgrade,
-  Connect,
-}
-
-impl PlainProxyFastPathMissReason {
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::PlanDisabled => "plan_disabled",
-      Self::UnsupportedVersion => "unsupported_version",
-      Self::UnsupportedRoute => "unsupported_route",
-      Self::PersonProofApi => "person_proof_api",
-      Self::CachePolicy => "cache_policy",
-      Self::NativeGrpc => "native_grpc",
-      Self::Upgrade => "upgrade",
-      Self::Connect => "connect",
-    }
-  }
-}
+pub(super) use crate::metrics::fast_path::labels::FastPathPlainProxyMissReason as PlainProxyFastPathMissReason;
 
 pub(super) fn plain_proxy_fast_path_decision<B>(
   request: &Request<B>,
@@ -96,21 +71,25 @@ pub(super) fn record_plain_proxy_fast_path_decision(
     Some(reason) => {
       state
         .metrics
-        .record_plain_proxy_fast_path_decision(protocol, "miss", reason.as_str());
+        .record_plain_proxy_fast_path_decision_miss_id(protocol, reason);
     }
     None => {
       state
         .metrics
-        .record_plain_proxy_fast_path_decision(protocol, "hit", "eligible");
+        .record_plain_proxy_fast_path_decision_hit_id(protocol);
     }
   }
 }
 
-fn plain_proxy_fast_path_protocol(version: http::Version) -> &'static str {
+fn plain_proxy_fast_path_protocol(
+  version: http::Version,
+) -> crate::metrics::fast_path::labels::FastPathMetricProtocol {
+  use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+
   match version {
-    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
-    http::Version::HTTP_2 => "h2",
-    http::Version::HTTP_3 => "h3",
-    _ => "other",
+    http::Version::HTTP_10 | http::Version::HTTP_11 => FastPathMetricProtocol::H1,
+    http::Version::HTTP_2 => FastPathMetricProtocol::H2,
+    http::Version::HTTP_3 => FastPathMetricProtocol::H3,
+    _ => FastPathMetricProtocol::Other,
   }
 }

@@ -6,7 +6,7 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::metrics::Metrics;
-use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathRequestBodyOutcome};
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   h2_or_h3_safe_method_empty_probe_allowed, http1_request_body_is_definitely_empty,
@@ -29,10 +29,10 @@ pub(super) struct FastPathRequestBodyMetrics<'a> {
 }
 
 impl FastPathRequestBodyMetrics<'_> {
-  fn record(self, outcome: &str) {
+  fn record(self, outcome: FastPathRequestBodyOutcome) {
     self
       .metrics
-      .record_fast_path_request_body(self.protocol.as_str(), outcome);
+      .record_fast_path_request_body_id(self.protocol, outcome);
   }
 }
 
@@ -143,9 +143,9 @@ where
     if body.is_end_stream() || definitely_empty {
       if let Some(metrics) = metrics {
         metrics.record(if definitely_empty {
-          "verified_empty"
+          FastPathRequestBodyOutcome::VerifiedEmpty
         } else {
-          "already_empty"
+          FastPathRequestBodyOutcome::AlreadyEmpty
         });
       }
       return FastPathRequestBody::empty();
@@ -156,7 +156,7 @@ where
     }
 
     if let Some(metrics) = metrics {
-      metrics.record("streaming");
+      metrics.record(FastPathRequestBodyOutcome::Streaming);
     }
     FastPathRequestBody::streaming(body::with_read_timeout(
       Limited::new(body, max_body_bytes),
@@ -182,7 +182,7 @@ where
     let first = match fast_path_poll_request_body_once(Pin::new(&mut body)) {
       Poll::Ready(None) => {
         if let Some(metrics) = metrics {
-          metrics.record("probe_eof");
+          metrics.record(FastPathRequestBodyOutcome::ProbeEof);
         }
         return FastPathRequestBody::empty();
       }
@@ -190,21 +190,21 @@ where
       Poll::Pending => {
         if body.is_end_stream() {
           if let Some(metrics) = metrics {
-            metrics.record("probe_eof");
+            metrics.record(FastPathRequestBodyOutcome::ProbeEof);
           }
           return FastPathRequestBody::empty();
         }
         tokio::task::yield_now().await;
         if body.is_end_stream() {
           if let Some(metrics) = metrics {
-            metrics.record("probe_eof");
+            metrics.record(FastPathRequestBodyOutcome::ProbeEof);
           }
           return FastPathRequestBody::empty();
         }
         match fast_path_poll_request_body_once(Pin::new(&mut body)) {
           Poll::Ready(None) => {
             if let Some(metrics) = metrics {
-              metrics.record("probe_eof");
+              metrics.record(FastPathRequestBodyOutcome::ProbeEof);
             }
             return FastPathRequestBody::empty();
           }
@@ -215,7 +215,7 @@ where
     };
 
     if let Some(metrics) = metrics {
-      metrics.record("streaming");
+      metrics.record(FastPathRequestBodyOutcome::Streaming);
     }
     FastPathRequestBody::streaming(body::with_read_timeout(
       Limited::new(

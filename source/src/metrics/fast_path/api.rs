@@ -3,10 +3,36 @@
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
   DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
-  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathTransportMissReason,
+  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathPlainProxyMissReason,
+  FastPathRequestBodyOutcome, FastPathTransportMissReason,
 };
 
 impl Metrics {
+  pub(crate) fn record_plain_proxy_fast_path_decision_hit_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+  ) {
+    self.fast_path.record_plain_proxy_decision_hit_id(protocol);
+  }
+
+  pub(crate) fn record_plain_proxy_fast_path_decision_miss_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    reason: FastPathPlainProxyMissReason,
+  ) {
+    self
+      .fast_path
+      .record_plain_proxy_decision_miss_id(protocol, reason);
+  }
+
+  pub(crate) fn record_fast_path_request_body_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    outcome: FastPathRequestBodyOutcome,
+  ) {
+    self.fast_path.record_request_body_id(protocol, outcome);
+  }
+
   pub(crate) fn record_fast_path_stage_duration_ns_id(
     &self,
     path: FastPathMetricPath,

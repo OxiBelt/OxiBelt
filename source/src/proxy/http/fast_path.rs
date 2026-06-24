@@ -429,6 +429,7 @@ impl PlainProxyFastPath {
         request_body_proven_empty,
         outbound,
         timeouts,
+        snapshot.request_path_features.hot_path_diagnostic_metrics,
         timing_enabled,
       )
       .await
@@ -597,7 +598,7 @@ impl PlainProxyFastPath {
       }
       Err(error) => {
         timing::response_body_result(snapshot, metric_protocol, false, response_body_started);
-        if state.request_path_features.hot_path_metrics {
+        if state.request_path_features.hot_path_diagnostic_metrics {
           state.metrics.record_fast_path_response_body(
             metric_protocol.as_str(),
             "error",
@@ -609,7 +610,7 @@ impl PlainProxyFastPath {
         return response;
       }
     };
-    if state.request_path_features.hot_path_metrics {
+    if state.request_path_features.hot_path_diagnostic_metrics {
       state.metrics.record_fast_path_response_body(
         metric_protocol.as_str(),
         response_body_disposition,

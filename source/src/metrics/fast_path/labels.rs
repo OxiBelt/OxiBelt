@@ -73,6 +73,48 @@ impl FastPathMetricProtocol {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
+pub(crate) enum FastPathPlainProxyMissReason {
+  PlanDisabled = 0,
+  UnsupportedVersion = 1,
+  UnsupportedRoute = 2,
+  PersonProofApi = 3,
+  CachePolicy = 4,
+  NativeGrpc = 5,
+  Upgrade = 6,
+  Connect = 7,
+}
+
+impl FastPathPlainProxyMissReason {
+  pub(crate) fn index(self) -> usize {
+    self as usize
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(crate) enum FastPathRequestBodyOutcome {
+  AlreadyEmpty = 0,
+  VerifiedEmpty = 1,
+  ProbeEof = 2,
+  Streaming = 3,
+}
+
+impl FastPathRequestBodyOutcome {
+  pub(crate) const ALL: [Self; 4] = [
+    Self::AlreadyEmpty,
+    Self::VerifiedEmpty,
+    Self::ProbeEof,
+    Self::Streaming,
+  ];
+  pub(crate) const COUNT: usize = Self::ALL.len();
+
+  pub(crate) fn index(self) -> usize {
+    self as usize
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 pub(crate) enum FastPathMetricStage {
   DirectH1Connect = 0,
   DirectH1PoolTake = 1,

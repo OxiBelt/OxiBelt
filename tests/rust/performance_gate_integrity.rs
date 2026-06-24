@@ -1019,6 +1019,7 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "oxibelt-runtime-direct-h1-experiment-h2",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only",
+    "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
     "fast_path.io_backend.direct_h1",
   ] {
@@ -1063,7 +1064,7 @@ fn pool_concurrency_serving_type_runs_controlled_diagnostic_matrix() {
   for expected in [
     "IFS=',' read -r -a pool_caps <<<\"${pool_experiment_caps}\"",
     "IFS=',' read -r -a concurrency_presets <<<\"${pool_experiment_concurrency_presets}\"",
-    "start_oxibelt \"${scenario}\" oxibelt",
+    "start_oxibelt \"${scenario}\" oxibelt --detailed-hot-path-diagnostics",
     "run_load \"oxibelt-pool${pool_cap}-conc${preset}-h2\" h2 oxibelt \"/perf/h2?body=ok\" \"${duration_seconds}\" \"${preset}\"",
     "run_load \"oxibelt-pool${pool_cap}-conc${preset}-h3\" h3 oxibelt \"/perf/h3?body=ok\" \"${duration_seconds}\" \"${preset}\"",
     "mandatory HTTP/3 probe failed for pool cap ${pool_cap} concurrency ${preset}",

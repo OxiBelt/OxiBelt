@@ -9,6 +9,7 @@ pub(crate) struct RequestPathFeaturePlan {
   pub(crate) compression: bool,
   pub(crate) detailed_metrics: bool,
   pub(crate) dynamic_policy: bool,
+  pub(crate) hot_path_diagnostic_metrics: bool,
   pub(crate) hot_path_metrics: bool,
   pub(crate) person_proof_api: bool,
   pub(crate) rate_limits: bool,
@@ -28,18 +29,21 @@ impl RequestPathFeaturePlan {
     system_access_log_enabled: bool,
     person_proof_api: bool,
   ) -> Self {
+    let detailed_metrics =
+      config.metrics.enabled && config.metrics.detail == MetricsDetail::Detailed;
+
     Self {
       cache: cache_enabled,
       compression: config.compression.enabled,
-      detailed_metrics: config.metrics.enabled && config.metrics.detail == MetricsDetail::Detailed,
+      detailed_metrics,
       dynamic_policy: dynamic_policy_enabled,
+      hot_path_diagnostic_metrics: detailed_metrics,
       hot_path_metrics: config.metrics.enabled || config.admin.enabled,
       person_proof_api,
       rate_limits: !config.rate_limits.is_empty(),
       runtime_introspection: config.admin.enabled,
       security_response_headers: config.security.headers.enabled(),
-      stage_timing_metrics: config.metrics.enabled
-        && config.metrics.detail == MetricsDetail::Detailed,
+      stage_timing_metrics: detailed_metrics,
       system_access_log: system_access_log_enabled,
       telemetry: telemetry_enabled,
     }
@@ -112,6 +116,7 @@ detail = "detailed"
     assert!(plan.compression);
     assert!(plan.detailed_metrics);
     assert!(plan.dynamic_policy);
+    assert!(plan.hot_path_diagnostic_metrics);
     assert!(plan.hot_path_metrics);
     assert!(plan.person_proof_api);
     assert!(plan.rate_limits);
@@ -158,6 +163,25 @@ x_content_type_options = "nosniff"
     assert!(plan.hot_path_metrics);
     assert!(plan.runtime_introspection);
     assert!(!plan.detailed_metrics);
+    assert!(!plan.hot_path_diagnostic_metrics);
+    assert!(!plan.stage_timing_metrics);
+  }
+
+  #[test]
+  fn request_path_feature_plan_keeps_basic_metrics_diagnostics_off() {
+    let temp_dir = common::TempDir::new("request-path-features-basic-metrics");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "request-path-features-basic-metrics");
+    let mut config = parse_config(&common::minimal_config_toml(&cert_path, &key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    ));
+    config.metrics.enabled = true;
+    config.metrics.detail = MetricsDetail::Basic;
+    let plan = RequestPathFeaturePlan::new(&config, false, false, false, false, false);
+
+    assert!(plan.hot_path_metrics);
+    assert!(!plan.hot_path_diagnostic_metrics);
     assert!(!plan.stage_timing_metrics);
   }
 

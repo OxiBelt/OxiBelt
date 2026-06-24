@@ -2,7 +2,7 @@ use http::{Extensions, HeaderMap, Request, Response};
 use hyper::body::Body;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
-use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathRequestBodyOutcome};
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
@@ -117,13 +117,13 @@ pub(super) fn record_empty_request_body(
     let outcome = if extensions.get::<VerifiedContentLengthZeroBody>().is_some()
       || extensions.get::<VerifiedEmptyRequestBody>().is_some()
     {
-      "verified_empty"
+      FastPathRequestBodyOutcome::VerifiedEmpty
     } else {
-      "already_empty"
+      FastPathRequestBodyOutcome::AlreadyEmpty
     };
     state
       .metrics
-      .record_fast_path_request_body(protocol.as_str(), outcome);
+      .record_fast_path_request_body_id(protocol, outcome);
   }
 }
 

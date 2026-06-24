@@ -436,6 +436,7 @@ async fn streamed_body_recycles_direct_h1_sender_on_eof() -> anyhow::Result<()> 
     pool: pool.clone(),
     metrics: Metrics::new(),
     sender: closed_direct_h1_sender().await?,
+    diagnostic_metrics: false,
     reusable_by_headers: true,
   };
   let body = Full::new(Bytes::from_static(b"ok"))
@@ -589,6 +590,7 @@ async fn send_and_recycle_direct_get(
     FastPathMetricProtocol::H1,
     prepared,
     timeouts,
+    false,
     timing_enabled,
   )
   .await?;

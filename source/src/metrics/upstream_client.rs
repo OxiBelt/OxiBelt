@@ -2,12 +2,13 @@
 
 use std::fmt::Write as _;
 
-use super::StripedCounter;
+use super::{Metrics, StripedCounter};
 
 const VERSIONS: [&str; 5] = ["h1", "h2", "h2c", "h3", "other"];
 const SCHEMES: [&str; 3] = ["http", "https", "other"];
 const POOLS: [&str; 3] = ["primary", "health", "other"];
 const COUNTER_COUNT: usize = VERSIONS.len() * SCHEMES.len() * POOLS.len();
+const H1_HTTP_PRIMARY_INDEX: usize = 0;
 
 #[derive(Debug)]
 pub(super) struct UpstreamClientMetrics {
@@ -27,6 +28,18 @@ impl Default for UpstreamClientMetrics {
 }
 
 impl UpstreamClientMetrics {
+  pub(super) fn record_h1_http_primary_request(&self) {
+    self.requests[H1_HTTP_PRIMARY_INDEX].increment();
+  }
+
+  pub(super) fn record_h1_http_primary_pool_miss(&self) {
+    self.pool_misses[H1_HTTP_PRIMARY_INDEX].increment();
+  }
+
+  pub(super) fn record_h1_http_primary_connection_created(&self) {
+    self.connections_created[H1_HTTP_PRIMARY_INDEX].increment();
+  }
+
   pub(super) fn record_request(&self, version: &str, scheme: &str, pool: &str) {
     if let Some(index) = counter_index(version, scheme, pool) {
       self.requests[index].increment();
@@ -87,6 +100,22 @@ impl UpstreamClientMetrics {
         }
       }
     }
+  }
+}
+
+impl Metrics {
+  pub(crate) fn record_http_upstream_h1_http_primary_request(&self) {
+    self.upstream_client.record_h1_http_primary_request();
+  }
+
+  pub(crate) fn record_http_upstream_h1_http_primary_pool_miss(&self) {
+    self.upstream_client.record_h1_http_primary_pool_miss();
+  }
+
+  pub(crate) fn record_http_upstream_h1_http_primary_connection_created(&self) {
+    self
+      .upstream_client
+      .record_h1_http_primary_connection_created();
   }
 }
 
@@ -173,15 +202,18 @@ mod tests {
     metrics.record_request("h1", "http", "primary");
     metrics.record_pool_miss("h1", "http", "primary");
     metrics.record_connection_created("h1", "http", "primary");
+    metrics.record_h1_http_primary_request();
+    metrics.record_h1_http_primary_pool_miss();
+    metrics.record_h1_http_primary_connection_created();
     metrics.record_request("h3", "https", "primary");
     metrics.record_pool_miss("h3", "https", "primary");
     metrics.record_connection_created("h3", "https", "primary");
     metrics.record_request("h9", "http", "primary");
 
     let index = counter_index("h1", "http", "primary").unwrap();
-    assert_eq!(metrics.requests[index].load(), 1);
-    assert_eq!(metrics.pool_misses[index].load(), 1);
-    assert_eq!(metrics.connections_created[index].load(), 1);
+    assert_eq!(metrics.requests[index].load(), 2);
+    assert_eq!(metrics.pool_misses[index].load(), 2);
+    assert_eq!(metrics.connections_created[index].load(), 2);
     let h3_index = counter_index("h3", "https", "primary").unwrap();
     assert_eq!(metrics.requests[h3_index].load(), 1);
     assert_eq!(metrics.pool_misses[h3_index].load(), 1);

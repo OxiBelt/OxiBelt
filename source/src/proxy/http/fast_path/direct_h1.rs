@@ -240,6 +240,7 @@ pub(super) struct DirectH1Lease {
   pool: Arc<DirectH1Pool>,
   metrics: Arc<Metrics>,
   sender: SendRequest<ProxyBody>,
+  diagnostic_metrics: bool,
   reusable_by_headers: bool,
 }
 
@@ -247,19 +248,21 @@ impl DirectH1Lease {
   pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
     if body_consumed && self.reusable_by_headers {
       if let Err(error) = self.pool.put_sender(self.sender) {
-        self
-          .metrics
-          .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
-        match error {
-          DirectH1PutError::Full => self
+        if self.diagnostic_metrics {
+          self
             .metrics
-            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
-          DirectH1PutError::Locked => self
-            .metrics
-            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
+            .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
+          match error {
+            DirectH1PutError::Full => self
+              .metrics
+              .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
+            DirectH1PutError::Locked => self
+              .metrics
+              .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
+          }
         }
       }
-    } else {
+    } else if self.diagnostic_metrics {
       self
         .metrics
         .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
@@ -348,6 +351,7 @@ pub(super) async fn try_send_direct_h1(
   request_body_proven_empty: bool,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
+  diagnostic_metrics: bool,
   timing_enabled: bool,
 ) -> DirectH1SendResult {
   let protocol = fast_path_metric_protocol(request_version);
@@ -382,8 +386,16 @@ pub(super) async fn try_send_direct_h1(
     }
   };
 
-  let result =
-    send_prepared_request(pool, metrics, protocol, prepared, timeouts, timing_enabled).await;
+  let result = send_prepared_request(
+    pool,
+    metrics,
+    protocol,
+    prepared,
+    timeouts,
+    diagnostic_metrics,
+    timing_enabled,
+  )
+  .await;
   match &result {
     Ok(_) => metrics.record_direct_h1_transport_hit_id(protocol),
     Err(error) if error.to_string().contains("timed out") => {
@@ -431,10 +443,13 @@ async fn send_prepared_request(
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
+  diagnostic_metrics: bool,
   timing_enabled: bool,
 ) -> anyhow::Result<DirectH1Response> {
-  metrics.record_http_upstream_client_request("h1", "http", "primary");
-  DirectH1RuntimeBackend::current().record_attempt(metrics, protocol);
+  metrics.record_http_upstream_h1_http_primary_request();
+  if diagnostic_metrics {
+    DirectH1RuntimeBackend::current().record_attempt(metrics, protocol);
+  }
 
   let pool_take_started = timing::start(timing_enabled);
   let reused_sender = pool.take_sender();
@@ -445,19 +460,23 @@ async fn send_prepared_request(
     true,
     pool_take_started,
   );
-  record_stale_direct_h1_senders(metrics, reused_sender.stale_pruned);
+  if diagnostic_metrics {
+    record_stale_direct_h1_senders(metrics, reused_sender.stale_pruned);
+  }
   let reused = reused_sender.sender.is_some();
-  if reused {
-    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Hit);
-  } else {
-    metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Miss);
-    match reused_sender.miss_reason {
-      DirectH1TakeMissReason::None => {}
-      DirectH1TakeMissReason::Empty => {
-        metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissEmpty);
-      }
-      DirectH1TakeMissReason::Locked => {
-        metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissLocked);
+  if diagnostic_metrics {
+    if reused {
+      metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Hit);
+    } else {
+      metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Miss);
+      match reused_sender.miss_reason {
+        DirectH1TakeMissReason::None => {}
+        DirectH1TakeMissReason::Empty => {
+          metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissEmpty);
+        }
+        DirectH1TakeMissReason::Locked => {
+          metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::MissLocked);
+        }
       }
     }
   }
@@ -480,7 +499,9 @@ async fn send_prepared_request(
     Ok(response) => response,
     Err(DirectH1SendAttemptError::Hyper(error)) if reused => {
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
-      metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
+      if diagnostic_metrics {
+        metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
+      }
       sender = connect_sender(&pool, metrics, protocol, timing_enabled).await?;
       let retry = retry
         .take()
@@ -515,6 +536,7 @@ async fn send_prepared_request(
       pool,
       metrics: metrics.clone(),
       sender,
+      diagnostic_metrics,
       reusable_by_headers,
     }),
   })
@@ -548,7 +570,7 @@ async fn connect_sender_inner(
   pool: &Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
-  metrics.record_http_upstream_client_pool_miss("h1", "http", "primary");
+  metrics.record_http_upstream_h1_http_primary_pool_miss();
   let stream = tokio::time::timeout(
     pool.connect_timeout,
     TcpStream::connect((pool.origin.host.as_str(), pool.origin.port)),
@@ -567,7 +589,7 @@ async fn connect_sender_inner(
   let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
     .await
     .context("failed to establish direct H1 upstream connection")?;
-  metrics.record_http_upstream_client_connection_created("h1", "http", "primary");
+  metrics.record_http_upstream_h1_http_primary_connection_created();
   tokio::spawn(async move {
     if let Err(error) = connection.await {
       warn!(error = %error, "direct H1 upstream connection closed with error");

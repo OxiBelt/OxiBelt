@@ -3,11 +3,36 @@
 use super::labels::{
   DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
   FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathMetricTransport,
-  FastPathTransportMissReason,
+  FastPathPlainProxyMissReason, FastPathRequestBodyOutcome, FastPathTransportMissReason,
 };
-use super::{FastPathMetrics, direct_h1_io, transport_counter_index_by_parts};
+use super::{
+  FastPathMetrics, OUTCOMES_PER_PROTOCOL, direct_h1_io, transport_counter_index_by_parts,
+};
 
 impl FastPathMetrics {
+  pub(super) fn record_plain_proxy_decision_hit_id(&self, protocol: FastPathMetricProtocol) {
+    self.decision_counters[protocol.index() * OUTCOMES_PER_PROTOCOL].increment();
+  }
+
+  pub(super) fn record_plain_proxy_decision_miss_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    reason: FastPathPlainProxyMissReason,
+  ) {
+    self.decision_counters[protocol.index() * OUTCOMES_PER_PROTOCOL + 1 + reason.index()]
+      .increment();
+  }
+
+  pub(super) fn record_request_body_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    outcome: FastPathRequestBodyOutcome,
+  ) {
+    self.request_body_counters
+      [protocol.index() * FastPathRequestBodyOutcome::COUNT + outcome.index()]
+    .increment();
+  }
+
   pub(super) fn record_direct_h1_transport_hit_id(&self, protocol: FastPathMetricProtocol) {
     self.record_transport_hit_id(FastPathMetricTransport::DirectH1, protocol);
   }
@@ -78,5 +103,47 @@ impl FastPathMetrics {
     self.transport_counters
       [transport_counter_index_by_parts(transport.index(), protocol.index(), 1 + reason.index())]
     .increment();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::super::{counter_index, request_body_counter_index};
+  use super::*;
+
+  #[test]
+  fn specialized_gate_recorders_use_fixed_indexes() {
+    let metrics = FastPathMetrics::default();
+    metrics.record_plain_proxy_decision_hit_id(FastPathMetricProtocol::H2);
+    metrics.record_plain_proxy_decision_miss_id(
+      FastPathMetricProtocol::H3,
+      FastPathPlainProxyMissReason::CachePolicy,
+    );
+    metrics.record_request_body_id(
+      FastPathMetricProtocol::H2,
+      FastPathRequestBodyOutcome::VerifiedEmpty,
+    );
+    metrics.record_request_body_id(
+      FastPathMetricProtocol::H3,
+      FastPathRequestBodyOutcome::ProbeEof,
+    );
+
+    assert_eq!(
+      metrics.decision_counters[counter_index("h2", "hit", "eligible").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.decision_counters[counter_index("h3", "miss", "cache_policy").unwrap()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.request_body_counters[request_body_counter_index("h2", "verified_empty").unwrap()]
+        .load(),
+      1
+    );
+    assert_eq!(
+      metrics.request_body_counters[request_body_counter_index("h3", "probe_eof").unwrap()].load(),
+      1
+    );
   }
 }

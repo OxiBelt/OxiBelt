@@ -2091,16 +2091,29 @@ run_load() {
     direct_h1_delta="$(direct_h1_transport_delta "${direct_h1_before}" "${direct_h1_after}")"
     direct_h2_delta="$(direct_h2_transport_delta "${direct_h2_before}" "${direct_h2_after}")"
     direct_h1_pool_delta="$(counter_map_delta "${direct_h1_pool_before}" "${direct_h1_pool_after}")"
+    direct_h1_pool_delta="$(nonzero_counter_map "${direct_h1_pool_delta}")"
     direct_h1_io_backend_delta_json="$(nested_counter_map_delta "${direct_h1_io_backend_before}" "${direct_h1_io_backend_after}")"
+    direct_h1_io_backend_delta_json="$(nonzero_nested_counter_map "${direct_h1_io_backend_delta_json}")"
     if [[ "${direct_transport}" == "direct_h2" ]]; then
       direct_h2_pool_delta="$(counter_map_delta "${direct_h2_pool_before}" "${direct_h2_pool_after}")"
+      direct_h2_pool_delta="$(nonzero_counter_map "${direct_h2_pool_delta}")"
     fi
     stage_timing_delta_json="$(stage_timing_delta "${stage_timing_before}" "${stage_timing_after}")"
-    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" --argjson direct_h1_pool "${direct_h1_pool_delta}" --argjson direct_h1_io_backend "${direct_h1_io_backend_delta_json}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}, pool: {direct_h1: $direct_h1_pool}, io_backend: {direct_h1: $direct_h1_io_backend}}}' <<<"${json}")"
-    if [[ "${direct_transport}" == "direct_h2" ]]; then
-      json="$(jq -c --argjson direct_h2_pool "${direct_h2_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h2: $direct_h2_pool})})}' <<<"${json}")"
+    json="$(jq -c --arg protocol "${fast_path_protocol}" --argjson fast_path "${fast_path_delta}" --argjson request_body "${request_body_delta}" --argjson direct_h1 "${direct_h1_delta}" --argjson direct_h2 "${direct_h2_delta}" '. + {fast_path: {plain_proxy: {($protocol): $fast_path}, request_body: {($protocol): $request_body}, transport: {direct_h1: {($protocol): $direct_h1}, direct_h2: {($protocol): $direct_h2}}}}' <<<"${json}")"
+    if [[ "${direct_h1_pool_delta}" != "{}" ]]; then
+      json="$(jq -c --argjson direct_h1_pool "${direct_h1_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h1: $direct_h1_pool})})}' <<<"${json}")"
     fi
-    json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
+    if [[ "${direct_h1_io_backend_delta_json}" != "{}" ]]; then
+      json="$(jq -c --argjson direct_h1_io_backend "${direct_h1_io_backend_delta_json}" '. + {fast_path: ((.fast_path // {}) + {io_backend: (((.fast_path // {}).io_backend // {}) + {direct_h1: $direct_h1_io_backend})})}' <<<"${json}")"
+    fi
+    if [[ "${direct_transport}" == "direct_h2" ]]; then
+      if [[ "${direct_h2_pool_delta}" != "{}" ]]; then
+        json="$(jq -c --argjson direct_h2_pool "${direct_h2_pool_delta}" '. + {fast_path: ((.fast_path // {}) + {pool: (((.fast_path // {}).pool // {}) + {direct_h2: $direct_h2_pool})})}' <<<"${json}")"
+      fi
+    fi
+    if [[ "${stage_timing_delta_json}" != "{}" ]]; then
+      json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
+    fi
     if ! direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
       assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
     fi
@@ -2526,6 +2539,24 @@ nested_counter_map_delta() {
      | reduce $paths[] as $path ({}; setpath($path; positive_delta($path)))'
 }
 
+nonzero_counter_map() {
+  local value="$1"
+  jq -c 'with_entries(select((.value // 0) != 0))' <<<"${value}"
+}
+
+nonzero_nested_counter_map() {
+  local value="$1"
+  jq -c '
+    def prune:
+      if type == "object" then
+        with_entries(.value |= prune | select(.value != {} and .value != 0))
+      else
+        .
+      end;
+    prune
+  ' <<<"${value}"
+}
+
 stage_timing_delta() {
   local before="$1"
   local after="$2"
@@ -2833,14 +2864,31 @@ start_oxibelt() {
   local remote_signer_volume="oxibelt-perf-keysigner-sock-${scenario}-${run_id}"
   local remote_signer_cert_volume="oxibelt-perf-keysigner-cert-${scenario}-${run_id}"
   local remote_signer_cert_seed_container="oxibelt-perf-keysigner-cert-seed-${scenario}-${run_id}"
-  local -a oxibelt_env_args=("$@")
+  local detailed_hot_path_diagnostics=0
+  local -a oxibelt_env_args=()
   local -a remote_signer_args=()
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --detailed-hot-path-diagnostics)
+        detailed_hot_path_diagnostics=1
+        shift
+        ;;
+      *)
+        oxibelt_env_args+=("$1")
+        shift
+        ;;
+    esac
+  done
   stop_active_proxy
   if [[ ! -d "${fixture_dir}/config" ]]; then
     fail_with_diagnostics "missing OxiBelt performance fixture: ${scenario}"
   fi
   mkdir -p "${configs_dir}/oxibelt-${scenario}"
   cp -R "${fixture_dir}/." "${configs_dir}/oxibelt-${scenario}/"
+  if [[ "${detailed_hot_path_diagnostics}" == "1" ]]; then
+    sed -i 's/^[[:space:]]*detail = "basic"[[:space:]]*$/detail = "detailed"/' \
+      "${configs_dir}/oxibelt-${scenario}/config/oxibelt.toml"
+  fi
   if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
     remote_signer=1
   fi
@@ -2927,7 +2975,7 @@ start_oxibelt() {
     "${oxibelt_env_args[@]}" \
     "${remote_signer_args[@]}" \
     "${oxibelt_image}" >/dev/null
-  docker cp "${fixture_dir}/config/." "${container}:/etc/oxibelt/config"
+  docker cp "${configs_dir}/oxibelt-${scenario}/config/." "${container}:/etc/oxibelt/config"
   if [[ "${remote_signer}" == "1" ]]; then
     docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/oxibelt/cert/fullchain.pem"
     docker cp "${tls_dir}/quic-host-key.b64" "${container}:/etc/oxibelt/cert/quic-host-key.b64"
@@ -3234,7 +3282,7 @@ run_pool_concurrency_experiments_group() {
       continue
     fi
 
-    start_oxibelt "${scenario}" oxibelt
+    start_oxibelt "${scenario}" oxibelt --detailed-hot-path-diagnostics
     for preset in "${concurrency_presets[@]}"; do
       if ! [[ "${preset}" =~ ^[1-9][0-9]*$ ]]; then
         record_skip "oxibelt-pool${pool_cap}-conc${preset}-h2" load h2 "invalid pool-concurrency preset"
@@ -3505,7 +3553,7 @@ run_runtime_direct_h1_group() {
     return
   fi
 
-  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt --detailed-hot-path-diagnostics
   run_load "oxibelt-runtime-direct-h1-control-h1" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
   run_load "oxibelt-runtime-direct-h1-control-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
   if h3_probe_succeeds oxibelt; then
@@ -3515,6 +3563,7 @@ run_runtime_direct_h1_group() {
   fi
 
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
+    --detailed-hot-path-diagnostics \
     -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio \
     -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only
   run_load "oxibelt-runtime-direct-h1-experiment-h1" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
