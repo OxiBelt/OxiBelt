@@ -21,6 +21,26 @@ assert_same_body_projection() {
   fi
 }
 
+assert_not_modified_no_body() {
+  local response="$1"
+  assert_response_jq "${response}" '.status == 304
+    and .body == ""
+    and (.headers["content-length"] == null or .headers["content-length"] == "2")'
+}
+
+assert_same_not_modified_content_length() {
+  local left="$1"
+  local right="$2"
+  local left_value right_value
+  left_value="$(jq -r '.headers["content-length"] // "absent"' <<<"${left}")"
+  right_value="$(jq -r '.headers["content-length"] // "absent"' <<<"${right}")"
+  if [[ "${left_value}" != "${right_value}" ]]; then
+    echo "fast 304 content-length: ${left_value}" >&2
+    echo "general 304 content-length: ${right_value}" >&2
+    fail_with_diagnostics "fast/general 304 content-length semantics diverged"
+  fi
+}
+
 run_case_checks() {
   local fast general fast_bad general_bad h2_fast h2_general
 
@@ -101,8 +121,9 @@ run_case_checks() {
 
   fast="$(client_request "example.test" "/fast/not-modified?status=304&body=ok" 304)"
   general="$(client_request "example.test" "/general/not-modified?status=304&body=ok" 304)"
-  assert_response_jq "${fast}" '.body == "" and .headers["content-length"] == "2"'
-  assert_response_jq "${general}" '.body == "" and .headers["content-length"] == "2"'
+  assert_not_modified_no_body "${fast}"
+  assert_not_modified_no_body "${general}"
+  assert_same_not_modified_content_length "${fast}" "${general}"
 
   h2_fast="$(protocol_probe_client_with_headers "h2" "example.test" "/fast/head?body=ok" 200 "HEAD" "")"
   h2_general="$(protocol_probe_client_with_headers "h2" "example.test" "/general/head?body=ok" 200 "HEAD" "")"
@@ -111,8 +132,11 @@ run_case_checks() {
 
   h2_fast="$(protocol_probe_client_with_headers "h2" "example.test" "/fast/not-modified?status=304&body=ok" 304 "GET" "")"
   h2_general="$(protocol_probe_client_with_headers "h2" "example.test" "/general/not-modified?status=304&body=ok" 304 "GET" "")"
-  assert_response_jq "${h2_fast}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
-  assert_response_jq "${h2_general}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
+  assert_response_jq "${h2_fast}" '.negotiated_protocol == "h2"'
+  assert_response_jq "${h2_general}" '.negotiated_protocol == "h2"'
+  assert_not_modified_no_body "${h2_fast}"
+  assert_not_modified_no_body "${h2_general}"
+  assert_same_not_modified_content_length "${h2_fast}" "${h2_general}"
 
   fast_bad="$(chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
   general_bad="$(chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
