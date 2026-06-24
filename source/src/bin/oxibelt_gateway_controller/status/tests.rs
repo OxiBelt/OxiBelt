@@ -18,7 +18,7 @@ fn args() -> SharedArgs {
 }
 
 fn object(raw: &str) -> KubernetesObject {
-  let value: Value = serde_yaml::from_str(raw).expect("yaml");
+  let value: Value = serde_saphyr::from_str(raw).expect("yaml");
   KubernetesObject::from_value(value)
     .expect("object")
     .into_iter()

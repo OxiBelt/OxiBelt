@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::model::KubernetesObject;
@@ -62,9 +61,9 @@ fn load_file_objects(path: &Path) -> anyhow::Result<Vec<KubernetesObject>> {
     return KubernetesObject::from_value(value);
   }
   let mut objects = Vec::new();
-  for document in serde_yaml::Deserializer::from_str(&raw) {
-    let value = Value::deserialize(document)
-      .with_context(|| format!("failed to parse YAML from {}", path.display()))?;
+  for value in serde_saphyr::from_multiple::<Value>(&raw)
+    .with_context(|| format!("failed to parse YAML from {}", path.display()))?
+  {
     objects.extend(KubernetesObject::from_value(value)?);
   }
   Ok(objects)

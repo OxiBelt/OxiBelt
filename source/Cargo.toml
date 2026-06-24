@@ -23,7 +23,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 clubcard-crlite = { version = "0.4.0", default-features = false, features = ["builder"] }
 der = "0.8.0"
 glob = "0.3.3"
-gateway-api = "0.21.0"
 http = "1.4.2"
 httpdate = "1.0.3"
 http-body-util = "0.1.3"
@@ -39,8 +38,6 @@ hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] 
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
 k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
-# gateway-api 0.21.0 still depends on k8s-openapi 0.27.x and needs a version feature.
-k8s-openapi-v027 = { package = "k8s-openapi", version = "0.27.1", features = ["v1_35"] }
 kube = { version = "4.0.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.186"
 md-5 = "0.11.0"
@@ -53,7 +50,7 @@ sequoia-openpgp = { version = "2.3.0", default-features = false, features = ["cr
 webpki = { package = "rustls-webpki", version = "0.103.13" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-serde_yaml = "0.9.34"
+serde-saphyr = { version = "0.0.27", default-features = false, features = ["deserialize"] }
 sha1 = { version = "0.11.0", features = ["oid"] }
 socket2 = "0.6.4"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }

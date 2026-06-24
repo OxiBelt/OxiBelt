@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::super::{RenderedConfig, translate_objects};
@@ -24,8 +23,7 @@ fn args() -> SharedArgs {
 
 fn objects(raw: &str) -> Vec<KubernetesObject> {
   let mut objects = Vec::new();
-  for document in serde_yaml::Deserializer::from_str(raw) {
-    let value = Value::deserialize(document).expect("yaml should parse");
+  for value in serde_saphyr::from_multiple::<Value>(raw).expect("yaml should parse") {
     objects.extend(KubernetesObject::from_value(value).expect("object should parse"));
   }
   objects
