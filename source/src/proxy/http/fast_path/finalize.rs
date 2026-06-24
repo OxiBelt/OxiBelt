@@ -58,17 +58,16 @@ pub(super) fn finalize_response(
   pool_selection: Option<&PoolSelection>,
   sticky_cookie: Option<&HeaderValue>,
   access_log: &mut SystemAccessLogContext<'_>,
-  compiled_proxy: Option<&SelectedCompiledProxyAction<'_>>,
+  compiled_known_small_noop_candidate: bool,
   metric_protocol: FastPathMetricProtocol,
   finalize_started: Option<Instant>,
   direct_h1_lease: Option<DirectH1Lease>,
   direct_h2_lease: Option<DirectH2Lease>,
   mut parts: Parts,
   mut response_body: ProxyBody,
-  request_body_proven_empty: bool,
   known_small_response_body: bool,
   known_no_trailers: bool,
-  inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  mut inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
   trailers_handled: bool,
   response_send_timeout: Duration,
 ) -> Response<ProxyBody> {
@@ -82,15 +81,7 @@ pub(super) fn finalize_response(
   strip_hop_by_hop_headers(&mut parts.headers);
 
   if can_use_compiled_known_small_noop_response(
-    state,
-    compiled_proxy,
-    request_version,
-    downstream_scheme,
-    transport_network,
-    request_waf,
-    pool_selection,
-    sticky_cookie,
-    request_body_proven_empty,
+    compiled_known_small_noop_candidate,
     known_small_response_body,
     known_no_trailers,
     trailers_handled,
@@ -121,6 +112,11 @@ pub(super) fn finalize_response(
     return response;
   }
 
+  materialize_h2_inlined_known_small_body(
+    request_version,
+    &mut response_body,
+    &mut inlined_known_small_body,
+  );
   apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
   if state.request_path_features.security_response_headers {
     apply_security_headers(&mut parts.headers, &state.config.security.headers);
@@ -227,8 +223,20 @@ pub(super) fn finalize_response(
   response
 }
 
-#[allow(clippy::too_many_arguments)]
 fn can_use_compiled_known_small_noop_response(
+  compiled_known_small_noop_candidate: bool,
+  known_small_response_body: bool,
+  known_no_trailers: bool,
+  trailers_handled: bool,
+) -> bool {
+  compiled_known_small_noop_candidate
+    && known_small_response_body
+    && known_no_trailers
+    && trailers_handled
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compiled_known_small_noop_static_candidate(
   state: &AppSnapshot,
   compiled_proxy: Option<&SelectedCompiledProxyAction<'_>>,
   request_version: http::Version,
@@ -238,9 +246,6 @@ fn can_use_compiled_known_small_noop_response(
   pool_selection: Option<&PoolSelection>,
   sticky_cookie: Option<&HeaderValue>,
   request_body_proven_empty: bool,
-  known_small_response_body: bool,
-  known_no_trailers: bool,
-  trailers_handled: bool,
 ) -> bool {
   let Some(compiled) = compiled_proxy else {
     return false;
@@ -255,9 +260,6 @@ fn can_use_compiled_known_small_noop_response(
     request_version,
     http::Version::HTTP_2 | http::Version::HTTP_3
   ) && request_body_proven_empty
-    && known_small_response_body
-    && known_no_trailers
-    && trailers_handled
     && request_waf.request_header_mutations.is_empty()
     && request_waf.response_header_mutations.is_empty()
     && pool_selection.is_none()
@@ -269,12 +271,17 @@ fn can_use_compiled_known_small_noop_response(
 
 fn finalize_known_small_noop_response(
   parts: Parts,
-  response_body: ProxyBody,
-  inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
+  mut response_body: ProxyBody,
+  mut inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
   request_version: http::Version,
   response_send_timeout: Duration,
   transport_network: WafTransportNetwork,
 ) -> Response<ProxyBody> {
+  materialize_h2_inlined_known_small_body(
+    request_version,
+    &mut response_body,
+    &mut inlined_known_small_body,
+  );
   let compiled_h3_noop = request_version == http::Version::HTTP_3
     && inlined_known_small_body
       .as_ref()
@@ -287,6 +294,21 @@ fn finalize_known_small_noop_response(
       .insert(body::CompiledKnownSmallNoopResponse);
   }
   fast_path_downstream_response_timeout(response, true, response_send_timeout, transport_network)
+}
+
+fn materialize_h2_inlined_known_small_body(
+  request_version: http::Version,
+  response_body: &mut ProxyBody,
+  inlined_known_small_body: &mut Option<body::InlinedKnownSmallResponseBody>,
+) {
+  if request_version != http::Version::HTTP_2 {
+    return;
+  }
+  let Some(inlined) = inlined_known_small_body.take() else {
+    return;
+  };
+  let (data, trailers) = inlined.into_parts();
+  *response_body = body::materialized_known_small_body(data, trailers);
 }
 
 fn mark_known_small_response_extensions(
@@ -402,7 +424,7 @@ mod tests {
         .expect("compiled selection should not fail")
         .expect("H2 compiled action should be selected");
 
-    can_use_compiled_known_small_noop_response(
+    let static_candidate = compiled_known_small_noop_static_candidate(
       state,
       Some(&selected),
       http::Version::HTTP_2,
@@ -412,6 +434,10 @@ mod tests {
       None,
       None,
       request_body_proven_empty,
+    );
+
+    can_use_compiled_known_small_noop_response(
+      static_candidate,
       known_small_response_body,
       known_no_trailers,
       trailers_handled,
@@ -561,6 +587,54 @@ x_content_type_options = "nosniff"
         .is_none(),
       "TCP known-small responses should still skip downstream timeout wrapping"
     );
+  }
+
+  #[tokio::test]
+  async fn h2_known_small_noop_response_materializes_inlined_metadata() {
+    let response = finalize_known_small_noop_response(
+      response_parts(http::Version::HTTP_2),
+      empty_proxy_body(),
+      Some(body::InlinedKnownSmallResponseBody::new(
+        Bytes::from_static(b"ok"),
+        None,
+      )),
+      http::Version::HTTP_2,
+      std::time::Duration::from_millis(10),
+      WafTransportNetwork::Tcp,
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::KnownSmallResponseBody>()
+        .is_some()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::InlinedKnownSmallResponseBody>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<DownstreamResponseSendTimeout>()
+        .is_none(),
+      "TCP known-small responses should still skip downstream timeout wrapping"
+    );
+    let bytes = response
+      .into_body()
+      .collect()
+      .await
+      .expect("materialized H2 body should collect")
+      .to_bytes();
+    assert_eq!(bytes.as_ref(), b"ok");
   }
 
   #[test]

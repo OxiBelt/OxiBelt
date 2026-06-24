@@ -10,7 +10,8 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Frame, SizeHint};
 
 use super::super::{
-  FastPathResponseSemantics, body, fast_path_downstream_response_timeout, fast_path_response_body,
+  FastPathResponseBodyOptions, FastPathResponseSemantics, body,
+  fast_path_downstream_response_timeout, fast_path_response_body,
 };
 use crate::config::TrailerMode;
 use crate::metrics::Metrics;
@@ -35,6 +36,20 @@ fn proxy_body(bytes: &'static [u8]) -> body::ProxyBody {
 
 fn response_semantics(method: Method, status: StatusCode) -> FastPathResponseSemantics {
   FastPathResponseSemantics::new(method, status)
+}
+
+fn response_options(
+  trailer_mode: TrailerMode,
+  request_version: http::Version,
+  compiled_known_small_noop_candidate: bool,
+) -> FastPathResponseBodyOptions {
+  FastPathResponseBodyOptions {
+    upstream_read_timeout: Duration::from_secs(1),
+    trailer_mode,
+    request_version,
+    compiled_known_small_noop_candidate,
+    direct_h1_first_frame_timing: None,
+  }
 }
 
 struct EmptyAdvertisedLengthBody {
@@ -71,10 +86,7 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
       response_semantics(Method::GET, StatusCode::OK),
       &response_headers_with_content_length("2"),
       body,
-      Duration::from_secs(1),
-      TrailerMode::Drop,
-      version,
-      None,
+      response_options(TrailerMode::Drop, version, false),
     )
     .await
     {
@@ -107,10 +119,7 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
     response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_3,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_3, false),
   )
   .await
   {
@@ -137,6 +146,39 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
 }
 
 #[tokio::test]
+async fn h2_compiled_noop_candidate_keeps_known_small_metadata_without_materialized_body() {
+  let body =
+    Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
+
+  let prepared = match fast_path_response_body(
+    response_semantics(Method::GET, StatusCode::OK),
+    &response_headers_with_content_length("2"),
+    body,
+    response_options(TrailerMode::Drop, http::Version::HTTP_2, true),
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  let inlined = prepared
+    .inlined_known_small_body
+    .expect("compiled H2 no-op candidate should keep known-small metadata");
+  assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
+  assert!(prepared.trailers_handled);
+  assert_eq!(inlined.data.as_ref(), b"ok");
+  let bytes = prepared
+    .body
+    .collect()
+    .await
+    .expect("placeholder body should collect")
+    .to_bytes();
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
 async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
   let body = Empty::<Bytes>::new().map_err(|never| -> body::BoxError { match never {} });
 
@@ -144,10 +186,7 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
     response_semantics(Method::GET, StatusCode::OK),
     &HeaderMap::new(),
     body,
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_11,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_11, false),
   )
   .await
   {
@@ -179,10 +218,7 @@ async fn unknown_length_fast_path_response_body_keeps_streaming_metadata() {
     response_semantics(Method::GET, StatusCode::OK),
     &HeaderMap::new(),
     body,
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_11,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_11, false),
   )
   .await
   {
@@ -208,10 +244,10 @@ async fn direct_h1_first_frame_timing_records_when_body_is_polled() {
     response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_11,
-    Some((metrics.clone(), FastPathMetricProtocol::H2)),
+    FastPathResponseBodyOptions {
+      direct_h1_first_frame_timing: Some((metrics.clone(), FastPathMetricProtocol::H2)),
+      ..response_options(TrailerMode::Drop, http::Version::HTTP_11, false)
+    },
   )
   .await
   {
@@ -266,10 +302,7 @@ async fn known_small_response_body_reports_trailer_presence() {
     response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
-    Duration::from_secs(1),
-    TrailerMode::Pass,
-    http::Version::HTTP_2,
-    None,
+    response_options(TrailerMode::Pass, http::Version::HTTP_2, false),
   )
   .await
   {
@@ -300,10 +333,7 @@ async fn head_response_with_representation_content_length_does_not_mismatch() {
     response_semantics(Method::HEAD, StatusCode::OK),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_11,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_11, false),
   )
   .await
   {
@@ -331,10 +361,7 @@ async fn not_modified_response_with_representation_content_length_does_not_misma
     response_semantics(Method::GET, StatusCode::NOT_MODIFIED),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_2,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_2, false),
   )
   .await
   {
@@ -362,10 +389,7 @@ async fn ok_response_still_rejects_short_advertised_body() {
     response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
-    Duration::from_secs(1),
-    TrailerMode::Drop,
-    http::Version::HTTP_11,
-    None,
+    response_options(TrailerMode::Drop, http::Version::HTTP_11, false),
   )
   .await
   {

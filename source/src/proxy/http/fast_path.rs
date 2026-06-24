@@ -66,7 +66,7 @@ use self::downstream_direct_h1::{
   prepare_downstream_direct_h1_or_generic,
 };
 pub(crate) use self::entry::try_handle_plain_proxy;
-use self::finalize::finalize_response;
+use self::finalize::{compiled_known_small_noop_static_candidate, finalize_response};
 #[cfg(test)]
 use self::helpers::fast_path_downstream_response_timeout;
 use self::helpers::{
@@ -85,7 +85,8 @@ use self::request_body::{
   fast_path_request_body_with_metrics,
 };
 use self::response_body::{
-  FastPathResponseBody, FastPathResponseSemantics, fast_path_response_body,
+  FastPathResponseBody, FastPathResponseBodyOptions, FastPathResponseSemantics,
+  fast_path_response_body,
 };
 use self::stage_timing as timing;
 
@@ -576,6 +577,17 @@ impl PlainProxyFastPath {
     }
     let (parts, response_body) = upstream_response.into_parts();
     let response_body_started = timing::start(timing_enabled);
+    let compiled_known_small_noop_candidate = compiled_known_small_noop_static_candidate(
+      snapshot,
+      compiled_proxy.as_ref(),
+      request_version,
+      downstream_scheme,
+      transport_network,
+      &request_waf,
+      pool_selection.as_ref(),
+      sticky_cookie.as_ref(),
+      request_body_proven_empty,
+    );
     let FastPathResponseBody {
       body: response_body,
       known_small_response_body,
@@ -588,11 +600,14 @@ impl PlainProxyFastPath {
       FastPathResponseSemantics::new(request_method, parts.status),
       &parts.headers,
       response_body,
-      timeouts.upstream_read,
-      state.config.proxy.http.trailers,
-      request_version,
-      (direct_h1_lease.is_some() && timing_enabled)
-        .then(|| (state.metrics.clone(), metric_protocol)),
+      FastPathResponseBodyOptions {
+        upstream_read_timeout: timeouts.upstream_read,
+        trailer_mode: state.config.proxy.http.trailers,
+        request_version,
+        compiled_known_small_noop_candidate,
+        direct_h1_first_frame_timing: (direct_h1_lease.is_some() && timing_enabled)
+          .then(|| (state.metrics.clone(), metric_protocol)),
+      },
     )
     .await
     {
@@ -644,14 +659,13 @@ impl PlainProxyFastPath {
       pool_selection.as_ref(),
       sticky_cookie.as_ref(),
       access_log,
-      compiled_proxy.as_ref(),
+      compiled_known_small_noop_candidate,
       metric_protocol,
       finalize_started,
       direct_h1_lease.take(),
       direct_h2_lease.take(),
       parts,
       response_body,
-      request_body_proven_empty,
       known_small_response_body,
       known_no_trailers,
       inlined_known_small_body,

@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use http::{HeaderMap, Method, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -33,6 +34,14 @@ pub(super) struct FastPathResponseBodyError {
   pub(super) reason: &'static str,
 }
 
+pub(super) struct FastPathResponseBodyOptions {
+  pub(super) upstream_read_timeout: Duration,
+  pub(super) trailer_mode: TrailerMode,
+  pub(super) request_version: http::Version,
+  pub(super) compiled_known_small_noop_candidate: bool,
+  pub(super) direct_h1_first_frame_timing: Option<(Arc<Metrics>, FastPathMetricProtocol)>,
+}
+
 pub(super) struct FastPathResponseSemantics {
   request_method: Method,
   response_status: StatusCode,
@@ -58,37 +67,43 @@ pub(super) async fn fast_path_response_body<B>(
   semantics: FastPathResponseSemantics,
   headers: &HeaderMap,
   response_body: B,
-  upstream_read_timeout: std::time::Duration,
-  trailer_mode: TrailerMode,
-  request_version: http::Version,
-  direct_h1_first_frame_timing: Option<(Arc<Metrics>, FastPathMetricProtocol)>,
+  options: FastPathResponseBodyOptions,
 ) -> Result<FastPathResponseBody, FastPathResponseBodyError>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
-  let mut first_frame_timing = direct_h1_first_frame_timing
+  let mut first_frame_timing = options
+    .direct_h1_first_frame_timing
     .map(|(metrics, protocol)| DirectH1ResponseFirstFrameTiming::new(metrics, protocol));
   fast_path_response_body_inner(
     semantics,
     headers,
     response_body,
-    upstream_read_timeout,
-    trailer_mode,
-    request_version,
-    first_frame_timing.as_mut(),
+    FastPathResponseBodyInnerOptions {
+      upstream_read_timeout: options.upstream_read_timeout,
+      trailer_mode: options.trailer_mode,
+      request_version: options.request_version,
+      compiled_known_small_noop_candidate: options.compiled_known_small_noop_candidate,
+      first_frame_timing: first_frame_timing.as_mut(),
+    },
   )
   .await
+}
+
+struct FastPathResponseBodyInnerOptions<'a> {
+  upstream_read_timeout: Duration,
+  trailer_mode: TrailerMode,
+  request_version: http::Version,
+  compiled_known_small_noop_candidate: bool,
+  first_frame_timing: Option<&'a mut DirectH1ResponseFirstFrameTiming>,
 }
 
 async fn fast_path_response_body_inner<B>(
   semantics: FastPathResponseSemantics,
   headers: &HeaderMap,
   response_body: B,
-  upstream_read_timeout: std::time::Duration,
-  trailer_mode: TrailerMode,
-  request_version: http::Version,
-  mut first_frame_timing: Option<&mut DirectH1ResponseFirstFrameTiming>,
+  mut options: FastPathResponseBodyInnerOptions<'_>,
 ) -> Result<FastPathResponseBody, FastPathResponseBodyError>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
@@ -99,7 +114,7 @@ where
       .map_err(|error| -> body::BoxError { error.into() })
       .boxed();
     if body.is_end_stream() {
-      record_first_frame_success(first_frame_timing.as_deref_mut());
+      record_first_frame_success(options.first_frame_timing.as_deref_mut());
       return Ok(FastPathResponseBody {
         body,
         known_small_response_body: true,
@@ -111,7 +126,11 @@ where
       });
     }
     return Ok(FastPathResponseBody {
-      body: streaming_body_with_timing(body, upstream_read_timeout, first_frame_timing),
+      body: streaming_body_with_timing(
+        body,
+        options.upstream_read_timeout,
+        options.first_frame_timing,
+      ),
       known_small_response_body: false,
       inlined_known_small_body: None,
       known_no_trailers: false,
@@ -124,10 +143,14 @@ where
   match try_inline_response_body_with_first_frame_recorder(
     headers,
     response_body,
-    upstream_read_timeout,
-    trailer_mode,
-    response_materialization(request_version),
-    first_frame_timing
+    options.upstream_read_timeout,
+    options.trailer_mode,
+    response_materialization(
+      options.request_version,
+      options.compiled_known_small_noop_candidate,
+    ),
+    options
+      .first_frame_timing
       .as_deref_mut()
       .map(|recorder| recorder as &mut dyn SmallResponseFirstFrameRecorder),
   )
@@ -147,7 +170,7 @@ where
       reason: "known_small",
     }),
     SmallResponseDisposition::Streaming { body, .. } if body.is_end_stream() => {
-      record_first_frame_success(first_frame_timing.as_deref_mut());
+      record_first_frame_success(options.first_frame_timing.as_deref_mut());
       Ok(FastPathResponseBody {
         body,
         known_small_response_body: true,
@@ -159,7 +182,11 @@ where
       })
     }
     SmallResponseDisposition::Streaming { body, reason } => Ok(FastPathResponseBody {
-      body: streaming_body_with_timing(body, upstream_read_timeout, first_frame_timing),
+      body: streaming_body_with_timing(
+        body,
+        options.upstream_read_timeout,
+        options.first_frame_timing,
+      ),
       known_small_response_body: false,
       inlined_known_small_body: None,
       known_no_trailers: false,
@@ -196,7 +223,18 @@ fn record_first_frame_success(timing: Option<&mut DirectH1ResponseFirstFrameTimi
   }
 }
 
-fn response_materialization(request_version: http::Version) -> SmallResponseMaterialization {
+fn response_materialization(
+  request_version: http::Version,
+  compiled_known_small_noop_candidate: bool,
+) -> SmallResponseMaterialization {
+  if compiled_known_small_noop_candidate
+    && matches!(
+      request_version,
+      http::Version::HTTP_2 | http::Version::HTTP_3
+    )
+  {
+    return SmallResponseMaterialization::MetadataOnly;
+  }
   match request_version {
     http::Version::HTTP_2 => SmallResponseMaterialization::H2KnownSmallNoTrailers,
     http::Version::HTTP_3 => SmallResponseMaterialization::MetadataOnly,

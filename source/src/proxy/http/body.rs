@@ -1,6 +1,7 @@
 //! Body capture, timeout, and streaming helpers for HTTP proxying.
 //! Captured prefixes are bounded because request and response bodies are attacker controlled.
 
+use std::convert::Infallible;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -9,8 +10,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::HeaderMap;
-use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
@@ -50,6 +51,20 @@ pub(crate) fn is_known_small_response_body_len(len: usize) -> bool {
 
 pub(crate) fn known_small_no_trailers_body(bytes: Bytes) -> ProxyBody {
   KnownSmallNoTrailersBody::new(bytes).boxed()
+}
+
+pub(crate) fn materialized_known_small_body(
+  bytes: Bytes,
+  trailers: Option<HeaderMap>,
+) -> ProxyBody {
+  let Some(trailers) = trailers else {
+    return known_small_no_trailers_body(bytes);
+  };
+
+  Full::new(bytes)
+    .with_trailers(std::future::ready(Some(Ok::<_, Infallible>(trailers))))
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed()
 }
 
 #[derive(Debug, Clone)]
