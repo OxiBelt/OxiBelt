@@ -247,19 +247,19 @@ pub(super) struct DirectH1Lease {
 impl DirectH1Lease {
   pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
     if body_consumed && self.reusable_by_headers {
-      if let Err(error) = self.pool.put_sender(self.sender) {
-        if self.diagnostic_metrics {
-          self
+      if let Err(error) = self.pool.put_sender(self.sender)
+        && self.diagnostic_metrics
+      {
+        self
+          .metrics
+          .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
+        match error {
+          DirectH1PutError::Full => self
             .metrics
-            .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
-          match error {
-            DirectH1PutError::Full => self
-              .metrics
-              .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
-            DirectH1PutError::Locked => self
-              .metrics
-              .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
-          }
+            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
+          DirectH1PutError::Locked => self
+            .metrics
+            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
         }
       }
     } else if self.diagnostic_metrics {
