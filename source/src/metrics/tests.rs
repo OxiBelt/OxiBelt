@@ -71,6 +71,7 @@ fn prometheus_output_includes_plain_proxy_fast_path_decisions() {
 fn prometheus_output_includes_fast_path_response_body_dispositions() {
   let metrics = Metrics::new();
   metrics.record_fast_path_response_body("h1", "inlined", "known_small");
+  metrics.record_fast_path_response_body("h1", "inlined", "no_body_semantics");
   metrics.record_fast_path_response_body("h1", "streamed", "unknown_length");
   metrics.record_fast_path_response_body("h1", "error", "read_timeout");
   metrics.record_fast_path_response_body("h1", "streamed", "unknown");
@@ -83,6 +84,9 @@ fn prometheus_output_includes_fast_path_response_body_dispositions() {
 
   assert!(body.contains(
     "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"inlined\",reason=\"known_small\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"inlined\",reason=\"no_body_semantics\"} 1"
   ));
   assert!(body.contains(
     "oxibelt_http_fast_path_response_bodies_total{protocol=\"h1\",disposition=\"streamed\",reason=\"unknown_length\"} 1"

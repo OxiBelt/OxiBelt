@@ -22,7 +22,7 @@ assert_same_body_projection() {
 }
 
 run_case_checks() {
-  local fast general fast_bad general_bad
+  local fast general fast_bad general_bad h2_fast h2_general
 
   fast="$(client_request "example.test" "/fast/echo?case=get" 200)"
   general="$(client_request "example.test" "/general/echo?case=get" 200)"
@@ -93,6 +93,26 @@ run_case_checks() {
   assert_body_jq "${general}" '.headers.forwarded == null
     and (.headers["x-forwarded-for"] | contains("198.51.100.1") | not)
     and .headers["x-forwarded-port"] == "443"'
+
+  fast="$(client_request_with_headers "example.test" "/fast/head?body=ok" 200 "HEAD" "")"
+  general="$(client_request_with_headers "example.test" "/general/head?body=ok" 200 "HEAD" "")"
+  assert_response_jq "${fast}" '.body == "" and .headers["content-length"] == "2"'
+  assert_response_jq "${general}" '.body == "" and .headers["content-length"] == "2"'
+
+  fast="$(client_request "example.test" "/fast/not-modified?status=304&body=ok" 304)"
+  general="$(client_request "example.test" "/general/not-modified?status=304&body=ok" 304)"
+  assert_response_jq "${fast}" '.body == "" and .headers["content-length"] == "2"'
+  assert_response_jq "${general}" '.body == "" and .headers["content-length"] == "2"'
+
+  h2_fast="$(protocol_probe_client_with_headers "h2" "example.test" "/fast/head?body=ok" 200 "HEAD" "")"
+  h2_general="$(protocol_probe_client_with_headers "h2" "example.test" "/general/head?body=ok" 200 "HEAD" "")"
+  assert_response_jq "${h2_fast}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
+  assert_response_jq "${h2_general}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
+
+  h2_fast="$(protocol_probe_client_with_headers "h2" "example.test" "/fast/not-modified?status=304&body=ok" 304 "GET" "")"
+  h2_general="$(protocol_probe_client_with_headers "h2" "example.test" "/general/not-modified?status=304&body=ok" 304 "GET" "")"
+  assert_response_jq "${h2_fast}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
+  assert_response_jq "${h2_general}" '.negotiated_protocol == "h2" and .body == "" and .headers["content-length"] == "2"'
 
   fast_bad="$(chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
   general_bad="$(chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"

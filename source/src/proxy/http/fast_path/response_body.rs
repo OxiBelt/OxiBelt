@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
-use http::{HeaderMap, Response};
+use http::{HeaderMap, Method, Response, StatusCode};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 
@@ -34,6 +34,8 @@ pub(super) struct FastPathResponseBodyError {
 }
 
 pub(super) async fn fast_path_response_body<B>(
+  request_method: &Method,
+  response_status: StatusCode,
   headers: &HeaderMap,
   response_body: B,
   upstream_read_timeout: std::time::Duration,
@@ -48,6 +50,8 @@ where
   let mut first_frame_timing = direct_h1_first_frame_timing
     .map(|(metrics, protocol)| DirectH1ResponseFirstFrameTiming::new(metrics, protocol));
   fast_path_response_body_inner(
+    request_method,
+    response_status,
     headers,
     response_body,
     upstream_read_timeout,
@@ -59,6 +63,8 @@ where
 }
 
 async fn fast_path_response_body_inner<B>(
+  request_method: &Method,
+  response_status: StatusCode,
   headers: &HeaderMap,
   response_body: B,
   upstream_read_timeout: std::time::Duration,
@@ -70,6 +76,33 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
+  if response_body_must_be_empty(request_method, response_status) {
+    let body = response_body
+      .map_err(|error| -> body::BoxError { error.into() })
+      .boxed();
+    if body.is_end_stream() {
+      record_first_frame_success(first_frame_timing.as_deref_mut());
+      return Ok(FastPathResponseBody {
+        body,
+        known_small_response_body: true,
+        inlined_known_small_body: None,
+        known_no_trailers: true,
+        trailers_handled: true,
+        disposition: "inlined",
+        reason: "no_body_semantics",
+      });
+    }
+    return Ok(FastPathResponseBody {
+      body: streaming_body_with_timing(body, upstream_read_timeout, first_frame_timing),
+      known_small_response_body: false,
+      inlined_known_small_body: None,
+      known_no_trailers: false,
+      trailers_handled: false,
+      disposition: "streamed",
+      reason: "no_body_semantics",
+    });
+  }
+
   match try_inline_response_body_with_first_frame_recorder(
     headers,
     response_body,
@@ -121,6 +154,13 @@ where
       reason: reason.as_str(),
     }),
   }
+}
+
+fn response_body_must_be_empty(method: &Method, status: StatusCode) -> bool {
+  *method == Method::HEAD
+    || status.is_informational()
+    || status == StatusCode::NO_CONTENT
+    || status == StatusCode::NOT_MODIFIED
 }
 
 fn streaming_body_with_timing(

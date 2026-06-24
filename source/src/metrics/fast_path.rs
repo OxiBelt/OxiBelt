@@ -26,9 +26,10 @@ const MISS_REASONS: [&str; 8] = [
 const OUTCOMES_PER_PROTOCOL: usize = 1 + MISS_REASONS.len();
 const DECISION_COUNTER_COUNT: usize = PROTOCOLS.len() * OUTCOMES_PER_PROTOCOL;
 const BODY_DISPOSITIONS: [&str; 3] = ["inlined", "streamed", "error"];
-const BODY_REASONS: [&str; 6] = [
+const BODY_REASONS: [&str; 7] = [
   "known_small",
   "empty",
+  "no_body_semantics",
   "unknown_length",
   "read_timeout",
   "length_mismatch",

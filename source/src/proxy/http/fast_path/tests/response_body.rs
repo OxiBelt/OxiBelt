@@ -1,10 +1,13 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
-use http::{Response, StatusCode};
+use http::{Method, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
+use hyper::body::{Body, Frame, SizeHint};
 
 use super::super::{body, fast_path_downstream_response_timeout, fast_path_response_body};
 use crate::config::TrailerMode;
@@ -28,6 +31,30 @@ fn proxy_body(bytes: &'static [u8]) -> body::ProxyBody {
     .boxed()
 }
 
+struct EmptyAdvertisedLengthBody {
+  length: u64,
+}
+
+impl Body for EmptyAdvertisedLengthBody {
+  type Data = Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Poll::Ready(None)
+  }
+
+  fn is_end_stream(&self) -> bool {
+    true
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::with_exact(self.length)
+  }
+}
+
 #[tokio::test]
 async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materialized_body() {
   for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
@@ -35,6 +62,8 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
       Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
 
     let prepared = match fast_path_response_body(
+      &Method::GET,
+      StatusCode::OK,
       &response_headers_with_content_length("2"),
       body,
       Duration::from_secs(1),
@@ -70,6 +99,8 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
     Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -106,6 +137,8 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
   let body = Empty::<Bytes>::new().map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
     &HeaderMap::new(),
     body,
     Duration::from_secs(1),
@@ -140,6 +173,8 @@ async fn unknown_length_fast_path_response_body_keeps_streaming_metadata() {
     .map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
     &HeaderMap::new(),
     body,
     Duration::from_secs(1),
@@ -168,6 +203,8 @@ async fn direct_h1_first_frame_timing_records_when_body_is_polled() {
   let metrics = Metrics::new();
 
   let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -225,6 +262,8 @@ async fn known_small_response_body_reports_trailer_presence() {
     .map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -253,6 +292,92 @@ async fn known_small_response_body_reports_trailer_presence() {
     "kept"
   );
   assert_eq!(collected.to_bytes().as_ref(), b"ok");
+}
+
+#[tokio::test]
+async fn head_response_with_representation_content_length_does_not_mismatch() {
+  let prepared = match fast_path_response_body(
+    &Method::HEAD,
+    StatusCode::OK,
+    &response_headers_with_content_length("2"),
+    EmptyAdvertisedLengthBody { length: 2 },
+    Duration::from_secs(1),
+    TrailerMode::Drop,
+    http::Version::HTTP_11,
+    None,
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
+  assert!(prepared.trailers_handled);
+  assert_eq!(prepared.disposition, "inlined");
+  assert_eq!(prepared.reason, "no_body_semantics");
+  let bytes = prepared
+    .body
+    .collect()
+    .await
+    .expect("HEAD response body should collect")
+    .to_bytes();
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn not_modified_response_with_representation_content_length_does_not_mismatch() {
+  let prepared = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::NOT_MODIFIED,
+    &response_headers_with_content_length("2"),
+    EmptyAdvertisedLengthBody { length: 2 },
+    Duration::from_secs(1),
+    TrailerMode::Drop,
+    http::Version::HTTP_2,
+    None,
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
+  assert!(prepared.trailers_handled);
+  assert_eq!(prepared.disposition, "inlined");
+  assert_eq!(prepared.reason, "no_body_semantics");
+  let bytes = prepared
+    .body
+    .collect()
+    .await
+    .expect("304 response body should collect")
+    .to_bytes();
+  assert!(bytes.is_empty());
+}
+
+#[tokio::test]
+async fn ok_response_still_rejects_short_advertised_body() {
+  let error = match fast_path_response_body(
+    &Method::GET,
+    StatusCode::OK,
+    &response_headers_with_content_length("2"),
+    EmptyAdvertisedLengthBody { length: 2 },
+    Duration::from_secs(1),
+    TrailerMode::Drop,
+    http::Version::HTTP_11,
+    None,
+  )
+  .await
+  {
+    Ok(_) => panic!("ordinary response should reject body length mismatch"),
+    Err(error) => error,
+  };
+
+  assert_eq!(error.response.status(), StatusCode::BAD_GATEWAY);
+  assert_eq!(error.reason, "length_mismatch");
 }
 
 fn metrics_prometheus(metrics: &Metrics) -> String {

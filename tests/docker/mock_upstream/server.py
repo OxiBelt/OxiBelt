@@ -43,6 +43,9 @@ class EchoHandler(BaseHTTPRequestHandler):
       return
     self._handle()
 
+  def do_HEAD(self):
+    self._handle()
+
   def do_POST(self):
     self._handle()
 
@@ -177,6 +180,8 @@ class EchoHandler(BaseHTTPRequestHandler):
     else:
       self.send_header("content-length", str(len(encoded)))
     self.end_headers()
+    if self.command == "HEAD" or status == 304:
+      return
     if body_delay_ms > 0:
       time.sleep(body_delay_ms / 1000.0)
     if chunked_response:

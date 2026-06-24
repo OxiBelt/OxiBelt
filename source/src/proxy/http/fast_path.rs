@@ -261,8 +261,9 @@ impl PlainProxyFastPath {
       return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
     }
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+    let request_method = request.method().clone();
     let request_context =
-      response_waf_enabled.then(|| (request.method().clone(), request.uri().clone()));
+      response_waf_enabled.then(|| (request_method.clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
     let (parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
@@ -582,6 +583,8 @@ impl PlainProxyFastPath {
       disposition: response_body_disposition,
       reason: response_body_reason,
     } = match fast_path_response_body(
+      &request_method,
+      parts.status,
       &parts.headers,
       response_body,
       timeouts.upstream_read,
