@@ -79,7 +79,7 @@ impl OutboundRevocationRuntime {
     let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
       .context("failed to build outbound revocation bootstrap HTTP client")?;
     let (managed_filters, initial_crlite_error_code) =
-      load_managed_crlite_filters(config, &control_http, &metrics).await?;
+      load_managed_crlite_filters(config, &metrics).await?;
     let crlite_managed_filters = managed_filters.len();
     Ok(Self {
       inner: Arc::new(OutboundRevocationInner {
@@ -582,7 +582,6 @@ fn outbound_revocation_enabled(config: &Config) -> bool {
 
 async fn load_managed_crlite_filters(
   config: &Config,
-  control_http: &ControlHttpClient,
   metrics: &Metrics,
 ) -> anyhow::Result<(Vec<ManagedCrlitePolicy>, Option<String>)> {
   let mut policies = Vec::new();
@@ -597,10 +596,15 @@ async fn load_managed_crlite_filters(
       collect_managed_crlite_policy(&mut policies, policy);
     }
   }
+  if policies.is_empty() {
+    return Ok((Vec::new(), None));
+  }
+  let remote_client = crlite_managed::ManagedCrliteRemoteClient::new_webpki_only()
+    .context("failed to build outbound managed CRLite HTTP client")?;
   let mut loaded = Vec::new();
   let mut degraded_error = None;
   for policy in policies {
-    match crlite_managed::load_or_fetch_filter_for_config(&policy.crlite, control_http)
+    match crlite_managed::load_or_fetch_filter_for_config(&policy.crlite, &remote_client)
       .await
       .context("failed to load outbound managed CRLite filter")
     {

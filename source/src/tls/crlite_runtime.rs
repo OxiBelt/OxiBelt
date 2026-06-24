@@ -11,8 +11,8 @@ use super::crlite::{
   CrliteCheckOutcome, check_crlite, check_crlite_filter_bytes, classify_crlite_error,
   coverage_policy_name, failure_policy_name, unix_now,
 };
+use super::crlite_managed::ManagedCrliteRemoteClient;
 use crate::config::{CrliteFailurePolicy, CrliteMode, TlsConfig};
-use crate::control_http::ControlHttpClient;
 use crate::metrics::Metrics;
 
 #[derive(Clone, Debug)]
@@ -128,10 +128,10 @@ impl CrliteRuntime {
     metrics: Arc<Metrics>,
     checked_at: Option<u64>,
   ) -> anyhow::Result<Self> {
-    let control_http =
-      ControlHttpClient::new_webpki_only().context("failed to build managed CRLite HTTP client")?;
+    let remote_client = ManagedCrliteRemoteClient::new_webpki_only()
+      .context("failed to build managed CRLite HTTP client")?;
     let reject_handshakes = Arc::new(AtomicBool::new(false));
-    let loaded = super::crlite_managed::load_or_fetch_filter(tls, &control_http).await;
+    let loaded = super::crlite_managed::load_or_fetch_filter(tls, &remote_client).await;
     record_managed_load_metrics(&loaded, &metrics);
     let status_context = managed_status_context(tls, checked_at, loaded.as_ref().ok());
     let status = evaluate_crlite_result(
@@ -144,7 +144,7 @@ impl CrliteRuntime {
     let status = Arc::new(Mutex::new(status));
     let worker = spawn_managed_worker(
       tls.clone(),
-      control_http,
+      remote_client,
       metrics,
       status.clone(),
       reject_handshakes.clone(),
@@ -394,7 +394,7 @@ fn record_managed_load_metrics(
 
 fn spawn_managed_worker(
   tls: TlsConfig,
-  control_http: ControlHttpClient,
+  remote_client: ManagedCrliteRemoteClient,
   metrics: Arc<Metrics>,
   status: Arc<Mutex<CrliteRuntimeStatus>>,
   reject_handshakes: Arc<AtomicBool>,
@@ -407,7 +407,7 @@ fn spawn_managed_worker(
       .await;
       refresh_managed_once(
         &tls,
-        &control_http,
+        &remote_client,
         metrics.clone(),
         status.clone(),
         reject_handshakes.clone(),
@@ -419,14 +419,14 @@ fn spawn_managed_worker(
 
 async fn refresh_managed_once(
   tls: &TlsConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
   metrics: Arc<Metrics>,
   status: Arc<Mutex<CrliteRuntimeStatus>>,
   reject_handshakes: Arc<AtomicBool>,
 ) {
   metrics.record_crlite_check();
   let checked_at = Some(unix_now());
-  let loaded = super::crlite_managed::fetch_and_store_filter(tls, control_http).await;
+  let loaded = super::crlite_managed::fetch_and_store_filter(tls, remote_client).await;
   record_managed_load_metrics(&loaded, &metrics);
   let context = managed_status_context(tls, checked_at, loaded.as_ref().ok());
   let evaluated = evaluate_crlite_refresh_result(

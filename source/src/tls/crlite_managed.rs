@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::config::{CrliteConfig, CrliteManagedStorage, TlsConfig};
-use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
+use crate::control_http::{ControlHttpClient, ControlHttpResponse, empty_body, uri_from_url};
 
 const REMOTE_SETTINGS_ROOT: &str = "https://firefox.settings.services.mozilla.com/v1/";
 const CERT_REVOCATIONS_RECORDS_PATH: &str =
@@ -25,6 +25,31 @@ pub(super) struct ManagedFilter {
   pub cache_fresh: bool,
   pub filter_stale: bool,
   pub last_success_at: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(super) struct ManagedCrliteRemoteClient {
+  control_http: ControlHttpClient,
+}
+
+impl ManagedCrliteRemoteClient {
+  pub(super) fn new_webpki_only() -> anyhow::Result<Self> {
+    Ok(Self {
+      control_http: ControlHttpClient::new_webpki_only()?,
+    })
+  }
+
+  async fn request(
+    &self,
+    request: http::Request<crate::control_http::ControlBody>,
+    timeout: Duration,
+    max_body_bytes: usize,
+  ) -> anyhow::Result<ControlHttpResponse> {
+    self
+      .control_http
+      .request(request, timeout, max_body_bytes)
+      .await
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,17 +111,17 @@ struct CachedFilter {
 
 pub(super) async fn load_or_fetch_filter(
   tls: &TlsConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<ManagedFilter> {
-  load_or_fetch_filter_for_config(&tls.crlite, control_http).await
+  load_or_fetch_filter_for_config(&tls.crlite, remote_client).await
 }
 
 pub(super) async fn load_or_fetch_filter_for_config(
   config: &CrliteConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<ManagedFilter> {
   if config.managed.storage == CrliteManagedStorage::Memory {
-    return fetch_filter(config, control_http)
+    return fetch_filter(config, remote_client)
       .await
       .map(|filter| ManagedFilter {
         bytes: filter.bytes,
@@ -120,7 +145,7 @@ pub(super) async fn load_or_fetch_filter_for_config(
     });
   }
 
-  match fetch_and_store_filter_for_config(config, control_http).await {
+  match fetch_and_store_filter_for_config(config, remote_client).await {
     Ok(filter) => Ok(filter),
     Err(error) => {
       if let Some(cached) = cached {
@@ -139,16 +164,16 @@ pub(super) async fn load_or_fetch_filter_for_config(
 
 pub(super) async fn fetch_and_store_filter(
   tls: &TlsConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<ManagedFilter> {
-  fetch_and_store_filter_for_config(&tls.crlite, control_http).await
+  fetch_and_store_filter_for_config(&tls.crlite, remote_client).await
 }
 
 pub(super) async fn fetch_and_store_filter_for_config(
   config: &CrliteConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<ManagedFilter> {
-  let filter = fetch_filter(config, control_http).await?;
+  let filter = fetch_filter(config, remote_client).await?;
   if config.managed.storage != CrliteManagedStorage::Memory {
     store_cached_filter(config, &filter)?;
   }
@@ -210,18 +235,18 @@ fn store_cached_filter(config: &CrliteConfig, filter: &RemoteFilter) -> anyhow::
 
 async fn fetch_filter(
   config: &CrliteConfig,
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<RemoteFilter> {
   let timeout = Duration::from_millis(config.managed.request_timeout_ms);
   let root_url = Url::parse(REMOTE_SETTINGS_ROOT).expect("Remote Settings root URL is valid");
-  let root: RootResponse = fetch_json(control_http, root_url.clone(), timeout)
+  let root: RootResponse = fetch_json(remote_client, root_url.clone(), timeout)
     .await
     .with_context(|| "crlite_managed_root_fetch")?;
   let base_url = attachment_base_url(root)?;
   let records_url = root_url
     .join(CERT_REVOCATIONS_RECORDS_PATH)
     .expect("Remote Settings records path is valid");
-  let records: RecordsResponse = fetch_json(control_http, records_url, timeout)
+  let records: RecordsResponse = fetch_json(remote_client, records_url, timeout)
     .await
     .with_context(|| "crlite_managed_records_fetch")?;
   let record = select_filter_record(&records.data)?;
@@ -236,7 +261,7 @@ async fn fetch_filter(
     bail!("crlite_managed_attachment_too_large");
   }
   let attachment_url = attachment_url(&base_url, attachment)?;
-  let body = fetch_bytes(control_http, attachment_url, timeout, expected_size).await?;
+  let body = fetch_bytes(remote_client, attachment_url, timeout, expected_size).await?;
   if body.len() != expected_size {
     bail!("crlite_managed_attachment_size_mismatch");
   }
@@ -250,7 +275,7 @@ async fn fetch_filter(
 }
 
 async fn fetch_json<T>(
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
   url: Url,
   timeout: Duration,
 ) -> anyhow::Result<T>
@@ -263,7 +288,7 @@ where
     .header(ACCEPT, "application/json")
     .body(empty_body())
     .context("crlite_managed_request_build")?;
-  let response = control_http
+  let response = remote_client
     .request(request, timeout, JSON_MAX_BODY_BYTES)
     .await
     .context("crlite_managed_http")?;
@@ -274,7 +299,7 @@ where
 }
 
 async fn fetch_bytes(
-  control_http: &ControlHttpClient,
+  remote_client: &ManagedCrliteRemoteClient,
   url: Url,
   timeout: Duration,
   max_body_bytes: usize,
@@ -287,7 +312,7 @@ async fn fetch_bytes(
     .uri(uri_from_url(&url)?)
     .body(empty_body())
     .context("crlite_managed_request_build")?;
-  let response = control_http
+  let response = remote_client
     .request(request, timeout, max_body_bytes)
     .await
     .context("crlite_managed_attachment_fetch")?;
@@ -397,6 +422,12 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn managed_remote_client_builds_with_webpki_only_trust() {
+    ManagedCrliteRemoteClient::new_webpki_only()
+      .expect("managed CRLite remote client should build with WebPKI-only trust");
+  }
 
   #[test]
   fn selects_latest_filter_record_and_ignores_stashes() {
