@@ -9,7 +9,9 @@ use http::{Method, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Frame, SizeHint};
 
-use super::super::{body, fast_path_downstream_response_timeout, fast_path_response_body};
+use super::super::{
+  FastPathResponseSemantics, body, fast_path_downstream_response_timeout, fast_path_response_body,
+};
 use crate::config::TrailerMode;
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
@@ -29,6 +31,10 @@ fn proxy_body(bytes: &'static [u8]) -> body::ProxyBody {
   Full::new(Bytes::from_static(bytes))
     .map_err(|never| -> body::BoxError { match never {} })
     .boxed()
+}
+
+fn response_semantics(method: Method, status: StatusCode) -> FastPathResponseSemantics {
+  FastPathResponseSemantics::new(method, status)
 }
 
 struct EmptyAdvertisedLengthBody {
@@ -62,8 +68,7 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
       Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
 
     let prepared = match fast_path_response_body(
-      &Method::GET,
-      StatusCode::OK,
+      response_semantics(Method::GET, StatusCode::OK),
       &response_headers_with_content_length("2"),
       body,
       Duration::from_secs(1),
@@ -99,8 +104,7 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
     Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -137,8 +141,7 @@ async fn end_stream_fast_path_response_body_skips_timeout_wrapping() {
   let body = Empty::<Bytes>::new().map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &HeaderMap::new(),
     body,
     Duration::from_secs(1),
@@ -173,8 +176,7 @@ async fn unknown_length_fast_path_response_body_keeps_streaming_metadata() {
     .map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &HeaderMap::new(),
     body,
     Duration::from_secs(1),
@@ -203,8 +205,7 @@ async fn direct_h1_first_frame_timing_records_when_body_is_polled() {
   let metrics = Metrics::new();
 
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -262,8 +263,7 @@ async fn known_small_response_body_reports_trailer_presence() {
     .map_err(|never| -> body::BoxError { match never {} });
 
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
     Duration::from_secs(1),
@@ -297,8 +297,7 @@ async fn known_small_response_body_reports_trailer_presence() {
 #[tokio::test]
 async fn head_response_with_representation_content_length_does_not_mismatch() {
   let prepared = match fast_path_response_body(
-    &Method::HEAD,
-    StatusCode::OK,
+    response_semantics(Method::HEAD, StatusCode::OK),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
     Duration::from_secs(1),
@@ -329,8 +328,7 @@ async fn head_response_with_representation_content_length_does_not_mismatch() {
 #[tokio::test]
 async fn not_modified_response_with_representation_content_length_does_not_mismatch() {
   let prepared = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::NOT_MODIFIED,
+    response_semantics(Method::GET, StatusCode::NOT_MODIFIED),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
     Duration::from_secs(1),
@@ -361,8 +359,7 @@ async fn not_modified_response_with_representation_content_length_does_not_misma
 #[tokio::test]
 async fn ok_response_still_rejects_short_advertised_body() {
   let error = match fast_path_response_body(
-    &Method::GET,
-    StatusCode::OK,
+    response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     EmptyAdvertisedLengthBody { length: 2 },
     Duration::from_secs(1),

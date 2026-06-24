@@ -84,7 +84,9 @@ use self::request_body::{
   FastPathRequestBody, FastPathRequestBodyMetrics, fast_path_request_body_empty_probe_allowed,
   fast_path_request_body_with_metrics,
 };
-use self::response_body::{FastPathResponseBody, fast_path_response_body};
+use self::response_body::{
+  FastPathResponseBody, FastPathResponseSemantics, fast_path_response_body,
+};
 use self::stage_timing as timing;
 
 pub(crate) struct PlainProxyFastPath;
@@ -583,8 +585,7 @@ impl PlainProxyFastPath {
       disposition: response_body_disposition,
       reason: response_body_reason,
     } = match fast_path_response_body(
-      &request_method,
-      parts.status,
+      FastPathResponseSemantics::new(request_method, parts.status),
       &parts.headers,
       response_body,
       timeouts.upstream_read,

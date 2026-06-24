@@ -33,9 +33,29 @@ pub(super) struct FastPathResponseBodyError {
   pub(super) reason: &'static str,
 }
 
-pub(super) async fn fast_path_response_body<B>(
-  request_method: &Method,
+pub(super) struct FastPathResponseSemantics {
+  request_method: Method,
   response_status: StatusCode,
+}
+
+impl FastPathResponseSemantics {
+  pub(super) fn new(request_method: Method, response_status: StatusCode) -> Self {
+    Self {
+      request_method,
+      response_status,
+    }
+  }
+
+  fn response_body_must_be_empty(&self) -> bool {
+    self.request_method == Method::HEAD
+      || self.response_status.is_informational()
+      || self.response_status == StatusCode::NO_CONTENT
+      || self.response_status == StatusCode::NOT_MODIFIED
+  }
+}
+
+pub(super) async fn fast_path_response_body<B>(
+  semantics: FastPathResponseSemantics,
   headers: &HeaderMap,
   response_body: B,
   upstream_read_timeout: std::time::Duration,
@@ -50,8 +70,7 @@ where
   let mut first_frame_timing = direct_h1_first_frame_timing
     .map(|(metrics, protocol)| DirectH1ResponseFirstFrameTiming::new(metrics, protocol));
   fast_path_response_body_inner(
-    request_method,
-    response_status,
+    semantics,
     headers,
     response_body,
     upstream_read_timeout,
@@ -63,8 +82,7 @@ where
 }
 
 async fn fast_path_response_body_inner<B>(
-  request_method: &Method,
-  response_status: StatusCode,
+  semantics: FastPathResponseSemantics,
   headers: &HeaderMap,
   response_body: B,
   upstream_read_timeout: std::time::Duration,
@@ -76,7 +94,7 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
-  if response_body_must_be_empty(request_method, response_status) {
+  if semantics.response_body_must_be_empty() {
     let body = response_body
       .map_err(|error| -> body::BoxError { error.into() })
       .boxed();
@@ -154,13 +172,6 @@ where
       reason: reason.as_str(),
     }),
   }
-}
-
-fn response_body_must_be_empty(method: &Method, status: StatusCode) -> bool {
-  *method == Method::HEAD
-    || status.is_informational()
-    || status == StatusCode::NO_CONTENT
-    || status == StatusCode::NOT_MODIFIED
 }
 
 fn streaming_body_with_timing(
