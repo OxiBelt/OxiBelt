@@ -1,27 +1,35 @@
 //! TURN edge session state.
 //! Allocation state is scoped to the listener that admitted it.
 
+mod relay;
+mod request;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::bail;
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::WebRtcTurnListenerConfig;
+use crate::config::{TurnRelayAddressFamily, WebRtcTurnListenerConfig};
 use crate::lifecycle::ConnectionDrain;
 
 use super::auth::{self, AuthDecision};
 use super::listener::BoxedIo;
 use super::protocol::*;
+use relay::{
+  bind_relay_socket, expire_client_state, remove_expired_client_state, send,
+  send_allocation_mismatch, send_turn_error, spawn_peer_reader, stream_outbound_channel,
+};
+use request::{
+  address_family_attr, allocate_families, allocation_lifetime, peer_allowed, relay_family_config,
+};
 
 #[derive(Clone, Default)]
 pub(super) struct EdgeState {
-  allocations: Arc<Mutex<HashMap<EdgeClient, EdgeAllocation>>>,
+  clients: Arc<Mutex<HashMap<EdgeClient, EdgeClientState>>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -36,9 +44,13 @@ enum EdgeSender {
   Stream(mpsc::Sender<Vec<u8>>),
 }
 
+struct EdgeClientState {
+  sender: EdgeSender,
+  allocations: HashMap<TurnRelayAddressFamily, EdgeAllocation>,
+}
+
 struct EdgeAllocation {
   relay: Arc<UdpSocket>,
-  sender: EdgeSender,
   transaction_id: [u8; 12],
   permissions: HashMap<IpAddr, Instant>,
   channels: HashMap<u16, EdgeChannelBinding>,
@@ -80,12 +92,6 @@ pub(super) async fn serve_stream(
   }
 }
 
-fn stream_outbound_channel(
-  config: &WebRtcTurnListenerConfig,
-) -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
-  mpsc::channel(config.stream_outbound_queue_capacity)
-}
-
 pub(super) async fn handle_udp_packet(
   socket: Arc<UdpSocket>,
   edge: EdgeState,
@@ -115,15 +121,19 @@ async fn process_frame(
     .is_some_and(|byte| byte & 0b1100_0000 == 0b0100_0000)
   {
     let channel = parse_channel_data(packet)?;
-    let mut allocations = edge.allocations.lock().await;
-    remove_expired_allocation(&mut allocations, client);
-    if let Some(allocation) = allocations.get_mut(&client) {
-      expire_allocation_state(allocation);
-      if let Some(binding) = allocation.channels.get(&channel.channel) {
-        allocation
-          .relay
-          .send_to(channel.payload, binding.peer)
-          .await?;
+    let mut clients = edge.clients.lock().await;
+    remove_expired_client_state(&mut clients, client);
+    if let Some(state) = clients.get_mut(&client) {
+      state.sender = sender.clone();
+      expire_client_state(state);
+      for allocation in state.allocations.values_mut() {
+        if let Some(binding) = allocation.channels.get(&channel.channel) {
+          allocation
+            .relay
+            .send_to(channel.payload, binding.peer)
+            .await?;
+          break;
+        }
       }
     }
     return Ok(());
@@ -133,7 +143,11 @@ async fn process_frame(
     BINDING_REQUEST => {
       let mapped = match &sender {
         EdgeSender::Udp(_, addr) => *addr,
-        EdgeSender::Stream(_) => "0.0.0.0:0".parse().expect("static socket addr"),
+        EdgeSender::Stream(_) => config
+          .relay_families
+          .first()
+          .map(|family| SocketAddr::new(family.public_ip, 0))
+          .unwrap_or_else(|| "0.0.0.0:0".parse().expect("static socket addr")),
       };
       send(
         &sender,
@@ -152,54 +166,143 @@ async fn process_frame(
       if !auth_allows(config, &message, &sender).await? {
         return Ok(());
       }
-      if attr_bytes(&message, ATTR_REQUESTED_TRANSPORT).and_then(|value| value.first().copied())
-        != Some(17)
-      {
-        send(
+      let Some(requested_transport) =
+        attr_bytes(&message, ATTR_REQUESTED_TRANSPORT).and_then(|value| value.first().copied())
+      else {
+        send_turn_error(
           &sender,
-          encode_error(
-            ALLOCATE_REQUEST,
-            message.transaction_id,
-            400,
-            "Bad Request",
-            None,
-            None,
-          ),
+          ALLOCATE_REQUEST,
+          message.transaction_id,
+          400,
+          "Bad Request",
+        )
+        .await?;
+        return Ok(());
+      };
+      if requested_transport != 17 {
+        send_turn_error(
+          &sender,
+          ALLOCATE_REQUEST,
+          message.transaction_id,
+          442,
+          "Unsupported Transport Protocol",
         )
         .await?;
         return Ok(());
       }
-      let relay = bind_relay_socket(config)?;
-      let relayed_addr = SocketAddr::new(
-        config.public_ip.expect("validated public_ip"),
-        relay.local_addr()?.port(),
-      );
-      let relay = Arc::new(UdpSocket::from_std(relay)?);
-      edge.allocations.lock().await.insert(
-        client,
-        EdgeAllocation {
-          relay: relay.clone(),
+      let families = match allocate_families(config, &message) {
+        Ok(families) => families,
+        Err(error) => {
+          error
+            .send(&sender, ALLOCATE_REQUEST, message.transaction_id)
+            .await?;
+          return Ok(());
+        }
+      };
+      let lifetime = allocation_lifetime(config, attr_u32(&message, ATTR_LIFETIME));
+      let mut bound_relays = Vec::with_capacity(families.len());
+      for family in families {
+        let Some(relay_config) = relay_family_config(config, family) else {
+          send_turn_error(
+            &sender,
+            ALLOCATE_REQUEST,
+            message.transaction_id,
+            440,
+            "Address Family not Supported",
+          )
+          .await?;
+          return Ok(());
+        };
+        let relay = match bind_relay_socket(relay_config) {
+          Ok(relay) => relay,
+          Err(_) => {
+            send_turn_error(
+              &sender,
+              ALLOCATE_REQUEST,
+              message.transaction_id,
+              508,
+              "Insufficient Capacity",
+            )
+            .await?;
+            return Ok(());
+          }
+        };
+        let relayed_addr = SocketAddr::new(relay_config.public_ip, relay.local_addr()?.port());
+        bound_relays.push((family, relay, relayed_addr));
+      }
+      let mut response_attrs = Vec::with_capacity(bound_relays.len() + 1);
+      let mut peer_readers = Vec::with_capacity(bound_relays.len());
+      {
+        let mut clients = edge.clients.lock().await;
+        remove_expired_client_state(&mut clients, client);
+        let total_allocations = clients
+          .values()
+          .map(|state| state.allocations.len())
+          .sum::<usize>();
+        let client_allocations = clients
+          .get(&client)
+          .map(|state| state.allocations.len())
+          .unwrap_or(0);
+        if total_allocations + bound_relays.len() > config.limits.max_allocations_per_listener {
+          send_turn_error(
+            &sender,
+            ALLOCATE_REQUEST,
+            message.transaction_id,
+            508,
+            "Insufficient Capacity",
+          )
+          .await?;
+          return Ok(());
+        }
+        if client_allocations + bound_relays.len() > config.limits.max_allocations_per_client {
+          send_turn_error(
+            &sender,
+            ALLOCATE_REQUEST,
+            message.transaction_id,
+            486,
+            "Allocation Quota Reached",
+          )
+          .await?;
+          return Ok(());
+        }
+        let state = clients.entry(client).or_insert_with(|| EdgeClientState {
           sender: sender.clone(),
-          transaction_id: message.transaction_id,
-          permissions: HashMap::new(),
-          channels: HashMap::new(),
-          expires_at: Instant::now() + Duration::from_secs(600),
-        },
-      );
-      spawn_peer_reader(edge.clone(), client, relay);
+          allocations: HashMap::new(),
+        });
+        state.sender = sender.clone();
+        if bound_relays
+          .iter()
+          .any(|(family, _, _)| state.allocations.contains_key(family))
+        {
+          send_allocation_mismatch(&sender, ALLOCATE_REQUEST, message.transaction_id).await?;
+          return Ok(());
+        }
+        for (family, relay, relayed_addr) in bound_relays {
+          let relay = Arc::new(UdpSocket::from_std(relay)?);
+          response_attrs.push((
+            ATTR_XOR_RELAYED_ADDRESS,
+            encode_xor_address(relayed_addr, &message.transaction_id),
+          ));
+          peer_readers.push((family, relay.clone()));
+          state.allocations.insert(
+            family,
+            EdgeAllocation {
+              relay,
+              transaction_id: message.transaction_id,
+              permissions: HashMap::new(),
+              channels: HashMap::new(),
+              expires_at: Instant::now() + Duration::from_secs(u64::from(lifetime)),
+            },
+          );
+        }
+      }
+      response_attrs.push((ATTR_LIFETIME, lifetime.to_be_bytes().to_vec()));
+      for (family, relay) in peer_readers {
+        spawn_peer_reader(edge.clone(), client, family, relay);
+      }
       send(
         &sender,
-        encode_success(
-          ALLOCATE_REQUEST,
-          message.transaction_id,
-          &[
-            (
-              ATTR_XOR_RELAYED_ADDRESS,
-              encode_xor_address(relayed_addr, &message.transaction_id),
-            ),
-            (ATTR_LIFETIME, 600u32.to_be_bytes().to_vec()),
-          ],
-        ),
+        encode_success(ALLOCATE_REQUEST, message.transaction_id, &response_attrs),
       )
       .await?;
     }
@@ -207,13 +310,53 @@ async fn process_frame(
       if !auth_allows(config, &message, &sender).await? {
         return Ok(());
       }
-      let lifetime = attr_u32(&message, ATTR_LIFETIME).unwrap_or(600);
-      let mut allocations = edge.allocations.lock().await;
-      remove_expired_allocation(&mut allocations, client);
-      if lifetime == 0 {
-        allocations.remove(&client);
-      } else if let Some(allocation) = allocations.get_mut(&client) {
-        allocation.expires_at = Instant::now() + Duration::from_secs(lifetime as u64);
+      let requested_family = match address_family_attr(&message, ATTR_REQUESTED_ADDRESS_FAMILY) {
+        Ok(family) => family,
+        Err(error) => {
+          error
+            .send(&sender, REFRESH_REQUEST, message.transaction_id)
+            .await?;
+          return Ok(());
+        }
+      };
+      let requested_lifetime = attr_u32(&message, ATTR_LIFETIME);
+      let lifetime = allocation_lifetime(config, requested_lifetime);
+      let mut clients = edge.clients.lock().await;
+      remove_expired_client_state(&mut clients, client);
+      let Some(state) = clients.get_mut(&client) else {
+        send_allocation_mismatch(&sender, REFRESH_REQUEST, message.transaction_id).await?;
+        return Ok(());
+      };
+      expire_client_state(state);
+      let families = if let Some(family) = requested_family {
+        if !state.allocations.contains_key(&family) {
+          send_turn_error(
+            &sender,
+            REFRESH_REQUEST,
+            message.transaction_id,
+            443,
+            "Peer Address Family Mismatch",
+          )
+          .await?;
+          return Ok(());
+        }
+        vec![family]
+      } else {
+        state.allocations.keys().copied().collect::<Vec<_>>()
+      };
+      if requested_lifetime == Some(0) {
+        for family in families {
+          state.allocations.remove(&family);
+        }
+      } else {
+        for family in families {
+          if let Some(allocation) = state.allocations.get_mut(&family) {
+            allocation.expires_at = Instant::now() + Duration::from_secs(u64::from(lifetime));
+          }
+        }
+      }
+      if state.allocations.is_empty() {
+        clients.remove(&client);
       }
       send(
         &sender,
@@ -229,29 +372,66 @@ async fn process_frame(
       if !auth_allows(config, &message, &sender).await? {
         return Ok(());
       }
-      let Some(peer) = attr_xor_addr(&message, ATTR_XOR_PEER_ADDRESS)? else {
-        send(
+      let peers = attr_xor_addrs(&message, ATTR_XOR_PEER_ADDRESS)?;
+      if peers.is_empty() {
+        send_turn_error(
           &sender,
-          encode_error(
-            CREATE_PERMISSION_REQUEST,
-            message.transaction_id,
-            400,
-            "Bad Request",
-            None,
-            None,
-          ),
+          CREATE_PERMISSION_REQUEST,
+          message.transaction_id,
+          400,
+          "Bad Request",
         )
         .await?;
         return Ok(());
-      };
-      let mut allocations = edge.allocations.lock().await;
-      remove_expired_allocation(&mut allocations, client);
-      let Some(allocation) = allocations.get_mut(&client) else {
+      }
+      if peers
+        .iter()
+        .any(|peer| !peer_allowed(peer.ip(), &config.peer_policy))
+      {
+        send_turn_error(
+          &sender,
+          CREATE_PERMISSION_REQUEST,
+          message.transaction_id,
+          403,
+          "Forbidden",
+        )
+        .await?;
+        return Ok(());
+      }
+      let mut clients = edge.clients.lock().await;
+      remove_expired_client_state(&mut clients, client);
+      let Some(state) = clients.get_mut(&client) else {
         send_allocation_mismatch(&sender, CREATE_PERMISSION_REQUEST, message.transaction_id)
           .await?;
         return Ok(());
       };
-      {
+      expire_client_state(state);
+      for peer in peers {
+        let family = TurnRelayAddressFamily::from_ip(peer.ip());
+        let Some(allocation) = state.allocations.get_mut(&family) else {
+          send_turn_error(
+            &sender,
+            CREATE_PERMISSION_REQUEST,
+            message.transaction_id,
+            443,
+            "Peer Address Family Mismatch",
+          )
+          .await?;
+          return Ok(());
+        };
+        if !allocation.permissions.contains_key(&peer.ip())
+          && allocation.permissions.len() >= config.limits.max_permissions_per_allocation
+        {
+          send_turn_error(
+            &sender,
+            CREATE_PERMISSION_REQUEST,
+            message.transaction_id,
+            508,
+            "Insufficient Capacity",
+          )
+          .await?;
+          return Ok(());
+        }
         allocation
           .permissions
           .insert(peer.ip(), Instant::now() + Duration::from_secs(300));
@@ -267,56 +447,107 @@ async fn process_frame(
         return Ok(());
       }
       let Some(peer) = attr_xor_addr(&message, ATTR_XOR_PEER_ADDRESS)? else {
-        send(
+        send_turn_error(
           &sender,
-          encode_error(
-            CHANNEL_BIND_REQUEST,
-            message.transaction_id,
-            400,
-            "Bad Request",
-            None,
-            None,
-          ),
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          400,
+          "Bad Request",
         )
         .await?;
         return Ok(());
       };
+      if !peer_allowed(peer.ip(), &config.peer_policy) {
+        send_turn_error(
+          &sender,
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          403,
+          "Forbidden",
+        )
+        .await?;
+        return Ok(());
+      }
       let Some(channel) = attr_bytes(&message, ATTR_CHANNEL_NUMBER)
         .filter(|value| value.len() >= 2)
         .map(|value| u16::from_be_bytes([value[0], value[1]]))
       else {
-        send(
+        send_turn_error(
           &sender,
-          encode_error(
-            CHANNEL_BIND_REQUEST,
-            message.transaction_id,
-            400,
-            "Bad Request",
-            None,
-            None,
-          ),
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          400,
+          "Bad Request",
         )
         .await?;
         return Ok(());
       };
-      let mut allocations = edge.allocations.lock().await;
-      remove_expired_allocation(&mut allocations, client);
-      let Some(allocation) = allocations.get_mut(&client) else {
+      if !(0x4000..=0x7fff).contains(&channel) {
+        send_turn_error(
+          &sender,
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          400,
+          "Bad Request",
+        )
+        .await?;
+        return Ok(());
+      }
+      let mut clients = edge.clients.lock().await;
+      remove_expired_client_state(&mut clients, client);
+      let Some(state) = clients.get_mut(&client) else {
         send_allocation_mismatch(&sender, CHANNEL_BIND_REQUEST, message.transaction_id).await?;
         return Ok(());
       };
+      expire_client_state(state);
+      let family = TurnRelayAddressFamily::from_ip(peer.ip());
+      let Some(allocation) = state.allocations.get_mut(&family) else {
+        send_turn_error(
+          &sender,
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          443,
+          "Peer Address Family Mismatch",
+        )
+        .await?;
+        return Ok(());
+      };
+      if !allocation.permissions.contains_key(&peer.ip())
+        && allocation.permissions.len() >= config.limits.max_permissions_per_allocation
       {
-        allocation
-          .permissions
-          .insert(peer.ip(), Instant::now() + Duration::from_secs(300));
-        allocation.channels.insert(
-          channel,
-          EdgeChannelBinding {
-            peer,
-            expires_at: Instant::now() + Duration::from_secs(600),
-          },
-        );
+        send_turn_error(
+          &sender,
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          508,
+          "Insufficient Capacity",
+        )
+        .await?;
+        return Ok(());
       }
+      if !allocation.channels.contains_key(&channel)
+        && allocation.channels.len() >= config.limits.max_channels_per_allocation
+      {
+        send_turn_error(
+          &sender,
+          CHANNEL_BIND_REQUEST,
+          message.transaction_id,
+          508,
+          "Insufficient Capacity",
+        )
+        .await?;
+        return Ok(());
+      }
+      allocation
+        .permissions
+        .insert(peer.ip(), Instant::now() + Duration::from_secs(300));
+      allocation.channels.insert(
+        channel,
+        EdgeChannelBinding {
+          peer,
+          expires_at: Instant::now() + Duration::from_secs(600),
+        },
+      );
       send(
         &sender,
         encode_success(CHANNEL_BIND_REQUEST, message.transaction_id, &[]),
@@ -328,11 +559,14 @@ async fn process_frame(
         return Ok(());
       };
       let data = attr_bytes(&message, ATTR_DATA).unwrap_or_default();
-      let mut allocations = edge.allocations.lock().await;
-      remove_expired_allocation(&mut allocations, client);
-      if let Some(allocation) = allocations.get_mut(&client) {
-        expire_allocation_state(allocation);
-        if allocation.permissions.contains_key(&peer.ip()) {
+      let mut clients = edge.clients.lock().await;
+      remove_expired_client_state(&mut clients, client);
+      if let Some(state) = clients.get_mut(&client) {
+        expire_client_state(state);
+        let family = TurnRelayAddressFamily::from_ip(peer.ip());
+        if let Some(allocation) = state.allocations.get_mut(&family)
+          && allocation.permissions.contains_key(&peer.ip())
+        {
           allocation.relay.send_to(data, peer).await?;
         }
       }
@@ -393,267 +627,6 @@ async fn auth_allows(
       )
       .await?;
       Ok(false)
-    }
-  }
-}
-
-fn spawn_peer_reader(edge: EdgeState, client: EdgeClient, relay: Arc<UdpSocket>) {
-  tokio::spawn(async move {
-    let mut buffer = vec![0u8; 65_536];
-    while let Ok((len, peer)) = relay.recv_from(&mut buffer).await {
-      let out = {
-        let mut allocations = edge.allocations.lock().await;
-        remove_expired_allocation(&mut allocations, client);
-        let Some(allocation) = allocations.get_mut(&client) else {
-          break;
-        };
-        expire_allocation_state(allocation);
-        let channel = allocation
-          .channels
-          .iter()
-          .find_map(|(channel, binding)| (binding.peer == peer).then_some(*channel));
-        match channel {
-          Some(channel) => encode_channel_data(channel, &buffer[..len]),
-          None => encode_data_indication(allocation.transaction_id, peer, &buffer[..len]),
-        }
-      };
-      let sender = {
-        let allocations = edge.allocations.lock().await;
-        allocations
-          .get(&client)
-          .map(|allocation| allocation.sender.clone())
-      };
-      if let Some(sender) = sender
-        && send(&sender, out).await.is_err()
-      {
-        break;
-      }
-    }
-  });
-}
-
-async fn send(sender: &EdgeSender, bytes: Vec<u8>) -> anyhow::Result<()> {
-  match sender {
-    EdgeSender::Udp(socket, addr) => {
-      socket.send_to(&bytes, addr).await?;
-    }
-    EdgeSender::Stream(tx) => {
-      tx.try_send(bytes).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => {
-          anyhow::anyhow!("TURN stream outbound queue is full")
-        }
-        mpsc::error::TrySendError::Closed(_) => anyhow::anyhow!("TURN stream closed"),
-      })?;
-    }
-  }
-  Ok(())
-}
-
-fn bind_relay_socket(config: &WebRtcTurnListenerConfig) -> anyhow::Result<std::net::UdpSocket> {
-  let bind_ip = config.relay_bind_ip.expect("validated relay_bind_ip");
-  let range = config
-    .relay_port_range
-    .as_ref()
-    .expect("validated relay_port_range");
-  for port in range.start..=range.end {
-    let bind = SocketAddr::new(bind_ip, port);
-    if let Ok(socket) = bind_udp_socket(bind) {
-      return Ok(socket);
-    }
-  }
-  bail!(
-    "no available TURN relay UDP ports in configured range {}..={}",
-    range.start,
-    range.end
-  )
-}
-
-fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
-  let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
-  socket.set_reuse_address(true)?;
-  socket.bind(&bind.into())?;
-  let socket: std::net::UdpSocket = socket.into();
-  socket.set_nonblocking(true)?;
-  Ok(socket)
-}
-
-fn expire_allocation_state(allocation: &mut EdgeAllocation) {
-  let now = Instant::now();
-  allocation.permissions.retain(|_, expires| *expires > now);
-  allocation
-    .channels
-    .retain(|_, binding| binding.expires_at > now);
-}
-
-fn remove_expired_allocation(
-  allocations: &mut HashMap<EdgeClient, EdgeAllocation>,
-  client: EdgeClient,
-) {
-  let expired = allocations
-    .get(&client)
-    .is_some_and(|allocation| allocation.expires_at <= Instant::now());
-  if expired {
-    allocations.remove(&client);
-  }
-}
-
-async fn send_allocation_mismatch(
-  sender: &EdgeSender,
-  request_type: u16,
-  transaction_id: [u8; 12],
-) -> anyhow::Result<()> {
-  send(
-    sender,
-    encode_error(
-      request_type,
-      transaction_id,
-      437,
-      "Allocation Mismatch",
-      None,
-      None,
-    ),
-  )
-  .await
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::config::{
-    TurnAuthConfig, TurnListenerTlsConfig, TurnRelayPortRange, WebRtcTurnListenerMode,
-  };
-
-  #[tokio::test]
-  async fn allocation_state_expiry_removes_permissions_and_channels() {
-    let now = Instant::now();
-    let mut allocation = EdgeAllocation {
-      relay: Arc::new(bind_loopback_udp().await),
-      sender: EdgeSender::Stream(mpsc::channel(1).0),
-      transaction_id: [7; 12],
-      permissions: HashMap::from([
-        (
-          "127.0.0.1".parse().expect("ip"),
-          now - Duration::from_secs(1),
-        ),
-        (
-          "127.0.0.2".parse().expect("ip"),
-          now + Duration::from_secs(60),
-        ),
-      ]),
-      channels: HashMap::from([
-        (
-          0x4000,
-          EdgeChannelBinding {
-            peer: "127.0.0.1:9000".parse().expect("socket addr"),
-            expires_at: now - Duration::from_secs(1),
-          },
-        ),
-        (
-          0x4001,
-          EdgeChannelBinding {
-            peer: "127.0.0.2:9000".parse().expect("socket addr"),
-            expires_at: now + Duration::from_secs(60),
-          },
-        ),
-      ]),
-      expires_at: now + Duration::from_secs(600),
-    };
-
-    expire_allocation_state(&mut allocation);
-
-    assert_eq!(allocation.permissions.len(), 1);
-    assert!(
-      allocation
-        .permissions
-        .contains_key(&"127.0.0.2".parse().expect("ip"))
-    );
-    assert_eq!(allocation.channels.len(), 1);
-    assert!(allocation.channels.contains_key(&0x4001));
-  }
-
-  #[tokio::test]
-  async fn expired_allocation_is_removed() {
-    let client = EdgeClient::Stream(1);
-    let mut allocations = HashMap::from([(
-      client,
-      EdgeAllocation {
-        relay: Arc::new(bind_loopback_udp().await),
-        sender: EdgeSender::Stream(mpsc::channel(1).0),
-        transaction_id: [3; 12],
-        permissions: HashMap::new(),
-        channels: HashMap::new(),
-        expires_at: Instant::now() - Duration::from_secs(1),
-      },
-    )]);
-
-    remove_expired_allocation(&mut allocations, client);
-
-    assert!(!allocations.contains_key(&client));
-  }
-
-  #[test]
-  fn stream_outbound_channel_uses_configured_capacity() {
-    let config = edge_relay_config_with_stream_queue_capacity(2);
-    let (tx, _rx) = stream_outbound_channel(&config);
-
-    tx.try_send(vec![1]).expect("first queued frame should fit");
-    tx.try_send(vec![2])
-      .expect("second queued frame should fit");
-    let error = tx
-      .try_send(vec![3])
-      .expect_err("configured stream queue capacity should be enforced");
-
-    assert!(matches!(error, mpsc::error::TrySendError::Full(_)));
-  }
-
-  async fn bind_loopback_udp() -> UdpSocket {
-    UdpSocket::bind("127.0.0.1:0")
-      .await
-      .expect("bind loopback UDP")
-  }
-
-  #[tokio::test]
-  async fn stream_sender_rejects_when_outbound_queue_is_full() -> anyhow::Result<()> {
-    let (tx, _rx) = mpsc::channel(1);
-    let sender = EdgeSender::Stream(tx);
-
-    send(&sender, vec![1]).await?;
-    let error = send(&sender, vec![2])
-      .await
-      .expect_err("full stream queue must reject more relay data");
-
-    assert!(
-      error
-        .to_string()
-        .contains("TURN stream outbound queue is full"),
-      "unexpected error: {error:#}"
-    );
-    Ok(())
-  }
-
-  fn edge_relay_config_with_stream_queue_capacity(
-    stream_outbound_queue_capacity: usize,
-  ) -> WebRtcTurnListenerConfig {
-    WebRtcTurnListenerConfig {
-      name: "edge-relay".to_string(),
-      mode: WebRtcTurnListenerMode::EdgeRelay,
-      bind_udp: None,
-      bind_tcp: Some("127.0.0.1:0".parse().expect("socket addr")),
-      bind_tls: None,
-      idle_timeout_ms: 75_000,
-      realm: "example.test".to_string(),
-      auth: TurnAuthConfig::default(),
-      udp_pool: None,
-      tcp_pool: None,
-      tls_pool: None,
-      public_ip: Some("127.0.0.1".parse().expect("ip addr")),
-      relay_bind_ip: Some("127.0.0.1".parse().expect("ip addr")),
-      relay_port_range: Some(TurnRelayPortRange {
-        start: 49152,
-        end: 49160,
-      }),
-      stream_outbound_queue_capacity,
-      tls: TurnListenerTlsConfig::default(),
     }
   }
 }

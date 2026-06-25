@@ -27,8 +27,11 @@ pub const ATTR_DATA: u16 = 0x0013;
 pub const ATTR_REALM: u16 = 0x0014;
 pub const ATTR_NONCE: u16 = 0x0015;
 pub const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
+pub const ATTR_REQUESTED_ADDRESS_FAMILY: u16 = 0x0017;
 pub const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 pub const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+pub const ATTR_ADDITIONAL_ADDRESS_FAMILY: u16 = 0x8000;
+pub const ATTR_ADDRESS_ERROR_CODE: u16 = 0x8001;
 pub const ATTR_FINGERPRINT: u16 = 0x8028;
 
 #[derive(Debug, Clone)]
@@ -142,6 +145,15 @@ pub fn attr_xor_addr(message: &StunMessage<'_>, kind: u16) -> anyhow::Result<Opt
     return Ok(None);
   };
   decode_xor_address(attr.value, &message.transaction_id).map(Some)
+}
+
+pub fn attr_xor_addrs(message: &StunMessage<'_>, kind: u16) -> anyhow::Result<Vec<SocketAddr>> {
+  message
+    .attrs
+    .iter()
+    .filter(|attr| attr.kind == kind)
+    .map(|attr| decode_xor_address(attr.value, &message.transaction_id))
+    .collect()
 }
 
 pub fn success_type(request_type: u16) -> u16 {

@@ -1,6 +1,8 @@
 //! TURN listener and pool configuration validation.
 //! TURN credentials and upstream references are checked before UDP/TCP listeners bind.
 
+mod relay;
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -22,6 +24,12 @@ use super::{
   default_client_idle_timeout_ms, default_pool_server_weight, default_true,
   resolve_existing_local_config_file_path_with_logical, turn_upstream_pool_server_id,
   validate_runtime_identifier,
+};
+
+use relay::resolve_relay_families;
+pub use relay::{
+  TurnEdgeRelayLimitsConfig, TurnEdgeRelayPeerPolicyConfig, TurnRelayAddressFamily,
+  TurnRelayFamilyConfig,
 };
 
 impl Config {
@@ -190,6 +198,7 @@ impl Config {
           if listener.public_ip.is_some()
             || listener.relay_bind_ip.is_some()
             || listener.relay_port_range.is_some()
+            || !listener.relay_families.is_empty()
           {
             bail!(
               "WebRTC TURN listener {} edge relay fields are only valid when mode = \"edge_relay\"",
@@ -204,29 +213,23 @@ impl Config {
               listener.name
             );
           }
-          if listener.public_ip.is_none() {
+          listener.limits.validate(&listener.name)?;
+          if listener.relay_families.is_empty() {
             bail!(
-              "WebRTC TURN listener {} edge_relay requires public_ip",
+              "WebRTC TURN listener {} edge_relay requires relay_families or legacy public_ip/relay_bind_ip/relay_port_range",
               listener.name
             );
           }
-          if listener.relay_bind_ip.is_none() {
-            bail!(
-              "WebRTC TURN listener {} edge_relay requires relay_bind_ip",
-              listener.name
-            );
-          }
-          let range = listener.relay_port_range.as_ref().ok_or_else(|| {
-            anyhow!(
-              "WebRTC TURN listener {} edge_relay requires relay_port_range",
-              listener.name
-            )
-          })?;
-          if range.start == 0 || range.end == 0 || range.start > range.end {
-            bail!(
-              "WebRTC TURN listener {} relay_port_range must have positive start <= end",
-              listener.name
-            );
+          let mut relay_families = HashSet::new();
+          for family in &listener.relay_families {
+            if !relay_families.insert(family.family) {
+              bail!(
+                "WebRTC TURN listener {} has duplicate relay family {:?}",
+                listener.name,
+                family.family
+              );
+            }
+            family.validate(&listener.name)?;
           }
           if listener.udp_pool.is_some()
             || listener.tcp_pool.is_some()
@@ -281,6 +284,12 @@ pub(super) struct RawWebRtcTurnListenerConfig {
   #[serde(default)]
   relay_port_range: Option<TurnRelayPortRange>,
   #[serde(default)]
+  relay_families: Vec<TurnRelayFamilyConfig>,
+  #[serde(default)]
+  limits: TurnEdgeRelayLimitsConfig,
+  #[serde(default)]
+  peer_policy: TurnEdgeRelayPeerPolicyConfig,
+  #[serde(default)]
   stream_outbound_queue_capacity: Option<TurnStreamOutboundQueueCapacitySetting>,
   #[serde(default)]
   tls: TurnListenerTlsConfig,
@@ -303,6 +312,13 @@ impl RawWebRtcTurnListenerConfig {
       Some(setting) => setting.resolve(&self.name, available_parallelism)?,
       None => DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY,
     };
+    let relay_families = resolve_relay_families(
+      &self.name,
+      self.public_ip,
+      self.relay_bind_ip,
+      self.relay_port_range.clone(),
+      self.relay_families,
+    )?;
     Ok(WebRtcTurnListenerConfig {
       name: self.name,
       mode: self.mode,
@@ -318,6 +334,9 @@ impl RawWebRtcTurnListenerConfig {
       public_ip: self.public_ip,
       relay_bind_ip: self.relay_bind_ip,
       relay_port_range: self.relay_port_range,
+      relay_families,
+      limits: self.limits,
+      peer_policy: self.peer_policy,
       stream_outbound_queue_capacity,
       tls: self.tls,
     })
@@ -353,6 +372,12 @@ pub struct WebRtcTurnListenerConfig {
   pub relay_bind_ip: Option<IpAddr>,
   #[serde(default)]
   pub relay_port_range: Option<TurnRelayPortRange>,
+  #[serde(default)]
+  pub relay_families: Vec<TurnRelayFamilyConfig>,
+  #[serde(default)]
+  pub limits: TurnEdgeRelayLimitsConfig,
+  #[serde(default)]
+  pub peer_policy: TurnEdgeRelayPeerPolicyConfig,
   #[serde(default = "default_turn_stream_outbound_queue_capacity")]
   pub stream_outbound_queue_capacity: usize,
   #[serde(default)]

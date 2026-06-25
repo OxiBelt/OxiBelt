@@ -6879,6 +6879,142 @@ fn webrtc_turn_edge_relay_stream_queue_rejects_unsafe_values() {
 }
 
 #[test]
+fn webrtc_turn_edge_relay_accepts_dual_stack_relay_families() {
+  let temp_dir = common::TempDir::new("turn-edge-dual-stack");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-edge-dual-stack");
+  let raw = format!(
+    r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv4"
+public_ip = "203.0.113.10"
+relay_bind_ip = "0.0.0.0"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = 49152
+end = 49160
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv6"
+public_ip = "2001:db8::10"
+relay_bind_ip = "::"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "turn-secret"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("dual-stack TURN edge relay should validate");
+  assert_eq!(config.webrtc_turn_listeners[0].relay_families.len(), 2);
+}
+
+#[test]
+fn webrtc_turn_edge_relay_rejects_mixed_legacy_and_relay_families() {
+  let temp_dir = common::TempDir::new("turn-edge-mixed-family-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-edge-mixed-family-config");
+  let raw = format!(
+    r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+public_ip = "127.0.0.1"
+relay_bind_ip = "127.0.0.1"
+
+[webrtc_turn_listeners.relay_port_range]
+start = 49152
+end = 49160
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv4"
+public_ip = "203.0.113.10"
+relay_bind_ip = "0.0.0.0"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "turn-secret"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("mixed relay fields should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("must not mix relay_families with legacy"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn webrtc_turn_edge_relay_rejects_relay_family_ip_mismatch() {
+  let temp_dir = common::TempDir::new("turn-edge-family-mismatch");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-edge-family-mismatch");
+  let raw = format!(
+    r#"
+{}
+
+[[webrtc_turn_listeners]]
+name = "edge-relay"
+mode = "edge_relay"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv6"
+public_ip = "203.0.113.10"
+relay_bind_ip = "::"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = 49152
+end = 49160
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+rest_shared_secret = "turn-secret"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("relay family IP mismatch should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("public_ip must use the same address family"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn webrtc_turn_proxy_pool_rejects_stream_queue_capacity() {
   let temp_dir = common::TempDir::new("turn-proxy-stream-queue");
   let (cert_path, key_path) =

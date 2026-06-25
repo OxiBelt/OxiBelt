@@ -3195,11 +3195,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "bind_tls",
       "bind_udp",
       "idle_timeout_ms",
+      "limits",
       "mode",
       "name",
+      "peer_policy",
       "public_ip",
       "realm",
       "relay_bind_ip",
+      "relay_families",
       "relay_port_range",
       "stream_outbound_queue_capacity",
       "tcp_pool",
@@ -3217,6 +3220,24 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "webrtc_turn_listeners.auth.static_credentials" => {
       &["password", "password_env", "username"][..]
     }
+    "webrtc_turn_listeners.limits" => &[
+      "max_allocation_lifetime_seconds",
+      "max_allocations_per_client",
+      "max_allocations_per_listener",
+      "max_channels_per_allocation",
+      "max_permissions_per_allocation",
+    ][..],
+    "webrtc_turn_listeners.peer_policy" => &[
+      "allow_link_local_peers",
+      "allow_loopback_peers",
+      "allow_multicast_peers",
+      "allow_private_peers",
+      "allow_unspecified_peers",
+    ][..],
+    "webrtc_turn_listeners.relay_families" => {
+      &["family", "public_ip", "relay_bind_ip", "relay_port_range"][..]
+    }
+    "webrtc_turn_listeners.relay_families.relay_port_range" => &["end", "start"][..],
     "webrtc_turn_listeners.relay_port_range" => &["end", "start"][..],
     "webrtc_turn_listeners.tls" => &[
       "cert_chain",

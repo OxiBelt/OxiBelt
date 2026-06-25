@@ -108,11 +108,7 @@ impl BoundTurnListener {
 
   pub(crate) fn key(&self) -> TurnListenerKey {
     TurnListenerKey {
-      name: self.config.name.clone(),
-      bind_udp: self.config.bind_udp,
-      bind_tcp: self.config.bind_tcp,
-      bind_tls: self.config.bind_tls,
-      stream_outbound_queue_capacity: self.config.stream_outbound_queue_capacity,
+      config: self.config.clone(),
       tcp_options: self.tcp_options,
     }
   }
@@ -191,13 +187,9 @@ impl BoundTurnListener {
   }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TurnListenerKey {
-  pub(crate) name: String,
-  pub(crate) bind_udp: Option<SocketAddr>,
-  pub(crate) bind_tcp: Option<SocketAddr>,
-  pub(crate) bind_tls: Option<SocketAddr>,
-  pub(crate) stream_outbound_queue_capacity: usize,
+  pub(crate) config: WebRtcTurnListenerConfig,
   pub(crate) tcp_options: TcpListenOptions,
 }
 

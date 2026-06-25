@@ -1319,30 +1319,14 @@ impl ListenerSupervisor {
       .config
       .webrtc_turn_listeners
       .iter()
-      .map(|listener| {
-        (
-          listener.name.clone(),
-          listener.bind_udp,
-          listener.bind_tcp,
-          listener.bind_tls,
-          listener.stream_outbound_queue_capacity,
-          tcp_options,
-        )
-      })
+      .map(|listener| (listener.clone(), tcp_options))
       .collect::<Vec<_>>();
     let current_turns = self
       .turns
       .iter()
       .map(|listener| {
         let key = listener.listener_key();
-        (
-          key.name.clone(),
-          key.bind_udp,
-          key.bind_tcp,
-          key.bind_tls,
-          key.stream_outbound_queue_capacity,
-          key.tcp_options,
-        )
+        (key.config.clone(), key.tcp_options)
       })
       .collect::<Vec<_>>();
     let turns = if desired_turns != current_turns {
