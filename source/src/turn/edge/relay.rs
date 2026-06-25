@@ -101,6 +101,9 @@ pub(super) fn bind_relay_socket(
 fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
   socket.set_reuse_address(true)?;
+  if bind.is_ipv6() {
+    socket.set_only_v6(true)?;
+  }
   socket.bind(&bind.into())?;
   let socket: std::net::UdpSocket = socket.into();
   socket.set_nonblocking(true)?;
@@ -285,6 +288,15 @@ mod tests {
         .contains("TURN stream outbound queue is full"),
       "unexpected error: {error:#}"
     );
+    Ok(())
+  }
+
+  #[test]
+  fn ipv6_relay_socket_sets_v6_only() -> anyhow::Result<()> {
+    let socket = bind_udp_socket("[::1]:0".parse()?)?;
+    let socket = socket2::SockRef::from(&socket);
+
+    assert!(socket.only_v6()?);
     Ok(())
   }
 

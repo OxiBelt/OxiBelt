@@ -134,6 +134,9 @@ pub(super) fn peer_allowed(ip: IpAddr, policy: &TurnEdgeRelayPeerPolicyConfig) -
       true
     }
     IpAddr::V6(ip) => {
+      if ip.to_ipv4_mapped().is_some() {
+        return false;
+      }
       if ip.is_unique_local() && !policy.allow_private_peers {
         return false;
       }
@@ -224,6 +227,26 @@ mod tests {
     assert!(!peer_allowed("fc00::10".parse().expect("ip"), &policy));
     assert!(peer_allowed("203.0.113.10".parse().expect("ip"), &policy));
     assert!(peer_allowed("2001:db8::10".parse().expect("ip"), &policy));
+  }
+
+  #[test]
+  fn peer_policy_denies_ipv4_mapped_ipv6_targets() {
+    let policy = TurnEdgeRelayPeerPolicyConfig::default();
+
+    for peer in [
+      "::ffff:10.0.0.10",
+      "::ffff:127.0.0.1",
+      "::ffff:169.254.0.10",
+      "::ffff:0.0.0.0",
+      "::ffff:224.0.0.1",
+      "::ffff:255.255.255.255",
+      "::ffff:203.0.113.10",
+    ] {
+      assert!(
+        !peer_allowed(peer.parse().expect("ip"), &policy),
+        "IPv4-mapped IPv6 peer {peer} must be rejected"
+      );
+    }
   }
 
   fn edge_relay_config_with_dual_stack() -> WebRtcTurnListenerConfig {
