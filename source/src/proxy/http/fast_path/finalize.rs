@@ -106,6 +106,7 @@ pub(super) fn finalize_response(
       request_version,
       response_send_timeout,
       transport_network,
+      Some((state, downstream_scheme)),
     );
     state.record_hot_path_response(response.status());
     timing::record_finalize(state, metric_protocol, request_version, finalize_started);
@@ -240,7 +241,7 @@ pub(super) fn compiled_known_small_noop_static_candidate(
   state: &AppSnapshot,
   compiled_proxy: Option<&SelectedCompiledProxyAction<'_>>,
   request_version: http::Version,
-  downstream_scheme: &str,
+  _downstream_scheme: &str,
   transport_network: WafTransportNetwork,
   request_waf: &RequestWafDecision,
   pool_selection: Option<&PoolSelection>,
@@ -265,23 +266,32 @@ pub(super) fn compiled_known_small_noop_static_candidate(
     && pool_selection.is_none()
     && sticky_cookie.is_none()
     && !state.request_path_features.security_response_headers
-    && (plan.alt_svc_noop || !fast_path_alt_svc_possible(state, downstream_scheme, request_version))
     && (transport_network != WafTransportNetwork::Udp || request_version == http::Version::HTTP_3)
 }
 
 fn finalize_known_small_noop_response(
-  parts: Parts,
+  mut parts: Parts,
   mut response_body: ProxyBody,
   mut inlined_known_small_body: Option<body::InlinedKnownSmallResponseBody>,
   request_version: http::Version,
   response_send_timeout: Duration,
   transport_network: WafTransportNetwork,
+  alt_svc: Option<(&AppSnapshot, &str)>,
 ) -> Response<ProxyBody> {
   materialize_h2_inlined_known_small_body(
     request_version,
     &mut response_body,
     &mut inlined_known_small_body,
   );
+  if let Some((state, downstream_scheme)) = alt_svc {
+    apply_alt_svc_header(
+      &mut parts.headers,
+      parts.status,
+      state,
+      downstream_scheme,
+      request_version,
+    );
+  }
   let compiled_h3_noop = request_version == http::Version::HTTP_3
     && inlined_known_small_body
       .as_ref()
@@ -356,10 +366,26 @@ mod tests {
   }
 
   async fn h2_direct_h1_state(extra: &str) -> AppSnapshot {
+    h2_direct_h1_state_inner(extra, false).await
+  }
+
+  async fn h2_direct_h1_state_with_http3(extra: &str) -> AppSnapshot {
+    h2_direct_h1_state_inner(extra, true).await
+  }
+
+  async fn h2_direct_h1_state_inner(extra: &str, http3_enabled: bool) -> AppSnapshot {
     let temp_dir = common::TempDir::new("h2-known-small-finalize");
     let (cert_path, key_path) =
       common::create_self_signed_cert(temp_dir.path(), "h2-known-small-finalize");
     let mut raw = common::minimal_config_toml(&cert_path, &key_path)
+      .replace(
+        "http3 = false",
+        if http3_enabled {
+          "http3 = true"
+        } else {
+          "http3 = false"
+        },
+      )
       .replace(
         "[compression]\nenabled = true",
         "[compression]\nenabled = false",
@@ -368,6 +394,15 @@ mod tests {
         "origin = \"https://app.internal.example\"\nmax_http_version = \"h2\"",
         "origin = \"http://app.internal.example\"\nmax_http_version = \"h1\"",
       );
+    if http3_enabled {
+      raw.push_str(
+        r#"
+
+[quic.socket]
+reuse_port = true
+"#,
+      );
+    }
     raw.push_str(extra);
     AppSnapshot::new(parse_config(&raw))
       .await
@@ -446,8 +481,9 @@ mod tests {
 
   #[tokio::test]
   async fn h2_known_small_noop_guard_accepts_compiled_safe_case() {
-    let state = h2_direct_h1_state("").await;
+    let state = h2_direct_h1_state_with_http3("").await;
 
+    assert!(state.alt_svc_header_value.is_some());
     assert!(can_use_h2_known_small_noop(
       &state,
       &RequestWafDecision::default(),
@@ -534,6 +570,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_3,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Udp,
+      None,
     );
 
     assert!(
@@ -572,6 +609,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_2,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Tcp,
+      None,
     );
 
     assert!(
@@ -591,6 +629,7 @@ x_content_type_options = "nosniff"
 
   #[tokio::test]
   async fn h2_known_small_noop_response_materializes_inlined_metadata() {
+    let state = h2_direct_h1_state_with_http3("").await;
     let response = finalize_known_small_noop_response(
       response_parts(http::Version::HTTP_2),
       empty_proxy_body(),
@@ -601,6 +640,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_2,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Tcp,
+      Some((&state, "https")),
     );
 
     assert!(
@@ -628,6 +668,10 @@ x_content_type_options = "nosniff"
         .is_none(),
       "TCP known-small responses should still skip downstream timeout wrapping"
     );
+    assert_eq!(
+      response.headers().get(http::header::ALT_SVC),
+      state.alt_svc_header_value.as_ref()
+    );
     let bytes = response
       .into_body()
       .collect()
@@ -651,6 +695,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_3,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Udp,
+      None,
     );
 
     assert!(
