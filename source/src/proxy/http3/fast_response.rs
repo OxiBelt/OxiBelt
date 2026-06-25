@@ -129,7 +129,7 @@ pub(super) fn take_h3_known_small_body_plan(
 }
 
 async fn respond_to_h3_compiled_known_small_no_trailers<S>(
-  mut stream: h3::server::RequestStream<S, Bytes>,
+  stream: h3::server::RequestStream<S, Bytes>,
   data: Bytes,
   response_send_timeout: Option<Duration>,
 ) -> anyhow::Result<()>
@@ -142,15 +142,46 @@ where
       KNOWN_SMALL_BODY_MAX_BYTES
     );
   }
+  timeout_h3_compiled_known_small_send(
+    response_send_timeout,
+    send_h3_compiled_known_small_no_trailers(stream, data),
+  )
+  .await
+}
+
+async fn send_h3_compiled_known_small_no_trailers<S>(
+  mut stream: h3::server::RequestStream<S, Bytes>,
+  data: Bytes,
+) -> anyhow::Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
   if !data.is_empty() {
-    maybe_timeout(response_send_timeout, stream.send_data(data))
+    stream
+      .send_data(data)
       .await
       .context("failed to send downstream HTTP/3 response data")?;
   }
-  maybe_timeout(response_send_timeout, stream.finish())
+  stream
+    .finish()
     .await
     .context("failed to finish downstream HTTP/3 response")?;
   Ok(())
+}
+
+async fn timeout_h3_compiled_known_small_send<F>(
+  timeout: Option<Duration>,
+  future: F,
+) -> anyhow::Result<()>
+where
+  F: std::future::Future<Output = anyhow::Result<()>>,
+{
+  match timeout {
+    Some(timeout) => tokio::time::timeout(timeout, future)
+      .await
+      .context("downstream HTTP/3 response send timed out")?,
+    None => future.await,
+  }
 }
 
 async fn respond_to_h3_known_small_body<S>(
@@ -284,5 +315,34 @@ where
       .context("downstream HTTP/3 response send timed out")?
       .map_err(Into::into),
     None => future.await.map_err(Into::into),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn compiled_known_small_send_timeout_covers_entire_future() {
+    let result = timeout_h3_compiled_known_small_send(Some(Duration::from_millis(5)), async {
+      tokio::time::sleep(Duration::from_secs(60)).await;
+      Ok(())
+    })
+    .await;
+
+    assert!(result.is_err());
+    assert!(
+      result
+        .expect_err("pending send future should time out")
+        .to_string()
+        .contains("downstream HTTP/3 response send timed out")
+    );
+  }
+
+  #[tokio::test]
+  async fn compiled_known_small_send_timeout_allows_ready_future() {
+    timeout_h3_compiled_known_small_send(Some(Duration::from_secs(1)), async { Ok(()) })
+      .await
+      .expect("ready send future should complete");
   }
 }

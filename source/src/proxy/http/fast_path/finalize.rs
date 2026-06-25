@@ -106,7 +106,7 @@ pub(super) fn finalize_response(
       request_version,
       response_send_timeout,
       transport_network,
-      Some((state, downstream_scheme)),
+      compiled_known_small_alt_svc(state, downstream_scheme, request_version),
     );
     state.record_hot_path_response(response.status());
     timing::record_finalize(state, metric_protocol, request_version, finalize_started);
@@ -236,6 +236,16 @@ fn can_use_compiled_known_small_noop_response(
     && trailers_handled
 }
 
+fn compiled_known_small_alt_svc<'a>(
+  state: &'a AppSnapshot,
+  downstream_scheme: &'a str,
+  request_version: http::Version,
+) -> Option<(&'a AppSnapshot, &'a str)> {
+  (request_version == http::Version::HTTP_2
+    && fast_path_alt_svc_possible(state, downstream_scheme, request_version))
+  .then_some((state, downstream_scheme))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compiled_known_small_noop_static_candidate(
   state: &AppSnapshot,
@@ -283,7 +293,9 @@ fn finalize_known_small_noop_response(
     &mut response_body,
     &mut inlined_known_small_body,
   );
-  if let Some((state, downstream_scheme)) = alt_svc {
+  if request_version == http::Version::HTTP_2
+    && let Some((state, downstream_scheme)) = alt_svc
+  {
     apply_alt_svc_header(
       &mut parts.headers,
       parts.status,
@@ -628,15 +640,12 @@ x_content_type_options = "nosniff"
   }
 
   #[tokio::test]
-  async fn h2_known_small_noop_response_materializes_inlined_metadata() {
+  async fn h2_known_small_noop_response_uses_prepared_known_small_body() {
     let state = h2_direct_h1_state_with_http3("").await;
     let response = finalize_known_small_noop_response(
       response_parts(http::Version::HTTP_2),
-      empty_proxy_body(),
-      Some(body::InlinedKnownSmallResponseBody::new(
-        Bytes::from_static(b"ok"),
-        None,
-      )),
+      body::known_small_no_trailers_body(Bytes::from_static(b"ok")),
+      None,
       http::Version::HTTP_2,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Tcp,
@@ -676,9 +685,34 @@ x_content_type_options = "nosniff"
       .into_body()
       .collect()
       .await
-      .expect("materialized H2 body should collect")
+      .expect("prepared H2 body should collect")
       .to_bytes();
     assert_eq!(bytes.as_ref(), b"ok");
+  }
+
+  #[tokio::test]
+  async fn h3_known_small_noop_response_skips_alt_svc_helper_work() {
+    let state = h2_direct_h1_state_with_http3("").await;
+    let response = finalize_known_small_noop_response(
+      response_parts(http::Version::HTTP_3),
+      empty_proxy_body(),
+      Some(body::InlinedKnownSmallResponseBody::new(
+        Bytes::from_static(b"ok"),
+        None,
+      )),
+      http::Version::HTTP_3,
+      std::time::Duration::from_millis(10),
+      WafTransportNetwork::Udp,
+      Some((&state, "https")),
+    );
+
+    assert!(response.headers().get(http::header::ALT_SVC).is_none());
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_some()
+    );
   }
 
   #[test]

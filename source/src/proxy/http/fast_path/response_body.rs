@@ -227,13 +227,12 @@ fn response_materialization(
   request_version: http::Version,
   compiled_known_small_noop_candidate: bool,
 ) -> SmallResponseMaterialization {
-  if compiled_known_small_noop_candidate
-    && matches!(
-      request_version,
-      http::Version::HTTP_2 | http::Version::HTTP_3
-    )
-  {
-    return SmallResponseMaterialization::MetadataOnly;
+  if compiled_known_small_noop_candidate {
+    match request_version {
+      http::Version::HTTP_2 => return SmallResponseMaterialization::H2KnownSmallNoTrailers,
+      http::Version::HTTP_3 => return SmallResponseMaterialization::MetadataOnly,
+      _ => {}
+    }
   }
   match request_version {
     http::Version::HTTP_2 => SmallResponseMaterialization::H2KnownSmallNoTrailers,

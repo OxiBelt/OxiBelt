@@ -146,7 +146,7 @@ async fn h3_fast_path_response_body_inlines_small_known_body_without_materialize
 }
 
 #[tokio::test]
-async fn h2_compiled_noop_candidate_keeps_known_small_metadata_without_materialized_body() {
+async fn h2_compiled_noop_candidate_uses_known_small_body_without_metadata_roundtrip() {
   let body =
     Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
 
@@ -162,9 +162,43 @@ async fn h2_compiled_noop_candidate_keeps_known_small_metadata_without_materiali
     Err(error) => panic!("unexpected response status {}", error.response.status()),
   };
 
+  assert!(
+    prepared.inlined_known_small_body.is_none(),
+    "compiled H2 no-op candidates should not round-trip through inlined metadata"
+  );
+  assert!(prepared.known_small_response_body);
+  assert!(prepared.known_no_trailers);
+  assert!(prepared.trailers_handled);
+  assert_eq!(prepared.body.size_hint().upper(), Some(2));
+  let bytes = prepared
+    .body
+    .collect()
+    .await
+    .expect("H2 known-small body should collect")
+    .to_bytes();
+  assert_eq!(bytes.as_ref(), b"ok");
+}
+
+#[tokio::test]
+async fn h3_compiled_noop_candidate_keeps_known_small_metadata_without_materialized_body() {
+  let body =
+    Full::new(Bytes::from_static(b"ok")).map_err(|never| -> body::BoxError { match never {} });
+
+  let prepared = match fast_path_response_body(
+    response_semantics(Method::GET, StatusCode::OK),
+    &response_headers_with_content_length("2"),
+    body,
+    response_options(TrailerMode::Drop, http::Version::HTTP_3, true),
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
   let inlined = prepared
     .inlined_known_small_body
-    .expect("compiled H2 no-op candidate should keep known-small metadata");
+    .expect("compiled H3 no-op candidate should keep known-small metadata");
   assert!(prepared.known_small_response_body);
   assert!(prepared.known_no_trailers);
   assert!(prepared.trailers_handled);
@@ -302,7 +336,7 @@ async fn known_small_response_body_reports_trailer_presence() {
     response_semantics(Method::GET, StatusCode::OK),
     &response_headers_with_content_length("2"),
     body,
-    response_options(TrailerMode::Pass, http::Version::HTTP_2, false),
+    response_options(TrailerMode::Pass, http::Version::HTTP_2, true),
   )
   .await
   {
