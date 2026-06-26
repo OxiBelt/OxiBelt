@@ -245,7 +245,8 @@ modified GitHub Actions workflow files, and keep CI behavior compatible with
 Linux GitHub-hosted runners unless otherwise documented.
 
 Use GitHub Actions `parallel` only for independent same-job steps whose child
-steps do not consume each other's `steps.<id>.outputs` values. Keep
+steps do not consume each other's `steps.<id>.outputs` or
+`steps['<id>'].outputs` values. Keep
 long-running service lifecycles out of CI workflows unless the matching
 workflow integrity tests validate the required `background`, `wait`,
 `wait-all`, or `cancel` behavior. Current local `actionlint` releases may lag
