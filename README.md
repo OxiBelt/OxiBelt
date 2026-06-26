@@ -148,6 +148,17 @@ docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 
 The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
 CI scans each built OxiBelt release image artifact with Trivy, appends a Markdown vulnerability table to the job summary, and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs.
+Release CI publishes validated images to GitHub Container Registry at
+`ghcr.io/oxibelt/oxibelt`. Published tags use strict OxiBelt release tags such
+as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags
+are rejected. Stable releases also update major Alpine musl aliases such as
+`5-alpine-musl-amd64`, plus the multi-arch `latest` and `alpine-musl` aliases.
+
+```sh
+docker pull ghcr.io/oxibelt/oxibelt:15.2.0-alpine-musl
+docker pull ghcr.io/oxibelt/oxibelt:15.2.0-alpine-musl-amd64
+docker pull ghcr.io/oxibelt/oxibelt:5-alpine-musl-amd64
+```
 
 The Alpine image runs as UID/GID `10001:10001`, exposes `8443/tcp` and `8443/udp`, and expects its default entry configuration at:
 

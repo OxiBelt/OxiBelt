@@ -1,5 +1,4 @@
 {
-  "files": [],
   "references": [
     {
       "path": "./ui/person-proof"
@@ -12,6 +11,7 @@
     "removeComments": false,
     "skipLibCheck": true,
     "strict": true,
+    "types": ["node"],
     "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
@@ -21,5 +21,6 @@
       "@reporoot/*": ["./*"],
       "@person-proof-ui/*": ["./ui/person-proof/source/*"]
     }
-  }
+  },
+  "include": ["devops/sources/**/*.ts", "devops/tests/**/*.ts"]
 }

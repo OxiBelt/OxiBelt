@@ -47,10 +47,11 @@ image_tar="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}.tar"
 rust_builder_image="rust:1.96.0-alpine3.24"
 rust_target=""
 rust_target_cpu=""
-oxibelt_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)"
-oxibelt_revision="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
-oxibelt_created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-oxibelt_source="$(detect_oxibelt_source)"
+oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)}"
+oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)}"
+oxibelt_created="${OXIBELT_DOCKER_IMAGE_CREATED:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+oxibelt_source="${OXIBELT_DOCKER_IMAGE_SOURCE:-$(detect_oxibelt_source)}"
+oxibelt_ref_name="${OXIBELT_DOCKER_IMAGE_REF_NAME:-${oxibelt_version}}"
 
 case "${artifact_arch}" in
   amd64v2)
@@ -113,6 +114,7 @@ docker buildx build \
   --build-arg "OXIBELT_REVISION=${oxibelt_revision}" \
   --build-arg "OXIBELT_CREATED=${oxibelt_created}" \
   --build-arg "OXIBELT_SOURCE=${oxibelt_source}" \
+  --build-arg "OXIBELT_REF_NAME=${oxibelt_ref_name}" \
   --tag "${image_tag}" \
   --output "type=docker,dest=${image_tar}" \
   "${repo_root}"

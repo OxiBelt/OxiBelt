@@ -1,0 +1,479 @@
+name: Release OxiBelt images
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - "*.*.*-build.????????"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Strict release tag to publish, such as 15.2.0, 15.2.0-beta.1, or 15.2.0-build.4f43abcd
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  OXIBELT_GHCR_IMAGE: ghcr.io/oxibelt/oxibelt
+  OXIBELT_SOURCE_URL: https://github.com/OxiBelt/OxiBelt
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      created: ${{ steps.release-ref.outputs.created }}
+      kind: ${{ steps.image-plan.outputs.kind }}
+      revision: ${{ steps.release-ref.outputs.revision }}
+      version: ${{ steps.image-plan.outputs.version }}
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0 --activate
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release ref matches checkout
+        id: release-ref
+        env:
+          OXIBELT_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+        run: |
+          set -euo pipefail
+
+          release_ref="${OXIBELT_RELEASE_REF}"
+          if [[ "${release_ref}" != refs/tags/* ]]; then
+            echo "release ref must start with refs/tags/: ${release_ref}" >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse "${release_ref}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "${tag_commit}" != "${head_commit}" ]]; then
+            echo "release tag ${release_ref} resolves to ${tag_commit}, but checkout is ${head_commit}" >&2
+            exit 1
+          fi
+
+          created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "created=${created}"
+            echo "revision=${head_commit}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Apply release version
+        env:
+          OXIBELT_IMAGE_PLAN_OUTPUT: ${{ runner.temp }}/oxibelt-release/image-plan.json
+          OXIBELT_RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          OXIBELT_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          OXIBELT_RELEASE_REVISION: ${{ steps.release-ref.outputs.revision }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/oxibelt-release"
+          pnpm run versioning:release
+
+      - name: Validate image release plan
+        id: image-plan
+        env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release/image-plan.json
+          OXIBELT_RELEASE_REVISION: ${{ steps.release-ref.outputs.revision }}
+        run: |
+          set -euo pipefail
+
+          python3 - "${IMAGE_PLAN}" "${OXIBELT_RELEASE_REVISION}" <<'PY'
+          import json
+          import re
+          import sys
+
+          plan_path = sys.argv[1]
+          revision = sys.argv[2]
+          plan = json.load(open(plan_path, encoding="utf-8"))
+          tag = plan["tag"]
+          kind = plan["kind"]
+          strict_tag = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-beta\.(0|[1-9][0-9]*)|-build\.([0-9a-f]{8}))?$"
+          )
+
+          if tag.startswith("v") or not strict_tag.fullmatch(tag):
+              raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
+          if kind == "build" and not tag.endswith(revision[:8].lower()):
+              raise SystemExit(f"build release tag {tag} must end with revision prefix {revision[:8].lower()}")
+          if plan["image"] != "ghcr.io/oxibelt/oxibelt":
+              raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
+          if plan["revision"] != revision:
+              raise SystemExit("image plan revision does not match checked-out commit")
+
+          expected = {
+              "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64"),
+              "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64"),
+              "amd64v4": ("oxibelt-alpine-musl-amd64v4-image", "oxibelt-alpine-musl-amd64v4.tar", "amd64"),
+              "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64"),
+              "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64"),
+          }
+          artifacts = {artifact["artifactArch"]: artifact for artifact in plan["artifacts"]}
+          if set(artifacts) != set(expected):
+              raise SystemExit(f"unexpected artifact matrix: {sorted(artifacts)}")
+          for arch, (artifact_name, image_tar, docker_arch) in expected.items():
+              artifact = artifacts[arch]
+              if artifact["artifactName"] != artifact_name or artifact["imageTar"] != image_tar:
+                  raise SystemExit(f"unexpected artifact naming for {arch}")
+              if artifact["dockerArchitecture"] != docker_arch:
+                  raise SystemExit(f"unexpected docker architecture for {arch}")
+              if f"{tag}-alpine-musl-{arch}" not in " ".join(artifact["ghcrTags"]):
+                  raise SystemExit(f"missing release arch tag for {arch}")
+
+          serialized = json.dumps(plan, sort_keys=True)
+          major = tag.split(".", 1)[0]
+          if kind == "stable":
+              if f":{major}-alpine-musl-amd64" not in serialized:
+                  raise SystemExit("stable releases must include major arch aliases")
+              if ":latest" not in serialized:
+                  raise SystemExit("stable releases must include the latest manifest alias")
+          elif f":{major}-alpine-musl" in serialized or ":latest" in serialized:
+              raise SystemExit("non-stable releases must not include latest or major aliases")
+          PY
+
+          {
+            echo "version=$(jq -r '.version' "${IMAGE_PLAN}")"
+            echo "kind=$(jq -r '.kind' "${IMAGE_PLAN}")"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify release worktree changes
+        run: |
+          set -euo pipefail
+
+          git diff --check HEAD --
+
+          unexpected_files="$(git diff --name-only HEAD -- . ':(exclude)Cargo.lock' ':(exclude)source/Cargo.toml')"
+          if [[ -n "${unexpected_files}" ]]; then
+            echo "unexpected release worktree changes:" >&2
+            printf '%s\n' "${unexpected_files}" >&2
+            exit 1
+          fi
+
+      - name: Prepare release metadata artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/oxibelt-release-metadata/source"
+          cp Cargo.lock "${RUNNER_TEMP}/oxibelt-release-metadata/Cargo.lock"
+          cp source/Cargo.toml "${RUNNER_TEMP}/oxibelt-release-metadata/source/Cargo.toml"
+          cp "${RUNNER_TEMP}/oxibelt-release/image-plan.json" "${RUNNER_TEMP}/oxibelt-release-metadata/image-plan.json"
+
+      - name: Upload release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-alpine-musl-image:
+    name: Docker image (Alpine musl, ${{ matrix.artifact_arch }})
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - validate
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+            artifact_name: oxibelt-alpine-musl-amd64v2-image
+            platform: linux/amd64
+            runner: ubuntu-26.04
+            qemu_platforms: ""
+          - artifact_arch: amd64
+            artifact_name: oxibelt-alpine-musl-amd64-image
+            platform: linux/amd64
+            runner: ubuntu-26.04
+            qemu_platforms: ""
+          - artifact_arch: amd64v4
+            artifact_name: oxibelt-alpine-musl-amd64v4-image
+            platform: linux/amd64
+            runner: ubuntu-26.04
+            qemu_platforms: ""
+          - artifact_arch: arm64
+            artifact_name: oxibelt-alpine-musl-arm64-image
+            platform: linux/arm64
+            runner: ubuntu-26.04-arm
+            qemu_platforms: ""
+          - artifact_arch: riscv64
+            artifact_name: oxibelt-alpine-musl-riscv64-image
+            platform: linux/riscv64
+            runner: ubuntu-26.04
+            qemu_platforms: riscv64
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Apply release metadata
+        run: |
+          set -euo pipefail
+          cp "${RUNNER_TEMP}/oxibelt-release-metadata/Cargo.lock" Cargo.lock
+          cp "${RUNNER_TEMP}/oxibelt-release-metadata/source/Cargo.toml" source/Cargo.toml
+
+      - name: Setup QEMU
+        if: matrix.qemu_platforms != ''
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3
+        with:
+          platforms: ${{ matrix.qemu_platforms }}
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0
+
+      - name: Build Docker image artifact
+        env:
+          OXIBELT_DOCKER_IMAGE_CREATED: ${{ needs.validate.outputs.created }}
+          OXIBELT_DOCKER_IMAGE_REF_NAME: ${{ needs.validate.outputs.version }}
+          OXIBELT_DOCKER_IMAGE_REVISION: ${{ needs.validate.outputs.revision }}
+          OXIBELT_DOCKER_IMAGE_SOURCE: ${{ env.OXIBELT_SOURCE_URL }}
+          OXIBELT_DOCKER_IMAGE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          tests/scripts/build-docker-image-artifact.sh \
+            "${{ matrix.platform }}" \
+            "${{ matrix.artifact_arch }}" \
+            "${RUNNER_TEMP}/oxibelt-image"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-image-trivy-scan:
+    name: Docker image Trivy scan (${{ matrix.artifact_arch }})
+    runs-on: ubuntu-26.04
+    needs:
+      - docker-alpine-musl-image
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+            artifact_name: oxibelt-alpine-musl-amd64v2-image
+            image_tar: oxibelt-alpine-musl-amd64v2.tar
+            image_tag: oxibelt:alpine-musl-amd64v2
+          - artifact_arch: amd64
+            artifact_name: oxibelt-alpine-musl-amd64-image
+            image_tar: oxibelt-alpine-musl-amd64.tar
+            image_tag: oxibelt:alpine-musl-amd64
+          - artifact_arch: amd64v4
+            artifact_name: oxibelt-alpine-musl-amd64v4-image
+            image_tar: oxibelt-alpine-musl-amd64v4.tar
+            image_tag: oxibelt:alpine-musl-amd64v4
+          - artifact_arch: arm64
+            artifact_name: oxibelt-alpine-musl-arm64-image
+            image_tar: oxibelt-alpine-musl-arm64.tar
+            image_tag: oxibelt:alpine-musl-arm64
+          - artifact_arch: riscv64
+            artifact_name: oxibelt-alpine-musl-riscv64-image
+            image_tar: oxibelt-alpine-musl-riscv64.tar
+            image_tag: oxibelt:alpine-musl-riscv64
+
+    steps:
+      - name: Download OxiBelt Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image_tag }}
+          format: json
+          output: trivy-results-${{ matrix.artifact_arch }}.json
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload Trivy vulnerability report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: trivy-release-oxibelt-${{ matrix.artifact_arch }}-json
+          path: trivy-results-${{ matrix.artifact_arch }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  ghcr-publish:
+    name: Publish GHCR images
+    runs-on: ubuntu-26.04
+    needs:
+      - validate
+      - docker-alpine-musl-image
+      - docker-image-trivy-scan
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download OxiBelt Docker image artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: oxibelt-alpine-musl-*-image
+          path: ${{ runner.temp }}/oxibelt-images
+
+      - name: Validate Docker image artifacts
+        env:
+          IMAGE_ROOT: ${{ runner.temp }}/oxibelt-images
+          METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
+          OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+          OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          OXIBELT_SOURCE_URL: ${{ env.OXIBELT_SOURCE_URL }}
+        run: |
+          set -euo pipefail
+
+          python3 - "${METADATA_ROOT}/image-plan.json" "${IMAGE_ROOT}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          import json
+          import pathlib
+          import sys
+          import tarfile
+
+          plan_path = pathlib.Path(sys.argv[1])
+          image_root = pathlib.Path(sys.argv[2])
+          version = sys.argv[3]
+          revision = sys.argv[4]
+          source = sys.argv[5]
+          plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+          if plan["version"] != version or plan["revision"] != revision:
+              raise SystemExit("release plan version or revision does not match workflow outputs")
+          if plan["source"] != source:
+              raise SystemExit("release plan source URL does not match workflow source")
+
+          expected_artifacts = {artifact["artifactName"] for artifact in plan["artifacts"]}
+          actual_artifacts = {path.name for path in image_root.iterdir() if path.is_dir()}
+          if actual_artifacts != expected_artifacts:
+              raise SystemExit(f"unexpected downloaded image artifacts: {sorted(actual_artifacts)}")
+
+          for artifact in plan["artifacts"]:
+              image_tar = image_root / artifact["artifactName"] / artifact["imageTar"]
+              if not image_tar.is_file():
+                  raise SystemExit(f"missing Docker image tar: {image_tar}")
+              with tarfile.open(image_tar) as docker_tar:
+                  manifest_member = docker_tar.extractfile("manifest.json")
+                  if manifest_member is None:
+                      raise SystemExit(f"{image_tar} is missing manifest.json")
+                  manifest = json.load(manifest_member)
+                  if len(manifest) != 1:
+                      raise SystemExit(f"{image_tar} should contain exactly one image")
+                  config_member = docker_tar.extractfile(manifest[0]["Config"])
+                  if config_member is None:
+                      raise SystemExit(f"{image_tar} is missing image config")
+                  config = json.load(config_member)
+
+              labels = config.get("config", {}).get("Labels", {})
+              for key, expected in {
+                  "org.opencontainers.image.version": version,
+                  "org.opencontainers.image.ref.name": version,
+                  "org.opencontainers.image.revision": revision,
+                  "org.opencontainers.image.source": source,
+                  "org.opencontainers.image.url": source,
+              }.items():
+                  if labels.get(key) != expected:
+                      raise SystemExit(f"{image_tar} label {key} was {labels.get(key)!r}, expected {expected!r}")
+              if config.get("architecture") != artifact["dockerArchitecture"]:
+                  raise SystemExit(f"{image_tar} architecture does not match release plan")
+              entrypoint = config.get("config", {}).get("Entrypoint")
+              if entrypoint != ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]:
+                  raise SystemExit(f"{image_tar} has unexpected entrypoint: {entrypoint}")
+              exposed = config.get("config", {}).get("ExposedPorts", {})
+              if "8443/tcp" not in exposed or "8443/udp" not in exposed:
+                  raise SystemExit(f"{image_tar} must expose 8443/tcp and 8443/udp")
+          PY
+
+      - name: Load, tag, and push arch images
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          IMAGE_ROOT: ${{ runner.temp }}/oxibelt-images
+        run: |
+          set -euo pipefail
+
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+          jq -r '.artifacts[] | @base64' "${IMAGE_PLAN}" | while read -r artifact_b64; do
+            artifact_json="$(printf '%s' "${artifact_b64}" | base64 --decode)"
+            artifact_name="$(jq -r '.artifactName' <<<"${artifact_json}")"
+            image_tar="$(jq -r '.imageTar' <<<"${artifact_json}")"
+            local_tag="$(jq -r '.localTag' <<<"${artifact_json}")"
+
+            docker load --input "${IMAGE_ROOT}/${artifact_name}/${image_tar}"
+            jq -r '.ghcrTags[]' <<<"${artifact_json}" | while read -r ghcr_tag; do
+              docker tag "${local_tag}" "${ghcr_tag}"
+              docker push "${ghcr_tag}"
+            done
+          done
+
+      - name: Publish multi-arch manifests
+        env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        run: |
+          set -euo pipefail
+
+          jq -r '.manifests[] | @base64' "${IMAGE_PLAN}" | while read -r manifest_b64; do
+            manifest_json="$(printf '%s' "${manifest_b64}" | base64 --decode)"
+            mapfile -t manifest_tags < <(jq -r '.ghcrTags[]' <<<"${manifest_json}")
+            mapfile -t source_tags < <(
+              jq -r --argjson manifest "${manifest_json}" '
+                .artifacts as $artifacts
+                | $manifest.artifactArchs[]
+                | . as $artifact_arch
+                | $artifacts[]
+                | select(.artifactArch == $artifact_arch)
+                | .ghcrTags[0]
+              ' "${IMAGE_PLAN}"
+            )
+
+            for manifest_tag in "${manifest_tags[@]}"; do
+              docker manifest rm "${manifest_tag}" >/dev/null 2>&1 || true
+              docker manifest create "${manifest_tag}" "${source_tags[@]}"
+              docker manifest push "${manifest_tag}"
+            done
+          done

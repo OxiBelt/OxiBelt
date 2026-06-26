@@ -289,6 +289,18 @@ If TypeScript DevOps tooling is added, CI should run its typecheck, lint, and
 tests. If browser WebDriver tests are added, CI must run them with both
 Chromium and Firefox.
 
+OxiBelt uses the root pnpm workspace for TypeScript DevOps tooling under
+`devops/`. When changing release versioning, GHCR image publishing, or other
+DevOps TypeScript automation, run:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run lint
+pnpm run typecheck
+pnpm run test
+pnpm run versioning:check
+```
+
 ## Security Requirements
 
 Do not hard-code:

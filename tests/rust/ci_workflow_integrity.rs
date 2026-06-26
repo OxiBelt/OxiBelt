@@ -98,6 +98,11 @@ fn workflow_text() -> String {
     .expect("check-oxibelt workflow should be readable")
 }
 
+fn release_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+    .expect("release workflow should be readable")
+}
+
 fn workflow_job_text(workflow: &str, job_id: &str) -> String {
   let marker = format!("  {job_id}:");
   let mut lines = Vec::new();
@@ -329,6 +334,11 @@ fn comparator_build_script_text() -> String {
     repo_root().join("tests/scripts/build-performance-comparator-image-artifact.sh"),
   )
   .expect("performance comparator build script should be readable")
+}
+
+fn docker_image_artifact_build_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/build-docker-image-artifact.sh"))
+    .expect("Docker image artifact build script should be readable")
 }
 
 fn performance_probe_build_script_text() -> String {
@@ -612,6 +622,32 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     ),
     "source/ops/Dockerfile.alpine should keep oxibelt as the container entrypoint"
   );
+}
+
+#[test]
+fn alpine_dockerfile_records_release_ref_name_label() {
+  let dockerfile = dockerfile_text();
+  let script = docker_image_artifact_build_script_text();
+
+  assert!(
+    dockerfile.contains("ARG OXIBELT_REF_NAME=dev")
+      && dockerfile.contains("ARG OXIBELT_REF_NAME")
+      && dockerfile.contains("org.opencontainers.image.ref.name=\"${OXIBELT_REF_NAME}\""),
+    "source/ops/Dockerfile.alpine should expose the validated release tag as an OCI ref.name label"
+  );
+  for expected in [
+    "OXIBELT_DOCKER_IMAGE_VERSION",
+    "OXIBELT_DOCKER_IMAGE_REVISION",
+    "OXIBELT_DOCKER_IMAGE_CREATED",
+    "OXIBELT_DOCKER_IMAGE_SOURCE",
+    "OXIBELT_DOCKER_IMAGE_REF_NAME",
+    "--build-arg \"OXIBELT_REF_NAME=${oxibelt_ref_name}\"",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Docker image artifact builder should support release metadata override {expected}"
+    );
+  }
 }
 
 #[test]
@@ -1292,6 +1328,147 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     assert!(
       snapshot_job_text.contains(expected),
       "dependency snapshot job should include {expected}"
+    );
+  }
+}
+
+#[test]
+fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
+  let workflow = release_workflow_text();
+  let _: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
+  let jobs = parse_jobs(&workflow);
+  let validate_job = jobs
+    .get("validate")
+    .expect("release workflow should define validate");
+  let build_job = jobs
+    .get("docker-alpine-musl-image")
+    .expect("release workflow should define docker-alpine-musl-image");
+  let scan_job = jobs
+    .get("docker-image-trivy-scan")
+    .expect("release workflow should define docker-image-trivy-scan");
+  let publish_job = jobs
+    .get("ghcr-publish")
+    .expect("release workflow should define ghcr-publish");
+  let validate_job_text = workflow_job_text(&workflow, "validate");
+  let publish_job_text = workflow_job_text(&workflow, "ghcr-publish");
+
+  assert!(
+    workflow.contains("release:")
+      && workflow.contains("types: [published]")
+      && workflow.contains("push:")
+      && workflow.contains("- \"*.*.*-build.????????\"")
+      && workflow.contains("workflow_dispatch:")
+      && workflow.contains("release_tag:")
+      && workflow.contains("15.2.0-build.4f43abcd")
+      && !workflow.contains("v1.2.3"),
+    "release workflow should publish only strict OxiBelt tag formats and should not document v-prefixed tags"
+  );
+  assert!(
+    validate_job.needs.is_empty(),
+    "release validate job should not wait for other jobs"
+  );
+  assert_eq!(
+    build_job.needs,
+    vec!["validate".to_owned()],
+    "release image builds should wait for validated release metadata"
+  );
+  assert_eq!(
+    scan_job.needs,
+    vec!["docker-alpine-musl-image".to_owned()],
+    "release Trivy scans should wait for release image artifacts"
+  );
+  assert_eq!(
+    publish_job.needs,
+    vec![
+      "validate".to_owned(),
+      "docker-alpine-musl-image".to_owned(),
+      "docker-image-trivy-scan".to_owned(),
+    ],
+    "GHCR publish should wait for validation, image artifacts, and image scans"
+  );
+  assert_eq!(
+    workflow.matches("packages: write").count(),
+    1,
+    "release workflow should grant packages: write only once"
+  );
+  for expected in [
+    "contents: read",
+    "pnpm install --frozen-lockfile",
+    "pnpm run versioning:release",
+    "OXIBELT_RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}",
+    "git rev-parse \"${release_ref}^{commit}\"",
+    "git diff --name-only HEAD -- . ':(exclude)Cargo.lock' ':(exclude)source/Cargo.toml'",
+    "tag.startswith(\"v\")",
+    "build release tag",
+    "ghcr.io/oxibelt/oxibelt",
+    "image-plan.json",
+  ] {
+    assert!(
+      validate_job_text.contains(expected),
+      "release validate job should include {expected}"
+    );
+  }
+  for expected in [
+    "github.repository == 'OxiBelt/OxiBelt'",
+    "packages: write",
+    "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
+    "org.opencontainers.image.version",
+    "org.opencontainers.image.ref.name",
+    "org.opencontainers.image.revision",
+    "org.opencontainers.image.source",
+    "docker manifest create",
+    "docker manifest push",
+  ] {
+    assert!(
+      publish_job_text.contains(expected),
+      "GHCR publish job should include {expected}"
+    );
+  }
+}
+
+#[test]
+fn release_workflow_covers_oxibelt_image_artifact_matrix() {
+  let workflow = release_workflow_text();
+  let build_job_text = workflow_job_text(&workflow, "docker-alpine-musl-image");
+  let scan_job_text = workflow_job_text(&workflow, "docker-image-trivy-scan");
+
+  for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
+    for expected in [
+      format!("artifact_arch: {artifact_arch}"),
+      format!("artifact_name: {artifact_name}"),
+    ] {
+      assert!(
+        build_job_text.contains(&expected) || scan_job_text.contains(&expected),
+        "release image matrix should include {expected}"
+      );
+    }
+    assert!(
+      scan_job_text.contains(&format!("image_tar: {image_tar}"))
+        && scan_job_text.contains(&format!("image_tag: {image_tag}")),
+      "release Trivy scan matrix should include {artifact_arch} tar and local tag"
+    );
+    assert!(
+      workflow.contains(artifact_name) && workflow.contains(image_tar),
+      "release workflow should know {artifact_name} and {image_tar}"
+    );
+  }
+
+  for expected in [
+    "OXIBELT_DOCKER_IMAGE_VERSION",
+    "OXIBELT_DOCKER_IMAGE_REVISION",
+    "OXIBELT_DOCKER_IMAGE_CREATED",
+    "OXIBELT_DOCKER_IMAGE_REF_NAME",
+    "OXIBELT_DOCKER_IMAGE_SOURCE",
+    "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0",
+    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
+    "pattern: oxibelt-alpine-musl-*-image",
+    ":latest",
+    "major arch aliases",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "release workflow should include {expected}"
     );
   }
 }

@@ -5,41 +5,40 @@ const ReturnPath = '__RETURN_PATH_JS__'
 const EmbeddedDifficulty = Number('__DIFFICULTY__')
 const Encoder = new TextEncoder()
 
+/* eslint-disable @typescript-eslint/naming-convention -- Challenge API payloads use lower-case JSON keys. */
 type SessionDocument = {
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   session: string
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   person_proof_mode: string
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   expires_unix_ms: number
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   return_path: string
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   verify_path: string
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   clearance?: ClearanceMetadata
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   challenge: {
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     kind: string
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     difficulty?: number
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     token?: string
   }
 }
 
 type ClearanceMetadata = {
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   issue_to?: string
   token?: string
-  // eslint-disable-next-line @typescript-eslint/naming-convention
   local_storage?: {
     key?: string
-    // eslint-disable-next-line @typescript-eslint/naming-convention
     request_header?: string
   }
 }
+
+type WorkerMessage = {
+  type: string
+  nonce?: number
+}
+
+type VerifyResponse = {
+  return_path?: string
+  clearance?: ClearanceMetadata
+}
+/* eslint-enable @typescript-eslint/naming-convention */
 
 const StatusElement = document.querySelector<HTMLElement>('[data-status]')
 
@@ -153,7 +152,7 @@ const SolveWithWorkers = async (Token: string, Difficulty: number): Promise<numb
     for (let Index = 0; Index < WorkerCount; Index += 1) {
       const WorkerInstance = new Worker(BlobUrl)
       Workers.push(WorkerInstance)
-      WorkerInstance.onmessage = (Event: MessageEvent<{ type: string; nonce?: number }>) => {
+      WorkerInstance.onmessage = (Event: MessageEvent<WorkerMessage>) => {
         if (Event.data.type === 'found' && typeof Event.data.nonce === 'number') {
           Finish(Event.data.nonce)
         } else {
@@ -232,7 +231,7 @@ const SubmitProof = async (SessionToken: string, Nonce: number): Promise<string>
     throw new Error(`verify endpoint returned ${Response.status}`)
   }
 
-  const Body = (await Response.json()) as { return_path?: string; clearance?: ClearanceMetadata }
+  const Body = (await Response.json()) as VerifyResponse
   StoreClearance(Body.clearance)
   return Body.return_path || ReturnPath || '/'
 }

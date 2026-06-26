@@ -1,4 +1,5 @@
 packages:
+  - "devops"
   - "ui/*"
 allowBuilds:
   esbuild: true
