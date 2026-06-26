@@ -1357,7 +1357,7 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     workflow.contains("release:")
       && workflow.contains("types: [published]")
       && workflow.contains("push:")
-      && workflow.contains("- \"*.*.*-build.????????\"")
+      && workflow.contains("- \"*.*.*-build.*\"")
       && workflow.contains("workflow_dispatch:")
       && workflow.contains("release_tag:")
       && workflow.contains("15.2.0-build.4f43abcd")

@@ -5,7 +5,7 @@ on:
     types: [published]
   push:
     tags:
-      - "*.*.*-build.????????"
+      - "*.*.*-build.*"
   workflow_dispatch:
     inputs:
       release_tag:
