@@ -15,6 +15,7 @@ mod decision;
 mod direct_selection;
 mod h3;
 mod person_proof;
+mod post_probe_direct_h1;
 mod response_body;
 
 mod common {

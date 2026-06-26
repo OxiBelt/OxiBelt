@@ -62,8 +62,8 @@ use self::direct_transport::{
   DirectFastPathTransport, DirectTransportAttempt, direct_fast_path_transport,
 };
 use self::downstream_direct_h1::{
-  DownstreamDirectH1Preparation, DownstreamDirectH1RequestOptions,
-  prepare_downstream_direct_h1_or_generic,
+  DownstreamDirectH1Preparation, DownstreamDirectH1RequestBuild, DownstreamDirectH1RequestOptions,
+  prepare_downstream_direct_h1_or_generic, try_build_downstream_direct_h1_request,
 };
 pub(crate) use self::entry::try_handle_plain_proxy;
 use self::finalize::{compiled_known_small_noop_static_candidate, finalize_response};
@@ -274,22 +274,26 @@ impl PlainProxyFastPath {
     let preparation = match prepare_downstream_direct_h1_or_generic(
       parts,
       body,
-      compiled_proxy
-        .as_ref()
-        .map(|compiled| DownstreamDirectH1RequestOptions {
-          selected: compiled,
-          downstream_version: request_version,
-          forwarded_client_addr,
-          downstream_scheme,
-          downstream_host: host,
-          downstream_port,
-          forwarded_header_cache,
-          forwarded_request_header_values: &forwarded_request_header_values,
-          compression_enabled: state.config.compression.enabled,
-          request_body_definitely_empty,
-          request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
-          request_waf: &request_waf,
-        }),
+      request_body_definitely_empty
+        .then(|| {
+          compiled_proxy
+            .as_ref()
+            .map(|compiled| DownstreamDirectH1RequestOptions {
+              selected: compiled,
+              downstream_version: request_version,
+              forwarded_client_addr,
+              downstream_scheme,
+              downstream_host: host,
+              downstream_port,
+              forwarded_header_cache,
+              forwarded_request_header_values: &forwarded_request_header_values,
+              compression_enabled: state.config.compression.enabled,
+              request_body_definitely_empty,
+              request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
+              request_waf: &request_waf,
+            })
+        })
+        .flatten(),
     ) {
       Ok(preparation) => preparation,
       Err(error) => {
@@ -310,8 +314,10 @@ impl PlainProxyFastPath {
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
         (outbound, true)
       }
-      DownstreamDirectH1Preparation::Generic(mut parts, body) => {
-        timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
+      DownstreamDirectH1Preparation::Generic(parts, body) => {
+        if request_body_definitely_empty {
+          timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
+        }
         let target_uri = if let Some(compiled) = compiled_proxy.as_ref() {
           match compiled.target_uri(&parts.uri) {
             Ok(uri) => uri,
@@ -338,29 +344,6 @@ impl PlainProxyFastPath {
           }
         };
 
-        let rebuild = RebuildRequestOptions {
-          target_uri,
-          compression: &state.config.compression,
-          forwarded_client_addr,
-          downstream_scheme,
-          downstream_host: host,
-          downstream_port,
-          forwarded_header_mode,
-          forwarded_header_cache,
-          forwarded_request_header_values: Some(&forwarded_request_header_values),
-          preserve_host,
-          upstream_version,
-          waf_mutations: &request_waf.request_header_mutations,
-          route_mutations: &[],
-          remove_accept_encoding: false,
-        };
-        rebuild_request_parts(&mut parts, rebuild);
-        semantics::strip_accepted_expect(&mut parts.headers);
-        apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
-        state
-          .telemetry
-          .inject_trace_context(&mut parts.headers, trace_context);
-        timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
         let request_body_started = timing::start(timing_enabled);
         let request_body = if request_body_definitely_empty {
           record_empty_request_body(snapshot, metric_protocol, &parts.extensions);
@@ -393,20 +376,102 @@ impl PlainProxyFastPath {
         };
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
         let request_body_proven_empty = request_body.proven_empty();
-        let outbound_body = if request_body_proven_empty {
-          request_body.into_body()
+        let mut parts = Some(parts);
+        let mut post_probe_outbound = None;
+        if !request_body_definitely_empty && request_body_proven_empty {
+          let direct_h1_build_started = timing::start(timing_enabled);
+          if let Some(compiled) = compiled_proxy.as_ref() {
+            let current_parts = parts
+              .take()
+              .expect("generic request parts should be available before direct-H1 retry");
+            match try_build_downstream_direct_h1_request(
+              current_parts,
+              DownstreamDirectH1RequestOptions {
+                selected: compiled,
+                downstream_version: request_version,
+                forwarded_client_addr,
+                downstream_scheme,
+                downstream_host: host,
+                downstream_port,
+                forwarded_header_cache,
+                forwarded_request_header_values: &forwarded_request_header_values,
+                compression_enabled: state.config.compression.enabled,
+                request_body_definitely_empty: true,
+                request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
+                request_waf: &request_waf,
+              },
+            ) {
+              Ok(DownstreamDirectH1RequestBuild::Built(mut outbound)) => {
+                timing::direct_h1_build_ok(snapshot, metric_protocol, direct_h1_build_started);
+                state
+                  .telemetry
+                  .inject_trace_context(outbound.headers_mut(), trace_context);
+                timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+                post_probe_outbound = Some(outbound);
+              }
+              Ok(DownstreamDirectH1RequestBuild::Fallback(returned_parts)) => {
+                timing::direct_h1_build_fallback(
+                  snapshot,
+                  metric_protocol,
+                  direct_h1_build_started,
+                );
+                parts = Some(returned_parts);
+              }
+              Err(error) => {
+                warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
+                return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+              }
+            }
+          } else {
+            timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
+          }
+        } else if !request_body_definitely_empty {
+          let direct_h1_build_started = timing::start(timing_enabled);
+          timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
+        }
+        if let Some(outbound) = post_probe_outbound {
+          (outbound, true)
         } else {
-          let body = request_body.into_body();
-          fast_path_outbound_request_body(
-            body,
-            state.config.proxy.http.trailers,
-            timeouts.upstream_send,
+          let mut parts =
+            parts.expect("generic request parts should remain after direct-H1 fallback");
+          let rebuild = RebuildRequestOptions {
+            target_uri,
+            compression: &state.config.compression,
+            forwarded_client_addr,
+            downstream_scheme,
+            downstream_host: host,
+            downstream_port,
+            forwarded_header_mode,
+            forwarded_header_cache,
+            forwarded_request_header_values: Some(&forwarded_request_header_values),
+            preserve_host,
+            upstream_version,
+            waf_mutations: &request_waf.request_header_mutations,
+            route_mutations: &[],
+            remove_accept_encoding: false,
+          };
+          rebuild_request_parts(&mut parts, rebuild);
+          semantics::strip_accepted_expect(&mut parts.headers);
+          apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
+          state
+            .telemetry
+            .inject_trace_context(&mut parts.headers, trace_context);
+          timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+          let outbound_body = if request_body_proven_empty {
+            request_body.into_body()
+          } else {
+            let body = request_body.into_body();
+            fast_path_outbound_request_body(
+              body,
+              state.config.proxy.http.trailers,
+              timeouts.upstream_send,
+            )
+          };
+          (
+            Request::from_parts(parts, outbound_body),
+            request_body_proven_empty,
           )
-        };
-        (
-          Request::from_parts(parts, outbound_body),
-          request_body_proven_empty,
-        )
+        }
       }
     };
 
