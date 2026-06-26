@@ -8,6 +8,22 @@ struct Job {
   needs: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct WorkflowStep {
+  job_id: String,
+  step_index: usize,
+  keys: BTreeSet<String>,
+  parallel_children: Vec<WorkflowParallelChild>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkflowParallelChild {
+  child_index: usize,
+  keys: BTreeSet<String>,
+  id: Option<String>,
+  text: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Outcome {
   Success,
@@ -101,6 +117,189 @@ fn workflow_job_text(workflow: &str, job_id: &str) -> String {
 
   assert!(in_job, "workflow should define job {job_id}");
   lines.join("\n")
+}
+
+fn step_mapping(entry: &str) -> Option<(String, String)> {
+  let (key, value) = entry.trim().split_once(':')?;
+  let key = key.trim();
+  if key.is_empty() || key.contains(char::is_whitespace) {
+    None
+  } else {
+    Some((
+      key.to_owned(),
+      value.trim().trim_matches('"').trim_matches('\'').to_owned(),
+    ))
+  }
+}
+
+fn step_mapping_key(entry: &str) -> Option<String> {
+  step_mapping(entry).map(|(key, _)| key)
+}
+
+fn push_current_child(
+  current_step: &mut Option<WorkflowStep>,
+  current_child: &mut Option<WorkflowParallelChild>,
+) {
+  if let Some(child) = current_child.take() {
+    if let Some(step) = current_step {
+      step.parallel_children.push(child);
+    }
+  }
+}
+
+fn push_current_step(
+  steps: &mut Vec<WorkflowStep>,
+  current_step: &mut Option<WorkflowStep>,
+  current_child: &mut Option<WorkflowParallelChild>,
+) {
+  push_current_child(current_step, current_child);
+  if let Some(step) = current_step.take() {
+    steps.push(step);
+  }
+}
+
+fn workflow_top_level_steps(workflow: &str) -> Vec<WorkflowStep> {
+  let mut steps = Vec::new();
+  let mut in_jobs = false;
+  let mut current_job: Option<String> = None;
+  let mut in_steps = false;
+  let mut current_step: Option<WorkflowStep> = None;
+  let mut current_child: Option<WorkflowParallelChild> = None;
+  let mut step_index = 0;
+
+  for raw_line in workflow.lines() {
+    let line = raw_line.trim_end();
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+      continue;
+    }
+
+    let indent = line
+      .chars()
+      .take_while(|character| *character == ' ')
+      .count();
+    if !in_jobs {
+      in_jobs = line == "jobs:";
+      continue;
+    }
+
+    if indent == 0 {
+      break;
+    }
+
+    if indent == 2 && line.ends_with(':') {
+      push_current_step(&mut steps, &mut current_step, &mut current_child);
+      let id = trimmed.trim_end_matches(':');
+      if !id.contains(char::is_whitespace) {
+        current_job = Some(id.to_owned());
+        in_steps = false;
+        step_index = 0;
+      }
+      continue;
+    }
+
+    if indent == 4 && trimmed == "steps:" {
+      push_current_step(&mut steps, &mut current_step, &mut current_child);
+      in_steps = true;
+      step_index = 0;
+      continue;
+    }
+
+    if !in_steps {
+      continue;
+    }
+
+    if indent <= 4 {
+      push_current_step(&mut steps, &mut current_step, &mut current_child);
+      in_steps = false;
+      continue;
+    }
+
+    if indent == 6 && trimmed.starts_with("- ") {
+      push_current_step(&mut steps, &mut current_step, &mut current_child);
+      step_index += 1;
+
+      let mut keys = BTreeSet::new();
+      if let Some(key) = step_mapping_key(
+        trimmed
+          .strip_prefix("- ")
+          .expect("starts_with already checked"),
+      ) {
+        keys.insert(key);
+      }
+
+      if let Some(job_id) = &current_job {
+        current_step = Some(WorkflowStep {
+          job_id: job_id.clone(),
+          step_index,
+          keys,
+          parallel_children: Vec::new(),
+        });
+      }
+      continue;
+    }
+
+    if indent == 8 {
+      if let Some(step) = &mut current_step {
+        if let Some(key) = step_mapping_key(trimmed) {
+          step.keys.insert(key);
+        }
+      }
+      continue;
+    }
+
+    if current_step
+      .as_ref()
+      .is_some_and(|step| step.keys.contains("parallel"))
+    {
+      if indent == 10 && trimmed.starts_with("- ") {
+        push_current_child(&mut current_step, &mut current_child);
+
+        let mut keys = BTreeSet::new();
+        let mut id = None;
+        if let Some((key, value)) = step_mapping(
+          trimmed
+            .strip_prefix("- ")
+            .expect("starts_with already checked"),
+        ) {
+          if key == "id" {
+            id = Some(value);
+          }
+          keys.insert(key);
+        }
+        let child_index = current_step
+          .as_ref()
+          .map(|step| step.parallel_children.len() + 1)
+          .unwrap_or(1);
+        current_child = Some(WorkflowParallelChild {
+          child_index,
+          keys,
+          id,
+          text: format!("{line}\n"),
+        });
+        continue;
+      }
+
+      if indent > 10 {
+        if let Some(child) = &mut current_child {
+          child.text.push_str(line);
+          child.text.push('\n');
+          if indent == 12 {
+            if let Some((key, value)) = step_mapping(trimmed) {
+              if key == "id" {
+                child.id = Some(value);
+              }
+              child.keys.insert(key);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  push_current_step(&mut steps, &mut current_step, &mut current_child);
+
+  steps
 }
 
 fn write_test_file(path: &Path, contents: &str) {
@@ -489,6 +688,88 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
       "{job_id} would be skipped if source-structure failed"
     );
   }
+}
+
+#[test]
+fn check_workflow_steps_are_executable_actions_or_scripts() {
+  let workflow = workflow_text();
+  let unsupported_top_level_step_keys = ["background", "wait", "wait-all", "cancel"];
+  let unsupported_parallel_child_keys = ["parallel", "background", "wait", "wait-all", "cancel"];
+  let invalid_steps: Vec<String> = workflow_top_level_steps(&workflow)
+    .into_iter()
+    .filter_map(|step| {
+      let unsupported_keys = unsupported_top_level_step_keys
+        .iter()
+        .filter(|key| step.keys.contains(**key))
+        .copied()
+        .collect::<Vec<_>>();
+      let is_executable = step.keys.contains("run") || step.keys.contains("uses");
+      let is_parallel = step.keys.contains("parallel");
+      if unsupported_keys.is_empty() && is_executable && !is_parallel {
+        None
+      } else if unsupported_keys.is_empty() && is_parallel && !is_executable {
+        let child_ids = step
+          .parallel_children
+          .iter()
+          .filter_map(|child| child.id.as_deref())
+          .collect::<Vec<_>>();
+        let mut child_errors = Vec::new();
+        if step.parallel_children.is_empty() {
+          child_errors.push("parallel group has no child steps".to_owned());
+        }
+        for child in &step.parallel_children {
+          let unsupported_child_keys = unsupported_parallel_child_keys
+            .iter()
+            .filter(|key| child.keys.contains(**key))
+            .copied()
+            .collect::<Vec<_>>();
+          if !unsupported_child_keys.is_empty() {
+            child_errors.push(format!(
+              "child {} has unsupported keys {:?}",
+              child.child_index, unsupported_child_keys
+            ));
+          }
+          if !(child.keys.contains("run") || child.keys.contains("uses")) {
+            child_errors.push(format!(
+              "child {} has keys {:?} without run or uses",
+              child.child_index, child.keys
+            ));
+          }
+          for sibling_id in &child_ids {
+            if child.id.as_deref() != Some(*sibling_id)
+              && child.text.contains(&format!("steps.{sibling_id}.outputs"))
+            {
+              child_errors.push(format!(
+                "child {} consumes sibling output steps.{sibling_id}.outputs",
+                child.child_index
+              ));
+            }
+          }
+        }
+        if child_errors.is_empty() {
+          None
+        } else {
+          Some(format!(
+            "jobs.{}.steps[{}] parallel group is invalid: {}",
+            step.job_id,
+            step.step_index,
+            child_errors.join("; ")
+          ))
+        }
+      } else {
+        Some(format!(
+          "jobs.{}.steps[{}] has keys {:?}; unsupported step-control keys: {:?}",
+          step.job_id, step.step_index, step.keys, unsupported_keys
+        ))
+      }
+    })
+    .collect();
+
+  assert!(
+    invalid_steps.is_empty(),
+    "workflow top-level steps must be executable run/uses steps or validated parallel groups:\n{}",
+    invalid_steps.join("\n")
+  );
 }
 
 #[test]
@@ -1496,6 +1777,15 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
   let (artifact_download_parallel_group, _) = after_download_parallel_marker
     .split_once("\n      - name: Load AMD64 v2 OxiBelt Docker image")
     .expect("docker-performance should load Docker images after parallel artifact downloads");
+  let artifact_selection_parallel_start = performance_job
+    .find("      - parallel:\n")
+    .expect("docker-performance should define artifact selection parallel group");
+  let artifact_download_parallel_start = performance_job
+    .find("\n      - parallel:\n          - name: Download AMD64 v2 Docker image artifact")
+    .expect("docker-performance should define artifact download parallel group");
+  let artifact_load_start = performance_job
+    .find("\n      - name: Load AMD64 v2 OxiBelt Docker image")
+    .expect("docker-performance should load Docker images after artifact downloads");
 
   assert!(
     workflow.contains("performance_iterations:"),
@@ -1569,9 +1859,10 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
   );
   assert!(
     !workflow.contains("background:")
+      && !workflow.contains("wait:")
       && !workflow.contains("wait-all:")
       && !workflow.contains("cancel:"),
-    "workflow should keep explicit background/wait-all/cancel primitives out of this conservative parallel-step adoption"
+    "workflow should keep service lifecycle step-control primitives out of CI gates"
   );
   assert!(
     workflow.contains("timeout-minutes: 360"),
@@ -1666,6 +1957,19 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     performance_job.matches("      - parallel:\n").count(),
     2,
     "docker-performance should use focused parallel groups for selection and download setup"
+  );
+  assert!(
+    artifact_selection_parallel_start < artifact_download_parallel_start
+      && artifact_download_parallel_start < artifact_load_start,
+    "docker-performance should use selection outputs only after the selection parallel group completes"
+  );
+  assert!(
+    !artifact_selection_parallel_group.contains("steps.select-amd64-")
+      && artifact_download_parallel_group.contains("steps.select-amd64-v2.outputs.supported")
+      && artifact_download_parallel_group.contains("steps.select-amd64-v2.outputs.artifact_name")
+      && artifact_download_parallel_group.contains("steps.select-amd64-v3.outputs.supported")
+      && artifact_download_parallel_group.contains("steps.select-amd64-v3.outputs.artifact_name"),
+    "download steps should consume selection outputs only in the later parallel group"
   );
   assert!(
     artifact_selection_parallel_group.contains("name: Select AMD64 v2 Docker image artifact")

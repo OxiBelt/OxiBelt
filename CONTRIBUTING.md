@@ -244,11 +244,13 @@ local dependencies, prefer explicit configuration, validate generated or
 modified GitHub Actions workflow files, and keep CI behavior compatible with
 Linux GitHub-hosted runners unless otherwise documented.
 
-Use GitHub Actions `parallel` for independent same-job steps that do not
-depend on each other's outputs, generated files, or runner-side service
-lifecycles. Reserve explicit `background`, `wait`, `wait-all`, and `cancel`
-for long-running services that need to overlap with later steps and be stopped
-cleanly.
+Use GitHub Actions `parallel` only for independent same-job steps whose child
+steps do not consume each other's `steps.<id>.outputs` values. Keep
+long-running service lifecycles out of CI workflows unless the matching
+workflow integrity tests validate the required `background`, `wait`,
+`wait-all`, or `cancel` behavior. Current local `actionlint` releases may lag
+behind newly documented GitHub Actions syntax, so pair workflow linting with
+`cargo test --test ci_workflow_integrity --locked` for `parallel` changes.
 
 If package manager files are added under `devops/`, document the expected
 commands. For example:
