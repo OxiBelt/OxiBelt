@@ -148,11 +148,12 @@ jobs:
           rustup default ${{ matrix.rust_version }}
           rustup component add rustfmt clippy --toolchain ${{ matrix.rust_version }}
 
-      - name: Cargo fmt
-        run: cargo fmt --check
+      - parallel:
+          - name: Cargo fmt
+            run: cargo fmt --check
 
-      - name: Tests rustfmt
-        run: tests/scripts/check-tests-rustfmt.sh
+          - name: Tests rustfmt
+            run: tests/scripts/check-tests-rustfmt.sh
 
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -1616,75 +1617,77 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
-      - name: Select AMD64 v2 Docker image artifact
-        id: select-amd64-v2
-        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v2 --allow-unsupported
+      - parallel:
+          - name: Select AMD64 v2 Docker image artifact
+            id: select-amd64-v2
+            run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v2 --allow-unsupported
 
-      - name: Select AMD64 v3 Docker image artifact
-        id: select-amd64-v3
-        run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported
+          - name: Select AMD64 v3 Docker image artifact
+            id: select-amd64-v3
+            run: tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported
 
-      - name: Download AMD64 v2 Docker image artifact
-        if: steps.select-amd64-v2.outputs.supported == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ steps.select-amd64-v2.outputs.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/x86-64-v2
+      - parallel:
+          - name: Download AMD64 v2 Docker image artifact
+            if: steps.select-amd64-v2.outputs.supported == 'true'
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: ${{ steps.select-amd64-v2.outputs.artifact_name }}
+              path: ${{ runner.temp }}/oxibelt-image/x86-64-v2
 
-      - name: Download AMD64 v3 Docker image artifact
-        if: steps.select-amd64-v3.outputs.supported == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ steps.select-amd64-v3.outputs.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/x86-64-v3
+          - name: Download AMD64 v3 Docker image artifact
+            if: steps.select-amd64-v3.outputs.supported == 'true'
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: ${{ steps.select-amd64-v3.outputs.artifact_name }}
+              path: ${{ runner.temp }}/oxibelt-image/x86-64-v3
 
-      - name: Download AMD64 v2 nginx comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-nginx-x86-64-v2-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/nginx
+          - name: Download AMD64 v2 nginx comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-nginx-x86-64-v2-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/nginx
 
-      - name: Download AMD64 v2 Caddy comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-caddy-x86-64-v2-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/caddy
+          - name: Download AMD64 v2 Caddy comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-caddy-x86-64-v2-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/caddy
 
-      - name: Download AMD64 v2 OpenResty comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-openresty-x86-64-v2-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/openresty
+          - name: Download AMD64 v2 OpenResty comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-openresty-x86-64-v2-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v2/openresty
 
-      - name: Download AMD64 v3 nginx comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-nginx-x86-64-v3-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/nginx
+          - name: Download AMD64 v3 nginx comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-nginx-x86-64-v3-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/nginx
 
-      - name: Download AMD64 v3 Caddy comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-caddy-x86-64-v3-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/caddy
+          - name: Download AMD64 v3 Caddy comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-caddy-x86-64-v3-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/caddy
 
-      - name: Download AMD64 v3 OpenResty comparator image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-openresty-x86-64-v3-image
-          path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/openresty
+          - name: Download AMD64 v3 OpenResty comparator image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-openresty-x86-64-v3-image
+              path: ${{ runner.temp }}/oxibelt-comparator-image/x86-64-v3/openresty
 
-      - name: Download performance probe image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-performance-probe-image
-          path: ${{ runner.temp }}/oxibelt-performance-probe-image
+          - name: Download performance probe image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-performance-probe-image
+              path: ${{ runner.temp }}/oxibelt-performance-probe-image
 
-      - name: Download external benchmark image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-external-benchmark-image
-          path: ${{ runner.temp }}/oxibelt-external-benchmark-image
+          - name: Download external benchmark image artifact
+            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+            with:
+              name: oxibelt-external-benchmark-image
+              path: ${{ runner.temp }}/oxibelt-external-benchmark-image
 
       - name: Load AMD64 v2 OxiBelt Docker image
         if: steps.select-amd64-v2.outputs.supported == 'true'

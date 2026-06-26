@@ -492,6 +492,54 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
 }
 
 #[test]
+fn test_job_runs_independent_format_checks_in_parallel() {
+  let workflow = workflow_text();
+  let test_job = workflow_job_text(&workflow, "test");
+  let format_parallel_group = test_job
+    .split_once("      - parallel:\n")
+    .and_then(|(_, rest)| rest.split_once("\n      - name: Cargo clippy"))
+    .map(|(group, _)| group)
+    .expect("test job should run format checks in a parallel group");
+
+  assert_eq!(
+    test_job.matches("      - parallel:\n").count(),
+    1,
+    "test job should use one focused parallel group"
+  );
+  assert!(
+    format_parallel_group.contains("name: Cargo fmt")
+      && format_parallel_group.contains("run: cargo fmt --check")
+      && format_parallel_group.contains("name: Tests rustfmt")
+      && format_parallel_group.contains("run: tests/scripts/check-tests-rustfmt.sh"),
+    "test job should run independent format checks in the parallel group"
+  );
+  for sequential_step in ["name: Cargo clippy", "name: Cargo test"] {
+    assert!(
+      !format_parallel_group.contains(sequential_step),
+      "test job should keep {sequential_step} after the format parallel group"
+    );
+  }
+
+  let install_rust = test_job
+    .find("name: Install Rust toolchain")
+    .expect("test job should install Rust before checks");
+  let format_parallel = test_job
+    .find("      - parallel:\n")
+    .expect("test job should define a format parallel group");
+  let cargo_clippy = test_job
+    .find("name: Cargo clippy")
+    .expect("test job should run cargo clippy");
+  let cargo_test = test_job
+    .find("name: Cargo test")
+    .expect("test job should run cargo test");
+
+  assert!(
+    install_rust < format_parallel && format_parallel < cargo_clippy && cargo_clippy < cargo_test,
+    "test job should install Rust, run parallel format checks, then run clippy and tests sequentially"
+  );
+}
+
+#[test]
 fn rust_advisory_checks_run_as_independent_primary_gate() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
@@ -1438,6 +1486,16 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     })
     .map(|(step, _)| step)
     .expect("docker-performance should prepare summary input before upload");
+  let (_, after_selection_parallel_marker) = performance_job
+    .split_once("      - parallel:\n")
+    .expect("docker-performance should start artifact setup with a parallel group");
+  let (artifact_selection_parallel_group, after_download_parallel_marker) =
+    after_selection_parallel_marker
+      .split_once("\n      - parallel:\n")
+      .expect("docker-performance should have a second parallel group for artifact downloads");
+  let (artifact_download_parallel_group, _) = after_download_parallel_marker
+    .split_once("\n      - name: Load AMD64 v2 OxiBelt Docker image")
+    .expect("docker-performance should load Docker images after parallel artifact downloads");
 
   assert!(
     workflow.contains("performance_iterations:"),
@@ -1508,6 +1566,12 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
       && performance_job
         .contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""),
     "smoke performance runs should enable diagnostic CPU and memory profiling artifacts separately from primary rows"
+  );
+  assert!(
+    !workflow.contains("background:")
+      && !workflow.contains("wait-all:")
+      && !workflow.contains("cancel:"),
+    "workflow should keep explicit background/wait-all/cancel primitives out of this conservative parallel-step adoption"
   );
   assert!(
     workflow.contains("timeout-minutes: 360"),
@@ -1596,6 +1660,46 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
         "tests/scripts/select-amd64-docker-image-artifact.sh {target_cpu} --allow-unsupported"
       )),
       "docker-performance should select the {target_cpu} artifact with unsupported-runner handling"
+    );
+  }
+  assert_eq!(
+    performance_job.matches("      - parallel:\n").count(),
+    2,
+    "docker-performance should use focused parallel groups for selection and download setup"
+  );
+  assert!(
+    artifact_selection_parallel_group.contains("name: Select AMD64 v2 Docker image artifact")
+      && artifact_selection_parallel_group.contains(
+        "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v2 --allow-unsupported"
+      )
+      && artifact_selection_parallel_group.contains("name: Select AMD64 v3 Docker image artifact")
+      && artifact_selection_parallel_group.contains(
+        "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported"
+      ),
+    "docker-performance should select independent AMD64 artifacts in one parallel group"
+  );
+  assert_eq!(
+    artifact_download_parallel_group
+      .matches("uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1")
+      .count(),
+    10,
+    "docker-performance should keep exactly ten artifact downloads in the parallel group"
+  );
+  for expected in [
+    "name: Download AMD64 v2 Docker image artifact",
+    "name: Download AMD64 v3 Docker image artifact",
+    "name: Download AMD64 v2 nginx comparator image artifact",
+    "name: Download AMD64 v2 Caddy comparator image artifact",
+    "name: Download AMD64 v2 OpenResty comparator image artifact",
+    "name: Download AMD64 v3 nginx comparator image artifact",
+    "name: Download AMD64 v3 Caddy comparator image artifact",
+    "name: Download AMD64 v3 OpenResty comparator image artifact",
+    "name: Download performance probe image artifact",
+    "name: Download external benchmark image artifact",
+  ] {
+    assert!(
+      artifact_download_parallel_group.contains(expected),
+      "docker-performance should keep {expected} inside the artifact download parallel group"
     );
   }
   assert!(

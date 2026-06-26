@@ -244,6 +244,12 @@ local dependencies, prefer explicit configuration, validate generated or
 modified GitHub Actions workflow files, and keep CI behavior compatible with
 Linux GitHub-hosted runners unless otherwise documented.
 
+Use GitHub Actions `parallel` for independent same-job steps that do not
+depend on each other's outputs, generated files, or runner-side service
+lifecycles. Reserve explicit `background`, `wait`, `wait-all`, and `cancel`
+for long-running services that need to overlap with later steps and be stopped
+cleanly.
+
 If package manager files are added under `devops/`, document the expected
 commands. For example:
 
