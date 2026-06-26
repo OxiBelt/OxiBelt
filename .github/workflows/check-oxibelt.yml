@@ -73,7 +73,7 @@ jobs:
   # fail structure checks and cause branch-protected test jobs to be skipped.
   source-structure:
     name: Source structure checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
 
@@ -135,8 +135,8 @@ jobs:
         rust_version:
           - 1.96.0
         runner:
-          - ubuntu-latest
-          - ubuntu-24.04-arm
+          - ubuntu-26.04
+          - ubuntu-26.04-arm
 
     steps:
       - name: Checkout
@@ -162,7 +162,7 @@ jobs:
 
   rust-advisory-checks:
     name: Rust advisory checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
 
@@ -188,7 +188,7 @@ jobs:
 
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     strategy:
@@ -230,7 +230,7 @@ jobs:
 
   test-riscv64-qemu:
     name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     strategy:
@@ -295,7 +295,7 @@ jobs:
 
   generate-test-matrices:
     name: Generate integration test matrices
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -376,7 +376,7 @@ jobs:
 
   linux-target-builds:
     name: Linux target builds
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -409,7 +409,7 @@ jobs:
 
   docker-alpine-musl-image-amd64:
     name: Docker image (Alpine musl, amd64, ${{ matrix.target_cpu }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -457,7 +457,7 @@ jobs:
 
   docker-alpine-comparator-musl-image-amd64:
     name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -521,7 +521,7 @@ jobs:
 
   docker-performance-probe-image:
     name: Docker performance probe image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -556,7 +556,7 @@ jobs:
 
   docker-external-benchmark-image:
     name: Docker external benchmark image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -605,7 +605,7 @@ jobs:
         include:
           - arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             qemu_platforms: ""
 
     steps:
@@ -640,7 +640,7 @@ jobs:
 
   docker-alpine-musl-image-riscv64:
     name: Docker image (Alpine musl, riscv64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     needs:
@@ -680,7 +680,7 @@ jobs:
 
   docker-image-trivy-scan:
     name: Docker image Trivy scan (${{ matrix.artifact_arch }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - docker-alpine-musl-image-amd64
       - docker-alpine-musl-image-other
@@ -794,7 +794,7 @@ jobs:
 
   docker-image-dependency-snapshot:
     name: Docker image dependency snapshot (${{ matrix.artifact_arch }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - docker-alpine-musl-image-amd64
       - docker-alpine-musl-image-other
@@ -859,7 +859,7 @@ jobs:
 
   docker-integration-helper-images:
     name: Docker integration helper images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
@@ -894,7 +894,7 @@ jobs:
 
   docker-integration-config-runtime:
     name: Docker integration config-runtime (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -966,7 +966,7 @@ jobs:
 
   docker-integration-proxy:
     name: Docker integration proxy (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1038,7 +1038,7 @@ jobs:
 
   docker-integration-protocol:
     name: Docker integration protocol (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1110,7 +1110,7 @@ jobs:
 
   docker-integration-waf:
     name: Docker integration waf (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1182,7 +1182,7 @@ jobs:
 
   docker-integration-cache:
     name: Docker integration cache (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1254,7 +1254,7 @@ jobs:
 
   docker-integration-state-data:
     name: Docker integration state-data (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1326,7 +1326,7 @@ jobs:
 
   docker-integration-ops:
     name: Docker integration ops (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1398,7 +1398,7 @@ jobs:
 
   docker-integration-security:
     name: Docker integration security (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1470,7 +1470,7 @@ jobs:
 
   remote-signer-dos-docker:
     name: Docker remote signer DoS regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - docker-alpine-musl-image-amd64
     permissions:
@@ -1504,7 +1504,7 @@ jobs:
 
   browser-webdriver:
     name: Browser WebDriver (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - generate-test-matrices
       - docker-alpine-musl-image-amd64
@@ -1575,7 +1575,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - ubuntu-latest
+          - ubuntu-26.04
         shard:
           - 1
           - 2
@@ -1991,7 +1991,7 @@ jobs:
 
   docker-performance-summary:
     name: Docker performance summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - docker-performance
     if: always()
@@ -2286,7 +2286,7 @@ jobs:
 
   docker-aggressive-long-run:
     name: Docker aggressive long-run
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - docker-performance
     if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))

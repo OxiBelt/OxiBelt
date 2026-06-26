@@ -509,7 +509,7 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
 
   for expected in [
     "name: Rust advisory checks",
-    "runs-on: ubuntu-latest",
+    "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
     "rustup toolchain install 1.96.0 --profile minimal",
