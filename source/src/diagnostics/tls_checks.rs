@@ -21,7 +21,20 @@ pub(super) fn diagnose_tls(config: &Config, report: &mut DiagnosticReport) {
 }
 
 fn diagnose_downstream_tls(config: &Config, report: &mut DiagnosticReport) {
-  check_certificate_file(report, "tls.cert_chain", &config.tls.cert_chain, &[]);
+  check_certificate_file(
+    report,
+    "tls.cert_chain",
+    &config.tls.cert_chain,
+    &config.tls.server_names,
+  );
+  for (index, certificate) in config.tls.certificates.iter().enumerate() {
+    check_certificate_file(
+      report,
+      &format!("tls.certificates[{index}].cert_chain"),
+      &certificate.cert_chain,
+      &certificate.server_names,
+    );
+  }
   if !config.tls.remote_signer.enabled {
     if let Err(error) = crate::tls::build_server_config(&config.tls, &config.listeners) {
       report.push(
@@ -33,15 +46,29 @@ fn diagnose_downstream_tls(config: &Config, report: &mut DiagnosticReport) {
         "Fix tls.cert_chain, tls.private_key, client auth roots, or static OCSP before serving traffic.",
       );
     }
-  } else if let Err(error) = read_first_cert(&config.tls.cert_chain) {
-    report.push(
-      DiagnosticSeverity::Error,
-      "tls.cert_parse_failed",
-      "tls",
-      "tls.cert_chain",
-      format!("downstream certificate chain could not be parsed: {error:#}"),
-      "Replace tls.cert_chain with a readable PEM certificate chain.",
-    );
+  } else {
+    if let Err(error) = read_first_cert(&config.tls.cert_chain) {
+      report.push(
+        DiagnosticSeverity::Error,
+        "tls.cert_parse_failed",
+        "tls",
+        "tls.cert_chain",
+        format!("downstream certificate chain could not be parsed: {error:#}"),
+        "Replace tls.cert_chain with a readable PEM certificate chain.",
+      );
+    }
+    for (index, certificate) in config.tls.certificates.iter().enumerate() {
+      if let Err(error) = read_first_cert(&certificate.cert_chain) {
+        report.push(
+          DiagnosticSeverity::Error,
+          "tls.cert_parse_failed",
+          "tls",
+          format!("tls.certificates[{index}].cert_chain"),
+          format!("downstream certificate chain could not be parsed: {error:#}"),
+          "Replace the certificate chain with a readable PEM certificate chain.",
+        );
+      }
+    }
   }
   check_ocsp_file(config, report);
 }
@@ -164,14 +191,14 @@ fn check_certificate_file(
         if !name_covered_by_cert(name, &info) {
           report.push(
             DiagnosticSeverity::Warning,
-            "tls.admin_sni_not_covered",
+            "tls.sni_not_covered",
             "tls",
             target,
             format!(
-              "admin TLS server_name {name} is not covered by certificate {}",
+              "TLS server_name {name} is not covered by certificate {}",
               path.display()
             ),
-            "Use a certificate whose SAN covers every configured admin.tls.certificates.server_names value.",
+            "Use a certificate whose SAN covers every configured TLS server name value.",
           );
         }
       }
@@ -227,12 +254,25 @@ fn check_validity(report: &mut DiagnosticReport, target: &str, path: &Path, info
 }
 
 fn check_ocsp_file(config: &Config, report: &mut DiagnosticReport) {
-  if config.tls.ocsp.mode != OcspMode::StaticFile {
-    return;
+  if config.tls.ocsp.mode == OcspMode::StaticFile
+    && let Some(path) = &config.tls.ocsp.response_file
+  {
+    check_ocsp_response_file(report, "tls.ocsp.response_file", path);
   }
-  let Some(path) = &config.tls.ocsp.response_file else {
-    return;
-  };
+  for (index, certificate) in config.tls.certificates.iter().enumerate() {
+    if certificate.ocsp.mode == OcspMode::StaticFile
+      && let Some(path) = &certificate.ocsp.response_file
+    {
+      check_ocsp_response_file(
+        report,
+        &format!("tls.certificates[{index}].ocsp.response_file"),
+        path,
+      );
+    }
+  }
+}
+
+fn check_ocsp_response_file(report: &mut DiagnosticReport, target: &str, path: &Path) {
   match std::fs::read(path).context("failed to read OCSP response") {
     Ok(bytes) => match earliest_future_der_time(&bytes) {
       Some(next_update) if next_update > now_unix_seconds() => {}
@@ -240,7 +280,7 @@ fn check_ocsp_file(config: &Config, report: &mut DiagnosticReport) {
         DiagnosticSeverity::Error,
         "tls.ocsp_expired",
         "tls",
-        "tls.ocsp.response_file",
+        target,
         format!(
           "static OCSP response {} appears expired or has no future nextUpdate",
           path.display()
@@ -252,7 +292,7 @@ fn check_ocsp_file(config: &Config, report: &mut DiagnosticReport) {
       DiagnosticSeverity::Error,
       "tls.ocsp_unreadable",
       "tls",
-      "tls.ocsp.response_file",
+      target,
       format!(
         "static OCSP response {} could not be read: {error:#}",
         path.display()

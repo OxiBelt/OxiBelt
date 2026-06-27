@@ -436,9 +436,13 @@ request_timeout_ms = 1
 
   fn test_tls_config(cert_path: PathBuf, key_path: PathBuf) -> TlsConfig {
     TlsConfig {
+      server_names: Vec::new(),
       cert_chain: cert_path,
       private_key: Some(key_path),
       remote_signer: TlsRemoteSignerConfig::default(),
+      require_sni: false,
+      reject_unknown_sni: false,
+      certificates: Vec::new(),
       min_version: TlsVersion::Tls13,
       max_version: TlsVersion::Tls13,
       key_exchange_groups: vec![

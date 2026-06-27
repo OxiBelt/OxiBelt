@@ -92,15 +92,15 @@ Upgrade and extended protocol behavior:
 
 ## TLS and Identity
 
-Downstream TLS uses configured certificate files from the cert directory and either a local private key file or an IPC remote private-key signer. OxiBelt supports TLS 1.2 through TLS 1.3 for TCP TLS; HTTP/3 requires TLS 1.3.
+Downstream TLS uses configured certificate files from the cert directory and either local private key files or an IPC remote private-key signer. Additional downstream certificates can be selected by TLS SNI before HTTP routing; the default certificate remains the fallback unless SNI strictness is enabled. OxiBelt supports TLS 1.2 through TLS 1.3 for TCP TLS; HTTP/3 requires TLS 1.3.
 
 Supported downstream TLS features:
 
-- Server certificate chain loading with local private key loading or Unix socket remote signing.
+- Server certificate chain loading with local private key loading or Unix socket remote signing, including multiple SNI-selected downstream certificates.
 - Optional or required downstream client certificate authentication.
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
-- Experimental CRLite filter enforcement for the configured downstream TLS certificate, including operator-supplied local filters and WebPKI-only managed Mozilla CRLite cache downloads.
+- Experimental CRLite filter enforcement for configured downstream TLS certificates, including operator-supplied local filters and WebPKI-only managed Mozilla CRLite cache downloads.
 - Opt-in outbound TLS revocation checks for runtime upstream clients using live OCSP fetch/cache and experimental CRLite local or WebPKI-only managed filters.
 - Session tickets with configurable rotation interval.
 

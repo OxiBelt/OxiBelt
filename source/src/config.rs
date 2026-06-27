@@ -79,7 +79,7 @@ pub use route_actions::*;
 pub use route_header_policy::*;
 pub use route_static_files::*;
 pub use sni_forward::*;
-pub use source_paths::ConfigSourcePaths;
+pub use source_paths::{ConfigSourcePaths, DownstreamTlsCertificateSourcePaths};
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;
@@ -500,6 +500,68 @@ impl Config {
         .source_paths
         .remember_downstream_tls_file(tls_private_key_logical.clone());
       self.source_paths.downstream_tls_private_key = Some(tls_private_key_logical);
+    }
+
+    self.source_paths.downstream_tls_certificates.clear();
+    for (index, certificate) in self.tls.certificates.iter_mut().enumerate() {
+      let (cert_chain, cert_logical) = resolve_existing_local_config_file_path_with_logical(
+        &format!("tls.certificates[{index}].cert_chain"),
+        &path_roots.cert_dir,
+        &certificate.cert_chain,
+      )?;
+      certificate.cert_chain = cert_chain;
+      self
+        .source_paths
+        .remember_runtime_file(cert_logical.clone());
+      self
+        .source_paths
+        .remember_downstream_tls_file(cert_logical.clone());
+
+      let private_key_logical = certificate
+        .private_key
+        .take()
+        .map(|private_key| {
+          let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+            &format!("tls.certificates[{index}].private_key"),
+            &path_roots.cert_dir,
+            &private_key,
+          )?;
+          certificate.private_key = Some(resolved);
+          self.source_paths.remember_runtime_file(logical.clone());
+          self
+            .source_paths
+            .remember_downstream_tls_file(logical.clone());
+          Ok::<PathBuf, anyhow::Error>(logical)
+        })
+        .transpose()?;
+
+      let ocsp_response_logical = certificate
+        .ocsp
+        .response_file
+        .take()
+        .map(|response_file| {
+          let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+            &format!("tls.certificates[{index}].ocsp.response_file"),
+            &path_roots.cert_dir,
+            &response_file,
+          )?;
+          certificate.ocsp.response_file = Some(resolved);
+          self.source_paths.remember_runtime_file(logical.clone());
+          self
+            .source_paths
+            .remember_downstream_tls_file(logical.clone());
+          Ok::<PathBuf, anyhow::Error>(logical)
+        })
+        .transpose()?;
+
+      self
+        .source_paths
+        .downstream_tls_certificates
+        .push(DownstreamTlsCertificateSourcePaths {
+          cert_chain: cert_logical,
+          private_key: private_key_logical,
+          ocsp_response_file: ocsp_response_logical,
+        });
     }
 
     self.tls.remote_signer.token_file = self
@@ -1105,20 +1167,7 @@ impl Config {
     self.validate_stream_listeners()?;
     self.validate_webrtc_turn_listeners(&turn_pool_names)?;
 
-    match self.tls.ocsp.mode {
-      OcspMode::Disabled => {}
-      OcspMode::StaticFile => {
-        if self.tls.ocsp.response_file.is_none() {
-          bail!("tls.ocsp.response_file is required when tls.ocsp.mode = \"static_file\"");
-        }
-      }
-      OcspMode::LiveFetch => {
-        if self.tls.ocsp.response_file.is_some() {
-          bail!("tls.ocsp.response_file cannot be used when tls.ocsp.mode = \"live_fetch\"");
-        }
-      }
-    }
-    self.tls.ocsp.validate_fetch_settings()?;
+    validate_ocsp_config("tls.ocsp", &self.tls.ocsp)?;
     self.tls.crlite.validate()?;
     self.client_identity.validate()?;
     crate::waf::validate_config(self)?;
@@ -1927,6 +1976,13 @@ impl Config {
     }
     validate_tls_key_exchange_groups(&self.tls.key_exchange_groups)?;
     validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
+    let multi_certificate = !self.tls.certificates.is_empty();
+    if multi_certificate && self.tls.resumption.mode != TlsServerResumptionMode::Off {
+      bail!("tls.resumption.mode must be \"off\" when tls.certificates is configured");
+    }
+    if multi_certificate && self.quic.zero_rtt != QuicZeroRttMode::Off {
+      bail!("quic.zero_rtt must be \"off\" when tls.certificates is configured");
+    }
     if self.listeners.http3
       && self.quic.zero_rtt == QuicZeroRttMode::SafeMethods
       && self.tls.resumption.mode == TlsServerResumptionMode::Stateless
@@ -1950,6 +2006,52 @@ impl Config {
     } else if self.tls.private_key.is_none() {
       bail!("tls.private_key is required unless tls.remote_signer.enabled = true");
     }
+    let mut server_names = HashSet::new();
+    for name in &self.tls.server_names {
+      validate_tls_server_name("tls.server_names", name)?;
+      if !server_names.insert(name.to_ascii_lowercase()) {
+        bail!("duplicate tls server_name {name}");
+      }
+    }
+    for (index, certificate) in self.tls.certificates.iter().enumerate() {
+      if certificate.server_names.is_empty() {
+        bail!("tls.certificates[{index}].server_names must not be empty");
+      }
+      for name in &certificate.server_names {
+        validate_tls_server_name("tls.certificates.server_names", name)?;
+        if !server_names.insert(name.to_ascii_lowercase()) {
+          bail!("duplicate tls certificate server_name {name}");
+        }
+      }
+      if self.tls.remote_signer.enabled {
+        if certificate.private_key.is_some() {
+          bail!(
+            "tls.certificates[{index}].private_key must not be set when tls.remote_signer.enabled = true"
+          );
+        }
+        match certificate.remote_signer_key_id.as_deref() {
+          Some(key_id) if !key_id.trim().is_empty() => {}
+          _ => bail!(
+            "tls.certificates[{index}].remote_signer_key_id is required when tls.remote_signer.enabled = true"
+          ),
+        }
+      } else {
+        if certificate.remote_signer_key_id.is_some() {
+          bail!(
+            "tls.certificates[{index}].remote_signer_key_id requires tls.remote_signer.enabled = true"
+          );
+        }
+        if certificate.private_key.is_none() {
+          bail!(
+            "tls.certificates[{index}].private_key is required unless tls.remote_signer.enabled = true"
+          );
+        }
+      }
+      validate_ocsp_config(
+        &format!("tls.certificates[{index}].ocsp"),
+        &certificate.ocsp,
+      )?;
+    }
     if self.listeners.http3 && self.tls.min_version != TlsVersion::Tls13 {
       bail!("HTTP/3 requires tls.min_version = \"tls1.3\"");
     }
@@ -1970,6 +2072,23 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn validate_ocsp_config(prefix: &str, ocsp: &OcspConfig) -> anyhow::Result<()> {
+  match ocsp.mode {
+    OcspMode::Disabled => {}
+    OcspMode::StaticFile => {
+      if ocsp.response_file.is_none() {
+        bail!("{prefix}.response_file is required when {prefix}.mode = \"static_file\"");
+      }
+    }
+    OcspMode::LiveFetch => {
+      if ocsp.response_file.is_some() {
+        bail!("{prefix}.response_file cannot be used when {prefix}.mode = \"live_fetch\"");
+      }
+    }
+  }
+  ocsp.validate_fetch_settings_with_prefix(prefix)
 }
 
 fn validate_tls_key_exchange_groups(groups: &[TlsKeyExchangeGroup]) -> anyhow::Result<()> {
@@ -2170,30 +2289,34 @@ fn validate_base64_32_byte_env(field_name: &str, env_name: &str) -> anyhow::Resu
   Ok(())
 }
 
-fn validate_admin_server_name(name: &str) -> anyhow::Result<()> {
+fn validate_tls_server_name(field_name: &str, name: &str) -> anyhow::Result<()> {
   if name.trim() != name || name.is_empty() {
-    bail!("admin.tls certificate server name must not be empty or padded");
+    bail!("{field_name} must not be empty or padded");
   }
   if name.bytes().any(|byte| byte.is_ascii_control()) {
-    bail!("admin.tls certificate server name {name} contains a control character");
+    bail!("{field_name} {name} contains a control character");
   }
   let name = name.strip_prefix("*.").unwrap_or(name);
   if name.is_empty() || name.contains('*') {
-    bail!("admin.tls certificate server name may only use a leftmost wildcard");
+    bail!("{field_name} may only use a leftmost wildcard");
   }
   if name
     .split('.')
     .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
   {
-    bail!("admin.tls certificate server name {name} is not a valid DNS pattern");
+    bail!("{field_name} {name} is not a valid DNS pattern");
   }
   if !name
     .bytes()
     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
   {
-    bail!("admin.tls certificate server name {name} contains invalid characters");
+    bail!("{field_name} {name} contains invalid characters");
   }
   Ok(())
+}
+
+fn validate_admin_server_name(name: &str) -> anyhow::Result<()> {
+  validate_tls_server_name("admin.tls certificate server name", name)
 }
 
 pub(crate) fn upstream_pool_server_id(index: usize, server: &UpstreamPoolServerConfig) -> String {
@@ -2400,6 +2523,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "tls.resumption" => allowed_keys::TLS_RESUMPTION_CONFIG_KEYS,
     "tls.remote_signer" => allowed_keys::TLS_REMOTE_SIGNER_CONFIG_KEYS,
     "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
+    "tls.certificates" => &[
+      "cert_chain",
+      "ocsp",
+      "private_key",
+      "remote_signer_key_id",
+      "server_names",
+    ][..],
+    "tls.certificates.ocsp" => tls::OCSP_CONFIG_KEYS,
     "tls.crlite" => crlite::CRLITE_CONFIG_KEYS,
     "tls.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "tls.client_auth" => allowed_keys::TLS_CLIENT_AUTH_CONFIG_KEYS,

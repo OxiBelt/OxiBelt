@@ -4,6 +4,7 @@ use serde::Serialize;
 pub struct TlsRuntimeSnapshot {
   pub downstream_cert_chain_configured: bool,
   pub downstream_private_key_configured: bool,
+  pub downstream_certificates: Vec<DownstreamTlsCertificateRuntimeSnapshot>,
   pub crlite_mode: String,
   pub crlite_filter_file_configured: bool,
   pub crlite: crate::tls::CrliteRuntimeStatus,
@@ -15,4 +16,14 @@ pub struct TlsRuntimeSnapshot {
   pub remote_signer_enabled: bool,
   pub remote_signer_token_file_configured: bool,
   pub admin_tls_configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownstreamTlsCertificateRuntimeSnapshot {
+  pub server_names: Vec<String>,
+  pub cert_chain_configured: bool,
+  pub private_key_configured: bool,
+  pub remote_signer_key_id_configured: bool,
+  pub ocsp_mode: String,
+  pub ocsp_response_file_configured: bool,
 }

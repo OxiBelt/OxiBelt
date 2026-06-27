@@ -336,11 +336,46 @@ fn load_downstream_certified_key(
   tls: &TlsConfig,
   provider: &rustls::crypto::CryptoProvider,
 ) -> anyhow::Result<CertifiedKey> {
-  let certs = load_certs(&tls.cert_chain)?;
+  load_downstream_certified_key_for_material(
+    tls,
+    &tls.cert_chain,
+    tls.private_key.as_ref(),
+    tls
+      .remote_signer
+      .enabled
+      .then_some(&tls.remote_signer.key_id),
+    provider,
+  )
+}
+
+pub(super) fn load_downstream_certificate_certified_key(
+  tls: &TlsConfig,
+  certificate: &crate::config::TlsCertificateConfig,
+  provider: &rustls::crypto::CryptoProvider,
+) -> anyhow::Result<CertifiedKey> {
+  load_downstream_certified_key_for_material(
+    tls,
+    &certificate.cert_chain,
+    certificate.private_key.as_ref(),
+    certificate.remote_signer_key_id.as_ref(),
+    provider,
+  )
+}
+
+fn load_downstream_certified_key_for_material(
+  tls: &TlsConfig,
+  cert_chain: &std::path::Path,
+  private_key: Option<&std::path::PathBuf>,
+  remote_signer_key_id: Option<&String>,
+  provider: &rustls::crypto::CryptoProvider,
+) -> anyhow::Result<CertifiedKey> {
+  let certs = load_certs(cert_chain)?;
   if tls.remote_signer.enabled {
+    let key_id = remote_signer_key_id
+      .ok_or_else(|| anyhow!("remote signer key id is required for downstream TLS certificate"))?;
     let signing_key = crate::remote_signer::RemoteSigningKey::connect(
       &tls.remote_signer,
-      &tls.remote_signer.key_id,
+      key_id,
       end_entity_cert(&certs)?,
     )?;
     let certified_key = CertifiedKey::new(certs, signing_key);
@@ -351,9 +386,7 @@ fn load_downstream_certified_key(
       Err(error) => Err(error).context("remote signer key does not match certificate"),
     }
   } else {
-    let private_key = tls
-      .private_key
-      .as_ref()
+    let private_key = private_key
       .ok_or_else(|| anyhow!("tls.private_key is required unless remote signing is enabled"))?;
     let key = load_private_key(private_key)?;
     CertifiedKey::from_der(certs, key, provider).context("failed to load local TLS private key")
@@ -439,7 +472,7 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
       if certificate
         .server_names
         .iter()
-        .any(|pattern| admin_sni_matches(pattern, server_name))
+        .any(|pattern| sni_matches(pattern, server_name))
       {
         return Some(certificate.certified_key.clone());
       }
@@ -452,7 +485,7 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
   }
 }
 
-fn admin_sni_matches(pattern: &str, server_name: &str) -> bool {
+pub(super) fn sni_matches(pattern: &str, server_name: &str) -> bool {
   if let Some(suffix) = pattern.strip_prefix("*.") {
     let Some(prefix_len) = server_name.len().checked_sub(suffix.len() + 1) else {
       return false;
@@ -494,12 +527,11 @@ fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'sta
   })
 }
 
-fn load_ocsp_response(tls: &TlsConfig) -> anyhow::Result<Option<Vec<u8>>> {
-  match tls.ocsp.mode {
+fn load_ocsp_response(ocsp: &crate::config::OcspConfig) -> anyhow::Result<Option<Vec<u8>>> {
+  match ocsp.mode {
     OcspMode::Disabled => Ok(None),
     OcspMode::StaticFile => {
-      let path = tls
-        .ocsp
+      let path = ocsp
         .response_file
         .as_ref()
         .ok_or_else(|| anyhow!("OCSP response file must be configured"))?;
@@ -590,19 +622,13 @@ fn tls_protocol_versions(
 
 #[cfg(test)]
 mod tests {
-  use super::admin_sni_matches;
+  use super::sni_matches;
 
   #[test]
-  fn admin_sni_matches_without_lowercase_allocation() {
-    assert!(admin_sni_matches(
-      "admin.example.test",
-      "Admin.Example.Test"
-    ));
-    assert!(admin_sni_matches("*.example.test", "Admin.Example.Test"));
-    assert!(!admin_sni_matches(
-      "*.example.test",
-      "deep.admin.example.test"
-    ));
-    assert!(!admin_sni_matches("*.example.test", "example.test"));
+  fn sni_matches_without_lowercase_allocation() {
+    assert!(sni_matches("admin.example.test", "Admin.Example.Test"));
+    assert!(sni_matches("*.example.test", "Admin.Example.Test"));
+    assert!(!sni_matches("*.example.test", "deep.admin.example.test"));
+    assert!(!sni_matches("*.example.test", "example.test"));
   }
 }

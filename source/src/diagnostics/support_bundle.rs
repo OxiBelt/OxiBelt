@@ -22,7 +22,7 @@ mod tests;
 mod tls;
 pub use process::ProcessSnapshot;
 use process::process_snapshot;
-pub use tls::TlsRuntimeSnapshot;
+pub use tls::{DownstreamTlsCertificateRuntimeSnapshot, TlsRuntimeSnapshot};
 
 const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 1;
 const WAF_RULE_LIMIT: usize = 50;
@@ -353,6 +353,30 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
         .source_paths
         .downstream_tls_private_key
         .is_some(),
+      downstream_certificates: snapshot
+        .config
+        .tls
+        .certificates
+        .iter()
+        .enumerate()
+        .map(|(index, certificate)| {
+          let paths = snapshot
+            .config
+            .source_paths
+            .downstream_tls_certificates
+            .get(index);
+          DownstreamTlsCertificateRuntimeSnapshot {
+            server_names: certificate.server_names.clone(),
+            cert_chain_configured: paths.is_some(),
+            private_key_configured: paths.and_then(|paths| paths.private_key.as_ref()).is_some(),
+            remote_signer_key_id_configured: certificate.remote_signer_key_id.is_some(),
+            ocsp_mode: format!("{:?}", certificate.ocsp.mode),
+            ocsp_response_file_configured: paths
+              .and_then(|paths| paths.ocsp_response_file.as_ref())
+              .is_some(),
+          }
+        })
+        .collect(),
       crlite_mode: snapshot.config.tls.crlite.mode.as_str().to_string(),
       crlite_filter_file_configured: snapshot
         .config

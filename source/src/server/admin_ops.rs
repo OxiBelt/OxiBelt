@@ -280,11 +280,34 @@ pub(super) async fn admin_tls_response(
           "config:ReadDownstreamTls",
         ));
       }
+      let downstream_certificates = snapshot
+        .config
+        .tls
+        .certificates
+        .iter()
+        .enumerate()
+        .map(|(index, certificate)| {
+          let paths = snapshot
+            .config
+            .source_paths
+            .downstream_tls_certificates
+            .get(index);
+          json!({
+            "server_names": certificate.server_names,
+            "cert_chain": paths.map(|paths| paths.cert_chain.clone()),
+            "private_key_configured": paths.and_then(|paths| paths.private_key.as_ref()).is_some(),
+            "remote_signer_key_id_configured": certificate.remote_signer_key_id.is_some(),
+            "ocsp_mode": format!("{:?}", certificate.ocsp.mode),
+            "ocsp_response_file": paths.and_then(|paths| paths.ocsp_response_file.clone()),
+          })
+        })
+        .collect::<Vec<_>>();
       Some(admin::json_response(
         StatusCode::OK,
         &json!({
           "cert_chain": snapshot.config.source_paths.downstream_tls_cert_chain,
           "private_key_configured": snapshot.config.source_paths.downstream_tls_private_key.is_some(),
+          "certificates": downstream_certificates,
           "remote_signer_enabled": snapshot.config.tls.remote_signer.enabled,
           "crlite_mode": snapshot.config.tls.crlite.mode.as_str(),
           "crlite": snapshot.crlite.status(),

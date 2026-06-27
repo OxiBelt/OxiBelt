@@ -10,8 +10,8 @@ use std::time::Duration;
 use base64::Engine;
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
-  ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig,
+  ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsCertificateConfig,
+  TlsClientAuthConfig, TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig,
   TlsServerResumptionMode, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::remote_signer::{
@@ -20,6 +20,7 @@ use oxibelt::remote_signer::{
 };
 use oxibelt::tls;
 use rustls::NamedGroup;
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -104,6 +105,78 @@ fn server_config_sets_alpn_from_listener_flags() {
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
   assert_eq!(server_config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downstream_sni_resolver_selects_exact_certificate_for_tcp() {
+  let temp_dir = common::TempDir::new("downstream-sni-exact");
+  let (ca_cert_path, ca_key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-sni-ca");
+  let (default_cert, default_key) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "default.example.me",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let (iam_cert, iam_key) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "iam.example.me",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let mut tls_config =
+    downstream_tls_config(default_cert, default_key, TlsClientAuthConfig::default());
+  tls_config.resumption.mode = TlsServerResumptionMode::Off;
+  tls_config.session_tickets = false;
+  tls_config.certificates.push(TlsCertificateConfig {
+    server_names: vec!["iam.example.me".to_string()],
+    cert_chain: iam_cert.clone(),
+    private_key: Some(iam_key),
+    remote_signer_key_id: None,
+    ocsp: OcspConfig::default(),
+  });
+
+  let selected = tcp_selected_peer_certificate(tls_config, &ca_cert_path, "iam.example.me").await;
+
+  assert_eq!(selected, first_certificate_der(&iam_cert));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downstream_sni_resolver_uses_default_for_unknown_sni() {
+  let temp_dir = common::TempDir::new("downstream-sni-default");
+  let (ca_cert_path, ca_key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-sni-default-ca");
+  let (default_cert, default_key) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "unknown.example.me",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let (iam_cert, iam_key) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "iam.example.me",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let mut tls_config = downstream_tls_config(
+    default_cert.clone(),
+    default_key,
+    TlsClientAuthConfig::default(),
+  );
+  tls_config.resumption.mode = TlsServerResumptionMode::Off;
+  tls_config.session_tickets = false;
+  tls_config.certificates.push(TlsCertificateConfig {
+    server_names: vec!["iam.example.me".to_string()],
+    cert_chain: iam_cert,
+    private_key: Some(iam_key),
+    remote_signer_key_id: None,
+    ocsp: OcspConfig::default(),
+  });
+
+  let selected =
+    tcp_selected_peer_certificate(tls_config, &ca_cert_path, "unknown.example.me").await;
+
+  assert_eq!(selected, first_certificate_der(&default_cert));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -554,9 +627,13 @@ fn downstream_tls_config(
   client_auth: TlsClientAuthConfig,
 ) -> TlsConfig {
   TlsConfig {
+    server_names: Vec::new(),
     cert_chain: cert_path,
     private_key: Some(key_path),
     remote_signer: TlsRemoteSignerConfig::default(),
+    require_sni: false,
+    reject_unknown_sni: false,
+    certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
     key_exchange_groups: default_tls_key_exchange_groups(),
@@ -569,6 +646,68 @@ fn downstream_tls_config(
   }
 }
 
+async fn tcp_selected_peer_certificate(
+  tls_config: TlsConfig,
+  ca_cert_path: &Path,
+  server_name: &str,
+) -> Vec<u8> {
+  let listeners = ListenerConfig {
+    https_bind: "127.0.0.1:8443".parse().unwrap(),
+    http_bind: None,
+    http_mode: Default::default(),
+    http1: true,
+    http2: true,
+    http3: false,
+    proxy_protocol: ProxyProtocolConfig::default(),
+  };
+  let server_config =
+    tls::build_server_config(&tls_config, &listeners).expect("server config should build");
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("server listener should bind");
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.expect("server should accept");
+    TlsAcceptor::from(server_config)
+      .accept(stream)
+      .await
+      .expect("server TLS handshake should complete");
+  });
+
+  let client_config =
+    tls::build_upstream_client_config(&[ca_cert_path.to_path_buf()], &UpstreamEchConfig::default())
+      .expect("client config should build");
+  let stream = TcpStream::connect(addr)
+    .await
+    .expect("client should connect to server");
+  let tls_stream = TlsConnector::from(Arc::new(client_config))
+    .connect(server_name.to_owned().try_into().unwrap(), stream)
+    .await
+    .expect("client TLS handshake should complete");
+  let cert = tls_stream
+    .get_ref()
+    .1
+    .peer_certificates()
+    .expect("server should send certificates")
+    .first()
+    .expect("server should send a leaf certificate")
+    .as_ref()
+    .to_vec();
+  drop(tls_stream);
+  server.await.expect("server task should finish");
+  cert
+}
+
+fn first_certificate_der(path: &Path) -> Vec<u8> {
+  let bytes = std::fs::read(path).expect("certificate should read");
+  CertificateDer::pem_slice_iter(&bytes)
+    .next()
+    .expect("certificate PEM should contain a certificate")
+    .expect("certificate PEM should parse")
+    .as_ref()
+    .to_vec()
+}
+
 fn remote_tls_config(
   cert_path: PathBuf,
   socket_path: PathBuf,
@@ -577,6 +716,7 @@ fn remote_tls_config(
   allow_tls12_unstructured_signing: bool,
 ) -> TlsConfig {
   TlsConfig {
+    server_names: Vec::new(),
     cert_chain: cert_path,
     private_key: None,
     remote_signer: TlsRemoteSignerConfig {
@@ -593,6 +733,9 @@ fn remote_tls_config(
       pool_max_idle_connections: 64,
       allow_tls12_unstructured_signing,
     },
+    require_sni: false,
+    reject_unknown_sni: false,
+    certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
     key_exchange_groups: default_tls_key_exchange_groups(),

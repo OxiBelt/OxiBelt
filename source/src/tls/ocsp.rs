@@ -47,18 +47,18 @@ pub(crate) struct OcspStapleRuntime {
 }
 
 struct OcspStapleRuntimeInner {
-  live: Option<Arc<LiveOcspResolver>>,
+  live: Option<Arc<dyn ResolvesServerCert>>,
   status: Arc<Mutex<OcspStatusState>>,
-  worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+  worker: Mutex<Vec<tokio::task::JoinHandle<()>>>,
   server_identity: Option<String>,
 }
 
 impl Drop for OcspStapleRuntimeInner {
   fn drop(&mut self) {
-    if let Ok(mut worker) = self.worker.lock()
-      && let Some(worker) = worker.take()
-    {
-      worker.abort();
+    if let Ok(mut workers) = self.worker.lock() {
+      for worker in workers.drain(..) {
+        worker.abort();
+      }
     }
   }
 }
@@ -69,12 +69,21 @@ impl OcspStapleRuntime {
     control_http: &ControlHttpClient,
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
+    if tls.ocsp.mode == OcspMode::LiveFetch
+      || tls
+        .certificates
+        .iter()
+        .any(|certificate| certificate.ocsp.mode == OcspMode::LiveFetch)
+    {
+      return Self::live_fetch(tls, control_http.clone(), metrics).await;
+    }
+
     match tls.ocsp.mode {
       OcspMode::Disabled => Ok(Self::inactive(OcspStatusState::disabled())),
       OcspMode::StaticFile => Ok(Self::inactive(OcspStatusState::static_file(
         tls.ocsp.response_file.is_some(),
       ))),
-      OcspMode::LiveFetch => Self::live_fetch(tls, control_http.clone(), metrics).await,
+      OcspMode::LiveFetch => unreachable!("live fetch returned above"),
     }
   }
 
@@ -83,7 +92,7 @@ impl OcspStapleRuntime {
       inner: Arc::new(OcspStapleRuntimeInner {
         live: None,
         status: Arc::new(Mutex::new(status)),
-        worker: Mutex::new(None),
+        worker: Mutex::new(Vec::new()),
         server_identity: None,
       }),
     }
@@ -95,48 +104,74 @@ impl OcspStapleRuntime {
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
     let provider = Arc::new(super::downstream_crypto_provider(tls));
-    let mut base_key = super::load_downstream_certified_key(tls, &provider)
+    let mut identity_certs = Vec::new();
+    let mut workers = Vec::new();
+
+    let base_key = super::load_downstream_certified_key(tls, &provider)
       .context("failed to create rustls certified key for OCSP live fetch")?;
-    base_key.ocsp = None;
-    let server_identity = super::certificate_identity(&base_key.cert);
-    let context = Arc::new(LiveOcspContext::new(
-      tls,
+    identity_certs.extend(base_key.cert.iter().cloned());
+    let (default_resolver, status) = build_certificate_ocsp_resolver(
+      "tls",
+      &tls.ocsp,
       base_key,
-      control_http,
+      control_http.clone(),
       metrics.clone(),
-    )?);
-    let status = Arc::new(Mutex::new(OcspStatusState::live_degraded(None)));
-    let live = Arc::new(LiveOcspResolver::new(
-      context.base_key.clone(),
-      status.clone(),
-      metrics,
-    ));
+      &mut workers,
+    )
+    .await?;
 
-    refresh_once(context.clone(), live.clone(), status.clone()).await;
+    let mut certificates = Vec::new();
+    for (index, certificate) in tls.certificates.iter().enumerate() {
+      let certified_key =
+        super::load_downstream_certificate_certified_key(tls, certificate, &provider)
+          .with_context(|| {
+            format!("failed to create rustls certified key for tls.certificates[{index}]")
+          })?;
+      identity_certs.extend(certified_key.cert.iter().cloned());
+      let (resolver, _status) = build_certificate_ocsp_resolver(
+        &format!("tls.certificates[{index}]"),
+        &certificate.ocsp,
+        certified_key,
+        control_http.clone(),
+        metrics.clone(),
+        &mut workers,
+      )
+      .await?;
+      certificates.push(DownstreamCertResolverEntry {
+        server_names: certificate
+          .server_names
+          .iter()
+          .map(|name| name.to_ascii_lowercase())
+          .collect(),
+        resolver,
+      });
+    }
 
-    let worker_live = live.clone();
-    let worker_status = status.clone();
-    let worker_context = context.clone();
-    let worker = tokio::spawn(async move {
-      refresh_worker(worker_context, worker_live, worker_status).await;
+    let server_identity = super::certificate_identity(&identity_certs);
+    let live = Arc::new(DownstreamCertResolver {
+      certificates,
+      default_server_names: tls
+        .server_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect(),
+      default: default_resolver,
+      require_sni: tls.require_sni,
+      reject_unknown_sni: tls.reject_unknown_sni,
     });
 
     Ok(Self {
       inner: Arc::new(OcspStapleRuntimeInner {
         live: Some(live),
         status,
-        worker: Mutex::new(Some(worker)),
+        worker: Mutex::new(workers),
         server_identity: Some(server_identity),
       }),
     })
   }
 
   pub(crate) fn live_resolver(&self) -> Option<Arc<dyn rustls::server::ResolvesServerCert>> {
-    self
-      .inner
-      .live
-      .as_ref()
-      .map(|resolver| resolver.clone() as Arc<dyn rustls::server::ResolvesServerCert>)
+    self.inner.live.as_ref().map(Arc::clone)
   }
 
   pub(crate) fn server_identity(&self) -> Option<&str> {
@@ -146,17 +181,151 @@ impl OcspStapleRuntime {
   pub(crate) fn status(&self) -> OcspRuntimeStatus {
     self
       .inner
-      .live
-      .as_ref()
-      .inspect(|resolver| resolver.drop_stale_if_needed())
-      .map(|_| ())
-      .unwrap_or(());
-    self
-      .inner
       .status
       .lock()
       .map(|status| status.to_public())
       .unwrap_or_else(|_| OcspStatusState::live_degraded(Some("status_lock")).to_public())
+  }
+}
+
+async fn build_certificate_ocsp_resolver(
+  field_name: &str,
+  ocsp: &crate::config::OcspConfig,
+  mut base_key: CertifiedKey,
+  control_http: ControlHttpClient,
+  metrics: Arc<Metrics>,
+  workers: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> anyhow::Result<(Arc<dyn ResolvesServerCert>, Arc<Mutex<OcspStatusState>>)> {
+  match ocsp.mode {
+    OcspMode::Disabled => {
+      base_key.ocsp = None;
+      Ok((
+        Arc::new(rustls::sign::SingleCertAndKey::from(base_key)),
+        Arc::new(Mutex::new(OcspStatusState::disabled())),
+      ))
+    }
+    OcspMode::StaticFile => {
+      base_key.ocsp = super::load_ocsp_response(ocsp)?;
+      Ok((
+        Arc::new(rustls::sign::SingleCertAndKey::from(base_key)),
+        Arc::new(Mutex::new(OcspStatusState::static_file(
+          ocsp.response_file.is_some(),
+        ))),
+      ))
+    }
+    OcspMode::LiveFetch => {
+      base_key.ocsp = None;
+      let context = Arc::new(LiveOcspContext::new(
+        field_name,
+        ocsp,
+        base_key,
+        control_http,
+        metrics.clone(),
+      )?);
+      let status = Arc::new(Mutex::new(OcspStatusState::live_degraded(None)));
+      let live = Arc::new(LiveOcspResolver::new(
+        context.base_key.clone(),
+        status.clone(),
+        metrics,
+      ));
+
+      refresh_once(context.clone(), live.clone(), status.clone()).await;
+
+      let worker_live = live.clone();
+      let worker_status = status.clone();
+      let worker_context = context.clone();
+      workers.push(tokio::spawn(async move {
+        refresh_worker(worker_context, worker_live, worker_status).await;
+      }));
+
+      Ok((live, status))
+    }
+  }
+}
+
+#[derive(Clone)]
+struct DownstreamCertResolverEntry {
+  server_names: Vec<String>,
+  resolver: Arc<dyn ResolvesServerCert>,
+}
+
+struct DownstreamCertResolver {
+  certificates: Vec<DownstreamCertResolverEntry>,
+  default_server_names: Vec<String>,
+  default: Arc<dyn ResolvesServerCert>,
+  require_sni: bool,
+  reject_unknown_sni: bool,
+}
+
+impl std::fmt::Debug for DownstreamCertResolver {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("DownstreamCertResolver")
+      .field("certificate_count", &self.certificates.len())
+      .field("default_server_names", &self.default_server_names)
+      .field("require_sni", &self.require_sni)
+      .field("reject_unknown_sni", &self.reject_unknown_sni)
+      .finish()
+  }
+}
+
+impl DownstreamCertResolver {
+  fn named_resolver_for(&self, server_name: &str) -> Option<Arc<dyn ResolvesServerCert>> {
+    if self
+      .default_server_names
+      .iter()
+      .any(|pattern| !pattern.starts_with("*.") && pattern.eq_ignore_ascii_case(server_name))
+    {
+      return Some(self.default.clone());
+    }
+    for certificate in &self.certificates {
+      if certificate
+        .server_names
+        .iter()
+        .any(|pattern| !pattern.starts_with("*.") && pattern.eq_ignore_ascii_case(server_name))
+      {
+        return Some(certificate.resolver.clone());
+      }
+    }
+    if self
+      .default_server_names
+      .iter()
+      .any(|pattern| pattern.starts_with("*.") && super::sni_matches(pattern, server_name))
+    {
+      return Some(self.default.clone());
+    }
+    for certificate in &self.certificates {
+      if certificate
+        .server_names
+        .iter()
+        .any(|pattern| pattern.starts_with("*.") && super::sni_matches(pattern, server_name))
+      {
+        return Some(certificate.resolver.clone());
+      }
+    }
+    None
+  }
+}
+
+impl ResolvesServerCert for DownstreamCertResolver {
+  fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+    let selected = match client_hello.server_name() {
+      Some(server_name) => self.named_resolver_for(server_name).or_else(|| {
+        if self.reject_unknown_sni {
+          None
+        } else {
+          Some(self.default.clone())
+        }
+      }),
+      None => {
+        if self.require_sni {
+          None
+        } else {
+          Some(self.default.clone())
+        }
+      }
+    }?;
+    selected.resolve(client_hello)
   }
 }
 
@@ -177,13 +346,42 @@ pub(super) fn downstream_cert_resolver(
     ));
   }
 
+  let mut identity_certs = Vec::new();
   let mut certified_key = super::load_downstream_certified_key(tls, provider)
     .context("failed to create rustls certified key")?;
-  let server_identity = super::certificate_identity(&certified_key.cert);
-  certified_key.ocsp = super::load_ocsp_response(tls)?;
+  identity_certs.extend(certified_key.cert.iter().cloned());
+  certified_key.ocsp = super::load_ocsp_response(&tls.ocsp)?;
+  let default = Arc::new(rustls::sign::SingleCertAndKey::from(certified_key));
+  let mut certificates = Vec::new();
+  for (index, certificate) in tls.certificates.iter().enumerate() {
+    let mut certified_key =
+      super::load_downstream_certificate_certified_key(tls, certificate, provider)
+        .with_context(|| format!("failed to create tls.certificates[{index}] certified key"))?;
+    identity_certs.extend(certified_key.cert.iter().cloned());
+    certified_key.ocsp = super::load_ocsp_response(&certificate.ocsp)?;
+    certificates.push(DownstreamCertResolverEntry {
+      server_names: certificate
+        .server_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect(),
+      resolver: Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)),
+    });
+  }
+  let server_identity = super::certificate_identity(&identity_certs);
   Ok((
     server_identity,
-    Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)),
+    Arc::new(DownstreamCertResolver {
+      certificates,
+      default_server_names: tls
+        .server_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect(),
+      default,
+      require_sni: tls.require_sni,
+      reject_unknown_sni: tls.reject_unknown_sni,
+    }),
   ))
 }
 
@@ -274,7 +472,8 @@ struct LiveOcspContext {
 
 impl LiveOcspContext {
   fn new(
-    tls: &TlsConfig,
+    field_name: &str,
+    ocsp: &crate::config::OcspConfig,
     base_key: CertifiedKey,
     control_http: ControlHttpClient,
     metrics: Arc<Metrics>,
@@ -282,33 +481,33 @@ impl LiveOcspContext {
     let leaf_der = base_key
       .cert
       .first()
-      .ok_or_else(|| anyhow!("tls.cert_chain must include a leaf certificate"))?
+      .ok_or_else(|| anyhow!("{field_name}.cert_chain must include a leaf certificate"))?
       .as_ref()
       .to_vec();
     let issuer_der = base_key
       .cert
       .get(1)
       .ok_or_else(|| {
-        anyhow!("tls.cert_chain must include an issuer certificate for OCSP live fetch")
+        anyhow!("{field_name}.cert_chain must include an issuer certificate for OCSP live fetch")
       })?
       .as_ref()
       .to_vec();
-    let ocsp = build_ocsp_request_context(
+    let request_context = build_ocsp_request_context(
       &leaf_der,
       &issuer_der,
-      tls.ocsp.responder_url.as_deref(),
-      Duration::from_secs(tls.ocsp.clock_skew_seconds),
+      ocsp.responder_url.as_deref(),
+      Duration::from_secs(ocsp.clock_skew_seconds),
     )?;
     Ok(Self {
-      responder_url: ocsp.responder_url,
-      request_der: ocsp.request_der,
-      verification: ocsp.verification,
+      responder_url: request_context.responder_url,
+      request_der: request_context.request_der,
+      verification: request_context.verification,
       base_key: Arc::new(base_key),
       control_http,
       metrics,
-      timeout: Duration::from_millis(tls.ocsp.request_timeout_ms),
-      max_response_bytes: tls.ocsp.max_response_bytes,
-      refresh_jitter_pct: tls.ocsp.refresh_jitter_pct,
+      timeout: Duration::from_millis(ocsp.request_timeout_ms),
+      max_response_bytes: ocsp.max_response_bytes,
+      refresh_jitter_pct: ocsp.refresh_jitter_pct,
     })
   }
 }

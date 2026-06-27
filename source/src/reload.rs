@@ -418,7 +418,7 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     .transpose()?;
 
   let old_tls = config.tls.clone();
-  let mut remote_signer = old_tls.remote_signer;
+  let mut remote_signer = old_tls.remote_signer.clone();
   remote_signer.token_file = remote_signer_token_file;
   remote_signer.token_file_reload_path = config
     .source_paths
@@ -430,12 +430,55 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     .map(|_| cert_dir.clone());
   let mut old_quic = config.quic.clone();
   old_quic.host_key_file = quic_host_key_file;
+  if old_tls.certificates.len() != config.source_paths.downstream_tls_certificates.len() {
+    anyhow::bail!("configured tls.certificates path metadata is incomplete");
+  }
+  let certificates = old_tls
+    .certificates
+    .into_iter()
+    .zip(config.source_paths.downstream_tls_certificates.iter())
+    .enumerate()
+    .map(|(index, (mut certificate, paths))| {
+      certificate.cert_chain = canonicalize_under_base(
+        &format!("tls.certificates[{index}].cert_chain"),
+        cert_dir,
+        &paths.cert_chain,
+      )?;
+      certificate.private_key = paths
+        .private_key
+        .as_ref()
+        .map(|path| {
+          canonicalize_under_base(
+            &format!("tls.certificates[{index}].private_key"),
+            cert_dir,
+            path,
+          )
+        })
+        .transpose()?;
+      certificate.ocsp.response_file = paths
+        .ocsp_response_file
+        .as_ref()
+        .map(|path| {
+          canonicalize_under_base(
+            &format!("tls.certificates[{index}].ocsp.response_file"),
+            cert_dir,
+            path,
+          )
+        })
+        .transpose()?;
+      Ok::<_, anyhow::Error>(certificate)
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
   config.tls = TlsConfig {
+    server_names: old_tls.server_names,
     cert_chain: canonicalize_under_base("tls.cert_chain", cert_dir, cert_chain)?,
     private_key: private_key
       .map(|path| canonicalize_under_base("tls.private_key", cert_dir, path))
       .transpose()?,
     remote_signer,
+    require_sni: old_tls.require_sni,
+    reject_unknown_sni: old_tls.reject_unknown_sni,
+    certificates,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,
     key_exchange_groups: old_tls.key_exchange_groups,

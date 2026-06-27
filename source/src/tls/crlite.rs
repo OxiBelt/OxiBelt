@@ -40,8 +40,8 @@ pub(super) fn check_crlite(tls: &TlsConfig) -> anyhow::Result<CrliteCheckOutcome
     .as_deref()
     .ok_or_else(|| anyhow!("crlite_missing_filter_file"))?;
   let (filter, stale) = load_filter(&tls.crlite, filter_path)?;
-  let material = crlite_query_material(tls)?;
-  check_crlite_filter(&tls.crlite, &material, &filter, stale)
+  let materials = crlite_query_materials(tls)?;
+  check_crlite_filter_for_materials(&tls.crlite, &materials, &filter, stale)
 }
 
 pub(super) fn check_crlite_filter_bytes(
@@ -49,8 +49,8 @@ pub(super) fn check_crlite_filter_bytes(
   bytes: &[u8],
   stale: bool,
 ) -> anyhow::Result<CrliteCheckOutcome> {
-  let material = crlite_query_material(tls)?;
-  check_crlite_filter_bytes_for_material(&tls.crlite, &material, bytes, stale)
+  let materials = crlite_query_materials(tls)?;
+  check_crlite_filter_bytes_for_materials(&tls.crlite, &materials, bytes, stale)
 }
 
 pub(super) fn check_crlite_config(
@@ -71,11 +71,46 @@ pub(super) fn check_crlite_filter_bytes_for_material(
   bytes: &[u8],
   stale: bool,
 ) -> anyhow::Result<CrliteCheckOutcome> {
+  check_crlite_filter_bytes_for_materials(config, std::slice::from_ref(material), bytes, stale)
+}
+
+fn check_crlite_filter_bytes_for_materials(
+  config: &CrliteConfig,
+  materials: &[CrliteQueryMaterial],
+  bytes: &[u8],
+  stale: bool,
+) -> anyhow::Result<CrliteCheckOutcome> {
   if bytes.len() > config.max_filter_bytes {
     bail!("crlite_filter_too_large");
   }
   let filter = CRLiteClubcard::from_bytes(bytes).map_err(|_| anyhow!("crlite_filter_parse"))?;
-  check_crlite_filter(config, material, &filter, stale)
+  check_crlite_filter_for_materials(config, materials, &filter, stale)
+}
+
+fn check_crlite_filter_for_materials(
+  config: &CrliteConfig,
+  materials: &[CrliteQueryMaterial],
+  filter: &CRLiteClubcard,
+  stale: bool,
+) -> anyhow::Result<CrliteCheckOutcome> {
+  let mut degraded = None;
+  for material in materials {
+    let outcome = check_crlite_filter(config, material, filter, stale)?;
+    if outcome.certificate_rejected {
+      return Ok(outcome);
+    }
+    if outcome.error_code.is_some() {
+      degraded = Some(outcome);
+    }
+  }
+  Ok(degraded.unwrap_or(CrliteCheckOutcome {
+    status: if stale { "degraded" } else { "fresh" },
+    result: None,
+    filter_loaded: true,
+    filter_stale: stale,
+    error_code: stale.then_some("crlite_filter_stale"),
+    certificate_rejected: false,
+  }))
 }
 
 fn check_crlite_filter(
@@ -174,8 +209,20 @@ fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn crlite_query_material(tls: &TlsConfig) -> anyhow::Result<CrliteQueryMaterial> {
-  let certs = super::load_certs(&tls.cert_chain).context("crlite_cert_chain_read")?;
+fn crlite_query_materials(tls: &TlsConfig) -> anyhow::Result<Vec<CrliteQueryMaterial>> {
+  let mut materials = vec![crlite_query_material_from_cert_chain(&tls.cert_chain)?];
+  for certificate in &tls.certificates {
+    materials.push(crlite_query_material_from_cert_chain(
+      &certificate.cert_chain,
+    )?);
+  }
+  Ok(materials)
+}
+
+fn crlite_query_material_from_cert_chain(
+  cert_chain: &std::path::Path,
+) -> anyhow::Result<CrliteQueryMaterial> {
+  let certs = super::load_certs(cert_chain).context("crlite_cert_chain_read")?;
   let leaf_der = certs
     .first()
     .ok_or_else(|| anyhow!("crlite_missing_leaf_certificate"))?
@@ -551,9 +598,13 @@ mod tests {
 
   fn test_tls_config(filter_file: std::path::PathBuf) -> TlsConfig {
     TlsConfig {
+      server_names: Vec::new(),
       cert_chain: std::path::PathBuf::from("cert.pem"),
       private_key: Some(std::path::PathBuf::from("key.pem")),
       remote_signer: crate::config::TlsRemoteSignerConfig::default(),
+      require_sni: false,
+      reject_unknown_sni: false,
+      certificates: Vec::new(),
       min_version: crate::config::TlsVersion::Tls13,
       max_version: crate::config::TlsVersion::Tls13,
       key_exchange_groups: Vec::new(),

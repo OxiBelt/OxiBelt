@@ -38,6 +38,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
 
 pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "cert_chain",
+  "certificates",
   "client_auth",
   "crlite",
   "key_exchange_groups",
@@ -45,8 +46,11 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "min_version",
   "ocsp",
   "private_key",
+  "reject_unknown_sni",
   "remote_signer",
+  "require_sni",
   "resumption",
+  "server_names",
   "session_ticket_rotation_seconds",
   "session_tickets",
 ];

@@ -500,9 +500,13 @@ mod tests {
 
   fn test_tls(cache_dir: PathBuf) -> TlsConfig {
     let mut tls = TlsConfig {
+      server_names: Vec::new(),
       cert_chain: PathBuf::from("cert.pem"),
       private_key: Some(PathBuf::from("key.pem")),
       remote_signer: crate::config::TlsRemoteSignerConfig::default(),
+      require_sni: false,
+      reject_unknown_sni: false,
+      certificates: Vec::new(),
       min_version: crate::config::TlsVersion::Tls13,
       max_version: crate::config::TlsVersion::Tls13,
       key_exchange_groups: Vec::new(),

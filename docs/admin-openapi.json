@@ -711,6 +711,49 @@
                     "private_key_configured": {
                       "type": "boolean"
                     },
+                    "certificates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "server_names",
+                          "cert_chain",
+                          "private_key_configured",
+                          "remote_signer_key_id_configured",
+                          "ocsp_mode",
+                          "ocsp_response_file"
+                        ],
+                        "properties": {
+                          "server_names": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "cert_chain": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "private_key_configured": {
+                            "type": "boolean"
+                          },
+                          "remote_signer_key_id_configured": {
+                            "type": "boolean"
+                          },
+                          "ocsp_mode": {
+                            "type": "string"
+                          },
+                          "ocsp_response_file": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    },
                     "remote_signer_enabled": {
                       "type": "boolean"
                     },

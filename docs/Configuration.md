@@ -90,6 +90,7 @@ include = ["conf.d/*.toml"]
 [sni_forward]
 [[sni_forward.rules]]
 [tls]
+[[tls.certificates]]
 [tls.client_auth]
 [tls.ocsp]
 [proxy]
@@ -350,6 +351,9 @@ At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
+server_names = []
+require_sni = false
+reject_unknown_sni = false
 min_version = "tls1.3"
 max_version = "tls1.3"
 key_exchange_groups = ["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]
@@ -361,6 +365,19 @@ mode = "stateful" # off | stateful | stateless
 session_cache_size = 4096
 tls13_ticket_count = 2
 rotation_seconds = 86400
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "iam-fullchain.pem"
+private_key = "iam-privkey.pem"
+
+[[tls.certificates]]
+server_names = ["admin.example.me"]
+cert_chain = "admin-fullchain.pem"
+private_key = "admin-privkey.pem"
+
+[tls.certificates.ocsp]
+mode = "disabled"
 
 [tls.remote_signer]
 enabled = false
@@ -433,7 +450,9 @@ mode = "disabled" # disabled | enforce | managed
 # request_timeout_ms = 3000
 ```
 
-`cert_chain` is always required. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `key_exchange_groups` controls the downstream TCP TLS, HTTP/3 TLS, and TURN TLS groups exposed through the aws-lc-rs provider. The default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. The remote signer uses a Unix domain socket and a base64 32-byte token. Prefer `token_file = "keysigner-token.b64"` for short rotation; it is resolved under the certificate directory, must contain exactly 32 random bytes in base64, is tracked as a downstream TLS reload input, and takes precedence over `token_env`. `token_env` remains supported for existing deployments. `token_reload_interval_ms` controls how often OxiBelt refreshes the file-backed token cache before requests; an `unauthorized` signer response forces one immediate token reload and retry. `socket_path` must be absolute, and `key_id` selects the signer-held key. `pool_max_idle_connections` caps reusable idle signer sockets per remote signing key and defaults to `64`; set it to `0` to open a fresh Unix socket for each signing request. Idle pooled sockets older than `sign_timeout_ms` are discarded before reuse. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
+`cert_chain` is always required and is the default downstream certificate. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `server_names` can name SNI values owned by the default certificate. Additional `[[tls.certificates]]` entries select certificate material by SNI before HTTP routing; exact names match before leftmost wildcards. Missing or unknown SNI uses the default certificate unless `require_sni = true` or `reject_unknown_sni = true`. In local-key mode each extra certificate requires `private_key`; in remote-signer mode each extra certificate requires `remote_signer_key_id` and uses the global signer socket/token settings. Multi-certificate downstream TLS currently requires `tls.resumption.mode = "off"` and `quic.zero_rtt = "off"`.
+
+`key_exchange_groups` controls the downstream TCP TLS, HTTP/3 TLS, and TURN TLS groups exposed through the aws-lc-rs provider. The default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. The remote signer uses a Unix domain socket and a base64 32-byte token. Prefer `token_file = "keysigner-token.b64"` for short rotation; it is resolved under the certificate directory, must contain exactly 32 random bytes in base64, is tracked as a downstream TLS reload input, and takes precedence over `token_env`. `token_env` remains supported for existing deployments. `token_reload_interval_ms` controls how often OxiBelt refreshes the file-backed token cache before requests; an `unauthorized` signer response forces one immediate token reload and retry. `socket_path` must be absolute, and `key_id` selects the signer-held default key. `pool_max_idle_connections` caps reusable idle signer sockets per remote signing key and defaults to `64`; set it to `0` to open a fresh Unix socket for each signing request. Idle pooled sockets older than `sign_timeout_ms` are discarded before reuse. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
 
 Run the sidecar as a separate UID that can read private key files. OxiBelt should be able to read certificate chains and connect to the socket, but should not be able to read private keys. The sidecar command is:
 

@@ -7326,6 +7326,182 @@ upstream = "app"
 }
 
 #[test]
+fn downstream_tls_sni_certificates_validate_and_reject_duplicates() {
+  let temp_dir = common::TempDir::new("downstream-sni-certs");
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(temp_dir.path(), "default.example.me");
+  let (iam_cert, iam_key) = common::create_self_signed_cert(temp_dir.path(), "iam.example.me");
+  let (admin_cert, admin_key) =
+    common::create_self_signed_cert(temp_dir.path(), "admin.example.me");
+
+  let raw = format!(
+    r#"
+{}
+
+[tls.resumption]
+mode = "off"
+
+[[tls.certificates]]
+server_names = ["iam.example.me", "*.iam.example.me"]
+cert_chain = "{}"
+private_key = "{}"
+
+[[tls.certificates]]
+server_names = ["admin.example.me"]
+cert_chain = "{}"
+private_key = "{}"
+"#,
+    common::minimal_config_toml(&default_cert, &default_key),
+    iam_cert.display(),
+    iam_key.display(),
+    admin_cert.display(),
+    admin_key.display(),
+  );
+
+  let config: Config = toml::from_str(&raw).expect("multi-certificate config should parse");
+  config
+    .validate()
+    .expect("multi-certificate config should validate with resumption off");
+
+  let duplicate = raw.replace("admin.example.me", "IAM.EXAMPLE.ME");
+  let config: Config = toml::from_str(&duplicate).expect("duplicate config should parse");
+  let error = config
+    .validate()
+    .expect_err("duplicate SNI names should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("duplicate tls certificate server_name"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn downstream_tls_sni_certificates_require_resumption_off() {
+  let temp_dir = common::TempDir::new("downstream-sni-resumption");
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(temp_dir.path(), "default-resumption.example.me");
+  let (iam_cert, iam_key) =
+    common::create_self_signed_cert(temp_dir.path(), "iam-resumption.example.me");
+
+  let raw = format!(
+    r#"
+{}
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "{}"
+private_key = "{}"
+"#,
+    common::minimal_config_toml(&default_cert, &default_key),
+    iam_cert.display(),
+    iam_key.display(),
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("multi-certificate resumption should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.resumption.mode must be \"off\""),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn config_load_resolves_downstream_sni_certificate_paths_under_cert_directory() {
+  let temp_dir = common::TempDir::new("relative-downstream-sni-cert");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+  std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(&cert_dir, "relative-default.example.me");
+  let (iam_cert, iam_key) = common::create_self_signed_cert(&cert_dir, "relative-iam.example.me");
+  let iam_ocsp = cert_dir.join("iam.ocsp.der");
+  std::fs::write(&iam_ocsp, b"ocsp").expect("failed to write OCSP response");
+  let config_path = config_dir.join("oxibelt.toml");
+  let default_cert_file = default_cert.file_name().unwrap().to_string_lossy();
+  let default_key_file = default_key.file_name().unwrap().to_string_lossy();
+  let iam_cert_file = iam_cert.file_name().unwrap().to_string_lossy();
+  let iam_key_file = iam_key.file_name().unwrap().to_string_lossy();
+
+  std::fs::write(
+    &config_path,
+    format!(
+      r#"
+{}
+
+[tls.resumption]
+mode = "off"
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "{iam_cert_file}"
+private_key = "{iam_key_file}"
+
+[tls.certificates.ocsp]
+mode = "static_file"
+response_file = "iam.ocsp.der"
+"#,
+      common::minimal_config_toml_with_paths(&default_cert_file, &default_key_file)
+    ),
+  )
+  .expect("failed to write config");
+
+  let config = Config::load(&config_path).expect("config should load");
+
+  assert_eq!(config.tls.certificates.len(), 1);
+  assert_eq!(config.tls.certificates[0].cert_chain, iam_cert);
+  assert_eq!(
+    config.tls.certificates[0].private_key.as_deref(),
+    Some(iam_key.as_path())
+  );
+  assert_eq!(
+    config.tls.certificates[0].ocsp.response_file.as_deref(),
+    Some(iam_ocsp.canonicalize().unwrap().as_path())
+  );
+  let reload_files = config.source_paths.downstream_tls_reload_files();
+  assert!(reload_files.contains(&iam_cert));
+  assert!(reload_files.contains(&iam_key));
+  assert!(reload_files.contains(&iam_ocsp));
+  assert_eq!(
+    config.source_paths.downstream_tls_certificates[0].cert_chain,
+    iam_cert
+  );
+}
+
+#[test]
+fn config_load_rejects_unknown_downstream_sni_certificate_fields() {
+  let temp_dir = common::TempDir::new("strict-downstream-sni-cert");
+  let config_path = write_loadable_config(&temp_dir, "strict-downstream-sni-cert", |raw| {
+    format!(
+      r#"{raw}
+
+[tls.resumption]
+mode = "off"
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "cert-0.pem"
+private_key = "cert-0.key"
+unexpected = true
+"#
+    )
+  });
+
+  let error = Config::load(&config_path).expect_err("unknown certificate field should fail");
+
+  assert!(
+    error.to_string().contains("tls.certificates.unexpected"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
 fn config_load_resolves_upstream_pool_health_check_tls_paths_against_cert_directory() {
   let temp_dir = common::TempDir::new("relative-health-check-tls");
   let config_dir = temp_dir.path().join("config");

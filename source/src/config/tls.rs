@@ -27,9 +27,13 @@ pub(super) const OCSP_CONFIG_KEYS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TlsConfig {
+  pub server_names: Vec<String>,
   pub cert_chain: PathBuf,
   pub private_key: Option<PathBuf>,
   pub remote_signer: TlsRemoteSignerConfig,
+  pub require_sni: bool,
+  pub reject_unknown_sni: bool,
+  pub certificates: Vec<TlsCertificateConfig>,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
   pub key_exchange_groups: Vec<TlsKeyExchangeGroup>,
@@ -48,11 +52,19 @@ impl<'de> Deserialize<'de> for TlsConfig {
   {
     #[derive(Deserialize)]
     struct RawTlsConfig {
+      #[serde(default)]
+      server_names: Vec<String>,
       cert_chain: PathBuf,
       #[serde(default)]
       private_key: Option<PathBuf>,
       #[serde(default)]
       remote_signer: TlsRemoteSignerConfig,
+      #[serde(default)]
+      require_sni: bool,
+      #[serde(default)]
+      reject_unknown_sni: bool,
+      #[serde(default)]
+      certificates: Vec<TlsCertificateConfig>,
       #[serde(default = "default_tls_min_version")]
       min_version: TlsVersion,
       #[serde(default = "default_tls_max_version")]
@@ -83,9 +95,13 @@ impl<'de> Deserialize<'de> for TlsConfig {
       )
       .map_err(serde::de::Error::custom)?;
     Ok(Self {
+      server_names: raw.server_names,
       cert_chain: raw.cert_chain,
       private_key: raw.private_key,
       remote_signer: raw.remote_signer,
+      require_sni: raw.require_sni,
+      reject_unknown_sni: raw.reject_unknown_sni,
+      certificates: raw.certificates,
       min_version: raw.min_version,
       max_version: raw.max_version,
       key_exchange_groups: raw.key_exchange_groups,
@@ -97,6 +113,19 @@ impl<'de> Deserialize<'de> for TlsConfig {
       crlite: raw.crlite,
     })
   }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct TlsCertificateConfig {
+  #[serde(default)]
+  pub server_names: Vec<String>,
+  pub cert_chain: PathBuf,
+  #[serde(default)]
+  pub private_key: Option<PathBuf>,
+  #[serde(default)]
+  pub remote_signer_key_id: Option<String>,
+  #[serde(default)]
+  pub ocsp: OcspConfig,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -615,31 +644,31 @@ impl Default for OcspConfig {
 }
 
 impl OcspConfig {
-  pub(super) fn validate_fetch_settings(&self) -> anyhow::Result<()> {
+  pub(super) fn validate_fetch_settings_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
     if self.request_timeout_ms == 0 {
-      bail!("tls.ocsp.request_timeout_ms must be greater than 0");
+      bail!("{prefix}.request_timeout_ms must be greater than 0");
     }
     if self.max_response_bytes == 0 {
-      bail!("tls.ocsp.max_response_bytes must be greater than 0");
+      bail!("{prefix}.max_response_bytes must be greater than 0");
     }
     if self.refresh_jitter_pct > 100 {
-      bail!("tls.ocsp.refresh_jitter_pct must be between 0 and 100");
+      bail!("{prefix}.refresh_jitter_pct must be between 0 and 100");
     }
     let Some(raw_url) = self.responder_url.as_deref() else {
       return Ok(());
     };
-    let url = Url::parse(raw_url).context("invalid tls.ocsp.responder_url")?;
+    let url = Url::parse(raw_url).with_context(|| format!("invalid {prefix}.responder_url"))?;
     if !matches!(url.scheme(), "http" | "https") {
-      bail!("tls.ocsp.responder_url scheme must be http or https");
+      bail!("{prefix}.responder_url scheme must be http or https");
     }
     if url.host_str().is_none() {
-      bail!("tls.ocsp.responder_url must include a host");
+      bail!("{prefix}.responder_url must include a host");
     }
     if !url.username().is_empty() || url.password().is_some() {
-      bail!("tls.ocsp.responder_url must not include credentials");
+      bail!("{prefix}.responder_url must not include credentials");
     }
     if url.fragment().is_some() {
-      bail!("tls.ocsp.responder_url must not include a fragment");
+      bail!("{prefix}.responder_url must not include a fragment");
     }
     Ok(())
   }
