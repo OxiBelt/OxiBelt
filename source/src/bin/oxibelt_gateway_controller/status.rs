@@ -61,6 +61,7 @@ pub fn build_status_patches(
   let gateways = gateway_summaries(objects, &accepted_classes);
   let namespace_labels = gateway_policy::namespace_labels(objects);
   let diagnostics_by_object = diagnostics_by_object(diagnostics);
+  let status_addresses = controller_status_addresses(objects, args);
   let mut patches = Vec::new();
 
   for object in objects {
@@ -74,7 +75,7 @@ pub fn build_status_patches(
         patches.push(gateway_patch(
           object,
           gateways.get(&object.key()).expect("checked gateway key"),
-          args,
+          &status_addresses,
           &now,
         ));
       }
@@ -121,7 +122,7 @@ fn gateway_class_patch(object: &KubernetesObject, now: &str) -> StatusPatch {
 fn gateway_patch(
   object: &KubernetesObject,
   gateway: &GatewaySummary,
-  args: &SharedArgs,
+  status_addresses: &[Value],
   now: &str,
 ) -> StatusPatch {
   let listener_conflicts = listener_conflicts(&gateway.listeners);
@@ -170,19 +171,8 @@ fn gateway_patch(
     ],
     "listeners": listeners,
   });
-  if !args.status_address.is_empty() {
-    status["addresses"] = Value::Array(
-      args
-        .status_address
-        .iter()
-        .map(|address| {
-          json!({
-            "type": if address.parse::<IpAddr>().is_ok() { "IPAddress" } else { "Hostname" },
-            "value": address,
-          })
-        })
-        .collect(),
-    );
+  if !status_addresses.is_empty() {
+    status["addresses"] = Value::Array(status_addresses.to_vec());
   }
   StatusPatch {
     api_prefix: "/apis/gateway.networking.k8s.io/v1",
@@ -191,6 +181,51 @@ fn gateway_patch(
     name: object.name().to_string(),
     status,
   }
+}
+
+fn controller_status_addresses(objects: &[KubernetesObject], args: &SharedArgs) -> Vec<Value> {
+  if !args.status_address.is_empty() {
+    return args
+      .status_address
+      .iter()
+      .map(|address| gateway_address(address))
+      .collect();
+  }
+  let Some((namespace, name)) = args.status_service.as_deref().and_then(parse_service_ref) else {
+    return Vec::new();
+  };
+  let Some(service) = objects.iter().find(|object| {
+    object.kind == "Service" && object.namespace() == namespace && object.name() == name
+  }) else {
+    return Vec::new();
+  };
+  service
+    .status
+    .get("loadBalancer")
+    .and_then(|load_balancer| load_balancer.get("ingress"))
+    .and_then(Value::as_array)
+    .into_iter()
+    .flatten()
+    .filter_map(|ingress| {
+      ingress
+        .get("ip")
+        .and_then(Value::as_str)
+        .or_else(|| ingress.get("hostname").and_then(Value::as_str))
+    })
+    .map(gateway_address)
+    .collect()
+}
+
+fn gateway_address(address: &str) -> Value {
+  json!({
+    "type": if address.parse::<IpAddr>().is_ok() { "IPAddress" } else { "Hostname" },
+    "value": address,
+  })
+}
+
+fn parse_service_ref(value: &str) -> Option<(&str, &str)> {
+  let (namespace, name) = value.split_once('/')?;
+  (!namespace.is_empty() && !name.is_empty() && !name.contains('/')).then_some((namespace, name))
 }
 
 fn listener_status(

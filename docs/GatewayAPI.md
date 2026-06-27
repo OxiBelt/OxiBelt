@@ -9,6 +9,8 @@ OxiBelt in Kubernetes without making OxiBelt itself own certificate issuance,
 listener binding, Admin/IPM policy, or base runtime configuration.
 The controller, Gateway API translations, and Helm chart are currently
 `experimental` in the canonical [feature lifecycle matrix](FeatureStatus.md).
+The data-plane chart and controller chart are documented together in
+[KubernetesDeployment.md](KubernetesDeployment.md).
 
 ## Supported Resources
 
@@ -27,8 +29,8 @@ Only `GatewayClass.spec.controllerName = "oxibelt.dev/gateway-controller"` is
 in scope by default. Use `--controller-name` to change that value.
 
 `HTTPRoute` and `GRPCRoute` rules generate deterministic `[[routes]]` and
-`[[upstream_pools]]` entries. Service backends become static cluster DNS
-origins such as:
+`[[upstream_pools]]` entries. Service backends use static cluster DNS origins
+by default, such as:
 
 ```toml
 origin = "http://app.default.svc.cluster.local:8080"
@@ -37,6 +39,17 @@ origin = "http://app.default.svc.cluster.local:8080"
 Weighted `backendRefs` become OxiBelt upstream-pool server weights. The
 controller reads `oxibelt.dev/upstream-scheme = "http" | "https"` from a
 `Service`; the default is `http`.
+
+Set `--backend-resolution=endpoint_slice_watch` to generate a Kubernetes
+EndpointSlice discovery block for route rules that reference exactly one
+nonzero Service backend. Weighted multi-backend rules remain static-DNS-only in
+this mode and are rejected with a blocking diagnostic rather than silently
+dropping weights. Generated discovery uses the in-pod service-account token
+file:
+
+```toml
+token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+```
 
 `TLSRoute` is supported only for Gateway listeners with
 `tls.mode = "Passthrough"`. It generates `[[sni_forward.rules]]` with
@@ -142,7 +155,9 @@ resources owned by its configured `--controller-name`.
 - `GatewayClass`: sets `Accepted=True` for matching classes.
 - `Gateway`: sets `Accepted`, `Programmed`, listener `SupportedKinds`,
   `ResolvedRefs`, and listener conflict conditions. `--status-address` values
-  are published as Gateway addresses.
+  are published as Gateway addresses. When explicit addresses are not set,
+  `--status-service namespace/name` publishes the referenced Service
+  `status.loadBalancer.ingress` IPs or hostnames as Gateway addresses.
 - `HTTPRoute`, `GRPCRoute`, and `TLSRoute`: replaces only this controller's entries in
   `status.parents`, preserving entries for other controllers from the observed
   object snapshot. Blocking translation diagnostics are reflected as

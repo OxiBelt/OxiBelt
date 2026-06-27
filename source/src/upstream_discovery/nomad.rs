@@ -226,6 +226,7 @@ mod tests {
       port_name: None,
       key_prefix: None,
       token_env: None,
+      token_file: None,
       filter: None,
       datacenter: None,
       file: None,

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "controllerName": { "type": "string", "minLength": 1 },
+    "managedConfigPath": { "type": "string", "minLength": 1 },
+    "watchNamespace": { "type": "string" },
+    "statusService": { "type": "string" },
+    "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
+    "dryRun": { "type": "boolean" },
+    "admin": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "tokenSecretName": { "type": "string", "minLength": 1 },
+        "tokenSecretKey": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

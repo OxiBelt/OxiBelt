@@ -128,9 +128,10 @@ async fn watch_endpoint_slices_once(
     .method(http::Method::GET)
     .uri(uri_from_url(&url)?)
     .header(http::header::ACCEPT, "application/json");
-  super::add_bearer_env_header(
+  super::add_bearer_token_header(
     &mut builder,
     discovery.token_env.as_deref(),
+    discovery.token_file.as_deref(),
     http::header::AUTHORIZATION,
   )?;
   let response = client
@@ -451,6 +452,7 @@ mod tests {
       port_name: Some("http".to_string()),
       key_prefix: None,
       token_env: None,
+      token_file: None,
       filter: None,
       datacenter: None,
       file: None,

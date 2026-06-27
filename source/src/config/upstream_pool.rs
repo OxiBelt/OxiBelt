@@ -69,6 +69,8 @@ pub struct UpstreamPoolDiscoveryConfig {
   #[serde(default)]
   pub token_env: Option<String>,
   #[serde(default)]
+  pub token_file: Option<PathBuf>,
+  #[serde(default)]
   pub filter: Option<String>,
   #[serde(default)]
   pub datacenter: Option<String>,
@@ -319,6 +321,16 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
           "upstream_pools.discovery.token_env",
           discovery.token_env.as_deref(),
         )?;
+        validate_optional_path_non_empty(
+          "upstream_pools.discovery.token_file",
+          discovery.token_file.as_ref(),
+        )?;
+        if discovery.token_env.is_some() && discovery.token_file.is_some() {
+          bail!(
+            "upstream pool {} kubernetes discovery requires only one of token_env or token_file",
+            pool.name
+          );
+        }
         if discovery.namespace.is_none() || discovery.service.is_none() {
           bail!(
             "upstream pool {} kubernetes discovery requires namespace and service",
@@ -443,6 +455,7 @@ fn validate_nomad_discovery_fields(
     || discovery.key_prefix.is_some()
     || discovery.datacenter.is_some()
     || discovery.file.is_some()
+    || discovery.token_file.is_some()
     || discovery.port.is_some()
   {
     bail!(
@@ -468,6 +481,19 @@ fn validate_non_kubernetes_discovery_fields(
       "upstream pool {} discovery watch is only supported for kubernetes providers",
       pool.name
     );
+  }
+  if discovery.token_file.is_some() {
+    bail!(
+      "upstream pool {} discovery token_file is only supported for kubernetes providers",
+      pool.name
+    );
+  }
+  Ok(())
+}
+
+fn validate_optional_path_non_empty(label: &str, value: Option<&PathBuf>) -> anyhow::Result<()> {
+  if value.is_some_and(|path| path.as_os_str().is_empty()) {
+    bail!("{label} must not be empty");
   }
   Ok(())
 }

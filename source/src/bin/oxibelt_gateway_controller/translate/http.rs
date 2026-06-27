@@ -2,10 +2,12 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use super::{
-  GeneratedExternalAuth, GeneratedPool, GeneratedRoute, GeneratedServer, NamedExactMatch,
-  ObjectKey, TranslationState, backend_port, backend_ref_is_service, filters::ParsedRouteFilters,
-  filters::parse_route_filters, intersect_hosts, sanitize_name, string_at, u32_at,
+  GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool, GeneratedRoute,
+  GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
+  backend_ref_is_service, filters::ParsedRouteFilters, filters::parse_route_filters,
+  intersect_hosts, sanitize_name, string_at, u32_at,
 };
+use crate::cli::BackendResolution;
 use crate::model::{KubernetesObject, object_ref as model_object_ref};
 
 impl TranslationState {
@@ -104,12 +106,42 @@ impl TranslationState {
       ));
       return None;
     };
-    let mut servers = Vec::new();
-    for (index, backend) in backend_refs.iter().enumerate() {
-      let weight = u32_at(backend, &["weight"]).unwrap_or(1);
-      if weight == 0 {
-        continue;
+    let nonzero_backends = backend_refs
+      .iter()
+      .enumerate()
+      .filter(|(_, backend)| u32_at(backend, &["weight"]).unwrap_or(1) > 0)
+      .collect::<Vec<_>>();
+    if nonzero_backends.is_empty() {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        "rule.backendRefs has no usable nonzero Service backend",
+      ));
+      return None;
+    }
+    if self.backend_resolution == BackendResolution::EndpointSliceWatch {
+      if nonzero_backends.len() != 1 {
+        self.diagnostics.push(crate::model::Diagnostic::error(
+          model_object_ref(route),
+          "EndpointSlice backend resolution requires exactly one nonzero Service backendRef per rule",
+        ));
+        return None;
       }
+      let (index, backend) = nonzero_backends[0];
+      let Some(discovery) = self.backend_discovery(route, from_kind, backend, index) else {
+        return None;
+      };
+      let name = sanitize_name(&format!("{route_name}-pool"));
+      return Some(GeneratedPool {
+        source: source.to_string(),
+        name,
+        servers: Vec::new(),
+        discoveries: vec![discovery],
+      });
+    }
+
+    let mut servers = Vec::new();
+    for (index, backend) in nonzero_backends {
+      let weight = u32_at(backend, &["weight"]).unwrap_or(1);
       let Some(server) = self.backend_server(route, from_kind, backend, index, weight) else {
         continue;
       };
@@ -127,6 +159,7 @@ impl TranslationState {
       source: source.to_string(),
       name,
       servers,
+      discoveries: Vec::new(),
     })
   }
 
@@ -182,6 +215,58 @@ impl TranslationState {
       id: sanitize_name(&format!("{namespace}-{name}-{port}-{index}")),
       origin,
       weight,
+    })
+  }
+
+  fn backend_discovery(
+    &mut self,
+    route: &KubernetesObject,
+    from_kind: &str,
+    backend: &Value,
+    _index: usize,
+  ) -> Option<GeneratedKubernetesDiscovery> {
+    if !backend_ref_is_service(backend) {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        "only Kubernetes Service backendRefs are supported",
+      ));
+      return None;
+    }
+    let name = string_at(backend, &["name"])?;
+    let namespace = string_at(backend, &["namespace"]).unwrap_or(route.namespace());
+    if namespace != route.namespace()
+      && !self.reference_allowed(route, from_kind, namespace, "Service", name)
+    {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        format!("cross-namespace backendRef to {namespace}/{name} requires ReferenceGrant"),
+      ));
+      return None;
+    }
+    let key = ObjectKey {
+      namespace: namespace.to_string(),
+      name: name.to_string(),
+    };
+    let Some(service) = self.services.get(&key) else {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        format!("backend Service {namespace}/{name} was not found in input snapshot"),
+      ));
+      return None;
+    };
+    let Some(port) = backend_port(backend, service) else {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        format!("backend Service {namespace}/{name} does not expose the referenced port"),
+      ));
+      return None;
+    };
+    Some(GeneratedKubernetesDiscovery {
+      endpoint: "https://kubernetes.default.svc".to_string(),
+      namespace: service.namespace.clone(),
+      service: service.name.clone(),
+      scheme: service.scheme.clone(),
+      port,
     })
   }
 

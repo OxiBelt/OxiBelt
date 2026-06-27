@@ -16,6 +16,8 @@ fn args() -> SharedArgs {
     client_key: None,
     watch_namespace: None,
     status_address: Vec::new(),
+    status_service: None,
+    backend_resolution: crate::cli::BackendResolution::ClusterDns,
     dry_run: false,
     health_bind: None,
   }

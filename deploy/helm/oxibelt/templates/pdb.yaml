@@ -1,0 +1,13 @@
+{{- if and .Values.podDisruptionBudget.enabled (eq .Values.workload.kind "Deployment") }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "oxibelt.name" . }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+{{- end }}

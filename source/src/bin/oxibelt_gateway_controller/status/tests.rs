@@ -12,6 +12,8 @@ fn args() -> SharedArgs {
     client_key: None,
     watch_namespace: None,
     status_address: vec!["203.0.113.10".to_string()],
+    status_service: None,
+    backend_resolution: crate::cli::BackendResolution::ClusterDns,
     dry_run: false,
     health_bind: None,
   }
@@ -70,6 +72,61 @@ spec:
     gateway.status["listeners"][0]["conditions"][0]["status"],
     CONDITION_TRUE
   );
+}
+
+#[test]
+fn gateway_status_can_use_data_plane_service_load_balancer_address() {
+  let mut args = args();
+  args.status_address.clear();
+  args.status_service = Some("oxibelt/edge".to_string());
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: oxibelt
+spec:
+  controllerName: oxibelt.dev/gateway-controller
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: default
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+"#,
+    ),
+    object(
+      r#"
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge
+  namespace: oxibelt
+status:
+  loadBalancer:
+    ingress:
+    - hostname: edge.example.net
+"#,
+    ),
+  ];
+  let patches = build_status_patches(&objects, &args, &[]);
+
+  let gateway = patches
+    .iter()
+    .find(|patch| patch.resource == "gateways")
+    .expect("gateway patch");
+  assert_eq!(gateway.status["addresses"][0]["type"], "Hostname");
+  assert_eq!(gateway.status["addresses"][0]["value"], "edge.example.net");
 }
 
 #[test]

@@ -32,6 +32,8 @@ fn args() -> SharedArgs {
     client_key: None,
     watch_namespace: None,
     status_address: Vec::new(),
+    status_service: None,
+    backend_resolution: crate::cli::BackendResolution::ClusterDns,
     dry_run: false,
     health_bind: None,
   }
@@ -310,6 +312,40 @@ fn grpc_external_auth_protocol_is_blocking_diagnostic() {
 #[test]
 fn generated_http_toml_validates_with_oxibelt_config() {
   let rendered = translate_objects(&objects(HTTP_FIXTURE), &args()).expect("translate");
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn endpoint_slice_backend_resolution_generates_discovery_pool() {
+  let raw = HTTP_FIXTURE.replace(
+    "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
+    "    - name: app\n      port: 8080",
+  );
+  let mut args = args();
+  args.backend_resolution = crate::cli::BackendResolution::EndpointSliceWatch;
+  let rendered = translate_objects(&objects(&raw), &args).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("[[upstream_pools.discovery]]"));
+  assert!(rendered.toml.contains("provider = \"kubernetes\""));
+  assert!(rendered.toml.contains("service = \"app\""));
+  assert!(rendered.toml.contains("port = 8080"));
+  assert!(
+    rendered
+      .toml
+      .contains("kubernetes_resource = \"endpoint_slice\"")
+  );
+  assert!(rendered.toml.contains("watch = true"));
+  assert!(
+    rendered
+      .toml
+      .contains("token_file = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"")
+  );
+  assert!(!rendered.toml.contains("[[upstream_pools.servers]]"));
   generated_toml_validates(&rendered.toml);
 }
 

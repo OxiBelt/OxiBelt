@@ -54,6 +54,28 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str(&server.weight.to_string());
       out.push('\n');
     }
+    for discovery in &pool.discoveries {
+      out.push_str("\n[[upstream_pools.discovery]]\n");
+      out.push_str("provider = \"kubernetes\"\n");
+      out.push_str("endpoint = ");
+      out.push_str(&toml_string(&discovery.endpoint));
+      out.push('\n');
+      out.push_str("namespace = ");
+      out.push_str(&toml_string(&discovery.namespace));
+      out.push('\n');
+      out.push_str("service = ");
+      out.push_str(&toml_string(&discovery.service));
+      out.push('\n');
+      out.push_str("scheme = ");
+      out.push_str(&toml_string(&discovery.scheme));
+      out.push('\n');
+      out.push_str("port = ");
+      out.push_str(&discovery.port.to_string());
+      out.push('\n');
+      out.push_str("kubernetes_resource = \"endpoint_slice\"\n");
+      out.push_str("watch = true\n");
+      out.push_str("token_file = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\n");
+    }
     out.push('\n');
   }
 

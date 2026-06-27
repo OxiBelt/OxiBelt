@@ -1,0 +1,136 @@
+{{- if eq .Values.workload.kind "DaemonSet" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "oxibelt.name" . }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  selector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "oxibelt.selectorLabels" . | indent 8 }}
+{{- with .Values.podLabels }}
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.podAnnotations }}
+      annotations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+    spec:
+      serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
+      containers:
+      - name: oxibelt
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        - "--config"
+        - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
+        {{- if or .Values.admin.enabled .Values.extraEnv }}
+        env:
+        {{- if .Values.admin.enabled }}
+        - name: OXIBELT_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ required "admin.tokenSecretName is required when admin.enabled=true" .Values.admin.tokenSecretName }}
+              key: {{ .Values.admin.tokenSecretKey }}
+        {{- end }}
+        {{- with .Values.extraEnv }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+        {{- end }}
+        ports:
+        {{- if .Values.service.ports.http.enabled }}
+        - name: http
+          containerPort: {{ .Values.service.ports.http.targetPort }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.service.ports.https.enabled }}
+        - name: https
+          containerPort: {{ .Values.service.ports.https.targetPort }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.service.ports.http3.enabled }}
+        - name: http3
+          containerPort: {{ .Values.service.ports.http3.targetPort }}
+          protocol: UDP
+        {{- end }}
+        - name: metrics
+          containerPort: {{ .Values.metrics.service.port }}
+          protocol: TCP
+        - name: health
+          containerPort: {{ .Values.health.port }}
+          protocol: TCP
+        {{- if .Values.admin.enabled }}
+        - name: admin
+          containerPort: {{ .Values.admin.service.port }}
+          protocol: TCP
+        {{- end }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.health.readyPath }}
+            port: health
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.health.livePath }}
+            port: health
+        startupProbe:
+          httpGet:
+            path: {{ .Values.health.livePath }}
+            port: health
+          failureThreshold: 30
+          periodSeconds: 2
+        securityContext:
+{{ toYaml .Values.securityContext | indent 10 }}
+        volumeMounts:
+        - name: config
+          mountPath: {{ .Values.config.mountPath }}
+          readOnly: true
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          mountPath: {{ .Values.tls.mountPath }}
+          readOnly: true
+        {{- end }}
+        {{- if .Values.oxirule.enabled }}
+        - name: oxirule
+          mountPath: {{ .Values.oxirule.mountPath }}
+          readOnly: true
+        {{- end }}
+        - name: cache
+          mountPath: /var/cache/oxibelt
+        {{- with .Values.extraVolumeMounts }}
+{{ toYaml . | indent 8 }}
+        {{- end }}
+        resources:
+{{ toYaml .Values.resources | indent 10 }}
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "oxibelt.configMapName" . }}
+      {{- if .Values.tls.enabled }}
+      - name: tls
+        secret:
+          secretName: {{ required "tls.secretName is required when tls.enabled=true" .Values.tls.secretName }}
+      {{- end }}
+      {{- if .Values.oxirule.enabled }}
+      - name: oxirule
+        configMap:
+          name: {{ required "oxirule.existingConfigMap is required when oxirule.enabled=true" .Values.oxirule.existingConfigMap }}
+      {{- end }}
+      - name: cache
+        emptyDir: {}
+{{- with .Values.extraVolumes }}
+{{ toYaml . | indent 6 }}
+{{- end }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+{{- end }}

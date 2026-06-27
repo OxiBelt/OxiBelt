@@ -72,6 +72,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
     ("gateway-api-httproute", "experimental"),
     ("gateway-api-grpcroute", "experimental"),
     ("gateway-api-tlsroute", "experimental"),
+    ("helm-data-plane", "experimental"),
     ("helm-gateway-controller", "experimental"),
     ("acme", "reserved"),
     ("crlite", "experimental"),

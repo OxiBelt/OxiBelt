@@ -2960,6 +2960,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "scheme",
       "service",
       "token_env",
+      "token_file",
       "update_debounce_ms",
       "watch",
       "watch_timeout_seconds",

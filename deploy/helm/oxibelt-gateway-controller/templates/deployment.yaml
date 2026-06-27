@@ -15,6 +15,8 @@ spec:
         app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
     spec:
       serviceAccountName: {{ include "oxibelt-gateway-controller.name" . }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
       - name: controller
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -36,6 +38,10 @@ spec:
         {{- if .Values.watchNamespace }}
         - "--watch-namespace={{ .Values.watchNamespace }}"
         {{- end }}
+        {{- if .Values.statusService }}
+        - "--status-service={{ .Values.statusService }}"
+        {{- end }}
+        - "--backend-resolution={{ .Values.backendResolution }}"
         {{- if .Values.dryRun }}
         - "--dry-run"
         {{- end }}
@@ -48,6 +54,10 @@ spec:
             path: /readyz
             port: health
         livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        startupProbe:
           httpGet:
             path: /healthz
             port: health
@@ -65,6 +75,8 @@ spec:
           mountPath: /var/run/oxibelt-admin-client-tls
           readOnly: true
         {{- end }}
+        securityContext:
+{{ toYaml .Values.securityContext | indent 10 }}
         resources:
 {{ toYaml .Values.resources | indent 10 }}
       volumes:

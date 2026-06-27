@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
 use url::Url;
 
@@ -41,9 +41,21 @@ pub struct SharedArgs {
   #[arg(long, global = true)]
   pub status_address: Vec<String>,
   #[arg(long, global = true)]
+  pub status_service: Option<String>,
+  #[arg(long, global = true, value_enum, default_value = "cluster_dns")]
+  pub backend_resolution: BackendResolution,
+  #[arg(long, global = true)]
   pub dry_run: bool,
   #[arg(long, global = true)]
   pub health_bind: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum BackendResolution {
+  #[default]
+  ClusterDns,
+  EndpointSliceWatch,
 }
 
 #[derive(Debug, Subcommand)]

@@ -1103,6 +1103,7 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # watch_timeout_seconds = 300
 # update_debounce_ms = 250
 # token_env = "KUBERNETES_SERVICE_TOKEN"
+# token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 # refresh_interval_ms = 30000
 #
 #[[upstream_pools.discovery]]

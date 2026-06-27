@@ -11,6 +11,7 @@ fn endpoint_slice_discovery() -> UpstreamPoolDiscoveryConfig {
     port_name: Some("http".to_string()),
     key_prefix: None,
     token_env: None,
+    token_file: None,
     filter: None,
     datacenter: None,
     file: None,
@@ -41,6 +42,7 @@ fn endpoint_slice_servers_require_ready_non_terminating_ip_endpoints() {
         {"addresses": ["10.0.0.1"], "conditions": {"ready": true}},
         {"addresses": ["10.0.0.2"], "conditions": {"ready": false}},
         {"addresses": ["10.0.0.3"], "conditions": {"ready": true, "terminating": true}},
+        {"addresses": ["10.0.0.4"]},
         {"addresses": ["pod.example"], "conditions": {"ready": true}}
       ]
     }"#,
@@ -55,11 +57,12 @@ fn endpoint_slice_servers_require_ready_non_terminating_ip_endpoints() {
   );
 
   let mut slice = slice;
-  slice.endpoints.truncate(3);
+  slice.endpoints.truncate(4);
   let servers = endpoint_slice_servers("default", "app", &discovery, &slice)
     .expect("valid ready endpoints should convert");
-  assert_eq!(servers.len(), 1);
+  assert_eq!(servers.len(), 2);
   assert_eq!(servers[0].origin.as_str(), "http://10.0.0.1:8080/");
+  assert_eq!(servers[1].origin.as_str(), "http://10.0.0.4:8080/");
 }
 
 #[test]

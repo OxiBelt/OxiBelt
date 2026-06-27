@@ -1,0 +1,11 @@
+{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oxibelt.configMapName" . }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+data:
+  {{ .Values.config.key }}: |-
+{{ tpl .Values.config.inline . | indent 4 }}
+{{- end }}

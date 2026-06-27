@@ -147,3 +147,7 @@ path = "../tests/rust/feature_status_contract.rs"
 [[test]]
 name = "observability_assets"
 path = "../tests/rust/observability_assets.rs"
+
+[[test]]
+name = "helm_chart_assets"
+path = "../tests/rust/helm_chart_assets.rs"

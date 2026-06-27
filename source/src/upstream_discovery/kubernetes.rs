@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
@@ -62,9 +63,10 @@ async fn discover_endpoints_servers(
     .method(http::Method::GET)
     .uri(uri_from_url(&url)?)
     .header(http::header::ACCEPT, "application/json");
-  add_bearer_env_header(
+  add_bearer_token_header(
     &mut builder,
     discovery.token_env.as_deref(),
+    discovery.token_file.as_deref(),
     http::header::AUTHORIZATION,
   )?;
   let response = client
@@ -150,9 +152,10 @@ async fn list_endpoint_slices(
     .method(http::Method::GET)
     .uri(uri_from_url(&url)?)
     .header(http::header::ACCEPT, "application/json");
-  add_bearer_env_header(
+  add_bearer_token_header(
     &mut builder,
     discovery.token_env.as_deref(),
+    discovery.token_file.as_deref(),
     http::header::AUTHORIZATION,
   )?;
   let response = client
@@ -298,7 +301,7 @@ fn selected_endpoint_slice_port(
 }
 
 fn endpoint_is_ready(endpoint: &KubernetesEndpointSliceEndpoint) -> bool {
-  endpoint.conditions.ready == Some(true) && endpoint.conditions.terminating != Some(true)
+  endpoint.conditions.ready != Some(false) && endpoint.conditions.terminating != Some(true)
 }
 
 fn endpoint_slice_matches_service(
@@ -452,18 +455,26 @@ fn sort_discovered_servers(servers: &mut Vec<UpstreamPoolServerConfig>) {
   servers.dedup_by(|left, right| left.id == right.id);
 }
 
-fn add_bearer_env_header(
+fn add_bearer_token_header(
   builder: &mut http::request::Builder,
   token_env: Option<&str>,
+  token_file: Option<&Path>,
   header_name: http::HeaderName,
 ) -> anyhow::Result<()> {
-  let Some(token_env) = token_env else {
-    return Ok(());
+  let token = match (token_env, token_file) {
+    (Some(token_env), None) => std::env::var(token_env)
+      .with_context(|| format!("failed to read discovery token_env {token_env}"))?,
+    (None, Some(token_file)) => std::fs::read_to_string(token_file).with_context(|| {
+      format!(
+        "failed to read discovery token_file {}",
+        token_file.display()
+      )
+    })?,
+    (None, None) => return Ok(()),
+    (Some(_), Some(_)) => bail!("discovery requires only one of token_env or token_file"),
   };
-  let token = std::env::var(token_env)
-    .with_context(|| format!("failed to read discovery token_env {token_env}"))?;
   if token.trim().is_empty() {
-    bail!("discovery token_env {token_env} resolved to an empty value");
+    bail!("discovery bearer token resolved to an empty value");
   }
   let headers = builder
     .headers_mut()

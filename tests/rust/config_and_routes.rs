@@ -5526,6 +5526,7 @@ kubernetes_resource = "endpoint_slice"
 watch = true
 watch_timeout_seconds = 120
 update_debounce_ms = 50
+token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 "#,
     common::minimal_config_toml(&cert_path, &key_path)
   );
@@ -5540,6 +5541,12 @@ update_debounce_ms = 50
   assert!(discovery.watch);
   assert_eq!(discovery.watch_timeout_seconds, 120);
   assert_eq!(discovery.update_debounce_ms, 50);
+  assert_eq!(
+    discovery.token_file.as_deref(),
+    Some(std::path::Path::new(
+      "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    ))
+  );
 }
 
 #[test]
@@ -5657,6 +5664,35 @@ update_debounce_ms = 0
     .expect_err("zero discovery debounce should be rejected");
   assert!(
     error.to_string().contains("update_debounce_ms"),
+    "unexpected error: {error}"
+  );
+
+  let raw = format!(
+    r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+
+[[upstream_pools.discovery]]
+provider = "kubernetes"
+endpoint = "https://kubernetes.default.svc"
+namespace = "default"
+service = "api"
+port = 8080
+token_env = "KUBERNETES_TOKEN"
+token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("ambiguous Kubernetes token sources should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("only one of token_env or token_file"),
     "unexpected error: {error}"
   );
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::bail;
 use serde_json::Value;
 
-use super::cli::SharedArgs;
+use super::cli::{BackendResolution, SharedArgs};
 use super::gateway_policy::{self, ListenerPolicy, ReferenceGrantInfo, RoutePolicyDecision};
 use super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref as model_object_ref};
 
@@ -86,6 +86,7 @@ struct GeneratedPool {
   source: String,
   name: String,
   servers: Vec<GeneratedServer>,
+  discoveries: Vec<GeneratedKubernetesDiscovery>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,15 @@ struct GeneratedServer {
   id: String,
   origin: String,
   weight: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedKubernetesDiscovery {
+  endpoint: String,
+  namespace: String,
+  service: String,
+  scheme: String,
+  port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +179,7 @@ struct RequestMirrorAction {
 
 #[derive(Default)]
 struct TranslationState {
+  backend_resolution: BackendResolution,
   services: HashMap<ObjectKey, ServiceInfo>,
   namespace_labels: HashMap<String, BTreeMap<String, String>>,
   gateway_classes: HashSet<String>,
@@ -186,6 +197,7 @@ pub fn translate_objects(
   args: &SharedArgs,
 ) -> anyhow::Result<RenderedConfig> {
   let mut state = TranslationState {
+    backend_resolution: args.backend_resolution,
     namespace_labels: gateway_policy::namespace_labels(objects),
     ..Default::default()
   };

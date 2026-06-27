@@ -1,0 +1,166 @@
+image:
+  repository: oxibelt
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+replicaCount: 2
+
+workload:
+  kind: Deployment # Deployment | DaemonSet
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: true
+
+kubernetesDiscovery:
+  rbac:
+    create: false
+
+service:
+  type: LoadBalancer
+  annotations: {}
+  externalTrafficPolicy: Local
+  ports:
+    http:
+      enabled: true
+      port: 80
+      targetPort: 8080
+    https:
+      enabled: true
+      port: 443
+      targetPort: 8443
+    http3:
+      enabled: true
+      port: 443
+      targetPort: 8443
+
+admin:
+  enabled: false
+  service:
+    enabled: false
+    type: ClusterIP
+    port: 9092
+    annotations: {}
+  tokenSecretName: ""
+  tokenSecretKey: token
+
+metrics:
+  enabled: true
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 9090
+    annotations: {}
+
+health:
+  port: 9091
+  readyPath: /ready
+  livePath: /live
+
+config:
+  create: true
+  existingConfigMap: ""
+  key: oxibelt.toml
+  mountPath: /etc/oxibelt/config
+  inline: |
+    include = ["conf.d/*.toml"]
+
+    [config]
+    strict_unknown_fields = true
+    warn_on_deprecated_fields = true
+
+    [logging]
+    level = "info"
+
+    [runtime]
+    linux_only = true
+    read_only_rootfs_compatible = true
+    memory_only_state = true
+    unprivileged_mode = true
+
+    [listeners]
+    http_bind = "0.0.0.0:8080"
+    https_bind = "0.0.0.0:8443"
+    http_mode = "redirect_to_https"
+    http1 = true
+    http2 = true
+    http3 = true
+
+    [tls]
+    cert_chain = "/etc/oxibelt/cert/tls.crt"
+    private_key = "/etc/oxibelt/cert/tls.key"
+    min_version = "tls1.3"
+    max_version = "tls1.3"
+
+    [health]
+    enabled = true
+    bind = "0.0.0.0:{{ .Values.health.port }}"
+    ready_path = "{{ .Values.health.readyPath }}"
+    live_path = "{{ .Values.health.livePath }}"
+
+    [metrics]
+    enabled = {{ .Values.metrics.enabled }}
+    bind = "0.0.0.0:9090"
+    format = "prometheus"
+    detail = "basic"
+
+    [admin]
+    enabled = {{ .Values.admin.enabled }}
+    bind = "0.0.0.0:9092"
+    bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+    allow_insecure_plaintext = false
+
+tls:
+  enabled: true
+  secretName: oxibelt-tls
+  mountPath: /etc/oxibelt/cert
+
+oxirule:
+  enabled: false
+  existingConfigMap: ""
+  mountPath: /etc/oxibelt/oxirule
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
