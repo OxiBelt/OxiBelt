@@ -30,6 +30,7 @@ use crate::proxy::http::headers::{ForwardedHeaderCache, extract_downstream_port}
 use crate::proxy::http::request_framing::{
   RequestBodyFraming, VerifiedContentLengthZeroBody, request_body_framing,
 };
+use crate::proxy::http::response::is_silent_close_response;
 use crate::routes::{RouteMatchContext, RouteRequestProtocol, normalize_host};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
@@ -182,18 +183,17 @@ pub(super) async fn try_handle_connection(
       }
     };
 
-    let close_after_response = header_has_token(response.headers(), CONNECTION, "close");
-    let response_timeout =
-      proxy_http::downstream_response_send_timeout(&response).unwrap_or(timeout);
-    let skip_body =
-      request_method == Method::HEAD || response_status_has_no_body(response.status());
-    let keep_alive = !close_after_request && !close_after_response;
+    let Some(write_plan) =
+      response_write_plan(&response, &request_method, close_after_request, timeout)
+    else {
+      return Ok(H1FastProxyPreflight::Done);
+    };
     if let Err(error) = write_response(
       &mut stream,
       response,
-      keep_alive,
-      skip_body,
-      response_timeout,
+      write_plan.keep_alive,
+      write_plan.skip_body,
+      write_plan.response_send_timeout,
       &mut head_buffer,
     )
     .await
@@ -202,7 +202,7 @@ pub(super) async fn try_handle_connection(
       return Ok(H1FastProxyPreflight::Done);
     }
     served_requests += 1;
-    if !keep_alive {
+    if !write_plan.keep_alive {
       return Ok(H1FastProxyPreflight::Done);
     }
     buffer = next_buffer;
@@ -397,6 +397,30 @@ fn empty_proxy_body() -> ProxyBody {
   Empty::<Bytes>::new()
     .map_err(|never: Infallible| -> BoxError { match never {} })
     .boxed()
+}
+
+struct ResponseWritePlan {
+  keep_alive: bool,
+  skip_body: bool,
+  response_send_timeout: Duration,
+}
+
+fn response_write_plan(
+  response: &Response<ProxyBody>,
+  request_method: &Method,
+  close_after_request: bool,
+  default_timeout: Duration,
+) -> Option<ResponseWritePlan> {
+  if is_silent_close_response(response) {
+    return None;
+  }
+  let close_after_response = header_has_token(response.headers(), CONNECTION, "close");
+  Some(ResponseWritePlan {
+    keep_alive: !close_after_request && !close_after_response,
+    skip_body: request_method == Method::HEAD || response_status_has_no_body(response.status()),
+    response_send_timeout: proxy_http::downstream_response_send_timeout(response)
+      .unwrap_or(default_timeout),
+  })
 }
 
 async fn write_response<I>(
@@ -648,4 +672,32 @@ where
     .await
     .context("TLS H1 pre-Hyper response shutdown failed")??;
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::proxy::http::response::{silent_close_response, text_response};
+
+  #[test]
+  fn silent_close_response_stops_before_h1_fast_writer() {
+    let response = silent_close_response();
+
+    assert!(
+      response_write_plan(&response, &Method::GET, false, Duration::from_secs(1)).is_none(),
+      "silent_close sentinel must close before serializing a 204 response"
+    );
+  }
+
+  #[test]
+  fn ordinary_no_content_response_is_still_serialized_without_body() {
+    let response = text_response(StatusCode::NO_CONTENT, "");
+
+    let write_plan = response_write_plan(&response, &Method::GET, false, Duration::from_secs(1))
+      .expect("ordinary 204 should still be serialized");
+
+    assert!(write_plan.keep_alive);
+    assert!(write_plan.skip_body);
+    assert_eq!(write_plan.response_send_timeout, Duration::from_secs(1));
+  }
 }
