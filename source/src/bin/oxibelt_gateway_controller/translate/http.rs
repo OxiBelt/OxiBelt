@@ -127,9 +127,7 @@ impl TranslationState {
         return None;
       }
       let (index, backend) = nonzero_backends[0];
-      let Some(discovery) = self.backend_discovery(route, from_kind, backend, index) else {
-        return None;
-      };
+      let discovery = self.backend_discovery(route, from_kind, backend, index)?;
       let name = sanitize_name(&format!("{route_name}-pool"));
       return Some(GeneratedPool {
         source: source.to_string(),
