@@ -96,8 +96,8 @@ use self::request_framing::{
 use self::response::{
   apply_security_headers, apply_sticky_cookie, draining_response, external_auth_response,
   proxy_error_response, request_buffering_error_response, response_buffering_error_response,
-  text_response, upstream_error_response, upstream_selection_error_response, waf_terminal_response,
-  with_pending_dynamic_person_proof_response_mutations,
+  silent_close_response, text_response, upstream_error_response, upstream_selection_error_response,
+  waf_http_terminal_response, with_pending_dynamic_person_proof_response_mutations,
 };
 use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
 use self::route_action_runtime as route_runtime;
@@ -698,6 +698,9 @@ where
           &dynamic_challenge_response_mutations,
         );
       }
+      DynamicPolicyTerminal::SilentClose => {
+        return silent_close_response();
+      }
       DynamicPolicyTerminal::Challenge { status } => {
         let person_proof_api_path = state.request_path_features.person_proof_api
           && state.waf.has_person_proof_api_path(request_uri.path());
@@ -744,7 +747,7 @@ where
             }
           };
           if let Some(terminal) = decision.terminal {
-            return waf_terminal_response(terminal, &decision.response_header_mutations);
+            return waf_http_terminal_response(terminal, &decision.response_header_mutations);
           }
           dynamic_person_proof_mutation_added = !decision.response_header_mutations.is_empty();
           dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
@@ -932,7 +935,7 @@ where
   access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal {
-    return waf_terminal_response(terminal, &request_waf.response_header_mutations);
+    return waf_http_terminal_response(terminal, &request_waf.response_header_mutations);
   }
 
   if let Some(static_root) = resolved.route.static_root.as_deref() {
@@ -1856,7 +1859,7 @@ where
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      return waf_terminal_response(terminal, &mutations);
+      return waf_http_terminal_response(terminal, &mutations);
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }

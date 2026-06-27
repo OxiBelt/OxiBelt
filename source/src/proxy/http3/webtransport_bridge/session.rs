@@ -22,7 +22,7 @@ use super::connection::DownstreamWebTransportConnection;
 use super::{DispatcherEvent, DownstreamBidiStream, DownstreamUniRecvStream};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
@@ -37,6 +37,8 @@ mod connection_limits;
 mod index;
 #[path = "session/metrics.rs"]
 mod metrics;
+#[path = "session/silent_close.rs"]
+mod silent_close;
 #[path = "session/state.rs"]
 mod state;
 #[path = "session/task_reporting.rs"]
@@ -47,6 +49,7 @@ use connection_limits::acquire_webtransport_session_permits;
 pub(super) use index::WebTransportSessionIndex;
 use index::session_id_for_stream_id;
 use metrics::record_session_end_metrics;
+pub(super) use silent_close::close_session_silent;
 pub(super) use state::ActiveWebTransportSession;
 use task_reporting::{report_activity, report_session_task_result, report_stream_task_result};
 const WEBTRANSPORT_DRAFT_HEADER: &str = "sec-webtransport-http3-draft";
@@ -82,6 +85,9 @@ pub(super) async fn accept_webtransport_session(
   {
     Ok(prepared) => prepared,
     Err(response) => {
+      if is_silent_close_response(&response) {
+        return Ok(());
+      }
       respond_to_h3_request(stream, *response).await?;
       return Ok(());
     }
@@ -403,6 +409,7 @@ pub(super) fn handle_downstream_datagram(
     return;
   };
   let mut close = None;
+  let mut silent_close = false;
   let mut end_session = false;
   {
     let Some(session) = sessions.get_mut(&session_id) else {
@@ -422,16 +429,26 @@ pub(super) fn handle_downstream_datagram(
         &payload,
         stream_waf_bridge::webtransport_datagram_metadata(len),
       ) {
-        close = Some(blocked.close().clone());
+        if blocked.is_silent_close() {
+          silent_close = true;
+        } else {
+          close = Some(blocked.close().clone());
+        }
       }
     }
 
     if close.is_none()
+      && !silent_close
       && let Err(error) = session.upstream.send_datagram(payload)
     {
       warn!(?session_id, error = %error, "failed to send upstream WebTransport datagram");
       end_session = true;
     }
+  }
+
+  if silent_close {
+    close_session_silent(sessions, session_index, session_id);
+    return;
   }
 
   if let Some(close) = close {

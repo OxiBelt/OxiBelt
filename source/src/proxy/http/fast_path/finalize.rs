@@ -14,7 +14,7 @@ use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::proxy::http::headers::strip_hop_by_hop_headers;
 use crate::proxy::http::response::{
-  apply_security_headers, apply_sticky_cookie, waf_terminal_response,
+  apply_security_headers, apply_sticky_cookie, waf_http_terminal_response,
 };
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -177,8 +177,10 @@ pub(super) fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      let response = waf_terminal_response(terminal, &mutations);
-      state.record_hot_path_response(response.status());
+      let response = waf_http_terminal_response(terminal, &mutations);
+      if !crate::proxy::http::response::is_silent_close_response(&response) {
+        state.record_hot_path_response(response.status());
+      }
       return response;
     }
     if !response_waf.response_header_mutations.is_empty() {

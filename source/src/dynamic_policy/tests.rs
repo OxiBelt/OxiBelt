@@ -114,6 +114,7 @@ fn terminal_status(terminal: &DynamicPolicyTerminal) -> StatusCode {
     DynamicPolicyTerminal::Text { status, .. } | DynamicPolicyTerminal::Challenge { status } => {
       *status
     }
+    DynamicPolicyTerminal::SilentClose => panic!("silent_close terminal has no status"),
   }
 }
 
@@ -391,6 +392,46 @@ fn matching_client_ip_path_rejects_request() {
     outcome.terminal.as_ref().map(terminal_status),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
+}
+
+#[test]
+fn matching_client_ip_silent_close_silently_closes_request() {
+  let policy = policy(
+    1,
+    DynamicPolicyAction::SilentClose,
+    DynamicPolicySubjectType::Ip,
+    "203.0.113.10",
+  );
+  let outcome = evaluate_snapshot(
+    &test_config(),
+    Metrics::new().as_ref(),
+    &snapshot(vec![policy]),
+    request("203.0.113.10", "app-route", "/"),
+    LimitState::new(None).as_ref(),
+  );
+
+  assert!(outcome.context.matched);
+  assert_eq!(outcome.context.action.as_deref(), Some("silent_close"));
+  assert!(matches!(
+    outcome.terminal,
+    Some(DynamicPolicyTerminal::SilentClose)
+  ));
+}
+
+#[test]
+fn silent_close_rejects_response_shaping_fields() {
+  let mut status = row(1, "silent_close", "client_ip", "203.0.113.10");
+  status.status = Some(403);
+  assert!(validate_policy_row(status, &test_config(), "test", &route_names(), None).is_err());
+
+  let mut body = row(2, "silent_close", "client_ip", "203.0.113.10");
+  body.body = Some("blocked".to_string());
+  assert!(validate_policy_row(body, &test_config(), "test", &route_names(), None).is_err());
+
+  let mut rate = row(3, "silent_close", "client_ip", "203.0.113.10");
+  rate.rate = Some("1r/s".to_string());
+  rate.burst = Some(1);
+  assert!(validate_policy_row(rate, &test_config(), "test", &route_names(), None).is_err());
 }
 
 #[test]

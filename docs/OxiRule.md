@@ -495,11 +495,11 @@ Response body and native stream payload inspection are bounded by `waf.limits.ma
 
 ## Execution Phases
 
-Request rules run after OxiBelt parses the request and matches a route, but before upstream forwarding. They can reject the request, mutate request headers, set transaction tags, require Person proof, or override the upstream/pool selection.
+Request rules run after OxiBelt parses the request and matches a route, but before upstream forwarding. They can reject the request, silently close the downstream connection, mutate request headers, set transaction tags, require Person proof, or override the upstream/pool selection.
 
-Response rules run after OxiBelt receives an upstream response or creates a synthetic upstream-error response, but before returning data to the downstream client. They can continue, replace, or reject the response, mutate response headers, and emit access logs.
+Response rules run after OxiBelt receives an upstream response or creates a synthetic upstream-error response, but before returning data to the downstream client. They can continue, replace, reject, or silently close instead of forwarding the response, mutate response headers, and emit access logs.
 
-Stream rules run after a WebSocket upgrade or WebTransport CONNECT session is established. They inspect both directions, including WebSocket raw frames, reassembled WebSocket messages, WebTransport stream chunks, and WebTransport datagrams. They can close the active stream/session with `close_stream`; request/response mutation and routing actions are not valid in stream phase. Generic HTTP Upgrade and CONNECT tunnels remain byte tunnels in v1.
+Stream rules run after a WebSocket upgrade or WebTransport CONNECT session is established. They inspect both directions, including WebSocket raw frames, reassembled WebSocket messages, WebTransport stream chunks, and WebTransport datagrams. They can close the active stream/session with `close_stream` or abort it with `silent_close`; request/response mutation and routing actions are not valid in stream phase. Generic HTTP Upgrade and CONNECT tunnels remain byte tunnels in v1.
 
 Rules that read request, response, or stream payload content trigger bounded prefix inspection before forwarding that side of the transaction. OxiBelt scans up to `waf.limits.max_body_inspection_bytes`, replays the captured prefix, and forwards data beyond the inspection window unchanged with `Body.IsTruncated = true` or `Stream.Payload.IsTruncated = true`, except that oversized WebSocket frames on stream-WAF routes are rejected before forwarding to keep proxy-owned frame buffers bounded. On routes with WAF HTTP body compression transform enabled, `Request.Body` and `Response.Body` use the decoded `Content-Encoding` view for OxiRule, OxiRule Group, external OxiRule file, rulepack, and CRS body inspection; DynamicPolicy still runs earlier from header/metadata subjects and does not expose a decoded body subject.
 
@@ -677,6 +677,15 @@ provider_fail_policy = "closed" # closed | open
 send_remote_ip = true
 ```
 
+Silent-close terminal action:
+
+```toml
+[[waf.rules.actions]]
+type = "silent_close"
+```
+
+`silent_close` is valid in request, response, and stream phases. It supports only `priority`; `status`, `body`, WebSocket/WebTransport close codes, and `reason` are rejected because no HTTP response or protocol close payload is sent. In request phase OxiBelt closes or resets the downstream connection before upstream forwarding. In response phase OxiBelt discards the upstream response and closes or resets before sending downstream response headers. In stream phase OxiBelt aborts the active WebSocket or WebTransport session without a WebSocket close frame or WebTransport close reason.
+
 `rate_limit` is request-phase only. Supported keys are `global`, `route`, `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, `access_token_path`, `client_ip_prefix`, `client_ip_prefix_route`, `client_ip_prefix_path`, `tls_fingerprint`, `tls_fingerprint_route`, `token_binding_hash`, `token_binding_hash_route`, `person_proof_clearance`, `person_proof_clearance_route`, `composite_client`, `composite_client_route`, `asn`, and `asn_route`; `client-ip` style aliases are accepted for the client-IP keys. `global` uses one bucket shared by all matching requests, and `route` uses one bucket per resolved route. Access-token limits must set `access_token_source`: `trusted_authorization_bearer` reads only `Authorization: Bearer <token>` and rejects `token_header`, while `trusted_header` reads only `token_header` and ignores `Authorization`. `token_header` is valid only for `trusted_header` access-token keys. This is a breaking hardening change for existing `access_token*` rules. Use access-token keys only after a trusted authentication layer has validated or injected the token; public pre-auth routes should pair route/IP/prefix/composite/TLS/Person proof budgets before trusting app/API tokens. Token values, TLS fingerprints, token-binding payloads, and composite-client payloads are hashed before storage. Missing identities fall back to `fallback_ip:<ip>` where possible, not a shared `unknown` bucket. `ipv4_prefix_bits` and `ipv6_prefix_bits` default to `/24` and `/56`. `identity_parts` is required for `composite_client*` keys and may include `client_ip_prefix`, `user_agent`, `tls_fingerprint`, and `asn`. `token_bindings` is required for `token_binding_hash*` keys and reuses Person proof token binding names except `tcp_max_hop`, which is rejected for rate-limit token binding hashes. `person_proof_clearance*` buckets use the stable hash of a verified clearance credential and never store raw clearance tokens. `asn*` uses `[client_identity.asn]` lookup; `Request.Client.Asn` remains `null` when ASN lookup is disabled or degraded. `max_buckets` defaults to `16384` and caps buckets for a single WAF rate-limit action; in enforcing mode, new identities are rejected after the cap until an existing bucket expires or can be reclaimed. When shared state maps rate limits to a backend, WAF `rate_limit` actions use the same Redis-compatible or PostgreSQL token-bucket storage as route rate limits and enforce `max_buckets` before creating a new distributed bucket. Monitor-mode rules count matches without consuming rate-limit tokens.
 
 Response-phase terminal actions:
@@ -767,7 +776,7 @@ key = "LoginRequest"
 value = "true"
 ```
 
-Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. `waf.limits.max_mutations` counts request/response header mutations, `set_tag`, routing overrides, `set_load_balancing_policy`, `rate_limit`, `weigh_person_proof`, `allow_person_proof`, and `emit_mitigation`. Terminal actions such as `reject`, `replace_response`, `reject_response`, `require_person_proof`, `continue_response`, and `close_stream` are validated separately and do not consume this mutation budget.
+Tag keys and Person proof `success_tag` values must match `[A-Za-z0-9-]{1,32}`. `waf.limits.max_mutations` counts request/response header mutations, `set_tag`, routing overrides, `set_load_balancing_policy`, `rate_limit`, `weigh_person_proof`, `allow_person_proof`, and `emit_mitigation`. Terminal actions such as `reject`, `silent_close`, `replace_response`, `reject_response`, `require_person_proof`, `continue_response`, and `close_stream` are validated separately and do not consume this mutation budget.
 
 Mitigation emission action:
 
@@ -1082,7 +1091,7 @@ Context.Mode: 'enforcing' | 'monitor' # effective mode for the current rule, or 
 
 ```text
 DynamicPolicy.Matched: Bool
-DynamicPolicy.Action: 'allow' | 'reject' | 'rate_limit' | 'challenge' | Null
+DynamicPolicy.Action: 'allow' | 'reject' | 'silent_close' | 'rate_limit' | 'challenge' | Null
 DynamicPolicy.Name: String | Null
 DynamicPolicy.Reason: String | Null
 DynamicPolicy.Code: String | Null
@@ -1090,7 +1099,7 @@ DynamicPolicy.Mode: 'enforce' | 'dry_run' | Null
 DynamicPolicy.Source: String | Null
 ```
 
-`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Subject identities that contain sensitive material, such as TLS fingerprints, token-binding payloads, composite-client parts, and Person proof clearances, are compared as prefixed SHA-256 hashes before this context is populated. Terminal dynamic policy rejects and Person proof challenges happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, valid-clearance `challenge`, or `dry_run` policy and for response/access-log expressions.
+`DynamicPolicy.*` is read-only request context from OxiBelt's in-memory dynamic policy snapshot. It does not perform SQL or any other external I/O while evaluating an OxiRule expression. Subject identities that contain sensitive material, such as TLS fingerprints, token-binding payloads, composite-client parts, and Person proof clearances, are compared as prefixed SHA-256 hashes before this context is populated. Terminal dynamic policy rejects, silent closes, and Person proof challenges happen before request-phase OxiRule evaluation, so these fields are mainly useful for requests that matched an allowed dynamic `allow`, non-terminal `rate_limit`, valid-clearance `challenge`, or `dry_run` policy and for response/access-log expressions.
 
 ```text
 Request.Id: String
@@ -1417,6 +1426,7 @@ OxiRule validation rejects:
 - Request routing actions in response-phase rules.
 - Request, response, routing, rate-limit, tag, Person proof, and access-log actions in stream-phase rules.
 - `close_stream` outside stream phase.
+- `silent_close` fields other than `priority`.
 - `emit_access_log` outside response phase.
 - Header mutations or other mutations that exceed `max_mutations`.
 - Pattern sets that exceed configured count, length, regex, or budget limits.

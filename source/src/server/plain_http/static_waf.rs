@@ -14,8 +14,8 @@ use crate::proxy::http::static_files::{self, StaticResponsePlan};
 use crate::routes::RouteWafExecutionPlan;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  HeaderMutation, RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput,
-  WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+  HeaderMutation, RequestWafDecision, WafHttpTerminal, WafProtocol, WafRequestInput,
+  WafResponseInput, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
   apply_header_mutations,
 };
 
@@ -64,6 +64,7 @@ pub(super) async fn apply_static_waf(
   access_log.add_tags(&request_waf.tags);
   if let Some(terminal) = request_waf.terminal.take() {
     return TimedStaticResponsePlan {
+      silent_close: terminal.is_silent_close(),
       response: static_waf_terminal_plan(terminal, &request_waf.response_header_mutations),
       response_send_timeout,
       access_log: Some(access_log),
@@ -77,6 +78,7 @@ pub(super) async fn apply_static_waf(
       ),
       response_send_timeout,
       access_log: Some(access_log),
+      silent_close: false,
     };
   }
 
@@ -127,6 +129,7 @@ pub(super) async fn apply_static_waf(
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
       return TimedStaticResponsePlan {
+        silent_close: terminal.is_silent_close(),
         response: static_waf_terminal_plan(terminal, &mutations),
         response_send_timeout,
         access_log: Some(access_log),
@@ -139,13 +142,17 @@ pub(super) async fn apply_static_waf(
     response: plan,
     response_send_timeout,
     access_log: Some(access_log),
+    silent_close: false,
   }
 }
 
 fn static_waf_terminal_plan(
-  terminal: WafTerminalResponse,
+  terminal: WafHttpTerminal,
   mutations: &[HeaderMutation],
 ) -> StaticResponsePlan {
+  let Some(terminal) = terminal.into_response() else {
+    return static_files::text_plan(StatusCode::NO_CONTENT, "");
+  };
   let mut plan = static_files::text_plan(terminal.status, terminal.body);
   apply_header_mutations(&mut plan.headers, &terminal.headers);
   apply_header_mutations(&mut plan.headers, mutations);

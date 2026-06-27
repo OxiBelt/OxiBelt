@@ -25,7 +25,7 @@ use super::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, set_effective_host_header,
   strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
-use super::response::{text_response, waf_terminal_response};
+use super::response::{silent_close_response, text_response, waf_http_terminal_response};
 use super::route_actions::{self, RouteActionRenderContext};
 use super::uri::validate_downstream_path;
 use super::version::select_upstream_http_version;
@@ -196,6 +196,9 @@ pub(crate) async fn prepare_webtransport(
           ),
         ));
       }
+      DynamicPolicyTerminal::SilentClose => {
+        return Err(Box::new(silent_close_response()));
+      }
       DynamicPolicyTerminal::Challenge { status } => {
         let person_proof_api_path = state.request_path_features.person_proof_api
           && state.waf.has_person_proof_api_path(request_uri.path());
@@ -245,7 +248,7 @@ pub(crate) async fn prepare_webtransport(
             }
           };
           if let Some(terminal) = decision.terminal {
-            return Err(Box::new(waf_terminal_response(
+            return Err(Box::new(waf_http_terminal_response(
               terminal,
               &decision.response_header_mutations,
             )));
@@ -380,7 +383,7 @@ pub(crate) async fn prepare_webtransport(
   }
 
   if let Some(terminal) = request_waf.terminal {
-    return Err(Box::new(waf_terminal_response(
+    return Err(Box::new(waf_http_terminal_response(
       terminal,
       &request_waf.response_header_mutations,
     )));

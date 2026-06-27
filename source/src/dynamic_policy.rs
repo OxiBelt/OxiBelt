@@ -21,9 +21,11 @@ pub mod admin;
 pub mod signature;
 pub mod store;
 pub use admin::*;
+mod action;
 mod person_proof_scope;
 mod subject;
 mod sybil;
+use action::DynamicPolicyAction;
 use subject::{DynamicPolicySubjectType, parse_subject_type, validate_subject};
 use sybil::sybil_spec;
 
@@ -80,25 +82,6 @@ struct DynamicPolicy {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum DynamicPolicyAction {
-  Allow,
-  Challenge,
-  Reject,
-  RateLimit,
-}
-
-impl DynamicPolicyAction {
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::Allow => "allow",
-      Self::Challenge => "challenge",
-      Self::Reject => "reject",
-      Self::RateLimit => "rate_limit",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum DynamicPolicyMode {
   Enforce,
   DryRun,
@@ -128,6 +111,7 @@ pub struct DynamicPolicyContext {
 pub enum DynamicPolicyTerminal {
   Text { status: StatusCode, body: String },
   Challenge { status: StatusCode },
+  SilentClose,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -392,6 +376,21 @@ fn evaluate_snapshot(
           status: policy.status,
           body: policy.body.clone(),
         }),
+      }
+    }
+    DynamicPolicyAction::SilentClose => {
+      metrics.record_dynamic_policy_reject();
+      info!(
+        policy_id = policy.id,
+        policy_name = %policy.name,
+        action = "silent_close",
+        route = request.route_name,
+        client_ip = %request.client_ip,
+        "dynamic policy silently closed request"
+      );
+      DynamicPolicyOutcome {
+        context,
+        terminal: Some(DynamicPolicyTerminal::SilentClose),
       }
     }
     DynamicPolicyAction::RateLimit => {
@@ -848,6 +847,7 @@ fn validate_policy_row(
     "challenge" => DynamicPolicyAction::Challenge,
     "reject" => DynamicPolicyAction::Reject,
     "rate_limit" => DynamicPolicyAction::RateLimit,
+    "silent_close" => DynamicPolicyAction::SilentClose,
     _ => bail!("dynamic policy {id} has unsupported action {action}"),
   };
   let subject_type = parse_subject_type(&subject_type)
@@ -889,6 +889,7 @@ fn validate_policy_row(
       Ok::<_, anyhow::Error>(code)
     })
     .transpose()?;
+  let status_provided = status.is_some();
   let status = status
     .map(validate_status)
     .transpose()
@@ -900,6 +901,14 @@ fn validate_policy_row(
         StatusCode::from_u16(config.default_status).expect("validated default status")
       }
     });
+  if action == DynamicPolicyAction::SilentClose {
+    if status_provided || body.is_some() {
+      bail!("dynamic policy {id} silent_close action does not support status or body");
+    }
+    if rate.is_some() || burst.is_some() {
+      bail!("dynamic policy {id} silent_close action does not support rate or burst");
+    }
+  }
   if action == DynamicPolicyAction::Challenge {
     if body.is_some() {
       bail!("dynamic policy {id} challenge action does not support body");
@@ -908,7 +917,11 @@ fn validate_policy_row(
       bail!("dynamic policy {id} challenge action does not support rate or burst");
     }
   }
-  let body = body.unwrap_or_else(|| config.default_body.clone());
+  let body = if action == DynamicPolicyAction::SilentClose {
+    String::new()
+  } else {
+    body.unwrap_or_else(|| config.default_body.clone())
+  };
   validate_string_len("dynamic policy body", &body, MAX_DYNAMIC_POLICY_BODY_BYTES)?;
 
   let (subject, cidr) = validate_subject(

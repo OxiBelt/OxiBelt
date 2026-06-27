@@ -5,15 +5,17 @@ use bytes::Bytes;
 use http::header::HeaderMap;
 use http::{HeaderValue, Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
+use std::error::Error;
+use std::fmt;
 use tracing::warn;
 
 use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
 use crate::external_auth::ExternalAuthTerminal;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  EvaluatedPersonProofRequest, HeaderMutation, WafBodyInput, WafRequestInput, WafResponseInput,
-  WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
-  WafUpstreamError, apply_header_mutations,
+  EvaluatedPersonProofRequest, HeaderMutation, WafBodyInput, WafHttpTerminal, WafRequestInput,
+  WafResponseInput, WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput,
+  WafTransportNetwork, WafUpstreamError, apply_header_mutations,
 };
 
 use super::SystemAccessLogContext;
@@ -50,6 +52,40 @@ pub(crate) fn waf_terminal_response(
   apply_header_mutations(response.headers_mut(), &terminal.headers);
   apply_header_mutations(response.headers_mut(), mutations);
   response
+}
+
+pub(crate) fn waf_http_terminal_response(
+  terminal: WafHttpTerminal,
+  mutations: &[HeaderMutation],
+) -> Response<ProxyBody> {
+  match terminal {
+    WafHttpTerminal::Response(terminal) => waf_terminal_response(terminal, mutations),
+    WafHttpTerminal::SilentClose => silent_close_response(),
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SilentClose;
+
+impl fmt::Display for SilentClose {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("connection silently closed by policy")
+  }
+}
+
+impl Error for SilentClose {}
+
+#[derive(Debug, Clone, Copy)]
+struct SilentCloseResponse;
+
+pub(crate) fn silent_close_response() -> Response<ProxyBody> {
+  let mut response = text_response(StatusCode::NO_CONTENT, "");
+  response.extensions_mut().insert(SilentCloseResponse);
+  response
+}
+
+pub(crate) fn is_silent_close_response(response: &Response<ProxyBody>) -> bool {
+  response.extensions().get::<SilentCloseResponse>().is_some()
 }
 
 pub(crate) fn apply_sticky_cookie(
@@ -375,7 +411,7 @@ pub(super) fn upstream_error_response(
   if let Some(terminal) = response_waf.terminal {
     let mut mutations = request_response_mutations.to_vec();
     mutations.extend(response_waf.response_header_mutations);
-    return waf_terminal_response(terminal, &mutations);
+    return waf_http_terminal_response(terminal, &mutations);
   }
 
   apply_header_mutations(

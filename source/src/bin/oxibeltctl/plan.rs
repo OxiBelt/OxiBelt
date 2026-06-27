@@ -70,6 +70,7 @@ pub(crate) async fn plan_command(
     }
     Command::Block(args) => crate::dynamic_policy_plan::plan_mitigation("reject", args),
     Command::Allow(args) => crate::dynamic_policy_plan::plan_mitigation("allow", args),
+    Command::SilentClose(args) => crate::dynamic_policy_plan::plan_mitigation("silent_close", args),
     Command::Challenge(args) => crate::dynamic_policy_plan::plan_challenge(args),
     Command::RateLimit(args) => crate::dynamic_policy_plan::plan_rate_limit(args),
     Command::Mitigate(args) => {

@@ -69,10 +69,13 @@ rate = "5r/m"
 [[actions]]
 type = "reject"
 status = 403
+
+[[actions]]
+type = "silent_close"
 "#,
   );
 
-  assert_eq!(actions, vec!["rate_limit", "reject"]);
+  assert_eq!(actions, vec!["rate_limit", "reject", "silent_close"]);
 }
 
 #[test]

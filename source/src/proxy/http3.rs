@@ -22,7 +22,7 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::stage_timing as timing;
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::server::downstream_quic_tls_metadata;
 use crate::state::AppSnapshot;
@@ -658,6 +658,10 @@ async fn handle_h3_request(
     context.drain,
   )
   .await;
+  if is_silent_close_response(&response) {
+    reset_silent_h3_request(send_stream);
+    return Ok(StatusCode::NO_CONTENT);
+  }
   let status = response.status();
   let send_started = timing::start(timing_enabled);
   let send_result = respond_to_h3_request(send_stream, response).await;
@@ -675,6 +679,13 @@ async fn handle_h3_request(
   );
   send_result?;
   Ok(status)
+}
+
+fn reset_silent_h3_request<S>(mut stream: h3::server::RequestStream<S, Bytes>)
+where
+  S: h3::quic::SendStream<Bytes>,
+{
+  stream.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
 }
 
 pub(crate) async fn respond_to_h3_request<S>(

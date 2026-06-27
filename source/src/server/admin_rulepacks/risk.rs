@@ -178,7 +178,12 @@ fn terminal_actions_for_content(content: &str) -> Vec<String> {
     .filter(|action_type| {
       matches!(
         *action_type,
-        "reject" | "rate_limit" | "replace_response" | "reject_response" | "challenge"
+        "reject"
+          | "silent_close"
+          | "rate_limit"
+          | "replace_response"
+          | "reject_response"
+          | "challenge"
       )
     })
     .map(str::to_string)

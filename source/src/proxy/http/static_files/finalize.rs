@@ -5,7 +5,7 @@ use http::{HeaderMap, Method, Response};
 use tracing::warn;
 
 use super::super::body::ProxyBody;
-use super::super::response::{apply_security_headers, text_response, waf_terminal_response};
+use super::super::response::{apply_security_headers, text_response, waf_http_terminal_response};
 use super::super::{
   SystemAccessLogContext, apply_alt_svc_header, capture_response_body_for_waf, compression,
   response_body_capture_error_response, waf_body_input, with_downstream_response_timeout,
@@ -119,7 +119,7 @@ pub(in crate::proxy::http) async fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      return waf_terminal_response(terminal, &mutations);
+      return waf_http_terminal_response(terminal, &mutations);
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }

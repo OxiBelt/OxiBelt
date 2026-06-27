@@ -307,6 +307,33 @@ fn block_ip_uses_apply_with_duration_route_and_dry_run() {
 }
 
 #[test]
+fn silent_close_ip_uses_dynamic_silent_close_action() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "silent-close",
+    "ip",
+    "203.0.113.11",
+    "--ttl",
+    "30m",
+  ])
+  .expect("silent-close command should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.endpoint, "/admin/v1/dynamic-policies/apply");
+  let body = plan.body.expect("request body");
+  assert_eq!(body["action"], "silent_close");
+  assert_eq!(body["ttl_seconds"], 1800);
+  assert_eq!(body["name"], "silent_close-client_ip-203-0-113-11");
+}
+
+#[test]
 fn challenge_person_proof_uses_dynamic_challenge_action() {
   let parsed = Cli::try_parse_from([
     "oxibeltctl",

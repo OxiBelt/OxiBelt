@@ -542,6 +542,85 @@ body = "blocked"
 }
 
 #[test]
+fn request_phase_silent_close_sets_no_response_terminal() {
+  let engine = compile_waf_fragment(
+    "waf-request-silent-close",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "silent-request"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/silent'"
+
+[[waf.rules.actions]]
+type = "silent_close"
+"#,
+  );
+
+  let decision = evaluate_simple_request(&engine, "/silent");
+  assert!(
+    decision
+      .terminal
+      .as_ref()
+      .is_some_and(|terminal| terminal.is_silent_close())
+  );
+}
+
+#[test]
+fn response_phase_silent_close_sets_no_response_terminal() {
+  let engine = compile_waf_fragment(
+    "waf-response-silent-close",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "silent-response"
+phase = "response"
+priority = 10
+when = "Response.Http.Status >= 500"
+
+[[waf.rules.actions]]
+type = "silent_close"
+"#,
+  );
+  let method = Method::GET;
+  let uri: Uri = "/upstream-error".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+  let response_headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let peer_addr = "203.0.113.10:49152".parse().unwrap();
+
+  let decision = engine.evaluate_response(WafResponseInput {
+    request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
+    response_id: "test-response-id",
+    received_at_unix_ms: 1_700_000_000_123,
+    version: http::Version::HTTP_11,
+    status: StatusCode::BAD_GATEWAY,
+    headers: &response_headers,
+    body: None,
+    upstream_name: "app",
+    upstream_pool: None,
+    upstream_scheme: "http",
+    upstream_connect_time_ms: None,
+    upstream_first_byte_time_ms: Some(7),
+    upstream_error: None,
+  });
+
+  assert!(
+    decision
+      .terminal
+      .as_ref()
+      .is_some_and(|terminal| terminal.is_silent_close())
+  );
+}
+
+#[test]
 fn route_level_rate_limit_action_blocks_second_matching_request() {
   let temp_dir = common::TempDir::new("waf-rate-limit-action");
   let (cert_path, key_path) =
@@ -3578,6 +3657,55 @@ reason = "first"
     .find(|hit| hit.name == "later-stream-close")
     .expect("later stream rule snapshot should exist");
   assert_eq!(later_hit.hits, 0);
+}
+
+#[test]
+fn stream_phase_silent_close_sets_silent_decision() {
+  let engine = compile_waf_fragment(
+    "waf-stream-silent-close",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "silent-stream"
+phase = "stream"
+priority = 10
+when = "Stream.Payload.contains('block-me')"
+
+[[waf.rules.actions]]
+type = "silent_close"
+"#,
+  );
+  let method = Method::GET;
+  let uri: Uri = "/ws".parse().expect("URI should parse");
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+
+  let decision = engine.evaluate_stream(websocket_stream_input(
+    request_input(
+      &method,
+      &uri,
+      &headers,
+      &tags,
+      "203.0.113.10:49152".parse().unwrap(),
+    ),
+    WafStreamDirection::DownstreamToUpstream,
+    WafStreamUnit::WebsocketMessage,
+    b"please block-me",
+    false,
+    WafWebSocketStreamMetadata {
+      opcode: "message",
+      fin: true,
+      is_control: false,
+      message_opcode: Some("text"),
+      frame_payload_size: 15,
+    },
+  ));
+
+  assert!(decision.silent_close);
+  assert!(decision.close.is_none());
 }
 
 #[test]
@@ -10678,6 +10806,49 @@ type = "close_stream"
     let error_chain = format!("{error:#}");
     assert!(
       error_chain.contains(expected),
+      "unexpected error for {name}: {error}"
+    );
+  }
+}
+
+#[test]
+fn validation_rejects_silent_close_response_fields() {
+  for (name, fields) in [
+    ("silent-close-status", r#"status = 444"#),
+    ("silent-close-body", r#"body = "blocked""#),
+    ("silent-close-stream-code", r#"websocket_code = 4001"#),
+    (
+      "silent-close-webtransport-code",
+      r#"webtransport_code = 42"#,
+    ),
+    ("silent-close-reason", r#"reason = "blocked""#),
+  ] {
+    let temp_dir = common::TempDir::new(name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+    let base_config = common::minimal_config_toml(&cert_path, &key_path);
+    let raw = format!(
+      r#"{base_config}
+
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "{name}"
+phase = "request"
+priority = 1
+when = "Request.Http.Path == '/silent'"
+
+[[waf.rules.actions]]
+type = "silent_close"
+{fields}
+"#
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config.validate().expect_err("validation should fail");
+    let error_chain = format!("{error:#}");
+    assert!(
+      error_chain.contains("silent_close supports only priority"),
       "unexpected error for {name}: {error}"
     );
   }

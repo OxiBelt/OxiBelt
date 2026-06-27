@@ -1,7 +1,6 @@
 //! Plain HTTP listener fast path.
 //! This path parses enough HTTP/1 to enforce configured proxy and WAF policy before forwarding.
 
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +21,9 @@ use crate::limits::ConnectionLimitContext;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http;
 use crate::proxy::http::fast_path::stage_timing;
-use crate::proxy::http::response::{apply_security_headers, text_response};
+use crate::proxy::http::response::{
+  SilentClose, apply_security_headers, is_silent_close_response, text_response,
+};
 use crate::proxy::http::static_files::{
   self, StaticBodyPlan, StaticResponseHeadBytes, StaticResponsePlan,
 };
@@ -55,6 +56,7 @@ struct TimedStaticResponsePlan {
   response: StaticResponsePlan,
   response_send_timeout: Duration,
   access_log: Option<StaticFastPathContext>,
+  silent_close: bool,
 }
 
 enum SendfilePreflight {
@@ -134,17 +136,17 @@ pub(super) async fn handle_connection(
     let drain = drain.clone();
     async move {
       let _request_guard = state.runtime_introspection_guard(RuntimeCounter::Http1Request);
-      let response = match state.config.listeners.http_mode {
-        HttpListenerMode::RedirectToHttps => super::redirect_to_https(&request),
+      match state.config.listeners.http_mode {
+        HttpListenerMode::RedirectToHttps => Ok(super::redirect_to_https(&request)),
         HttpListenerMode::Proxy => {
           if request_index.unwrap_or(usize::MAX) >= state.config.limits.max_requests_per_connection
           {
-            text_response(
+            Ok(text_response(
               StatusCode::TOO_MANY_REQUESTS,
               "too many requests on this connection",
-            )
+            ))
           } else {
-            http::handle(
+            let response = http::handle(
               request,
               peer_addr,
               None,
@@ -155,12 +157,19 @@ pub(super) async fn handle_connection(
               "http",
               drain,
             )
-            .await
+            .await;
+            if is_silent_close_response(&response) {
+              Err(SilentClose)
+            } else {
+              Ok(response)
+            }
           }
         }
-        HttpListenerMode::Off => text_response(StatusCode::NOT_FOUND, "HTTP listener is disabled"),
-      };
-      Ok::<_, Infallible>(response)
+        HttpListenerMode::Off => Ok(text_response(
+          StatusCode::NOT_FOUND,
+          "HTTP listener is disabled",
+        )),
+      }
     }
   });
   let mut builder = hyper::server::conn::http1::Builder::new();
@@ -305,6 +314,9 @@ async fn try_sendfile_fast_path_inner(
     };
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
 
+    if plan.silent_close {
+      return Ok(SendfilePreflight::Done);
+    }
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
     emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan);
     buffer = request.remaining;
@@ -382,6 +394,7 @@ async fn eligible_static_plan(
           snapshot.config.limits.response_send_timeout_ms,
         ),
         access_log: None,
+        silent_close: false,
       });
     }
   };
@@ -484,6 +497,7 @@ async fn eligible_static_plan(
       response: plan,
       response_send_timeout,
       access_log,
+      silent_close: false,
     });
   }
   clear_cached_static_response_heads(&mut plan);

@@ -2,8 +2,8 @@
 
 use super::super::{
   BodyNeed, BodyTextCaches, CompiledAction, EvalContext, HeaderMutation, PersonProofRequestStatus,
-  RequestWafDecision, ResponseWafDecision, TransactionBudget, WafActionConfig, WafEngine, WafPhase,
-  WafStreamClose, WafStreamDecision, WafTerminalResponse,
+  RequestWafDecision, ResponseWafDecision, TransactionBudget, WafActionConfig, WafEngine,
+  WafHttpTerminal, WafPhase, WafStreamClose, WafStreamDecision, WafTerminalResponse,
 };
 use super::fixture::{BuiltFixture, header_value_to_string};
 use super::types::{
@@ -75,11 +75,7 @@ pub(super) fn summarize_request_decision(
   decision: RequestWafDecision,
 ) {
   if let Some(terminal) = decision.terminal {
-    report.actions.push(OxiRuleActionSummary {
-      action: "terminal".to_string(),
-      target: Some(terminal.status.as_u16().to_string()),
-    });
-    report.terminal = Some(terminal_summary(terminal));
+    summarize_http_terminal(report, "terminal", terminal);
   }
   append_mutations(
     &mut report.mutations,
@@ -122,11 +118,7 @@ pub(super) fn summarize_response_decision(
   decision: ResponseWafDecision,
 ) {
   if let Some(terminal) = decision.terminal {
-    report.actions.push(OxiRuleActionSummary {
-      action: "response_terminal".to_string(),
-      target: Some(terminal.status.as_u16().to_string()),
-    });
-    report.terminal = Some(terminal_summary(terminal));
+    summarize_http_terminal(report, "response_terminal", terminal);
   }
   append_mutations(
     &mut report.mutations,
@@ -151,6 +143,12 @@ pub(super) fn summarize_stream_decision(
       target: Some(close.reason.clone()),
     });
     report.stream_close = Some(stream_close_summary(close));
+  }
+  if decision.silent_close {
+    report.actions.push(OxiRuleActionSummary {
+      action: "silent_close".to_string(),
+      target: None,
+    });
   }
 }
 
@@ -256,6 +254,28 @@ fn terminal_summary(terminal: WafTerminalResponse) -> OxiRuleTerminalSummary {
   }
 }
 
+fn summarize_http_terminal(
+  report: &mut OxiRuleDevtoolsReport,
+  action: &str,
+  terminal: WafHttpTerminal,
+) {
+  match terminal {
+    WafHttpTerminal::Response(terminal) => {
+      report.actions.push(OxiRuleActionSummary {
+        action: action.to_string(),
+        target: Some(terminal.status.as_u16().to_string()),
+      });
+      report.terminal = Some(terminal_summary(terminal));
+    }
+    WafHttpTerminal::SilentClose => {
+      report.actions.push(OxiRuleActionSummary {
+        action: "silent_close".to_string(),
+        target: None,
+      });
+    }
+  }
+}
+
 fn stream_close_summary(close: WafStreamClose) -> OxiRuleStreamCloseSummary {
   OxiRuleStreamCloseSummary {
     websocket_code: close.websocket_code,
@@ -316,6 +336,7 @@ fn action_label(action: &CompiledAction) -> String {
 fn action_config_label(action: &WafActionConfig) -> &'static str {
   match action {
     WafActionConfig::Reject { .. } => "reject",
+    WafActionConfig::SilentClose { .. } => "silent_close",
     WafActionConfig::ContinueResponse { .. } => "continue_response",
     WafActionConfig::ReplaceResponse { .. } => "replace_response",
     WafActionConfig::RejectResponse { .. } => "reject_response",

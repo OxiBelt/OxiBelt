@@ -5,7 +5,7 @@ use tracing::warn;
 
 use super::{
   HeaderMutation, PersonProofRequestStatus, PersonProofState, RequestWafDecision,
-  WafDuplicateMetadataPolicy, WafEngine, WafFailPolicy, WafRequestInput, WafTerminalResponse,
+  WafDuplicateMetadataPolicy, WafEngine, WafFailPolicy, WafHttpTerminal, WafRequestInput,
   person_proof_dynamic, person_proof_rate_limited_decision, request_metadata_has_duplicates,
 };
 
@@ -58,7 +58,7 @@ impl WafEngine {
       decision.response_header_mutations.extend(mutation);
       return Ok(decision);
     }
-    decision.terminal = Some(self.person_proof.issue_challenge(input, policy)?);
+    decision.terminal = Some(self.person_proof.issue_challenge(input, policy)?.into());
     Ok(decision)
   }
 
@@ -97,7 +97,7 @@ impl WafEngine {
       && request_metadata_has_duplicates(input)
     {
       return RequestWafDecision {
-        terminal: Some(WafTerminalResponse::new(
+        terminal: Some(WafHttpTerminal::response(
           StatusCode::BAD_REQUEST,
           "duplicate request metadata".to_string(),
         )),
@@ -118,7 +118,7 @@ impl WafEngine {
         WafFailPolicy::Closed => {
           warn!(error = %error, "WAF request evaluation failed closed");
           RequestWafDecision {
-            terminal: Some(WafTerminalResponse::new(
+            terminal: Some(WafHttpTerminal::response(
               StatusCode::FORBIDDEN,
               "WAF evaluation failed".to_string(),
             )),

@@ -11,6 +11,7 @@ use regex::{Regex, RegexBuilder};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -370,6 +371,20 @@ pub enum WafActionConfig {
     #[serde(default)]
     body: Option<String>,
   },
+  SilentClose {
+    #[serde(default)]
+    priority: i64,
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    websocket_code: Option<u16>,
+    #[serde(default)]
+    webtransport_code: Option<u32>,
+    #[serde(default)]
+    reason: Option<String>,
+  },
   ContinueResponse {
     #[serde(default)]
     priority: i64,
@@ -598,6 +613,7 @@ impl WafActionConfig {
   pub(super) fn priority(&self) -> i64 {
     match self {
       Self::Reject { priority, .. }
+      | Self::SilentClose { priority, .. }
       | Self::ContinueResponse { priority }
       | Self::ReplaceResponse { priority, .. }
       | Self::RejectResponse { priority, .. }
@@ -1069,6 +1085,23 @@ fn validate_actions(
       WafActionConfig::Reject { status, .. } => {
         require_phase(rule, WafPhase::Request, "reject")?;
         validate_status(*status, &rule.name)?;
+      }
+      WafActionConfig::SilentClose {
+        status,
+        body,
+        websocket_code,
+        webtransport_code,
+        reason,
+        ..
+      } => {
+        if status.is_some()
+          || body.is_some()
+          || websocket_code.is_some()
+          || webtransport_code.is_some()
+          || reason.is_some()
+        {
+          bail!("WAF rule {} silent_close supports only priority", rule.name);
+        }
       }
       WafActionConfig::ContinueResponse { .. } => {
         require_phase(rule, WafPhase::Response, "continue_response")?;
@@ -1824,7 +1857,7 @@ impl WafEngine {
         WafFailPolicy::Closed => {
           warn!(error = %error, "WAF response evaluation failed closed");
           ResponseWafDecision {
-            terminal: Some(WafTerminalResponse::new(
+            terminal: Some(WafHttpTerminal::response(
               StatusCode::FORBIDDEN,
               "WAF evaluation failed".to_string(),
             )),
@@ -1851,6 +1884,7 @@ impl WafEngine {
           warn!(error = %error, "WAF stream evaluation failed closed");
           WafStreamDecision {
             close: Some(WafStreamClose::default()),
+            ..WafStreamDecision::default()
           }
         }
       },
@@ -2788,7 +2822,7 @@ pub struct WafUpstreamError<'a> {
 
 #[derive(Debug, Default)]
 pub struct RequestWafDecision {
-  pub terminal: Option<WafTerminalResponse>,
+  pub terminal: Option<WafHttpTerminal>,
   pub request_header_mutations: Vec<HeaderMutation>,
   pub response_header_mutations: Vec<HeaderMutation>,
   pub tags: Vec<(String, String)>,
@@ -2799,7 +2833,7 @@ pub struct RequestWafDecision {
 
 #[derive(Debug, Default)]
 pub struct ResponseWafDecision {
-  pub terminal: Option<WafTerminalResponse>,
+  pub terminal: Option<WafHttpTerminal>,
   pub response_header_mutations: Vec<HeaderMutation>,
   pub access_logs: Vec<AccessLogRecord>,
 }
@@ -2807,6 +2841,7 @@ pub struct ResponseWafDecision {
 #[derive(Debug, Clone, Default)]
 pub struct WafStreamDecision {
   pub close: Option<WafStreamClose>,
+  pub silent_close: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2838,7 +2873,7 @@ fn record_request_tag(
 
 fn person_proof_rate_limited_decision() -> RequestWafDecision {
   RequestWafDecision {
-    terminal: Some(WafTerminalResponse::new(
+    terminal: Some(WafHttpTerminal::response(
       StatusCode::TOO_MANY_REQUESTS,
       "person proof token capacity exhausted".to_string(),
     )),
@@ -2848,13 +2883,13 @@ fn person_proof_rate_limited_decision() -> RequestWafDecision {
 
 fn apply_crs_request_decision(crs: CrsDecision, decision: &mut RequestWafDecision) {
   if decision.terminal.is_none() {
-    decision.terminal = crs.terminal;
+    decision.terminal = crs.terminal.map(Into::into);
   }
 }
 
 fn apply_crs_response_decision(crs: CrsDecision, decision: &mut ResponseWafDecision) {
   if decision.terminal.is_none() {
-    decision.terminal = crs.terminal;
+    decision.terminal = crs.terminal.map(Into::into);
   }
 }
 
@@ -2872,6 +2907,46 @@ impl WafTerminalResponse {
       body,
       headers: Vec::new(),
     }
+  }
+}
+
+#[derive(Debug)]
+pub enum WafHttpTerminal {
+  Response(WafTerminalResponse),
+  SilentClose,
+}
+
+impl WafHttpTerminal {
+  pub(super) fn response(status: StatusCode, body: String) -> Self {
+    Self::Response(WafTerminalResponse::new(status, body))
+  }
+
+  pub fn is_silent_close(&self) -> bool {
+    matches!(self, Self::SilentClose)
+  }
+
+  pub fn into_response(self) -> Option<WafTerminalResponse> {
+    match self {
+      Self::Response(response) => Some(response),
+      Self::SilentClose => None,
+    }
+  }
+}
+
+impl Deref for WafHttpTerminal {
+  type Target = WafTerminalResponse;
+
+  fn deref(&self) -> &Self::Target {
+    match self {
+      Self::Response(response) => response,
+      Self::SilentClose => panic!("silent_close WAF terminal has no HTTP response"),
+    }
+  }
+}
+
+impl From<WafTerminalResponse> for WafHttpTerminal {
+  fn from(response: WafTerminalResponse) -> Self {
+    Self::Response(response)
   }
 }
 
@@ -2914,10 +2989,14 @@ fn apply_request_actions(
     tx.count_mutation()?;
     match action {
       CompiledAction::Config(WafActionConfig::Reject { status, body, .. }) => {
-        decision.terminal = Some(WafTerminalResponse::new(
+        decision.terminal = Some(WafHttpTerminal::response(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
+        return Ok(person_proof_policy);
+      }
+      CompiledAction::Config(WafActionConfig::SilentClose { .. }) => {
+        decision.terminal = Some(WafHttpTerminal::SilentClose);
         return Ok(person_proof_policy);
       }
       CompiledAction::Config(WafActionConfig::SetRequestHeader { name, value, .. }) => {
@@ -2989,7 +3068,7 @@ fn apply_request_actions(
           status: *status,
         };
         if let Some(status) = rate_limits.check_rate_limit(context, check) {
-          decision.terminal = Some(WafTerminalResponse::new(
+          decision.terminal = Some(WafHttpTerminal::response(
             status,
             body
               .clone()
@@ -3008,14 +3087,14 @@ fn apply_request_actions(
         if person_proof_policy.challenge_suppressed(ctx.person_proof) {
           continue;
         }
-        decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?);
+        decision.terminal = Some(person_proof.issue_challenge(input, policy.clone())?.into());
         return Ok(person_proof_policy);
       }
       CompiledAction::EmitMitigation(action) => {
         if let Some(terminal) =
           apply_mitigation_http_action(action, rule, ctx, None, mitigation, tx)?
         {
-          decision.terminal = Some(terminal);
+          decision.terminal = Some(terminal.into());
           return Ok(person_proof_policy);
         }
       }
@@ -3048,9 +3127,13 @@ fn apply_response_actions(
     tx.count_mutation()?;
     match action {
       CompiledAction::Config(WafActionConfig::ContinueResponse { .. }) => return Ok(()),
+      CompiledAction::Config(WafActionConfig::SilentClose { .. }) => {
+        decision.terminal = Some(WafHttpTerminal::SilentClose);
+        return Ok(());
+      }
       CompiledAction::Config(WafActionConfig::ReplaceResponse { status, body, .. })
       | CompiledAction::Config(WafActionConfig::RejectResponse { status, body, .. }) => {
-        decision.terminal = Some(WafTerminalResponse::new(
+        decision.terminal = Some(WafHttpTerminal::response(
           StatusCode::from_u16(*status)?,
           body.clone().unwrap_or_else(|| "Blocked by WAF".to_string()),
         ));
@@ -3091,7 +3174,7 @@ fn apply_response_actions(
         if let Some(terminal) =
           apply_mitigation_http_action(action, rule, ctx, Some(input), mitigation, tx)?
         {
-          decision.terminal = Some(terminal);
+          decision.terminal = Some(terminal.into());
           return Ok(());
         }
       }
@@ -3139,6 +3222,10 @@ fn apply_stream_actions(
           webtransport_code: *webtransport_code,
           reason: reason.clone(),
         });
+        return Ok(());
+      }
+      CompiledAction::Config(WafActionConfig::SilentClose { .. }) => {
+        decision.silent_close = true;
         return Ok(());
       }
       CompiledAction::EmitMitigation(action) => {

@@ -4730,7 +4730,15 @@
                   "type": "string"
                 },
                 "action": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Dynamic policy action. silent_close closes or resets the downstream connection without sending an HTTP response and does not support status, body, rate, or burst.",
+                  "enum": [
+                    "allow",
+                    "reject",
+                    "silent_close",
+                    "rate_limit",
+                    "challenge"
+                  ]
                 },
                 "subject_type": {
                   "type": "string",

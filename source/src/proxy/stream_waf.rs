@@ -21,7 +21,7 @@ mod webtransport;
 mod tests;
 
 pub(crate) use webtransport::{
-  blocked_close, check_webtransport_payload, webtransport_datagram_metadata,
+  blocked_close, blocked_silent_close, check_webtransport_payload, webtransport_datagram_metadata,
   webtransport_stream_metadata,
 };
 
@@ -34,22 +34,48 @@ pub(crate) use context::{StreamWafRequestContext, StreamWafRequestSeed};
 
 #[derive(Debug)]
 pub(crate) struct StreamWafBlocked {
-  close: WafStreamClose,
+  close: Option<WafStreamClose>,
+  silent_close: bool,
 }
 
 impl StreamWafBlocked {
   pub(crate) fn new(close: WafStreamClose) -> Self {
-    Self { close }
+    Self {
+      close: Some(close),
+      silent_close: false,
+    }
+  }
+
+  pub(crate) fn silent_close() -> Self {
+    Self {
+      close: None,
+      silent_close: true,
+    }
   }
 
   pub(crate) fn close(&self) -> &WafStreamClose {
-    &self.close
+    self
+      .close
+      .as_ref()
+      .expect("stream WAF blocked without close payload")
+  }
+
+  pub(crate) fn close_option(&self) -> Option<&WafStreamClose> {
+    self.close.as_ref()
+  }
+
+  pub(crate) fn is_silent_close(&self) -> bool {
+    self.silent_close
   }
 }
 
 impl std::fmt::Display for StreamWafBlocked {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    formatter.write_str("stream closed by stream-phase WAF rule")
+    if self.silent_close {
+      formatter.write_str("stream silently closed by stream-phase WAF rule")
+    } else {
+      formatter.write_str("stream closed by stream-phase WAF rule")
+    }
   }
 }
 
@@ -190,6 +216,9 @@ where
         ) {
           Ok(outcome) => outcome,
           Err(blocked) => {
+            if blocked.is_silent_close() {
+              return Ok(());
+            }
             close_websocket_pair(&mut downstream_writer, &mut upstream_writer, blocked.close())
               .await;
             return Ok(());
@@ -215,6 +244,9 @@ where
         ) {
           Ok(outcome) => outcome,
           Err(blocked) => {
+            if blocked.is_silent_close() {
+              return Ok(());
+            }
             close_websocket_pair(&mut downstream_writer, &mut upstream_writer, blocked.close())
               .await;
             return Ok(());
@@ -333,6 +365,9 @@ fn inspect_websocket_frame(
   );
   if let Some(close) = raw_decision.close {
     return Err(StreamWafBlocked::new(close));
+  }
+  if raw_decision.silent_close {
+    return Err(StreamWafBlocked::silent_close());
   }
 
   if websocket_is_control(frame.opcode) {
@@ -530,6 +565,8 @@ fn evaluate_websocket_message(
   );
   if let Some(close) = decision.close {
     Err(StreamWafBlocked::new(close))
+  } else if decision.silent_close {
+    Err(StreamWafBlocked::silent_close())
   } else {
     Ok(())
   }

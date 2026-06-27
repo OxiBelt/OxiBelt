@@ -58,6 +58,7 @@ enum DispatcherEvent {
   Activity(SessionId),
   AdminClose(SessionId, u32, String),
   Blocked(SessionId, WafStreamClose),
+  SilentBlocked(SessionId),
   SessionEnded(SessionId),
   ConnectionClosed,
   Fatal(anyhow::Error),
@@ -207,6 +208,9 @@ pub(super) async fn serve_webtransport_connection(
               Some(&close),
               b"stream WAF closed WebTransport session",
             );
+          }
+          Some(DispatcherEvent::SilentBlocked(session_id)) => {
+            session::close_session_silent(&mut sessions, &mut session_index, session_id);
           }
           Some(DispatcherEvent::SessionEnded(session_id)) => {
             close_session(

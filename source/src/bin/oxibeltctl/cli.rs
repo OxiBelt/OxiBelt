@@ -74,6 +74,8 @@ pub(crate) enum Command {
   DynamicPolicy(DynamicPolicyCommand),
   Block(MitigationArgs),
   Allow(MitigationArgs),
+  #[command(name = "silent-close")]
+  SilentClose(MitigationArgs),
   Challenge(ChallengeArgs),
   RateLimit(RateLimitArgs),
   Mitigate(MitigateArgs),

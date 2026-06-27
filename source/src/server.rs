@@ -29,7 +29,7 @@ use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::pool_health;
 use crate::proxy::http::body::ProxyBody;
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::response::{SilentClose, is_silent_close_response, text_response};
 use crate::proxy::{http, http3};
 use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
@@ -2134,28 +2134,30 @@ async fn handle_connection(
     let drain = drain.clone();
     async move {
       let _request_guard = state.runtime_introspection_guard(request_counter);
-      Ok::<_, Infallible>(
-        if request_index >= state.config.limits.max_requests_per_connection {
-          text_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many requests on this connection",
-          )
-        } else {
-          http::handle_with_forwarded_header_cache(
-            request,
-            peer_addr,
-            tcp_max_hop,
-            transport_metadata,
-            tls_metadata,
-            connection_limit_context.clone(),
-            forwarded_header_cache,
-            state,
-            "https",
-            drain,
-          )
-          .await
-        },
+      if request_index >= state.config.limits.max_requests_per_connection {
+        return Ok(text_response(
+          StatusCode::TOO_MANY_REQUESTS,
+          "too many requests on this connection",
+        ));
+      }
+      let response = http::handle_with_forwarded_header_cache(
+        request,
+        peer_addr,
+        tcp_max_hop,
+        transport_metadata,
+        tls_metadata,
+        connection_limit_context.clone(),
+        forwarded_header_cache,
+        state,
+        "https",
+        drain,
       )
+      .await;
+      if is_silent_close_response(&response) {
+        Err(SilentClose)
+      } else {
+        Ok(response)
+      }
     }
   });
 

@@ -20,12 +20,16 @@ pub(super) async fn report_stream_task_result<F>(
   F: std::future::Future<Output = anyhow::Result<()>>,
 {
   let result = future.await;
-  if let Err(error) = result
-    && let Some(close) = stream_waf_bridge::blocked_close(&error)
-  {
-    let _ = events
-      .send(DispatcherEvent::Blocked(session_id, close.clone()))
-      .await;
+  if let Err(error) = result {
+    if stream_waf_bridge::blocked_silent_close(&error) {
+      let _ = events
+        .send(DispatcherEvent::SilentBlocked(session_id))
+        .await;
+    } else if let Some(close) = stream_waf_bridge::blocked_close(&error) {
+      let _ = events
+        .send(DispatcherEvent::Blocked(session_id, close.clone()))
+        .await;
+    }
   }
 }
 
@@ -42,7 +46,11 @@ pub(super) async fn report_session_task_result<F>(
       let _ = events.send(DispatcherEvent::SessionEnded(session_id)).await;
     }
     Err(error) => {
-      if let Some(close) = stream_waf_bridge::blocked_close(&error) {
+      if stream_waf_bridge::blocked_silent_close(&error) {
+        let _ = events
+          .send(DispatcherEvent::SilentBlocked(session_id))
+          .await;
+      } else if let Some(close) = stream_waf_bridge::blocked_close(&error) {
         let _ = events
           .send(DispatcherEvent::Blocked(session_id, close.clone()))
           .await;

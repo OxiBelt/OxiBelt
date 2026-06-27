@@ -200,6 +200,14 @@ pub(super) fn validate_policy_fields(
   validate_mode(mode)?;
   match action {
     "allow" | "reject" => {}
+    "silent_close" => {
+      if status.is_some() || body.is_some() {
+        bail!("dynamic policy silent_close action does not support status or body");
+      }
+      if rate.is_some() || burst.is_some() {
+        bail!("dynamic policy silent_close action does not support rate or burst");
+      }
+    }
     "challenge" => {
       if rate.is_some() || burst.is_some() {
         bail!("dynamic policy challenge action does not support rate or burst");
