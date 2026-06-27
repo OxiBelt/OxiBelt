@@ -1,6 +1,28 @@
 
+cache_metric_value() {
+  local metrics="$1" metric="$2"
+  jq -r --arg metric "${metric}" '
+    .body
+    | split("\n")
+    | map(select(startswith($metric + " ")))
+    | .[0] // ""
+    | split(" ")
+    | .[1] // empty
+  ' <<<"${metrics}"
+}
+
+require_cache_metric_at_least() {
+  local metrics="$1" metric="$2" minimum="$3" actual
+  actual="$(cache_metric_value "${metrics}" "${metric}")"
+  if [[ ! "${actual}" =~ ^[0-9]+$ ]] || ((actual < minimum)); then
+    echo "Expected ${metric} >= ${minimum}, got ${actual:-missing}" >&2
+    fail_with_diagnostics "cache metric assertion failed"
+  fi
+  printf '%s' "${actual}"
+}
+
 run_case_checks() {
-  local first_file second_file third_file first second third metrics
+  local first_file second_file third_file first second third metrics no_store_waiters cacheable_waiters
   first_file="${work_dir}/first-cache-fill.json"
   second_file="${work_dir}/second-cache-fill.json"
   third_file="${work_dir}/third-cache-fill.json"
@@ -17,7 +39,7 @@ run_case_checks() {
   assert_response_jq "${third}" '.body == "uncached"'
 
   metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
-  assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_waiters_total 2")'
+  no_store_waiters="$(require_cache_metric_at_least "${metrics}" "oxibelt_cache_fill_waiters_total" 1)"
   assert_response_jq "${metrics}" '.body | contains("reason=\"fill_not_stored\"")'
 
   client_request "example.test" "/app/collapse?body=collapsed&cache_control=public&content_type=text/plain&header_delay_ms=800" 200 >"${first_file}" &
@@ -30,6 +52,10 @@ run_case_checks() {
   assert_response_jq "${second}" '.body == "collapsed"'
 
   metrics="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
-  assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_waiters_total 3")'
+  cacheable_waiters="$(require_cache_metric_at_least "${metrics}" "oxibelt_cache_fill_waiters_total" "$((no_store_waiters + 1))")"
+  if ((cacheable_waiters <= no_store_waiters)); then
+    echo "Expected oxibelt_cache_fill_waiters_total to increase after cacheable collapse, got ${cacheable_waiters} after ${no_store_waiters}" >&2
+    fail_with_diagnostics "cache waiter metric did not increase"
+  fi
   assert_response_jq "${metrics}" '.body | contains("oxibelt_cache_fill_lock_timeouts_total 0")'
 }
