@@ -11,7 +11,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::waf::{AccessLogFieldConfig, WafConfig};
+use crate::waf::WafConfig;
 
 mod admin_legacy;
 mod admin_runtime;
@@ -29,6 +29,7 @@ mod ipm;
 mod lb_policy_compat;
 mod limits;
 mod loader;
+mod logging;
 mod outbound_revocation;
 mod quic;
 mod rate_limit;
@@ -69,6 +70,7 @@ use limits::{
 use loader::{
   absolute_config_path, load_toml_with_includes, load_toml_with_includes_and_overrides,
 };
+pub use logging::*;
 pub use outbound_revocation::*;
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
@@ -3858,60 +3860,6 @@ fn validate_postgres_identifier(field_name: &str, value: &str) -> anyhow::Result
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct LoggingConfig {
-  #[serde(default = "default_log_level")]
-  pub level: String,
-  #[serde(default)]
-  pub access_log: LoggingAccessLogConfig,
-}
-
-impl Default for LoggingConfig {
-  fn default() -> Self {
-    Self {
-      level: default_log_level(),
-      access_log: LoggingAccessLogConfig::default(),
-    }
-  }
-}
-
-impl LoggingConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    if self.level.trim().is_empty() {
-      bail!("logging.level must not be empty");
-    }
-    crate::waf::validate_access_log_field_configs("logging.access_log", &self.access_log.fields)?;
-    self
-      .access_log
-      .database
-      .validate_with_prefix("logging.access_log.database")?;
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct LoggingAccessLogConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default = "default_true")]
-  pub stdout: bool,
-  #[serde(default = "default_system_access_log_field_configs")]
-  pub fields: Vec<AccessLogFieldConfig>,
-  #[serde(default)]
-  pub database: DatabaseAccessLogConfig,
-}
-
-impl Default for LoggingAccessLogConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      stdout: true,
-      fields: default_system_access_log_field_configs(),
-      database: DatabaseAccessLogConfig::default(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeDrainConfig {
   #[serde(default = "default_drain_graceful_timeout_ms")]
   pub graceful_timeout_ms: u64,
@@ -5510,53 +5458,6 @@ impl HttpVersion {
 
 fn default_true() -> bool {
   true
-}
-
-fn default_log_level() -> String {
-  "info".to_string()
-}
-
-fn default_system_access_log_field_configs() -> Vec<AccessLogFieldConfig> {
-  [
-    ("request_id", "Request.Id"),
-    ("response_id", "Response.Id"),
-    ("transaction_id", "Context.TransactionId"),
-    ("method", "Request.Http.Method"),
-    ("uri", "Request.Http.Uri"),
-    ("path", "Request.Http.Path"),
-    ("query", "Request.Http.Query"),
-    ("request_version", "Request.Http.Version"),
-    ("host", "Request.Http.Host"),
-    ("user_agent", "Request.Headers.getAll('User-Agent')"),
-    ("client_ip", "Request.Client.Ip"),
-    ("client_port", "Request.Client.Port"),
-    ("protocol", "Request.Protocol"),
-    ("transport", "Request.Transport.Network"),
-    ("tls", "Request.Tls.Enabled"),
-    ("route", "Context.RouteName"),
-    ("status", "Response.Http.Status"),
-    ("reason", "Response.Http.Reason"),
-    ("response_body_bytes", "Response.Body.Size"),
-    ("upstream", "Response.Upstream.Name"),
-    ("upstream_pool", "Response.Upstream.Pool"),
-    ("upstream_scheme", "Response.Upstream.Scheme"),
-    (
-      "upstream_connect_time_ms",
-      "Response.Upstream.ConnectTimeMs",
-    ),
-    (
-      "upstream_first_byte_time_ms",
-      "Response.Upstream.FirstByteTimeMs",
-    ),
-    ("request_received_at_unix_ms", "Request.ReceivedAtUnixMs"),
-    ("response_received_at_unix_ms", "Response.ReceivedAtUnixMs"),
-  ]
-  .into_iter()
-  .map(|(name, value)| AccessLogFieldConfig {
-    name: name.to_string(),
-    value: value.to_string(),
-  })
-  .collect()
 }
 
 fn default_hot_reload_poll_interval_ms() -> u64 {
