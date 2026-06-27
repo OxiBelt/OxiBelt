@@ -4,8 +4,9 @@ use serde_json::Value;
 use super::{
   GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool, GeneratedRoute,
   GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
-  backend_ref_is_service, filters::ParsedRouteFilters, filters::parse_route_filters,
-  intersect_hosts, sanitize_name, string_at, u32_at,
+  backend_ref_is_service, backend_service_port, endpoint_slice_discovery_port,
+  filters::ParsedRouteFilters, filters::parse_route_filters, intersect_hosts, sanitize_name,
+  string_at, u32_at,
 };
 use crate::cli::BackendResolution;
 use crate::model::{KubernetesObject, object_ref as model_object_ref};
@@ -252,12 +253,22 @@ impl TranslationState {
       ));
       return None;
     };
-    let Some(port) = backend_port(backend, service) else {
+    let Some(service_port) = backend_service_port(backend, service) else {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} does not expose the referenced port"),
       ));
       return None;
+    };
+    let port = match endpoint_slice_discovery_port(service_port) {
+      Ok(port) => port,
+      Err(message) => {
+        self.diagnostics.push(crate::model::Diagnostic::error(
+          model_object_ref(route),
+          format!("backend Service {namespace}/{name} {message}"),
+        ));
+        return None;
+      }
     };
     Some(GeneratedKubernetesDiscovery {
       endpoint: "https://kubernetes.default.svc".to_string(),

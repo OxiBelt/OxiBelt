@@ -44,8 +44,10 @@ Set `--backend-resolution=endpoint_slice_watch` to generate a Kubernetes
 EndpointSlice discovery block for route rules that reference exactly one
 nonzero Service backend. Weighted multi-backend rules remain static-DNS-only in
 this mode and are rejected with a blocking diagnostic rather than silently
-dropping weights. Generated discovery uses the in-pod service-account token
-file:
+dropping weights. For direct EndpointSlice routing, generated discovery uses a
+named Service port as `port_name`, otherwise it uses numeric `targetPort` when
+available, falling back to the Service port only when `targetPort` is omitted.
+Generated discovery uses the in-pod service-account token file:
 
 ```toml
 token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"

@@ -1,5 +1,5 @@
 use super::super::cli::SharedArgs;
-use super::{GENERATED_HEADER, TranslationState};
+use super::{GENERATED_HEADER, GeneratedKubernetesDiscoveryPort, TranslationState};
 
 pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String {
   let mut out = String::from(GENERATED_HEADER);
@@ -69,9 +69,18 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str("scheme = ");
       out.push_str(&toml_string(&discovery.scheme));
       out.push('\n');
-      out.push_str("port = ");
-      out.push_str(&discovery.port.to_string());
-      out.push('\n');
+      match &discovery.port {
+        GeneratedKubernetesDiscoveryPort::Number(port) => {
+          out.push_str("port = ");
+          out.push_str(&port.to_string());
+          out.push('\n');
+        }
+        GeneratedKubernetesDiscoveryPort::Name(name) => {
+          out.push_str("port_name = ");
+          out.push_str(&toml_string(name));
+          out.push('\n');
+        }
+      }
       out.push_str("kubernetes_resource = \"endpoint_slice\"\n");
       out.push_str("watch = true\n");
       out.push_str("token_file = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\n");

@@ -42,6 +42,13 @@ struct ServiceInfo {
 struct ServicePort {
   name: Option<String>,
   port: u16,
+  target_port: Option<ServiceTargetPort>,
+}
+
+#[derive(Debug, Clone)]
+enum ServiceTargetPort {
+  Number(u16),
+  Name,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +109,13 @@ struct GeneratedKubernetesDiscovery {
   namespace: String,
   service: String,
   scheme: String,
-  port: u16,
+  port: GeneratedKubernetesDiscoveryPort,
+}
+
+#[derive(Debug, Clone)]
+enum GeneratedKubernetesDiscoveryPort {
+  Number(u16),
+  Name(String),
 }
 
 #[derive(Debug, Clone)]
@@ -490,6 +503,7 @@ fn parse_service(object: &KubernetesObject) -> anyhow::Result<ServiceInfo> {
     ports.push(ServicePort {
       name: string_at(&port, &["name"]).map(str::to_string),
       port: number,
+      target_port: service_target_port(&port),
     });
   }
   let scheme = object
@@ -560,21 +574,46 @@ fn parent_ref_is_gateway(parent: &Value) -> bool {
 }
 
 fn backend_port(backend: &Value, service: &ServiceInfo) -> Option<u16> {
+  backend_service_port(backend, service).map(|port| port.port)
+}
+
+fn backend_service_port<'a>(backend: &Value, service: &'a ServiceInfo) -> Option<&'a ServicePort> {
   if let Some(port) = u16_at(backend, &["port"]) {
     return service
       .ports
       .iter()
-      .any(|candidate| candidate.port == port)
-      .then_some(port);
+      .find(|candidate| candidate.port == port);
   }
   if let Some(name) = string_at(backend, &["port"]) {
     return service
       .ports
       .iter()
-      .find(|candidate| candidate.name.as_deref() == Some(name))
-      .map(|candidate| candidate.port);
+      .find(|candidate| candidate.name.as_deref() == Some(name));
   }
   None
+}
+
+fn endpoint_slice_discovery_port(
+  service_port: &ServicePort,
+) -> Result<GeneratedKubernetesDiscoveryPort, &'static str> {
+  if let Some(name) = &service_port.name {
+    return Ok(GeneratedKubernetesDiscoveryPort::Name(name.clone()));
+  }
+  match &service_port.target_port {
+    Some(ServiceTargetPort::Number(port)) => Ok(GeneratedKubernetesDiscoveryPort::Number(*port)),
+    Some(ServiceTargetPort::Name) => Err(
+      "EndpointSlice backend resolution requires unnamed Service ports to use numeric targetPort",
+    ),
+    None => Ok(GeneratedKubernetesDiscoveryPort::Number(service_port.port)),
+  }
+}
+
+fn service_target_port(port: &Value) -> Option<ServiceTargetPort> {
+  let target = port.get("targetPort")?;
+  if let Some(number) = target.as_u64().and_then(|raw| u16::try_from(raw).ok()) {
+    return Some(ServiceTargetPort::Number(number));
+  }
+  target.as_str().map(|_| ServiceTargetPort::Name)
 }
 
 fn intersect_hosts(route_hosts: &[String], listener_hostname: Option<&str>) -> Vec<String> {

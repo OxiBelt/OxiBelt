@@ -39,6 +39,12 @@ fn args() -> SharedArgs {
   }
 }
 
+fn endpoint_slice_args() -> SharedArgs {
+  let mut args = args();
+  args.backend_resolution = crate::cli::BackendResolution::EndpointSliceWatch;
+  args
+}
+
 fn objects(raw: &str) -> Vec<KubernetesObject> {
   let mut objects = Vec::new();
   for value in serde_saphyr::from_multiple::<Value>(raw).expect("yaml should parse") {
@@ -321,9 +327,7 @@ fn endpoint_slice_backend_resolution_generates_discovery_pool() {
     "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
     "    - name: app\n      port: 8080",
   );
-  let mut args = args();
-  args.backend_resolution = crate::cli::BackendResolution::EndpointSliceWatch;
-  let rendered = translate_objects(&objects(&raw), &args).expect("translate");
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
 
   assert!(
     rendered.diagnostics.is_empty(),
@@ -333,7 +337,8 @@ fn endpoint_slice_backend_resolution_generates_discovery_pool() {
   assert!(rendered.toml.contains("[[upstream_pools.discovery]]"));
   assert!(rendered.toml.contains("provider = \"kubernetes\""));
   assert!(rendered.toml.contains("service = \"app\""));
-  assert!(rendered.toml.contains("port = 8080"));
+  assert!(rendered.toml.contains("port_name = \"http\""));
+  assert!(!rendered.toml.contains("port = 8080"));
   assert!(
     rendered
       .toml
@@ -347,6 +352,111 @@ fn endpoint_slice_backend_resolution_generates_discovery_pool() {
   );
   assert!(!rendered.toml.contains("[[upstream_pools.servers]]"));
   generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn endpoint_slice_backend_resolution_uses_numeric_target_port_for_unnamed_service_port() {
+  let raw = HTTP_FIXTURE
+    .replace(
+      "  - name: http\n    port: 8080",
+      "  - port: 80\n    targetPort: 8080",
+    )
+    .replace(
+      "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
+      "    - name: app\n      port: 80",
+    );
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("service = \"app\""));
+  assert!(rendered.toml.contains("port = 8080"));
+  assert!(!rendered.toml.contains("port_name = "));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn endpoint_slice_backend_resolution_prefers_port_name_when_target_port_differs() {
+  let raw = HTTP_FIXTURE
+    .replace(
+      "  - name: http\n    port: 8080",
+      "  - name: http\n    port: 80\n    targetPort: 8080",
+    )
+    .replace(
+      "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
+      "    - name: app\n      port: 80",
+    );
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("service = \"app\""));
+  assert!(rendered.toml.contains("port_name = \"http\""));
+  assert!(!rendered.toml.contains("port = 8080"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn cluster_dns_backend_resolution_keeps_service_port_when_target_port_differs() {
+  let raw = HTTP_FIXTURE
+    .replace(
+      "  - name: http\n    port: 8080",
+      "  - name: http\n    port: 80\n    targetPort: 8080",
+    )
+    .replace(
+      "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
+      "    - name: app\n      port: 80\n      weight: 80\n    - name: canary\n      port: 80\n      weight: 20",
+    );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("origin = \"http://app.default.svc.cluster.local:80\"")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("origin = \"http://canary.default.svc.cluster.local:80\"")
+  );
+  assert!(!rendered.toml.contains("[[upstream_pools.discovery]]"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn endpoint_slice_backend_resolution_rejects_named_target_port_without_service_port_name() {
+  let raw = HTTP_FIXTURE
+    .replace(
+      "  - name: http\n    port: 8080",
+      "  - port: 80\n    targetPort: web",
+    )
+    .replace(
+      "    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20",
+      "    - name: app\n      port: 80",
+    );
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    has_error_containing(
+      &rendered,
+      "EndpointSlice backend resolution requires unnamed Service ports to use numeric targetPort"
+    ),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[upstream_pools.discovery]]"));
+  assert!(!rendered.toml.contains("[[routes]]"));
 }
 
 fn generated_toml_validates(rendered_toml: &str) {
