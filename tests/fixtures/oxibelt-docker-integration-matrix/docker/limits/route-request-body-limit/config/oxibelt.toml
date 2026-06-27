@@ -16,9 +16,9 @@ accept_error_backoff_ms = 10
 
 [listeners]
 https_bind = "0.0.0.0:8443"
-http1 = false
-http2 = false
-http3 = true
+http1 = true
+http2 = true
+http3 = false
 
 [tls]
 cert_chain = "fullchain.pem"
@@ -34,22 +34,8 @@ trusted_ca_certs = []
 enabled = true
 max_http_version = "h2"
 
-[proxy.buffering]
-request = "memory"
-response = "streaming"
-max_memory_body_bytes = 1024
-max_temp_file_bytes = 0
-
 [limits]
-max_request_body_bytes = 16
-
-[compression]
-enabled = false
-
-[waf]
-enabled = false
-mode = "enforcing"
-fail_policy = "closed"
+max_request_body_bytes = 4
 
 [[upstreams]]
 name = "http-upstream"
@@ -62,20 +48,17 @@ websocket = true
 webrtc = true
 webtransport = true
 
-[upstreams.tls.ech]
-mode = "disabled"
+[[routes]]
+name = "inherited-limit"
+hosts = ["example.test"]
+path_prefix = "/default"
+upstream = "http-upstream"
 
 [[routes]]
-name = "main-route"
+name = "upload-limit"
 hosts = ["example.test"]
-path_prefix = "/"
+path_prefix = "/upload"
 upstream = "http-upstream"
 
 [routes.limits]
-max_request_body_bytes = 4
-
-[quic.socket]
-receive_buffer_bytes = 16777216
-send_buffer_bytes = 16777216
-workers = "auto"
-reuse_port = true
+max_request_body_bytes = 8

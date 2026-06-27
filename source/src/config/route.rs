@@ -11,7 +11,7 @@ use crate::waf::RouteWafConfig;
 
 use super::route_actions::RouteActionsConfig;
 use super::{
-  BufferingMode, HttpVersion, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
+  BufferingMode, HttpVersion, LimitsConfig, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
   default_hosts, default_path_prefix,
 };
 
@@ -55,6 +55,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub buffering: RouteBufferingConfig,
   #[serde(default)]
+  pub limits: RouteLimitsConfig,
+  #[serde(default)]
   pub timeouts: RouteTimeoutConfig,
   #[serde(default)]
   pub retry: Option<RouteRetryConfig>,
@@ -70,6 +72,13 @@ impl RouteConfig {
       .prefix
       .as_deref()
       .unwrap_or(&self.path_prefix)
+  }
+
+  pub fn effective_max_request_body_bytes(&self, limits: &LimitsConfig) -> u64 {
+    self
+      .limits
+      .max_request_body_bytes
+      .unwrap_or(limits.max_request_body_bytes)
   }
 }
 
@@ -430,6 +439,21 @@ pub struct RouteBufferingConfig {
   pub max_memory_body_bytes: Option<usize>,
   #[serde(default)]
   pub max_temp_file_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteLimitsConfig {
+  #[serde(default)]
+  pub max_request_body_bytes: Option<u64>,
+}
+
+impl RouteLimitsConfig {
+  pub(super) fn validate(&self, route_name: &str) -> anyhow::Result<()> {
+    if self.max_request_body_bytes == Some(0) {
+      bail!("route {route_name} limits.max_request_body_bytes must be greater than 0");
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

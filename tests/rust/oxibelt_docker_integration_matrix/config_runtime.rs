@@ -113,6 +113,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "limits",
+      "route-request-body-limit",
+      "route request body limit overrides the global request body limit",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "limits",
       "http3-content-length-zero-body-limit",
       "HTTP/3 Content-Length zero requests still apply body limits to DATA frames",
       ExpectStart::Success,

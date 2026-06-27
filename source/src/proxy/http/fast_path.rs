@@ -364,9 +364,12 @@ impl PlainProxyFastPath {
                 metrics: state.metrics.as_ref(),
                 protocol: metric_protocol,
               });
+          let max_request_body_bytes = resolved
+            .route
+            .effective_max_request_body_bytes(&state.config.limits);
           fast_path_request_body_with_metrics(
             body,
-            state.config.limits.max_request_body_bytes as usize,
+            max_request_body_bytes as usize,
             client_body_timeout,
             false,
             request_body_empty_probe_allowed,

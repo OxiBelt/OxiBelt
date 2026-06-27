@@ -491,6 +491,13 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   access_log.set_route_name(&resolved.route.name);
+  let max_request_body_bytes = resolved
+    .route
+    .effective_max_request_body_bytes(&state.config.limits);
+  if let Err((status, message)) = validate_request_body_size_limit(&request, max_request_body_bytes)
+  {
+    return text_response(status, message);
+  }
 
   if let Some(response) =
     route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
@@ -834,7 +841,7 @@ where
     waf_body_compression_transform && response_body_need != BodyNeed::None;
   let request = request.map(|body| {
     body::with_read_timeout(
-      Limited::new(body, state.config.limits.max_request_body_bytes as usize).boxed(),
+      Limited::new(body, max_request_body_bytes as usize).boxed(),
       client_body_timeout,
       BodyTimeoutKind::DownstreamRequestRead,
     )
@@ -2772,8 +2779,15 @@ pub(crate) fn validate_request_limits<B>(
     }
     _ => {}
   }
+  Ok(())
+}
+
+pub(crate) fn validate_request_body_size_limit<B>(
+  request: &Request<B>,
+  max_request_body_bytes: u64,
+) -> Result<(), (StatusCode, &'static str)> {
   if positive_content_length(request.headers())
-    .is_some_and(|length| length > limits.max_request_body_bytes)
+    .is_some_and(|length| length > max_request_body_bytes)
   {
     return Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"));
   }

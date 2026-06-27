@@ -667,6 +667,7 @@ private_key = "/tmp/key.pem"
         max_memory_body_bytes: Some(4),
         max_temp_file_bytes: Some(8),
       },
+      limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
       waf: Default::default(),

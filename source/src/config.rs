@@ -1078,6 +1078,7 @@ impl Config {
         }
       }
       route.timeouts.validate(&route.name)?;
+      route.limits.validate(&route.name)?;
       route.ipm.validate(&route.name)?;
       if let Some(retry) = &route.retry {
         retry.validate(&route.name)?;
@@ -2238,6 +2239,7 @@ fn routes_without_waf_are_equivalent(left: &[RouteConfig], right: &[RouteConfig]
         && left.cache == right.cache
         && left.compression == right.compression
         && left.buffering == right.buffering
+        && left.limits == right.limits
     })
 }
 
@@ -3087,6 +3089,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "grpc_web",
       "external_auth",
       "ipm",
+      "limits",
       "static_root",
       "static_files",
       "upstream",
@@ -3175,6 +3178,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "request",
       "response",
     ][..],
+    "routes.limits" => &["max_request_body_bytes"][..],
     "routes.timeouts" => &[
       "client_body_timeout_ms",
       "response_send_timeout_ms",

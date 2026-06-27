@@ -97,7 +97,9 @@ async fn assert_probe_empty_request_uses_direct_h1_build(
   let (parts, body) = request.into_parts();
   let request_body = fast_path_request_body_with_metrics(
     body,
-    state.config.limits.max_request_body_bytes as usize,
+    resolved
+      .route
+      .effective_max_request_body_bytes(&state.config.limits) as usize,
     EffectiveTimeouts::route_body_only(&state.config, resolved.route),
     false,
     fast_path_request_body_empty_probe_allowed(&parts.method, request_version, &parts.headers),

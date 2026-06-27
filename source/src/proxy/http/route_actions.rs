@@ -350,6 +350,7 @@ mod tests {
       cache: None,
       compression: None,
       buffering: Default::default(),
+      limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
       waf: Default::default(),

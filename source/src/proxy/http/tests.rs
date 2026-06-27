@@ -83,11 +83,25 @@ fn request_limits_reject_invalid_content_length() {
 }
 
 #[test]
-fn request_limits_apply_body_size_to_single_positive_content_length() {
+fn request_limits_leave_body_size_for_route_validation() {
   let limits = crate::config::LimitsConfig {
     max_request_body_bytes: 6,
     ..crate::config::LimitsConfig::default()
   };
+  let larger_than_global = Request::builder()
+    .uri("/")
+    .header(http::header::CONTENT_LENGTH, "7")
+    .body(())
+    .expect("request should build");
+
+  assert_eq!(
+    validate_request_limits(&larger_than_global, &limits),
+    Ok(())
+  );
+}
+
+#[test]
+fn request_body_size_limit_applies_to_single_positive_content_length() {
   let too_large = Request::builder()
     .uri("/")
     .header(http::header::CONTENT_LENGTH, "7")
@@ -95,9 +109,10 @@ fn request_limits_apply_body_size_to_single_positive_content_length() {
     .expect("request should build");
 
   assert_eq!(
-    validate_request_limits(&too_large, &limits),
+    validate_request_body_size_limit(&too_large, 6),
     Err((StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"))
   );
+  assert_eq!(validate_request_body_size_limit(&too_large, 7), Ok(()));
 }
 
 #[test]

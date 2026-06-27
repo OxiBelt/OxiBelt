@@ -2791,6 +2791,55 @@ upstream_send_timeout_ms = 10000
 }
 
 #[test]
+fn route_request_body_limit_inherits_global_and_parses_override() {
+  let temp_dir = common::TempDir::new("route-request-body-limit-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-request-body-limit-config");
+  let raw = format!(
+    r#"
+{}
+
+[limits]
+max_request_body_bytes = 64
+
+[[routes]]
+name = "small-upload"
+hosts = ["small.example.com"]
+path_prefix = "/upload"
+upstream = "app"
+
+[routes.limits]
+max_request_body_bytes = 8
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  let inherited = config
+    .routes
+    .iter()
+    .find(|route| route.name == "app-root")
+    .expect("default route should exist");
+  let override_route = config
+    .routes
+    .iter()
+    .find(|route| route.name == "small-upload")
+    .expect("override route should exist");
+  assert_eq!(inherited.limits.max_request_body_bytes, None);
+  assert_eq!(override_route.limits.max_request_body_bytes, Some(8));
+  assert_eq!(
+    inherited.effective_max_request_body_bytes(&config.limits),
+    64
+  );
+  assert_eq!(
+    override_route.effective_max_request_body_bytes(&config.limits),
+    8
+  );
+}
+
+#[test]
 fn webtransport_session_limits_default_to_connection_limits_and_parse_overrides() {
   let temp_dir = common::TempDir::new("webtransport-session-limit-config");
   let (cert_path, key_path) =
@@ -2860,6 +2909,33 @@ upstream_read_timeout_ms = 0
     error
       .to_string()
       .contains("timeouts.upstream_read_timeout_ms must be greater than 0"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn route_request_body_limit_values_must_be_positive_when_configured() {
+  let temp_dir = common::TempDir::new("route-request-body-limit-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-request-body-limit-invalid");
+  let raw = format!(
+    r#"
+{}
+
+[routes.limits]
+max_request_body_bytes = 0
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("zero route request body limit should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("limits.max_request_body_bytes must be greater than 0"),
     "unexpected error: {error}"
   );
 }
@@ -7372,6 +7448,43 @@ unexpected = true"#,
     error
       .to_string()
       .contains("routes.actions.rewrite.unexpected"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn config_load_accepts_route_limits_fields_by_default() {
+  let temp_dir = common::TempDir::new("strict-route-limits-known");
+  let config_path = write_loadable_config(&temp_dir, "strict-route-limits-known", |raw| {
+    raw.replace(
+      "upstream = \"app\"",
+      r#"upstream = "app"
+
+[routes.limits]
+max_request_body_bytes = 8"#,
+    )
+  });
+
+  Config::load(&config_path).expect("known route limits field should load");
+}
+
+#[test]
+fn config_load_rejects_unknown_route_limits_fields_by_default() {
+  let temp_dir = common::TempDir::new("strict-route-limits-unknown");
+  let config_path = write_loadable_config(&temp_dir, "strict-route-limits-unknown", |raw| {
+    raw.replace(
+      "upstream = \"app\"",
+      r#"upstream = "app"
+
+[routes.limits]
+unexpected = true"#,
+    )
+  });
+
+  let error = Config::load(&config_path).expect_err("unknown route limits field should fail");
+
+  assert!(
+    error.to_string().contains("routes.limits.unexpected"),
     "unexpected error: {error:#}"
   );
 }

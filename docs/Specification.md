@@ -77,7 +77,7 @@ Upstream protocol support:
 - Ordinary upstream HTTP/3 forwarding uses a per-upstream QUIC connection pool and multiplexes requests over pooled HTTP/3 connections when `quic.upstream_pool.enabled = true`; when disabled, each ordinary HTTP/3 upstream request uses a one-shot QUIC connection. WebTransport uses a dedicated upstream QUIC connection per session.
 - `proxy.auto_upgrade` controls the maximum upstream HTTP version OxiBelt may select.
 - Route-level `upstream_http_version` can override backend protocol selection within the selected upstream capability.
-- Route-level timeout overrides can adjust downstream body/send, upgrade idle, WebTransport idle, and upstream connect/first-byte/read/send behavior for individual routes. TLS handshake and downstream header read timeouts remain listener-wide.
+- Route-level timeout overrides can adjust downstream body/send, upgrade idle, WebTransport idle, and upstream connect/first-byte/read/send behavior for individual routes. Route-level request body limits can override the global request body cap after route matching. TLS handshake and downstream header read timeouts remain listener-wide.
 - PROXY protocol egress is supported only for TCP-based upstream connections and stream proxy targets, not HTTP/3/QUIC upstreams.
 
 Upgrade and extended protocol behavior:
