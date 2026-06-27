@@ -99,6 +99,7 @@ jobs:
           plan_path = sys.argv[1]
           revision = sys.argv[2]
           plan = json.load(open(plan_path, encoding="utf-8"))
+          image = "ghcr.io/oxibelt/oxibelt"
           tag = plan["tag"]
           kind = plan["kind"]
           strict_tag = re.compile(
@@ -107,13 +108,20 @@ jobs:
 
           if tag.startswith("v") or not strict_tag.fullmatch(tag):
               raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
+          if kind not in ("stable", "beta", "build"):
+              raise SystemExit(f"invalid release kind: {kind}")
+          if plan["schemaVersion"] != 1:
+              raise SystemExit("unsupported image release plan schema")
+          if plan["version"] != tag:
+              raise SystemExit("image plan version does not match release tag")
           if kind == "build" and not tag.endswith(revision[:8].lower()):
               raise SystemExit(f"build release tag {tag} must end with revision prefix {revision[:8].lower()}")
-          if plan["image"] != "ghcr.io/oxibelt/oxibelt":
+          if plan["image"] != image:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
           if plan["revision"] != revision:
               raise SystemExit("image plan revision does not match checked-out commit")
 
+          major = tag.split(".", 1)[0]
           expected = {
               "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64"),
               "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64"),
@@ -121,7 +129,18 @@ jobs:
               "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64"),
               "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64"),
           }
-          artifacts = {artifact["artifactArch"]: artifact for artifact in plan["artifacts"]}
+          def expected_artifact_tags(arch):
+              tags = [f"{image}:{tag}-alpine-musl-{arch}"]
+              if kind == "stable":
+                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
+              return tags
+
+          artifacts = {}
+          for artifact in plan["artifacts"]:
+              arch = artifact["artifactArch"]
+              if arch in artifacts:
+                  raise SystemExit(f"duplicate release artifact for {arch}")
+              artifacts[arch] = artifact
           if set(artifacts) != set(expected):
               raise SystemExit(f"unexpected artifact matrix: {sorted(artifacts)}")
           for arch, (artifact_name, image_tar, docker_arch) in expected.items():
@@ -130,18 +149,31 @@ jobs:
                   raise SystemExit(f"unexpected artifact naming for {arch}")
               if artifact["dockerArchitecture"] != docker_arch:
                   raise SystemExit(f"unexpected docker architecture for {arch}")
-              if f"{tag}-alpine-musl-{arch}" not in " ".join(artifact["ghcrTags"]):
-                  raise SystemExit(f"missing release arch tag for {arch}")
+              expected_tags = expected_artifact_tags(arch)
+              if artifact["ghcrTags"] != expected_tags:
+                  raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
 
-          serialized = json.dumps(plan, sort_keys=True)
-          major = tag.split(".", 1)[0]
+          expected_manifests = {
+              "release": (["amd64v2", "arm64", "riscv64"], [f"{image}:{tag}"]),
+              "alpine-musl": (["amd64v2", "arm64", "riscv64"], [f"{image}:{tag}-alpine-musl"]),
+          }
           if kind == "stable":
-              if f":{major}-alpine-musl-amd64" not in serialized:
-                  raise SystemExit("stable releases must include major arch aliases")
-              if ":latest" not in serialized:
-                  raise SystemExit("stable releases must include the latest manifest alias")
-          elif f":{major}-alpine-musl" in serialized or ":latest" in serialized:
-              raise SystemExit("non-stable releases must not include latest or major aliases")
+              expected_manifests["release"][1].append(f"{image}:latest")
+              expected_manifests["alpine-musl"][1].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
+          manifests = {}
+          for manifest in plan["manifests"]:
+              name = manifest["name"]
+              if name in manifests:
+                  raise SystemExit(f"duplicate release manifest for {name}")
+              manifests[name] = manifest
+          if set(manifests) != set(expected_manifests):
+              raise SystemExit(f"unexpected manifest matrix: {sorted(manifests)}")
+          for name, (artifact_archs, ghcr_tags) in expected_manifests.items():
+              manifest = manifests[name]
+              if manifest["artifactArchs"] != artifact_archs:
+                  raise SystemExit(f"unexpected manifest architectures for {name}")
+              if manifest["ghcrTags"] != ghcr_tags:
+                  raise SystemExit(f"unexpected manifest GHCR tags for {name}: {manifest['ghcrTags']!r}")
           PY
 
           {
@@ -363,13 +395,14 @@ jobs:
         env:
           IMAGE_ROOT: ${{ runner.temp }}/oxibelt-images
           METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
+          OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}
           OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
           OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           OXIBELT_SOURCE_URL: ${{ env.OXIBELT_SOURCE_URL }}
         run: |
           set -euo pipefail
 
-          python3 - "${METADATA_ROOT}/image-plan.json" "${IMAGE_ROOT}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          python3 - "${METADATA_ROOT}/image-plan.json" "${IMAGE_ROOT}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
           import json
           import pathlib
           import sys
@@ -378,21 +411,83 @@ jobs:
           plan_path = pathlib.Path(sys.argv[1])
           image_root = pathlib.Path(sys.argv[2])
           version = sys.argv[3]
-          revision = sys.argv[4]
-          source = sys.argv[5]
+          kind = sys.argv[4]
+          revision = sys.argv[5]
+          source = sys.argv[6]
           plan = json.loads(plan_path.read_text(encoding="utf-8"))
+          image = "ghcr.io/oxibelt/oxibelt"
 
-          if plan["version"] != version or plan["revision"] != revision:
-              raise SystemExit("release plan version or revision does not match workflow outputs")
+          if kind not in ("stable", "beta", "build"):
+              raise SystemExit(f"invalid release kind: {kind}")
+          if plan["schemaVersion"] != 1:
+              raise SystemExit("unsupported image release plan schema")
+          if plan["image"] != image:
+              raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
+          if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
+              raise SystemExit("release plan identity does not match workflow outputs")
           if plan["source"] != source:
               raise SystemExit("release plan source URL does not match workflow source")
 
-          expected_artifacts = {artifact["artifactName"] for artifact in plan["artifacts"]}
+          major = version.split(".", 1)[0]
+          expected = {
+              "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64"),
+              "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64"),
+              "amd64v4": ("oxibelt-alpine-musl-amd64v4-image", "oxibelt-alpine-musl-amd64v4.tar", "amd64"),
+              "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64"),
+              "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64"),
+          }
+          def expected_artifact_tags(arch):
+              tags = [f"{image}:{version}-alpine-musl-{arch}"]
+              if kind == "stable":
+                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
+              return tags
+
+          artifacts = {}
+          for artifact in plan["artifacts"]:
+              arch = artifact["artifactArch"]
+              if arch in artifacts:
+                  raise SystemExit(f"duplicate release artifact for {arch}")
+              artifacts[arch] = artifact
+          if set(artifacts) != set(expected):
+              raise SystemExit(f"unexpected artifact matrix: {sorted(artifacts)}")
+          for arch, (artifact_name, image_tar, docker_arch) in expected.items():
+              artifact = artifacts[arch]
+              if artifact["artifactName"] != artifact_name or artifact["imageTar"] != image_tar:
+                  raise SystemExit(f"unexpected artifact naming for {arch}")
+              if artifact["dockerArchitecture"] != docker_arch:
+                  raise SystemExit(f"unexpected docker architecture for {arch}")
+              expected_tags = expected_artifact_tags(arch)
+              if artifact["ghcrTags"] != expected_tags:
+                  raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
+
+          expected_manifests = {
+              "release": (["amd64v2", "arm64", "riscv64"], [f"{image}:{version}"]),
+              "alpine-musl": (["amd64v2", "arm64", "riscv64"], [f"{image}:{version}-alpine-musl"]),
+          }
+          if kind == "stable":
+              expected_manifests["release"][1].append(f"{image}:latest")
+              expected_manifests["alpine-musl"][1].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
+          manifests = {}
+          for manifest in plan["manifests"]:
+              name = manifest["name"]
+              if name in manifests:
+                  raise SystemExit(f"duplicate release manifest for {name}")
+              manifests[name] = manifest
+          if set(manifests) != set(expected_manifests):
+              raise SystemExit(f"unexpected manifest matrix: {sorted(manifests)}")
+          for name, (artifact_archs, ghcr_tags) in expected_manifests.items():
+              manifest = manifests[name]
+              if manifest["artifactArchs"] != artifact_archs:
+                  raise SystemExit(f"unexpected manifest architectures for {name}")
+              if manifest["ghcrTags"] != ghcr_tags:
+                  raise SystemExit(f"unexpected manifest GHCR tags for {name}: {manifest['ghcrTags']!r}")
+
+          expected_artifacts = {artifact["artifactName"] for artifact in artifacts.values()}
           actual_artifacts = {path.name for path in image_root.iterdir() if path.is_dir()}
           if actual_artifacts != expected_artifacts:
               raise SystemExit(f"unexpected downloaded image artifacts: {sorted(actual_artifacts)}")
 
-          for artifact in plan["artifacts"]:
+          for artifact in artifacts.values():
               image_tar = image_root / artifact["artifactName"] / artifact["imageTar"]
               if not image_tar.is_file():
                   raise SystemExit(f"missing Docker image tar: {image_tar}")

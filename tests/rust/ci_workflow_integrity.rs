@@ -1402,6 +1402,12 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     "tag.startswith(\"v\")",
     "build release tag",
     "ghcr.io/oxibelt/oxibelt",
+    "if plan[\"schemaVersion\"] != 1:",
+    "if plan[\"version\"] != tag:",
+    "def expected_artifact_tags(arch):",
+    "if artifact[\"ghcrTags\"] != expected_tags:",
+    "expected_manifests = {",
+    "if manifest[\"ghcrTags\"] != ghcr_tags:",
     "image-plan.json",
   ] {
     assert!(
@@ -1412,6 +1418,13 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
   for expected in [
     "github.repository == 'OxiBelt/OxiBelt'",
     "packages: write",
+    "OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}",
+    "\"${OXIBELT_RELEASE_VERSION}\" \"${OXIBELT_RELEASE_KIND}\" \"${OXIBELT_RELEASE_REVISION}\"",
+    "if plan[\"tag\"] != version or plan[\"version\"] != version or plan[\"kind\"] != kind or plan[\"revision\"] != revision:",
+    "def expected_artifact_tags(arch):",
+    "if artifact[\"ghcrTags\"] != expected_tags:",
+    "if manifest[\"ghcrTags\"] != ghcr_tags:",
+    "expected_artifacts = {artifact[\"artifactName\"] for artifact in artifacts.values()}",
     "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
     "org.opencontainers.image.version",
     "org.opencontainers.image.ref.name",
@@ -1423,6 +1436,16 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     assert!(
       publish_job_text.contains(expected),
       "GHCR publish job should include {expected}"
+    );
+  }
+  for removed in [
+    r#"if f"{tag}-alpine-musl-{arch}" not in " ".join(artifact["ghcrTags"]):"#,
+    r#"serialized = json.dumps(plan, sort_keys=True)"#,
+    r#"elif f":{major}-alpine-musl" in serialized or ":latest" in serialized:"#,
+  ] {
+    assert!(
+      !validate_job_text.contains(removed),
+      "release validate job should not keep substring-based tag validation: {removed}"
     );
   }
 }
@@ -1464,7 +1487,7 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
     "pattern: oxibelt-alpine-musl-*-image",
     ":latest",
-    "major arch aliases",
+    r#"tags.append(f"{image}:{major}-alpine-musl-{arch}")"#,
   ] {
     assert!(
       workflow.contains(expected),
