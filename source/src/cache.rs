@@ -10,8 +10,8 @@ use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use bytes::Bytes;
 use http::header::{
-  CACHE_CONTROL, CONTENT_TYPE, ETAG, EXPIRES, HeaderName, HeaderValue, IF_MODIFIED_SINCE,
-  IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, VARY,
+  CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, ETAG, EXPIRES, HeaderName, HeaderValue,
+  IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, VARY,
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
 use ring::digest;
@@ -1508,6 +1508,11 @@ fn cache_metadata(
     MAX_VARY_VALUE_BYTES,
   )
   .map_err(|_| CacheFillSuppressionReason::VaryRejected)?;
+  if has_non_identity_content_encoding(response_headers)
+    && !response_varies_accept_encoding(response_headers)
+  {
+    return Err(CacheFillSuppressionReason::VaryRejected);
+  }
   let now = SystemTime::now();
   let mut ttl = surrogate
     .as_ref()
@@ -1592,6 +1597,25 @@ fn cacheable_status(policy: &CachePolicyRuntime, status: StatusCode) -> bool {
 
 fn response_has_set_cookie(headers: &HeaderMap) -> bool {
   headers.contains_key(http::header::SET_COOKIE)
+}
+
+fn has_non_identity_content_encoding(headers: &HeaderMap) -> bool {
+  headers.get_all(CONTENT_ENCODING).iter().any(|value| {
+    value
+      .to_str()
+      .map(|value| !value.trim().eq_ignore_ascii_case("identity"))
+      .unwrap_or(true)
+  })
+}
+
+fn response_varies_accept_encoding(headers: &HeaderMap) -> bool {
+  headers
+    .get_all(VARY)
+    .iter()
+    .filter_map(|value| value.to_str().ok())
+    .flat_map(|value| value.split(','))
+    .map(str::trim)
+    .any(|item| item == "*" || item.eq_ignore_ascii_case("accept-encoding"))
 }
 
 fn request_no_store(headers: &HeaderMap, bypass_headers: &[HeaderName]) -> bool {

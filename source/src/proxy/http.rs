@@ -1175,6 +1175,7 @@ where
   let rebuild = RebuildRequestOptions {
     target_uri,
     compression: &state.config.compression,
+    route_compression: resolved.route.compression.as_deref(),
     forwarded_client_addr,
     downstream_scheme,
     downstream_host: host,
@@ -1186,7 +1187,7 @@ where
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
     route_mutations: &route_request_mutations,
-    remove_accept_encoding: response_waf_body_compression_transform,
+    force_strip_accept_encoding: response_waf_body_compression_transform,
   };
   let mut outbound = rebuild_request(request, rebuild);
   semantics::strip_accepted_expect(outbound.headers_mut());

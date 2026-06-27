@@ -4,14 +4,16 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 
+use async_compression::Level as CompressionLevel;
 use async_compression::tokio::bufread::{BrotliEncoder, GzipEncoder, ZlibEncoder, ZstdEncoder};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::header::{
   ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
-  CONTENT_TYPE, COOKIE, ETAG, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHORIZATION, RANGE,
-  SET_COOKIE, TRAILER, VARY,
+  CONTENT_TYPE, COOKIE, ETAG, EXPIRES, HeaderMap, HeaderName, HeaderValue, LAST_MODIFIED,
+  PROXY_AUTHORIZATION, RANGE, SET_COOKIE, TRAILER, VARY,
 };
 use http::{Method, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
@@ -20,7 +22,7 @@ use tokio::io::{AsyncRead, BufReader, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
 
-use crate::config::{CompressionConfig, CompressionPolicyConfig};
+use crate::config::{CompressionConfig, CompressionPolicyConfig, CompressionProxiedPredicate};
 
 use super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error};
 
@@ -83,6 +85,9 @@ struct EffectiveCompressionPolicy<'a> {
   zstd: bool,
   br: bool,
   min_size_bytes: u64,
+  level: u8,
+  vary: bool,
+  proxied: &'a [CompressionProxiedPredicate],
   statuses: &'a [u16],
   mime_types: &'a [String],
 }
@@ -96,6 +101,9 @@ impl<'a> EffectiveCompressionPolicy<'a> {
       zstd: config.zstd,
       br: config.br,
       min_size_bytes: config.min_size_bytes,
+      level: config.level,
+      vary: config.vary,
+      proxied: &config.proxied,
       statuses: &config.statuses,
       mime_types: &config.mime_types,
     }
@@ -109,6 +117,9 @@ impl<'a> EffectiveCompressionPolicy<'a> {
       zstd: policy.zstd,
       br: policy.br,
       min_size_bytes: policy.min_size_bytes,
+      level: policy.level,
+      vary: policy.vary,
+      proxied: &policy.proxied,
       statuses: &policy.statuses,
       mime_types: &policy.mime_types,
     }
@@ -121,6 +132,10 @@ impl<'a> EffectiveCompressionPolicy<'a> {
       CompressionEncoding::Gzip => self.gzip,
       CompressionEncoding::Deflate => self.deflate,
     }
+  }
+
+  fn has_enabled_encoding(&self) -> bool {
+    self.br || self.zstd || self.gzip || self.deflate
   }
 }
 
@@ -138,7 +153,7 @@ pub(crate) fn maybe_compress_response(
   let Some(policy) = policy_for_route(config, route_compression) else {
     return response;
   };
-  if !policy.enabled || request_method == Method::HEAD {
+  if !policy.enabled {
     return response;
   }
   if request_headers.contains_key(RANGE) {
@@ -147,17 +162,26 @@ pub(crate) fn maybe_compress_response(
   if request_has_sensitive_credentials(request_headers) {
     return response;
   }
-  let Some(encoding) = negotiate_encoding(request_headers, &policy) else {
-    return response;
-  };
-  let Some(permit) = state.try_acquire() else {
-    return response;
-  };
-
   let (mut parts, body) = response.into_parts();
   if !response_is_eligible(&parts.headers, parts.status, &policy) {
     return Response::from_parts(parts, body);
   }
+  if !proxied_response_allowed(request_headers, &parts.headers, &policy) {
+    return Response::from_parts(parts, body);
+  }
+  if policy.vary && policy.has_enabled_encoding() {
+    append_vary_accept_encoding(&mut parts.headers);
+  }
+  if request_method == Method::HEAD {
+    return Response::from_parts(parts, body);
+  }
+  let Some(encoding) = negotiate_encoding(request_headers, &policy) else {
+    return Response::from_parts(parts, body);
+  };
+  let Some(permit) = state.try_acquire() else {
+    return Response::from_parts(parts, body);
+  };
+
   parts.extensions.remove::<KnownSmallResponseBody>();
   parts.extensions.remove::<InlinedKnownSmallResponseBody>();
 
@@ -166,10 +190,9 @@ pub(crate) fn maybe_compress_response(
     HeaderValue::from_static(encoding.content_encoding()),
   );
   parts.headers.remove(CONTENT_LENGTH);
-  append_vary_accept_encoding(&mut parts.headers);
   weaken_strong_etag(&mut parts.headers);
 
-  Response::from_parts(parts, compress_body(body, encoding, permit))
+  Response::from_parts(parts, compress_body(body, encoding, policy.level, permit))
 }
 
 pub(crate) fn request_header_subset(headers: &HeaderMap) -> HeaderMap {
@@ -179,6 +202,7 @@ pub(crate) fn request_header_subset(headers: &HeaderMap) -> HeaderMap {
   append_all(&mut subset, headers, AUTHORIZATION);
   append_all(&mut subset, headers, PROXY_AUTHORIZATION);
   append_all(&mut subset, headers, ACCEPT_ENCODING);
+  append_all(&mut subset, headers, HeaderName::from_static("via"));
   subset
 }
 
@@ -230,6 +254,57 @@ fn response_is_eligible(
     .mime_types
     .iter()
     .any(|pattern| mime_pattern_matches(pattern, &content_type))
+}
+
+fn proxied_response_allowed(
+  request_headers: &HeaderMap,
+  response_headers: &HeaderMap,
+  policy: &EffectiveCompressionPolicy<'_>,
+) -> bool {
+  if !request_headers.contains_key("via") {
+    return true;
+  }
+  if policy.proxied.contains(&CompressionProxiedPredicate::Off) {
+    return false;
+  }
+  if policy.proxied.contains(&CompressionProxiedPredicate::Any) {
+    return true;
+  }
+  policy
+    .proxied
+    .iter()
+    .any(|predicate| proxied_predicate_matches(*predicate, request_headers, response_headers))
+}
+
+fn proxied_predicate_matches(
+  predicate: CompressionProxiedPredicate,
+  request_headers: &HeaderMap,
+  response_headers: &HeaderMap,
+) -> bool {
+  match predicate {
+    CompressionProxiedPredicate::Off | CompressionProxiedPredicate::Any => false,
+    CompressionProxiedPredicate::Expired => response_is_expired(response_headers),
+    CompressionProxiedPredicate::NoCache => {
+      has_cache_control_directive(response_headers, "no-cache")
+    }
+    CompressionProxiedPredicate::NoStore => {
+      has_cache_control_directive(response_headers, "no-store")
+    }
+    CompressionProxiedPredicate::Private => {
+      has_cache_control_directive(response_headers, "private")
+    }
+    CompressionProxiedPredicate::NoLastModified => !response_headers.contains_key(LAST_MODIFIED),
+    CompressionProxiedPredicate::NoEtag => !response_headers.contains_key(ETAG),
+    CompressionProxiedPredicate::Auth => request_headers.contains_key(AUTHORIZATION),
+  }
+}
+
+fn response_is_expired(headers: &HeaderMap) -> bool {
+  headers
+    .get(EXPIRES)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| httpdate::parse_http_date(value).ok())
+    .is_some_and(|expires| expires <= SystemTime::now())
 }
 
 fn request_has_sensitive_credentials(headers: &HeaderMap) -> bool {
@@ -400,14 +475,16 @@ fn weaken_strong_etag(headers: &mut HeaderMap) {
 fn compress_body(
   body: ProxyBody,
   encoding: CompressionEncoding,
+  level: u8,
   permit: OwnedSemaphorePermit,
 ) -> ProxyBody {
   let reader = BufReader::new(ProxyBodyReader::new(body, permit));
+  let level = CompressionLevel::Precise(i32::from(level));
   match encoding {
-    CompressionEncoding::Br => reader_body(BrotliEncoder::new(reader)),
-    CompressionEncoding::Zstd => reader_body(ZstdEncoder::new(reader)),
-    CompressionEncoding::Gzip => reader_body(GzipEncoder::new(reader)),
-    CompressionEncoding::Deflate => reader_body(ZlibEncoder::new(reader)),
+    CompressionEncoding::Br => reader_body(BrotliEncoder::with_quality(reader, level)),
+    CompressionEncoding::Zstd => reader_body(ZstdEncoder::with_quality(reader, level)),
+    CompressionEncoding::Gzip => reader_body(GzipEncoder::with_quality(reader, level)),
+    CompressionEncoding::Deflate => reader_body(ZlibEncoder::with_quality(reader, level)),
   }
 }
 
@@ -480,7 +557,7 @@ impl AsyncRead for ProxyBodyReader {
 mod tests {
   use http::header::{
     ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
-    COOKIE, PROXY_AUTHORIZATION, SET_COOKIE,
+    COOKIE, EXPIRES, PROXY_AUTHORIZATION, SET_COOKIE,
   };
   use http_body_util::Full;
   use tokio::io::AsyncReadExt;
@@ -522,12 +599,14 @@ mod tests {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
     headers.insert(COOKIE, HeaderValue::from_static("session=1"));
+    headers.insert("via", HeaderValue::from_static("1.1 proxy.example"));
     headers.insert("x-unrelated", HeaderValue::from_static("ignored"));
 
     let subset = request_header_subset(&headers);
 
     assert_eq!(subset[ACCEPT_ENCODING], "gzip");
     assert_eq!(subset[COOKIE], "session=1");
+    assert_eq!(subset["via"], "1.1 proxy.example");
     assert!(!subset.contains_key("x-unrelated"));
   }
 
@@ -637,6 +716,104 @@ mod tests {
     weaken_strong_etag(&mut headers);
 
     assert_eq!(headers.get(ETAG).unwrap(), "W/\"abc\"");
+  }
+
+  #[test]
+  fn proxied_gate_requires_configured_predicate_for_via_requests() {
+    let mut request_headers = gzip_request_headers();
+    request_headers.insert("via", HeaderValue::from_static("1.1 proxy.example"));
+    let response = eligible_response();
+    let policy = default_policy();
+
+    assert!(!proxied_response_allowed(
+      &request_headers,
+      response.headers(),
+      &policy
+    ));
+
+    let mut response = eligible_response();
+    response
+      .headers_mut()
+      .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    assert!(proxied_response_allowed(
+      &request_headers,
+      response.headers(),
+      &policy
+    ));
+
+    let mut response = eligible_response();
+    response.headers_mut().insert(
+      EXPIRES,
+      HeaderValue::from_str(&httpdate::fmt_http_date(std::time::SystemTime::UNIX_EPOCH)).unwrap(),
+    );
+    assert!(proxied_response_allowed(
+      &request_headers,
+      response.headers(),
+      &policy
+    ));
+  }
+
+  #[test]
+  fn proxied_auth_predicate_does_not_override_sensitive_request_skip() {
+    let config = CompressionConfig {
+      proxied: vec![CompressionProxiedPredicate::Any],
+      ..CompressionConfig::default()
+    };
+    let state = CompressionState::new(&config);
+    let mut request_headers = gzip_request_headers();
+    request_headers.insert("via", HeaderValue::from_static("1.1 proxy.example"));
+    request_headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &request_headers,
+      None,
+      &config,
+      &state,
+    );
+
+    assert_response_is_not_compressed(&response);
+  }
+
+  #[test]
+  fn vary_is_added_to_eligible_identity_response_when_negotiation_is_absent() {
+    let config = CompressionConfig::default();
+    let state = CompressionState::new(&config);
+    let request_headers = HeaderMap::new();
+
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &request_headers,
+      None,
+      &config,
+      &state,
+    );
+
+    assert_response_is_not_compressed(&response);
+    assert_eq!(response.headers().get(VARY).unwrap(), "Accept-Encoding");
+  }
+
+  #[test]
+  fn vary_false_suppresses_dynamic_compression_vary_header() {
+    let config = CompressionConfig {
+      vary: false,
+      ..CompressionConfig::default()
+    };
+    let state = CompressionState::new(&config);
+
+    let response = maybe_compress_response(
+      eligible_response(),
+      &Method::GET,
+      &gzip_request_headers(),
+      None,
+      &config,
+      &state,
+    );
+
+    assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
+    assert!(!response.headers().contains_key(VARY));
   }
 
   #[test]

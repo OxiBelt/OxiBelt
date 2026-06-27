@@ -1,6 +1,7 @@
 use super::*;
 use http::header::{
-  CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue, RANGE, VARY,
+  CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue, RANGE,
+  VARY,
 };
 
 #[test]
@@ -203,6 +204,59 @@ fn vary_variant_cap_rejects_exploding_variants() {
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
     CacheInsertOutcome::Rejected
+  );
+}
+
+#[test]
+fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let cache = ResponseCache::new(&config, None).unwrap();
+  let uri = "/asset/app.css".parse::<Uri>().unwrap();
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+  response_headers.insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+
+  assert_eq!(
+    cache.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &HeaderMap::new(),
+      },
+      CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
+    ),
+    CacheInsertOutcome::NotCacheable
+  );
+
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+  response_headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+  response_headers.insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  assert_eq!(
+    cache.insert(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &HeaderMap::new(),
+      },
+      CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
+    ),
+    CacheInsertOutcome::Stored
   );
 }
 

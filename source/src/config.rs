@@ -1464,6 +1464,8 @@ impl Config {
   }
 
   fn validate_compression(&self) -> anyhow::Result<()> {
+    validate_compression_level("compression.level", self.compression.level)?;
+    validate_compression_proxied("compression.proxied", &self.compression.proxied)?;
     validate_compression_statuses("compression.statuses", &self.compression.statuses)?;
     validate_compression_mime_types("compression.mime_types", &self.compression.mime_types)?;
 
@@ -1478,6 +1480,14 @@ impl Config {
       if !names.insert(policy.name.as_str()) {
         bail!("duplicate compression policy name {}", policy.name);
       }
+      validate_compression_level(
+        &format!("compression policy {} level", policy.name),
+        policy.level,
+      )?;
+      validate_compression_proxied(
+        &format!("compression policy {} proxied", policy.name),
+        &policy.proxied,
+      )?;
       validate_compression_statuses(
         &format!("compression policy {} statuses", policy.name),
         &policy.statuses,
@@ -1998,6 +2008,37 @@ fn validate_compression_statuses(field_name: &str, statuses: &[u16]) -> anyhow::
   for status in statuses {
     http::StatusCode::from_u16(*status)
       .with_context(|| format!("{field_name} contains invalid status {status}"))?;
+  }
+  Ok(())
+}
+
+fn validate_compression_level(field_name: &str, level: u8) -> anyhow::Result<()> {
+  if !(1..=9).contains(&level) {
+    bail!("{field_name} must be between 1 and 9");
+  }
+  Ok(())
+}
+
+fn validate_compression_proxied(
+  field_name: &str,
+  proxied: &[CompressionProxiedPredicate],
+) -> anyhow::Result<()> {
+  if proxied.is_empty() {
+    bail!("{field_name} must include at least one predicate");
+  }
+  let mut seen = HashSet::new();
+  for predicate in proxied {
+    if !seen.insert(*predicate) {
+      bail!("{field_name} contains duplicate predicate {predicate:?}");
+    }
+  }
+  let has_off = seen.contains(&CompressionProxiedPredicate::Off);
+  let has_any = seen.contains(&CompressionProxiedPredicate::Any);
+  if has_off && proxied.len() > 1 {
+    bail!("{field_name} predicate off cannot be combined with other predicates");
+  }
+  if has_any && proxied.len() > 1 {
+    bail!("{field_name} predicate any cannot be combined with other predicates");
   }
   Ok(())
 }
@@ -2559,11 +2600,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "deflate",
       "enabled",
       "gzip",
+      "level",
       "max_concurrent_responses",
       "mime_types",
       "min_size_bytes",
       "policies",
+      "proxied",
       "statuses",
+      "upstream_accept_encoding",
+      "vary",
       "zstd",
     ][..],
     "compression.policies" => &[
@@ -2571,10 +2616,14 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "deflate",
       "enabled",
       "gzip",
+      "level",
       "mime_types",
       "min_size_bytes",
       "name",
+      "proxied",
       "statuses",
+      "upstream_accept_encoding",
+      "vary",
       "zstd",
     ][..],
     "cache" => &[
@@ -4222,6 +4271,14 @@ pub struct CompressionConfig {
   pub statuses: Vec<u16>,
   #[serde(default = "default_compression_mime_types")]
   pub mime_types: Vec<String>,
+  #[serde(default = "default_compression_level")]
+  pub level: u8,
+  #[serde(default = "default_true")]
+  pub vary: bool,
+  #[serde(default = "default_compression_proxied")]
+  pub proxied: Vec<CompressionProxiedPredicate>,
+  #[serde(default)]
+  pub upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode,
   #[serde(default)]
   pub max_concurrent_responses: usize,
   #[serde(default)]
@@ -4247,32 +4304,75 @@ pub struct CompressionPolicyConfig {
   pub statuses: Vec<u16>,
   #[serde(default = "default_compression_mime_types")]
   pub mime_types: Vec<String>,
+  #[serde(default = "default_compression_level")]
+  pub level: u8,
+  #[serde(default = "default_true")]
+  pub vary: bool,
+  #[serde(default = "default_compression_proxied")]
+  pub proxied: Vec<CompressionProxiedPredicate>,
+  #[serde(default)]
+  pub upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompressionProxiedPredicate {
+  Off,
+  Expired,
+  NoCache,
+  NoStore,
+  Private,
+  NoLastModified,
+  NoEtag,
+  Auth,
+  Any,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionUpstreamAcceptEncodingMode {
+  Strip,
+  Preserve,
+  Configured,
+}
+
+impl Default for CompressionUpstreamAcceptEncodingMode {
+  fn default() -> Self {
+    Self::Strip
+  }
 }
 
 impl CompressionConfig {
   pub fn accept_encoding_value(&self) -> Option<String> {
-    if !self.enabled {
+    compression_accept_encoding_value(self.enabled, self.br, self.zstd, self.gzip, self.deflate)
+  }
+
+  pub fn accept_encoding_value_for_route(&self, route_compression: Option<&str>) -> Option<String> {
+    match route_compression {
+      Some("off") => None,
+      Some("default") | None => self.accept_encoding_value(),
+      Some(name) => self
+        .policies
+        .iter()
+        .find(|policy| policy.name == name)
+        .and_then(CompressionPolicyConfig::accept_encoding_value),
+    }
+  }
+
+  pub fn upstream_accept_encoding_for_route(
+    &self,
+    route_compression: Option<&str>,
+  ) -> Option<CompressionUpstreamAcceptEncodingMode> {
+    if !self.enabled || route_compression == Some("off") {
       return None;
     }
-
-    let mut values = Vec::new();
-    if self.br {
-      values.push("br");
-    }
-    if self.zstd {
-      values.push("zstd");
-    }
-    if self.gzip {
-      values.push("gzip");
-    }
-    if self.deflate {
-      values.push("deflate");
-    }
-
-    if values.is_empty() {
-      None
-    } else {
-      Some(values.join(", "))
+    match route_compression {
+      Some("default") | None => Some(self.upstream_accept_encoding),
+      Some(name) => self
+        .policies
+        .iter()
+        .find(|policy| policy.name == name)
+        .map(|policy| policy.upstream_accept_encoding),
     }
   }
 }
@@ -4288,9 +4388,51 @@ impl Default for CompressionConfig {
       min_size_bytes: default_compression_min_size_bytes(),
       statuses: default_compression_statuses(),
       mime_types: default_compression_mime_types(),
+      level: default_compression_level(),
+      vary: true,
+      proxied: default_compression_proxied(),
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Strip,
       max_concurrent_responses: 0,
       policies: Vec::new(),
     }
+  }
+}
+
+impl CompressionPolicyConfig {
+  pub fn accept_encoding_value(&self) -> Option<String> {
+    compression_accept_encoding_value(self.enabled, self.br, self.zstd, self.gzip, self.deflate)
+  }
+}
+
+fn compression_accept_encoding_value(
+  enabled: bool,
+  br: bool,
+  zstd: bool,
+  gzip: bool,
+  deflate: bool,
+) -> Option<String> {
+  if !enabled {
+    return None;
+  }
+
+  let mut values = Vec::new();
+  if br {
+    values.push("br");
+  }
+  if zstd {
+    values.push("zstd");
+  }
+  if gzip {
+    values.push("gzip");
+  }
+  if deflate {
+    values.push("deflate");
+  }
+
+  if values.is_empty() {
+    None
+  } else {
+    Some(values.join(", "))
   }
 }
 
@@ -5507,8 +5649,19 @@ fn default_compression_min_size_bytes() -> u64 {
   1_024
 }
 
+fn default_compression_level() -> u8 {
+  1
+}
+
 fn default_compression_statuses() -> Vec<u16> {
   vec![200]
+}
+
+fn default_compression_proxied() -> Vec<CompressionProxiedPredicate> {
+  vec![
+    CompressionProxiedPredicate::Expired,
+    CompressionProxiedPredicate::NoCache,
+  ]
 }
 
 fn default_compression_mime_types() -> Vec<String> {

@@ -1,12 +1,14 @@
 //! Request rebuild helpers for upstream forwarding.
 //! Authority and encoding headers are set in one place to avoid route-specific drift.
 
-use http::header::{ACCEPT_ENCODING, HOST};
+use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, HOST, PROXY_AUTHORIZATION};
 use http::{Request, Uri, request};
 use http_body_util::BodyExt;
 use hyper::body::Body;
 
-use crate::config::{CompressionConfig, ForwardedHeaderMode, HttpVersion};
+use crate::config::{
+  CompressionConfig, CompressionUpstreamAcceptEncodingMode, ForwardedHeaderMode, HttpVersion,
+};
 use crate::waf::{HeaderMutation, apply_header_mutations};
 
 use super::body::{BoxError, ProxyBody};
@@ -19,6 +21,7 @@ use super::version::upstream_request_version;
 pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) target_uri: Uri,
   pub(crate) compression: &'a CompressionConfig,
+  pub(crate) route_compression: Option<&'a str>,
   pub(crate) forwarded_client_addr: std::net::SocketAddr,
   pub(crate) downstream_host: &'a str,
   pub(crate) downstream_scheme: &'a str,
@@ -30,7 +33,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
   pub(crate) route_mutations: &'a [HeaderMutation],
-  pub(crate) remove_accept_encoding: bool,
+  pub(crate) force_strip_accept_encoding: bool,
 }
 
 pub(crate) fn rebuild_request<B>(
@@ -50,6 +53,7 @@ pub(crate) fn rebuild_request_parts(
   parts: &mut request::Parts,
   options: RebuildRequestOptions<'_>,
 ) {
+  let accept_encoding_decision = upstream_accept_encoding_decision(parts, &options);
   parts.uri = options.target_uri;
   parts.version = upstream_request_version(options.upstream_version);
   strip_hop_by_hop_headers(&mut parts.headers);
@@ -75,15 +79,9 @@ pub(crate) fn rebuild_request_parts(
     options.forwarded_request_header_values,
   );
 
-  if options.compression.enabled || options.remove_accept_encoding {
-    parts.headers.remove(ACCEPT_ENCODING);
-  }
-
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
   apply_header_mutations(&mut parts.headers, options.route_mutations);
-  if options.remove_accept_encoding {
-    parts.headers.remove(ACCEPT_ENCODING);
-  }
+  apply_accept_encoding_decision(&mut parts.headers, accept_encoding_decision);
 }
 
 pub(crate) fn proxy_body<B>(body: B) -> ProxyBody
@@ -92,6 +90,89 @@ where
   B::Error: Into<BoxError> + Send + Sync + 'static,
 {
   body.map_err(Into::into).boxed()
+}
+
+enum UpstreamAcceptEncodingDecision {
+  Strip,
+  Preserve(Vec<http::HeaderValue>),
+  Set(http::HeaderValue),
+}
+
+fn upstream_accept_encoding_decision(
+  parts: &request::Parts,
+  options: &RebuildRequestOptions<'_>,
+) -> UpstreamAcceptEncodingDecision {
+  let original = parts
+    .headers
+    .get_all(ACCEPT_ENCODING)
+    .iter()
+    .cloned()
+    .collect::<Vec<_>>();
+  if options.force_strip_accept_encoding || request_has_sensitive_credentials(&parts.headers) {
+    return UpstreamAcceptEncodingDecision::Strip;
+  }
+  if !options.compression.enabled {
+    return UpstreamAcceptEncodingDecision::Preserve(original);
+  }
+  if options.route_compression == Some("off") {
+    return UpstreamAcceptEncodingDecision::Strip;
+  }
+  match options
+    .compression
+    .upstream_accept_encoding_for_route(options.route_compression)
+    .unwrap_or(CompressionUpstreamAcceptEncodingMode::Strip)
+  {
+    CompressionUpstreamAcceptEncodingMode::Strip => UpstreamAcceptEncodingDecision::Strip,
+    CompressionUpstreamAcceptEncodingMode::Preserve => {
+      UpstreamAcceptEncodingDecision::Preserve(original)
+    }
+    CompressionUpstreamAcceptEncodingMode::Configured => {
+      configured_accept_encoding(&parts.headers, options)
+        .map(UpstreamAcceptEncodingDecision::Set)
+        .unwrap_or(UpstreamAcceptEncodingDecision::Strip)
+    }
+  }
+}
+
+fn request_has_sensitive_credentials(headers: &http::HeaderMap) -> bool {
+  headers.contains_key(COOKIE)
+    || headers.contains_key(AUTHORIZATION)
+    || headers.contains_key(PROXY_AUTHORIZATION)
+}
+
+fn configured_accept_encoding(
+  headers: &http::HeaderMap,
+  options: &RebuildRequestOptions<'_>,
+) -> Option<http::HeaderValue> {
+  let value = options
+    .compression
+    .accept_encoding_value_for_route(options.route_compression)?;
+  let encodings = value
+    .split(", ")
+    .filter(|encoding| super::compression::accepted_encoding_quality(headers, encoding) > 0.0)
+    .collect::<Vec<_>>();
+  if encodings.is_empty() {
+    return None;
+  }
+  http::HeaderValue::from_str(&encodings.join(", ")).ok()
+}
+
+fn apply_accept_encoding_decision(
+  headers: &mut http::HeaderMap,
+  decision: UpstreamAcceptEncodingDecision,
+) {
+  headers.remove(ACCEPT_ENCODING);
+  match decision {
+    UpstreamAcceptEncodingDecision::Strip => {}
+    UpstreamAcceptEncodingDecision::Preserve(values) => {
+      for value in values {
+        headers.append(ACCEPT_ENCODING, value);
+      }
+    }
+    UpstreamAcceptEncodingDecision::Set(value) => {
+      headers.insert(ACCEPT_ENCODING, value);
+    }
+  }
 }
 
 #[cfg(test)]
@@ -117,6 +198,7 @@ mod tests {
     RebuildRequestOptions {
       target_uri,
       compression,
+      route_compression: None,
       forwarded_client_addr: "203.0.113.10:5443".parse().unwrap(),
       downstream_host,
       downstream_scheme: "https",
@@ -128,7 +210,7 @@ mod tests {
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],
       route_mutations: &[],
-      remove_accept_encoding: false,
+      force_strip_accept_encoding: false,
     }
   }
 
@@ -205,5 +287,131 @@ mod tests {
     assert_eq!(rebuilt.headers()[HOST], "example.test");
     assert_eq!(rebuilt.headers()["x-forwarded-host"], "example.test");
     assert_eq!(rebuilt.headers()["x-forwarded-port"], "8443");
+  }
+
+  #[test]
+  fn rebuild_request_strips_accept_encoding_by_default_when_compression_is_enabled() {
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig::default();
+
+    let rebuilt = rebuild_request(
+      request,
+      rebuild_options(
+        "http://upstream.internal/app".parse().unwrap(),
+        &compression,
+        "example.test",
+        false,
+      ),
+    );
+
+    assert!(!rebuilt.headers().contains_key(ACCEPT_ENCODING));
+  }
+
+  #[test]
+  fn rebuild_request_preserves_original_accept_encoding_after_route_mutations() {
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig {
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Preserve,
+      ..CompressionConfig::default()
+    };
+    let route_mutations = [HeaderMutation::Set {
+      name: ACCEPT_ENCODING,
+      value: http::HeaderValue::from_static("br"),
+    }];
+    let mut options = rebuild_options(
+      "http://upstream.internal/app".parse().unwrap(),
+      &compression,
+      "example.test",
+      false,
+    );
+    options.route_mutations = &route_mutations;
+
+    let rebuilt = rebuild_request(request, options);
+
+    assert_eq!(rebuilt.headers()[ACCEPT_ENCODING], "gzip");
+  }
+
+  #[test]
+  fn rebuild_request_configured_accept_encoding_uses_enabled_client_intersection() {
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip;q=1.0, br;q=0, zstd;q=0.5")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig {
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Configured,
+      ..CompressionConfig::default()
+    };
+
+    let rebuilt = rebuild_request(
+      request,
+      rebuild_options(
+        "http://upstream.internal/app".parse().unwrap(),
+        &compression,
+        "example.test",
+        false,
+      ),
+    );
+
+    assert_eq!(rebuilt.headers()[ACCEPT_ENCODING], "zstd, gzip");
+  }
+
+  #[test]
+  fn rebuild_request_strips_accept_encoding_for_credentials_and_forced_waf_boundary() {
+    let compression = CompressionConfig {
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Preserve,
+      ..CompressionConfig::default()
+    };
+    let credentialed = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip")
+      .header(AUTHORIZATION, "Bearer secret")
+      .body(empty_proxy_body())
+      .expect("request should build");
+
+    let rebuilt = rebuild_request(
+      credentialed,
+      rebuild_options(
+        "http://upstream.internal/app".parse().unwrap(),
+        &compression,
+        "example.test",
+        false,
+      ),
+    );
+    assert!(!rebuilt.headers().contains_key(ACCEPT_ENCODING));
+
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let route_mutations = [HeaderMutation::Set {
+      name: ACCEPT_ENCODING,
+      value: http::HeaderValue::from_static("br"),
+    }];
+    let mut options = rebuild_options(
+      "http://upstream.internal/app".parse().unwrap(),
+      &compression,
+      "example.test",
+      false,
+    );
+    options.route_mutations = &route_mutations;
+    options.force_strip_accept_encoding = true;
+
+    let rebuilt = rebuild_request(request, options);
+    assert!(!rebuilt.headers().contains_key(ACCEPT_ENCODING));
   }
 }

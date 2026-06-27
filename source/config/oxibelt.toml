@@ -425,6 +425,10 @@ mime_types = [
   "application/*+xml",
   "image/svg+xml",
 ]
+level = 1
+vary = true
+proxied = ["expired", "no-cache"]
+upstream_accept_encoding = "strip"
 max_concurrent_responses = 0
 
 [cache]

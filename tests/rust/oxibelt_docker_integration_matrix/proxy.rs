@@ -36,6 +36,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       None,
     ),
     docker_case(
+      "proxy-compression",
+      "proxied-vary-and-upstream-encoding",
+      "compression proxied, vary, and upstream Accept-Encoding controls apply",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
       "http-semantics",
       "early-hints-pass",
       "HTTP semantics accepts early hints pass mode and forwards final responses",

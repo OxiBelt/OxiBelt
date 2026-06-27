@@ -7,15 +7,16 @@ use base64::Engine;
 use oxibelt::config::{
   AccessTokenRateLimitSource, AdminTransportMode, BufferingMode, CacheStore,
   ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
-  CompressionConfig, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
-  CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, DatabaseMitigationMode, DatabaseTlsMode,
-  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
-  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
-  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
-  OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+  CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
+  ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
+  CrliteMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
+  DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
+  ExternalAuthProvider, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
+  ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode,
+  IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm,
+  MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode,
+  ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
+  RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
   StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode,
   TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
@@ -8837,6 +8838,19 @@ fn compression_defaults_enable_downstream_algorithms_and_policy_fields() {
   assert!(config.compression.zstd);
   assert!(config.compression.br);
   assert_eq!(config.compression.min_size_bytes, 1024);
+  assert_eq!(config.compression.level, 1);
+  assert!(config.compression.vary);
+  assert_eq!(
+    config.compression.proxied,
+    vec![
+      CompressionProxiedPredicate::Expired,
+      CompressionProxiedPredicate::NoCache
+    ]
+  );
+  assert_eq!(
+    config.compression.upstream_accept_encoding,
+    CompressionUpstreamAcceptEncodingMode::Strip
+  );
   assert_eq!(config.compression.statuses, vec![200]);
   config.validate().expect("config should validate");
 }
@@ -8981,12 +8995,75 @@ gzip = true
 deflate = false
 zstd = true
 br = true
+level = 4
+vary = false
+proxied = ["any"]
+upstream_accept_encoding = "configured"
 mime_types = ["application/json", "application/*+json"]
 "#;
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
 
   config.validate().expect("config should validate");
+  let policy = &config.compression.policies[0];
+  assert_eq!(policy.level, 4);
+  assert!(!policy.vary);
+  assert_eq!(policy.proxied, vec![CompressionProxiedPredicate::Any]);
+  assert_eq!(
+    policy.upstream_accept_encoding,
+    CompressionUpstreamAcceptEncodingMode::Configured
+  );
+}
+
+#[test]
+fn compression_rejects_invalid_level_and_proxied_policy() {
+  let temp_dir = common::TempDir::new("compression-invalid-controls");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "compression-invalid-controls");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (field, expected) in [
+    ("level = 0", "compression.level must be between 1 and 9"),
+    (
+      "proxied = []",
+      "compression.proxied must include at least one predicate",
+    ),
+    (
+      "proxied = [\"expired\", \"expired\"]",
+      "compression.proxied contains duplicate predicate",
+    ),
+    (
+      "proxied = [\"off\", \"expired\"]",
+      "compression.proxied predicate off cannot be combined",
+    ),
+    (
+      "proxied = [\"any\", \"no-cache\"]",
+      "compression.proxied predicate any cannot be combined",
+    ),
+  ] {
+    let raw = base.replace("zstd = true", &format!("zstd = true\n{field}"));
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid compression control should fail");
+    assert!(
+      error.to_string().contains(expected),
+      "expected {expected:?} in {error}"
+    );
+  }
+  for (extra, expected) in [(
+    "[[compression.policies]]\nname = \"bad\"\nlevel = 10\n",
+    "compression policy bad level must be between 1 and 9",
+  )] {
+    let config: Config = toml::from_str(&(base.clone() + extra)).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid compression control should fail");
+    assert!(
+      error.to_string().contains(expected),
+      "expected {expected:?} in {error}"
+    );
+  }
 }
 
 #[test]

@@ -437,6 +437,7 @@ impl PlainProxyFastPath {
           let rebuild = RebuildRequestOptions {
             target_uri,
             compression: &state.config.compression,
+            route_compression: resolved.route.compression.as_deref(),
             forwarded_client_addr,
             downstream_scheme,
             downstream_host: host,
@@ -448,7 +449,7 @@ impl PlainProxyFastPath {
             upstream_version,
             waf_mutations: &request_waf.request_header_mutations,
             route_mutations: &[],
-            remove_accept_encoding: false,
+            force_strip_accept_encoding: false,
           };
           rebuild_request_parts(&mut parts, rebuild);
           semantics::strip_accepted_expect(&mut parts.headers);
