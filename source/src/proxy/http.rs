@@ -35,6 +35,7 @@ use crate::waf::{
 };
 
 pub(crate) mod access_log;
+mod alt_svc;
 pub(crate) mod body;
 mod body_capture;
 pub(crate) mod buffering;
@@ -68,6 +69,9 @@ pub(crate) mod warm;
 pub(crate) use warm::warm_cache_request;
 
 pub(crate) use self::access_log::SystemAccessLogContext;
+use self::alt_svc::apply_alt_svc_header;
+#[cfg(test)]
+use self::alt_svc::should_add_alt_svc;
 use self::body::{
   BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout, error_is_timeout,
 };
@@ -1908,37 +1912,6 @@ where
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
   state.record_hot_path_response(response.status());
   response
-}
-
-pub(super) fn apply_alt_svc_header(
-  headers: &mut HeaderMap,
-  status: StatusCode,
-  state: &AppSnapshot,
-  downstream_scheme: &str,
-  request_version: http::Version,
-) {
-  if !should_add_alt_svc(status, state, downstream_scheme, request_version) {
-    return;
-  }
-  if let Some(value) = state.alt_svc_header_value.as_ref() {
-    let value = value.clone();
-    headers.insert(http::header::ALT_SVC, value);
-  }
-}
-
-fn should_add_alt_svc(
-  status: StatusCode,
-  state: &AppSnapshot,
-  downstream_scheme: &str,
-  request_version: http::Version,
-) -> bool {
-  state.alt_svc_header_value.is_some()
-    && downstream_scheme == "https"
-    && matches!(
-      request_version,
-      http::Version::HTTP_10 | http::Version::HTTP_11 | http::Version::HTTP_2
-    )
-    && status != StatusCode::SWITCHING_PROTOCOLS
 }
 
 pub(super) fn with_downstream_response_timeout(

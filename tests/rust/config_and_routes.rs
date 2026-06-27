@@ -9164,19 +9164,16 @@ fn compression_rejects_invalid_level_and_proxied_policy() {
       "expected {expected:?} in {error}"
     );
   }
-  for (extra, expected) in [(
-    "[[compression.policies]]\nname = \"bad\"\nlevel = 10\n",
-    "compression policy bad level must be between 1 and 9",
-  )] {
-    let config: Config = toml::from_str(&(base.clone() + extra)).expect("config should parse");
-    let error = config
-      .validate()
-      .expect_err("invalid compression control should fail");
-    assert!(
-      error.to_string().contains(expected),
-      "expected {expected:?} in {error}"
-    );
-  }
+  let extra = "[[compression.policies]]\nname = \"bad\"\nlevel = 10\n";
+  let expected = "compression policy bad level must be between 1 and 9";
+  let config: Config = toml::from_str(&(base + extra)).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("invalid compression control should fail");
+  assert!(
+    error.to_string().contains(expected),
+    "expected {expected:?} in {error}"
+  );
 }
 
 #[test]
