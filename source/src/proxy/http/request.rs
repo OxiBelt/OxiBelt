@@ -81,6 +81,11 @@ pub(crate) fn rebuild_request_parts(
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
   apply_header_mutations(&mut parts.headers, options.route_mutations);
+  let accept_encoding_decision = if request_has_sensitive_credentials(&parts.headers) {
+    UpstreamAcceptEncodingDecision::Strip
+  } else {
+    accept_encoding_decision
+  };
   apply_accept_encoding_decision(&mut parts.headers, accept_encoding_decision);
 }
 
@@ -365,6 +370,66 @@ mod tests {
     );
 
     assert_eq!(rebuilt.headers()[ACCEPT_ENCODING], "zstd, gzip");
+  }
+
+  #[test]
+  fn rebuild_request_strips_preserved_accept_encoding_when_route_mutation_adds_credentials() {
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig {
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Preserve,
+      ..CompressionConfig::default()
+    };
+    let route_mutations = [HeaderMutation::Set {
+      name: AUTHORIZATION,
+      value: http::HeaderValue::from_static("Bearer injected-by-route"),
+    }];
+    let mut options = rebuild_options(
+      "http://upstream.internal/app".parse().unwrap(),
+      &compression,
+      "example.test",
+      false,
+    );
+    options.route_mutations = &route_mutations;
+
+    let rebuilt = rebuild_request(request, options);
+
+    assert_eq!(rebuilt.headers()[AUTHORIZATION], "Bearer injected-by-route");
+    assert!(!rebuilt.headers().contains_key(ACCEPT_ENCODING));
+  }
+
+  #[test]
+  fn rebuild_request_strips_configured_accept_encoding_when_waf_mutation_adds_cookie() {
+    let request = Request::builder()
+      .uri("/app")
+      .header(HOST, "example.test")
+      .header(ACCEPT_ENCODING, "gzip;q=1.0, zstd;q=0.5")
+      .body(empty_proxy_body())
+      .expect("request should build");
+    let compression = CompressionConfig {
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Configured,
+      ..CompressionConfig::default()
+    };
+    let waf_mutations = [HeaderMutation::Set {
+      name: COOKIE,
+      value: http::HeaderValue::from_static("session=injected-by-waf"),
+    }];
+    let mut options = rebuild_options(
+      "http://upstream.internal/app".parse().unwrap(),
+      &compression,
+      "example.test",
+      false,
+    );
+    options.waf_mutations = &waf_mutations;
+
+    let rebuilt = rebuild_request(request, options);
+
+    assert_eq!(rebuilt.headers()[COOKIE], "session=injected-by-waf");
+    assert!(!rebuilt.headers().contains_key(ACCEPT_ENCODING));
   }
 
   #[test]
