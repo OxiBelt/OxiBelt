@@ -1,6 +1,19 @@
 use super::*;
-use crate::config::LimitsConfig;
+use crate::config::{Config, LimitsConfig};
 use crate::limits::LimitState;
+
+mod common {
+  include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/rust/common/mod.rs"
+  ));
+}
+
+fn parse_config(raw: &str) -> Config {
+  let config: Config = toml::from_str(raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  config
+}
 
 #[test]
 fn short_header_cid_lookup_uses_byte_after_flags() {
@@ -162,6 +175,85 @@ fn forwarded_quic_session_holds_connection_permit_until_removed() {
 
   drop(sessions.remove_forward_client(client));
   assert!(state.acquire_connection(client.ip(), &limits, &[]).is_ok());
+}
+
+#[tokio::test]
+async fn policy_demux_parse_failure_fails_closed_without_sni_forwarding() {
+  let temp_dir = common::TempDir::new("quic-policy-demux-parse-failure");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "quic-policy-demux-parse-failure");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace("http3 = false", "http3 = true")
+    + r#"
+
+[routes.tls.1_3]
+key_exchange_groups = ["x25519"]
+
+[quic.socket]
+workers = 1
+"#;
+  let snapshot = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("application snapshot should initialize");
+  let quic_config = snapshot
+    .quic_server_config
+    .as_ref()
+    .expect("HTTP/3 snapshot should build QUIC config");
+  assert!(quic_config.requires_sni_policy_demux());
+  assert_ne!(quic_config.policy_index_for_sni(Some("example.com")), 0);
+  let policy_count = quic_config.configs().len();
+
+  let state = AppHandle::new(snapshot);
+  let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let (demux, sockets) = QuicDemuxSocket::new(socket, 4, policy_count);
+  let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+  demux
+    .handle_datagram(b"not a QUIC Initial", peer, &state)
+    .await
+    .expect("parse failures should be rejected without surfacing an I/O error");
+
+  for endpoint in sockets {
+    let mut receiver = endpoint
+      .local_rx
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(receiver.try_recv().is_err());
+  }
+}
+
+#[tokio::test]
+async fn parse_failure_queues_default_when_no_classification_is_required() {
+  let temp_dir = common::TempDir::new("quic-no-demux-parse-failure");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "quic-no-demux-parse-failure");
+  let snapshot = AppSnapshot::new(parse_config(&common::minimal_config_toml(
+    &cert_path, &key_path,
+  )))
+  .await
+  .expect("application snapshot should initialize");
+  assert!(
+    snapshot.quic_server_config.is_none(),
+    "HTTP/3 disabled config should not require QUIC classification"
+  );
+
+  let state = AppHandle::new(snapshot);
+  let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let (demux, sockets) = QuicDemuxSocket::new(socket, 4, 1);
+  let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+  demux
+    .handle_datagram(b"not a QUIC Initial", peer, &state)
+    .await
+    .expect("unclassified local datagram should queue");
+
+  let mut receiver = sockets[0]
+    .local_rx
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let queued = receiver.try_recv().expect("datagram should queue locally");
+  assert_eq!(queued.bytes, b"not a QUIC Initial");
+  assert_eq!(queued.peer, peer);
 }
 
 #[tokio::test]

@@ -284,10 +284,6 @@ impl QuicDemuxSocket {
     let (sni, client_scid) = match initial {
       Ok(value) => value,
       Err(error) => {
-        if !sni_forward_enabled {
-          self.queue_local(0, datagram, peer);
-          return Ok(());
-        }
         snapshot.metrics.record_sni_forward_parse_failure("quic");
         snapshot
           .metrics
