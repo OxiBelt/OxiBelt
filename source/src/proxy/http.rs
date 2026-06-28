@@ -465,8 +465,7 @@ where
     }
   }
 
-  if !early_data::is_verified(&request)
-    && state.request_path_features.rate_limits
+  if state.request_path_features.rate_limits
     && let Some(status) = state
       .limits
       .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
@@ -498,14 +497,6 @@ where
   if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
   {
     return response;
-  }
-  if early_data::is_verified(&request)
-    && state.request_path_features.rate_limits
-    && let Some(status) = state
-      .limits
-      .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
-  {
-    return text_response(status, "rate limit exceeded");
   }
   access_log.set_route_name(&resolved.route.name);
   let max_request_body_bytes = resolved
@@ -3481,6 +3472,9 @@ mod webtransport_tests;
 
 #[cfg(test)]
 mod body_capture_tests;
+
+#[cfg(test)]
+mod early_data_rate_limit_tests;
 
 #[cfg(test)]
 mod tests;
