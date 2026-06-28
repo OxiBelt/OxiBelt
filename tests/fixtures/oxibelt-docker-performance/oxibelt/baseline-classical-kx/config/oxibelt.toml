@@ -37,6 +37,8 @@ max_requests_per_connection = 10000000
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
+
+[tls.1_3]
 key_exchange_groups = ["x25519", "secp256r1", "secp384r1"]
 
 [tls.ocsp]

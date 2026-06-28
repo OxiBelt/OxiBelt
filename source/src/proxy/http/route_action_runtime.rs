@@ -255,6 +255,7 @@ mod tests {
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     }
   }

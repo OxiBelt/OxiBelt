@@ -2029,9 +2029,12 @@ async fn handle_connection(
   .context("TLS ClientHello timed out")?
   .context("TLS ClientHello failed")?;
   let client_hello_metadata = client_hello_fingerprint_metadata(start.client_hello());
+  let tls_server_config = handshake_state
+    .tls_server_config
+    .select(&start.client_hello());
   let tls_stream = tokio::time::timeout(
     Duration::from_millis(handshake_state.config.limits.tls_handshake_timeout_ms),
-    start.into_stream(handshake_state.tls_server_config.clone()),
+    start.into_stream(tls_server_config),
   )
   .await
   .context("TLS handshake timed out")?

@@ -1,0 +1,398 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Context, bail};
+use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
+use rustls::{CipherSuite, NamedGroup, ServerConfig};
+
+use crate::config::{
+  ListenerConfig, QuicConfig, RouteConfig, TlsConfig, TlsKeyExchangeGroup, TlsKeyExchangePolicy,
+  TlsVersion,
+};
+
+use super::{CrliteRuntime, OcspStapleRuntime, TlsResumptionState};
+
+#[derive(Debug, Clone)]
+pub struct DownstreamTlsServerConfig {
+  default: Arc<TlsServerConfigSet>,
+  by_sni: Arc<HashMap<String, Arc<TlsServerConfigSet>>>,
+}
+
+impl DownstreamTlsServerConfig {
+  pub(crate) fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
+    let config_set = client_hello
+      .server_name()
+      .and_then(|name| self.by_sni.get(&name.to_ascii_lowercase()))
+      .unwrap_or(&self.default);
+    config_set.select(client_hello)
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct TurnTlsServerConfig {
+  config_set: Arc<TlsServerConfigSet>,
+}
+
+impl TurnTlsServerConfig {
+  pub(crate) fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
+    self.config_set.select(client_hello)
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct DownstreamQuicServerConfig {
+  configs: Arc<Vec<QuinnServerConfig>>,
+  by_sni: Arc<HashMap<String, usize>>,
+}
+
+impl DownstreamQuicServerConfig {
+  pub(crate) fn default_config(&self) -> QuinnServerConfig {
+    self
+      .configs
+      .first()
+      .expect("downstream QUIC config set must not be empty")
+      .clone()
+  }
+
+  pub(crate) fn configs(&self) -> &[QuinnServerConfig] {
+    &self.configs
+  }
+
+  pub(crate) fn requires_sni_policy_demux(&self) -> bool {
+    self.configs.len() > 1
+  }
+
+  pub(crate) fn policy_index_for_sni(&self, sni: Option<&str>) -> usize {
+    sni
+      .and_then(|name| self.by_sni.get(&name.to_ascii_lowercase()).copied())
+      .unwrap_or(0)
+  }
+}
+
+#[derive(Debug)]
+struct TlsServerConfigSet {
+  tls13: Option<TlsServerVersionConfig>,
+  tls12: Option<TlsServerVersionConfig>,
+}
+
+impl TlsServerConfigSet {
+  fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
+    if let Some(tls13) = &self.tls13
+      && client_offers_tls13(client_hello)
+      && client_offers_any_group(client_hello, &tls13.key_exchange_groups)
+    {
+      return tls13.config.clone();
+    }
+    if let Some(tls12) = &self.tls12
+      && client_offers_tls12(client_hello)
+      && client_offers_any_group(client_hello, &tls12.key_exchange_groups)
+    {
+      return tls12.config.clone();
+    }
+    self
+      .tls13
+      .as_ref()
+      .or(self.tls12.as_ref())
+      .expect("TLS config set must include at least one version")
+      .config
+      .clone()
+  }
+}
+
+#[derive(Debug)]
+struct TlsServerVersionConfig {
+  config: Arc<ServerConfig>,
+  key_exchange_groups: Vec<TlsKeyExchangeGroup>,
+}
+
+pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  routes: &[RouteConfig],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<DownstreamTlsServerConfig> {
+  let default_policy = tls.key_exchange_policy();
+  let mut policies = HashMap::<TlsKeyExchangePolicy, Arc<TlsServerConfigSet>>::new();
+  let default = build_or_get_tcp_policy(
+    &mut policies,
+    tls,
+    listeners,
+    &default_policy,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )?;
+  let mut by_sni = HashMap::new();
+  for route in routes {
+    if !route.tls.has_key_exchange_overrides() {
+      continue;
+    }
+    let policy = tls.effective_route_key_exchange_policy(&route.tls);
+    let config_set = build_or_get_tcp_policy(
+      &mut policies,
+      tls,
+      listeners,
+      &policy,
+      resumption_state,
+      ocsp_runtime,
+      crlite_runtime,
+    )
+    .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
+    for host in &route.hosts {
+      by_sni.insert(host.to_ascii_lowercase(), config_set.clone());
+    }
+  }
+  Ok(DownstreamTlsServerConfig {
+    default,
+    by_sni: Arc::new(by_sni),
+  })
+}
+
+pub(crate) fn build_turn_tls_server_config_with_resumption(
+  listener_tls: &crate::config::TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<TurnTlsServerConfig> {
+  let policy = default_tls.key_exchange_policy();
+  let tls13 = if default_tls.max_version >= TlsVersion::Tls13 {
+    Some(TlsServerVersionConfig {
+      config: super::build_turn_server_config_for_groups(
+        listener_tls,
+        default_tls,
+        &policy.tls13.key_exchange_groups,
+        &[&rustls::version::TLS13],
+        resumption_state,
+      )?,
+      key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
+    })
+  } else {
+    None
+  };
+  let tls12 = if default_tls.min_version <= TlsVersion::Tls12 {
+    Some(TlsServerVersionConfig {
+      config: super::build_turn_server_config_for_groups(
+        listener_tls,
+        default_tls,
+        &policy.tls12.key_exchange_groups,
+        &[&rustls::version::TLS12],
+        resumption_state,
+      )?,
+      key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
+    })
+  } else {
+    None
+  };
+  if tls13.is_none() && tls12.is_none() {
+    bail!("TURN TLS policy must allow at least one protocol version");
+  }
+  Ok(TurnTlsServerConfig {
+    config_set: Arc::new(TlsServerConfigSet { tls13, tls12 }),
+  })
+}
+
+pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&Path>,
+  routes: &[RouteConfig],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<DownstreamQuicServerConfig> {
+  let mut policy_indices = HashMap::<Vec<TlsKeyExchangeGroup>, usize>::new();
+  let mut configs = Vec::new();
+  let default_index = build_or_get_quic_policy(
+    &mut policy_indices,
+    &mut configs,
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    &tls.tls13.key_exchange_groups,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )?;
+  debug_assert_eq!(default_index, 0);
+
+  let mut by_sni = HashMap::new();
+  for route in routes {
+    if !route.tls.has_key_exchange_overrides() {
+      continue;
+    }
+    let policy = tls.effective_route_key_exchange_policy(&route.tls);
+    let index = build_or_get_quic_policy(
+      &mut policy_indices,
+      &mut configs,
+      tls,
+      quic,
+      quic_host_key_base_dir,
+      &policy.tls13.key_exchange_groups,
+      resumption_state,
+      ocsp_runtime,
+      crlite_runtime,
+    )
+    .with_context(|| {
+      format!(
+        "failed to build route {} downstream QUIC policy",
+        route.name
+      )
+    })?;
+    for host in &route.hosts {
+      by_sni.insert(host.to_ascii_lowercase(), index);
+    }
+  }
+
+  Ok(DownstreamQuicServerConfig {
+    configs: Arc::new(configs),
+    by_sni: Arc::new(by_sni),
+  })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_or_get_quic_policy(
+  policy_indices: &mut HashMap<Vec<TlsKeyExchangeGroup>, usize>,
+  configs: &mut Vec<QuinnServerConfig>,
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&Path>,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<usize> {
+  if let Some(index) = policy_indices.get(key_exchange_groups) {
+    return Ok(*index);
+  }
+  let config = super::build_downstream_quic_server_config_for_groups(
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    key_exchange_groups,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )?;
+  let index = configs.len();
+  configs.push(config);
+  policy_indices.insert(key_exchange_groups.to_vec(), index);
+  Ok(index)
+}
+
+fn build_or_get_tcp_policy(
+  policies: &mut HashMap<TlsKeyExchangePolicy, Arc<TlsServerConfigSet>>,
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  policy: &TlsKeyExchangePolicy,
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<Arc<TlsServerConfigSet>> {
+  if let Some(config) = policies.get(policy) {
+    return Ok(config.clone());
+  }
+  let config = Arc::new(build_tcp_policy(
+    tls,
+    listeners,
+    policy,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )?);
+  policies.insert(policy.clone(), config.clone());
+  Ok(config)
+}
+
+fn build_tcp_policy(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  policy: &TlsKeyExchangePolicy,
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<TlsServerConfigSet> {
+  let tls13 = if tls.max_version >= TlsVersion::Tls13 {
+    Some(TlsServerVersionConfig {
+      config: super::build_downstream_tcp_server_config_for_groups(
+        tls,
+        listeners,
+        &policy.tls13.key_exchange_groups,
+        &[&rustls::version::TLS13],
+        resumption_state,
+        ocsp_runtime,
+        crlite_runtime,
+      )?,
+      key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
+    })
+  } else {
+    None
+  };
+  let tls12 = if tls.min_version <= TlsVersion::Tls12 {
+    Some(TlsServerVersionConfig {
+      config: super::build_downstream_tcp_server_config_for_groups(
+        tls,
+        listeners,
+        &policy.tls12.key_exchange_groups,
+        &[&rustls::version::TLS12],
+        resumption_state,
+        ocsp_runtime,
+        crlite_runtime,
+      )?,
+      key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
+    })
+  } else {
+    None
+  };
+  if tls13.is_none() && tls12.is_none() {
+    bail!("TLS policy must allow at least one protocol version");
+  }
+  Ok(TlsServerConfigSet { tls13, tls12 })
+}
+
+fn client_offers_tls13(client_hello: &rustls::server::ClientHello<'_>) -> bool {
+  client_hello.cipher_suites().iter().any(|suite| {
+    matches!(
+      suite,
+      CipherSuite::TLS13_AES_128_GCM_SHA256
+        | CipherSuite::TLS13_AES_256_GCM_SHA384
+        | CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+    )
+  })
+}
+
+fn client_offers_tls12(client_hello: &rustls::server::ClientHello<'_>) -> bool {
+  client_hello.cipher_suites().iter().any(|suite| {
+    !matches!(
+      suite,
+      CipherSuite::TLS13_AES_128_GCM_SHA256
+        | CipherSuite::TLS13_AES_256_GCM_SHA384
+        | CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+        | CipherSuite::TLS13_AES_128_CCM_SHA256
+        | CipherSuite::TLS13_AES_128_CCM_8_SHA256
+    )
+  })
+}
+
+fn client_offers_any_group(
+  client_hello: &rustls::server::ClientHello<'_>,
+  groups: &[TlsKeyExchangeGroup],
+) -> bool {
+  let Some(offered) = client_hello.named_groups() else {
+    return false;
+  };
+  groups
+    .iter()
+    .map(|group| named_group(*group))
+    .any(|group| offered.contains(&group))
+}
+
+fn named_group(group: TlsKeyExchangeGroup) -> NamedGroup {
+  match group {
+    TlsKeyExchangeGroup::X25519MlKem768 => NamedGroup::X25519MLKEM768,
+    TlsKeyExchangeGroup::X25519 => NamedGroup::X25519,
+    TlsKeyExchangeGroup::Secp256r1 => NamedGroup::secp256r1,
+    TlsKeyExchangeGroup::Secp384r1 => NamedGroup::secp384r1,
+  }
+}

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Context;
 
 use crate::config::Config;
@@ -11,8 +9,8 @@ pub(super) async fn build_downstream_tls_reload_configs(
 ) -> anyhow::Result<(
   crate::tls::CrliteRuntime,
   crate::tls::OcspStapleRuntime,
-  Arc<rustls::ServerConfig>,
-  Option<h3_quinn::quinn::ServerConfig>,
+  crate::tls::DownstreamTlsServerConfig,
+  Option<crate::tls::DownstreamQuicServerConfig>,
 )> {
   let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
     .await
@@ -21,9 +19,10 @@ pub(super) async fn build_downstream_tls_reload_configs(
     crate::tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
       .await
       .context("failed to build OCSP staple runtime")?;
-  let tls_server_config = crate::tls::build_server_config_with_resumption_and_ocsp(
+  let tls_server_config = crate::tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
     &config.tls,
     &config.listeners,
+    &config.routes,
     Some(&active.tls_resumption),
     Some(&ocsp_staple),
     Some(&crlite),
@@ -31,10 +30,11 @@ pub(super) async fn build_downstream_tls_reload_configs(
   .context("failed to rebuild downstream TLS config")?;
   let quic_server_config = if config.listeners.http3 {
     Some(
-      crate::tls::build_quic_server_config_with_resumption_and_ocsp(
+      crate::tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
         &config.tls,
         &config.quic,
         config.source_paths.cert_dir.as_deref(),
+        &config.routes,
         Some(&active.tls_resumption),
         Some(&ocsp_staple),
         Some(&crlite),

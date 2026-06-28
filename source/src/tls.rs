@@ -26,6 +26,7 @@ mod crlite_runtime;
 mod ocsp;
 mod outbound_revocation;
 mod resumption;
+mod server_policy;
 mod upstream_client;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
@@ -39,6 +40,14 @@ pub use outbound_revocation::OutboundRevocationRuntimeStatus;
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,
+};
+pub use server_policy::{
+  DownstreamQuicServerConfig, DownstreamTlsServerConfig, TurnTlsServerConfig,
+};
+pub(crate) use server_policy::{
+  build_downstream_quic_server_config_with_resumption_and_ocsp,
+  build_downstream_tls_server_config_with_resumption_and_ocsp,
+  build_turn_tls_server_config_with_resumption,
 };
 pub use upstream_client::{
   build_upstream_client_config, build_upstream_client_config_with_resumption,
@@ -56,9 +65,14 @@ pub fn install_default_provider() -> anyhow::Result<()> {
 }
 
 fn downstream_crypto_provider(tls: &TlsConfig) -> rustls::crypto::CryptoProvider {
+  downstream_crypto_provider_for_groups(&tls.tls13.key_exchange_groups)
+}
+
+pub(super) fn downstream_crypto_provider_for_groups(
+  groups: &[TlsKeyExchangeGroup],
+) -> rustls::crypto::CryptoProvider {
   let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-  provider.kx_groups = tls
-    .key_exchange_groups
+  provider.kx_groups = groups
     .iter()
     .copied()
     .map(supported_key_exchange_group)
@@ -101,15 +115,34 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(downstream_crypto_provider(tls));
+  build_downstream_tcp_server_config_for_groups(
+    tls,
+    listeners,
+    &tls.tls13.key_exchange_groups,
+    &tls_protocol_versions(tls.min_version, tls.max_version),
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )
+}
+
+pub(super) fn build_downstream_tcp_server_config_for_groups(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
   let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   if let Some(runtime) = crlite_runtime {
     cert_resolver = runtime.wrap_resolver(cert_resolver);
   }
-  let versions = tls_protocol_versions(tls.min_version, tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(&versions)
+    .with_protocol_versions(versions)
     .context("failed to configure TLS versions")?;
   let mut server_config = match downstream_client_cert_verifier(&tls.client_auth, provider)? {
     Some(verifier) => builder.with_client_cert_verifier(verifier),
@@ -174,7 +207,27 @@ pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(downstream_crypto_provider(tls));
+  build_downstream_quic_server_config_for_groups(
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    &tls.tls13.key_exchange_groups,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )
+}
+
+pub(super) fn build_downstream_quic_server_config_for_groups(
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<QuinnServerConfig> {
+  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
   let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   if let Some(runtime) = crlite_runtime {
@@ -289,7 +342,23 @@ pub fn build_turn_server_config_with_resumption(
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(downstream_crypto_provider(default_tls));
+  build_turn_server_config_for_groups(
+    listener_tls,
+    default_tls,
+    &default_tls.tls13.key_exchange_groups,
+    &tls_protocol_versions(default_tls.min_version, default_tls.max_version),
+    resumption_state,
+  )
+}
+
+pub(super) fn build_turn_server_config_for_groups(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
   let cert_chain = listener_tls
     .cert_chain
     .as_ref()
@@ -305,9 +374,8 @@ pub fn build_turn_server_config_with_resumption(
   .context("failed to create TURN rustls certified key")?;
   let server_identity = certificate_identity(&certified_key.cert);
   let cert_resolver = rustls::sign::SingleCertAndKey::from(certified_key);
-  let versions = tls_protocol_versions(default_tls.min_version, default_tls.max_version);
   let builder = ServerConfig::builder_with_provider(provider)
-    .with_protocol_versions(&versions)
+    .with_protocol_versions(versions)
     .context("failed to configure TURN TLS versions")?;
   let mut server_config = builder
     .with_no_client_auth()

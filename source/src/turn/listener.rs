@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 use tracing::{info, warn};
 use url::Url;
 
@@ -48,7 +48,7 @@ pub struct BoundTurnListener {
   tls: Vec<TcpListener>,
   tcp_options: TcpListenOptions,
   accept_error_backoff: Duration,
-  tls_config: Option<Arc<rustls::ServerConfig>>,
+  tls_config: Option<tls::TurnTlsServerConfig>,
 }
 
 pub(super) trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -87,7 +87,7 @@ impl BoundTurnListener {
       None => Vec::new(),
     };
     let tls_config = if config.bind_tls.is_some() {
-      Some(tls::build_turn_server_config_with_resumption(
+      Some(tls::build_turn_tls_server_config_with_resumption(
         &config.tls,
         default_tls,
         Some(tls_resumption),
@@ -235,7 +235,7 @@ fn spawn_tcp_acceptor(
   connections: TaskRegistry,
   long_connection_close_delay: Duration,
   accept_error_backoff: Duration,
-  tls_config: Option<Arc<rustls::ServerConfig>>,
+  tls_config: Option<tls::TurnTlsServerConfig>,
   edge: EdgeState,
 ) {
   tasks.push(tokio::spawn(async move {
@@ -243,7 +243,6 @@ fn spawn_tcp_acceptor(
       let bind = listener.local_addr().context("failed to read TURN bind")?;
       let transport = if is_tls { "tls" } else { "tcp" };
       info!(name = %config.name, bind = %bind, transport, worker = worker_index, "WebRTC TURN listener started");
-      let acceptor = tls_config.map(TlsAcceptor::from);
       let mut next_stream_id = worker_index as u64;
       loop {
         tokio::select! {
@@ -278,7 +277,7 @@ fn spawn_tcp_acceptor(
             let conn_config = config.clone();
             let conn_state = state.clone();
             let conn_edge = edge.clone();
-            let conn_acceptor = acceptor.clone();
+            let conn_tls_config = tls_config.clone();
             let stream_pool = if is_tls {
               conn_config.tls_pool.clone()
             } else {
@@ -290,13 +289,21 @@ fn spawn_tcp_acceptor(
               let _introspection_guard = introspection_guard;
               conn_state.snapshot().metrics.record_turn_event(
                 &conn_config.name,
-                if conn_acceptor.is_some() { "tls" } else { "tcp" },
+                if conn_tls_config.is_some() { "tls" } else { "tcp" },
                 "connection_started",
               );
-              let result = if let Some(acceptor) = conn_acceptor {
+              let result = if let Some(tls_config) = conn_tls_config {
                 let handshake_timeout = Duration::from_millis(conn_config.idle_timeout_ms);
-                match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                  Ok(Ok(tls_stream)) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
+                let accept = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+                match tokio::time::timeout(handshake_timeout, accept).await {
+                  Ok(Ok(start)) => {
+                    let server_config = tls_config.select(&start.client_hello());
+                    match tokio::time::timeout(handshake_timeout, start.into_stream(server_config)).await {
+                      Ok(Ok(tls_stream)) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
+                      Ok(Err(error)) => Err(anyhow::anyhow!(error).context("TURN TLS handshake failed")),
+                      Err(_) => Err(anyhow::anyhow!("TURN TLS handshake timed out")),
+                    }
+                  },
                   Ok(Err(error)) => Err(anyhow::anyhow!(error).context("TURN TLS handshake failed")),
                   Err(_) => Err(anyhow::anyhow!("TURN TLS handshake timed out")),
                 }

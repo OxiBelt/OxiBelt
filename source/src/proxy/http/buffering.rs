@@ -670,6 +670,7 @@ private_key = "/tmp/key.pem"
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     };
     let effective = EffectiveBuffering::new(&config, &route);

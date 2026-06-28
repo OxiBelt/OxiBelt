@@ -62,7 +62,7 @@ fn pre_classification_limit_evicts_oldest_across_local_and_forwarded_clients() {
   );
   state
     .local_clients
-    .insert(local, now - Duration::from_secs(20));
+    .insert(local, local_session(now - Duration::from_secs(20)));
   state.forward_by_client.insert(
     new_forward,
     test_session_with_last_seen(target, now - Duration::from_secs(10)),
@@ -94,7 +94,9 @@ fn pre_classification_limit_bounds_cid_maps_to_session_limit() {
   let target = "127.0.0.1:443".parse().unwrap();
   let mut state = QuicForwardState::default();
   state.forward_by_client.insert(client, test_session(target));
-  state.local_clients.insert(local, Instant::now());
+  state
+    .local_clients
+    .insert(local, local_session(Instant::now()));
   for index in 0..8u8 {
     state.cid_to_client.insert(vec![index], client);
     state.local_cids.insert(vec![index + 16], local);
@@ -107,6 +109,32 @@ fn pre_classification_limit_bounds_cid_maps_to_session_limit() {
   assert!(state.local_cids.len() <= 2);
   assert!(state.cid_to_client.values().all(|mapped| *mapped == client));
   assert!(state.local_cids.values().all(|mapped| *mapped == local));
+}
+
+#[test]
+fn known_local_session_keeps_selected_policy_index() {
+  let client = "127.0.0.1:12345".parse().unwrap();
+  let mut state = QuicForwardState::default();
+  state.local_clients.insert(
+    client,
+    LocalQuicSession {
+      policy_index: 2,
+      last_seen: Instant::now() - Duration::from_secs(10),
+    },
+  );
+
+  match state.known_action(&[0x40, 0xaa, 0xbb], client) {
+    DatagramAction::QueueLocal(index) => assert_eq!(index, 2),
+    action => panic!("unexpected action: {action:?}"),
+  }
+  assert!(
+    state
+      .local_clients
+      .get(&client)
+      .expect("local client should remain")
+      .last_seen
+      > Instant::now() - Duration::from_secs(5)
+  );
 }
 
 #[test]
@@ -139,14 +167,14 @@ fn forwarded_quic_session_holds_connection_permit_until_removed() {
 #[tokio::test]
 async fn local_datagram_queue_drops_when_capacity_is_full() {
   let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-  let demux = QuicDemuxSocket::new(socket, 2);
+  let (demux, sockets) = QuicDemuxSocket::new(socket, 2, 1);
   let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
-  demux.queue_local(&[1], peer);
-  demux.queue_local(&[2], peer);
-  demux.queue_local(&[3], peer);
+  demux.queue_local(0, &[1], peer);
+  demux.queue_local(0, &[2], peer);
+  demux.queue_local(0, &[3], peer);
 
-  let mut receiver = demux
+  let mut receiver = sockets[0]
     .local_rx
     .lock()
     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -171,5 +199,12 @@ fn test_session_with_last_seen(target: SocketAddr, last_seen: Instant) -> QuicFo
     client_to_target: 0,
     target_to_client: 0,
     _connection_permit: None,
+  }
+}
+
+fn local_session(last_seen: Instant) -> LocalQuicSession {
+  LocalQuicSession {
+    policy_index: 0,
+    last_seen,
   }
 }

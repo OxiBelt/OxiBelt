@@ -95,9 +95,9 @@ pub struct AppSnapshot {
   pub shared_state: Option<Arc<SharedState>>,
   pub(crate) crlite: tls::CrliteRuntime,
   pub(crate) ocsp_staple: tls::OcspStapleRuntime,
-  pub tls_server_config: Arc<rustls::ServerConfig>,
+  pub tls_server_config: tls::DownstreamTlsServerConfig,
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
-  pub quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
+  pub quic_server_config: Option<tls::DownstreamQuicServerConfig>,
   pub admin_quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub(crate) tls_resumption: tls::TlsResumptionState,
   pub waf: WafEngine,
@@ -289,9 +289,10 @@ impl AppSnapshot {
       tls::OcspStapleRuntime::new(&config.tls, &bootstrap_control_http, metrics.clone())
         .await
         .context("failed to build OCSP staple runtime")?;
-    let tls_server_config = tls::build_server_config_with_resumption_and_ocsp(
+    let tls_server_config = tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
+      &config.routes,
       Some(&tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
@@ -307,10 +308,11 @@ impl AppSnapshot {
     };
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config_with_resumption_and_ocsp(
+        tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
+          &config.routes,
           Some(&tls_resumption),
           Some(&ocsp_staple),
           Some(&crlite),

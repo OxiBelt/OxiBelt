@@ -225,8 +225,12 @@ pub(super) fn refresh_http3_server_config(
   snapshot: &AppSnapshot,
 ) {
   if let Some(config) = &snapshot.quic_server_config {
+    let configs = config.configs();
     for task in current.values() {
-      for endpoint in &task.endpoints {
+      for (index, endpoint) in task.endpoints.iter().enumerate() {
+        let config = configs
+          .get(index % configs.len())
+          .expect("downstream QUIC config set must not be empty");
         endpoint.set_server_config(Some(config.clone()));
       }
       info!(bind = %task.bind, "downstream HTTP/3 TLS config refreshed");

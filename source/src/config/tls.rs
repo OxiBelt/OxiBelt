@@ -9,12 +9,18 @@ use base64::Engine;
 use serde::{Deserialize, Deserializer};
 
 use super::{
-  CrliteConfig, default_true, resolve_existing_local_config_file_path_with_logical,
+  CrliteConfig, RouteTlsConfig, default_true, resolve_existing_local_config_file_path_with_logical,
   validate_admin_server_name, validate_base64_32_byte_env, validate_optional_non_empty,
   validate_tls_server_resumption,
 };
 
+mod key_exchange;
 mod ocsp;
+pub use key_exchange::{
+  RawTlsVersionKeyExchangeConfig, TlsKeyExchangeGroup, TlsKeyExchangePolicy,
+  TlsVersionKeyExchangeConfig,
+};
+use key_exchange::{default_tls12_key_exchange_groups, default_tls13_key_exchange_groups};
 pub(in crate::config) use ocsp::OCSP_CONFIG_KEYS;
 pub use ocsp::*;
 
@@ -29,6 +35,8 @@ pub struct TlsConfig {
   pub certificates: Vec<TlsCertificateConfig>,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
+  pub tls12: TlsVersionKeyExchangeConfig,
+  pub tls13: TlsVersionKeyExchangeConfig,
   pub key_exchange_groups: Vec<TlsKeyExchangeGroup>,
   pub session_tickets: bool,
   pub session_ticket_rotation_seconds: u64,
@@ -62,8 +70,12 @@ impl<'de> Deserialize<'de> for TlsConfig {
       min_version: TlsVersion,
       #[serde(default = "default_tls_max_version")]
       max_version: TlsVersion,
-      #[serde(default = "default_tls_key_exchange_groups")]
-      key_exchange_groups: Vec<TlsKeyExchangeGroup>,
+      #[serde(default)]
+      key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
+      #[serde(default, rename = "1_2")]
+      tls12: RawTlsVersionKeyExchangeConfig,
+      #[serde(default, rename = "1_3")]
+      tls13: RawTlsVersionKeyExchangeConfig,
       #[serde(default)]
       session_tickets: Option<bool>,
       #[serde(default)]
@@ -87,6 +99,17 @@ impl<'de> Deserialize<'de> for TlsConfig {
         raw.session_ticket_rotation_seconds,
       )
       .map_err(serde::de::Error::custom)?;
+    let legacy_key_exchange_groups = raw.key_exchange_groups;
+    let tls13_key_exchange_groups = raw
+      .tls13
+      .key_exchange_groups
+      .or_else(|| legacy_key_exchange_groups.clone())
+      .unwrap_or_else(default_tls13_key_exchange_groups);
+    let tls12_key_exchange_groups = raw
+      .tls12
+      .key_exchange_groups
+      .or_else(|| legacy_key_exchange_groups.clone())
+      .unwrap_or_else(default_tls12_key_exchange_groups);
     Ok(Self {
       server_names: raw.server_names,
       cert_chain: raw.cert_chain,
@@ -97,7 +120,13 @@ impl<'de> Deserialize<'de> for TlsConfig {
       certificates: raw.certificates,
       min_version: raw.min_version,
       max_version: raw.max_version,
-      key_exchange_groups: raw.key_exchange_groups,
+      tls12: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: tls12_key_exchange_groups,
+      },
+      tls13: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: tls13_key_exchange_groups.clone(),
+      },
+      key_exchange_groups: tls13_key_exchange_groups,
       session_tickets,
       session_ticket_rotation_seconds,
       resumption,
@@ -105,6 +134,37 @@ impl<'de> Deserialize<'de> for TlsConfig {
       ocsp: raw.ocsp,
       crlite: raw.crlite,
     })
+  }
+}
+
+impl TlsConfig {
+  pub fn key_exchange_policy(&self) -> TlsKeyExchangePolicy {
+    TlsKeyExchangePolicy {
+      tls12: self.tls12.clone(),
+      tls13: self.tls13.clone(),
+    }
+  }
+
+  pub fn effective_route_key_exchange_policy(
+    &self,
+    route_tls: &RouteTlsConfig,
+  ) -> TlsKeyExchangePolicy {
+    TlsKeyExchangePolicy {
+      tls12: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: route_tls
+          .tls12
+          .key_exchange_groups
+          .clone()
+          .unwrap_or_else(|| self.tls12.key_exchange_groups.clone()),
+      },
+      tls13: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: route_tls
+          .tls13
+          .key_exchange_groups
+          .clone()
+          .unwrap_or_else(|| self.tls13.key_exchange_groups.clone()),
+      },
+    }
   }
 }
 
@@ -119,26 +179,6 @@ pub struct TlsCertificateConfig {
   pub remote_signer_key_id: Option<String>,
   #[serde(default)]
   pub ocsp: OcspConfig,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum TlsKeyExchangeGroup {
-  X25519MlKem768,
-  X25519,
-  Secp256r1,
-  Secp384r1,
-}
-
-impl TlsKeyExchangeGroup {
-  pub(crate) fn as_str(self) -> &'static str {
-    match self {
-      Self::X25519MlKem768 => "x25519mlkem768",
-      Self::X25519 => "x25519",
-      Self::Secp256r1 => "secp256r1",
-      Self::Secp384r1 => "secp384r1",
-    }
-  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -610,15 +650,6 @@ pub(super) fn default_tls_min_version() -> TlsVersion {
 
 pub(super) fn default_tls_max_version() -> TlsVersion {
   TlsVersion::Tls13
-}
-
-fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
-  vec![
-    TlsKeyExchangeGroup::X25519MlKem768,
-    TlsKeyExchangeGroup::X25519,
-    TlsKeyExchangeGroup::Secp256r1,
-    TlsKeyExchangeGroup::Secp384r1,
-  ]
 }
 
 fn default_session_ticket_rotation_seconds() -> u64 {

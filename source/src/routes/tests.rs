@@ -51,6 +51,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     limits: Default::default(),
     timeouts: Default::default(),
     retry: None,
+    tls: Default::default(),
     waf: Default::default(),
   }
 }
@@ -81,6 +82,7 @@ fn exact_host_beats_wildcard() {
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     },
     RouteConfig {
@@ -106,6 +108,7 @@ fn exact_host_beats_wildcard() {
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     },
   ];
@@ -187,6 +190,7 @@ fn longer_path_prefix_wins() {
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     },
     RouteConfig {
@@ -212,6 +216,7 @@ fn longer_path_prefix_wins() {
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
+      tls: Default::default(),
       waf: Default::default(),
     },
   ];

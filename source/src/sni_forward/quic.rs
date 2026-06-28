@@ -1,5 +1,4 @@
 //! QUIC SNI forwarding runtime.
-use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
@@ -10,15 +9,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use h3_quinn::quinn::udp::{RecvMeta, Transmit};
-use h3_quinn::quinn::{
-  AsyncUdpSocket, Endpoint, ServerConfig, TokioRuntime, UdpPoller, default_runtime,
-};
+use h3_quinn::quinn::{AsyncUdpSocket, Endpoint, TokioRuntime, UdpPoller, default_runtime};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::limits::ConnectionPermit;
 use crate::sni_forward::SniForwardDecision;
 use crate::sni_forward::client_hello::raw_client_hello_sni;
 use crate::sni_forward::connection_limits::acquire_quic_forward_connection_permit;
@@ -26,7 +22,9 @@ use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::resolve_target_addr;
 
 mod forward_record;
+mod state;
 use forward_record::QuicForwardRecord;
+use state::{DatagramAction, LocalQuicSession, QuicForwardSession, QuicForwardState};
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
@@ -47,17 +45,19 @@ impl BoundQuicForwardSocket {
 
 pub(crate) fn bind_server_endpoints(
   bind: SocketAddr,
-  server_config: ServerConfig,
+  server_config: crate::tls::DownstreamQuicServerConfig,
   snapshot: &AppSnapshot,
 ) -> anyhow::Result<(Vec<Endpoint>, Vec<BoundQuicForwardSocket>)> {
   let mut endpoints = Vec::with_capacity(snapshot.config.quic.socket.workers);
   let mut demuxes = Vec::with_capacity(snapshot.config.quic.socket.workers);
 
-  let (first_endpoint, first_demux) = bind_server_endpoint(bind, server_config.clone(), snapshot)?;
-  let assigned = first_endpoint
+  let (first_endpoints, first_demux) = bind_server_endpoint(bind, &server_config, snapshot)?;
+  let assigned = first_endpoints
+    .first()
+    .expect("downstream QUIC bind must create at least one endpoint")
     .local_addr()
     .context("failed to read downstream HTTP/3 listener address")?;
-  endpoints.push(first_endpoint);
+  endpoints.extend(first_endpoints);
   demuxes.push(first_demux);
 
   if snapshot.config.quic.socket.workers == 1 {
@@ -66,8 +66,8 @@ pub(crate) fn bind_server_endpoints(
 
   let worker_bind = SocketAddr::new(bind.ip(), assigned.port());
   for _ in 1..snapshot.config.quic.socket.workers {
-    let (endpoint, demux) = bind_server_endpoint(worker_bind, server_config.clone(), snapshot)?;
-    endpoints.push(endpoint);
+    let (worker_endpoints, demux) = bind_server_endpoint(worker_bind, &server_config, snapshot)?;
+    endpoints.extend(worker_endpoints);
     demuxes.push(demux);
   }
   Ok((endpoints, demuxes))
@@ -75,16 +75,16 @@ pub(crate) fn bind_server_endpoints(
 
 pub(crate) fn bind_sni_or_plain_server_endpoints(
   bind: SocketAddr,
-  server_config: ServerConfig,
+  server_config: crate::tls::DownstreamQuicServerConfig,
   snapshot: &AppSnapshot,
 ) -> anyhow::Result<(Vec<Endpoint>, Vec<BoundQuicForwardSocket>)> {
-  if snapshot.config.sni_forward.has_quic() {
+  if snapshot.config.sni_forward.has_quic() || server_config.requires_sni_policy_demux() {
     bind_server_endpoints(bind, server_config, snapshot)
   } else {
     Ok((
       crate::quic::bind_server_endpoints(
         bind,
-        server_config,
+        server_config.default_config(),
         &snapshot.config.quic,
         snapshot.config.source_paths.cert_dir.as_deref(),
       )?,
@@ -124,29 +124,34 @@ pub(crate) fn spawn_demux_tasks(
 
 fn bind_server_endpoint(
   bind: SocketAddr,
-  server_config: ServerConfig,
+  server_config: &crate::tls::DownstreamQuicServerConfig,
   snapshot: &AppSnapshot,
-) -> anyhow::Result<(Endpoint, BoundQuicForwardSocket)> {
+) -> anyhow::Result<(Vec<Endpoint>, BoundQuicForwardSocket)> {
   let socket = crate::quic::bind_udp_socket(bind, &snapshot.config.quic.socket)?;
   let socket = UdpSocket::from_std(socket).context("failed to register QUIC UDP socket")?;
-  let demux = QuicDemuxSocket::new(
+  let (demux, local_sockets) = QuicDemuxSocket::new(
     socket,
     snapshot.config.sni_forward.quic_local_queue_capacity,
+    server_config.configs().len(),
   );
   let runtime = default_runtime().unwrap_or_else(|| Arc::new(TokioRuntime));
-  let endpoint = Endpoint::new_with_abstract_socket(
-    crate::quic::endpoint_config(
-      &snapshot.config.quic,
-      &snapshot.config.quic.downstream.transport,
-      "quic.downstream.transport",
-      snapshot.config.source_paths.cert_dir.as_deref(),
-    )?,
-    Some(server_config),
-    demux.clone(),
-    runtime,
-  )
-  .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
-  Ok((endpoint, BoundQuicForwardSocket { socket: demux }))
+  let mut endpoints = Vec::with_capacity(local_sockets.len());
+  for (index, config) in server_config.configs().iter().enumerate() {
+    let endpoint = Endpoint::new_with_abstract_socket(
+      crate::quic::endpoint_config(
+        &snapshot.config.quic,
+        &snapshot.config.quic.downstream.transport,
+        "quic.downstream.transport",
+        snapshot.config.source_paths.cert_dir.as_deref(),
+      )?,
+      Some(config.clone()),
+      local_sockets[index].clone(),
+      runtime.clone(),
+    )
+    .with_context(|| format!("failed to bind downstream HTTP/3 listener to {bind}"))?;
+    endpoints.push(endpoint);
+  }
+  Ok((endpoints, BoundQuicForwardSocket { socket: demux }))
 }
 
 #[derive(Clone)]
@@ -157,9 +162,13 @@ struct LocalDatagram {
 
 struct QuicDemuxSocket {
   socket: Arc<UdpSocket>,
-  local_tx: mpsc::Sender<LocalDatagram>,
-  local_rx: Mutex<mpsc::Receiver<LocalDatagram>>,
+  local_txs: Vec<mpsc::Sender<LocalDatagram>>,
   sessions: Mutex<QuicForwardState>,
+}
+
+struct QuicDemuxEndpointSocket {
+  demux: Arc<QuicDemuxSocket>,
+  local_rx: Mutex<mpsc::Receiver<LocalDatagram>>,
 }
 
 impl fmt::Debug for QuicDemuxSocket {
@@ -168,15 +177,42 @@ impl fmt::Debug for QuicDemuxSocket {
   }
 }
 
+impl fmt::Debug for QuicDemuxEndpointSocket {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("QuicDemuxEndpointSocket")
+      .finish_non_exhaustive()
+  }
+}
+
 impl QuicDemuxSocket {
-  fn new(socket: UdpSocket, local_queue_capacity: usize) -> Arc<Self> {
-    let (local_tx, local_rx) = mpsc::channel(local_queue_capacity);
-    Arc::new(Self {
+  fn new(
+    socket: UdpSocket,
+    local_queue_capacity: usize,
+    local_policy_count: usize,
+  ) -> (Arc<Self>, Vec<Arc<QuicDemuxEndpointSocket>>) {
+    let policy_count = local_policy_count.max(1);
+    let mut local_txs = Vec::with_capacity(policy_count);
+    let mut local_rxs = Vec::with_capacity(policy_count);
+    for _ in 0..policy_count {
+      let (local_tx, local_rx) = mpsc::channel(local_queue_capacity);
+      local_txs.push(local_tx);
+      local_rxs.push(local_rx);
+    }
+    let demux = Arc::new(Self {
       socket: Arc::new(socket),
-      local_tx,
-      local_rx: Mutex::new(local_rx),
+      local_txs,
       sessions: Mutex::new(QuicForwardState::default()),
-    })
+    });
+    let endpoint_sockets = local_rxs
+      .into_iter()
+      .map(|local_rx| {
+        Arc::new(QuicDemuxEndpointSocket {
+          demux: demux.clone(),
+          local_rx: Mutex::new(local_rx),
+        })
+      })
+      .collect();
+    (demux, endpoint_sockets)
   }
 
   async fn run(
@@ -219,14 +255,19 @@ impl QuicDemuxSocket {
     state: &AppHandle,
   ) -> anyhow::Result<()> {
     let snapshot = state.snapshot();
-    if !snapshot.config.sni_forward.has_quic() {
-      self.queue_local(datagram, peer);
+    let sni_forward_enabled = snapshot.config.sni_forward.has_quic();
+    let sni_policy_demux = snapshot
+      .quic_server_config
+      .as_ref()
+      .is_some_and(|config| config.requires_sni_policy_demux());
+    if !sni_forward_enabled && !sni_policy_demux {
+      self.queue_local(0, datagram, peer);
       return Ok(());
     }
 
     match self.known_action(datagram, peer, snapshot.as_ref()) {
-      DatagramAction::QueueLocal => {
-        self.queue_local(datagram, peer);
+      DatagramAction::QueueLocal(index) => {
+        self.queue_local(index, datagram, peer);
         return Ok(());
       }
       DatagramAction::SendTo(target) => {
@@ -243,6 +284,10 @@ impl QuicDemuxSocket {
     let (sni, client_scid) = match initial {
       Ok(value) => value,
       Err(error) => {
+        if !sni_forward_enabled {
+          self.queue_local(0, datagram, peer);
+          return Ok(());
+        }
         snapshot.metrics.record_sni_forward_parse_failure("quic");
         snapshot
           .metrics
@@ -251,14 +296,25 @@ impl QuicDemuxSocket {
         return Ok(());
       }
     };
+    let local_policy_index = snapshot
+      .quic_server_config
+      .as_ref()
+      .map(|config| config.policy_index_for_sni(sni.as_deref()))
+      .unwrap_or(0);
+
+    if !sni_forward_enabled {
+      self.remember_local(peer, client_scid, local_policy_index, snapshot.as_ref());
+      self.queue_local(local_policy_index, datagram, peer);
+      return Ok(());
+    }
 
     match snapshot.sni_forward.decide_quic(sni.as_deref()) {
       SniForwardDecision::Local => {
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "local", "local_route", "local");
-        self.remember_local(peer, client_scid, snapshot.as_ref());
-        self.queue_local(datagram, peer);
+        self.remember_local(peer, client_scid, local_policy_index, snapshot.as_ref());
+        self.queue_local(local_policy_index, datagram, peer);
       }
       SniForwardDecision::Reject => {
         snapshot
@@ -330,9 +386,21 @@ impl QuicDemuxSocket {
     action
   }
 
-  fn remember_local(&self, peer: SocketAddr, client_scid: Vec<u8>, snapshot: &AppSnapshot) {
+  fn remember_local(
+    &self,
+    peer: SocketAddr,
+    client_scid: Vec<u8>,
+    local_policy_index: usize,
+    snapshot: &AppSnapshot,
+  ) {
     let mut sessions = lock_sessions(&self.sessions);
-    sessions.local_clients.insert(peer, Instant::now());
+    sessions.local_clients.insert(
+      peer,
+      LocalQuicSession {
+        policy_index: local_policy_index,
+        last_seen: Instant::now(),
+      },
+    );
     if !client_scid.is_empty() {
       sessions.local_cids.insert(client_scid, peer);
     }
@@ -391,11 +459,17 @@ impl QuicDemuxSocket {
     );
   }
 
-  fn queue_local(&self, datagram: &[u8], peer: SocketAddr) {
-    let _ = self.local_tx.try_send(LocalDatagram {
-      bytes: datagram.to_vec(),
-      peer,
-    });
+  fn queue_local(&self, local_policy_index: usize, datagram: &[u8], peer: SocketAddr) {
+    if let Some(local_tx) = self
+      .local_txs
+      .get(local_policy_index)
+      .or_else(|| self.local_txs.first())
+    {
+      let _ = local_tx.try_send(LocalDatagram {
+        bytes: datagram.to_vec(),
+        peer,
+      });
+    }
   }
 
   fn expire_idle(&self, snapshot: &AppSnapshot) {
@@ -418,21 +492,22 @@ impl QuicDemuxSocket {
   }
 }
 
-impl AsyncUdpSocket for QuicDemuxSocket {
+impl AsyncUdpSocket for QuicDemuxEndpointSocket {
   fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
     Box::pin(QuicDemuxPoller {
-      socket: self.socket.clone(),
+      socket: self.demux.socket.clone(),
     })
   }
 
   fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
     if let Some(segment_size) = transmit.segment_size {
       for chunk in transmit.contents.chunks(segment_size) {
-        self.socket.try_send_to(chunk, transmit.destination)?;
+        self.demux.socket.try_send_to(chunk, transmit.destination)?;
       }
       Ok(())
     } else {
       self
+        .demux
         .socket
         .try_send_to(transmit.contents, transmit.destination)
         .map(|_| ())
@@ -479,7 +554,7 @@ impl AsyncUdpSocket for QuicDemuxSocket {
   }
 
   fn local_addr(&self) -> io::Result<SocketAddr> {
-    self.socket.local_addr()
+    self.demux.socket.local_addr()
   }
 
   fn may_fragment(&self) -> bool {
@@ -500,206 +575,6 @@ impl UdpPoller for QuicDemuxPoller {
       Poll::Pending => Poll::Pending,
     }
   }
-}
-
-#[derive(Debug)]
-enum DatagramAction {
-  QueueLocal,
-  SendTo(SocketAddr),
-  Classify,
-}
-
-#[derive(Default)]
-struct QuicForwardState {
-  forward_by_client: HashMap<SocketAddr, QuicForwardSession>,
-  cid_to_client: HashMap<Vec<u8>, SocketAddr>,
-  local_clients: HashMap<SocketAddr, Instant>,
-  local_cids: HashMap<Vec<u8>, SocketAddr>,
-}
-
-impl QuicForwardState {
-  fn known_action(&mut self, datagram: &[u8], peer: SocketAddr) -> DatagramAction {
-    if let Some(client) = self.client_for_upstream_response(peer, datagram)
-      && let Some(session) = self.forward_by_client.get_mut(&client)
-    {
-      session.last_seen = Instant::now();
-      session.target_to_client = session
-        .target_to_client
-        .saturating_add(datagram.len() as u64);
-      return DatagramAction::SendTo(client);
-    }
-    if let Some(session) = self.forward_by_client.get_mut(&peer) {
-      session.last_seen = Instant::now();
-      session.client_to_target = session
-        .client_to_target
-        .saturating_add(datagram.len() as u64);
-      return DatagramAction::SendTo(session.target_addr);
-    }
-    if let Some(local) = self.local_clients.get_mut(&peer) {
-      *local = Instant::now();
-      return DatagramAction::QueueLocal;
-    }
-    DatagramAction::Classify
-  }
-
-  fn client_for_upstream_response(
-    &mut self,
-    peer: SocketAddr,
-    datagram: &[u8],
-  ) -> Option<SocketAddr> {
-    let mut matching_clients = self
-      .forward_by_client
-      .iter()
-      .filter_map(|(client, session)| (session.target_addr == peer).then_some(*client));
-    let first_matching_client = matching_clients.next()?;
-    let has_multiple_clients = matching_clients.next().is_some();
-
-    if let Ok(header) = quic_parser::parse_initial(datagram)
-      && let Some(client) = self.cid_to_client.get(header.dcid).copied()
-    {
-      if !header.scid.is_empty() {
-        self.cid_to_client.insert(header.scid.to_vec(), client);
-      }
-      return Some(client);
-    }
-    if let Some(dcid) = quic_parser::peek_long_header_dcid(datagram)
-      && let Some(client) = self.cid_to_client.get(dcid).copied()
-    {
-      return Some(client);
-    }
-    for (cid, client) in &self.cid_to_client {
-      if datagram.len() > cid.len() && datagram.get(1..1 + cid.len()) == Some(cid.as_slice()) {
-        return Some(*client);
-      }
-    }
-    // QUIC peers can switch to encrypted NEW_CONNECTION_ID values that are
-    // invisible to this L4 demux. A single active client for the target is
-    // still unambiguous; shared targets without a known CID fail closed.
-    if !has_multiple_clients {
-      return Some(first_matching_client);
-    }
-    None
-  }
-
-  fn enforce_pre_classification_limit(&mut self, max_sessions: usize) -> Vec<QuicForwardSession> {
-    let mut evicted = Vec::new();
-    while self.pre_classification_session_count() > max_sessions {
-      let oldest_forward = self
-        .forward_by_client
-        .iter()
-        .min_by_key(|(_, session)| session.last_seen)
-        .map(|(client, session)| (*client, session.last_seen));
-      let oldest_local = self
-        .local_clients
-        .iter()
-        .min_by_key(|(_, last_seen)| **last_seen)
-        .map(|(client, last_seen)| (*client, *last_seen));
-
-      match (oldest_forward, oldest_local) {
-        (Some((client, forward_seen)), Some((_local, local_seen)))
-          if forward_seen <= local_seen =>
-        {
-          if let Some(session) = self.remove_forward_client(client) {
-            evicted.push(session);
-          }
-        }
-        (Some(_), Some((local, _))) => {
-          self.remove_local_client(local);
-        }
-        (Some((client, _)), None) => {
-          if let Some(session) = self.remove_forward_client(client) {
-            evicted.push(session);
-          }
-        }
-        (None, Some((local, _))) => {
-          self.remove_local_client(local);
-        }
-        (None, None) => break,
-      }
-    }
-    self.prune_cid_maps(max_sessions);
-    evicted
-  }
-
-  fn pre_classification_session_count(&self) -> usize {
-    self
-      .forward_by_client
-      .len()
-      .saturating_add(self.local_clients.len())
-  }
-
-  fn remove_forward_client(&mut self, client: SocketAddr) -> Option<QuicForwardSession> {
-    let session = self.forward_by_client.remove(&client)?;
-    self
-      .cid_to_client
-      .retain(|_, mapped_client| *mapped_client != client);
-    Some(session)
-  }
-
-  fn remove_local_client(&mut self, client: SocketAddr) {
-    self.local_clients.remove(&client);
-    self
-      .local_cids
-      .retain(|_, mapped_client| *mapped_client != client);
-  }
-
-  fn prune_cid_maps(&mut self, max_sessions: usize) {
-    self
-      .cid_to_client
-      .retain(|_, client| self.forward_by_client.contains_key(client));
-    self
-      .local_cids
-      .retain(|_, client| self.local_clients.contains_key(client));
-    trim_cid_map(&mut self.cid_to_client, max_sessions);
-    trim_cid_map(&mut self.local_cids, max_sessions);
-  }
-
-  fn expire_forward(&mut self, now: Instant, force: bool) -> Vec<QuicForwardSession> {
-    self
-      .local_clients
-      .retain(|_, last_seen| !force && now.duration_since(*last_seen) < Duration::from_secs(300));
-    self
-      .local_cids
-      .retain(|_, client| self.local_clients.contains_key(client));
-    let mut expired_clients = Vec::new();
-    for (client, session) in &self.forward_by_client {
-      if force || now.duration_since(session.last_seen) >= session.idle_timeout {
-        expired_clients.push(*client);
-      }
-    }
-    let mut expired = Vec::with_capacity(expired_clients.len());
-    for client in expired_clients {
-      if let Some(session) = self.forward_by_client.remove(&client) {
-        expired.push(session);
-      }
-    }
-    self
-      .cid_to_client
-      .retain(|_, client| self.forward_by_client.contains_key(client));
-    expired
-  }
-}
-
-fn trim_cid_map(map: &mut HashMap<Vec<u8>, SocketAddr>, max_entries: usize) {
-  while map.len() > max_entries {
-    let Some(key) = map.keys().next().cloned() else {
-      break;
-    };
-    map.remove(&key);
-  }
-}
-
-struct QuicForwardSession {
-  target_addr: SocketAddr,
-  rule_name: String,
-  target: String,
-  sni: String,
-  started: Instant,
-  last_seen: Instant,
-  idle_timeout: Duration,
-  client_to_target: u64,
-  target_to_client: u64,
-  _connection_permit: Option<ConnectionPermit>,
 }
 
 pub(crate) fn extract_initial_sni(datagram: &[u8]) -> anyhow::Result<(Option<String>, Vec<u8>)> {

@@ -56,6 +56,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     limits: Default::default(),
     timeouts: Default::default(),
     retry: None,
+    tls: Default::default(),
     waf: Default::default(),
   }
 }

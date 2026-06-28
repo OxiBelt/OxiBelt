@@ -12,7 +12,8 @@ use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
   ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsCertificateConfig,
   TlsClientAuthConfig, TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig,
-  TlsServerResumptionMode, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
+  TlsServerResumptionMode, TlsVersion, TlsVersionKeyExchangeConfig, TurnListenerTlsConfig,
+  UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::remote_signer::{
   self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
@@ -193,11 +194,12 @@ async fn server_config_uses_configured_key_exchange_groups() {
     &ca_key_path,
   );
   let mut tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
-  tls_config.key_exchange_groups = vec![
+  tls_config.tls13.key_exchange_groups = vec![
     TlsKeyExchangeGroup::X25519,
     TlsKeyExchangeGroup::Secp256r1,
     TlsKeyExchangeGroup::Secp384r1,
   ];
+  tls_config.key_exchange_groups = tls_config.tls13.key_exchange_groups.clone();
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
     https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
@@ -646,6 +648,12 @@ fn downstream_tls_config(
     certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
+    tls12: TlsVersionKeyExchangeConfig {
+      key_exchange_groups: default_tls12_key_exchange_groups(),
+    },
+    tls13: TlsVersionKeyExchangeConfig {
+      key_exchange_groups: default_tls_key_exchange_groups(),
+    },
     key_exchange_groups: default_tls_key_exchange_groups(),
     session_tickets: true,
     session_ticket_rotation_seconds: 86_400,
@@ -750,6 +758,12 @@ fn remote_tls_config(
     certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
+    tls12: TlsVersionKeyExchangeConfig {
+      key_exchange_groups: default_tls12_key_exchange_groups(),
+    },
+    tls13: TlsVersionKeyExchangeConfig {
+      key_exchange_groups: default_tls_key_exchange_groups(),
+    },
     key_exchange_groups: default_tls_key_exchange_groups(),
     session_tickets: true,
     session_ticket_rotation_seconds: 86_400,
@@ -763,6 +777,14 @@ fn remote_tls_config(
 fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
   vec![
     TlsKeyExchangeGroup::X25519MlKem768,
+    TlsKeyExchangeGroup::X25519,
+    TlsKeyExchangeGroup::Secp256r1,
+    TlsKeyExchangeGroup::Secp384r1,
+  ]
+}
+
+fn default_tls12_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
+  vec![
     TlsKeyExchangeGroup::X25519,
     TlsKeyExchangeGroup::Secp256r1,
     TlsKeyExchangeGroup::Secp384r1,

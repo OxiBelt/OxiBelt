@@ -22,7 +22,7 @@ The implementation is optimized for:
 - Docker-based local and CI testing.
 - Optional in-process multi-worker accept using Linux `SO_REUSEPORT`.
 
-OxiBelt currently targets Rust 1.96 and uses `rustls` with the `aws-lc-rs` crypto provider. The default downstream TLS key exchange group set enables `X25519MLKEM768`, `X25519`, `secp256r1`, and `secp384r1`; deployments can omit the hybrid group with `tls.key_exchange_groups` when cold-handshake CPU cost matters more than post-quantum hybrid negotiation.
+OxiBelt currently targets Rust 1.96 and uses `rustls` with the `aws-lc-rs` crypto provider. The default downstream TLS 1.3 key exchange group set enables `X25519MLKEM768`, `X25519`, `secp256r1`, and `secp384r1`, while TLS 1.2 defaults to classical groups only. Deployments can omit the hybrid group with `tls.1_3.key_exchange_groups` when cold-handshake CPU cost matters more than post-quantum hybrid negotiation.
 
 ## Request Pipeline
 

@@ -39,6 +39,7 @@ mod route;
 mod route_actions;
 mod route_header_policy;
 mod route_static_files;
+mod route_tls_policy;
 mod sni_forward;
 mod source_paths;
 mod stream;
@@ -2022,7 +2023,17 @@ impl Config {
     if self.tls.session_ticket_rotation_seconds == 0 {
       bail!("tls.session_ticket_rotation_seconds must be greater than 0");
     }
-    validate_tls_key_exchange_groups(&self.tls.key_exchange_groups)?;
+    validate_tls_key_exchange_groups(
+      "tls.1_3.key_exchange_groups",
+      &self.tls.tls13.key_exchange_groups,
+      TlsVersion::Tls13,
+    )?;
+    validate_tls_key_exchange_groups(
+      "tls.1_2.key_exchange_groups",
+      &self.tls.tls12.key_exchange_groups,
+      TlsVersion::Tls12,
+    )?;
+    route_tls_policy::validate_key_exchange_policies(self)?;
     validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
     let multi_certificate = !self.tls.certificates.is_empty();
     if multi_certificate && self.tls.resumption.mode != TlsServerResumptionMode::Off {
@@ -2139,17 +2150,21 @@ fn validate_ocsp_config(prefix: &str, ocsp: &OcspConfig) -> anyhow::Result<()> {
   ocsp.validate_fetch_settings_with_prefix(prefix)
 }
 
-fn validate_tls_key_exchange_groups(groups: &[TlsKeyExchangeGroup]) -> anyhow::Result<()> {
+fn validate_tls_key_exchange_groups(
+  field_name: &str,
+  groups: &[TlsKeyExchangeGroup],
+  version: TlsVersion,
+) -> anyhow::Result<()> {
   if groups.is_empty() {
-    bail!("tls.key_exchange_groups must include at least one group");
+    bail!("{field_name} must include at least one group");
   }
   let mut seen = HashSet::new();
   for group in groups {
+    if version == TlsVersion::Tls12 && *group == TlsKeyExchangeGroup::X25519MlKem768 {
+      bail!("{field_name} cannot include x25519mlkem768 for tls1.2");
+    }
     if !seen.insert(*group) {
-      bail!(
-        "tls.key_exchange_groups contains duplicate {}",
-        group.as_str()
-      );
+      bail!("{field_name} contains duplicate {}", group.as_str());
     }
   }
   Ok(())
@@ -2570,6 +2585,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => allowed_keys::TLS_CONFIG_KEYS,
+    "tls.1_2" => allowed_keys::TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS,
+    "tls.1_3" => allowed_keys::TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS,
     "tls.resumption" => allowed_keys::TLS_RESUMPTION_CONFIG_KEYS,
     "tls.remote_signer" => allowed_keys::TLS_REMOTE_SIGNER_CONFIG_KEYS,
     "tls.ocsp" => tls::OCSP_CONFIG_KEYS,
@@ -3275,6 +3292,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "limits",
       "static_root",
       "static_files",
+      "tls",
       "upstream",
       "upstream_http_version",
       "upstream_pool",
@@ -3317,6 +3335,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "try_files",
     ][..],
     "routes.static_files.error_pages" => &["not_found", "server_error"][..],
+    "routes.tls" => &["1_2", "1_3"][..],
+    "routes.tls.1_2" => allowed_keys::TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS,
+    "routes.tls.1_3" => allowed_keys::TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS,
     "routes.match" => &[
       "headers",
       "methods",

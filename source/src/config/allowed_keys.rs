@@ -41,6 +41,8 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "certificates",
   "client_auth",
   "crlite",
+  "1_2",
+  "1_3",
   "key_exchange_groups",
   "max_version",
   "min_version",
@@ -54,6 +56,8 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "session_ticket_rotation_seconds",
   "session_tickets",
 ];
+
+pub(super) const TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS: &[&str] = &["key_exchange_groups"];
 
 pub(super) const TLS_RESUMPTION_CONFIG_KEYS: &[&str] = &[
   "mode",

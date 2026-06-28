@@ -12,7 +12,7 @@ use crate::waf::RouteWafConfig;
 use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, HttpVersion, LimitsConfig, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
-  default_hosts, default_path_prefix,
+  TlsKeyExchangeGroup, default_hosts, default_path_prefix,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -61,6 +61,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub retry: Option<RouteRetryConfig>,
   #[serde(default)]
+  pub tls: RouteTlsConfig,
+  #[serde(default)]
   pub waf: RouteWafConfig,
 }
 
@@ -80,6 +82,26 @@ impl RouteConfig {
       .max_request_body_bytes
       .unwrap_or(limits.max_request_body_bytes)
   }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteTlsConfig {
+  #[serde(default, rename = "1_2")]
+  pub tls12: RouteTlsVersionConfig,
+  #[serde(default, rename = "1_3")]
+  pub tls13: RouteTlsVersionConfig,
+}
+
+impl RouteTlsConfig {
+  pub fn has_key_exchange_overrides(&self) -> bool {
+    self.tls12.key_exchange_groups.is_some() || self.tls13.key_exchange_groups.is_some()
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteTlsVersionConfig {
+  #[serde(default)]
+  pub key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

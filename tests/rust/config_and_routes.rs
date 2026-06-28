@@ -2345,7 +2345,15 @@ fn tls_key_exchange_groups_parse_and_validate() {
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert_eq!(
-    config.tls.key_exchange_groups,
+    config.tls.tls13.key_exchange_groups,
+    vec![
+      TlsKeyExchangeGroup::X25519,
+      TlsKeyExchangeGroup::Secp256r1,
+      TlsKeyExchangeGroup::Secp384r1,
+    ]
+  );
+  assert_eq!(
+    config.tls.tls12.key_exchange_groups,
     vec![
       TlsKeyExchangeGroup::X25519,
       TlsKeyExchangeGroup::Secp256r1,
@@ -2361,7 +2369,7 @@ fn tls_key_exchange_groups_parse_and_validate() {
   assert!(
     error
       .to_string()
-      .contains("tls.key_exchange_groups must include at least one group"),
+      .contains("tls.1_3.key_exchange_groups must include at least one group"),
     "unexpected error: {error}"
   );
 
@@ -2376,7 +2384,142 @@ fn tls_key_exchange_groups_parse_and_validate() {
   assert!(
     error
       .to_string()
-      .contains("tls.key_exchange_groups contains duplicate x25519"),
+      .contains("tls.1_3.key_exchange_groups contains duplicate x25519"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn tls_version_key_exchange_groups_parse_and_validate() {
+  let temp_dir = common::TempDir::new("tls-version-key-exchange-groups");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "tls-version-key-exchange-groups");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    "[tls.1_3]\nkey_exchange_groups = [\"x25519mlkem768\", \"x25519\"]\n\n[tls.1_2]\nkey_exchange_groups = [\"secp256r1\"]\n\n[tls.ocsp]",
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  assert_eq!(
+    config.tls.tls13.key_exchange_groups,
+    vec![
+      TlsKeyExchangeGroup::X25519MlKem768,
+      TlsKeyExchangeGroup::X25519,
+    ]
+  );
+  assert_eq!(
+    config.tls.tls12.key_exchange_groups,
+    vec![TlsKeyExchangeGroup::Secp256r1]
+  );
+  assert_eq!(
+    config.tls.key_exchange_groups,
+    config.tls.tls13.key_exchange_groups
+  );
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    "[tls.1_2]\nkey_exchange_groups = [\"x25519mlkem768\"]\n\n[tls.ocsp]",
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("TLS 1.2 hybrid key exchange group should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.1_2.key_exchange_groups cannot include x25519mlkem768 for tls1.2"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn route_tls_key_exchange_groups_validate_sni_only_scope() {
+  let temp_dir = common::TempDir::new("route-tls-key-exchange-groups");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-tls-key-exchange-groups");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let route_override = r#"
+[routes.tls.1_3]
+key_exchange_groups = ["x25519"]
+
+[routes.tls.1_2]
+key_exchange_groups = ["secp256r1"]
+"#;
+
+  let raw = format!("{base}{route_override}");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("exact-host root route TLS policy should validate");
+  assert_eq!(
+    config.routes[0].tls.tls13.key_exchange_groups.as_deref(),
+    Some([TlsKeyExchangeGroup::X25519].as_slice())
+  );
+
+  let raw = format!(
+    "{}{}",
+    base.replace("path_prefix = \"/\"", "path_prefix = \"/api\""),
+    route_override
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("path-scoped route TLS policy should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root tls key_exchange_groups can only be set on SNI-only routes"),
+    "unexpected error: {error}"
+  );
+
+  let raw = format!(
+    "{}{}",
+    base.replace("hosts = [\"example.com\"]", "hosts = [\"*.example.com\"]"),
+    route_override
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("wildcard route TLS policy should fail");
+  assert!(
+    error.to_string().contains(
+      "route app-root tls key_exchange_groups can only be set on exact non-wildcard hosts"
+    ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn route_tls_key_exchange_groups_reject_host_conflicts() {
+  let temp_dir = common::TempDir::new("route-tls-key-exchange-conflicts");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-tls-key-exchange-conflicts");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let raw = format!(
+    r#"{base}
+[routes.tls.1_3]
+key_exchange_groups = ["x25519"]
+
+[[routes]]
+name = "app-root-conflict"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[routes.tls.1_3]
+key_exchange_groups = ["secp256r1"]
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("conflicting host TLS policies should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root-conflict tls key_exchange_groups conflict with route app-root"),
     "unexpected error: {error}"
   );
 }

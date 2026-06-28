@@ -281,8 +281,8 @@ mod tests {
 
   use crate::config::{
     Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, TlsClientAuthConfig, TlsConfig,
-    TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, UpstreamEchConfig,
-    UpstreamTlsResumptionConfig,
+    TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, TlsVersionKeyExchangeConfig,
+    UpstreamEchConfig, UpstreamTlsResumptionConfig,
   };
   use crate::metrics::Metrics;
   use rustls::HandshakeKind;
@@ -445,6 +445,20 @@ request_timeout_ms = 1
       certificates: Vec::new(),
       min_version: TlsVersion::Tls13,
       max_version: TlsVersion::Tls13,
+      tls12: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: vec![
+          TlsKeyExchangeGroup::X25519,
+          TlsKeyExchangeGroup::Secp256r1,
+          TlsKeyExchangeGroup::Secp384r1,
+        ],
+      },
+      tls13: TlsVersionKeyExchangeConfig {
+        key_exchange_groups: vec![
+          TlsKeyExchangeGroup::X25519MlKem768,
+          TlsKeyExchangeGroup::X25519,
+          TlsKeyExchangeGroup::Secp256r1,
+        ],
+      },
       key_exchange_groups: vec![
         TlsKeyExchangeGroup::X25519MlKem768,
         TlsKeyExchangeGroup::X25519,

@@ -163,6 +163,7 @@ fn check_ca_file(report: &mut DiagnosticReport, target: &str, path: &Path) {
 fn diagnose_pqc_tls_version(config: &Config, report: &mut DiagnosticReport) {
   if config
     .tls
+    .tls13
     .key_exchange_groups
     .contains(&TlsKeyExchangeGroup::X25519MlKem768)
     && config.tls.max_version < TlsVersion::Tls13
@@ -171,9 +172,9 @@ fn diagnose_pqc_tls_version(config: &Config, report: &mut DiagnosticReport) {
       DiagnosticSeverity::Error,
       "tls.pqc_without_tls13",
       "tls",
-      "tls.key_exchange_groups",
+      "tls.1_3.key_exchange_groups",
       "post-quantum key exchange is configured but TLS 1.3 is disabled",
-      "Enable TLS 1.3 or remove x25519mlkem768 from tls.key_exchange_groups.",
+      "Enable TLS 1.3 or remove x25519mlkem768 from tls.1_3.key_exchange_groups.",
     );
   }
 }

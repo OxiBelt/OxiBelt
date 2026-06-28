@@ -246,9 +246,10 @@ impl ReloadManager {
       tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
         .await
         .context("failed to build OCSP staple runtime")?;
-    let tls_server_config = tls::build_server_config_with_resumption_and_ocsp(
+    let tls_server_config = tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
+      &config.routes,
       Some(&active.tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
@@ -256,10 +257,11 @@ impl ReloadManager {
     .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
       Some(
-        tls::build_quic_server_config_with_resumption_and_ocsp(
+        tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
+          &config.routes,
           Some(&active.tls_resumption),
           Some(&ocsp_staple),
           Some(&crlite),
@@ -481,6 +483,8 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     certificates,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,
+    tls12: old_tls.tls12,
+    tls13: old_tls.tls13,
     key_exchange_groups: old_tls.key_exchange_groups,
     session_tickets: old_tls.session_tickets,
     session_ticket_rotation_seconds: old_tls.session_ticket_rotation_seconds,
