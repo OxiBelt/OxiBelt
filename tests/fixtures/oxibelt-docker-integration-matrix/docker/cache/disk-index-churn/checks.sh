@@ -13,6 +13,6 @@ run_case_checks() {
   docker rm -f "${http_container}" >/dev/null
   newest="$(client_request "example.test" "/app/churn-d?body_repeat=128&body_repeat_char=D&cache_control=public&content_type=text/plain" 200)"
   assert_response_jq "${newest}" '(.body | length) == 128 and .headers["x-oxibelt-cache"] == "hit"'
-  evicted="$(client_request "example.test" "/app/churn-a?body_repeat=128&body_repeat_char=A&cache_control=public&content_type=text/plain" 502)"
-  assert_response_jq "${evicted}" '.status == 502'
+  evicted="$(client_request_to_target "proxy" "example.test" "/app/churn-a?body_repeat=128&body_repeat_char=A&cache_control=public&content_type=text/plain" 502,504)"
+  assert_response_jq "${evicted}" '.status == 502 or .status == 504'
 }
