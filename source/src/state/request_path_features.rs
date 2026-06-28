@@ -42,7 +42,7 @@ impl RequestPathFeaturePlan {
       person_proof_api,
       rate_limits: !config.rate_limits.is_empty(),
       runtime_introspection: config.admin.enabled,
-      security_response_headers: config.security.headers.enabled(),
+      security_response_headers: config.security.any_response_headers_enabled(),
       stage_timing_metrics: detailed_metrics,
       system_access_log: system_access_log_enabled,
       telemetry: telemetry_enabled,
@@ -140,6 +140,32 @@ detail = "detailed"
 
 [security.headers]
 x_content_type_options = "nosniff"
+"#
+    );
+    let config = parse_config(&raw);
+    let plan = RequestPathFeaturePlan::new(&config, false, false, false, false, false);
+
+    assert!(plan.security_response_headers);
+  }
+
+  #[test]
+  fn request_path_feature_plan_tracks_named_security_header_policies() {
+    let temp_dir = common::TempDir::new("request-path-features-security-header-policy");
+    let (cert_path, key_path) = common::create_self_signed_cert(
+      temp_dir.path(),
+      "request-path-features-security-header-policy",
+    );
+    let raw = format!(
+      "{}{}",
+      common::minimal_config_toml(&cert_path, &key_path).replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      ),
+      r#"
+
+[[security.header_policies]]
+name = "api"
+referrer_policy = "same-origin"
 "#
     );
     let config = parse_config(&raw);

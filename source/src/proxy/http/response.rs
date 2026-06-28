@@ -9,13 +9,13 @@ use std::error::Error;
 use std::fmt;
 use tracing::warn;
 
-use crate::config::{ErrorResponseMode, SecurityHeadersConfig};
+use crate::config::{ErrorResponseMode, RouteConfig, SecurityConfig, SecurityHeadersConfig};
 use crate::external_auth::ExternalAuthTerminal;
 use crate::state::AppSnapshot;
 use crate::waf::{
   EvaluatedPersonProofRequest, HeaderMutation, WafBodyInput, WafHttpTerminal, WafRequestInput,
-  WafResponseInput, WafTerminalResponse, WafTlsMetadata, WafTransportMetadataInput,
-  WafTransportNetwork, WafUpstreamError, apply_header_mutations,
+  WafResponseInput, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork,
+  WafUpstreamError, apply_header_mutations,
 };
 
 use super::SystemAccessLogContext;
@@ -44,22 +44,20 @@ pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<Proxy
   response
 }
 
-pub(crate) fn waf_terminal_response(
-  terminal: WafTerminalResponse,
-  mutations: &[HeaderMutation],
-) -> Response<ProxyBody> {
-  let mut response = text_response(terminal.status, &terminal.body);
-  apply_header_mutations(response.headers_mut(), &terminal.headers);
-  apply_header_mutations(response.headers_mut(), mutations);
-  response
-}
-
-pub(crate) fn waf_http_terminal_response(
+pub(crate) fn waf_http_terminal_response_with_route_security(
   terminal: WafHttpTerminal,
   mutations: &[HeaderMutation],
+  security: &SecurityConfig,
+  route: &RouteConfig,
 ) -> Response<ProxyBody> {
   match terminal {
-    WafHttpTerminal::Response(terminal) => waf_terminal_response(terminal, mutations),
+    WafHttpTerminal::Response(terminal) => {
+      let mut response = text_response(terminal.status, &terminal.body);
+      apply_route_security_headers(response.headers_mut(), security, route);
+      apply_header_mutations(response.headers_mut(), &terminal.headers);
+      apply_header_mutations(response.headers_mut(), mutations);
+      response
+    }
     WafHttpTerminal::SilentClose => silent_close_response(),
   }
 }
@@ -299,6 +297,60 @@ pub(crate) fn apply_security_headers(
   }
 }
 
+pub(crate) fn apply_effective_security_headers(
+  headers: &mut http::HeaderMap,
+  security: &SecurityConfig,
+  route_security_headers: Option<&str>,
+) {
+  if let Some(config) = security.effective_headers_for_route(route_security_headers) {
+    apply_security_headers(headers, config);
+  }
+}
+
+pub(crate) fn apply_route_security_headers(
+  headers: &mut http::HeaderMap,
+  security: &SecurityConfig,
+  route: &RouteConfig,
+) {
+  apply_effective_security_headers(headers, security, route.security_headers.as_deref());
+}
+
+pub(crate) fn with_route_security_headers(
+  mut response: Response<ProxyBody>,
+  security: &SecurityConfig,
+  route: &RouteConfig,
+) -> Response<ProxyBody> {
+  apply_route_security_headers(response.headers_mut(), security, route);
+  response
+}
+
+pub(crate) struct RouteSecurityHeaders<'a> {
+  security: &'a SecurityConfig,
+  route: &'a RouteConfig,
+}
+
+impl<'a> RouteSecurityHeaders<'a> {
+  pub(crate) fn new(security: &'a SecurityConfig, route: &'a RouteConfig) -> Self {
+    Self { security, route }
+  }
+
+  pub(crate) fn apply(&self, response: Response<ProxyBody>) -> Response<ProxyBody> {
+    with_route_security_headers(response, self.security, self.route)
+  }
+
+  pub(crate) fn text(&self, status: StatusCode, message: &str) -> Response<ProxyBody> {
+    self.apply(text_response(status, message))
+  }
+
+  pub(crate) fn waf_http_terminal(
+    &self,
+    terminal: WafHttpTerminal,
+    mutations: &[HeaderMutation],
+  ) -> Response<ProxyBody> {
+    waf_http_terminal_response_with_route_security(terminal, mutations, self.security, self.route)
+  }
+}
+
 fn insert_header(headers: &mut http::HeaderMap, name: &'static str, value: &str) {
   if let Ok(value) = http::HeaderValue::from_str(value) {
     headers.insert(http::HeaderName::from_static(name), value);
@@ -308,7 +360,7 @@ fn insert_header(headers: &mut http::HeaderMap, name: &'static str, value: &str)
 #[allow(clippy::too_many_arguments)]
 pub(super) fn upstream_error_response(
   state: &AppSnapshot,
-  route_name: &str,
+  route: &RouteConfig,
   request_method: &Method,
   request_uri: &Uri,
   request_version: http::Version,
@@ -331,6 +383,7 @@ pub(super) fn upstream_error_response(
   request_response_mutations: &[HeaderMutation],
   access_log: &mut SystemAccessLogContext<'_>,
 ) -> Response<ProxyBody> {
+  let route_name = &route.name;
   let status = if upstream_error_code.contains("timeout") {
     StatusCode::GATEWAY_TIMEOUT
   } else {
@@ -358,6 +411,7 @@ pub(super) fn upstream_error_response(
       upstream_error_code,
     )
   });
+  apply_route_security_headers(response.headers_mut(), &state.config.security, route);
   apply_header_mutations(response.headers_mut(), request_response_mutations);
   if !state.waf.has_response_rules(route_name) {
     return response;
@@ -411,7 +465,12 @@ pub(super) fn upstream_error_response(
   if let Some(terminal) = response_waf.terminal {
     let mut mutations = request_response_mutations.to_vec();
     mutations.extend(response_waf.response_header_mutations);
-    return waf_http_terminal_response(terminal, &mutations);
+    return waf_http_terminal_response_with_route_security(
+      terminal,
+      &mutations,
+      &state.config.security,
+      route,
+    );
   }
 
   apply_header_mutations(

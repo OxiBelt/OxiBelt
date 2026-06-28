@@ -22,7 +22,7 @@ use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http;
 use crate::proxy::http::fast_path::stage_timing;
 use crate::proxy::http::response::{
-  SilentClose, apply_security_headers, is_silent_close_response, text_response,
+  SilentClose, apply_route_security_headers, is_silent_close_response, text_response,
 };
 use crate::proxy::http::static_files::{
   self, StaticBodyPlan, StaticResponseHeadBytes, StaticResponsePlan,
@@ -487,8 +487,11 @@ async fn eligible_static_plan(
   ) {
     return None;
   }
-  let security_headers_enabled = snapshot.config.security.headers.enabled();
-  apply_security_headers(&mut plan.headers, &snapshot.config.security.headers);
+  let security_headers_enabled = snapshot
+    .config
+    .security
+    .response_headers_enabled_for_route(resolved.route.security_headers.as_deref());
+  apply_route_security_headers(&mut plan.headers, &snapshot.config.security, resolved.route);
   if !resolved.execution_plan.waf.request.enabled()
     && !resolved.execution_plan.waf.response.enabled()
   {

@@ -2171,6 +2171,55 @@ permissions_policy = "geolocation=()"
 }
 
 #[test]
+fn security_header_policies_parse_and_route_selectors() {
+  let temp_dir = common::TempDir::new("security-header-policies");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "security-header-policies");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    "upstream = \"app\"\nsecurity_headers = \"api\"",
+  ) + r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+
+[[security.header_policies]]
+name = "api"
+hsts = true
+hsts_max_age_seconds = 15768000
+hsts_include_subdomains = false
+hsts_preload = false
+x_content_type_options = "api-nosniff"
+referrer_policy = "same-origin"
+permissions_policy = "geolocation=()"
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  config.validate().expect("config should validate");
+  assert_eq!(config.routes[0].security_headers.as_deref(), Some("api"));
+  assert_eq!(config.security.header_policies.len(), 1);
+  let policy = &config.security.header_policies[0];
+  assert_eq!(policy.name, "api");
+  assert!(policy.headers.hsts);
+  assert_eq!(policy.headers.hsts_max_age_seconds, 15_768_000);
+  assert!(!policy.headers.hsts_include_subdomains);
+  assert!(!policy.headers.hsts_preload);
+  assert_eq!(
+    policy.headers.x_content_type_options.as_deref(),
+    Some("api-nosniff")
+  );
+  assert_eq!(
+    policy.headers.referrer_policy.as_deref(),
+    Some("same-origin")
+  );
+  assert_eq!(
+    policy.headers.permissions_policy.as_deref(),
+    Some("geolocation=()")
+  );
+}
+
+#[test]
 fn security_headers_reject_invalid_header_values() {
   let temp_dir = common::TempDir::new("security-headers-invalid");
   let (cert_path, key_path) =
@@ -2178,6 +2227,10 @@ fn security_headers_reject_invalid_header_values() {
   let base = common::minimal_config_toml(&cert_path, &key_path);
 
   for (setting, expected_field) in [
+    (
+      r#"x_content_type_options = "   ""#,
+      "security.headers.x_content_type_options",
+    ),
     (
       r#"x_content_type_options = "nosniff\nbad""#,
       "security.headers.x_content_type_options",
@@ -2205,8 +2258,76 @@ fn security_headers_reject_invalid_header_values() {
       .expect_err("invalid header value should fail");
     let error = error.to_string();
     assert!(
-      error.contains(expected_field) && error.contains("not a valid header value"),
+      error.contains(expected_field)
+        && (error.contains("not a valid header value") || error.contains("must not be empty")),
       "unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn security_header_policies_reject_invalid_names_and_values() {
+  let temp_dir = common::TempDir::new("security-header-policy-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "security-header-policy-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (extra, expected) in [
+    (
+      r#"
+[[security.header_policies]]
+name = ""
+"#,
+      "security header policy name must not be empty",
+    ),
+    (
+      r#"
+[[security.header_policies]]
+name = "default"
+"#,
+      "security header policy name default is reserved",
+    ),
+    (
+      r#"
+[[security.header_policies]]
+name = "off"
+"#,
+      "security header policy name off is reserved",
+    ),
+    (
+      r#"
+[[security.header_policies]]
+name = "api"
+
+[[security.header_policies]]
+name = "api"
+"#,
+      "duplicate security header policy name api",
+    ),
+    (
+      r#"
+[[security.header_policies]]
+name = "api"
+x_content_type_options = " "
+"#,
+      "security header policy api.x_content_type_options must not be empty",
+    ),
+    (
+      r#"
+[[security.header_policies]]
+name = "api"
+referrer_policy = "same-origin\nbad"
+"#,
+      "security header policy api.referrer_policy is not a valid header value",
+    ),
+  ] {
+    let config: Config = toml::from_str(&(base.clone() + extra)).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid security header policy should fail");
+    assert!(
+      error.to_string().contains(expected),
+      "expected {expected:?} in {error}"
     );
   }
 }
@@ -10114,6 +10235,44 @@ fn routes_reject_unknown_compression_policies() {
 }
 
 #[test]
+fn routes_accept_reserved_security_header_route_keywords() {
+  for route_security_headers in ["default", "off"] {
+    let test_name = format!("security-header-route-keyword-{route_security_headers}");
+    let temp_dir = common::TempDir::new(&test_name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), &test_name);
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "upstream = \"app\"",
+      &format!("upstream = \"app\"\nsecurity_headers = \"{route_security_headers}\""),
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+
+    config.validate().expect("config should validate");
+  }
+}
+
+#[test]
+fn routes_reject_unknown_security_header_policies() {
+  let temp_dir = common::TempDir::new("security-header-policy-unknown");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "security-header-policy-unknown");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    "upstream = \"app\"\nsecurity_headers = \"missing\"",
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config.validate().expect_err("validation should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root references unknown security header policy missing"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn forwarded_headers_mode_defaults_to_overwrite() {
   let temp_dir = common::TempDir::new("forwarded-headers-default");
   let (cert_path, key_path) =
@@ -11464,6 +11623,13 @@ fn routes_reject_unknown_option_references() {
         "upstream = \"app\"\ncompression = \"missing\"",
       ),
       "route app-root references unknown compression policy missing",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        "upstream = \"app\"\nsecurity_headers = \"missing\"",
+      ),
+      "route app-root references unknown security header policy missing",
     ),
     (
       base.replace(

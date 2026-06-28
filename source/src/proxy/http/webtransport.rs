@@ -25,7 +25,10 @@ use super::headers::{
   add_forwarded_headers, extract_downstream_port, extract_host, set_effective_host_header,
   strip_hop_by_hop_headers, validate_authority_host_consistency,
 };
-use super::response::{silent_close_response, text_response, waf_http_terminal_response};
+use super::response::{
+  silent_close_response, text_response, waf_http_terminal_response_with_route_security,
+  with_route_security_headers,
+};
 use super::route_actions::{self, RouteActionRenderContext};
 use super::uri::validate_downstream_path;
 use super::version::select_upstream_http_version;
@@ -119,7 +122,11 @@ pub(crate) async fn prepare_webtransport(
   if let Some(response) =
     super::early_data::reject_if_disallowed(request, &state.config, resolved.route)
   {
-    return Err(Box::new(response));
+    return Err(Box::new(with_route_security_headers(
+      response,
+      &state.config.security,
+      resolved.route,
+    )));
   }
   let client_asn = state.client_identity.asn.lookup(client_addr.ip());
 
@@ -191,7 +198,7 @@ pub(crate) async fn prepare_webtransport(
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => {
-        return Err(Box::new(
+        return Err(Box::new(with_route_security_headers(
           super::with_pending_dynamic_person_proof_response_mutations(
             text_response(status, &body),
             state,
@@ -199,7 +206,9 @@ pub(crate) async fn prepare_webtransport(
             dynamic_person_proof_mutation_added,
             &dynamic_challenge_response_mutations,
           ),
-        ));
+          &state.config.security,
+          resolved.route,
+        )));
       }
       DynamicPolicyTerminal::SilentClose => {
         return Err(Box::new(silent_close_response()));
@@ -241,7 +250,7 @@ pub(crate) async fn prepare_webtransport(
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
-              return Err(Box::new(
+              return Err(Box::new(with_route_security_headers(
                 super::with_pending_dynamic_person_proof_response_mutations(
                   text_response(StatusCode::FORBIDDEN, "person proof challenge failed"),
                   state,
@@ -249,13 +258,17 @@ pub(crate) async fn prepare_webtransport(
                   dynamic_person_proof_mutation_added,
                   &dynamic_challenge_response_mutations,
                 ),
-              ));
+                &state.config.security,
+                resolved.route,
+              )));
             }
           };
           if let Some(terminal) = decision.terminal {
-            return Err(Box::new(waf_http_terminal_response(
+            return Err(Box::new(waf_http_terminal_response_with_route_security(
               terminal,
               &decision.response_header_mutations,
+              &state.config.security,
+              resolved.route,
             )));
           }
           dynamic_person_proof_mutation_added = !decision.response_header_mutations.is_empty();
@@ -276,7 +289,7 @@ pub(crate) async fn prepare_webtransport(
     },
   ) {
     Ok(Some(response)) => {
-      return Err(Box::new(
+      return Err(Box::new(with_route_security_headers(
         super::with_pending_dynamic_person_proof_response_mutations(
           response,
           state,
@@ -284,12 +297,14 @@ pub(crate) async fn prepare_webtransport(
           dynamic_person_proof_mutation_added,
           &dynamic_challenge_response_mutations,
         ),
-      ));
+        &state.config.security,
+        resolved.route,
+      )));
     }
     Ok(None) => {}
     Err(error) => {
       warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
-      return Err(Box::new(
+      return Err(Box::new(with_route_security_headers(
         super::with_pending_dynamic_person_proof_response_mutations(
           text_response(StatusCode::BAD_REQUEST, "invalid route redirect"),
           state,
@@ -297,7 +312,9 @@ pub(crate) async fn prepare_webtransport(
           dynamic_person_proof_mutation_added,
           &dynamic_challenge_response_mutations,
         ),
-      ));
+        &state.config.security,
+        resolved.route,
+      )));
     }
   }
 
@@ -319,7 +336,7 @@ pub(crate) async fn prepare_webtransport(
     {
       ExternalAuthOutcome::Allowed => {}
       ExternalAuthOutcome::Denied(terminal) => {
-        return Err(Box::new(
+        return Err(Box::new(with_route_security_headers(
           super::with_pending_dynamic_person_proof_response_mutations(
             super::external_auth_response(terminal),
             state,
@@ -327,7 +344,9 @@ pub(crate) async fn prepare_webtransport(
             dynamic_person_proof_mutation_added,
             &dynamic_challenge_response_mutations,
           ),
-        ));
+          &state.config.security,
+          resolved.route,
+        )));
       }
     }
   }
@@ -388,9 +407,11 @@ pub(crate) async fn prepare_webtransport(
   }
 
   if let Some(terminal) = request_waf.terminal {
-    return Err(Box::new(waf_http_terminal_response(
+    return Err(Box::new(waf_http_terminal_response_with_route_security(
       terminal,
       &request_waf.response_header_mutations,
+      &state.config.security,
+      resolved.route,
     )));
   }
 
@@ -441,9 +462,10 @@ pub(crate) async fn prepare_webtransport(
       Some(upstream) => upstream,
       None => {
         warn!(upstream = upstream_name, "WAF selected an unknown upstream");
-        return Err(Box::new(text_response(
-          StatusCode::BAD_GATEWAY,
-          "WAF selected an unknown upstream",
+        return Err(Box::new(with_route_security_headers(
+          text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream"),
+          &state.config.security,
+          resolved.route,
         )));
       }
     }
@@ -470,9 +492,10 @@ pub(crate) async fn prepare_webtransport(
       }
       Err(error) => {
         warn!(error = %error, pool = %pool_name, "failed to select upstream pool server");
-        return Err(Box::new(text_response(
-          StatusCode::BAD_GATEWAY,
-          "no available upstream pool server",
+        return Err(Box::new(with_route_security_headers(
+          text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server"),
+          &state.config.security,
+          resolved.route,
         )));
       }
     }
@@ -481,9 +504,13 @@ pub(crate) async fn prepare_webtransport(
   };
 
   if !upstream.webtransport {
-    return Err(Box::new(text_response(
-      StatusCode::BAD_GATEWAY,
-      "selected upstream does not allow WebTransport",
+    return Err(Box::new(with_route_security_headers(
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "selected upstream does not allow WebTransport",
+      ),
+      &state.config.security,
+      resolved.route,
     )));
   }
 
@@ -493,23 +520,32 @@ pub(crate) async fn prepare_webtransport(
     upstream.max_http_version,
   );
   if upstream_version != HttpVersion::H3 {
-    return Err(Box::new(text_response(
-      StatusCode::BAD_GATEWAY,
-      "WebTransport forwarding requires HTTP/3 upstream",
+    return Err(Box::new(with_route_security_headers(
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "WebTransport forwarding requires HTTP/3 upstream",
+      ),
+      &state.config.security,
+      resolved.route,
     )));
   }
   if upstream.origin.scheme() != "https" {
-    return Err(Box::new(text_response(
-      StatusCode::BAD_GATEWAY,
-      "WebTransport forwarding requires https upstream origin",
+    return Err(Box::new(with_route_security_headers(
+      text_response(
+        StatusCode::BAD_GATEWAY,
+        "WebTransport forwarding requires https upstream origin",
+      ),
+      &state.config.security,
+      resolved.route,
     )));
   }
 
   let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
     warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
-    return Err(Box::new(text_response(
-      StatusCode::BAD_GATEWAY,
-      "upstream URI is not configured",
+    return Err(Box::new(with_route_security_headers(
+      text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured"),
+      &state.config.security,
+      resolved.route,
     )));
   };
   let target_uri = route_actions::build_upstream_uri(
@@ -525,16 +561,18 @@ pub(crate) async fn prepare_webtransport(
   )
   .map_err(|error| {
     warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream WebTransport URI");
-    Box::new(text_response(
-      StatusCode::BAD_REQUEST,
-      "invalid upstream URI rewrite",
+    Box::new(with_route_security_headers(
+      text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+      &state.config.security,
+      resolved.route,
     ))
   })?;
   let target_url = url::Url::parse(&target_uri.to_string()).map_err(|error| {
     warn!(error = %error, uri = %target_uri, "failed to convert WebTransport target URI");
-    Box::new(text_response(
-      StatusCode::BAD_REQUEST,
-      "invalid WebTransport target URI",
+    Box::new(with_route_security_headers(
+      text_response(StatusCode::BAD_REQUEST, "invalid WebTransport target URI"),
+      &state.config.security,
+      resolved.route,
     ))
   })?;
 

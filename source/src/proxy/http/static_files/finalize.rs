@@ -5,7 +5,10 @@ use http::{HeaderMap, Method, Response};
 use tracing::warn;
 
 use super::super::body::ProxyBody;
-use super::super::response::{apply_security_headers, text_response, waf_http_terminal_response};
+use super::super::response::{
+  apply_route_security_headers, text_response, waf_http_terminal_response_with_route_security,
+  with_route_security_headers,
+};
 use super::super::{
   SystemAccessLogContext, apply_alt_svc_header, capture_response_body_for_waf, compression,
   response_body_capture_error_response, waf_body_input, with_downstream_response_timeout,
@@ -42,7 +45,7 @@ pub(in crate::proxy::http) async fn finalize_response(
   access_log: &mut SystemAccessLogContext<'_>,
 ) -> Response<ProxyBody> {
   let (mut parts, body) = response.into_parts();
-  apply_security_headers(&mut parts.headers, &state.config.security.headers);
+  apply_route_security_headers(&mut parts.headers, &state.config.security, route);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   let response_waf_body_compression_transform =
@@ -65,7 +68,11 @@ pub(in crate::proxy::http) async fn finalize_response(
       Err(error) => {
         let (status, message) = response_body_capture_error_response(&error);
         warn!(error = %error, route = %route.name, status = status.as_u16(), "failed to read static response body for WAF inspection");
-        return text_response(status, message);
+        return with_route_security_headers(
+          text_response(status, message),
+          &state.config.security,
+          route,
+        );
       }
     }
   } else {
@@ -119,7 +126,12 @@ pub(in crate::proxy::http) async fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      return waf_http_terminal_response(terminal, &mutations);
+      return waf_http_terminal_response_with_route_security(
+        terminal,
+        &mutations,
+        &state.config.security,
+        route,
+      );
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
@@ -156,4 +168,148 @@ pub(crate) fn static_response_send_timeout(state: &AppSnapshot, route: &RouteCon
       .response_send_timeout_ms
       .unwrap_or(state.config.limits.response_send_timeout_ms),
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashMap;
+  use std::path::Path;
+  use std::sync::Arc;
+
+  use http::{HeaderMap, Request, StatusCode};
+
+  use super::*;
+  use crate::config::Config;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  fn config_with_route_security(
+    cert_path: &Path,
+    key_path: &Path,
+    route_security_headers: Option<&str>,
+    extra: &str,
+  ) -> Config {
+    let mut raw = common::minimal_config_toml(cert_path, key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    );
+    if let Some(route_security_headers) = route_security_headers {
+      raw = raw.replace(
+        "upstream = \"app\"",
+        &format!("upstream = \"app\"\nsecurity_headers = \"{route_security_headers}\""),
+      );
+    }
+    raw.push_str(extra);
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config.validate().expect("config should validate");
+    config
+  }
+
+  async fn finalized_static_headers(
+    route_security_headers: Option<&str>,
+    extra: &str,
+  ) -> HeaderMap {
+    let test_name = route_security_headers
+      .map(|name| format!("static-finalize-security-{name}"))
+      .unwrap_or_else(|| "static-finalize-security-default".to_string());
+    let temp_dir = common::TempDir::new(&test_name);
+    let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), &test_name);
+    let state = AppSnapshot::new(config_with_route_security(
+      &cert_path,
+      &key_path,
+      route_security_headers,
+      extra,
+    ))
+    .await
+    .expect("snapshot should initialize");
+    let route = &state.config.routes[0];
+    let request = Request::builder()
+      .uri("https://example.com/static.txt")
+      .body(())
+      .expect("request should build");
+    let peer_addr = "127.0.0.1:12345".parse().unwrap();
+    let tls = Arc::new(WafTlsMetadata::default());
+    let mut access_log = SystemAccessLogContext::new(
+      &request,
+      peer_addr,
+      None,
+      Some(tls.clone()),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      false,
+      true,
+    );
+    let tags = HashMap::new();
+    let response = finalize_response(
+      text_response(StatusCode::OK, "static"),
+      &state,
+      route,
+      &RequestWafDecision::default(),
+      false,
+      BodyNeed::None,
+      request.method(),
+      request.uri(),
+      request.version(),
+      request.headers(),
+      peer_addr,
+      "example.com",
+      None,
+      tls.as_ref(),
+      WafProtocol::Http,
+      WafTransportNetwork::Tcp,
+      WafTransportMetadataInput::default(),
+      "https",
+      None,
+      &tags,
+      &mut access_log,
+    )
+    .await;
+    response.headers().clone()
+  }
+
+  #[tokio::test]
+  async fn static_finalize_applies_effective_route_security_headers() {
+    let off_headers = finalized_static_headers(
+      Some("off"),
+      r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+"#,
+    )
+    .await;
+    assert!(off_headers.get("x-content-type-options").is_none());
+
+    let named_headers = finalized_static_headers(
+      Some("static-policy"),
+      r#"
+
+[security.headers]
+x_content_type_options = "global-nosniff"
+
+[[security.header_policies]]
+name = "static-policy"
+hsts = true
+hsts_max_age_seconds = 15768000
+hsts_include_subdomains = false
+hsts_preload = false
+referrer_policy = "same-origin"
+"#,
+    )
+    .await;
+    assert_eq!(
+      named_headers.get("strict-transport-security").unwrap(),
+      "max-age=15768000"
+    );
+    assert_eq!(named_headers.get("referrer-policy").unwrap(), "same-origin");
+    assert!(named_headers.get("x-content-type-options").is_none());
+  }
 }

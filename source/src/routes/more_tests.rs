@@ -52,6 +52,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     ipm: Default::default(),
     cache: None,
     compression: None,
+    security_headers: None,
     buffering: Default::default(),
     limits: Default::default(),
     timeouts: Default::default(),

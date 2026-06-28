@@ -821,6 +821,16 @@ hsts_preload = false
 # referrer_policy = "strict-origin-when-cross-origin"
 # permissions_policy = "default"
 
+# [[security.header_policies]]
+# name = "api"
+# hsts = true
+# hsts_max_age_seconds = 31536000
+# hsts_include_subdomains = true
+# hsts_preload = false
+# x_content_type_options = "nosniff"
+# referrer_policy = "same-origin"
+# permissions_policy = "geolocation=()"
+
 [database.access_log]
 enabled = false
 connection_url_env = "OXIBELT_ACCESS_LOG_DATABASE_URL"
@@ -1361,6 +1371,7 @@ generic_http_upgrade = false
 connect_tunneling = false
 grpc_web = false
 # external_auth = "edge-auth"
+# security_headers = "default" # default | off | named policy
 
 [[routes]]
 name = "api-v1"
@@ -1372,6 +1383,7 @@ generic_http_upgrade = false
 connect_tunneling = false
 grpc_web = false
 # external_auth = "edge-auth"
+# security_headers = "default" # default | off | named policy
 
 # [routes.limits]
 # max_request_body_bytes = 10485760

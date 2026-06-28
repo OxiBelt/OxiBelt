@@ -54,6 +54,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub compression: Option<String>,
   #[serde(default)]
+  pub security_headers: Option<String>,
+  #[serde(default)]
   pub buffering: RouteBufferingConfig,
   #[serde(default)]
   pub limits: RouteLimitsConfig,

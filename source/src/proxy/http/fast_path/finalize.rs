@@ -14,7 +14,7 @@ use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::proxy::http::headers::strip_hop_by_hop_headers;
 use crate::proxy::http::response::{
-  apply_security_headers, apply_sticky_cookie, waf_http_terminal_response,
+  apply_route_security_headers, apply_sticky_cookie, waf_http_terminal_response_with_route_security,
 };
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -119,9 +119,7 @@ pub(super) fn finalize_response(
     &mut inlined_known_small_body,
   );
   apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-  if state.request_path_features.security_response_headers {
-    apply_security_headers(&mut parts.headers, &state.config.security.headers);
-  }
+  apply_route_security_headers(&mut parts.headers, &state.config.security, resolved.route);
   if !request_waf.response_header_mutations.is_empty() {
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
   }
@@ -177,7 +175,12 @@ pub(super) fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      let response = waf_http_terminal_response(terminal, &mutations);
+      let response = waf_http_terminal_response_with_route_security(
+        terminal,
+        &mutations,
+        &state.config.security,
+        resolved.route,
+      );
       if !crate::proxy::http::response::is_silent_close_response(&response) {
         state.record_hot_path_response(response.status());
       }
@@ -248,12 +251,9 @@ fn compiled_known_small_alt_svc<'a>(
   .then_some((state, downstream_scheme))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn compiled_known_small_noop_static_candidate(
-  state: &AppSnapshot,
   compiled_proxy: Option<&SelectedCompiledProxyAction<'_>>,
   request_version: http::Version,
-  _downstream_scheme: &str,
   transport_network: WafTransportNetwork,
   request_waf: &RequestWafDecision,
   pool_selection: Option<&PoolSelection>,
@@ -277,7 +277,6 @@ pub(super) fn compiled_known_small_noop_static_candidate(
     && request_waf.response_header_mutations.is_empty()
     && pool_selection.is_none()
     && sticky_cookie.is_none()
-    && !state.request_path_features.security_response_headers
     && (transport_network != WafTransportNetwork::Udp || request_version == http::Version::HTTP_3)
 }
 
@@ -474,10 +473,8 @@ reuse_port = true
         .expect("H2 compiled action should be selected");
 
     let static_candidate = compiled_known_small_noop_static_candidate(
-      state,
       Some(&selected),
       http::Version::HTTP_2,
-      "https",
       WafTransportNetwork::Tcp,
       request_waf,
       None,

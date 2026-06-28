@@ -49,7 +49,11 @@ impl PlainProxyFastPath {
       Ok(selection) => selection,
       Err(error) => {
         warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-        return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+        return with_route_security_headers(
+          text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+          &state.config.security,
+          resolved.route,
+        );
       }
     };
     let direct_retry_enabled = if compiled_proxy.is_none() {
@@ -125,7 +129,13 @@ impl PlainProxyFastPath {
         &request_waf,
       ) {
         Ok(selected) => selected,
-        Err(error) => return super::super::upstream_selection_error_response(error),
+        Err(error) => {
+          return with_route_security_headers(
+            super::super::upstream_selection_error_response(error),
+            &state.config.security,
+            resolved.route,
+          );
+        }
       };
       let upstream = selected.upstream;
       let upstream_index = selected.upstream_index;
@@ -173,7 +183,11 @@ impl PlainProxyFastPath {
     if upstream_version == HttpVersion::H3
       || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
     {
-      return text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream");
+      return with_route_security_headers(
+        text_response(StatusCode::BAD_GATEWAY, "unsupported fast-path upstream"),
+        &state.config.security,
+        resolved.route,
+      );
     }
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let request_method = request.method().clone();
@@ -212,7 +226,11 @@ impl PlainProxyFastPath {
       Ok(preparation) => preparation,
       Err(error) => {
         warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-        return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+        return with_route_security_headers(
+          text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+          &state.config.security,
+          resolved.route,
+        );
       }
     };
 
@@ -237,7 +255,11 @@ impl PlainProxyFastPath {
             Ok(uri) => uri,
             Err(error) => {
               warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-              return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+              return with_route_security_headers(
+                text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+                &state.config.security,
+                resolved.route,
+              );
             }
           }
         } else {
@@ -247,13 +269,21 @@ impl PlainProxyFastPath {
               upstream_index,
               "missing precomputed upstream URI parts"
             );
-            return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
+            return with_route_security_headers(
+              text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured"),
+              &state.config.security,
+              resolved.route,
+            );
           };
           match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
             Ok(uri) => uri,
             Err(error) => {
               warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-              return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+              return with_route_security_headers(
+                text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+                &state.config.security,
+                resolved.route,
+              );
             }
           }
         };
@@ -337,7 +367,11 @@ impl PlainProxyFastPath {
               }
               Err(error) => {
                 warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-                return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+                return with_route_security_headers(
+                  text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
+                  &state.config.security,
+                  resolved.route,
+                );
               }
             }
           } else {
@@ -484,7 +518,11 @@ impl PlainProxyFastPath {
         ) else {
           timing::general_result(snapshot, metric_protocol, false, general_started);
           warn!(upstream = %upstream.name, "missing upstream client pool");
-          return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+          return with_route_security_headers(
+            text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured"),
+            &state.config.security,
+            resolved.route,
+          );
         };
         let result = if let Some(selection) = pool_selection.take() {
           let (original_uri, pool_retry_cookie) = pool_retry_context
@@ -529,7 +567,11 @@ impl PlainProxyFastPath {
       Ok(response) => response,
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
-          return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+          return with_route_security_headers(
+            text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out"),
+            &state.config.security,
+            resolved.route,
+          );
         }
         warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
         let message = error.to_string();
@@ -547,8 +589,11 @@ impl PlainProxyFastPath {
         } else {
           StatusCode::BAD_GATEWAY
         };
-        let response =
-          configured_error_response(&state.config, "", status, "upstream request failed", code);
+        let response = with_route_security_headers(
+          configured_error_response(&state.config, "", status, "upstream request failed", code),
+          &state.config.security,
+          resolved.route,
+        );
         state.record_hot_path_response(response.status());
         return response;
       }
@@ -566,10 +611,8 @@ impl PlainProxyFastPath {
     let (parts, response_body) = upstream_response.into_parts();
     let response_body_started = timing::start(timing_enabled);
     let compiled_known_small_noop_candidate = compiled_known_small_noop_static_candidate(
-      snapshot,
       compiled_proxy.as_ref(),
       request_version,
-      downstream_scheme,
       transport_network,
       &request_waf,
       pool_selection.as_ref(),
@@ -612,7 +655,8 @@ impl PlainProxyFastPath {
             error.reason,
           );
         }
-        let response = error.response;
+        let response =
+          with_route_security_headers(error.response, &state.config.security, resolved.route);
         state.record_hot_path_response(response.status());
         return response;
       }

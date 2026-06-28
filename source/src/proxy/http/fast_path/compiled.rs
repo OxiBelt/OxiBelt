@@ -358,7 +358,9 @@ fn compile_response_finalize_fast_path(
     request_header_mutations_empty: !route.actions.request_headers.has_actions(),
     response_header_mutations_empty: !route.actions.response_headers.has_actions()
       && route.actions.cors.is_none(),
-    security_response_headers_noop: !config.security.headers.enabled(),
+    security_response_headers_noop: !config
+      .security
+      .response_headers_enabled_for_route(route.security_headers.as_deref()),
     alt_svc_noop: !config.listeners.http3 || !config.quic.alt_svc.enabled,
     sticky_cookie_noop: route.upstream_pool.is_none(),
     downstream_timeout_wrapper_noop_for_known_small: true,
@@ -557,6 +559,61 @@ x_content_type_options = "nosniff"
       .expect("proxy action itself should still compile");
 
     assert!(config.security.headers.enabled());
+    assert!(action.finalize_fast_path.is_none());
+  }
+
+  #[test]
+  fn route_security_headers_off_preserves_noop_finalize_plan() {
+    let config = proxy_config_with_raw(|raw| {
+      format!(
+        "{}{}",
+        raw.replace(
+          "upstream = \"app\"",
+          "upstream = \"app\"\nsecurity_headers = \"off\""
+        ),
+        r#"
+
+[security.headers]
+x_content_type_options = "nosniff"
+"#
+      )
+    });
+    let actions = compiled(&config);
+    let action = actions
+      .proxy_for_version(http::Version::HTTP_2)
+      .expect("proxy action itself should still compile");
+    let plan = action
+      .finalize_fast_path
+      .expect("route security_headers=off should keep security headers a no-op");
+
+    assert!(config.security.headers.enabled());
+    assert!(plan.security_response_headers_noop);
+    assert!(plan.can_skip_known_small_noop_work());
+  }
+
+  #[test]
+  fn named_route_security_header_policy_disables_noop_finalize_plan() {
+    let config = proxy_config_with_raw(|raw| {
+      format!(
+        "{}{}",
+        raw.replace(
+          "upstream = \"app\"",
+          "upstream = \"app\"\nsecurity_headers = \"api\""
+        ),
+        r#"
+
+[[security.header_policies]]
+name = "api"
+referrer_policy = "same-origin"
+"#
+      )
+    });
+    let actions = compiled(&config);
+    let action = actions
+      .proxy_for_version(http::Version::HTTP_2)
+      .expect("proxy action itself should still compile");
+
+    assert!(config.security.header_policies[0].headers.enabled());
     assert!(action.finalize_fast_path.is_none());
   }
 

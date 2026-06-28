@@ -97,10 +97,11 @@ use self::request_framing::{
   positive_content_length, request_body_framing,
 };
 use self::response::{
-  apply_security_headers, apply_sticky_cookie, draining_response, external_auth_response,
-  proxy_error_response, request_buffering_error_response, response_buffering_error_response,
-  silent_close_response, text_response, upstream_error_response, upstream_selection_error_response,
-  waf_http_terminal_response, with_pending_dynamic_person_proof_response_mutations,
+  RouteSecurityHeaders, apply_effective_security_headers, apply_route_security_headers,
+  apply_sticky_cookie, draining_response, external_auth_response, proxy_error_response,
+  request_buffering_error_response, response_buffering_error_response, silent_close_response,
+  text_response, upstream_error_response, upstream_selection_error_response,
+  with_pending_dynamic_person_proof_response_mutations,
 };
 #[cfg(test)]
 pub(crate) use self::response_timeout::DownstreamResponseSendTimeout;
@@ -497,6 +498,7 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   if !route_matches_selected_tls_negotiation_policy(state.as_ref(), tls.as_ref(), resolved.route) {
     warn!(
       sni = ?tls.sni,
@@ -504,11 +506,11 @@ where
       route = %resolved.route.name,
       "rejected downstream request with mismatched SNI-selected TLS policy"
     );
-    return text_response(StatusCode::MISDIRECTED_REQUEST, "misdirected request");
+    return route_security.text(StatusCode::MISDIRECTED_REQUEST, "misdirected request");
   }
   if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
   {
-    return response;
+    return route_security.apply(response);
   }
   access_log.set_route_name(&resolved.route.name);
   let max_request_body_bytes = resolved
@@ -516,18 +518,18 @@ where
     .effective_max_request_body_bytes(&state.config.limits);
   if let Err((status, message)) = validate_request_body_size_limit(&request, max_request_body_bytes)
   {
-    return text_response(status, message);
+    return route_security.text(status, message);
   }
 
   if let Some(response) =
     route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
   {
-    return response;
+    return route_security.apply(response);
   }
 
   if resolved.execution_plan.features.ipm {
     let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
-      return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+      return route_security.text(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     let action = resolved
       .route
@@ -546,7 +548,7 @@ where
       claims: std::collections::HashMap::new(),
     };
     if state.ipm.authorize(&actor, action, &resource, &context) != IpmDecision::Allow {
-      return text_response(StatusCode::FORBIDDEN, "forbidden");
+      return route_security.text(StatusCode::FORBIDDEN, "forbidden");
     }
   }
 
@@ -585,7 +587,9 @@ where
   let request =
     match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
       Ok(request) => request,
-      Err(response) => return response,
+      Err(response) => {
+        return route_security.apply(response);
+      }
     };
   let mut request = if cl0_guard_required {
     match fast_path::try_handle_plain_proxy(
@@ -637,7 +641,7 @@ where
       .limits
       .check_route_rate_limits(rate_limit_context, &state.config.rate_limits)
     {
-      return text_response(status, "rate limit exceeded");
+      return route_security.text(status, "rate limit exceeded");
     }
   }
   let mut evaluated_person_proof = None;
@@ -707,13 +711,13 @@ where
   if let Some(terminal) = dynamic_policy.terminal {
     match terminal {
       DynamicPolicyTerminal::Text { status, body } => {
-        return with_pending_dynamic_person_proof_response_mutations(
+        return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
           text_response(status, &body),
           state.as_ref(),
           evaluated_person_proof.as_ref(),
           dynamic_person_proof_mutation_added,
           &dynamic_challenge_response_mutations,
-        );
+        ));
       }
       DynamicPolicyTerminal::SilentClose => {
         return silent_close_response();
@@ -754,17 +758,17 @@ where
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
-              return with_pending_dynamic_person_proof_response_mutations(
+              return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
                 text_response(StatusCode::FORBIDDEN, "person proof challenge failed"),
                 state.as_ref(),
                 evaluated_person_proof.as_ref(),
                 dynamic_person_proof_mutation_added,
                 &dynamic_challenge_response_mutations,
-              );
+              ));
             }
           };
           if let Some(terminal) = decision.terminal {
-            return waf_http_terminal_response(terminal, &decision.response_header_mutations);
+            return route_security.waf_http_terminal(terminal, &decision.response_header_mutations);
           }
           dynamic_person_proof_mutation_added = !decision.response_header_mutations.is_empty();
           dynamic_challenge_response_mutations.extend(decision.response_header_mutations);
@@ -799,35 +803,35 @@ where
       access_log.request_received_at_unix_ms,
     )
     .await;
-    return with_pending_dynamic_person_proof_response_mutations(
+    return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
       response,
       state.as_ref(),
       evaluated_person_proof.as_ref(),
       dynamic_person_proof_mutation_added,
       &dynamic_challenge_response_mutations,
-    );
+    ));
   }
   match route_actions::resolved_redirect_response(&resolved, downstream_scheme, host, &request_uri)
   {
     Ok(Some(response)) => {
-      return with_pending_dynamic_person_proof_response_mutations(
+      return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
         response,
         state.as_ref(),
         evaluated_person_proof.as_ref(),
         dynamic_person_proof_mutation_added,
         &dynamic_challenge_response_mutations,
-      );
+      ));
     }
     Ok(None) => {}
     Err(error) => {
       warn!(error = %error, route = %resolved.route.name, "failed to build route redirect response");
-      return with_pending_dynamic_person_proof_response_mutations(
+      return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
         text_response(StatusCode::BAD_REQUEST, "invalid route redirect"),
         state.as_ref(),
         evaluated_person_proof.as_ref(),
         dynamic_person_proof_mutation_added,
         &dynamic_challenge_response_mutations,
-      );
+      ));
     }
   }
   if resolved.execution_plan.features.external_auth
@@ -847,13 +851,13 @@ where
     {
       ExternalAuthOutcome::Allowed => {}
       ExternalAuthOutcome::Denied(terminal) => {
-        return with_pending_dynamic_person_proof_response_mutations(
+        return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
           external_auth_response(terminal),
           state.as_ref(),
           evaluated_person_proof.as_ref(),
           dynamic_person_proof_mutation_added,
           &dynamic_challenge_response_mutations,
-        );
+        ));
       }
     }
   }
@@ -886,13 +890,13 @@ where
         Err(error) => {
           warn!(error = %error, "failed to read request body for WAF inspection");
           let (status, message) = request_body_capture_error_response(&error);
-          return with_pending_dynamic_person_proof_response_mutations(
+          return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
             text_response(status, message),
             state.as_ref(),
             evaluated_person_proof.as_ref(),
             dynamic_person_proof_mutation_added,
             &dynamic_challenge_response_mutations,
-          );
+          ));
         }
       }
     } else {
@@ -952,7 +956,7 @@ where
   access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal {
-    return waf_http_terminal_response(terminal, &request_waf.response_header_mutations);
+    return route_security.waf_http_terminal(terminal, &request_waf.response_header_mutations);
   }
 
   if let Some(static_root) = resolved.route.static_root.as_deref() {
@@ -961,7 +965,7 @@ where
         route = %resolved.route.name,
         "WAF selected an upstream target for a static route"
       );
-      return text_response(
+      return route_security.text(
         StatusCode::BAD_GATEWAY,
         "WAF selected an upstream target for a static route",
       );
@@ -1074,7 +1078,7 @@ where
     {
       return response;
     }
-    return text_response(
+    return route_security.text(
       StatusCode::NOT_IMPLEMENTED,
       "unsupported HTTP upgrade request",
     );
@@ -1097,7 +1101,9 @@ where
     &request_waf,
   ) {
     Ok(selected) => selected,
-    Err(error) => return upstream_selection_error_response(error),
+    Err(error) => {
+      return route_security.apply(upstream_selection_error_response(error));
+    }
   };
   let mut upstream = selected.upstream;
   let mut upstream_index = selected.upstream_index;
@@ -1139,7 +1145,7 @@ where
   };
   if grpc_web_mode.is_some() {
     if upstream.max_http_version < HttpVersion::H2 {
-      return text_response(
+      return route_security.text(
         StatusCode::BAD_GATEWAY,
         "gRPC-Web upstream requires HTTP/2 support",
       );
@@ -1148,7 +1154,7 @@ where
   }
 
   if upstream_version == HttpVersion::H3 && upstream.origin.scheme() != "https" {
-    return text_response(
+    return route_security.text(
       StatusCode::BAD_GATEWAY,
       "upstream HTTP/3 requires https origin",
     );
@@ -1156,7 +1162,7 @@ where
   if upstream_version == HttpVersion::H3
     && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
   {
-    return text_response(
+    return route_security.text(
       StatusCode::BAD_GATEWAY,
       "PROXY protocol egress is not supported for HTTP/3 upstream",
     );
@@ -1164,7 +1170,9 @@ where
 
   let request = match buffer_request_body(request, &effective_buffering).await {
     Ok(request) => request,
-    Err(error) => return request_buffering_error_response(error),
+    Err(error) => {
+      return route_security.apply(request_buffering_error_response(error));
+    }
   };
   let cache_enabled_for_route = resolved.execution_plan.features.cache
     && state
@@ -1186,7 +1194,7 @@ where
 
   let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
     warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
-    return text_response(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
+    return route_security.text(StatusCode::BAD_GATEWAY, "upstream URI is not configured");
   };
   let target_uri = match route_actions::build_resolved_upstream_uri(
     upstream_uri,
@@ -1198,7 +1206,7 @@ where
     Ok(uri) => uri,
     Err(error) => {
       warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
-      return text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
+      return route_security.text(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite");
     }
   };
   let route_request_mutations = route_runtime::request_header_mutations(resolved.route);
@@ -1231,7 +1239,7 @@ where
       Ok(body) => body,
       Err(error) => {
         warn!(error = %error, "failed to prepare gRPC-Web upstream request");
-        return text_response(StatusCode::BAD_REQUEST, "invalid gRPC-Web request body");
+        return route_security.text(StatusCode::BAD_REQUEST, "invalid gRPC-Web request body");
       }
     };
     outbound = Request::from_parts(parts, body);
@@ -1498,7 +1506,7 @@ where
         }
         return upstream_error_response(
           state,
-          &resolved.route.name,
+          resolved.route,
           &request_method,
           &request_uri,
           request_version,
@@ -1545,7 +1553,7 @@ where
         }
         return upstream_error_response(
           state,
-          &resolved.route.name,
+          resolved.route,
           &request_method,
           &request_uri,
           request_version,
@@ -1582,7 +1590,7 @@ where
             upstream = %upstream.name,
             "missing upstream client pool"
         );
-        return text_response(StatusCode::BAD_GATEWAY, "upstream client is not configured");
+        return route_security.text(StatusCode::BAD_GATEWAY, "upstream client is not configured");
       };
       let early_hints_capture =
         semantics::attach_early_hints_capture(&mut outbound, state.config.proxy.http.early_hints);
@@ -1664,7 +1672,7 @@ where
       }
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
-          return text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+          return route_security.text(StatusCode::REQUEST_TIMEOUT, "request body timed out");
         }
         let upstream_first_byte_timeout = error_is_upstream_first_byte_timeout(&error);
         if !pool_failures_reported
@@ -1702,7 +1710,7 @@ where
         }
         return upstream_error_response(
           state,
-          &resolved.route.name,
+          resolved.route,
           &request_method,
           &request_uri,
           request_version,
@@ -1803,7 +1811,7 @@ where
     parts.headers.remove(http::header::TRAILER);
   }
   semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-  apply_security_headers(&mut parts.headers, &state.config.security.headers);
+  apply_route_security_headers(&mut parts.headers, &state.config.security, resolved.route);
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   let (body, captured_response_body) = if response_body_need != BodyNeed::None {
@@ -1823,7 +1831,7 @@ where
       Err(error) => {
         let (status, message) = response_body_capture_error_response(&error);
         warn!(error = %error, status = status.as_u16(), "failed to read upstream response body for WAF inspection");
-        return text_response(status, message);
+        return route_security.text(status, message);
       }
     }
   } else {
@@ -1877,7 +1885,7 @@ where
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
-      return waf_http_terminal_response(terminal, &mutations);
+      return route_security.waf_http_terminal(terminal, &mutations);
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
@@ -1903,7 +1911,9 @@ where
   .await
   {
     Ok(body) => body,
-    Err(error) => return response_buffering_error_response(error),
+    Err(error) => {
+      return route_security.apply(response_buffering_error_response(error));
+    }
   };
 
   let response = maybe_cache_response_with_store_permission(
@@ -1983,8 +1993,9 @@ async fn handle_connect_request(
   access_log: &mut SystemAccessLogContext<'_>,
   _trace_context: Option<TraceContext>,
 ) -> Response<ProxyBody> {
+  let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   if !state.config.proxy.upgrades.connect_tunneling || !resolved.route.connect_tunneling {
-    return text_response(
+    return route_security.text(
       StatusCode::METHOD_NOT_ALLOWED,
       "CONNECT tunneling is disabled for this route",
     );
@@ -2000,7 +2011,9 @@ async fn handle_connect_request(
     request_waf,
   ) {
     Ok(selected) => selected,
-    Err(error) => return upstream_selection_error_response(error),
+    Err(error) => {
+      return route_security.apply(upstream_selection_error_response(error));
+    }
   };
   let upstream = selected.upstream.clone();
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, &upstream);
@@ -2056,7 +2069,7 @@ async fn handle_connect_request(
       pool_report.report_failure(&upstream.name);
       warn!(upstream = %upstream.name, error = %error, "failed to establish CONNECT tunnel");
       access_log.record_upstream_error("connect_error", &error.to_string());
-      text_response(
+      route_security.text(
         StatusCode::BAD_GATEWAY,
         "failed to establish CONNECT tunnel",
       )
@@ -2277,8 +2290,9 @@ async fn handle_upgrade_request(
   access_log: &mut SystemAccessLogContext<'_>,
   trace_context: Option<TraceContext>,
 ) -> Option<Response<ProxyBody>> {
+  let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   if request.version() != http::Version::HTTP_11 {
-    return Some(text_response(
+    return Some(route_security.text(
       StatusCode::NOT_IMPLEMENTED,
       "HTTP upgrade tunneling requires HTTP/1.1 downstream",
     ));
@@ -2305,7 +2319,9 @@ async fn handle_upgrade_request(
     request_waf,
   ) {
     Ok(selected) => selected,
-    Err(error) => return Some(upstream_selection_error_response(error)),
+    Err(error) => {
+      return Some(route_security.apply(upstream_selection_error_response(error)));
+    }
   };
   let upstream = selected.upstream;
   if let Some(pool_name) = selected.pool_name() {
@@ -2317,17 +2333,14 @@ async fn handle_upgrade_request(
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
 
   if websocket_upgrade && !upstream.websocket {
-    return Some(text_response(
+    return Some(route_security.text(
       StatusCode::BAD_GATEWAY,
       "selected upstream does not allow WebSocket",
     ));
   }
   let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
     warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
-    return Some(text_response(
-      StatusCode::BAD_GATEWAY,
-      "upstream URI is not configured",
-    ));
+    return Some(route_security.text(StatusCode::BAD_GATEWAY, "upstream URI is not configured"));
   };
   let target_uri = match route_actions::build_resolved_upstream_uri(
     upstream_uri,
@@ -2338,10 +2351,7 @@ async fn handle_upgrade_request(
   ) {
     Ok(uri) => uri,
     Err(_) => {
-      return Some(text_response(
-        StatusCode::BAD_REQUEST,
-        "invalid upstream URI rewrite",
-      ));
+      return Some(route_security.text(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"));
     }
   };
   let downstream_upgrade = hyper::upgrade::on(&mut request);
@@ -2381,10 +2391,7 @@ async fn handle_upgrade_request(
       .clients
       .for_upstream_version(&upstream.name, upstream.origin.scheme(), HttpVersion::H1)
   else {
-    return Some(text_response(
-      StatusCode::BAD_GATEWAY,
-      "upstream client is not configured",
-    ));
+    return Some(route_security.text(StatusCode::BAD_GATEWAY, "upstream client is not configured"));
   };
   let upstream_started_at = Instant::now();
   let mut upstream_response =
@@ -2397,7 +2404,7 @@ async fn handle_upgrade_request(
         state.pools.report_failure(&upstream.name);
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("connect_error", &error.to_string());
-        return Some(text_response(
+        return Some(route_security.text(
           StatusCode::BAD_GATEWAY,
           &format!("upstream upgrade request failed: {error}"),
         ));
@@ -2406,7 +2413,7 @@ async fn handle_upgrade_request(
         state.pools.report_failure(&upstream.name);
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("read_timeout", "upstream upgrade request timed out");
-        return Some(text_response(
+        return Some(route_security.text(
           StatusCode::BAD_GATEWAY,
           "upstream upgrade request timed out",
         ));
@@ -2415,7 +2422,7 @@ async fn handle_upgrade_request(
 
   if upstream_response.status() != StatusCode::SWITCHING_PROTOCOLS {
     let response = upstream_response.map(|body| body.map_err(boxed_error).boxed());
-    return Some(response);
+    return Some(route_security.apply(response));
   }
   let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
   let pool_report = state.pools.clone();
@@ -2884,6 +2891,7 @@ fn handle_cache_lookup_result(
           upstream_version,
           timeouts,
           resolved.route.cache.as_deref(),
+          resolved.route.security_headers.as_deref(),
           downstream_scheme,
           host.to_string(),
           request_method.clone(),
@@ -3006,6 +3014,7 @@ fn spawn_background_refresh(
   upstream_version: HttpVersion,
   timeouts: EffectiveTimeouts,
   route_cache: Option<&str>,
+  route_security_headers: Option<&str>,
   scheme: &'static str,
   host: String,
   method: Method,
@@ -3042,6 +3051,7 @@ fn spawn_background_refresh(
     }
   };
   let route_cache = route_cache.map(str::to_string);
+  let route_security_headers = route_security_headers.map(str::to_string);
   let upstream = upstream.clone();
   let mut outbound = empty_request_from(outbound);
   for (name, value) in &stale.request_headers {
@@ -3057,6 +3067,7 @@ fn spawn_background_refresh(
       upstream_version,
       timeouts,
       route_cache,
+      route_security_headers,
       scheme,
       host,
       method,
@@ -3082,6 +3093,7 @@ async fn background_refresh(
   upstream_version: HttpVersion,
   timeouts: EffectiveTimeouts,
   route_cache: Option<String>,
+  route_security_headers: Option<String>,
   scheme: &'static str,
   host: String,
   method: Method,
@@ -3119,7 +3131,11 @@ async fn background_refresh(
   }
   strip_hop_by_hop_headers(&mut parts.headers);
   semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-  apply_security_headers(&mut parts.headers, &state.config.security.headers);
+  apply_effective_security_headers(
+    &mut parts.headers,
+    &state.config.security,
+    route_security_headers.as_deref(),
+  );
   apply_alt_svc_header(
     &mut parts.headers,
     parts.status,

@@ -661,6 +661,7 @@ private_key = "/tmp/key.pem"
       ipm: Default::default(),
       cache: None,
       compression: None,
+      security_headers: None,
       buffering: RouteBufferingConfig {
         request: Some(BufferingMode::Streaming),
         response: Some(BufferingMode::Spool),

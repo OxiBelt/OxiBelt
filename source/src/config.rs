@@ -40,6 +40,7 @@ mod route_actions;
 mod route_header_policy;
 mod route_static_files;
 mod route_tls_policy;
+mod security_headers;
 mod sni_forward;
 mod source_paths;
 mod stream;
@@ -84,6 +85,7 @@ pub use route::*;
 pub use route_actions::*;
 pub use route_header_policy::*;
 pub use route_static_files::*;
+pub use security_headers::*;
 pub use sni_forward::*;
 pub use source_paths::{ConfigSourcePaths, DownstreamTlsCertificateSourcePaths};
 pub use stream::*;
@@ -851,7 +853,7 @@ impl Config {
     self.validate_admin()?;
     self.validate_metrics_and_health()?;
     self.telemetry.validate()?;
-    self.validate_security_headers()?;
+    security_headers::validate_security_headers(self)?;
     self.validate_tls()?;
     self.quic.validate(self.listeners.http3)?;
     self.validate_http3_alt_svc_binds()?;
@@ -987,6 +989,12 @@ impl Config {
       .iter()
       .map(|policy| policy.name.as_str())
       .collect::<HashSet<_>>();
+    let security_header_policy_names = self
+      .security
+      .header_policies
+      .iter()
+      .map(|policy| policy.name.as_str())
+      .collect::<HashSet<_>>();
 
     let mut route_names = HashSet::new();
     for route in &self.routes {
@@ -1095,6 +1103,17 @@ impl Config {
           "route {} references unknown compression policy {}",
           route.name,
           compression
+        );
+      }
+      if let Some(security_headers) = &route.security_headers
+        && security_headers != "default"
+        && security_headers != "off"
+        && !security_header_policy_names.contains(security_headers.as_str())
+      {
+        bail!(
+          "route {} references unknown security header policy {}",
+          route.name,
+          security_headers
         );
       }
       if let Some(external_auth) = &route.external_auth {
@@ -1973,22 +1992,6 @@ impl Config {
     if !self.health.ready_path.starts_with('/') || !self.health.live_path.starts_with('/') {
       bail!("health ready_path and live_path must start with '/'");
     }
-    Ok(())
-  }
-
-  fn validate_security_headers(&self) -> anyhow::Result<()> {
-    validate_optional_header_value(
-      "security.headers.x_content_type_options",
-      self.security.headers.x_content_type_options.as_deref(),
-    )?;
-    validate_optional_header_value(
-      "security.headers.referrer_policy",
-      self.security.headers.referrer_policy.as_deref(),
-    )?;
-    validate_optional_header_value(
-      "security.headers.permissions_policy",
-      self.security.headers.permissions_policy.as_deref(),
-    )?;
     Ok(())
   }
 
@@ -3067,12 +3070,22 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "service_name",
     ][..],
     "health" => &["bind", "enabled", "live_path", "ready_path"][..],
-    "security" => &["headers"][..],
+    "security" => &["header_policies", "headers"][..],
     "security.headers" => &[
       "hsts",
       "hsts_include_subdomains",
       "hsts_max_age_seconds",
       "hsts_preload",
+      "permissions_policy",
+      "referrer_policy",
+      "x_content_type_options",
+    ][..],
+    "security.header_policies" => &[
+      "hsts",
+      "hsts_include_subdomains",
+      "hsts_max_age_seconds",
+      "hsts_preload",
+      "name",
       "permissions_policy",
       "referrer_policy",
       "x_content_type_options",
@@ -3308,6 +3321,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "path_prefix",
       "replace_prefix_with",
       "retry",
+      "security_headers",
       "connect_tunneling",
       "generic_http_upgrade",
       "grpc_web",
@@ -3888,15 +3902,6 @@ fn validate_relative_path(field_name: &str, path: &Path) -> anyhow::Result<()> {
 fn validate_optional_non_empty(field_name: &str, value: Option<&str>) -> anyhow::Result<()> {
   if matches!(value, Some(value) if value.trim().is_empty()) {
     bail!("{field_name} must not be empty");
-  }
-  Ok(())
-}
-
-fn validate_optional_header_value(field_name: &str, value: Option<&str>) -> anyhow::Result<()> {
-  if let Some(value) = value {
-    validate_optional_non_empty(field_name, Some(value))?;
-    http::HeaderValue::from_str(value)
-      .with_context(|| format!("{field_name} is not a valid header value"))?;
   }
   Ok(())
 }
@@ -4874,53 +4879,6 @@ impl Default for HealthConfig {
   }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct SecurityConfig {
-  #[serde(default)]
-  pub headers: SecurityHeadersConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct SecurityHeadersConfig {
-  #[serde(default)]
-  pub hsts: bool,
-  #[serde(default = "default_hsts_max_age_seconds")]
-  pub hsts_max_age_seconds: u64,
-  #[serde(default = "default_true")]
-  pub hsts_include_subdomains: bool,
-  #[serde(default)]
-  pub hsts_preload: bool,
-  #[serde(default)]
-  pub x_content_type_options: Option<String>,
-  #[serde(default)]
-  pub referrer_policy: Option<String>,
-  #[serde(default)]
-  pub permissions_policy: Option<String>,
-}
-
-impl Default for SecurityHeadersConfig {
-  fn default() -> Self {
-    Self {
-      hsts: false,
-      hsts_max_age_seconds: default_hsts_max_age_seconds(),
-      hsts_include_subdomains: true,
-      hsts_preload: false,
-      x_content_type_options: None,
-      referrer_policy: None,
-      permissions_policy: None,
-    }
-  }
-}
-
-impl SecurityHeadersConfig {
-  pub(crate) fn enabled(&self) -> bool {
-    self.hsts
-      || self.x_content_type_options.is_some()
-      || self.referrer_policy.is_some()
-      || self.permissions_policy.is_some()
-  }
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]
@@ -5706,10 +5664,6 @@ fn default_ready_path() -> String {
 
 fn default_live_path() -> String {
   "/live".to_string()
-}
-
-fn default_hsts_max_age_seconds() -> u64 {
-  31_536_000
 }
 
 fn default_pool_keepalive_max_idle() -> usize {

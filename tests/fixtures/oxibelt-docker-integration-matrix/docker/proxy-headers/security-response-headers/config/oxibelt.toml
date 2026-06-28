@@ -42,6 +42,21 @@ x_content_type_options = "nosniff"
 referrer_policy = "no-referrer"
 permissions_policy = "geolocation=(), camera=()"
 
+[[security.header_policies]]
+name = "api"
+hsts = true
+hsts_max_age_seconds = 15768000
+hsts_include_subdomains = false
+hsts_preload = false
+x_content_type_options = "api-nosniff"
+referrer_policy = "same-origin"
+permissions_policy = "microphone=()"
+
+[[security.header_policies]]
+name = "static"
+x_content_type_options = "static-nosniff"
+referrer_policy = "strict-origin"
+
 [compression]
 enabled = true
 gzip = true
@@ -49,9 +64,20 @@ deflate = true
 zstd = true
 
 [waf]
-enabled = false
+enabled = true
 mode = "enforcing"
 fail_policy = "closed"
+
+[[waf.rules]]
+name = "terminal-security-headers"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/terminal/security-headers'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "blocked by security header test"
 
 [[upstreams]]
 name = "http-upstream"
@@ -66,6 +92,48 @@ webtransport = true
 
 [upstreams.tls.ech]
 mode = "disabled"
+
+[[routes]]
+name = "api-route"
+hosts = ["example.test"]
+path_prefix = "/api"
+upstream = "http-upstream"
+compression = "off"
+security_headers = "api"
+
+[[routes]]
+name = "off-route"
+hosts = ["example.test"]
+path_prefix = "/off"
+upstream = "http-upstream"
+compression = "off"
+security_headers = "off"
+
+[[routes]]
+name = "static-route"
+hosts = ["example.test"]
+path_prefix = "/static"
+static_root = "public"
+compression = "off"
+security_headers = "static"
+
+[[routes]]
+name = "redirect-route"
+hosts = ["example.test"]
+path_prefix = "/redirect"
+security_headers = "api"
+
+[routes.actions.redirect]
+status = 308
+location_template = "/new{path_suffix}?{query}"
+
+[[routes]]
+name = "terminal-route"
+hosts = ["example.test"]
+path_prefix = "/terminal"
+upstream = "http-upstream"
+compression = "off"
+security_headers = "api"
 
 [[routes]]
 name = "main-route"

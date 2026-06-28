@@ -121,6 +121,7 @@ include = ["conf.d/*.toml"]
 [telemetry.tracing]
 [health]
 [security.headers]
+[[security.header_policies]]
 [database.access_log]
 [database.access_log.tls]
 [waf]
@@ -726,7 +727,7 @@ mode = "legacy_plain" # legacy_plain | plain | json
 
 `proxy.retry` controls ordinary HTTP retry behavior. `tries` is the maximum number of attempts including the first attempt. `timeout_ms` remains supported as the legacy total retry-loop budget; `total_budget_ms` is preferred and takes precedence when both are set. `per_attempt_timeout_ms` caps the first-byte wait for each upstream attempt. `on` accepts `connect_error`, `read_timeout`, and retryable response statuses such as `502`, `503`, and `504`. Backoff is disabled when `backoff_base_ms` or `backoff_max_ms` is `0`; otherwise OxiBelt sleeps between retryable failures up to the configured maximum, optionally applying jitter. For upstream pools, `reselect_pool_on_retry` picks a fresh backend on each retry, `exclude_failed_pool_upstreams` avoids retrying an upstream that already failed in the same request, and `report_passive_health` records retryable failures in passive health. Set `retry_non_idempotent = true` only when the upstream can tolerate duplicate write-side effects from retried POST, PATCH, or other non-idempotent requests.
 
-`proxy.static_files` controls built-in static file transfer behavior. Convenience behavior such as directory indexes, SPA fallback, precompressed variants, MIME overrides, cache-control headers, and custom error pages is configured per static route under `[routes.static_files]`. `inline_max_bytes` reads static response bodies at or below the configured size into a single response frame; `0` disables this small-file inline path. `sendfile = "auto"` enables a guarded Linux `sendfile(2)` fast path only for plaintext HTTP/1.1 `GET` and `HEAD` requests that can be proven equivalent to the normal static route path. OxiBelt opens each configured static root directory once per active configuration generation and uses that directory file descriptor for Linux `openat2(2)` resolution, reducing per-request root-open cost while keeping path resolution anchored to the validated root. OxiBelt probes the real kernel `sendfile(2)` path once at runtime; when the probe fails or the platform is not Linux, static routes fall back to the general path, including the small-file inline path. Sendfile responses honor the route or global `response_send_timeout_ms` while waiting on downstream write backpressure. Configured security response headers and request-wide system access logs are preserved on the sendfile path. Header-only and size-only WAF rules may run on the sendfile fast path and use the same resolved Real-IP client identity as the general path. HTTPS, HTTP/2, HTTP/3, WAF rules that require request or response body bytes, dynamic policy, rate limits, compression, Real-IP connection-limit modes, request bodies, upgrades, CONNECT, ambiguous `Content-Length`, and `Transfer-Encoding` all use the general Hyper path instead.
+`proxy.static_files` controls built-in static file transfer behavior. Convenience behavior such as directory indexes, SPA fallback, precompressed variants, MIME overrides, cache-control headers, and custom error pages is configured per static route under `[routes.static_files]`. `inline_max_bytes` reads static response bodies at or below the configured size into a single response frame; `0` disables this small-file inline path. `sendfile = "auto"` enables a guarded Linux `sendfile(2)` fast path only for plaintext HTTP/1.1 `GET` and `HEAD` requests that can be proven equivalent to the normal static route path. OxiBelt opens each configured static root directory once per active configuration generation and uses that directory file descriptor for Linux `openat2(2)` resolution, reducing per-request root-open cost while keeping path resolution anchored to the validated root. OxiBelt probes the real kernel `sendfile(2)` path once at runtime; when the probe fails or the platform is not Linux, static routes fall back to the general path, including the small-file inline path. Sendfile responses honor the route or global `response_send_timeout_ms` while waiting on downstream write backpressure. Effective route/global security response headers and request-wide system access logs are preserved on the sendfile path. Header-only and size-only WAF rules may run on the sendfile fast path and use the same resolved Real-IP client identity as the general path. HTTPS, HTTP/2, HTTP/3, WAF rules that require request or response body bytes, dynamic policy, rate limits, compression, Real-IP connection-limit modes, request bodies, upgrades, CONNECT, ambiguous `Content-Length`, and `Transfer-Encoding` all use the general Hyper path instead.
 
 Static hot-object caching is opt-in. Set `open_file_cache_max_entries`, `open_file_cache_ttl_ms`, and `hot_object_cache_max_bytes` to enable a bounded TTL cache for verified small static responses. `open_file_cache_max_entries` and `open_file_cache_ttl_ms` bound the entry count and freshness window; `hot_object_cache_max_bytes` and `hot_object_cache_max_file_bytes` bound body memory globally and per file. Cache fill and cached-hit refresh open the current file through the secure static-root resolution path. Cached hits preserve validators and range behavior only when the current validator still matches the cached object. Deleted, inaccessible, or replaced files do not continue serving stale cached bodies; they refresh or fail closed from the current filesystem state. Use `0` values to keep the default no-cache behavior.
 
@@ -1240,6 +1241,16 @@ hsts_preload = false
 # referrer_policy = "strict-origin-when-cross-origin"
 # permissions_policy = "default"
 
+[[security.header_policies]]
+name = "api"
+hsts = true
+hsts_max_age_seconds = 31536000
+hsts_include_subdomains = true
+hsts_preload = false
+x_content_type_options = "nosniff"
+referrer_policy = "same-origin"
+permissions_policy = "geolocation=()"
+
 [compression]
 enabled = true
 gzip = true
@@ -1263,6 +1274,8 @@ proxied = ["expired", "no-cache"]
 upstream_accept_encoding = "strip"
 max_concurrent_responses = 0
 ```
+
+`[security.headers]` is the default global response header policy. `[[security.header_policies]]` entries accept the same fields plus a unique `name`, and route `security_headers` selects `default`, `off`, or a named policy. Omitted route values preserve the current default behavior. Policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection.
 
 Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `level` is an nginx-style `1..9` compression level applied to all enabled encoders. `vary = true` adds `Vary: Accept-Encoding` for dynamic compression decisions; static precompressed file variants always vary on `Accept-Encoding`. `proxied` applies only to requests carrying `Via` and accepts `off`, `expired`, `no-cache`, `no-store`, `private`, `no-last-modified`, `no-etag`, `auth`, or `any`; `off` and `any` cannot be combined with other predicates. These proxied predicates are an additional gate and do not override OxiBelt's credential, `Set-Cookie`, private, or no-store skips. `upstream_accept_encoding = "strip"` preserves the default identity-upstream behavior; `preserve` forwards the downstream header when safe, and `configured` sends the enabled encoding list intersected with the downstream request. Response body WAF transforms and credential-bearing requests always strip upstream `Accept-Encoding`. `max_concurrent_responses = 0` uses an automatic CPU budget. Named `[[compression.policies]]` entries can override these fields and be selected with route `compression`; policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection.
 
@@ -2340,6 +2353,7 @@ upstream = "app"
 # grpc_web = false
 # cache = "default"
 # compression = "default" # default | off | named policy
+# security_headers = "default" # default | off | named policy
 
 [routes.match]
 # methods = ["GET", "HEAD"]
@@ -2490,6 +2504,7 @@ Fields:
 - `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
+- `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
 - `waf.http_body_compression`: optional route override for compressed HTTP request/response bodies before WAF body inspection. `inherit` uses the global setting, `off` disables the transform for the route, and `transform` enables it for that route.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.

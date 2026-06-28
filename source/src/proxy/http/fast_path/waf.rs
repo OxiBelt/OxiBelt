@@ -5,7 +5,7 @@ use http::{HeaderMap, Request, Response};
 
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::ProxyBody;
-use crate::proxy::http::response::waf_http_terminal_response;
+use crate::proxy::http::response::waf_http_terminal_response_with_route_security;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::waf::{
@@ -99,9 +99,11 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
   access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal.take() {
-    return Err(Box::new(waf_http_terminal_response(
+    return Err(Box::new(waf_http_terminal_response_with_route_security(
       terminal,
       &request_waf.response_header_mutations,
+      &state.config.security,
+      resolved.route,
     )));
   }
 
