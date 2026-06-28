@@ -11,6 +11,7 @@ use http_body_util::{BodyExt, Empty};
 
 use crate::config::{HttpVersion, ProxyProtocolEgressMode};
 use crate::proxy::http::body::{self, ProxyBody};
+use crate::proxy::http::early_data;
 use crate::proxy::http::headers::{
   ForwardedHeaderCache, ForwardedRequestHeaderValues, add_forwarded_headers_with_values,
   set_effective_host_header_value, strip_hop_by_hop_headers,
@@ -45,6 +46,7 @@ pub(super) struct DownstreamDirectH1RequestOptions<'a, 'state> {
   pub(super) request_body_definitely_empty: bool,
   pub(super) request_waf_context_disabled: bool,
   pub(super) request_waf: &'a RequestWafDecision,
+  pub(super) verified_early_data: bool,
 }
 
 pub(super) fn prepare_downstream_direct_h1_or_generic<B>(
@@ -107,6 +109,7 @@ pub(super) fn try_build_downstream_direct_h1_request(
 
   semantics::strip_accepted_expect(&mut parts.headers);
   apply_fast_path_priority_policy(&mut parts.headers, options.selected.priority);
+  early_data::apply_verified_upstream_header(&mut parts.headers, options.verified_early_data);
 
   let mut request = Request::from_parts(parts, empty_body());
   mark_prevalidated_direct_h1_request(&mut request);
@@ -225,6 +228,7 @@ mod tests {
         request_body_definitely_empty,
         request_waf_context_disabled: true,
         request_waf,
+        verified_early_data: false,
       },
     )
   }

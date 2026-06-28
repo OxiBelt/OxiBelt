@@ -65,7 +65,7 @@ Downstream protocol support:
 - The same downstream client certificate policy is enforced for TCP TLS and HTTP/3/QUIC listeners.
 - QUIC Retry/address validation can be enabled with `quic.retry`.
 - HTTPS HTTP/1.1 and HTTP/2 responses advertise HTTP/3 with `Alt-Svc` when downstream HTTP/3 and `quic.alt_svc.enabled` are both enabled. OxiBelt does not add that header on HTTP/3, plain HTTP, or `101 Switching Protocols` responses.
-- QUIC 0-RTT is disabled by default. `quic.zero_rtt = "safe_methods"` enables early data and only permits transport-verified early-data `GET` and `HEAD`; unsafe methods received as QUIC 0-RTT receive `425 Too Early`.
+- TLS early data is disabled by default. `tls.ssl_early_data` and `routes.tls.ssl_early_data` accept `off`, `safe_methods`, and `on`; `safe_methods` permits only transport-verified `GET` and `HEAD`, while `on` accepts replayable requests for routes that explicitly tolerate replay. TCP TLS early data requires TLS 1.3 stateful resumption and is not supported with multi-certificate SNI selection. HTTP/3 0-RTT transport admission remains controlled by `quic.zero_rtt`. Disallowed transport-verified early-data requests receive `425 Too Early`; accepted requests get a verified upstream `Early-Data: 1` header, and untrusted downstream `Early-Data` headers are stripped.
 - `quic.host_key_file` provides deployment-local host key material for stateless reset and Retry/validation tokens. It is cert-directory relative and hot-reload tracked; release images do not include shared key material.
 
 Upstream protocol support:
@@ -100,6 +100,7 @@ Supported downstream TLS features:
 - Optional or required downstream client certificate authentication.
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
+- Optional downstream TLS early data with global and per-route policy controls.
 - Experimental CRLite filter enforcement for configured downstream TLS certificates, including operator-supplied local filters and WebPKI-only managed Mozilla CRLite cache downloads.
 - Opt-in outbound TLS revocation checks for runtime upstream clients using live OCSP fetch/cache and experimental CRLite local or WebPKI-only managed filters.
 - Session tickets with configurable rotation interval.

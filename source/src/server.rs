@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2032,13 +2033,20 @@ async fn handle_connection(
   let tls_server_config = handshake_state
     .tls_server_config
     .select(&start.client_hello());
-  let tls_stream = tokio::time::timeout(
+  let mut tls_stream = tokio::time::timeout(
     Duration::from_millis(handshake_state.config.limits.tls_handshake_timeout_ms),
     start.into_stream(tls_server_config),
   )
   .await
   .context("TLS handshake timed out")?
   .context("TLS handshake failed")?;
+  let mut early_data_prefix = Vec::new();
+  if let Some(mut early_data) = tls_stream.get_mut().1.early_data() {
+    early_data
+      .read_to_end(&mut early_data_prefix)
+      .context("failed to read accepted TLS early data")?;
+  }
+  let tcp_early_data = !early_data_prefix.is_empty();
 
   let negotiated = tls_stream
     .get_ref()
@@ -2081,7 +2089,7 @@ async fn handle_connection(
   let h1_tls_metadata = tls_metadata.clone();
   let h1_request_count = request_count.clone();
   let request_state = handshake_state.clone();
-  let service = service_fn(move |request: hyper::Request<Incoming>| {
+  let service = service_fn(move |mut request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
     let forwarded_header_cache = forwarded_header_cache.clone();
@@ -2089,6 +2097,9 @@ async fn handle_connection(
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
+      if tcp_early_data {
+        http::early_data::mark_verified(&mut request);
+      }
       let _request_guard = state.runtime_introspection_guard(request_counter);
       if request_index >= state.config.limits.max_requests_per_connection {
         return Ok(text_response(
@@ -2124,7 +2135,8 @@ async fn handle_connection(
     builder.timer(TokioTimer::new());
     crate::h2_tuning::apply_server_defaults(&mut builder, &handshake_state.config.proxy.http2);
     builder.max_header_list_size(handshake_state.config.limits.max_total_header_bytes as u32);
-    let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
+    let io = prefixed_io::PrefixedIo::new(tls_stream, early_data_prefix);
+    let connection = builder.serve_connection(TokioIo::new(io), service);
     tokio::pin!(connection);
     if *shutdown.borrow() || *data_plane_drain.borrow() {
       connection.as_mut().graceful_shutdown();
@@ -2140,20 +2152,28 @@ async fn handle_connection(
   } else {
     let _http1_connection_guard =
       handshake_state.runtime_introspection_guard(RuntimeCounter::Http1Connection);
-    let Some((io, served_requests)) = h1_fast_proxy::try_handle_connection(
-      tls_stream,
-      peer_addr,
-      &handshake_state,
-      tcp_max_hop,
-      h1_tls_metadata,
-      transport_metadata,
-      h1_forwarded_header_cache.as_ref(),
-      &mut shutdown,
-      &mut data_plane_drain,
-    )
-    .await?
-    .into_continue() else {
-      return Ok(());
+    let (io, served_requests) = if tcp_early_data {
+      (
+        prefixed_io::PrefixedIo::new(tls_stream, early_data_prefix),
+        0,
+      )
+    } else {
+      let Some((io, served_requests)) = h1_fast_proxy::try_handle_connection(
+        tls_stream,
+        peer_addr,
+        &handshake_state,
+        tcp_max_hop,
+        h1_tls_metadata,
+        transport_metadata,
+        h1_forwarded_header_cache.as_ref(),
+        &mut shutdown,
+        &mut data_plane_drain,
+      )
+      .await?
+      .into_continue() else {
+        return Ok(());
+      };
+      (io, served_requests)
     };
     h1_request_count.store(served_requests, Ordering::Relaxed);
     let mut builder = hyper::server::conn::http1::Builder::new();

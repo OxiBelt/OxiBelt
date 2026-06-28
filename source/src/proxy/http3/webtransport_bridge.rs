@@ -19,11 +19,11 @@ use tracing::debug;
 
 use super::{
   H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection, handle_h3_request,
-  is_webtransport_request, rejects_unsafe_early_data, request_tasks, respond_to_h3_request,
+  is_webtransport_request, request_tasks, respond_to_h3_request,
 };
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
-use crate::proxy::http::response::text_response;
+use crate::proxy::http::{early_data as http_early_data, response::text_response};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::waf::WafStreamClose;
@@ -271,11 +271,12 @@ async fn handle_downstream_request(
     return Ok(());
   }
 
+  let mut request = request;
   let is_early_data = early_data.take(stream.id());
-  if rejects_unsafe_early_data(&request, state.config.quic.zero_rtt, is_early_data) {
-    respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
-    return Ok(());
+  if is_early_data {
+    http_early_data::mark_verified(&mut request);
   }
+  http_early_data::strip_untrusted_header(request.headers_mut());
 
   if is_webtransport_request(&request) {
     accept_webtransport_session(

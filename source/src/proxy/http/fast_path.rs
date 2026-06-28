@@ -268,6 +268,7 @@ impl PlainProxyFastPath {
     let request_context =
       response_waf_enabled.then(|| (request_method.clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
+    let verified_early_data = crate::proxy::http::early_data::is_verified(&request);
     let (parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
     let direct_h1_build_started = timing::start(timing_enabled);
@@ -291,6 +292,7 @@ impl PlainProxyFastPath {
               request_body_definitely_empty,
               request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
               request_waf: &request_waf,
+              verified_early_data,
             })
         })
         .flatten(),
@@ -402,6 +404,7 @@ impl PlainProxyFastPath {
                 request_body_definitely_empty: true,
                 request_waf_context_disabled: request_headers.is_none() && tags.is_none(),
                 request_waf: &request_waf,
+                verified_early_data,
               },
             ) {
               Ok(DownstreamDirectH1RequestBuild::Built(mut outbound)) => {
@@ -457,6 +460,10 @@ impl PlainProxyFastPath {
           rebuild_request_parts(&mut parts, rebuild);
           semantics::strip_accepted_expect(&mut parts.headers);
           apply_fast_path_priority_policy(&mut parts.headers, priority_mode);
+          crate::proxy::http::early_data::apply_verified_upstream_header(
+            &mut parts.headers,
+            verified_early_data,
+          );
           state
             .telemetry
             .inject_trace_context(&mut parts.headers, trace_context);

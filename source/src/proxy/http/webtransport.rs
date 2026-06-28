@@ -116,6 +116,11 @@ pub(crate) async fn prepare_webtransport(
       "no matching route",
     )));
   };
+  if let Some(response) =
+    super::early_data::reject_if_disallowed(request, &state.config, resolved.route)
+  {
+    return Err(Box::new(response));
+  }
   let client_asn = state.client_identity.asn.lookup(client_addr.ip());
 
   let mut evaluated_person_proof = None;
@@ -550,6 +555,10 @@ pub(crate) async fn prepare_webtransport(
     None,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
+  super::early_data::apply_verified_upstream_header(
+    &mut headers,
+    super::early_data::is_verified(request),
+  );
   state
     .telemetry
     .inject_trace_context(&mut headers, trace_context);

@@ -18,7 +18,7 @@ use oxibelt::config::{
   ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
   RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode,
   TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider,
   UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
   resolve_auto_worker_count,
@@ -2265,6 +2265,106 @@ max_version = "tls1.2"
     error
       .to_string()
       .contains("tls.session_ticket_rotation_seconds must be greater than 0"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn tls_ssl_early_data_parses_global_and_route_modes() {
+  let temp_dir = common::TempDir::new("tls-early-data");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "tls-early-data");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    r#"ssl_early_data = "safe_methods"
+
+[tls.ocsp]"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  assert_eq!(
+    config.tls.ssl_early_data,
+    Some(TlsEarlyDataMode::SafeMethods)
+  );
+  assert!(config.downstream_tcp_early_data_enabled());
+  assert_eq!(
+    config
+      .tls
+      .effective_tcp_early_data_mode(&config.routes[0].tls),
+    TlsEarlyDataMode::SafeMethods
+  );
+
+  let raw = format!(
+    r#"{base}
+
+[routes.tls]
+ssl_early_data = "on"
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  assert_eq!(
+    config.routes[0].tls.ssl_early_data,
+    Some(TlsEarlyDataMode::On)
+  );
+  assert_eq!(
+    config
+      .tls
+      .effective_tcp_early_data_mode(&config.routes[0].tls),
+    TlsEarlyDataMode::On
+  );
+  assert_eq!(
+    config
+      .tls
+      .effective_http3_early_data_mode(&config.routes[0].tls, QuicZeroRttMode::Off),
+    TlsEarlyDataMode::On
+  );
+}
+
+#[test]
+fn tls_ssl_early_data_requires_tls13_and_stateful_resumption() {
+  let temp_dir = common::TempDir::new("tls-early-data-validation");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "tls-early-data-validation");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    r#"ssl_early_data = "safe_methods"
+min_version = "tls1.2"
+max_version = "tls1.2"
+
+[tls.ocsp]"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("TLS early data without TLS 1.3 should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.ssl_early_data requires tls.max_version to allow tls1.3"),
+    "unexpected error: {error}"
+  );
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    r#"ssl_early_data = "safe_methods"
+
+[tls.resumption]
+mode = "off"
+
+[tls.ocsp]"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("TLS early data without stateful resumption should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.ssl_early_data requires tls.resumption.mode = \"stateful\""),
     "unexpected error: {error}"
   );
 }

@@ -22,7 +22,7 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::stage_timing as timing;
-use crate::proxy::http::response::{is_silent_close_response, text_response};
+use crate::proxy::http::response::is_silent_close_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::server::downstream_quic_tls_metadata;
 use crate::state::AppSnapshot;
@@ -422,7 +422,7 @@ pub(crate) async fn handle_downstream_connection(
       return Ok(());
     };
 
-    let (request, stream) = match resolver.resolve_request().await {
+    let (mut request, stream) = match resolver.resolve_request().await {
       Ok(resolved) => resolved,
       Err(error) => {
         request_tasks.abort_all().await;
@@ -430,11 +430,10 @@ pub(crate) async fn handle_downstream_connection(
       }
     };
     let is_early_data = early_data.take(stream.id());
-
-    if rejects_unsafe_early_data(&request, snapshot.config.quic.zero_rtt, is_early_data) {
-      respond_to_h3_request(stream, text_response(StatusCode::TOO_EARLY, "too early")).await?;
-      continue;
+    if is_early_data {
+      http_proxy::early_data::mark_verified(&mut request);
     }
+    http_proxy::early_data::strip_untrusted_header(request.headers_mut());
 
     if is_webtransport_request(&request) {
       request_tasks.wait_all().await;
@@ -778,6 +777,7 @@ pub(crate) fn is_webtransport_request(request: &Request<()>) -> bool {
       .is_some_and(|protocol| protocol == &Protocol::WEB_TRANSPORT)
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn rejects_unsafe_early_data(
   request: &Request<()>,
   zero_rtt: crate::config::QuicZeroRttMode,

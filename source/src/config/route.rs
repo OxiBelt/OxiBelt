@@ -12,7 +12,8 @@ use crate::waf::RouteWafConfig;
 use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, HttpVersion, LimitsConfig, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
-  Tls12CipherSuite, Tls13CipherSuite, TlsKeyExchangeGroup, default_hosts, default_path_prefix,
+  Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode, TlsKeyExchangeGroup, default_hosts,
+  default_path_prefix,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -86,6 +87,8 @@ impl RouteConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteTlsConfig {
+  #[serde(default)]
+  pub ssl_early_data: Option<TlsEarlyDataMode>,
   #[serde(default, rename = "1_2")]
   pub tls12: RouteTls12Config,
   #[serde(default, rename = "1_3")]

@@ -443,6 +443,7 @@ request_timeout_ms = 1
       remote_signer: TlsRemoteSignerConfig::default(),
       require_sni: false,
       reject_unknown_sni: false,
+      ssl_early_data: None,
       certificates: Vec::new(),
       min_version: TlsVersion::Tls13,
       max_version: TlsVersion::Tls13,

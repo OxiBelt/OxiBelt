@@ -123,6 +123,7 @@ async fn assert_probe_empty_request_uses_direct_h1_build(
       request_body_definitely_empty: request_body.proven_empty(),
       request_waf_context_disabled: true,
       request_waf: &RequestWafDecision::default(),
+      verified_early_data: false,
     },
   )?;
   let DownstreamDirectH1RequestBuild::Built(request) = built else {

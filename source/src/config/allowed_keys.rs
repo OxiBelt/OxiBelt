@@ -55,6 +55,7 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "server_names",
   "session_ticket_rotation_seconds",
   "session_tickets",
+  "ssl_early_data",
 ];
 
 pub(super) const TLS12_NEGOTIATION_CONFIG_KEYS: &[&str] = &["groups"];

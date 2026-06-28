@@ -380,6 +380,27 @@ impl Config {
     );
   }
 
+  pub fn downstream_tcp_early_data_enabled(&self) -> bool {
+    self
+      .tls
+      .ssl_early_data
+      .is_some_and(TlsEarlyDataMode::is_enabled)
+      || self.routes.iter().any(|route| {
+        route
+          .tls
+          .ssl_early_data
+          .is_some_and(TlsEarlyDataMode::is_enabled)
+      })
+  }
+
+  pub fn downstream_tcp_early_data_max_bytes(&self) -> u32 {
+    let header_budget = self.limits.max_total_header_bytes.max(8192) as u64;
+    let body_budget = self.limits.max_request_body_bytes;
+    header_budget
+      .saturating_add(body_budget)
+      .min(u32::MAX as u64) as u32
+  }
+
   pub fn apply_runtime_overrides(&mut self, overrides: &RuntimeOverrides) -> Vec<String> {
     let mut warnings = Vec::new();
     if let Some(mode) = overrides.hot_reload_mode {
@@ -2027,11 +2048,23 @@ impl Config {
     route_tls_policy::validate_negotiation_policies(self)?;
     validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
     let multi_certificate = !self.tls.certificates.is_empty();
+    let tcp_early_data_enabled = self.downstream_tcp_early_data_enabled();
     if multi_certificate && self.tls.resumption.mode != TlsServerResumptionMode::Off {
       bail!("tls.resumption.mode must be \"off\" when tls.certificates is configured");
     }
     if multi_certificate && self.quic.zero_rtt != QuicZeroRttMode::Off {
       bail!("quic.zero_rtt must be \"off\" when tls.certificates is configured");
+    }
+    if multi_certificate && tcp_early_data_enabled {
+      bail!(
+        "tls.ssl_early_data and routes.tls.ssl_early_data must be \"off\" when tls.certificates is configured"
+      );
+    }
+    if tcp_early_data_enabled && self.tls.max_version < TlsVersion::Tls13 {
+      bail!("tls.ssl_early_data requires tls.max_version to allow tls1.3");
+    }
+    if tcp_early_data_enabled && self.tls.resumption.mode != TlsServerResumptionMode::Stateful {
+      bail!("tls.ssl_early_data requires tls.resumption.mode = \"stateful\"");
     }
     if self.listeners.http3
       && self.quic.zero_rtt == QuicZeroRttMode::SafeMethods
@@ -3306,7 +3339,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "try_files",
     ][..],
     "routes.static_files.error_pages" => &["not_found", "server_error"][..],
-    "routes.tls" => &["1_2", "1_3"][..],
+    "routes.tls" => &["1_2", "1_3", "ssl_early_data"][..],
     "routes.tls.1_2" => allowed_keys::TLS12_NEGOTIATION_CONFIG_KEYS,
     "routes.tls.1_3" => allowed_keys::TLS13_NEGOTIATION_CONFIG_KEYS,
     "routes.match" => &[

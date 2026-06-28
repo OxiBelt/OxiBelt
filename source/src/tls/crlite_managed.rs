@@ -506,6 +506,7 @@ mod tests {
       remote_signer: crate::config::TlsRemoteSignerConfig::default(),
       require_sni: false,
       reject_unknown_sni: false,
+      ssl_early_data: None,
       certificates: Vec::new(),
       min_version: crate::config::TlsVersion::Tls13,
       max_version: crate::config::TlsVersion::Tls13,

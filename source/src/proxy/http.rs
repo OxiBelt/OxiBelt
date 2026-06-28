@@ -43,6 +43,7 @@ mod cache_status;
 mod cache_streaming;
 mod cache_wait;
 pub(crate) mod compression;
+pub(crate) mod early_data;
 pub(crate) mod fast_path;
 mod flow_helpers;
 pub(crate) mod grpc_web;
@@ -276,7 +277,7 @@ pub(crate) async fn handle_http3(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_inner<B>(
-  request: Request<B>,
+  mut request: Request<B>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   transport_metadata: WafTransportMetadataInput<'_>,
@@ -294,6 +295,7 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
+  early_data::strip_untrusted_header(request.headers_mut());
   let system_access_log_enabled = state.request_path_features.system_access_log;
   let trace_context = if state.request_path_features.telemetry {
     state.telemetry.context_from_headers(request.headers())
@@ -465,7 +467,8 @@ where
     }
   }
 
-  if state.request_path_features.rate_limits
+  if !early_data::is_verified(&request)
+    && state.request_path_features.rate_limits
     && let Some(status) = state
       .limits
       .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
@@ -494,6 +497,18 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
+  {
+    return response;
+  }
+  if early_data::is_verified(&request)
+    && state.request_path_features.rate_limits
+    && let Some(status) = state
+      .limits
+      .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
+  {
+    return text_response(status, "rate limit exceeded");
+  }
   access_log.set_route_name(&resolved.route.name);
   let max_request_body_bytes = resolved
     .route
@@ -534,6 +549,7 @@ where
     }
   }
 
+  let verified_early_data = early_data::is_verified(&request);
   let cl0_guard_required =
     h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
   let request = if !cl0_guard_required {
@@ -1204,6 +1220,7 @@ where
     force_strip_accept_encoding: response_waf_body_compression_transform,
   };
   let mut outbound = rebuild_request(request, rebuild);
+  early_data::apply_verified_upstream_header(outbound.headers_mut(), verified_early_data);
   semantics::strip_accepted_expect(outbound.headers_mut());
   semantics::apply_priority_policy(outbound.headers_mut(), state.config.proxy.http.priority);
   if let Some(mode) = grpc_web_mode {
@@ -2360,6 +2377,7 @@ async fn handle_upgrade_request(
     }
   };
   let downstream_upgrade = hyper::upgrade::on(&mut request);
+  let verified_early_data = early_data::is_verified(&request);
   let (mut parts, body) = request.into_parts();
   parts.uri = target_uri;
   parts.version = http::Version::HTTP_11;
@@ -2378,6 +2396,7 @@ async fn handle_upgrade_request(
     None,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.request_header_mutations);
+  early_data::apply_verified_upstream_header(&mut parts.headers, verified_early_data);
   state
     .telemetry
     .inject_trace_context(&mut parts.headers, trace_context);

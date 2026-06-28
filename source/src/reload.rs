@@ -250,6 +250,11 @@ impl ReloadManager {
       &config.tls,
       &config.listeners,
       &config.routes,
+      if config.downstream_tcp_early_data_enabled() {
+        config.downstream_tcp_early_data_max_bytes()
+      } else {
+        0
+      },
       Some(&active.tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
@@ -480,6 +485,7 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     remote_signer,
     require_sni: old_tls.require_sni,
     reject_unknown_sni: old_tls.reject_unknown_sni,
+    ssl_early_data: old_tls.ssl_early_data,
     certificates,
     min_version: old_tls.min_version,
     max_version: old_tls.max_version,

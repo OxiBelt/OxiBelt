@@ -84,12 +84,13 @@ pub fn build_server_config_with_resumption(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption_and_ocsp(tls, listeners, resumption_state, None, None)
+  build_server_config_with_resumption_and_ocsp(tls, listeners, 0, resumption_state, None, None)
 }
 
 pub(crate) fn build_server_config_with_resumption_and_ocsp(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
+  max_early_data_size: u32,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -99,6 +100,7 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
     listeners,
     &tls.negotiation_policy(),
     &tls_protocol_versions(tls.min_version, tls.max_version),
+    max_early_data_size,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -110,6 +112,7 @@ pub(super) fn build_downstream_tcp_server_config_for_policy(
   listeners: &ListenerConfig,
   policy: &TlsNegotiationPolicy,
   versions: &[&'static rustls::SupportedProtocolVersion],
+  max_early_data_size: u32,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -119,6 +122,7 @@ pub(super) fn build_downstream_tcp_server_config_for_policy(
     listeners,
     downstream_crypto_provider_for_policy(policy),
     versions,
+    max_early_data_size,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -132,6 +136,7 @@ pub(super) fn build_downstream_tcp_server_config_for_tls13(
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls13CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
+  max_early_data_size: u32,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -141,6 +146,7 @@ pub(super) fn build_downstream_tcp_server_config_for_tls13(
     listeners,
     downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
     versions,
+    max_early_data_size,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -154,6 +160,7 @@ pub(super) fn build_downstream_tcp_server_config_for_tls12(
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls12CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
+  max_early_data_size: u32,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -163,6 +170,7 @@ pub(super) fn build_downstream_tcp_server_config_for_tls12(
     listeners,
     downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
     versions,
+    max_early_data_size,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -175,6 +183,7 @@ fn build_downstream_tcp_server_config_with_provider(
   listeners: &ListenerConfig,
   provider: rustls::crypto::CryptoProvider,
   versions: &[&'static rustls::SupportedProtocolVersion],
+  max_early_data_size: u32,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -193,6 +202,7 @@ fn build_downstream_tcp_server_config_with_provider(
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(cert_resolver);
+  server_config.max_early_data_size = max_early_data_size;
   configure_server_resumption(
     &mut server_config,
     &tls.resumption,

@@ -23,6 +23,11 @@ pub(super) async fn build_downstream_tls_reload_configs(
     &config.tls,
     &config.listeners,
     &config.routes,
+    if config.downstream_tcp_early_data_enabled() {
+      config.downstream_tcp_early_data_max_bytes()
+    } else {
+      0
+    },
     Some(&active.tls_resumption),
     Some(&ocsp_staple),
     Some(&crlite),

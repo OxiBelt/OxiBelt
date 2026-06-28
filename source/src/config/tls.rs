@@ -9,9 +9,9 @@ use base64::Engine;
 use serde::{Deserialize, Deserializer};
 
 use super::{
-  CrliteConfig, RouteTlsConfig, default_true, resolve_existing_local_config_file_path_with_logical,
-  validate_admin_server_name, validate_base64_32_byte_env, validate_optional_non_empty,
-  validate_tls_server_resumption,
+  CrliteConfig, QuicZeroRttMode, RouteTlsConfig, default_true,
+  resolve_existing_local_config_file_path_with_logical, validate_admin_server_name,
+  validate_base64_32_byte_env, validate_optional_non_empty, validate_tls_server_resumption,
 };
 
 mod key_exchange;
@@ -40,6 +40,7 @@ pub struct TlsConfig {
   pub remote_signer: TlsRemoteSignerConfig,
   pub require_sni: bool,
   pub reject_unknown_sni: bool,
+  pub ssl_early_data: Option<TlsEarlyDataMode>,
   pub certificates: Vec<TlsCertificateConfig>,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
@@ -72,6 +73,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
       require_sni: bool,
       #[serde(default)]
       reject_unknown_sni: bool,
+      #[serde(default)]
+      ssl_early_data: Option<TlsEarlyDataMode>,
       #[serde(default)]
       certificates: Vec<TlsCertificateConfig>,
       #[serde(default = "default_tls_min_version")]
@@ -127,6 +130,7 @@ impl<'de> Deserialize<'de> for TlsConfig {
       remote_signer: raw.remote_signer,
       require_sni: raw.require_sni,
       reject_unknown_sni: raw.reject_unknown_sni,
+      ssl_early_data: raw.ssl_early_data,
       certificates: raw.certificates,
       min_version: raw.min_version,
       max_version: raw.max_version,
@@ -182,6 +186,48 @@ impl TlsConfig {
           .clone()
           .unwrap_or_else(|| self.tls13.ciphers.clone()),
       },
+    }
+  }
+
+  pub fn effective_tcp_early_data_mode(&self, route_tls: &RouteTlsConfig) -> TlsEarlyDataMode {
+    route_tls
+      .ssl_early_data
+      .unwrap_or_else(|| self.ssl_early_data.unwrap_or(TlsEarlyDataMode::Off))
+  }
+
+  pub fn effective_http3_early_data_mode(
+    &self,
+    route_tls: &RouteTlsConfig,
+    zero_rtt: QuicZeroRttMode,
+  ) -> TlsEarlyDataMode {
+    route_tls.ssl_early_data.unwrap_or_else(|| {
+      self.ssl_early_data.unwrap_or(match zero_rtt {
+        QuicZeroRttMode::Off => TlsEarlyDataMode::Off,
+        QuicZeroRttMode::SafeMethods => TlsEarlyDataMode::SafeMethods,
+      })
+    })
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsEarlyDataMode {
+  #[default]
+  Off,
+  SafeMethods,
+  On,
+}
+
+impl TlsEarlyDataMode {
+  pub fn is_enabled(self) -> bool {
+    self != Self::Off
+  }
+
+  pub fn permits_method(self, method: &http::Method) -> bool {
+    match self {
+      Self::Off => false,
+      Self::SafeMethods => matches!(method, &http::Method::GET | &http::Method::HEAD),
+      Self::On => true,
     }
   }
 }

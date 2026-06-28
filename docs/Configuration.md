@@ -356,6 +356,7 @@ require_sni = false
 reject_unknown_sni = false
 min_version = "tls1.3"
 max_version = "tls1.3"
+ssl_early_data = "off" # off | safe_methods | on
 session_tickets = true
 session_ticket_rotation_seconds = 86400
 
@@ -463,7 +464,9 @@ mode = "disabled" # disabled | enforce | managed
 # request_timeout_ms = 3000
 ```
 
-`cert_chain` is always required and is the default downstream certificate. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `server_names` can name SNI values owned by the default certificate. Additional `[[tls.certificates]]` entries select certificate material by SNI before HTTP routing; exact names match before leftmost wildcards. Missing or unknown SNI uses the default certificate unless `require_sni = true` or `reject_unknown_sni = true`. In local-key mode each extra certificate requires `private_key`; in remote-signer mode each extra certificate requires `remote_signer_key_id` and uses the global signer socket/token settings. Multi-certificate downstream TLS currently requires `tls.resumption.mode = "off"` and `quic.zero_rtt = "off"`.
+`cert_chain` is always required and is the default downstream certificate. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `server_names` can name SNI values owned by the default certificate. Additional `[[tls.certificates]]` entries select certificate material by SNI before HTTP routing; exact names match before leftmost wildcards. Missing or unknown SNI uses the default certificate unless `require_sni = true` or `reject_unknown_sni = true`. In local-key mode each extra certificate requires `private_key`; in remote-signer mode each extra certificate requires `remote_signer_key_id` and uses the global signer socket/token settings. Multi-certificate downstream TLS currently requires `tls.resumption.mode = "off"`, `quic.zero_rtt = "off"`, and `tls.ssl_early_data = "off"`.
+
+`tls.ssl_early_data` controls accepted downstream TLS early data. The default is `off`. `safe_methods` permits only transport-verified `GET` and `HEAD` requests, while `on` permits all methods and should be used only for routes that tolerate replay. TCP TLS early data requires TLS 1.3 and `tls.resumption.mode = "stateful"` and is rejected when `[[tls.certificates]]` is configured. HTTP/3 0-RTT transport admission remains controlled by `quic.zero_rtt`; when QUIC admits early data, the effective `ssl_early_data` mode controls route and method policy after route matching. Client-supplied `Early-Data` headers are stripped; OxiBelt adds `Early-Data: 1` upstream only for transport-verified early-data requests.
 
 `tls.1_3.key_exchange_groups` controls the downstream TCP TLS, HTTP/3, and TURN TLS named groups exposed through the aws-lc-rs provider. The TLS 1.3 default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. The legacy flat `tls.key_exchange_groups` key remains accepted as a compatibility alias for `tls.1_3.key_exchange_groups` only; it no longer changes TLS 1.2 behavior.
 
@@ -2402,6 +2405,9 @@ upstream = "app"
 #[routes.match.tls.client_cert.subject_cn]
 # suffix = ".example.com"
 
+[routes.tls]
+# ssl_early_data = "off" # off | safe_methods | on
+
 [routes.timeouts]
 # client_body_timeout_ms = 15000
 # response_send_timeout_ms = 30000
@@ -2500,6 +2506,8 @@ Extended route matching keeps existing `hosts` and `path_prefix` behavior by def
 Header, query, and client-certificate value matchers allow exactly one of `present`, `exact`, `prefix`, `suffix`, `contains`, or `regex`. Regex values are compiled during configuration validation. Header matching checks any duplicate value for the named header. Query matching uses form-style decoded query pairs. `source_cidrs` matches the resolved client IP after trusted Real-IP processing. `priority` defaults to `0`; higher values win before host and path specificity. `terminal = true` documents an intentional final route and is honored by conflict detection, but it does not override a route with a higher priority or more specific match.
 
 TLS client-certificate route matchers can check `present`, `fingerprint_sha256`, `subject_cn`, `san_dns`, and `san_ip`. TCP TLS populates this metadata from the presented downstream client certificate. HTTP/3 currently exposes TLS SNI, ALPN, and fingerprint metadata, but not client-certificate identity through the stable QUIC metadata path; client-certificate-specific matchers therefore fail closed for HTTP/3 requests unless that metadata becomes available.
+
+`routes.tls.ssl_early_data` overrides the global `tls.ssl_early_data` mode for requests resolved to that route. Use `off` for replay-sensitive routes, `safe_methods` for idempotent `GET`/`HEAD` handling, and `on` only when every accepted method on the route is replay-safe by application design.
 
 `static_root` enables the built-in static file server for the route. The value must resolve to an existing directory; absolute paths are accepted, and relative paths loaded through `Config::load` resolve under the configuration directory. OxiBelt strips the matched `path_prefix`, percent-decodes each remaining path segment, and serves only regular files whose resolved path stays under `static_root`. Directory listing is forbidden, and symlinks are allowed only when secure resolution can prove they remain inside the static root. On Linux kernels with `openat2(2)`, OxiBelt opens static files relative to a read-only `static_root` directory file descriptor with `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`; this path does not require `/proc/self/fd` and is compatible with read-only root filesystems. On kernels without `openat2`, and on non-Linux platforms, OxiBelt falls back to opening the file and rechecking the opened descriptor through `/proc/self/fd`; if that verification is unavailable, the request fails closed instead of serving an unverified file. Response metadata, validators, ranges, and bytes are all derived from the same verified descriptor. Static routes accept `GET` and `HEAD`, emit `ETag`, `Last-Modified`, and `Accept-Ranges`, support a single `Range: bytes=...` request, and honor `If-None-Match` and `If-Modified-Since`. Request WAF, response WAF, rate limits, dynamic policy, security headers, compression, and Alt-Svc still apply on the general path. Static routes reject upstream-only options such as `replace_prefix_with`, `actions.rewrite`, `cache`, `upstream_http_version`, `generic_http_upgrade`, `connect_tunneling`, and `grpc_web`.
 
@@ -2714,7 +2722,7 @@ Configuration validation rejects:
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
 - `runtime.drain.graceful_timeout_ms = 0` or `runtime.drain.long_connection_close_delay_ms = 0`.
-- TLS client auth without CA roots, invalid TLS version ranges, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, upstream CRLite enforcement without `filter_file`, invalid ASN identity database settings, or managed ASN sources that are not HTTPS.
+- TLS client auth without CA roots, invalid TLS version ranges, TCP TLS early data without TLS 1.3 stateful resumption, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, upstream CRLite enforcement without `filter_file`, invalid ASN identity database settings, or managed ASN sources that are not HTTPS.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.

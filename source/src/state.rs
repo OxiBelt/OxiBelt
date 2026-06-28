@@ -293,6 +293,11 @@ impl AppSnapshot {
       &config.tls,
       &config.listeners,
       &config.routes,
+      if config.downstream_tcp_early_data_enabled() {
+        config.downstream_tcp_early_data_max_bytes()
+      } else {
+        0
+      },
       Some(&tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
