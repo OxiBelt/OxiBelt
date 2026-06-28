@@ -3024,8 +3024,7 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
 }
 
 async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
-  let client_config =
-    downstream_client_config(Path::new(&args.ca_cert), b"h3", args.tls_version)?;
+  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", args.tls_version)?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
