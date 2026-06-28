@@ -54,6 +54,7 @@ pub(crate) mod request;
 pub(crate) mod request_framing;
 mod request_mirror;
 pub(crate) mod response;
+mod response_timeout;
 mod retry;
 mod route_action_runtime;
 mod route_actions;
@@ -99,6 +100,11 @@ use self::response::{
   proxy_error_response, request_buffering_error_response, response_buffering_error_response,
   silent_close_response, text_response, upstream_error_response, upstream_selection_error_response,
   waf_http_terminal_response, with_pending_dynamic_person_proof_response_mutations,
+};
+#[cfg(test)]
+pub(crate) use self::response_timeout::DownstreamResponseSendTimeout;
+pub(crate) use self::response_timeout::{
+  downstream_response_send_timeout, with_downstream_response_timeout,
 };
 use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
 use self::route_action_runtime as route_runtime;
@@ -177,14 +183,6 @@ impl EffectiveTimeouts {
         .unwrap_or(config.limits.client_body_timeout_ms),
     )
   }
-}
-#[derive(Clone, Copy)]
-pub(crate) struct DownstreamResponseSendTimeout(pub(crate) Duration);
-pub(crate) fn downstream_response_send_timeout(response: &Response<ProxyBody>) -> Option<Duration> {
-  response
-    .extensions()
-    .get::<DownstreamResponseSendTimeout>()
-    .map(|timeout| timeout.0)
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
@@ -1934,39 +1932,6 @@ where
   response
 }
 
-pub(super) fn with_downstream_response_timeout(
-  response: Response<ProxyBody>,
-  timeout: Duration,
-  transport_network: WafTransportNetwork,
-) -> Response<ProxyBody> {
-  if transport_network == WafTransportNetwork::Udp {
-    return mark_downstream_response_timeout(response, timeout);
-  }
-
-  let (mut parts, body) = response.into_parts();
-  if parts
-    .extensions
-    .get::<body::KnownSmallResponseBody>()
-    .is_some()
-  {
-    return Response::from_parts(parts, body);
-  }
-  parts
-    .extensions
-    .insert(DownstreamResponseSendTimeout(timeout));
-  let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
-  Response::from_parts(parts, body)
-}
-fn mark_downstream_response_timeout(
-  response: Response<ProxyBody>,
-  timeout: Duration,
-) -> Response<ProxyBody> {
-  let (mut parts, body) = response.into_parts();
-  parts
-    .extensions
-    .insert(DownstreamResponseSendTimeout(timeout));
-  Response::from_parts(parts, body)
-}
 async fn buffer_request_body(
   request: Request<ProxyBody>,
   effective: &buffering::EffectiveBuffering,

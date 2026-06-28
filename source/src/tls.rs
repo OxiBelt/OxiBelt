@@ -15,9 +15,8 @@ use self::negotiation::{
   downstream_crypto_provider_for_tls13,
 };
 use crate::config::{
-  AdminTlsConfig, ListenerConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion,
-  TurnListenerTlsConfig,
+  AdminTlsConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig, TlsClientAuthMode, TlsConfig,
+  TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion, TurnListenerTlsConfig,
 };
 
 mod admin_quic;
@@ -28,6 +27,7 @@ mod client_roots;
 mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
+mod downstream_tcp;
 mod negotiation;
 mod ocsp;
 mod outbound_revocation;
@@ -39,6 +39,11 @@ pub(crate) use cert_metadata::client_certificate_metadata;
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
+use downstream_tcp::{
+  DownstreamTcpTlsBuild, build_downstream_tcp_server_config_for_tls12,
+  build_downstream_tcp_server_config_for_tls13,
+};
+pub use downstream_tcp::{build_server_config, build_server_config_with_resumption};
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
@@ -68,164 +73,6 @@ pub fn install_default_provider() -> anyhow::Result<()> {
   let provider = rustls::crypto::aws_lc_rs::default_provider();
   let _ = provider.install_default();
   Ok(())
-}
-
-/// Builds the shared downstream TCP TLS server configuration for HTTP/1 and HTTP/2.
-pub fn build_server_config(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption(tls, listeners, None)
-}
-
-/// Builds the downstream TCP TLS server configuration with optional shared resumption storage.
-pub fn build_server_config_with_resumption(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  resumption_state: Option<&TlsResumptionState>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption_and_ocsp(tls, listeners, 0, resumption_state, None, None)
-}
-
-pub(crate) fn build_server_config_with_resumption_and_ocsp(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_for_policy(
-    tls,
-    listeners,
-    &tls.negotiation_policy(),
-    &tls_protocol_versions(tls.min_version, tls.max_version),
-    max_early_data_size,
-    resumption_state,
-    ocsp_runtime,
-    crlite_runtime,
-  )
-}
-
-pub(super) fn build_downstream_tcp_server_config_for_policy(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  policy: &TlsNegotiationPolicy,
-  versions: &[&'static rustls::SupportedProtocolVersion],
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    tls,
-    listeners,
-    downstream_crypto_provider_for_policy(policy),
-    versions,
-    max_early_data_size,
-    resumption_state,
-    ocsp_runtime,
-    crlite_runtime,
-  )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build_downstream_tcp_server_config_for_tls13(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  key_exchange_groups: &[TlsKeyExchangeGroup],
-  ciphers: &[crate::config::Tls13CipherSuite],
-  versions: &[&'static rustls::SupportedProtocolVersion],
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    tls,
-    listeners,
-    downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
-    versions,
-    max_early_data_size,
-    resumption_state,
-    ocsp_runtime,
-    crlite_runtime,
-  )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build_downstream_tcp_server_config_for_tls12(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  key_exchange_groups: &[TlsKeyExchangeGroup],
-  ciphers: &[crate::config::Tls12CipherSuite],
-  versions: &[&'static rustls::SupportedProtocolVersion],
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    tls,
-    listeners,
-    downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
-    versions,
-    max_early_data_size,
-    resumption_state,
-    ocsp_runtime,
-    crlite_runtime,
-  )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_downstream_tcp_server_config_with_provider(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
-  provider: rustls::crypto::CryptoProvider,
-  versions: &[&'static rustls::SupportedProtocolVersion],
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
-) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(provider);
-  let (server_identity, mut cert_resolver) =
-    ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
-  if let Some(runtime) = crlite_runtime {
-    cert_resolver = runtime.wrap_resolver(cert_resolver);
-  }
-  let builder = ServerConfig::builder_with_provider(provider.clone())
-    .with_protocol_versions(versions)
-    .context("failed to configure TLS versions")?;
-  let mut server_config = match downstream_client_cert_verifier(&tls.client_auth, provider)? {
-    Some(verifier) => builder.with_client_cert_verifier(verifier),
-    None => builder.with_no_client_auth(),
-  }
-  .with_cert_resolver(cert_resolver);
-  server_config.max_early_data_size = max_early_data_size;
-  configure_server_resumption(
-    &mut server_config,
-    &tls.resumption,
-    TlsServerResumptionKey {
-      scope: "downstream-tcp",
-      mode: tls.resumption.mode,
-      server_identity,
-      client_auth_identity: client_auth_identity(&tls.client_auth)?,
-      alpn_family: "http1-http2",
-    },
-    resumption_state,
-  )?;
-
-  let mut alpn = Vec::new();
-  if listeners.http2 {
-    alpn.push(b"h2".to_vec());
-  }
-  if listeners.http1 {
-    alpn.push(b"http/1.1".to_vec());
-  }
-  server_config.alpn_protocols = alpn;
-
-  Ok(Arc::new(server_config))
 }
 
 /// Builds the downstream QUIC server configuration used by HTTP/3 listeners.

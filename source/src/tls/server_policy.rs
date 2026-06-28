@@ -118,33 +118,23 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
 ) -> anyhow::Result<DownstreamTlsServerConfig> {
   let default_policy = tls.negotiation_policy();
   let mut policies = HashMap::<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>::new();
-  let default = build_or_get_tcp_policy(
-    &mut policies,
+  let tcp_build = super::DownstreamTcpTlsBuild::new(
     tls,
     listeners,
-    &default_policy,
     max_early_data_size,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
-  )?;
+  );
+  let default = build_or_get_tcp_policy(&mut policies, tcp_build, &default_policy)?;
   let mut by_sni = HashMap::new();
   for route in routes {
     if !route.tls.has_negotiation_overrides() {
       continue;
     }
     let policy = tls.effective_route_negotiation_policy(&route.tls);
-    let config_set = build_or_get_tcp_policy(
-      &mut policies,
-      tls,
-      listeners,
-      &policy,
-      max_early_data_size,
-      resumption_state,
-      ocsp_runtime,
-      crlite_runtime,
-    )
-    .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
+    let config_set = build_or_get_tcp_policy(&mut policies, tcp_build, &policy)
+      .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
     for host in &route.hosts {
       by_sni.insert(host.to_ascii_lowercase(), config_set.clone());
     }
@@ -292,51 +282,29 @@ fn build_or_get_quic_policy(
 
 fn build_or_get_tcp_policy(
   policies: &mut HashMap<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>,
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
+  build: super::DownstreamTcpTlsBuild<'_>,
   policy: &TlsNegotiationPolicy,
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<TlsServerConfigSet>> {
   if let Some(config) = policies.get(policy) {
     return Ok(config.clone());
   }
-  let config = Arc::new(build_tcp_policy(
-    tls,
-    listeners,
-    policy,
-    max_early_data_size,
-    resumption_state,
-    ocsp_runtime,
-    crlite_runtime,
-  )?);
+  let config = Arc::new(build_tcp_policy(build, policy)?);
   policies.insert(policy.clone(), config.clone());
   Ok(config)
 }
 
 fn build_tcp_policy(
-  tls: &TlsConfig,
-  listeners: &ListenerConfig,
+  build: super::DownstreamTcpTlsBuild<'_>,
   policy: &TlsNegotiationPolicy,
-  max_early_data_size: u32,
-  resumption_state: Option<&TlsResumptionState>,
-  ocsp_runtime: Option<&OcspStapleRuntime>,
-  crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<TlsServerConfigSet> {
+  let tls = build.tls();
   let tls13 = if tls.max_version >= TlsVersion::Tls13 {
     Some(TlsServerVersionConfig {
       config: super::build_downstream_tcp_server_config_for_tls13(
-        tls,
-        listeners,
+        build,
         &policy.tls13.key_exchange_groups,
         &policy.tls13.ciphers,
         &[&rustls::version::TLS13],
-        max_early_data_size,
-        resumption_state,
-        ocsp_runtime,
-        crlite_runtime,
       )?,
       key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
       cipher_suites: tls13_cipher_suites(&policy.tls13.ciphers),
@@ -347,15 +315,10 @@ fn build_tcp_policy(
   let tls12 = if tls.min_version <= TlsVersion::Tls12 {
     Some(TlsServerVersionConfig {
       config: super::build_downstream_tcp_server_config_for_tls12(
-        tls,
-        listeners,
+        build.with_max_early_data_size(0),
         &policy.tls12.key_exchange_groups,
         &policy.tls12.groups,
         &[&rustls::version::TLS12],
-        0,
-        resumption_state,
-        ocsp_runtime,
-        crlite_runtime,
       )?,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
       cipher_suites: tls12_cipher_suites(&policy.tls12.groups),
