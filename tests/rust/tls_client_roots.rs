@@ -10,18 +10,18 @@ use std::time::Duration;
 use base64::Engine;
 use h3_quinn::quinn::Endpoint;
 use oxibelt::config::{
-  ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, TlsCertificateConfig,
+  ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, Tls12CipherSuite,
+  Tls12NegotiationConfig, Tls13CipherSuite, Tls13NegotiationConfig, TlsCertificateConfig,
   TlsClientAuthConfig, TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig,
-  TlsServerResumptionMode, TlsVersion, TlsVersionKeyExchangeConfig, TurnListenerTlsConfig,
-  UpstreamEchConfig, UpstreamEchMode,
+  TlsServerResumptionMode, TlsVersion, TurnListenerTlsConfig, UpstreamEchConfig, UpstreamEchMode,
 };
 use oxibelt::remote_signer::{
   self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
   SignerServerConfig,
 };
 use oxibelt::tls;
-use rustls::NamedGroup;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
+use rustls::{CipherSuite, NamedGroup};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -245,6 +245,66 @@ async fn server_config_uses_configured_key_exchange_groups() {
 
   let group = server.await.expect("server task should finish");
   assert_eq!(group, NamedGroup::X25519);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_config_uses_configured_tls13_ciphers() {
+  let temp_dir = common::TempDir::new("server-config-tls13-ciphers");
+  let (ca_cert_path, ca_key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "tls13-cipher-ca");
+  let (cert_path, key_path) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "tls13-cipher-downstream",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let mut tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
+  tls_config.tls13.ciphers = vec![Tls13CipherSuite::Aes128GcmSha256];
+  let listeners = ListenerConfig {
+    https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
+    http_bind: None,
+    http_binds: Vec::new(),
+    http_mode: Default::default(),
+    http1: true,
+    http2: true,
+    http3: false,
+    proxy_protocol: ProxyProtocolConfig::default(),
+  };
+  let server_config =
+    tls::build_server_config(&tls_config, &listeners).expect("server config should build");
+
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("server listener should bind");
+  let addr = listener.local_addr().unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.expect("server should accept");
+    let tls_stream = TlsAcceptor::from(server_config)
+      .accept(stream)
+      .await
+      .expect("server TLS handshake should complete");
+    tls_stream
+      .get_ref()
+      .1
+      .negotiated_cipher_suite()
+      .expect("TLS handshake should negotiate a cipher suite")
+      .suite()
+  });
+
+  let client_config =
+    tls::build_upstream_client_config(&[ca_cert_path], &UpstreamEchConfig::default())
+      .expect("client config should build");
+  let stream = TcpStream::connect(addr)
+    .await
+    .expect("client should connect to server");
+  TlsConnector::from(Arc::new(client_config))
+    .connect("tls13-cipher-downstream".try_into().unwrap(), stream)
+    .await
+    .expect("client TLS handshake should complete");
+
+  let cipher = server.await.expect("server task should finish");
+  assert_eq!(cipher, CipherSuite::TLS13_AES_128_GCM_SHA256);
 }
 
 #[test]
@@ -648,11 +708,13 @@ fn downstream_tls_config(
     certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
-    tls12: TlsVersionKeyExchangeConfig {
+    tls12: Tls12NegotiationConfig {
+      groups: default_tls12_ciphers(),
       key_exchange_groups: default_tls12_key_exchange_groups(),
     },
-    tls13: TlsVersionKeyExchangeConfig {
+    tls13: Tls13NegotiationConfig {
       key_exchange_groups: default_tls_key_exchange_groups(),
+      ciphers: default_tls13_ciphers(),
     },
     key_exchange_groups: default_tls_key_exchange_groups(),
     session_tickets: true,
@@ -758,11 +820,13 @@ fn remote_tls_config(
     certificates: Vec::new(),
     min_version: TlsVersion::Tls13,
     max_version: TlsVersion::Tls13,
-    tls12: TlsVersionKeyExchangeConfig {
+    tls12: Tls12NegotiationConfig {
+      groups: default_tls12_ciphers(),
       key_exchange_groups: default_tls12_key_exchange_groups(),
     },
-    tls13: TlsVersionKeyExchangeConfig {
+    tls13: Tls13NegotiationConfig {
       key_exchange_groups: default_tls_key_exchange_groups(),
+      ciphers: default_tls13_ciphers(),
     },
     key_exchange_groups: default_tls_key_exchange_groups(),
     session_tickets: true,
@@ -780,6 +844,25 @@ fn default_tls_key_exchange_groups() -> Vec<TlsKeyExchangeGroup> {
     TlsKeyExchangeGroup::X25519,
     TlsKeyExchangeGroup::Secp256r1,
     TlsKeyExchangeGroup::Secp384r1,
+  ]
+}
+
+fn default_tls13_ciphers() -> Vec<Tls13CipherSuite> {
+  vec![
+    Tls13CipherSuite::Aes256GcmSha384,
+    Tls13CipherSuite::Aes128GcmSha256,
+    Tls13CipherSuite::Chacha20Poly1305Sha256,
+  ]
+}
+
+fn default_tls12_ciphers() -> Vec<Tls12CipherSuite> {
+  vec![
+    Tls12CipherSuite::EcdheEcdsaAes256GcmSha384,
+    Tls12CipherSuite::EcdheEcdsaAes128GcmSha256,
+    Tls12CipherSuite::EcdheEcdsaChacha20Poly1305Sha256,
+    Tls12CipherSuite::EcdheRsaAes256GcmSha384,
+    Tls12CipherSuite::EcdheRsaAes128GcmSha256,
+    Tls12CipherSuite::EcdheRsaChacha20Poly1305Sha256,
   ]
 }
 

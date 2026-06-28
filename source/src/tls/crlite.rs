@@ -13,6 +13,8 @@ use x509_cert::der::{
 
 use crate::config::{CrliteConfig, CrliteCoveragePolicy, CrliteFailurePolicy, TlsConfig};
 
+use super::certificate_io::load_certs;
+
 const CT_PRECERT_SCTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.2");
 
 type Serial = Vec<u8>;
@@ -222,7 +224,7 @@ fn crlite_query_materials(tls: &TlsConfig) -> anyhow::Result<Vec<CrliteQueryMate
 fn crlite_query_material_from_cert_chain(
   cert_chain: &std::path::Path,
 ) -> anyhow::Result<CrliteQueryMaterial> {
-  let certs = super::load_certs(cert_chain).context("crlite_cert_chain_read")?;
+  let certs = load_certs(cert_chain).context("crlite_cert_chain_read")?;
   let leaf_der = certs
     .first()
     .ok_or_else(|| anyhow!("crlite_missing_leaf_certificate"))?
@@ -607,11 +609,13 @@ mod tests {
       certificates: Vec::new(),
       min_version: crate::config::TlsVersion::Tls13,
       max_version: crate::config::TlsVersion::Tls13,
-      tls12: crate::config::TlsVersionKeyExchangeConfig {
+      tls12: crate::config::Tls12NegotiationConfig {
+        groups: Vec::new(),
         key_exchange_groups: Vec::new(),
       },
-      tls13: crate::config::TlsVersionKeyExchangeConfig {
+      tls13: crate::config::Tls13NegotiationConfig {
         key_exchange_groups: Vec::new(),
+        ciphers: Vec::new(),
       },
       key_exchange_groups: Vec::new(),
       session_tickets: true,

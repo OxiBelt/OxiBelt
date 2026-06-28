@@ -1,28 +1,34 @@
 //! TLS configuration builders for downstream, upstream, admin, TURN, and QUIC transports.
 //! Certificate loading and resumption keys stay scoped to the transport that uses them.
 
-use std::fs;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::pki_types::CertificateDer;
 use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
+use self::certificate_io::{end_entity_cert, load_certs, load_private_key};
+use self::negotiation::{
+  downstream_crypto_provider_for_policy, downstream_crypto_provider_for_tls12,
+  downstream_crypto_provider_for_tls13,
+};
 use crate::config::{
-  AdminTlsConfig, ListenerConfig, OcspMode, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsVersion, TurnListenerTlsConfig,
-  canonicalize_existing_file,
+  AdminTlsConfig, ListenerConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
+  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion,
+  TurnListenerTlsConfig,
 };
 
 mod admin_quic;
 mod cert_metadata;
+mod certificate_io;
 mod client_auth;
 mod client_roots;
 mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
+mod negotiation;
 mod ocsp;
 mod outbound_revocation;
 mod resumption;
@@ -64,33 +70,6 @@ pub fn install_default_provider() -> anyhow::Result<()> {
   Ok(())
 }
 
-fn downstream_crypto_provider(tls: &TlsConfig) -> rustls::crypto::CryptoProvider {
-  downstream_crypto_provider_for_groups(&tls.tls13.key_exchange_groups)
-}
-
-pub(super) fn downstream_crypto_provider_for_groups(
-  groups: &[TlsKeyExchangeGroup],
-) -> rustls::crypto::CryptoProvider {
-  let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-  provider.kx_groups = groups
-    .iter()
-    .copied()
-    .map(supported_key_exchange_group)
-    .collect();
-  provider
-}
-
-fn supported_key_exchange_group(
-  group: TlsKeyExchangeGroup,
-) -> &'static dyn rustls::crypto::SupportedKxGroup {
-  match group {
-    TlsKeyExchangeGroup::X25519MlKem768 => rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
-    TlsKeyExchangeGroup::X25519 => rustls::crypto::aws_lc_rs::kx_group::X25519,
-    TlsKeyExchangeGroup::Secp256r1 => rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
-    TlsKeyExchangeGroup::Secp384r1 => rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
-  }
-}
-
 /// Builds the shared downstream TCP TLS server configuration for HTTP/1 and HTTP/2.
 pub fn build_server_config(
   tls: &TlsConfig,
@@ -115,10 +94,10 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_for_groups(
+  build_downstream_tcp_server_config_for_policy(
     tls,
     listeners,
-    &tls.tls13.key_exchange_groups,
+    &tls.negotiation_policy(),
     &tls_protocol_versions(tls.min_version, tls.max_version),
     resumption_state,
     ocsp_runtime,
@@ -126,16 +105,81 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
   )
 }
 
-pub(super) fn build_downstream_tcp_server_config_for_groups(
+pub(super) fn build_downstream_tcp_server_config_for_policy(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
-  key_exchange_groups: &[TlsKeyExchangeGroup],
+  policy: &TlsNegotiationPolicy,
   versions: &[&'static rustls::SupportedProtocolVersion],
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
+  build_downstream_tcp_server_config_with_provider(
+    tls,
+    listeners,
+    downstream_crypto_provider_for_policy(policy),
+    versions,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_downstream_tcp_server_config_for_tls13(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  ciphers: &[crate::config::Tls13CipherSuite],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_downstream_tcp_server_config_with_provider(
+    tls,
+    listeners,
+    downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
+    versions,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_downstream_tcp_server_config_for_tls12(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  ciphers: &[crate::config::Tls12CipherSuite],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_downstream_tcp_server_config_with_provider(
+    tls,
+    listeners,
+    downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
+    versions,
+    resumption_state,
+    ocsp_runtime,
+    crlite_runtime,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_downstream_tcp_server_config_with_provider(
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  provider: rustls::crypto::CryptoProvider,
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+  ocsp_runtime: Option<&OcspStapleRuntime>,
+  crlite_runtime: Option<&CrliteRuntime>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(provider);
   let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   if let Some(runtime) = crlite_runtime {
@@ -207,27 +251,33 @@ pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  build_downstream_quic_server_config_for_groups(
+  build_downstream_quic_server_config_for_tls13(
     tls,
     quic,
     quic_host_key_base_dir,
     &tls.tls13.key_exchange_groups,
+    &tls.tls13.ciphers,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
   )
 }
 
-pub(super) fn build_downstream_quic_server_config_for_groups(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_downstream_quic_server_config_for_tls13(
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&std::path::Path>,
   key_exchange_groups: &[TlsKeyExchangeGroup],
+  ciphers: &[crate::config::Tls13CipherSuite],
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
+  let provider = Arc::new(downstream_crypto_provider_for_tls13(
+    key_exchange_groups,
+    ciphers,
+  ));
   let (server_identity, mut cert_resolver) =
     ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
   if let Some(runtime) = crlite_runtime {
@@ -342,23 +392,73 @@ pub fn build_turn_server_config_with_resumption(
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_turn_server_config_for_groups(
+  build_turn_server_config_for_policy(
     listener_tls,
     default_tls,
-    &default_tls.tls13.key_exchange_groups,
+    &default_tls.negotiation_policy(),
     &tls_protocol_versions(default_tls.min_version, default_tls.max_version),
     resumption_state,
   )
 }
 
-pub(super) fn build_turn_server_config_for_groups(
+pub(super) fn build_turn_server_config_for_policy(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
-  key_exchange_groups: &[TlsKeyExchangeGroup],
+  policy: &TlsNegotiationPolicy,
   versions: &[&'static rustls::SupportedProtocolVersion],
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(downstream_crypto_provider_for_groups(key_exchange_groups));
+  build_turn_server_config_with_provider(
+    listener_tls,
+    default_tls,
+    downstream_crypto_provider_for_policy(policy),
+    versions,
+    resumption_state,
+  )
+}
+
+pub(super) fn build_turn_server_config_for_tls13(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  ciphers: &[crate::config::Tls13CipherSuite],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_turn_server_config_with_provider(
+    listener_tls,
+    default_tls,
+    downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
+    versions,
+    resumption_state,
+  )
+}
+
+pub(super) fn build_turn_server_config_for_tls12(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  key_exchange_groups: &[TlsKeyExchangeGroup],
+  ciphers: &[crate::config::Tls12CipherSuite],
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_turn_server_config_with_provider(
+    listener_tls,
+    default_tls,
+    downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
+    versions,
+    resumption_state,
+  )
+}
+
+fn build_turn_server_config_with_provider(
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  provider: rustls::crypto::CryptoProvider,
+  versions: &[&'static rustls::SupportedProtocolVersion],
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(provider);
   let cert_chain = listener_tls
     .cert_chain
     .as_ref()
@@ -509,14 +609,6 @@ fn load_remote_turn_certified_key(
   }
 }
 
-fn end_entity_cert<'a>(
-  certs: &'a [CertificateDer<'static>],
-) -> anyhow::Result<&'a CertificateDer<'static>> {
-  certs
-    .first()
-    .ok_or_else(|| anyhow!("certificate chain must include an end-entity certificate"))
-}
-
 #[derive(Debug)]
 struct AdminCertificate {
   server_names: Vec<String>,
@@ -573,64 +665,6 @@ pub(super) fn sni_matches(pattern: &str, server_name: &str) -> bool {
     return !prefix.is_empty() && !prefix.contains('.');
   }
   pattern.eq_ignore_ascii_case(server_name)
-}
-
-pub(super) fn load_certs(path: &std::path::Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
-  let bytes = read_existing_file("certificate file", path)?;
-  CertificateDer::pem_slice_iter(&bytes)
-    .collect::<Result<Vec<_>, _>>()
-    .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))
-}
-
-fn load_private_key(path: &std::path::Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-  let bytes = read_existing_file("private key file", path)?;
-  PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| match error {
-    rustls::pki_types::pem::Error::NoItemsFound => {
-      anyhow!("no private key found in {}", path.display())
-    }
-    error => anyhow!(
-      "failed to parse private key from {}: {error}",
-      path.display()
-    ),
-  })
-}
-
-fn load_ocsp_response(ocsp: &crate::config::OcspConfig) -> anyhow::Result<Option<Vec<u8>>> {
-  match ocsp.mode {
-    OcspMode::Disabled => Ok(None),
-    OcspMode::StaticFile => {
-      let path = ocsp
-        .response_file
-        .as_ref()
-        .ok_or_else(|| anyhow!("OCSP response file must be configured"))?;
-      let bytes = read_existing_file("OCSP response file", path)?;
-      Ok(Some(bytes))
-    }
-    OcspMode::LiveFetch => Ok(None),
-  }
-}
-
-pub(super) fn read_existing_file(
-  field_name: &str,
-  path: &std::path::Path,
-) -> anyhow::Result<Vec<u8>> {
-  let canonical_path = canonicalize_existing_file(field_name, path)?;
-  let canonical_parent = path
-    .parent()
-    .unwrap_or_else(|| std::path::Path::new("."))
-    .canonicalize()
-    .with_context(|| {
-      format!(
-        "failed to resolve {field_name} parent for {}",
-        path.display()
-      )
-    })?;
-
-  if !canonical_path.starts_with(&canonical_parent) {
-    bail!("{field_name} must stay within its configured directory");
-  }
-
-  fs::read(&canonical_path).with_context(|| format!("failed to read {}", canonical_path.display()))
 }
 
 fn load_client_auth_root_store(paths: &[std::path::PathBuf]) -> anyhow::Result<RootCertStore> {

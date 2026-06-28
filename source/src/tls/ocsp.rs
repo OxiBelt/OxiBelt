@@ -18,6 +18,7 @@ mod cert_id;
 mod schedule;
 mod status;
 mod verify;
+use super::certificate_io::load_ocsp_response;
 pub(super) use schedule::{classify_ocsp_error, failure_retry_time, next_refresh_time, unix_now};
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
@@ -92,7 +93,9 @@ impl OcspStapleRuntime {
     control_http: ControlHttpClient,
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
-    let provider = Arc::new(super::downstream_crypto_provider(tls));
+    let provider = Arc::new(super::negotiation::downstream_crypto_provider_for_policy(
+      &tls.negotiation_policy(),
+    ));
     let mut identity_certs = Vec::new();
     let mut workers = Vec::new();
 
@@ -194,7 +197,7 @@ async fn build_certificate_ocsp_resolver(
       ))
     }
     OcspMode::StaticFile => {
-      base_key.ocsp = super::load_ocsp_response(ocsp)?;
+      base_key.ocsp = load_ocsp_response(ocsp)?;
       Ok((
         Arc::new(rustls::sign::SingleCertAndKey::from(base_key)),
         Arc::new(Mutex::new(OcspStatusState::static_file(
@@ -339,7 +342,7 @@ pub(super) fn downstream_cert_resolver(
   let mut certified_key = super::load_downstream_certified_key(tls, provider)
     .context("failed to create rustls certified key")?;
   identity_certs.extend(certified_key.cert.iter().cloned());
-  certified_key.ocsp = super::load_ocsp_response(&tls.ocsp)?;
+  certified_key.ocsp = load_ocsp_response(&tls.ocsp)?;
   let default = Arc::new(rustls::sign::SingleCertAndKey::from(certified_key));
   let mut certificates = Vec::new();
   for (index, certificate) in tls.certificates.iter().enumerate() {
@@ -347,7 +350,7 @@ pub(super) fn downstream_cert_resolver(
       super::load_downstream_certificate_certified_key(tls, certificate, provider)
         .with_context(|| format!("failed to create tls.certificates[{index}] certified key"))?;
     identity_certs.extend(certified_key.cert.iter().cloned());
-    certified_key.ocsp = super::load_ocsp_response(&certificate.ocsp)?;
+    certified_key.ocsp = load_ocsp_response(&certificate.ocsp)?;
     certificates.push(DownstreamCertResolverEntry {
       server_names: certificate
         .server_names

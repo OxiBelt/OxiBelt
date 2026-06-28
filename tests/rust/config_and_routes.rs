@@ -18,9 +18,10 @@ use oxibelt::config::{
   ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
   RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, TlsKeyExchangeGroup, TlsServerResumptionMode,
-  TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-  UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider,
+  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
+  resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -2340,17 +2341,13 @@ fn tls_key_exchange_groups_parse_and_validate() {
 
   let raw = base.replace(
     "private_key =",
-    "key_exchange_groups = [\"x25519\", \"secp256r1\", \"secp384r1\"]\nprivate_key =",
+    "key_exchange_groups = [\"x25519\"]\nprivate_key =",
   );
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert_eq!(
     config.tls.tls13.key_exchange_groups,
-    vec![
-      TlsKeyExchangeGroup::X25519,
-      TlsKeyExchangeGroup::Secp256r1,
-      TlsKeyExchangeGroup::Secp384r1,
-    ]
+    vec![TlsKeyExchangeGroup::X25519]
   );
   assert_eq!(
     config.tls.tls12.key_exchange_groups,
@@ -2390,15 +2387,15 @@ fn tls_key_exchange_groups_parse_and_validate() {
 }
 
 #[test]
-fn tls_version_key_exchange_groups_parse_and_validate() {
-  let temp_dir = common::TempDir::new("tls-version-key-exchange-groups");
+fn tls_version_negotiation_policy_parse_and_validate() {
+  let temp_dir = common::TempDir::new("tls-version-negotiation-policy");
   let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "tls-version-key-exchange-groups");
+    common::create_self_signed_cert(temp_dir.path(), "tls-version-negotiation-policy");
   let base = common::minimal_config_toml(&cert_path, &key_path);
 
   let raw = base.replace(
     "[tls.ocsp]",
-    "[tls.1_3]\nkey_exchange_groups = [\"x25519mlkem768\", \"x25519\"]\n\n[tls.1_2]\nkey_exchange_groups = [\"secp256r1\"]\n\n[tls.ocsp]",
+    "[tls.1_3]\nkey_exchange_groups = [\"x25519mlkem768\", \"x25519\"]\nciphers = [\" TLS_AES_256_GCM_SHA384\", \"TLS_CHACHA20_POLY1305_SHA256\"]\n\n[tls.1_2]\ngroups = [\"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384\"]\n\n[tls.ocsp]",
   );
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
@@ -2410,8 +2407,15 @@ fn tls_version_key_exchange_groups_parse_and_validate() {
     ]
   );
   assert_eq!(
-    config.tls.tls12.key_exchange_groups,
-    vec![TlsKeyExchangeGroup::Secp256r1]
+    config.tls.tls13.ciphers,
+    vec![
+      Tls13CipherSuite::Aes256GcmSha384,
+      Tls13CipherSuite::Chacha20Poly1305Sha256,
+    ]
+  );
+  assert_eq!(
+    config.tls.tls12.groups,
+    vec![Tls12CipherSuite::EcdheEcdsaAes256GcmSha384]
   );
   assert_eq!(
     config.tls.key_exchange_groups,
@@ -2420,16 +2424,41 @@ fn tls_version_key_exchange_groups_parse_and_validate() {
 
   let raw = base.replace(
     "[tls.ocsp]",
-    "[tls.1_2]\nkey_exchange_groups = [\"x25519mlkem768\"]\n\n[tls.ocsp]",
+    "[tls.1_2]\nkey_exchange_groups = [\"x25519\"]\n\n[tls.ocsp]",
+  );
+  let error =
+    toml::from_str::<Config>(&raw).expect_err("legacy TLS 1.2 key exchange group key should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.1_2.key_exchange_groups is no longer supported"),
+    "unexpected error: {error}"
+  );
+
+  let raw = base.replace("[tls.ocsp]", "[tls.1_3]\nciphers = []\n\n[tls.ocsp]");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("empty TLS 1.3 cipher suite list should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.1_3.ciphers must include at least one cipher suite"),
+    "unexpected error: {error}"
+  );
+
+  let raw = base.replace(
+    "[tls.ocsp]",
+    "[tls.1_2]\ngroups = [\"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256\", \"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256\"]\n\n[tls.ocsp]",
   );
   let config: Config = toml::from_str(&raw).expect("config should parse");
   let error = config
     .validate()
-    .expect_err("TLS 1.2 hybrid key exchange group should fail");
+    .expect_err("duplicate TLS 1.2 cipher suite should fail");
   assert!(
     error
       .to_string()
-      .contains("tls.1_2.key_exchange_groups cannot include x25519mlkem768 for tls1.2"),
+      .contains("tls.1_2.groups contains duplicate TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
     "unexpected error: {error}"
   );
 }
@@ -2443,9 +2472,10 @@ fn route_tls_key_exchange_groups_validate_sni_only_scope() {
   let route_override = r#"
 [routes.tls.1_3]
 key_exchange_groups = ["x25519"]
+ciphers = ["TLS_AES_128_GCM_SHA256"]
 
 [routes.tls.1_2]
-key_exchange_groups = ["secp256r1"]
+groups = ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
 "#;
 
   let raw = format!("{base}{route_override}");
@@ -2456,6 +2486,26 @@ key_exchange_groups = ["secp256r1"]
   assert_eq!(
     config.routes[0].tls.tls13.key_exchange_groups.as_deref(),
     Some([TlsKeyExchangeGroup::X25519].as_slice())
+  );
+  assert_eq!(
+    config.routes[0].tls.tls13.ciphers.as_deref(),
+    Some([Tls13CipherSuite::Aes128GcmSha256].as_slice())
+  );
+  assert_eq!(
+    config.routes[0].tls.tls12.groups.as_deref(),
+    Some([Tls12CipherSuite::EcdheRsaAes128GcmSha256].as_slice())
+  );
+
+  let raw = format!("{base}\n[routes.tls.1_2]\nkey_exchange_groups = [\"x25519\"]\n");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("route TLS 1.2 legacy key exchange group key should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root tls.1_2.key_exchange_groups is no longer supported"),
+    "unexpected error: {error}"
   );
 
   let raw = format!(
@@ -2470,7 +2520,7 @@ key_exchange_groups = ["secp256r1"]
   assert!(
     error
       .to_string()
-      .contains("route app-root tls key_exchange_groups can only be set on SNI-only routes"),
+      .contains("route app-root tls negotiation overrides can only be set on SNI-only routes"),
     "unexpected error: {error}"
   );
 
@@ -2485,7 +2535,7 @@ key_exchange_groups = ["secp256r1"]
     .expect_err("wildcard route TLS policy should fail");
   assert!(
     error.to_string().contains(
-      "route app-root tls key_exchange_groups can only be set on exact non-wildcard hosts"
+      "route app-root tls negotiation overrides can only be set on exact non-wildcard hosts"
     ),
     "unexpected error: {error}"
   );
@@ -2500,7 +2550,7 @@ fn route_tls_key_exchange_groups_reject_host_conflicts() {
   let raw = format!(
     r#"{base}
 [routes.tls.1_3]
-key_exchange_groups = ["x25519"]
+ciphers = ["TLS_AES_128_GCM_SHA256"]
 
 [[routes]]
 name = "app-root-conflict"
@@ -2509,7 +2559,7 @@ path_prefix = "/"
 upstream = "app"
 
 [routes.tls.1_3]
-key_exchange_groups = ["secp256r1"]
+ciphers = ["TLS_AES_256_GCM_SHA384"]
 "#
   );
   let config: Config = toml::from_str(&raw).expect("config should parse");
@@ -2519,7 +2569,7 @@ key_exchange_groups = ["secp256r1"]
   assert!(
     error
       .to_string()
-      .contains("route app-root-conflict tls key_exchange_groups conflict with route app-root"),
+      .contains("route app-root-conflict tls negotiation policy conflicts with route app-root"),
     "unexpected error: {error}"
   );
 }

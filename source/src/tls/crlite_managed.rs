@@ -509,11 +509,13 @@ mod tests {
       certificates: Vec::new(),
       min_version: crate::config::TlsVersion::Tls13,
       max_version: crate::config::TlsVersion::Tls13,
-      tls12: crate::config::TlsVersionKeyExchangeConfig {
+      tls12: crate::config::Tls12NegotiationConfig {
+        groups: Vec::new(),
         key_exchange_groups: Vec::new(),
       },
-      tls13: crate::config::TlsVersionKeyExchangeConfig {
+      tls13: crate::config::Tls13NegotiationConfig {
         key_exchange_groups: Vec::new(),
+        ciphers: Vec::new(),
       },
       key_exchange_groups: Vec::new(),
       session_tickets: true,

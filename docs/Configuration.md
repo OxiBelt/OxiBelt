@@ -361,9 +361,17 @@ session_ticket_rotation_seconds = 86400
 
 [tls.1_3]
 key_exchange_groups = ["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]
+ciphers = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256", "TLS_CHACHA20_POLY1305_SHA256"]
 
 [tls.1_2]
-key_exchange_groups = ["x25519", "secp256r1", "secp384r1"]
+groups = [
+  "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+  "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+  "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+  "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+  "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+  "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+]
 
 [tls.resumption]
 mode = "stateful" # off | stateful | stateless
@@ -457,9 +465,11 @@ mode = "disabled" # disabled | enforce | managed
 
 `cert_chain` is always required and is the default downstream certificate. `private_key` is required unless `tls.remote_signer.enabled = true`; when remote signing is enabled, `private_key` must not be set. `server_names` can name SNI values owned by the default certificate. Additional `[[tls.certificates]]` entries select certificate material by SNI before HTTP routing; exact names match before leftmost wildcards. Missing or unknown SNI uses the default certificate unless `require_sni = true` or `reject_unknown_sni = true`. In local-key mode each extra certificate requires `private_key`; in remote-signer mode each extra certificate requires `remote_signer_key_id` and uses the global signer socket/token settings. Multi-certificate downstream TLS currently requires `tls.resumption.mode = "off"` and `quic.zero_rtt = "off"`.
 
-`tls.1_3.key_exchange_groups` and `tls.1_2.key_exchange_groups` control the downstream TCP TLS and TURN TLS groups exposed through the aws-lc-rs provider for each protocol version. HTTP/3 always uses TLS 1.3 and therefore uses `tls.1_3.key_exchange_groups`. The TLS 1.3 default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. The TLS 1.2 default is classical-only: `["x25519", "secp256r1", "secp384r1"]`; `x25519mlkem768` is rejected for TLS 1.2. The legacy flat `tls.key_exchange_groups` key remains accepted as a compatibility alias for both version tables when a nested version table is not set.
+`tls.1_3.key_exchange_groups` controls the downstream TCP TLS, HTTP/3, and TURN TLS named groups exposed through the aws-lc-rs provider. The TLS 1.3 default keeps rustls' post-quantum hybrid first: `["x25519mlkem768", "x25519", "secp256r1", "secp384r1"]`. The legacy flat `tls.key_exchange_groups` key remains accepted as a compatibility alias for `tls.1_3.key_exchange_groups` only; it no longer changes TLS 1.2 behavior.
 
-For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768` from `tls.1_3.key_exchange_groups`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. Per-route overrides can be set under `routes.tls.1_3.key_exchange_groups` and `routes.tls.1_2.key_exchange_groups`, but only on exact-host, path-root routes with no additional match conditions. They are selected by TLS SNI before HTTP routing, so wildcard hosts or path/header/method-specific routes cannot carry TLS key-exchange overrides.
+`tls.1_3.ciphers` controls TLS 1.3 cipher suites. Supported values are `TLS_AES_256_GCM_SHA384`, `TLS_AES_128_GCM_SHA256`, and `TLS_CHACHA20_POLY1305_SHA256`. `tls.1_2.groups` controls TLS 1.2 cipher suites; the key name is intentionally `groups` for compatibility with TLS 1.2 cipher-suite group selection and replaces the old `tls.1_2.key_exchange_groups` key, which is rejected. Supported TLS 1.2 values are `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, and `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256`. Cipher names may have surrounding whitespace but otherwise must use exact uppercase IANA spelling; empty, duplicate, unknown, or wrong-version suites fail config validation.
+
+For handshake-heavy deployments that prefer lower cold-handshake CPU cost over post-quantum hybrid negotiation, omit `x25519mlkem768` from `tls.1_3.key_exchange_groups`, for example `["x25519", "secp256r1", "secp384r1"]`. In TLS 1.3 server mode, rustls chooses from the client supported-group order, so moving `x25519mlkem768` later does not force classical ECDHE when clients offer the hybrid group first. Per-route overrides can be set under `routes.tls.1_3.key_exchange_groups`, `routes.tls.1_3.ciphers`, and `routes.tls.1_2.groups`, but only on exact-host, path-root routes with no additional match conditions. They are selected by TLS SNI before HTTP routing, so wildcard hosts or path/header/method-specific routes cannot carry TLS negotiation overrides.
 
 The remote signer uses a Unix domain socket and a base64 32-byte token. Prefer `token_file = "keysigner-token.b64"` for short rotation; it is resolved under the certificate directory, must contain exactly 32 random bytes in base64, is tracked as a downstream TLS reload input, and takes precedence over `token_env`. `token_env` remains supported for existing deployments. `token_reload_interval_ms` controls how often OxiBelt refreshes the file-backed token cache before requests; an `unauthorized` signer response forces one immediate token reload and retry. `socket_path` must be absolute, and `key_id` selects the signer-held default key. `pool_max_idle_connections` caps reusable idle signer sockets per remote signing key and defaults to `64`; set it to `0` to open a fresh Unix socket for each signing request. Idle pooled sockets older than `sign_timeout_ms` are discarded before reuse. By default, remote signing is limited to TLS 1.3 server CertificateVerify inputs. Set `allow_tls12_unstructured_signing = true` only when TLS 1.2 compatibility is required and the signer sidecar is started with the same opt-in.
 

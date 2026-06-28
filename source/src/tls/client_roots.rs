@@ -1,6 +1,8 @@
 use anyhow::bail;
 use rustls::RootCertStore;
 
+use super::certificate_io::load_certs;
+
 pub(super) fn load_webpki_root_store() -> RootCertStore {
   let mut roots = RootCertStore::empty();
   roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -13,7 +15,7 @@ pub(crate) fn load_upstream_root_store(
   let mut roots = load_webpki_root_store();
 
   for path in extra_root_certificates {
-    let certs = super::load_certs(path)?;
+    let certs = load_certs(path)?;
     let (added, _ignored) = roots.add_parsable_certificates(certs);
     if added == 0 {
       bail!(

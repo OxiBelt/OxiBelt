@@ -7,8 +7,8 @@ use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use rustls::{CipherSuite, NamedGroup, ServerConfig};
 
 use crate::config::{
-  ListenerConfig, QuicConfig, RouteConfig, TlsConfig, TlsKeyExchangeGroup, TlsKeyExchangePolicy,
-  TlsVersion,
+  ListenerConfig, QuicConfig, RouteConfig, Tls13NegotiationConfig, TlsConfig, TlsKeyExchangeGroup,
+  TlsNegotiationPolicy, TlsVersion,
 };
 
 use super::{CrliteRuntime, OcspStapleRuntime, TlsResumptionState};
@@ -79,13 +79,13 @@ struct TlsServerConfigSet {
 impl TlsServerConfigSet {
   fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
     if let Some(tls13) = &self.tls13
-      && client_offers_tls13(client_hello)
+      && client_offers_any_cipher(client_hello, &tls13.cipher_suites)
       && client_offers_any_group(client_hello, &tls13.key_exchange_groups)
     {
       return tls13.config.clone();
     }
     if let Some(tls12) = &self.tls12
-      && client_offers_tls12(client_hello)
+      && client_offers_any_cipher(client_hello, &tls12.cipher_suites)
       && client_offers_any_group(client_hello, &tls12.key_exchange_groups)
     {
       return tls12.config.clone();
@@ -104,6 +104,7 @@ impl TlsServerConfigSet {
 struct TlsServerVersionConfig {
   config: Arc<ServerConfig>,
   key_exchange_groups: Vec<TlsKeyExchangeGroup>,
+  cipher_suites: Vec<CipherSuite>,
 }
 
 pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
@@ -114,8 +115,8 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<DownstreamTlsServerConfig> {
-  let default_policy = tls.key_exchange_policy();
-  let mut policies = HashMap::<TlsKeyExchangePolicy, Arc<TlsServerConfigSet>>::new();
+  let default_policy = tls.negotiation_policy();
+  let mut policies = HashMap::<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>::new();
   let default = build_or_get_tcp_policy(
     &mut policies,
     tls,
@@ -127,10 +128,10 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
   )?;
   let mut by_sni = HashMap::new();
   for route in routes {
-    if !route.tls.has_key_exchange_overrides() {
+    if !route.tls.has_negotiation_overrides() {
       continue;
     }
-    let policy = tls.effective_route_key_exchange_policy(&route.tls);
+    let policy = tls.effective_route_negotiation_policy(&route.tls);
     let config_set = build_or_get_tcp_policy(
       &mut policies,
       tls,
@@ -156,31 +157,35 @@ pub(crate) fn build_turn_tls_server_config_with_resumption(
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<TurnTlsServerConfig> {
-  let policy = default_tls.key_exchange_policy();
+  let policy = default_tls.negotiation_policy();
   let tls13 = if default_tls.max_version >= TlsVersion::Tls13 {
     Some(TlsServerVersionConfig {
-      config: super::build_turn_server_config_for_groups(
+      config: super::build_turn_server_config_for_tls13(
         listener_tls,
         default_tls,
         &policy.tls13.key_exchange_groups,
+        &policy.tls13.ciphers,
         &[&rustls::version::TLS13],
         resumption_state,
       )?,
       key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
+      cipher_suites: tls13_cipher_suites(&policy.tls13.ciphers),
     })
   } else {
     None
   };
   let tls12 = if default_tls.min_version <= TlsVersion::Tls12 {
     Some(TlsServerVersionConfig {
-      config: super::build_turn_server_config_for_groups(
+      config: super::build_turn_server_config_for_tls12(
         listener_tls,
         default_tls,
         &policy.tls12.key_exchange_groups,
+        &policy.tls12.groups,
         &[&rustls::version::TLS12],
         resumption_state,
       )?,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
+      cipher_suites: tls12_cipher_suites(&policy.tls12.groups),
     })
   } else {
     None
@@ -202,7 +207,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<DownstreamQuicServerConfig> {
-  let mut policy_indices = HashMap::<Vec<TlsKeyExchangeGroup>, usize>::new();
+  let mut policy_indices = HashMap::<Tls13NegotiationConfig, usize>::new();
   let mut configs = Vec::new();
   let default_index = build_or_get_quic_policy(
     &mut policy_indices,
@@ -210,7 +215,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
     tls,
     quic,
     quic_host_key_base_dir,
-    &tls.tls13.key_exchange_groups,
+    &tls.tls13,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -219,17 +224,17 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
 
   let mut by_sni = HashMap::new();
   for route in routes {
-    if !route.tls.has_key_exchange_overrides() {
+    if !route.tls.has_negotiation_overrides() {
       continue;
     }
-    let policy = tls.effective_route_key_exchange_policy(&route.tls);
+    let policy = tls.effective_route_negotiation_policy(&route.tls);
     let index = build_or_get_quic_policy(
       &mut policy_indices,
       &mut configs,
       tls,
       quic,
       quic_host_key_base_dir,
-      &policy.tls13.key_exchange_groups,
+      &policy.tls13,
       resumption_state,
       ocsp_runtime,
       crlite_runtime,
@@ -253,39 +258,40 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
 
 #[allow(clippy::too_many_arguments)]
 fn build_or_get_quic_policy(
-  policy_indices: &mut HashMap<Vec<TlsKeyExchangeGroup>, usize>,
+  policy_indices: &mut HashMap<Tls13NegotiationConfig, usize>,
   configs: &mut Vec<QuinnServerConfig>,
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&Path>,
-  key_exchange_groups: &[TlsKeyExchangeGroup],
+  policy: &Tls13NegotiationConfig,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<usize> {
-  if let Some(index) = policy_indices.get(key_exchange_groups) {
+  if let Some(index) = policy_indices.get(policy) {
     return Ok(*index);
   }
-  let config = super::build_downstream_quic_server_config_for_groups(
+  let config = super::build_downstream_quic_server_config_for_tls13(
     tls,
     quic,
     quic_host_key_base_dir,
-    key_exchange_groups,
+    &policy.key_exchange_groups,
+    &policy.ciphers,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
   )?;
   let index = configs.len();
   configs.push(config);
-  policy_indices.insert(key_exchange_groups.to_vec(), index);
+  policy_indices.insert(policy.clone(), index);
   Ok(index)
 }
 
 fn build_or_get_tcp_policy(
-  policies: &mut HashMap<TlsKeyExchangePolicy, Arc<TlsServerConfigSet>>,
+  policies: &mut HashMap<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>,
   tls: &TlsConfig,
   listeners: &ListenerConfig,
-  policy: &TlsKeyExchangePolicy,
+  policy: &TlsNegotiationPolicy,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -308,39 +314,43 @@ fn build_or_get_tcp_policy(
 fn build_tcp_policy(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
-  policy: &TlsKeyExchangePolicy,
+  policy: &TlsNegotiationPolicy,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<TlsServerConfigSet> {
   let tls13 = if tls.max_version >= TlsVersion::Tls13 {
     Some(TlsServerVersionConfig {
-      config: super::build_downstream_tcp_server_config_for_groups(
+      config: super::build_downstream_tcp_server_config_for_tls13(
         tls,
         listeners,
         &policy.tls13.key_exchange_groups,
+        &policy.tls13.ciphers,
         &[&rustls::version::TLS13],
         resumption_state,
         ocsp_runtime,
         crlite_runtime,
       )?,
       key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
+      cipher_suites: tls13_cipher_suites(&policy.tls13.ciphers),
     })
   } else {
     None
   };
   let tls12 = if tls.min_version <= TlsVersion::Tls12 {
     Some(TlsServerVersionConfig {
-      config: super::build_downstream_tcp_server_config_for_groups(
+      config: super::build_downstream_tcp_server_config_for_tls12(
         tls,
         listeners,
         &policy.tls12.key_exchange_groups,
+        &policy.tls12.groups,
         &[&rustls::version::TLS12],
         resumption_state,
         ocsp_runtime,
         crlite_runtime,
       )?,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
+      cipher_suites: tls12_cipher_suites(&policy.tls12.groups),
     })
   } else {
     None
@@ -351,28 +361,32 @@ fn build_tcp_policy(
   Ok(TlsServerConfigSet { tls13, tls12 })
 }
 
-fn client_offers_tls13(client_hello: &rustls::server::ClientHello<'_>) -> bool {
-  client_hello.cipher_suites().iter().any(|suite| {
-    matches!(
-      suite,
-      CipherSuite::TLS13_AES_128_GCM_SHA256
-        | CipherSuite::TLS13_AES_256_GCM_SHA384
-        | CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
-    )
-  })
+fn tls13_cipher_suites(ciphers: &[crate::config::Tls13CipherSuite]) -> Vec<CipherSuite> {
+  ciphers
+    .iter()
+    .copied()
+    .map(super::negotiation::supported_tls13_cipher_suite)
+    .map(|suite| suite.suite())
+    .collect()
 }
 
-fn client_offers_tls12(client_hello: &rustls::server::ClientHello<'_>) -> bool {
-  client_hello.cipher_suites().iter().any(|suite| {
-    !matches!(
-      suite,
-      CipherSuite::TLS13_AES_128_GCM_SHA256
-        | CipherSuite::TLS13_AES_256_GCM_SHA384
-        | CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
-        | CipherSuite::TLS13_AES_128_CCM_SHA256
-        | CipherSuite::TLS13_AES_128_CCM_8_SHA256
-    )
-  })
+fn tls12_cipher_suites(ciphers: &[crate::config::Tls12CipherSuite]) -> Vec<CipherSuite> {
+  ciphers
+    .iter()
+    .copied()
+    .map(super::negotiation::supported_tls12_cipher_suite)
+    .map(|suite| suite.suite())
+    .collect()
+}
+
+fn client_offers_any_cipher(
+  client_hello: &rustls::server::ClientHello<'_>,
+  ciphers: &[CipherSuite],
+) -> bool {
+  client_hello
+    .cipher_suites()
+    .iter()
+    .any(|suite| ciphers.contains(suite))
 }
 
 fn client_offers_any_group(

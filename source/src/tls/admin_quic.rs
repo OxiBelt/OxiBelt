@@ -8,6 +8,7 @@ use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
 use rustls::{ServerConfig, sign::CertifiedKey};
 
+use super::certificate_io::{load_certs, load_private_key};
 use super::*;
 use crate::config::{AdminTlsConfig, QuicConfig};
 

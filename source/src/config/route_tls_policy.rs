@@ -4,31 +4,42 @@ use anyhow::bail;
 
 use super::{Config, TlsVersion};
 
-pub(super) fn validate_key_exchange_policies(config: &Config) -> anyhow::Result<()> {
-  let global_policy = config.tls.key_exchange_policy();
+pub(super) fn validate_negotiation_policies(config: &Config) -> anyhow::Result<()> {
+  let global_policy = config.tls.negotiation_policy();
   let mut host_policies = HashMap::new();
 
   for route in &config.routes {
+    if route.tls.tls12.key_exchange_groups.is_some() {
+      bail!(
+        "route {} tls.1_2.key_exchange_groups is no longer supported; use tls.1_2.groups for TLS 1.2 cipher suites",
+        route.name
+      );
+    }
     if let Some(key_exchange_groups) = &route.tls.tls13.key_exchange_groups {
-      super::validate_tls_key_exchange_groups(
+      super::tls::validate_tls_key_exchange_groups(
         &format!("route {} tls.1_3.key_exchange_groups", route.name),
         key_exchange_groups,
         TlsVersion::Tls13,
       )?;
     }
-    if let Some(key_exchange_groups) = &route.tls.tls12.key_exchange_groups {
-      super::validate_tls_key_exchange_groups(
-        &format!("route {} tls.1_2.key_exchange_groups", route.name),
-        key_exchange_groups,
-        TlsVersion::Tls12,
+    if let Some(ciphers) = &route.tls.tls13.ciphers {
+      super::tls::validate_tls13_cipher_suites(
+        &format!("route {} tls.1_3.ciphers", route.name),
+        ciphers,
       )?;
     }
-    if !route.tls.has_key_exchange_overrides() {
+    if let Some(ciphers) = &route.tls.tls12.groups {
+      super::tls::validate_tls12_cipher_suites(
+        &format!("route {} tls.1_2.groups", route.name),
+        ciphers,
+      )?;
+    }
+    if !route.tls.has_negotiation_overrides() {
       continue;
     }
     if route.effective_path_prefix() != "/" || route.r#match.has_additional_conditions() {
       bail!(
-        "route {} tls key_exchange_groups can only be set on SNI-only routes with path_prefix = \"/\" and no additional match conditions",
+        "route {} tls negotiation overrides can only be set on SNI-only routes with path_prefix = \"/\" and no additional match conditions",
         route.name
       );
     }
@@ -38,11 +49,11 @@ pub(super) fn validate_key_exchange_policies(config: &Config) -> anyhow::Result<
       .any(|host| host == "*" || host.contains('*'))
     {
       bail!(
-        "route {} tls key_exchange_groups can only be set on exact non-wildcard hosts",
+        "route {} tls negotiation overrides can only be set on exact non-wildcard hosts",
         route.name
       );
     }
-    let policy = config.tls.effective_route_key_exchange_policy(&route.tls);
+    let policy = config.tls.effective_route_negotiation_policy(&route.tls);
     for host in &route.hosts {
       super::validate_tls_server_name(&format!("route {} hosts", route.name), host)?;
       match host_policies.entry(host.to_ascii_lowercase()) {
@@ -52,7 +63,7 @@ pub(super) fn validate_key_exchange_policies(config: &Config) -> anyhow::Result<
         std::collections::hash_map::Entry::Occupied(entry) if entry.get().1 == policy => {}
         std::collections::hash_map::Entry::Occupied(entry) => {
           bail!(
-            "route {} tls key_exchange_groups conflict with route {} for host {}",
+            "route {} tls negotiation policy conflicts with route {} for host {}",
             route.name,
             entry.get().0,
             host
@@ -63,8 +74,8 @@ pub(super) fn validate_key_exchange_policies(config: &Config) -> anyhow::Result<
   }
 
   for route in &config.routes {
-    let policy = if route.tls.has_key_exchange_overrides() {
-      config.tls.effective_route_key_exchange_policy(&route.tls)
+    let policy = if route.tls.has_negotiation_overrides() {
+      config.tls.effective_route_negotiation_policy(&route.tls)
     } else {
       global_policy.clone()
     };
@@ -78,7 +89,7 @@ pub(super) fn validate_key_exchange_policies(config: &Config) -> anyhow::Result<
       }
       if policy != host_policies[override_host].1 {
         bail!(
-          "route {} tls key_exchange_groups conflict with SNI policy for host {}",
+          "route {} tls negotiation policy conflicts with SNI policy for host {}",
           route.name,
           override_host
         );

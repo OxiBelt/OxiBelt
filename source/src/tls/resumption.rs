@@ -17,6 +17,8 @@ use crate::config::{
   UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig, UpstreamTlsResumptionMode,
 };
 
+use super::certificate_io::{load_certs, read_existing_file};
+
 const SERVER_SESSION_CACHE_SHARDS: usize = 16;
 
 #[derive(Clone, Default)]
@@ -439,7 +441,7 @@ pub(super) fn client_auth_identity(client_auth: &TlsClientAuthConfig) -> anyhow:
   context.update(format!("mode:{:?}", client_auth.mode).as_bytes());
   context.update(format!("verify_depth:{}", client_auth.verify_depth).as_bytes());
   for path in &client_auth.ca_certs {
-    for cert in super::load_certs(path)? {
+    for cert in load_certs(path)? {
       context.update(&(cert.as_ref().len() as u64).to_be_bytes());
       context.update(cert.as_ref());
     }
@@ -451,7 +453,7 @@ fn upstream_roots_identity(paths: &[std::path::PathBuf]) -> anyhow::Result<Strin
   let mut context = ring::digest::Context::new(&ring::digest::SHA256);
   context.update(b"webpki-roots");
   for path in paths {
-    for cert in super::load_certs(path)? {
+    for cert in load_certs(path)? {
       context.update(path.to_string_lossy().as_bytes());
       context.update(&(cert.as_ref().len() as u64).to_be_bytes());
       context.update(cert.as_ref());
@@ -464,10 +466,7 @@ fn upstream_ech_identity(ech: &UpstreamEchConfig) -> anyhow::Result<String> {
   let mut context = ring::digest::Context::new(&ring::digest::SHA256);
   context.update(format!("mode:{:?}", ech.mode).as_bytes());
   if let Some(path) = &ech.config_list_file {
-    context.update(&super::read_existing_file(
-      "upstream ECH config list file",
-      path,
-    )?);
+    context.update(&read_existing_file("upstream ECH config list file", path)?);
   }
   Ok(hex_encode(context.finish().as_ref()))
 }

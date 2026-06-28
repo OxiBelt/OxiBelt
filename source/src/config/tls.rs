@@ -16,13 +16,21 @@ use super::{
 
 mod key_exchange;
 mod ocsp;
+mod validation;
 pub use key_exchange::{
-  RawTlsVersionKeyExchangeConfig, TlsKeyExchangeGroup, TlsKeyExchangePolicy,
-  TlsVersionKeyExchangeConfig,
+  RawTls12NegotiationConfig, RawTls13NegotiationConfig, Tls12CipherSuite, Tls12NegotiationConfig,
+  Tls13CipherSuite, Tls13NegotiationConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy,
 };
-use key_exchange::{default_tls12_key_exchange_groups, default_tls13_key_exchange_groups};
+use key_exchange::{
+  default_tls12_ciphers, default_tls12_key_exchange_groups, default_tls13_ciphers,
+  default_tls13_key_exchange_groups,
+};
 pub(in crate::config) use ocsp::OCSP_CONFIG_KEYS;
 pub use ocsp::*;
+pub(in crate::config) use validation::{
+  validate_tls_key_exchange_groups, validate_tls_negotiation, validate_tls12_cipher_suites,
+  validate_tls13_cipher_suites,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TlsConfig {
@@ -35,8 +43,8 @@ pub struct TlsConfig {
   pub certificates: Vec<TlsCertificateConfig>,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
-  pub tls12: TlsVersionKeyExchangeConfig,
-  pub tls13: TlsVersionKeyExchangeConfig,
+  pub tls12: Tls12NegotiationConfig,
+  pub tls13: Tls13NegotiationConfig,
   pub key_exchange_groups: Vec<TlsKeyExchangeGroup>,
   pub session_tickets: bool,
   pub session_ticket_rotation_seconds: u64,
@@ -73,9 +81,9 @@ impl<'de> Deserialize<'de> for TlsConfig {
       #[serde(default)]
       key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
       #[serde(default, rename = "1_2")]
-      tls12: RawTlsVersionKeyExchangeConfig,
+      tls12: RawTls12NegotiationConfig,
       #[serde(default, rename = "1_3")]
-      tls13: RawTlsVersionKeyExchangeConfig,
+      tls13: RawTls13NegotiationConfig,
       #[serde(default)]
       session_tickets: Option<bool>,
       #[serde(default)]
@@ -100,16 +108,18 @@ impl<'de> Deserialize<'de> for TlsConfig {
       )
       .map_err(serde::de::Error::custom)?;
     let legacy_key_exchange_groups = raw.key_exchange_groups;
+    if raw.tls12.key_exchange_groups.is_some() {
+      return Err(serde::de::Error::custom(
+        "tls.1_2.key_exchange_groups is no longer supported; use tls.1_2.groups for TLS 1.2 cipher suites",
+      ));
+    }
     let tls13_key_exchange_groups = raw
       .tls13
       .key_exchange_groups
       .or_else(|| legacy_key_exchange_groups.clone())
       .unwrap_or_else(default_tls13_key_exchange_groups);
-    let tls12_key_exchange_groups = raw
-      .tls12
-      .key_exchange_groups
-      .or_else(|| legacy_key_exchange_groups.clone())
-      .unwrap_or_else(default_tls12_key_exchange_groups);
+    let tls13_ciphers = raw.tls13.ciphers.unwrap_or_else(default_tls13_ciphers);
+    let tls12_ciphers = raw.tls12.groups.unwrap_or_else(default_tls12_ciphers);
     Ok(Self {
       server_names: raw.server_names,
       cert_chain: raw.cert_chain,
@@ -120,11 +130,13 @@ impl<'de> Deserialize<'de> for TlsConfig {
       certificates: raw.certificates,
       min_version: raw.min_version,
       max_version: raw.max_version,
-      tls12: TlsVersionKeyExchangeConfig {
-        key_exchange_groups: tls12_key_exchange_groups,
+      tls12: Tls12NegotiationConfig {
+        groups: tls12_ciphers,
+        key_exchange_groups: default_tls12_key_exchange_groups(),
       },
-      tls13: TlsVersionKeyExchangeConfig {
+      tls13: Tls13NegotiationConfig {
         key_exchange_groups: tls13_key_exchange_groups.clone(),
+        ciphers: tls13_ciphers,
       },
       key_exchange_groups: tls13_key_exchange_groups,
       session_tickets,
@@ -138,31 +150,37 @@ impl<'de> Deserialize<'de> for TlsConfig {
 }
 
 impl TlsConfig {
-  pub fn key_exchange_policy(&self) -> TlsKeyExchangePolicy {
-    TlsKeyExchangePolicy {
+  pub fn negotiation_policy(&self) -> TlsNegotiationPolicy {
+    TlsNegotiationPolicy {
       tls12: self.tls12.clone(),
       tls13: self.tls13.clone(),
     }
   }
 
-  pub fn effective_route_key_exchange_policy(
+  pub fn effective_route_negotiation_policy(
     &self,
     route_tls: &RouteTlsConfig,
-  ) -> TlsKeyExchangePolicy {
-    TlsKeyExchangePolicy {
-      tls12: TlsVersionKeyExchangeConfig {
-        key_exchange_groups: route_tls
+  ) -> TlsNegotiationPolicy {
+    TlsNegotiationPolicy {
+      tls12: Tls12NegotiationConfig {
+        groups: route_tls
           .tls12
-          .key_exchange_groups
+          .groups
           .clone()
-          .unwrap_or_else(|| self.tls12.key_exchange_groups.clone()),
+          .unwrap_or_else(|| self.tls12.groups.clone()),
+        key_exchange_groups: self.tls12.key_exchange_groups.clone(),
       },
-      tls13: TlsVersionKeyExchangeConfig {
+      tls13: Tls13NegotiationConfig {
         key_exchange_groups: route_tls
           .tls13
           .key_exchange_groups
           .clone()
           .unwrap_or_else(|| self.tls13.key_exchange_groups.clone()),
+        ciphers: route_tls
+          .tls13
+          .ciphers
+          .clone()
+          .unwrap_or_else(|| self.tls13.ciphers.clone()),
       },
     }
   }

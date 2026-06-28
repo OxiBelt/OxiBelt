@@ -57,7 +57,9 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "session_tickets",
 ];
 
-pub(super) const TLS_VERSION_KEY_EXCHANGE_CONFIG_KEYS: &[&str] = &["key_exchange_groups"];
+pub(super) const TLS12_NEGOTIATION_CONFIG_KEYS: &[&str] = &["groups"];
+
+pub(super) const TLS13_NEGOTIATION_CONFIG_KEYS: &[&str] = &["ciphers", "key_exchange_groups"];
 
 pub(super) const TLS_RESUMPTION_CONFIG_KEYS: &[&str] = &[
   "mode",

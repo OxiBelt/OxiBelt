@@ -13,9 +13,9 @@ use crate::config::{
   UpstreamTlsResumptionConfig,
 };
 
+use super::certificate_io::read_existing_file;
 use super::client_roots::{load_upstream_root_store, load_webpki_root_store};
 use super::outbound_revocation::OutboundRevocationRuntime;
-use super::read_existing_file;
 use super::resumption::{
   TlsResumptionState, upstream_client_config_key, upstream_client_resumption,
 };
@@ -280,9 +280,10 @@ mod tests {
   use std::time::Duration;
 
   use crate::config::{
-    Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, TlsClientAuthConfig, TlsConfig,
-    TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, TlsVersionKeyExchangeConfig,
-    UpstreamEchConfig, UpstreamTlsResumptionConfig,
+    Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, Tls12CipherSuite,
+    Tls12NegotiationConfig, Tls13CipherSuite, Tls13NegotiationConfig, TlsClientAuthConfig,
+    TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, UpstreamEchConfig,
+    UpstreamTlsResumptionConfig,
   };
   use crate::metrics::Metrics;
   use rustls::HandshakeKind;
@@ -445,18 +446,31 @@ request_timeout_ms = 1
       certificates: Vec::new(),
       min_version: TlsVersion::Tls13,
       max_version: TlsVersion::Tls13,
-      tls12: TlsVersionKeyExchangeConfig {
+      tls12: Tls12NegotiationConfig {
+        groups: vec![
+          Tls12CipherSuite::EcdheEcdsaAes256GcmSha384,
+          Tls12CipherSuite::EcdheEcdsaAes128GcmSha256,
+          Tls12CipherSuite::EcdheEcdsaChacha20Poly1305Sha256,
+          Tls12CipherSuite::EcdheRsaAes256GcmSha384,
+          Tls12CipherSuite::EcdheRsaAes128GcmSha256,
+          Tls12CipherSuite::EcdheRsaChacha20Poly1305Sha256,
+        ],
         key_exchange_groups: vec![
           TlsKeyExchangeGroup::X25519,
           TlsKeyExchangeGroup::Secp256r1,
           TlsKeyExchangeGroup::Secp384r1,
         ],
       },
-      tls13: TlsVersionKeyExchangeConfig {
+      tls13: Tls13NegotiationConfig {
         key_exchange_groups: vec![
           TlsKeyExchangeGroup::X25519MlKem768,
           TlsKeyExchangeGroup::X25519,
           TlsKeyExchangeGroup::Secp256r1,
+        ],
+        ciphers: vec![
+          Tls13CipherSuite::Aes256GcmSha384,
+          Tls13CipherSuite::Aes128GcmSha256,
+          Tls13CipherSuite::Chacha20Poly1305Sha256,
         ],
       },
       key_exchange_groups: vec![

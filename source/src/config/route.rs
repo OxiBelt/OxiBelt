@@ -12,7 +12,7 @@ use crate::waf::RouteWafConfig;
 use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, HttpVersion, LimitsConfig, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
-  TlsKeyExchangeGroup, default_hosts, default_path_prefix,
+  Tls12CipherSuite, Tls13CipherSuite, TlsKeyExchangeGroup, default_hosts, default_path_prefix,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -87,21 +87,34 @@ impl RouteConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteTlsConfig {
   #[serde(default, rename = "1_2")]
-  pub tls12: RouteTlsVersionConfig,
+  pub tls12: RouteTls12Config,
   #[serde(default, rename = "1_3")]
-  pub tls13: RouteTlsVersionConfig,
+  pub tls13: RouteTls13Config,
 }
 
 impl RouteTlsConfig {
-  pub fn has_key_exchange_overrides(&self) -> bool {
-    self.tls12.key_exchange_groups.is_some() || self.tls13.key_exchange_groups.is_some()
+  pub fn has_negotiation_overrides(&self) -> bool {
+    self.tls12.groups.is_some()
+      || self.tls12.key_exchange_groups.is_some()
+      || self.tls13.key_exchange_groups.is_some()
+      || self.tls13.ciphers.is_some()
   }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct RouteTlsVersionConfig {
+pub struct RouteTls12Config {
+  #[serde(default)]
+  pub groups: Option<Vec<Tls12CipherSuite>>,
   #[serde(default)]
   pub key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteTls13Config {
+  #[serde(default)]
+  pub key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
+  #[serde(default)]
+  pub ciphers: Option<Vec<Tls13CipherSuite>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
