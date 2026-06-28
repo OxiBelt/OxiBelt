@@ -88,8 +88,9 @@ groups = [
 ]
 
 # Additional downstream certificates selected by TLS SNI. Multi-certificate
-# downstream TLS requires tls.resumption.mode = "off", quic.zero_rtt = "off",
-# and tls.ssl_early_data = "off".
+# downstream TLS keeps resumption, QUIC 0-RTT, and TCP early data disabled
+# unless tls.resumption.multi_certificate = "partition_by_sni" is set with
+# require_sni = true and reject_unknown_sni = true.
 # [[tls.certificates]]
 # server_names = ["iam.example.me"]
 # cert_chain = "iam-fullchain.pem"
@@ -106,6 +107,7 @@ groups = [
 
 [tls.resumption]
 mode = "stateful" # off | stateful | stateless
+multi_certificate = "off" # off | partition_by_sni
 session_cache_size = 4096
 tls13_ticket_count = 2
 rotation_seconds = 86400

@@ -8,25 +8,40 @@ use rustls::{CipherSuite, NamedGroup, ServerConfig};
 
 use crate::config::{
   ListenerConfig, QuicConfig, RouteConfig, Tls13NegotiationConfig, TlsConfig, TlsKeyExchangeGroup,
-  TlsNegotiationPolicy, TlsVersion,
+  TlsMultiCertificateResumptionMode, TlsNegotiationPolicy, TlsVersion,
 };
 
+use super::certificate_partition::{
+  DownstreamCertificatePartitions, downstream_certificate_partitions,
+};
 use super::{CrliteRuntime, OcspStapleRuntime, TlsResumptionState};
 
 #[derive(Debug, Clone)]
 pub struct DownstreamTlsServerConfig {
-  default: Arc<TlsServerConfigSet>,
-  by_sni: Arc<HashMap<String, Arc<TlsServerConfigSet>>>,
+  configs: Arc<HashMap<TcpServerConfigKey, Arc<TlsServerConfigSet>>>,
+  default_key: TcpServerConfigKey,
   default_policy: TlsNegotiationPolicy,
   by_sni_policy: Arc<HashMap<String, TlsNegotiationPolicy>>,
+  certificate_partitions: Option<Arc<DownstreamCertificatePartitions>>,
 }
 
 impl DownstreamTlsServerConfig {
   pub(crate) fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
-    let config_set = client_hello
-      .server_name()
-      .and_then(|name| self.by_sni.get(&name.to_ascii_lowercase()))
-      .unwrap_or(&self.default);
+    let sni = client_hello.server_name();
+    let policy = self.selected_negotiation_policy(sni).clone();
+    let certificate_identity = self
+      .certificate_partitions
+      .as_ref()
+      .map(|partitions| partitions.identity_for_sni_or_default(sni).to_string());
+    let key = TcpServerConfigKey {
+      policy,
+      certificate_identity,
+    };
+    let config_set = self
+      .configs
+      .get(&key)
+      .or_else(|| self.configs.get(&self.default_key))
+      .expect("downstream TLS config set must include default");
     config_set.select(client_hello)
   }
 
@@ -35,6 +50,12 @@ impl DownstreamTlsServerConfig {
       .and_then(|name| self.by_sni_policy.get(&name.to_ascii_lowercase()))
       .unwrap_or(&self.default_policy)
   }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TcpServerConfigKey {
+  policy: TlsNegotiationPolicy,
+  certificate_identity: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,8 +72,11 @@ impl TurnTlsServerConfig {
 #[derive(Debug, Clone)]
 pub struct DownstreamQuicServerConfig {
   configs: Arc<Vec<QuinnServerConfig>>,
-  by_sni: Arc<HashMap<String, usize>>,
+  indices: Arc<HashMap<QuicServerConfigKey, usize>>,
+  default_policy: Tls13NegotiationConfig,
+  by_sni_policy: Arc<HashMap<String, Tls13NegotiationConfig>>,
   reject_sni: Arc<HashSet<String>>,
+  certificate_partitions: Option<Arc<DownstreamCertificatePartitions>>,
 }
 
 impl DownstreamQuicServerConfig {
@@ -73,15 +97,36 @@ impl DownstreamQuicServerConfig {
   }
 
   pub(crate) fn policy_index_for_sni(&self, sni: Option<&str>) -> Option<usize> {
-    let Some(name) = sni else {
-      return Some(0);
-    };
-    let name = name.to_ascii_lowercase();
-    if self.reject_sni.contains(&name) {
+    let normalized = sni.map(str::to_ascii_lowercase);
+    if normalized
+      .as_ref()
+      .is_some_and(|name| self.reject_sni.contains(name))
+    {
       return None;
     }
-    Some(self.by_sni.get(&name).copied().unwrap_or(0))
+    let policy = normalized
+      .as_ref()
+      .and_then(|name| self.by_sni_policy.get(name))
+      .cloned()
+      .unwrap_or_else(|| self.default_policy.clone());
+    let certificate_identity = match &self.certificate_partitions {
+      Some(partitions) => Some(partitions.identity_for_sni(sni)?.to_string()),
+      None => None,
+    };
+    self
+      .indices
+      .get(&QuicServerConfigKey {
+        policy,
+        certificate_identity,
+      })
+      .copied()
   }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct QuicServerConfigKey {
+  policy: Tls13NegotiationConfig,
+  certificate_identity: Option<String>,
 }
 
 #[derive(Debug)]
@@ -131,7 +176,11 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<DownstreamTlsServerConfig> {
   let default_policy = tls.negotiation_policy();
-  let mut policies = HashMap::<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>::new();
+  let certificate_partitions = downstream_resumption_partitions(tls)?;
+  let default_certificate_identity = certificate_partitions
+    .as_ref()
+    .map(|partitions| partitions.default_identity().to_string());
+  let mut policies = HashMap::<TcpServerConfigKey, Arc<TlsServerConfigSet>>::new();
   let tcp_build = super::DownstreamTcpTlsBuild::new(
     tls,
     listeners,
@@ -140,27 +189,54 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
     ocsp_runtime,
     crlite_runtime,
   );
-  let default = build_or_get_tcp_policy(&mut policies, tcp_build, &default_policy)?;
-  let mut by_sni = HashMap::new();
+  let default_key = TcpServerConfigKey {
+    policy: default_policy.clone(),
+    certificate_identity: default_certificate_identity.clone(),
+  };
+  build_or_get_tcp_policy(&mut policies, &tcp_build, default_key.clone())?;
+  if let Some(partitions) = &certificate_partitions {
+    for identity in partitions.identities() {
+      build_or_get_tcp_policy(
+        &mut policies,
+        &tcp_build,
+        TcpServerConfigKey {
+          policy: default_policy.clone(),
+          certificate_identity: Some(identity),
+        },
+      )?;
+    }
+  }
   let mut by_sni_policy = HashMap::new();
   for route in routes {
     if !route.tls.has_negotiation_overrides() {
       continue;
     }
     let policy = tls.effective_route_negotiation_policy(&route.tls);
-    let config_set = build_or_get_tcp_policy(&mut policies, tcp_build, &policy)
-      .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
     for host in &route.hosts {
       let normalized_host = host.to_ascii_lowercase();
-      by_sni.insert(normalized_host.clone(), config_set.clone());
+      let certificate_identity = certificate_partitions.as_ref().map(|partitions| {
+        partitions
+          .identity_for_sni_or_default(Some(&normalized_host))
+          .to_string()
+      });
+      build_or_get_tcp_policy(
+        &mut policies,
+        &tcp_build,
+        TcpServerConfigKey {
+          policy: policy.clone(),
+          certificate_identity,
+        },
+      )
+      .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
       by_sni_policy.insert(normalized_host, policy.clone());
     }
   }
   Ok(DownstreamTlsServerConfig {
-    default,
-    by_sni: Arc::new(by_sni),
+    configs: Arc::new(policies),
+    default_key,
     default_policy,
     by_sni_policy: Arc::new(by_sni_policy),
+    certificate_partitions: certificate_partitions.map(Arc::new),
   })
 }
 
@@ -219,22 +295,48 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<DownstreamQuicServerConfig> {
-  let mut policy_indices = HashMap::<Tls13NegotiationConfig, usize>::new();
+  let certificate_partitions = downstream_resumption_partitions(tls)?;
+  let default_certificate_identity = certificate_partitions
+    .as_ref()
+    .map(|partitions| partitions.default_identity().to_string());
+  let mut policy_indices = HashMap::<QuicServerConfigKey, usize>::new();
   let mut configs = Vec::new();
+  let default_key = QuicServerConfigKey {
+    policy: tls.tls13.clone(),
+    certificate_identity: default_certificate_identity,
+  };
   let default_index = build_or_get_quic_policy(
     &mut policy_indices,
     &mut configs,
     tls,
     quic,
     quic_host_key_base_dir,
-    &tls.tls13,
+    default_key,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
   )?;
   debug_assert_eq!(default_index, 0);
+  if let Some(partitions) = &certificate_partitions {
+    for identity in partitions.identities() {
+      build_or_get_quic_policy(
+        &mut policy_indices,
+        &mut configs,
+        tls,
+        quic,
+        quic_host_key_base_dir,
+        QuicServerConfigKey {
+          policy: tls.tls13.clone(),
+          certificate_identity: Some(identity),
+        },
+        resumption_state,
+        ocsp_runtime,
+        crlite_runtime,
+      )?;
+    }
+  }
 
-  let mut by_sni = HashMap::new();
+  let mut by_sni_policy = HashMap::new();
   let mut reject_sni = HashSet::new();
   for route in routes {
     if !route.tls.has_negotiation_overrides() {
@@ -247,87 +349,113 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
       }
       continue;
     }
-    let index = build_or_get_quic_policy(
-      &mut policy_indices,
-      &mut configs,
-      tls,
-      quic,
-      quic_host_key_base_dir,
-      &policy.tls13,
-      resumption_state,
-      ocsp_runtime,
-      crlite_runtime,
-    )
-    .with_context(|| {
-      format!(
-        "failed to build route {} downstream QUIC policy",
-        route.name
-      )
-    })?;
     for host in &route.hosts {
-      by_sni.insert(host.to_ascii_lowercase(), index);
+      let normalized_host = host.to_ascii_lowercase();
+      let certificate_identity = certificate_partitions.as_ref().map(|partitions| {
+        partitions
+          .identity_for_sni_or_default(Some(&normalized_host))
+          .to_string()
+      });
+      build_or_get_quic_policy(
+        &mut policy_indices,
+        &mut configs,
+        tls,
+        quic,
+        quic_host_key_base_dir,
+        QuicServerConfigKey {
+          policy: policy.tls13.clone(),
+          certificate_identity,
+        },
+        resumption_state,
+        ocsp_runtime,
+        crlite_runtime,
+      )
+      .with_context(|| {
+        format!(
+          "failed to build route {} downstream QUIC policy for host {}",
+          route.name, host
+        )
+      })?;
+      by_sni_policy.insert(normalized_host, policy.tls13.clone());
     }
   }
 
   Ok(DownstreamQuicServerConfig {
     configs: Arc::new(configs),
-    by_sni: Arc::new(by_sni),
+    indices: Arc::new(policy_indices),
+    default_policy: tls.tls13.clone(),
+    by_sni_policy: Arc::new(by_sni_policy),
     reject_sni: Arc::new(reject_sni),
+    certificate_partitions: certificate_partitions.map(Arc::new),
   })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_or_get_quic_policy(
-  policy_indices: &mut HashMap<Tls13NegotiationConfig, usize>,
+  policy_indices: &mut HashMap<QuicServerConfigKey, usize>,
   configs: &mut Vec<QuinnServerConfig>,
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&Path>,
-  policy: &Tls13NegotiationConfig,
+  key: QuicServerConfigKey,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<usize> {
-  if let Some(index) = policy_indices.get(policy) {
+  if let Some(index) = policy_indices.get(&key) {
     return Ok(*index);
   }
   let config = super::build_downstream_quic_server_config_for_tls13(
     tls,
     quic,
     quic_host_key_base_dir,
-    &policy.key_exchange_groups,
-    &policy.ciphers,
+    &key.policy.key_exchange_groups,
+    &key.policy.ciphers,
+    key.certificate_identity.as_deref(),
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
   )?;
   let index = configs.len();
   configs.push(config);
-  policy_indices.insert(policy.clone(), index);
+  policy_indices.insert(key, index);
   Ok(index)
 }
 
+fn downstream_resumption_partitions(
+  tls: &TlsConfig,
+) -> anyhow::Result<Option<DownstreamCertificatePartitions>> {
+  if tls.resumption.multi_certificate != TlsMultiCertificateResumptionMode::PartitionBySni {
+    return Ok(None);
+  }
+  downstream_certificate_partitions(tls).map(Some)
+}
+
 fn build_or_get_tcp_policy(
-  policies: &mut HashMap<TlsNegotiationPolicy, Arc<TlsServerConfigSet>>,
-  build: super::DownstreamTcpTlsBuild<'_>,
-  policy: &TlsNegotiationPolicy,
+  policies: &mut HashMap<TcpServerConfigKey, Arc<TlsServerConfigSet>>,
+  build: &super::DownstreamTcpTlsBuild<'_>,
+  key: TcpServerConfigKey,
 ) -> anyhow::Result<Arc<TlsServerConfigSet>> {
-  if let Some(config) = policies.get(policy) {
+  if let Some(config) = policies.get(&key) {
     return Ok(config.clone());
   }
-  let config = Arc::new(build_tcp_policy(build, policy)?);
-  policies.insert(policy.clone(), config.clone());
+  let config = Arc::new(build_tcp_policy(build, &key)?);
+  policies.insert(key, config.clone());
   Ok(config)
 }
 
 fn build_tcp_policy(
-  build: super::DownstreamTcpTlsBuild<'_>,
-  policy: &TlsNegotiationPolicy,
+  build: &super::DownstreamTcpTlsBuild<'_>,
+  key: &TcpServerConfigKey,
 ) -> anyhow::Result<TlsServerConfigSet> {
+  let policy = &key.policy;
+  let build = build
+    .clone()
+    .with_certificate_partition_identity(key.certificate_identity.clone());
   let tls13 = if policy.allows_tls13() {
     Some(TlsServerVersionConfig {
       config: super::build_downstream_tcp_server_config_for_tls13(
-        build,
+        build.clone(),
         &policy.tls13.key_exchange_groups,
         &policy.tls13.ciphers,
         &[&rustls::version::TLS13],
@@ -409,193 +537,5 @@ fn named_group(group: TlsKeyExchangeGroup) -> NamedGroup {
 }
 
 #[cfg(test)]
-mod tests {
-  use std::path::{Path, PathBuf};
-  use std::sync::Arc;
-
-  use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-  use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
-  use tokio::net::{TcpListener, TcpStream};
-  use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
-
-  use super::*;
-
-  mod common {
-    include!(concat!(
-      env!("CARGO_MANIFEST_DIR"),
-      "/../tests/rust/common/mod.rs"
-    ));
-  }
-
-  #[test]
-  fn sni_version_policy_lookup_tracks_route_policy() {
-    let temp_dir = common::TempDir::new("sni-version-policy-lookup");
-    let (config, _) = sni_version_policy_config(&temp_dir);
-    let server_config = downstream_tls_server_config(&config);
-    assert_sni_policy_lookup(&server_config);
-  }
-
-  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn sni_version_policy_selects_tcp_tls_versions() {
-    let temp_dir = common::TempDir::new("sni-version-policy");
-    let (config, ca_cert_path) = sni_version_policy_config(&temp_dir);
-    let server_config = downstream_tls_server_config(&config);
-
-    let legacy_version = selected_tcp_tls_version(
-      server_config.clone(),
-      &ca_cert_path,
-      "legacy.example.com",
-      &[&rustls::version::TLS12],
-    )
-    .await;
-    let default_version = selected_tcp_tls_version(
-      server_config,
-      &ca_cert_path,
-      "example.com",
-      &[&rustls::version::TLS13],
-    )
-    .await;
-
-    assert_eq!(legacy_version, ProtocolVersion::TLSv1_2);
-    assert_eq!(default_version, ProtocolVersion::TLSv1_3);
-  }
-
-  fn sni_version_policy_config(temp_dir: &common::TempDir) -> (crate::config::Config, PathBuf) {
-    let (ca_cert_path, ca_key_path) =
-      common::create_self_signed_cert(temp_dir.path(), "sni-version-policy-ca");
-    let (default_cert, default_key) = common::create_ca_signed_server_cert(
-      temp_dir.path(),
-      "example.com",
-      &ca_cert_path,
-      &ca_key_path,
-    );
-    let (legacy_cert, legacy_key) = common::create_ca_signed_server_cert(
-      temp_dir.path(),
-      "legacy.example.com",
-      &ca_cert_path,
-      &ca_key_path,
-    );
-    let raw = common::minimal_config_toml(&default_cert, &default_key).replace(
-      "[tls.ocsp]",
-      &format!(
-        r#"server_names = ["example.com"]
-
-[tls.resumption]
-mode = "off"
-
-[[tls.certificates]]
-server_names = ["legacy.example.com"]
-cert_chain = "{}"
-private_key = "{}"
-
-[tls.ocsp]"#,
-        legacy_cert.display(),
-        legacy_key.display()
-      ),
-    ) + r#"
-
-[[routes]]
-name = "legacy-root"
-hosts = ["legacy.example.com"]
-path_prefix = "/"
-upstream = "app"
-
-[routes.tls]
-min_version = "tls1.2"
-max_version = "tls1.2"
-"#;
-    let config: crate::config::Config = toml::from_str(&raw).expect("config should parse");
-    config.validate().expect("config should validate");
-    (config, ca_cert_path)
-  }
-
-  fn downstream_tls_server_config(config: &crate::config::Config) -> DownstreamTlsServerConfig {
-    build_downstream_tls_server_config_with_resumption_and_ocsp(
-      &config.tls,
-      &config.listeners,
-      &config.routes,
-      0,
-      None,
-      None,
-      None,
-    )
-    .expect("server config should build")
-  }
-
-  fn assert_sni_policy_lookup(server_config: &DownstreamTlsServerConfig) {
-    let legacy_policy = server_config.selected_negotiation_policy(Some("legacy.example.com"));
-    assert_eq!(legacy_policy.min_version, TlsVersion::Tls12);
-    assert_eq!(legacy_policy.max_version, TlsVersion::Tls12);
-    let default_policy = server_config.selected_negotiation_policy(Some("example.com"));
-    assert_eq!(default_policy.min_version, TlsVersion::Tls13);
-    assert_eq!(default_policy.max_version, TlsVersion::Tls13);
-    assert_eq!(
-      server_config.selected_negotiation_policy(Some("unknown.example.com")),
-      default_policy
-    );
-    assert_eq!(
-      server_config.selected_negotiation_policy(None),
-      default_policy
-    );
-  }
-
-  async fn selected_tcp_tls_version(
-    server_config: DownstreamTlsServerConfig,
-    ca_cert_path: &Path,
-    server_name: &str,
-    versions: &[&'static rustls::SupportedProtocolVersion],
-  ) -> ProtocolVersion {
-    let listener = TcpListener::bind("127.0.0.1:0")
-      .await
-      .expect("server listener should bind");
-    let addr = listener.local_addr().expect("listener addr should resolve");
-    let server = tokio::spawn(async move {
-      let (stream, _) = listener.accept().await.expect("server should accept");
-      let start = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream)
-        .await
-        .expect("server should read ClientHello");
-      let selected_config = server_config.select(&start.client_hello());
-      let tls_stream = start
-        .into_stream(selected_config)
-        .await
-        .expect("server TLS handshake should complete");
-      tls_stream
-        .get_ref()
-        .1
-        .protocol_version()
-        .expect("TLS version should be selected")
-    });
-
-    let client_config = tcp_client_config(ca_cert_path, versions);
-    let stream = TcpStream::connect(addr)
-      .await
-      .expect("client should connect to server");
-    TlsConnector::from(Arc::new(client_config))
-      .connect(
-        ServerName::try_from(server_name.to_string()).expect("server name should be valid"),
-        stream,
-      )
-      .await
-      .expect("client TLS handshake should complete");
-
-    server.await.expect("server task should finish")
-  }
-
-  fn tcp_client_config(
-    ca_cert_path: &Path,
-    versions: &[&'static rustls::SupportedProtocolVersion],
-  ) -> ClientConfig {
-    let mut roots = RootCertStore::empty();
-    let certs = CertificateDer::pem_file_iter(ca_cert_path)
-      .expect("CA cert file should open")
-      .collect::<Result<Vec<_>, _>>()
-      .expect("CA cert should parse");
-    let (added, _) = roots.add_parsable_certificates(certs);
-    assert!(added > 0, "CA root should be added");
-    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-      .with_protocol_versions(versions)
-      .expect("client TLS versions should configure")
-      .with_root_certificates(roots)
-      .with_no_client_auth()
-  }
-}
+#[path = "server_policy_tests.rs"]
+mod tests;

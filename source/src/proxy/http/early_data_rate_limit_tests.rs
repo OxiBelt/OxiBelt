@@ -57,6 +57,40 @@ ssl_early_data = "safe_methods"
   );
 }
 
+#[tokio::test]
+async fn early_data_post_to_sensitive_static_route_returns_too_early() {
+  let (state, _temp_dir) = static_early_data_state("off").await;
+
+  assert_eq!(
+    handler_status_with_version(
+      state,
+      Method::POST,
+      "example.com",
+      "/ok.txt",
+      http::Version::HTTP_3,
+    )
+    .await,
+    StatusCode::TOO_EARLY
+  );
+}
+
+#[tokio::test]
+async fn early_data_get_to_allowed_static_route_passes() {
+  let (state, _temp_dir) = static_early_data_state("safe_methods").await;
+
+  assert_eq!(
+    handler_status_with_version(
+      state,
+      Method::GET,
+      "example.com",
+      "/ok.txt",
+      http::Version::HTTP_3,
+    )
+    .await,
+    StatusCode::OK
+  );
+}
+
 async fn rate_limited_state(extra: &str) -> Arc<AppSnapshot> {
   let temp_dir = common::TempDir::new("early-data-rate-limit");
   let (cert_path, key_path) =
@@ -82,16 +116,53 @@ status = 429
   )
 }
 
+async fn static_early_data_state(mode: &str) -> (Arc<AppSnapshot>, common::TempDir) {
+  let temp_dir = common::TempDir::new("early-data-static-route");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "early-data-static-route");
+  let static_root = temp_dir.path().join("public");
+  std::fs::create_dir(&static_root).expect("static root should be created");
+  std::fs::write(static_root.join("ok.txt"), "ok").expect("static fixture should be written");
+  let raw = format!(
+    r#"
+{}
+
+[routes.tls]
+ssl_early_data = "{mode}"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path).replace(
+      "upstream = \"app\"",
+      &format!("static_root = \"{}\"", static_root.display()),
+    ),
+  );
+  let state = Arc::new(
+    AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize"),
+  );
+  (state, temp_dir)
+}
+
 async fn handler_status(
   state: Arc<AppSnapshot>,
   method: Method,
   host: &str,
   uri: &str,
 ) -> StatusCode {
+  handler_status_with_version(state, method, host, uri, http::Version::HTTP_11).await
+}
+
+async fn handler_status_with_version(
+  state: Arc<AppSnapshot>,
+  method: Method,
+  host: &str,
+  uri: &str,
+  version: http::Version,
+) -> StatusCode {
   let mut request = Request::builder()
     .method(method)
     .uri(uri)
-    .version(http::Version::HTTP_11)
+    .version(version)
     .header(http::header::HOST, host)
     .body(empty_body())
     .expect("request should build");
@@ -107,7 +178,11 @@ async fn handler_status(
     None,
     state,
     WafProtocol::Http,
-    WafTransportNetwork::Tcp,
+    if version == http::Version::HTTP_3 {
+      WafTransportNetwork::Udp
+    } else {
+      WafTransportNetwork::Tcp
+    },
     true,
     "https",
     test_drain(),

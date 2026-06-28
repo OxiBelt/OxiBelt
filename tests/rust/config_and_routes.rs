@@ -7987,7 +7987,7 @@ private_key = "{}"
 }
 
 #[test]
-fn downstream_tls_sni_certificates_require_resumption_off() {
+fn downstream_tls_sni_certificates_require_partitioned_resumption_mode() {
   let temp_dir = common::TempDir::new("downstream-sni-resumption");
   let (default_cert, default_key) =
     common::create_self_signed_cert(temp_dir.path(), "default-resumption.example.me");
@@ -8015,9 +8015,94 @@ private_key = "{}"
   assert!(
     error
       .to_string()
-      .contains("tls.resumption.mode must be \"off\""),
+      .contains("tls.resumption.multi_certificate = \"partition_by_sni\" is required"),
     "unexpected error: {error:#}"
   );
+}
+
+#[test]
+fn downstream_tls_sni_partitioned_resumption_requires_strict_sni() {
+  let temp_dir = common::TempDir::new("downstream-sni-partition-strict");
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(temp_dir.path(), "default-strict.example.me");
+  let (iam_cert, iam_key) =
+    common::create_self_signed_cert(temp_dir.path(), "iam-strict.example.me");
+
+  let raw = format!(
+    r#"
+{}
+
+[tls.resumption]
+multi_certificate = "partition_by_sni"
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "{}"
+private_key = "{}"
+"#,
+    common::minimal_config_toml(&default_cert, &default_key),
+    iam_cert.display(),
+    iam_key.display(),
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("partitioned resumption should require SNI");
+  assert!(
+    error.to_string().contains("tls.require_sni must be true"),
+    "unexpected error: {error:#}"
+  );
+
+  let reject_unknown_sni_missing = raw.replace("[tls]\n", "[tls]\nrequire_sni = true\n");
+  let config: Config = toml::from_str(&reject_unknown_sni_missing).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("partitioned resumption should reject unknown SNI");
+  assert!(
+    error
+      .to_string()
+      .contains("tls.reject_unknown_sni must be true"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn downstream_tls_sni_partitioned_resumption_allows_safe_quic_zero_rtt() {
+  let temp_dir = common::TempDir::new("downstream-sni-partition-zero-rtt");
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(temp_dir.path(), "default-zero-rtt.example.me");
+  let (iam_cert, iam_key) =
+    common::create_self_signed_cert(temp_dir.path(), "iam-zero-rtt.example.me");
+
+  let raw = format!(
+    r#"
+{}
+
+[quic]
+zero_rtt = "safe_methods"
+
+[tls.resumption]
+mode = "stateful"
+multi_certificate = "partition_by_sni"
+
+[[tls.certificates]]
+server_names = ["iam.example.me"]
+cert_chain = "{}"
+private_key = "{}"
+"#,
+    common::minimal_config_toml(&default_cert, &default_key).replace(
+      "[tls]\n",
+      "[tls]\nserver_names = [\"example.com\"]\nrequire_sni = true\nreject_unknown_sni = true\n",
+    ),
+    iam_cert.display(),
+    iam_key.display(),
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("partitioned stateful resumption should allow safe QUIC 0-RTT");
 }
 
 #[test]

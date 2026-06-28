@@ -2058,17 +2058,28 @@ impl Config {
     route_tls_policy::validate_negotiation_policies(self)?;
     validate_tls_server_resumption("tls.resumption", &self.tls.resumption)?;
     let multi_certificate = !self.tls.certificates.is_empty();
+    let multi_certificate_partitioned =
+      self.tls.resumption.multi_certificate == TlsMultiCertificateResumptionMode::PartitionBySni;
     let tcp_early_data_enabled = self.downstream_tcp_early_data_enabled();
-    if multi_certificate && self.tls.resumption.mode != TlsServerResumptionMode::Off {
-      bail!("tls.resumption.mode must be \"off\" when tls.certificates is configured");
-    }
-    if multi_certificate && self.quic.zero_rtt != QuicZeroRttMode::Off {
-      bail!("quic.zero_rtt must be \"off\" when tls.certificates is configured");
-    }
-    if multi_certificate && tcp_early_data_enabled {
-      bail!(
-        "tls.ssl_early_data and routes.tls.ssl_early_data must be \"off\" when tls.certificates is configured"
-      );
+    if multi_certificate {
+      let unsafe_multi_cert_resumption = self.tls.resumption.mode != TlsServerResumptionMode::Off
+        || self.quic.zero_rtt != QuicZeroRttMode::Off
+        || tcp_early_data_enabled;
+      if unsafe_multi_cert_resumption && !multi_certificate_partitioned {
+        bail!(
+          "tls.resumption.multi_certificate = \"partition_by_sni\" is required when tls.certificates is configured with resumption, quic.zero_rtt, or ssl_early_data"
+        );
+      }
+      if multi_certificate_partitioned && !self.tls.require_sni {
+        bail!(
+          "tls.require_sni must be true when tls.resumption.multi_certificate = \"partition_by_sni\""
+        );
+      }
+      if multi_certificate_partitioned && !self.tls.reject_unknown_sni {
+        bail!(
+          "tls.reject_unknown_sni must be true when tls.resumption.multi_certificate = \"partition_by_sni\""
+        );
+      }
     }
     if tcp_early_data_enabled && self.tls.max_version < TlsVersion::Tls13 {
       bail!("tls.ssl_early_data requires tls.max_version to allow tls1.3");

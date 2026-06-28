@@ -22,6 +22,7 @@ use crate::config::{
 mod admin_quic;
 mod cert_metadata;
 mod certificate_io;
+mod certificate_partition;
 mod client_auth;
 mod client_roots;
 mod crlite;
@@ -114,6 +115,7 @@ pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
     quic_host_key_base_dir,
     &tls.tls13.key_exchange_groups,
     &tls.tls13.ciphers,
+    None,
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
@@ -127,6 +129,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   quic_host_key_base_dir: Option<&std::path::Path>,
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls13CipherSuite],
+  certificate_partition_identity: Option<&str>,
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
@@ -135,8 +138,12 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
     key_exchange_groups,
     ciphers,
   ));
-  let (server_identity, mut cert_resolver) =
-    ocsp::downstream_cert_resolver(tls, &provider, ocsp_runtime)?;
+  let (server_identity, mut cert_resolver) = ocsp::downstream_cert_resolver_for_identity(
+    tls,
+    &provider,
+    ocsp_runtime,
+    certificate_partition_identity,
+  )?;
   if let Some(runtime) = crlite_runtime {
     cert_resolver = runtime.wrap_resolver(cert_resolver);
   }

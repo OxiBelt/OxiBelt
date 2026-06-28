@@ -426,7 +426,7 @@ pub(super) fn upstream_client_config_key(
   })
 }
 
-pub(super) fn certificate_identity(certs: &[CertificateDer<'static>]) -> String {
+pub(in crate::tls) fn certificate_identity(certs: &[CertificateDer<'static>]) -> String {
   let mut context = ring::digest::Context::new(&ring::digest::SHA256);
   context.update(b"certs");
   for cert in certs {

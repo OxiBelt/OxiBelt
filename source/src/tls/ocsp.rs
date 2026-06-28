@@ -19,6 +19,7 @@ mod schedule;
 mod status;
 mod verify;
 use super::certificate_io::load_ocsp_response;
+use super::certificate_partition::normalize_server_names;
 pub(super) use schedule::{classify_ocsp_error, failure_retry_time, next_refresh_time, unix_now};
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
@@ -37,10 +38,9 @@ pub(crate) struct OcspStapleRuntime {
 }
 
 struct OcspStapleRuntimeInner {
-  live: Option<Arc<dyn ResolvesServerCert>>,
+  live: Option<Arc<DownstreamCertResolverBundle>>,
   status: Arc<Mutex<OcspStatusState>>,
   worker: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-  server_identity: Option<String>,
 }
 
 impl Drop for OcspStapleRuntimeInner {
@@ -83,7 +83,6 @@ impl OcspStapleRuntime {
         live: None,
         status: Arc::new(Mutex::new(status)),
         worker: Mutex::new(Vec::new()),
-        server_identity: None,
       }),
     }
   }
@@ -96,12 +95,13 @@ impl OcspStapleRuntime {
     let provider = Arc::new(super::negotiation::downstream_crypto_provider_for_policy(
       &tls.negotiation_policy(),
     ));
-    let mut identity_certs = Vec::new();
     let mut workers = Vec::new();
 
     let base_key = super::load_downstream_certified_key(tls, &provider)
       .context("failed to create rustls certified key for OCSP live fetch")?;
-    identity_certs.extend(base_key.cert.iter().cloned());
+    let default_identity = super::certificate_identity(&base_key.cert);
+    let mut aggregate_certs = Vec::new();
+    aggregate_certs.extend(base_key.cert.iter().cloned());
     let (default_resolver, status) = build_certificate_ocsp_resolver(
       "tls",
       &tls.ocsp,
@@ -119,7 +119,8 @@ impl OcspStapleRuntime {
           .with_context(|| {
             format!("failed to create rustls certified key for tls.certificates[{index}]")
           })?;
-      identity_certs.extend(certified_key.cert.iter().cloned());
+      let identity = super::certificate_identity(&certified_key.cert);
+      aggregate_certs.extend(certified_key.cert.iter().cloned());
       let (resolver, _status) = build_certificate_ocsp_resolver(
         &format!("tls.certificates[{index}]"),
         &certificate.ocsp,
@@ -130,24 +131,23 @@ impl OcspStapleRuntime {
       )
       .await?;
       certificates.push(DownstreamCertResolverEntry {
-        server_names: certificate
-          .server_names
-          .iter()
-          .map(|name| name.to_ascii_lowercase())
-          .collect(),
+        identity,
+        server_names: normalize_server_names(&certificate.server_names),
         resolver,
+        is_default: false,
       });
     }
 
-    let server_identity = super::certificate_identity(&identity_certs);
-    let live = Arc::new(DownstreamCertResolver {
+    let aggregate_identity = super::certificate_identity(&aggregate_certs);
+    let live = Arc::new(DownstreamCertResolverBundle {
+      aggregate_identity,
       certificates,
-      default_server_names: tls
-        .server_names
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect(),
-      default: default_resolver,
+      default: DownstreamCertResolverEntry {
+        identity: default_identity,
+        server_names: normalize_server_names(&tls.server_names),
+        resolver: default_resolver,
+        is_default: true,
+      },
       require_sni: tls.require_sni,
       reject_unknown_sni: tls.reject_unknown_sni,
     });
@@ -157,17 +157,12 @@ impl OcspStapleRuntime {
         live: Some(live),
         status,
         worker: Mutex::new(workers),
-        server_identity: Some(server_identity),
       }),
     })
   }
 
-  pub(crate) fn live_resolver(&self) -> Option<Arc<dyn rustls::server::ResolvesServerCert>> {
+  pub(in crate::tls) fn live_bundle(&self) -> Option<Arc<DownstreamCertResolverBundle>> {
     self.inner.live.as_ref().map(Arc::clone)
-  }
-
-  pub(crate) fn server_identity(&self) -> Option<&str> {
-    self.inner.server_identity.as_deref()
   }
 
   pub(crate) fn status(&self) -> OcspRuntimeStatus {
@@ -237,14 +232,63 @@ async fn build_certificate_ocsp_resolver(
 
 #[derive(Clone)]
 struct DownstreamCertResolverEntry {
+  identity: String,
   server_names: Vec<String>,
   resolver: Arc<dyn ResolvesServerCert>,
+  is_default: bool,
+}
+
+pub(in crate::tls) struct DownstreamCertResolverBundle {
+  aggregate_identity: String,
+  certificates: Vec<DownstreamCertResolverEntry>,
+  default: DownstreamCertResolverEntry,
+  require_sni: bool,
+  reject_unknown_sni: bool,
+}
+
+impl DownstreamCertResolverBundle {
+  pub(in crate::tls) fn aggregate_identity(&self) -> &str {
+    &self.aggregate_identity
+  }
+
+  pub(in crate::tls) fn aggregate_resolver(&self) -> Arc<dyn ResolvesServerCert> {
+    Arc::new(DownstreamCertResolver {
+      certificates: self.certificates.clone(),
+      default: self.default.clone(),
+      require_sni: self.require_sni,
+      reject_unknown_sni: self.reject_unknown_sni,
+    })
+  }
+
+  pub(in crate::tls) fn resolver_for_identity(
+    &self,
+    identity: &str,
+  ) -> Option<Arc<dyn ResolvesServerCert>> {
+    let entries = self
+      .entries_for_identity(identity)
+      .into_iter()
+      .cloned()
+      .collect::<Vec<_>>();
+    (!entries.is_empty()).then(|| {
+      Arc::new(DownstreamIdentityCertResolver {
+        entries,
+        require_sni: self.require_sni,
+        reject_unknown_sni: self.reject_unknown_sni,
+      }) as Arc<dyn ResolvesServerCert>
+    })
+  }
+
+  fn entries_for_identity(&self, identity: &str) -> Vec<&DownstreamCertResolverEntry> {
+    std::iter::once(&self.default)
+      .chain(self.certificates.iter())
+      .filter(|entry| entry.identity == identity)
+      .collect()
+  }
 }
 
 struct DownstreamCertResolver {
   certificates: Vec<DownstreamCertResolverEntry>,
-  default_server_names: Vec<String>,
-  default: Arc<dyn ResolvesServerCert>,
+  default: DownstreamCertResolverEntry,
   require_sni: bool,
   reject_unknown_sni: bool,
 }
@@ -254,7 +298,7 @@ impl std::fmt::Debug for DownstreamCertResolver {
     formatter
       .debug_struct("DownstreamCertResolver")
       .field("certificate_count", &self.certificates.len())
-      .field("default_server_names", &self.default_server_names)
+      .field("default_server_names", &self.default.server_names)
       .field("require_sni", &self.require_sni)
       .field("reject_unknown_sni", &self.reject_unknown_sni)
       .finish()
@@ -264,11 +308,12 @@ impl std::fmt::Debug for DownstreamCertResolver {
 impl DownstreamCertResolver {
   fn named_resolver_for(&self, server_name: &str) -> Option<Arc<dyn ResolvesServerCert>> {
     if self
-      .default_server_names
+      .default
+      .server_names
       .iter()
       .any(|pattern| !pattern.starts_with("*.") && pattern.eq_ignore_ascii_case(server_name))
     {
-      return Some(self.default.clone());
+      return Some(self.default.resolver.clone());
     }
     for certificate in &self.certificates {
       if certificate
@@ -280,11 +325,12 @@ impl DownstreamCertResolver {
       }
     }
     if self
-      .default_server_names
+      .default
+      .server_names
       .iter()
       .any(|pattern| pattern.starts_with("*.") && super::sni_matches(pattern, server_name))
     {
-      return Some(self.default.clone());
+      return Some(self.default.resolver.clone());
     }
     for certificate in &self.certificates {
       if certificate
@@ -306,14 +352,14 @@ impl ResolvesServerCert for DownstreamCertResolver {
         if self.reject_unknown_sni {
           None
         } else {
-          Some(self.default.clone())
+          Some(self.default.resolver.clone())
         }
       }),
       None => {
         if self.require_sni {
           None
         } else {
-          Some(self.default.clone())
+          Some(self.default.resolver.clone())
         }
       }
     }?;
@@ -321,27 +367,96 @@ impl ResolvesServerCert for DownstreamCertResolver {
   }
 }
 
-pub(super) fn downstream_cert_resolver(
+struct DownstreamIdentityCertResolver {
+  entries: Vec<DownstreamCertResolverEntry>,
+  require_sni: bool,
+  reject_unknown_sni: bool,
+}
+
+impl std::fmt::Debug for DownstreamIdentityCertResolver {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("DownstreamIdentityCertResolver")
+      .field("entry_count", &self.entries.len())
+      .field("require_sni", &self.require_sni)
+      .field("reject_unknown_sni", &self.reject_unknown_sni)
+      .finish()
+  }
+}
+
+impl DownstreamIdentityCertResolver {
+  fn named_resolver_for(&self, server_name: &str) -> Option<Arc<dyn ResolvesServerCert>> {
+    self
+      .matching_entry(server_name, false, true)
+      .or_else(|| self.matching_entry(server_name, false, false))
+      .or_else(|| self.matching_entry(server_name, true, true))
+      .or_else(|| self.matching_entry(server_name, true, false))
+      .map(|entry| entry.resolver.clone())
+  }
+
+  fn matching_entry(
+    &self,
+    server_name: &str,
+    wildcard: bool,
+    default: bool,
+  ) -> Option<&DownstreamCertResolverEntry> {
+    self
+      .entries
+      .iter()
+      .filter(|entry| entry.is_default == default)
+      .find(|entry| {
+        entry.server_names.iter().any(|pattern| {
+          if pattern.starts_with("*.") != wildcard {
+            return false;
+          }
+          if wildcard {
+            super::sni_matches(pattern, server_name)
+          } else {
+            pattern.eq_ignore_ascii_case(server_name)
+          }
+        })
+      })
+  }
+}
+
+impl ResolvesServerCert for DownstreamIdentityCertResolver {
+  fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+    let selected = match client_hello.server_name() {
+      Some(server_name) => self.named_resolver_for(server_name).or_else(|| {
+        if self.reject_unknown_sni {
+          None
+        } else {
+          self.entries.first().map(|entry| entry.resolver.clone())
+        }
+      }),
+      None => {
+        if self.require_sni {
+          None
+        } else {
+          self.entries.first().map(|entry| entry.resolver.clone())
+        }
+      }
+    }?;
+    selected.resolve(client_hello)
+  }
+}
+
+pub(in crate::tls) fn downstream_cert_resolver_bundle(
   tls: &TlsConfig,
   provider: &rustls::crypto::CryptoProvider,
   runtime: Option<&OcspStapleRuntime>,
-) -> anyhow::Result<(String, Arc<dyn ResolvesServerCert>)> {
+) -> anyhow::Result<Arc<DownstreamCertResolverBundle>> {
   if let Some(runtime) = runtime
-    && let Some(resolver) = runtime.live_resolver()
+    && let Some(bundle) = runtime.live_bundle()
   {
-    return Ok((
-      runtime
-        .server_identity()
-        .ok_or_else(|| anyhow!("OCSP live fetch runtime is missing TLS identity"))?
-        .to_string(),
-      resolver,
-    ));
+    return Ok(bundle);
   }
 
-  let mut identity_certs = Vec::new();
   let mut certified_key = super::load_downstream_certified_key(tls, provider)
     .context("failed to create rustls certified key")?;
-  identity_certs.extend(certified_key.cert.iter().cloned());
+  let default_identity = super::certificate_identity(&certified_key.cert);
+  let mut aggregate_certs = Vec::new();
+  aggregate_certs.extend(certified_key.cert.iter().cloned());
   certified_key.ocsp = load_ocsp_response(&tls.ocsp)?;
   let default = Arc::new(rustls::sign::SingleCertAndKey::from(certified_key));
   let mut certificates = Vec::new();
@@ -349,31 +464,47 @@ pub(super) fn downstream_cert_resolver(
     let mut certified_key =
       super::load_downstream_certificate_certified_key(tls, certificate, provider)
         .with_context(|| format!("failed to create tls.certificates[{index}] certified key"))?;
-    identity_certs.extend(certified_key.cert.iter().cloned());
+    let identity = super::certificate_identity(&certified_key.cert);
+    aggregate_certs.extend(certified_key.cert.iter().cloned());
     certified_key.ocsp = load_ocsp_response(&certificate.ocsp)?;
     certificates.push(DownstreamCertResolverEntry {
-      server_names: certificate
-        .server_names
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect(),
+      identity,
+      server_names: normalize_server_names(&certificate.server_names),
       resolver: Arc::new(rustls::sign::SingleCertAndKey::from(certified_key)),
+      is_default: false,
     });
   }
-  let server_identity = super::certificate_identity(&identity_certs);
+  let aggregate_identity = super::certificate_identity(&aggregate_certs);
+  Ok(Arc::new(DownstreamCertResolverBundle {
+    aggregate_identity,
+    certificates,
+    default: DownstreamCertResolverEntry {
+      identity: default_identity,
+      server_names: normalize_server_names(&tls.server_names),
+      resolver: default,
+      is_default: true,
+    },
+    require_sni: tls.require_sni,
+    reject_unknown_sni: tls.reject_unknown_sni,
+  }))
+}
+
+pub(in crate::tls) fn downstream_cert_resolver_for_identity(
+  tls: &TlsConfig,
+  provider: &rustls::crypto::CryptoProvider,
+  runtime: Option<&OcspStapleRuntime>,
+  identity: Option<&str>,
+) -> anyhow::Result<(String, Arc<dyn ResolvesServerCert>)> {
+  let bundle = downstream_cert_resolver_bundle(tls, provider, runtime)?;
+  if let Some(identity) = identity {
+    let resolver = bundle.resolver_for_identity(identity).ok_or_else(|| {
+      anyhow!("downstream TLS certificate partition identity is missing from resolver bundle")
+    })?;
+    return Ok((identity.to_string(), resolver));
+  }
   Ok((
-    server_identity,
-    Arc::new(DownstreamCertResolver {
-      certificates,
-      default_server_names: tls
-        .server_names
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect(),
-      default,
-      require_sni: tls.require_sni,
-      reject_unknown_sni: tls.reject_unknown_sni,
-    }),
+    bundle.aggregate_identity().to_string(),
+    bundle.aggregate_resolver(),
   ))
 }
 

@@ -254,6 +254,8 @@ pub struct TlsCertificateConfig {
 pub struct TlsServerResumptionConfig {
   #[serde(default)]
   pub mode: TlsServerResumptionMode,
+  #[serde(default)]
+  pub multi_certificate: TlsMultiCertificateResumptionMode,
   #[serde(default = "default_server_session_cache_size")]
   pub session_cache_size: usize,
   #[serde(default = "default_tls13_ticket_count")]
@@ -266,6 +268,7 @@ impl Default for TlsServerResumptionConfig {
   fn default() -> Self {
     Self {
       mode: TlsServerResumptionMode::Stateful,
+      multi_certificate: TlsMultiCertificateResumptionMode::Off,
       session_cache_size: default_server_session_cache_size(),
       tls13_ticket_count: default_tls13_ticket_count(),
       rotation_seconds: default_session_ticket_rotation_seconds(),
@@ -295,10 +298,20 @@ pub enum TlsServerResumptionMode {
   Stateless,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMultiCertificateResumptionMode {
+  #[default]
+  Off,
+  PartitionBySni,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RawTlsServerResumptionConfig {
   #[serde(default)]
   pub mode: Option<TlsServerResumptionMode>,
+  #[serde(default)]
+  pub multi_certificate: Option<TlsMultiCertificateResumptionMode>,
   #[serde(default)]
   pub session_cache_size: Option<usize>,
   #[serde(default)]
@@ -316,6 +329,9 @@ pub fn normalize_server_resumption(
   let raw_resumption = raw_resumption.unwrap_or_default();
   if let Some(mode) = raw_resumption.mode {
     base.mode = mode;
+  }
+  if let Some(multi_certificate) = raw_resumption.multi_certificate {
+    base.multi_certificate = multi_certificate;
   }
   if let Some(session_cache_size) = raw_resumption.session_cache_size {
     base.session_cache_size = session_cache_size;

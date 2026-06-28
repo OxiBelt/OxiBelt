@@ -19,7 +19,7 @@ use super::{
   tls_protocol_versions,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct DownstreamTcpTlsBuild<'a> {
   tls: &'a TlsConfig,
   listeners: &'a ListenerConfig,
@@ -27,6 +27,7 @@ pub(super) struct DownstreamTcpTlsBuild<'a> {
   resumption_state: Option<&'a TlsResumptionState>,
   ocsp_runtime: Option<&'a OcspStapleRuntime>,
   crlite_runtime: Option<&'a CrliteRuntime>,
+  certificate_partition_identity: Option<String>,
 }
 
 impl<'a> DownstreamTcpTlsBuild<'a> {
@@ -45,12 +46,23 @@ impl<'a> DownstreamTcpTlsBuild<'a> {
       resumption_state,
       ocsp_runtime,
       crlite_runtime,
+      certificate_partition_identity: None,
     }
   }
 
   pub(super) fn with_max_early_data_size(self, max_early_data_size: u32) -> Self {
     Self {
       max_early_data_size,
+      ..self
+    }
+  }
+
+  pub(super) fn with_certificate_partition_identity(
+    self,
+    certificate_partition_identity: Option<String>,
+  ) -> Self {
+    Self {
+      certificate_partition_identity,
       ..self
     }
   }
@@ -140,8 +152,12 @@ fn build_downstream_tcp_server_config_with_provider(
   versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let provider = Arc::new(provider);
-  let (server_identity, mut cert_resolver) =
-    ocsp::downstream_cert_resolver(build.tls, &provider, build.ocsp_runtime)?;
+  let (server_identity, mut cert_resolver) = ocsp::downstream_cert_resolver_for_identity(
+    build.tls,
+    &provider,
+    build.ocsp_runtime,
+    build.certificate_partition_identity.as_deref(),
+  )?;
   if let Some(runtime) = build.crlite_runtime {
     cert_resolver = runtime.wrap_resolver(cert_resolver);
   }
