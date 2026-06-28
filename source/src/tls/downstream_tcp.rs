@@ -54,10 +54,6 @@ impl<'a> DownstreamTcpTlsBuild<'a> {
       ..self
     }
   }
-
-  pub(super) fn tls(self) -> &'a TlsConfig {
-    self.tls
-  }
 }
 
 /// Builds the shared downstream TCP TLS server configuration for HTTP/1 and HTTP/2.

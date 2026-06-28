@@ -200,7 +200,10 @@ workers = 1
     .as_ref()
     .expect("HTTP/3 snapshot should build QUIC config");
   assert!(quic_config.requires_sni_policy_demux());
-  assert_ne!(quic_config.policy_index_for_sni(Some("example.com")), 0);
+  assert_ne!(
+    quic_config.policy_index_for_sni(Some("example.com")),
+    Some(0)
+  );
   let policy_count = quic_config.configs().len();
 
   let state = AppHandle::new(snapshot);
@@ -220,6 +223,39 @@ workers = 1
       .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(receiver.try_recv().is_err());
   }
+}
+
+#[tokio::test]
+async fn tls12_only_sni_policy_requires_demux_and_rejects_quic() {
+  let temp_dir = common::TempDir::new("quic-policy-demux-tls12-reject");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "quic-policy-demux-tls12-reject");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace("http3 = false", "http3 = true")
+    + r#"
+
+[routes.tls]
+min_version = "tls1.2"
+max_version = "tls1.2"
+
+[quic.socket]
+workers = 1
+"#;
+  let snapshot = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("application snapshot should initialize");
+  let quic_config = snapshot
+    .quic_server_config
+    .as_ref()
+    .expect("HTTP/3 snapshot should build QUIC config");
+
+  assert!(quic_config.requires_sni_policy_demux());
+  assert_eq!(quic_config.configs().len(), 1);
+  assert_eq!(quic_config.policy_index_for_sni(Some("example.com")), None);
+  assert_eq!(
+    quic_config.policy_index_for_sni(Some("other.example.com")),
+    Some(0)
+  );
 }
 
 #[tokio::test]

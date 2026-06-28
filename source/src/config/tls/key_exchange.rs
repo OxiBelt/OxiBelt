@@ -1,5 +1,7 @@
 use serde::{Deserialize, Deserializer};
 
+use super::TlsVersion;
+
 #[derive(Debug, Clone, Default, Deserialize, Eq, Hash, PartialEq)]
 pub struct RawTls12NegotiationConfig {
   #[serde(default)]
@@ -30,8 +32,20 @@ pub struct Tls13NegotiationConfig {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct TlsNegotiationPolicy {
+  pub min_version: TlsVersion,
+  pub max_version: TlsVersion,
   pub tls12: Tls12NegotiationConfig,
   pub tls13: Tls13NegotiationConfig,
+}
+
+impl TlsNegotiationPolicy {
+  pub fn allows_tls12(&self) -> bool {
+    self.min_version <= TlsVersion::Tls12 && self.max_version >= TlsVersion::Tls12
+  }
+
+  pub fn allows_tls13(&self) -> bool {
+    self.min_version <= TlsVersion::Tls13 && self.max_version >= TlsVersion::Tls13
+  }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]

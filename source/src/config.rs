@@ -393,6 +393,16 @@ impl Config {
       })
   }
 
+  fn downstream_tls12_allowed(&self) -> bool {
+    self.tls.min_version <= TlsVersion::Tls12
+      || self.routes.iter().any(|route| {
+        self
+          .tls
+          .effective_route_negotiation_policy(&route.tls)
+          .allows_tls12()
+      })
+  }
+
   pub fn downstream_tcp_early_data_max_bytes(&self) -> u32 {
     let header_budget = self.limits.max_total_header_bytes.max(8192) as u64;
     let body_budget = self.limits.max_request_body_bytes;
@@ -2079,11 +2089,10 @@ impl Config {
         bail!("tls.private_key must not be set when tls.remote_signer.enabled = true");
       }
       self.tls.remote_signer.validate("tls.remote_signer")?;
-      if self.tls.min_version == TlsVersion::Tls12
-        && !self.tls.remote_signer.allow_tls12_unstructured_signing
+      if self.downstream_tls12_allowed() && !self.tls.remote_signer.allow_tls12_unstructured_signing
       {
         bail!(
-          "tls.remote_signer.allow_tls12_unstructured_signing must be true when remote signing is enabled with tls.min_version = \"tls1.2\""
+          "tls.remote_signer.allow_tls12_unstructured_signing must be true when remote signing is enabled with any downstream TLS policy that allows tls1.2"
         );
       }
     } else if self.tls.private_key.is_none() {
@@ -3339,7 +3348,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "try_files",
     ][..],
     "routes.static_files.error_pages" => &["not_found", "server_error"][..],
-    "routes.tls" => &["1_2", "1_3", "ssl_early_data"][..],
+    "routes.tls" => &["1_2", "1_3", "max_version", "min_version", "ssl_early_data"][..],
     "routes.tls.1_2" => allowed_keys::TLS12_NEGOTIATION_CONFIG_KEYS,
     "routes.tls.1_3" => allowed_keys::TLS13_NEGOTIATION_CONFIG_KEYS,
     "routes.match" => &[

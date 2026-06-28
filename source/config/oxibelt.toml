@@ -1376,6 +1376,8 @@ grpc_web = false
 #
 # [routes.tls]
 # ssl_early_data = "off" # off | safe_methods | on
+# min_version = "tls1.2"
+# max_version = "tls1.3"
 
 # [routes.match]
 # methods = ["GET", "HEAD"]

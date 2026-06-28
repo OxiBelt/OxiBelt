@@ -31,7 +31,9 @@ use md5::{Digest, Md5};
 use ring::hmac;
 use rustls::client::Resumption;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, HandshakeKind, RootCertStore, ServerConfig};
+use rustls::{
+  ClientConfig, ClientConnection, HandshakeKind, ProtocolVersion, RootCertStore, ServerConfig,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -56,6 +58,40 @@ impl DownstreamProtocol {
       Self::H2 => "h2",
       Self::H3 => "h3",
     }
+  }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DownstreamTlsVersion {
+  Tls12,
+  Tls13,
+}
+
+const TLS12_PROTOCOL_VERSIONS: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS12];
+const TLS13_PROTOCOL_VERSIONS: [&rustls::SupportedProtocolVersion; 1] = [&rustls::version::TLS13];
+
+impl DownstreamTlsVersion {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "tls1.2" => Ok(Self::Tls12),
+      "tls1.3" => Ok(Self::Tls13),
+      _ => bail!("unsupported downstream TLS version: {raw}"),
+    }
+  }
+
+  fn versions(self) -> &'static [&'static rustls::SupportedProtocolVersion] {
+    match self {
+      Self::Tls12 => &TLS12_PROTOCOL_VERSIONS,
+      Self::Tls13 => &TLS13_PROTOCOL_VERSIONS,
+    }
+  }
+}
+
+fn tls_version_label(version: ProtocolVersion) -> &'static str {
+  match version {
+    ProtocolVersion::TLSv1_2 => "tls1.2",
+    ProtocolVersion::TLSv1_3 => "tls1.3",
+    _ => "unknown",
   }
 }
 
@@ -106,6 +142,7 @@ struct DownstreamArgs {
   omit_content_length: bool,
   headers: HeaderMap,
   ca_cert: String,
+  tls_version: Option<DownstreamTlsVersion>,
   expect_status: Option<u16>,
 }
 
@@ -364,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -807,6 +844,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut omit_content_length = false;
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
+  let mut tls_version = None;
   let mut expect_status = None;
 
   while let Some(flag) = args.next() {
@@ -845,6 +883,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       }
       "--header" => insert_header(&mut headers, &value)?,
       "--ca-cert" => ca_cert = Some(value),
+      "--tls-version" => tls_version = Some(DownstreamTlsVersion::parse(&value)?),
       "--expect-status" => {
         expect_status = Some(value.parse().context("invalid --expect-status value")?);
       }
@@ -862,6 +901,11 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       bail!("--zero-length-body-end-delay-ms cannot be combined with request body data");
     }
   }
+  if matches!(protocol, DownstreamProtocol::H3)
+    && tls_version.is_some_and(|version| version != DownstreamTlsVersion::Tls13)
+  {
+    bail!("--tls-version tls1.2 is only supported for TCP downstream protocols");
+  }
   Ok(DownstreamArgs {
     protocol,
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
@@ -877,6 +921,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     omit_content_length,
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    tls_version,
     expect_status,
   })
 }
@@ -1515,7 +1560,7 @@ async fn handle_websocket_echo_connection(mut stream: TcpStream) -> anyhow::Resu
 }
 
 async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
-  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
   client_config.enable_sni = true;
   let connector = TlsConnector::from(Arc::new(client_config));
   let stream = TcpStream::connect((args.host.as_str(), args.port))
@@ -1939,7 +1984,7 @@ async fn run_dpi_tls_client(args: DpiTlsArgs) -> anyhow::Result<()> {
 }
 
 fn dpi_tls_http1_request(args: DpiTlsArgs) -> anyhow::Result<serde_json::Value> {
-  let config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+  let config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
   let server_name = ServerName::try_from(args.server_name.clone())
     .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
   let mut conn = ClientConnection::new(Arc::new(config), server_name)
@@ -2399,7 +2444,7 @@ fn ensure_len(bytes: &[u8], offset: usize, len: usize, context: &str) -> anyhow:
 }
 
 async fn run_tls_resumption_load(args: TlsResumptionLoadArgs) -> anyhow::Result<()> {
-  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1")?;
+  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
   client_config.resumption = Resumption::in_memory_sessions(args.connections.max(8));
   let connector = TlsConnector::from(Arc::new(client_config));
   let mut full = 0usize;
@@ -2440,7 +2485,7 @@ async fn run_tls_resumption_load(args: TlsResumptionLoadArgs) -> anyhow::Result<
 }
 
 async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> anyhow::Result<()> {
-  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", None)?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
@@ -2513,7 +2558,7 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
 async fn run_webtransport_reload_gated_client(
   args: WebTransportReloadGatedArgs,
 ) -> anyhow::Result<()> {
-  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", None)?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
@@ -2917,7 +2962,8 @@ async fn wait_for_path(path: &str, timeout: Duration) -> anyhow::Result<()> {
 }
 
 async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
-  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"h2")?;
+  let mut client_config =
+    downstream_client_config(Path::new(&args.ca_cert), b"h2", args.tls_version)?;
   client_config.enable_sni = true;
   let connector = TlsConnector::from(Arc::new(client_config));
   let stream = TcpStream::connect((args.host.as_str(), args.port))
@@ -2929,6 +2975,11 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     .connect(server_name, stream)
     .await
     .context("failed to establish downstream TLS")?;
+  let tls_version = tls_stream
+    .get_ref()
+    .1
+    .protocol_version()
+    .map(tls_version_label);
   let negotiated = tls_stream
     .get_ref()
     .1
@@ -2965,6 +3016,7 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     .to_bytes();
   Ok(response_json(
     args.protocol.label(),
+    tls_version,
     parts.status,
     &parts.headers,
     &body,
@@ -2972,7 +3024,8 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
 }
 
 async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
-  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3")?;
+  let client_config =
+    downstream_client_config(Path::new(&args.ca_cert), b"h3", args.tls_version)?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
@@ -3045,6 +3098,7 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
   let (parts, _) = response.into_parts();
   Ok(response_json(
     args.protocol.label(),
+    None,
     parts.status,
     &parts.headers,
     &response_body.freeze(),
@@ -3120,13 +3174,21 @@ impl hyper::body::Body for DelayedEndZeroLengthBody {
   }
 }
 
-fn downstream_client_config(path: &Path, alpn: &[u8]) -> anyhow::Result<ClientConfig> {
-  let mut config =
-    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-      .with_safe_default_protocol_versions()
-      .context("failed to configure downstream TLS versions")?
-      .with_root_certificates(load_root_store(path)?)
-      .with_no_client_auth();
+fn downstream_client_config(
+  path: &Path,
+  alpn: &[u8],
+  tls_version: Option<DownstreamTlsVersion>,
+) -> anyhow::Result<ClientConfig> {
+  let builder =
+    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+  let builder = match tls_version {
+    Some(version) => builder.with_protocol_versions(version.versions()),
+    None => builder.with_safe_default_protocol_versions(),
+  }
+  .context("failed to configure downstream TLS versions")?;
+  let mut config = builder
+    .with_root_certificates(load_root_store(path)?)
+    .with_no_client_auth();
   config.alpn_protocols = vec![alpn.to_vec()];
   Ok(config)
 }
@@ -3357,12 +3419,14 @@ fn turn_long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
 
 fn response_json(
   negotiated_protocol: &str,
+  tls_version: Option<&str>,
   status: StatusCode,
   headers: &HeaderMap,
   body: &[u8],
 ) -> serde_json::Value {
   serde_json::json!({
     "negotiated_protocol": negotiated_protocol,
+    "tls_version": tls_version,
     "status": status.as_u16(),
     "reason": status.canonical_reason().unwrap_or(""),
     "headers": header_json(headers),

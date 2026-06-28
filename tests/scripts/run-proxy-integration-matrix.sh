@@ -1255,6 +1255,7 @@ protocol_probe_client_with_sni_and_ca() {
   local path="$4"
   local expect_status="$5"
   local ca_file="$6"
+  local extra_args=("${@:7}")
   local output=""
   local status=0
   local client_container=""
@@ -1274,7 +1275,8 @@ protocol_probe_client_with_sni_and_ca() {
       --authority "${authority}" \
       --path "${path}" \
       --ca-cert /tmp/probe-ca.pem \
-      --expect-status "${expect_status}" >/dev/null
+      --expect-status "${expect_status}" \
+      "${extra_args[@]}" >/dev/null
     docker cp "${ca_file}" "${client_container}:/tmp/probe-ca.pem"
 
     if output="$(docker_start_stdout_only "${client_container}")"; then

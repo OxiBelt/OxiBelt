@@ -295,10 +295,17 @@ impl QuicDemuxSocket {
     let local_policy_index = snapshot
       .quic_server_config
       .as_ref()
-      .map(|config| config.policy_index_for_sni(sni.as_deref()))
-      .unwrap_or(0);
+      .map_or(Some(0), |config| {
+        config.policy_index_for_sni(sni.as_deref())
+      });
 
     if !sni_forward_enabled {
+      let Some(local_policy_index) = local_policy_index else {
+        snapshot
+          .metrics
+          .record_sni_forward_decision("quic", "reject", "tls_policy", "none");
+        return Ok(());
+      };
       self.remember_local(peer, client_scid, local_policy_index, snapshot.as_ref());
       self.queue_local(local_policy_index, datagram, peer);
       return Ok(());
@@ -306,6 +313,12 @@ impl QuicDemuxSocket {
 
     match snapshot.sni_forward.decide_quic(sni.as_deref()) {
       SniForwardDecision::Local => {
+        let Some(local_policy_index) = local_policy_index else {
+          snapshot
+            .metrics
+            .record_sni_forward_decision("quic", "reject", "tls_policy", "none");
+          return Ok(());
+        };
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "local", "local_route", "local");

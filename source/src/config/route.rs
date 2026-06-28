@@ -12,8 +12,8 @@ use crate::waf::RouteWafConfig;
 use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, HttpVersion, LimitsConfig, RetryCondition, RouteIpmConfig, RouteStaticFilesConfig,
-  Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode, TlsKeyExchangeGroup, default_hosts,
-  default_path_prefix,
+  Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsVersion,
+  default_hosts, default_path_prefix,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -89,6 +89,10 @@ impl RouteConfig {
 pub struct RouteTlsConfig {
   #[serde(default)]
   pub ssl_early_data: Option<TlsEarlyDataMode>,
+  #[serde(default)]
+  pub min_version: Option<TlsVersion>,
+  #[serde(default)]
+  pub max_version: Option<TlsVersion>,
   #[serde(default, rename = "1_2")]
   pub tls12: RouteTls12Config,
   #[serde(default, rename = "1_3")]
@@ -97,7 +101,9 @@ pub struct RouteTlsConfig {
 
 impl RouteTlsConfig {
   pub fn has_negotiation_overrides(&self) -> bool {
-    self.tls12.groups.is_some()
+    self.min_version.is_some()
+      || self.max_version.is_some()
+      || self.tls12.groups.is_some()
       || self.tls12.key_exchange_groups.is_some()
       || self.tls13.key_exchange_groups.is_some()
       || self.tls13.ciphers.is_some()

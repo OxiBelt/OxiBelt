@@ -180,6 +180,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "protocol-proxying",
+      "downstream-sni-tls-version-override",
+      "SNI-scoped downstream TLS version policy can keep one host on TLS 1.2 while the default stays TLS 1.3",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
       "remote-signer-downstream-tls-http-suite",
       "remote signer downstream TLS proxies HTTP/1.1, HTTP/2, and HTTP/3 with stable forwarded metadata",
       ExpectStart::Success,

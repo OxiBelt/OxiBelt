@@ -157,6 +157,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
 impl TlsConfig {
   pub fn negotiation_policy(&self) -> TlsNegotiationPolicy {
     TlsNegotiationPolicy {
+      min_version: self.min_version,
+      max_version: self.max_version,
       tls12: self.tls12.clone(),
       tls13: self.tls13.clone(),
     }
@@ -167,6 +169,8 @@ impl TlsConfig {
     route_tls: &RouteTlsConfig,
   ) -> TlsNegotiationPolicy {
     TlsNegotiationPolicy {
+      min_version: route_tls.min_version.unwrap_or(self.min_version),
+      max_version: route_tls.max_version.unwrap_or(self.max_version),
       tls12: Tls12NegotiationConfig {
         groups: route_tls
           .tls12
@@ -579,7 +583,7 @@ pub struct AdminTlsCertificateConfig {
   pub default: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsVersion {
   #[serde(rename = "tls1.2")]

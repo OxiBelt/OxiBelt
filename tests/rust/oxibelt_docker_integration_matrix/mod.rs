@@ -242,6 +242,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("protocol-startup", "listener-reuseport-workers"),
   ("protocol-proxying", "downstream-h2-upstream-h1"),
   ("protocol-proxying", "downstream-tls-http-suite"),
+  ("protocol-proxying", "downstream-sni-tls-version-override"),
   (
     "protocol-proxying",
     "remote-signer-downstream-tls-http-suite",

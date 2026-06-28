@@ -2348,6 +2348,26 @@ max_version = "tls1.2"
     "unexpected error: {error}"
   );
 
+  let raw = format!(
+    r#"{base}
+
+[routes.tls]
+ssl_early_data = "safe_methods"
+min_version = "tls1.2"
+max_version = "tls1.2"
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("route TLS early data without TLS 1.3 should fail");
+  assert!(
+    error.to_string().contains(
+      "route app-root tls.ssl_early_data requires effective tls.max_version to allow tls1.3"
+    ),
+    "unexpected error: {error}"
+  );
+
   let raw = base.replace(
     "[tls.ocsp]",
     r#"ssl_early_data = "safe_methods"
@@ -2642,6 +2662,87 @@ groups = ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
 }
 
 #[test]
+fn route_tls_versions_validate_sni_only_scope_and_inheritance() {
+  let temp_dir = common::TempDir::new("route-tls-version-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-tls-version-policy");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let route_override = r#"
+[routes.tls]
+min_version = "tls1.2"
+max_version = "tls1.2"
+"#;
+
+  let raw = format!("{base}{route_override}");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("exact-host root route TLS versions should validate");
+  let policy = config
+    .tls
+    .effective_route_negotiation_policy(&config.routes[0].tls);
+  assert_eq!(config.routes[0].tls.min_version, Some(TlsVersion::Tls12));
+  assert_eq!(config.routes[0].tls.max_version, Some(TlsVersion::Tls12));
+  assert_eq!(policy.min_version, TlsVersion::Tls12);
+  assert_eq!(policy.max_version, TlsVersion::Tls12);
+
+  let raw = format!("{base}\n[routes.tls]\nmin_version = \"tls1.2\"\n");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("route TLS max version should inherit globally");
+  let policy = config
+    .tls
+    .effective_route_negotiation_policy(&config.routes[0].tls);
+  assert_eq!(policy.min_version, TlsVersion::Tls12);
+  assert_eq!(policy.max_version, TlsVersion::Tls13);
+
+  let raw = format!("{base}\n[routes.tls]\nmin_version = \"tls1.3\"\nmax_version = \"tls1.2\"\n");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("invalid route TLS version range should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root tls.min_version must be less than or equal to tls.max_version"),
+    "unexpected error: {error}"
+  );
+
+  let raw = format!(
+    "{}{}",
+    base.replace("path_prefix = \"/\"", "path_prefix = \"/api\""),
+    route_override
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("path-scoped route TLS versions should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root tls negotiation overrides can only be set on SNI-only routes"),
+    "unexpected error: {error}"
+  );
+
+  let raw = format!(
+    "{}{}",
+    base.replace("hosts = [\"example.com\"]", "hosts = [\"*.example.com\"]"),
+    route_override
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("wildcard route TLS versions should fail");
+  assert!(
+    error.to_string().contains(
+      "route app-root tls negotiation overrides can only be set on exact non-wildcard hosts"
+    ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn route_tls_key_exchange_groups_reject_host_conflicts() {
   let temp_dir = common::TempDir::new("route-tls-key-exchange-conflicts");
   let (cert_path, key_path) =
@@ -2666,6 +2767,40 @@ ciphers = ["TLS_AES_256_GCM_SHA384"]
   let error = config
     .validate()
     .expect_err("conflicting host TLS policies should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("route app-root-conflict tls negotiation policy conflicts with route app-root"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn route_tls_versions_reject_host_conflicts() {
+  let temp_dir = common::TempDir::new("route-tls-version-conflicts");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-tls-version-conflicts");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let raw = format!(
+    r#"{base}
+[routes.tls]
+min_version = "tls1.2"
+
+[[routes]]
+name = "app-root-conflict"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[routes.tls]
+min_version = "tls1.3"
+max_version = "tls1.3"
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("conflicting host TLS version policies should fail");
   assert!(
     error
       .to_string()
@@ -2806,6 +2941,25 @@ token_env = "{token_env}"
   let error = config
     .validate()
     .expect_err("TLS 1.2 remote signing requires explicit opt-in");
+  assert!(
+    error
+      .to_string()
+      .contains("allow_tls12_unstructured_signing"),
+    "unexpected error: {error}"
+  );
+
+  let route_tls12_without_opt_in = format!(
+    r#"{remote_only}
+
+[routes.tls]
+min_version = "tls1.2"
+max_version = "tls1.2"
+"#
+  );
+  let config: Config = toml::from_str(&route_tls12_without_opt_in).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("route TLS 1.2 remote signing requires explicit opt-in");
   assert!(
     error
       .to_string()

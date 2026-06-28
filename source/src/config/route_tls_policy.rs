@@ -34,6 +34,26 @@ pub(super) fn validate_negotiation_policies(config: &Config) -> anyhow::Result<(
         ciphers,
       )?;
     }
+    let policy = config.tls.effective_route_negotiation_policy(&route.tls);
+    if policy.min_version > policy.max_version {
+      bail!(
+        "route {} tls.min_version must be less than or equal to tls.max_version",
+        route.name
+      );
+    }
+    if route.tls.has_negotiation_overrides()
+      && (route.tls.min_version.is_some() || route.tls.max_version.is_some())
+      && config
+        .tls
+        .effective_tcp_early_data_mode(&route.tls)
+        .is_enabled()
+      && !policy.allows_tls13()
+    {
+      bail!(
+        "route {} tls.ssl_early_data requires effective tls.max_version to allow tls1.3",
+        route.name
+      );
+    }
     if !route.tls.has_negotiation_overrides() {
       continue;
     }
@@ -53,7 +73,6 @@ pub(super) fn validate_negotiation_policies(config: &Config) -> anyhow::Result<(
         route.name
       );
     }
-    let policy = config.tls.effective_route_negotiation_policy(&route.tls);
     for host in &route.hosts {
       super::validate_tls_server_name(&format!("route {} hosts", route.name), host)?;
       match host_policies.entry(host.to_ascii_lowercase()) {
