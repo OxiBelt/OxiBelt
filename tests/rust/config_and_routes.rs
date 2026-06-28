@@ -88,6 +88,169 @@ fn protocol_operations_defaults_are_disabled() {
 }
 
 #[test]
+fn listener_plural_binds_parse_and_validate() {
+  let temp_dir = common::TempDir::new("listener-plural-binds");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-plural-binds");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"https_bind = "127.0.0.1:8443""#,
+    r#"https_binds = ["127.0.0.1:8443", "[::1]:8443"]
+http_binds = ["127.0.0.1:8080", "[::1]:8080"]
+http_mode = "proxy""#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("plural listener binds should parse");
+  config
+    .validate()
+    .expect("plural listener binds should validate");
+
+  assert_eq!(config.listeners.https_binds.len(), 2);
+  assert_eq!(config.listeners.https_bind, config.listeners.https_binds[0]);
+  assert_eq!(config.listeners.http_binds.len(), 2);
+  assert_eq!(
+    config.listeners.http_bind,
+    Some(config.listeners.http_binds[0])
+  );
+}
+
+#[test]
+fn listener_scalar_bind_compatibility_still_normalizes_to_lists() {
+  let temp_dir = common::TempDir::new("listener-scalar-compat");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-scalar-compat");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+  let config: Config = toml::from_str(&raw).expect("legacy listener bind should parse");
+  config
+    .validate()
+    .expect("legacy listener bind should validate");
+
+  assert_eq!(config.listeners.https_binds, [config.listeners.https_bind]);
+  assert!(config.listeners.http_binds.is_empty());
+}
+
+#[test]
+fn listener_scalar_and_plural_binds_must_not_mix() {
+  let temp_dir = common::TempDir::new("listener-mixed-binds");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-mixed-binds");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"https_bind = "127.0.0.1:8443""#,
+    r#"https_bind = "127.0.0.1:8443"
+https_binds = ["[::1]:8443"]"#,
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("mixed listener binds should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("listeners.https_bind must not be mixed with listeners.https_binds"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_binds_reject_overlapping_wildcard_addresses() {
+  let temp_dir = common::TempDir::new("listener-overlap");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "listener-overlap");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"https_bind = "127.0.0.1:8443""#,
+    r#"https_binds = ["0.0.0.0:8443", "127.0.0.1:8443"]"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("overlapping listener binds should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("listeners.https_binds entries 0.0.0.0:8443 and 127.0.0.1:8443 overlap"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_privileged_bind_requires_netport_switcher() {
+  let temp_dir = common::TempDir::new("listener-plural-privileged");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-plural-privileged");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"https_bind = "127.0.0.1:8443""#,
+    r#"https_binds = ["127.0.0.1:443", "[::1]:443"]"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("privileged plural listener bind should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("listeners.https_binds entry 127.0.0.1:443 requires a privileged port"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_privileged_bind_validates_with_netport_switcher() {
+  let temp_dir = common::TempDir::new("listener-plural-netport");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-plural-netport");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      "unprivileged_mode = true",
+      r#"unprivileged_mode = true
+
+[runtime.netport_switcher]
+enabled = true"#,
+    )
+    .replace(
+      r#"https_bind = "127.0.0.1:8443""#,
+      r#"https_binds = ["127.0.0.1:443", "[::1]:443"]"#,
+    );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("netport switcher should allow privileged plural listener binds");
+}
+
+#[test]
+fn listener_plural_http3_alt_svc_requires_same_https_port() {
+  let temp_dir = common::TempDir::new("listener-alt-svc-ports");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-alt-svc-ports");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      r#"http3 = false"#,
+      r#"http3 = true
+
+[quic.socket]
+reuse_port = true"#,
+    )
+    .replace(
+      r#"https_bind = "127.0.0.1:8443""#,
+      r#"https_binds = ["127.0.0.1:8443", "[::1]:9443"]"#,
+    );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("mixed HTTPS ports should fail with Alt-Svc");
+
+  assert!(
+    error.to_string().contains(
+      "listeners.https_binds entries must use the same port when listeners.http3 and quic.alt_svc.enabled are true"
+    ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn netport_switcher_accepts_privileged_data_plane_ports() {
   let temp_dir = common::TempDir::new("netport-switcher-data-plane");
   let (cert_path, key_path) =

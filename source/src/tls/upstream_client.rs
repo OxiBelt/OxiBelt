@@ -462,7 +462,9 @@ request_timeout_ms = 1
   fn test_listeners() -> ListenerConfig {
     ListenerConfig {
       https_bind: "127.0.0.1:8443".parse().unwrap(),
+      https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
       http_bind: None,
+      http_binds: Vec::new(),
       http_mode: Default::default(),
       http1: true,
       http2: false,

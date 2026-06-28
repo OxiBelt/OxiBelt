@@ -16,4 +16,6 @@ exit 1
   fi
   response="$(client_request_on_port 443 "example.test" "/app/netport-switcher" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/netport-switcher"'
+  response="$(client_request_on_port 444 "example.test" "/app/netport-switcher-extra" 200)"
+  assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/netport-switcher-extra"'
 }

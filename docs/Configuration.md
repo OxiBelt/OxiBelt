@@ -190,7 +190,7 @@ Example split:
 include = ["conf.d/*.toml"]
 
 [listeners]
-https_bind = "0.0.0.0:8443"
+https_binds = ["0.0.0.0:8443", "[::]:8443"]
 http1 = true
 http2 = true
 http3 = false
@@ -332,8 +332,8 @@ Successful full reloads start replacement listeners before draining old listener
 
 ```toml
 [listeners]
-https_bind = "0.0.0.0:8443"
-http_bind = "0.0.0.0:8080"
+https_binds = ["0.0.0.0:8443", "[::]:8443"]
+http_binds = ["0.0.0.0:8080", "[::]:8080"]
 http_mode = "redirect_to_https" # off | redirect_to_https | proxy
 http1 = true
 http2 = true
@@ -345,7 +345,7 @@ version = "any" # v1 | v2 | any
 trusted_sources = []
 ```
 
-At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP. HTTP/3 listens on UDP using the same `https_bind` address and port. PROXY protocol is accepted only from configured trusted sources.
+At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP for every `https_binds` address. HTTP/3 listens on UDP for every `https_binds` address. `http_binds` controls the optional plain HTTP listener when `http_mode` is not `off`. Legacy scalar `https_bind` and `http_bind` remain accepted as one-address compatibility aliases, but they must not be mixed with `https_binds` or `http_binds` respectively. IPv6 listener sockets are IPv6-only; configure both `0.0.0.0:443` and `[::]:443` when you want explicit IPv4 and IPv6 exposure. Adding wildcard binds such as `0.0.0.0` or `[::]` exposes all interfaces for that IP family. PROXY protocol is accepted only from configured trusted sources. When HTTP/3 Alt-Svc is enabled, all HTTPS bind entries must use the same port because OxiBelt advertises one Alt-Svc port.
 
 ```toml
 [tls]
@@ -2551,7 +2551,7 @@ udp_datagram_burst = 400
 
 Each `[[stream_upstream_pools.servers]]` origin must use `tcp://host:port` or `udp://host:port`. A stream listener or SNI rule must set exactly one of `target` or `upstream_pool`; a listener may omit its default only when it has SNI rules, in which case no-SNI or unparseable flows fail closed without displacing established UDP flows. UDP listeners reject `proxy_protocol_egress`, pin each downstream client flow to one selected upstream until idle expiry or capacity eviction, and use `max_udp_flows` to cap process-local flow state. Capacity eviction only happens after a new UDP flow is routable, admitted by connection limits, and ready to insert. `udp_datagram_rate` and `udp_datagram_burst` apply per pinned downstream UDP flow.
 
-Stream SNI routing is passthrough classification only. OxiBelt peeks bounded TCP TLS ClientHello bytes or QUIC Initial CRYPTO frames when rules are configured, selects the first matching exact or wildcard server name rule, and forwards the untouched stream/datagrams to the chosen target. Flows without visible TLS or QUIC SNI use the listener default if present. Use `[sni_forward]` instead when TLS or QUIC traffic on `listeners.https_bind` must be selected by visible SNI before local HTTP termination.
+Stream SNI routing is passthrough classification only. OxiBelt peeks bounded TCP TLS ClientHello bytes or QUIC Initial CRYPTO frames when rules are configured, selects the first matching exact or wildcard server name rule, and forwards the untouched stream/datagrams to the chosen target. Flows without visible TLS or QUIC SNI use the listener default if present. Use `[sni_forward]` instead when TLS or QUIC traffic on `listeners.https_binds` must be selected by visible SNI before local HTTP termination.
 
 ## WebRTC TURN Listeners
 
@@ -2728,7 +2728,7 @@ main_gid = 10001
 io_timeout_ms = 5000
 
 [listeners]
-https_bind = "0.0.0.0:8443"
+https_binds = ["0.0.0.0:8443"]
 http1 = true
 http2 = true
 http3 = false

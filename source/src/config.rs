@@ -28,6 +28,7 @@ mod http2;
 mod ipm;
 mod lb_policy_compat;
 mod limits;
+mod listener;
 mod loader;
 mod logging;
 mod outbound_revocation;
@@ -67,6 +68,8 @@ use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
 };
+pub use listener::{HttpListenerMode, ListenerConfig, ProxyProtocolConfig, ProxyProtocolVersion};
+use listener::{RawListenerConfig, validate_bind_list, validate_bind_lists_do_not_overlap};
 use loader::{
   absolute_config_path, load_toml_with_includes, load_toml_with_includes_and_overrides,
 };
@@ -136,7 +139,7 @@ struct RawConfig {
   logging: LoggingConfig,
   #[serde(default)]
   runtime: RawRuntimeConfig,
-  listeners: ListenerConfig,
+  listeners: RawListenerConfig,
   tls: TlsConfig,
   #[serde(default)]
   quic: RawQuicConfig,
@@ -206,11 +209,12 @@ impl TryFrom<RawConfig> for Config {
       .into_iter()
       .map(|listener| listener.resolve(parallelism.available))
       .collect::<anyhow::Result<Vec<_>>>()?;
+    let listeners = raw.listeners.resolve()?;
     Ok(Self {
       config: raw.config,
       logging: raw.logging,
       runtime,
-      listeners: raw.listeners,
+      listeners,
       tls: raw.tls,
       quic,
       proxy: raw.proxy,
@@ -794,23 +798,9 @@ impl Config {
       bail!("at least one downstream HTTP version or SNI forwarding protocol must be enabled");
     }
 
-    if self.rejects_privileged_data_plane_bind(self.listeners.https_bind) {
-      bail!(
-        "https_bind {} requires a privileged port but unprivileged_mode=true",
-        self.listeners.https_bind
-      );
-    }
-    if self.rejects_privileged_data_plane_ports()
-      && let Some(http_bind) = self.listeners.http_bind
-      && self.rejects_privileged_data_plane_bind(http_bind)
-    {
-      bail!(
-        "http_bind {} requires a privileged port but unprivileged_mode=true",
-        http_bind
-      );
-    }
-    if self.listeners.http_mode != HttpListenerMode::Off && self.listeners.http_bind.is_none() {
-      bail!("listeners.http_bind is required when listeners.http_mode is not \"off\"");
+    self.validate_listener_binds()?;
+    if self.listeners.http_mode != HttpListenerMode::Off && self.listeners.http_binds.is_empty() {
+      bail!("listeners.http_binds is required when listeners.http_mode is not \"off\"");
     }
     if self.listeners.proxy_protocol.enabled {
       for cidr in &self.listeners.proxy_protocol.trusted_sources {
@@ -832,6 +822,7 @@ impl Config {
     self.validate_security_headers()?;
     self.validate_tls()?;
     self.quic.validate(self.listeners.http3)?;
+    self.validate_http3_alt_svc_binds()?;
     self.validate_sni_forward()?;
     self.logging.validate()?;
 
@@ -1969,6 +1960,61 @@ impl Config {
     Ok(())
   }
 
+  fn validate_listener_binds(&self) -> anyhow::Result<()> {
+    validate_bind_list("listeners.https_binds", &self.listeners.https_binds)?;
+    if self.listeners.http_mode != HttpListenerMode::Off || !self.listeners.http_binds.is_empty() {
+      validate_bind_list("listeners.http_binds", &self.listeners.http_binds)?;
+    }
+    if self.rejects_privileged_data_plane_ports() {
+      for bind in &self.listeners.https_binds {
+        if self.rejects_privileged_data_plane_bind(*bind) {
+          bail!(
+            "listeners.https_binds entry {} requires a privileged port but unprivileged_mode=true",
+            bind
+          );
+        }
+      }
+      for bind in &self.listeners.http_binds {
+        if self.rejects_privileged_data_plane_bind(*bind) {
+          bail!(
+            "listeners.http_binds entry {} requires a privileged port but unprivileged_mode=true",
+            bind
+          );
+        }
+      }
+    }
+    if self.needs_https_listener() && self.listeners.http_mode != HttpListenerMode::Off {
+      validate_bind_lists_do_not_overlap(
+        "listeners.https_binds",
+        &self.listeners.https_binds,
+        "listeners.http_binds",
+        &self.listeners.http_binds,
+      )?;
+    }
+    Ok(())
+  }
+
+  fn validate_http3_alt_svc_binds(&self) -> anyhow::Result<()> {
+    if !self.listeners.http3 || !self.quic.alt_svc.enabled {
+      return Ok(());
+    }
+    let Some(first) = self.listeners.https_binds.first() else {
+      return Ok(());
+    };
+    let port = first.port();
+    if self
+      .listeners
+      .https_binds
+      .iter()
+      .any(|bind| bind.port() != port)
+    {
+      bail!(
+        "listeners.https_binds entries must use the same port when listeners.http3 and quic.alt_svc.enabled are true"
+      );
+    }
+    Ok(())
+  }
+
   fn validate_tls(&self) -> anyhow::Result<()> {
     if self.tls.min_version > self.tls.max_version {
       bail!("tls.min_version must be less than or equal to tls.max_version");
@@ -2508,8 +2554,10 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "http2",
       "http3",
       "http_bind",
+      "http_binds",
       "http_mode",
       "https_bind",
+      "https_binds",
       "proxy_protocol",
     ][..],
     "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
@@ -3959,61 +4007,6 @@ impl FromStr for HotReloadMode {
       }
     }
   }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct ListenerConfig {
-  pub https_bind: SocketAddr,
-  #[serde(default)]
-  pub http_bind: Option<SocketAddr>,
-  #[serde(default)]
-  pub http_mode: HttpListenerMode,
-  #[serde(default = "default_true")]
-  pub http1: bool,
-  #[serde(default = "default_true")]
-  pub http2: bool,
-  #[serde(default)]
-  pub http3: bool,
-  #[serde(default)]
-  pub proxy_protocol: ProxyProtocolConfig,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpListenerMode {
-  #[default]
-  Off,
-  RedirectToHttps,
-  Proxy,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct ProxyProtocolConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub version: ProxyProtocolVersion,
-  #[serde(default)]
-  pub trusted_sources: Vec<String>,
-}
-
-impl Default for ProxyProtocolConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      version: ProxyProtocolVersion::Any,
-      trusted_sources: Vec::new(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyProtocolVersion {
-  V1,
-  V2,
-  #[default]
-  Any,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

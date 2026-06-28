@@ -87,8 +87,10 @@ pub struct LifecycleSnapshot {
 #[derive(Debug, Serialize)]
 pub struct ListenerSnapshot {
   pub https_bind: String,
+  pub https_binds: Vec<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub http_bind: Option<String>,
+  pub http_binds: Vec<String>,
   pub http_mode: String,
   pub http1: bool,
   pub http2: bool,
@@ -311,11 +313,25 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
     },
     listeners: ListenerSnapshot {
       https_bind: snapshot.config.listeners.https_bind.to_string(),
+      https_binds: snapshot
+        .config
+        .listeners
+        .https_binds
+        .iter()
+        .map(ToString::to_string)
+        .collect(),
       http_bind: snapshot
         .config
         .listeners
         .http_bind
         .map(|bind| bind.to_string()),
+      http_binds: snapshot
+        .config
+        .listeners
+        .http_binds
+        .iter()
+        .map(ToString::to_string)
+        .collect(),
       http_mode: format!("{:?}", snapshot.config.listeners.http_mode),
       http1: snapshot.config.listeners.http1,
       http2: snapshot.config.listeners.http2,

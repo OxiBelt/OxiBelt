@@ -81,8 +81,8 @@ config:
     unprivileged_mode = true
 
     [listeners]
-    http_bind = "0.0.0.0:8080"
-    https_bind = "0.0.0.0:8443"
+    http_binds = ["0.0.0.0:8080"]
+    https_binds = ["0.0.0.0:8443"]
     http_mode = "redirect_to_https"
     http1 = true
     http2 = true

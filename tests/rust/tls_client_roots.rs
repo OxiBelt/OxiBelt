@@ -94,7 +94,9 @@ fn server_config_sets_alpn_from_listener_flags() {
   let tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: false,
@@ -198,7 +200,9 @@ async fn server_config_uses_configured_key_exchange_groups() {
   ];
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: true,
@@ -247,7 +251,9 @@ fn server_config_applies_resumption_modes() {
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "downstream");
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: true,
@@ -311,7 +317,9 @@ async fn tcp_server_config_accepts_handshake_with_remote_signer() {
   );
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: true,
@@ -388,7 +396,9 @@ async fn remote_signer_rejects_spki_mismatch() {
   );
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: true,
@@ -653,7 +663,9 @@ async fn tcp_selected_peer_certificate(
 ) -> Vec<u8> {
   let listeners = ListenerConfig {
     https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
     http_bind: None,
+    http_binds: Vec::new(),
     http_mode: Default::default(),
     http1: true,
     http2: true,

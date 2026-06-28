@@ -1,6 +1,7 @@
 //! Listener supervision and control-plane orchestration for the running proxy.
 //! This module binds transports together without owning protocol-specific policy.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -75,6 +76,7 @@ mod connection_errors;
 mod file_sync_path;
 mod h1_fast_proxy;
 mod http_io;
+mod listener_sets;
 mod plain_http;
 mod prefixed_io;
 #[cfg(test)]
@@ -1062,9 +1064,9 @@ async fn graceful_process_shutdown(
 }
 
 pub(crate) struct ListenerSupervisor {
-  tcp: Option<TcpListenerTask>,
-  http: Option<TcpListenerTask>,
-  http3: Option<Http3ListenerTask>,
+  tcp: BTreeMap<SocketAddr, TcpListenerTask>,
+  http: BTreeMap<SocketAddr, TcpListenerTask>,
+  http3: BTreeMap<SocketAddr, Http3ListenerTask>,
   admin: Option<AdminListenerTask>,
   admin_h3: Option<admin_h3::AdminHttp3ListenerTask>,
   streams: Vec<StreamListenerTask>,
@@ -1075,7 +1077,6 @@ pub(crate) struct ListenerSupervisor {
 }
 
 struct TcpListenerTask {
-  bind: SocketAddr,
   options: TcpListenOptions,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -1129,9 +1130,9 @@ struct BoundAdminListener {
 }
 
 pub(crate) struct PendingListenerUpdate {
-  tcp: Option<Option<BoundTcpListener>>,
-  http: Option<Option<BoundTcpListener>>,
-  http3: Option<Option<BoundHttp3Listener>>,
+  tcp: Option<listener_sets::PendingTcpListenerSetUpdate>,
+  http: Option<listener_sets::PendingTcpListenerSetUpdate>,
+  http3: Option<listener_sets::PendingHttp3ListenerSetUpdate>,
   admin: Option<Option<BoundAdminListener>>,
   admin_h3: Option<Option<admin_h3::BoundAdminHttp3Listener>>,
   streams: Option<Vec<BoundStreamListener>>,
@@ -1166,9 +1167,9 @@ impl ListenerSupervisor {
   ) -> anyhow::Result<Self> {
     let snapshot = state.snapshot();
     let mut supervisor = Self {
-      tcp: None,
-      http: None,
-      http3: None,
+      tcp: BTreeMap::new(),
+      http: BTreeMap::new(),
+      http3: BTreeMap::new(),
       admin: None,
       admin_h3: None,
       streams: Vec::new(),
@@ -1187,70 +1188,40 @@ impl ListenerSupervisor {
     snapshot: &AppSnapshot,
   ) -> anyhow::Result<PendingListenerUpdate> {
     let tcp_options = TcpListenOptions::from(&snapshot.config.runtime.accept);
-    let tcp = if snapshot.config.needs_https_listener() {
-      let bind = snapshot.config.listeners.https_bind;
-      if self
-        .tcp
-        .as_ref()
-        .is_some_and(|task| task.bind == bind && task.options == tcp_options)
-      {
-        None
-      } else {
-        Some(Some(bind_tcp_listener(
-          bind,
-          tcp_options,
-          snapshot.config.runtime.accept.accept_error_backoff_ms,
-          TcpListenerKind::Https,
-        )?))
-      }
-    } else if self.tcp.is_some() {
-      Some(None)
+    let desired_tcp = if snapshot.config.needs_https_listener() {
+      snapshot.config.listeners.https_binds.clone()
     } else {
-      None
+      Vec::new()
     };
+    let tcp = listener_sets::prepare_tcp_listener_set_update(
+      &self.tcp,
+      desired_tcp,
+      tcp_options,
+      snapshot.config.runtime.accept.accept_error_backoff_ms,
+      TcpListenerKind::Https,
+    )?;
 
-    let http = if snapshot.config.listeners.http_mode != crate::config::HttpListenerMode::Off {
-      let bind = snapshot
-        .config
-        .listeners
-        .http_bind
-        .expect("validated http_bind");
-      if self
-        .http
-        .as_ref()
-        .is_some_and(|task| task.bind == bind && task.options == tcp_options)
-      {
-        None
+    let desired_http =
+      if snapshot.config.listeners.http_mode != crate::config::HttpListenerMode::Off {
+        snapshot.config.listeners.http_binds.clone()
       } else {
-        Some(Some(bind_tcp_listener(
-          bind,
-          tcp_options,
-          snapshot.config.runtime.accept.accept_error_backoff_ms,
-          TcpListenerKind::PlainHttp,
-        )?))
-      }
-    } else if self.http.is_some() {
-      Some(None)
-    } else {
-      None
-    };
+        Vec::new()
+      };
+    let http = listener_sets::prepare_tcp_listener_set_update(
+      &self.http,
+      desired_http,
+      tcp_options,
+      snapshot.config.runtime.accept.accept_error_backoff_ms,
+      TcpListenerKind::PlainHttp,
+    )?;
 
-    let (http3, refresh_http3_config) = if snapshot.config.listeners.http3 {
-      let bind = snapshot.config.listeners.https_bind;
-      if self.http3.as_ref().is_some_and(|task| {
-        task.bind == bind
-          && task.socket == snapshot.config.quic.socket
-          && task.transport == snapshot.config.quic.downstream.transport
-      }) {
-        (None, true)
-      } else {
-        (Some(Some(bind_http3_listener(bind, snapshot)?)), false)
-      }
-    } else if self.http3.is_some() {
-      (Some(None), false)
+    let desired_http3 = if snapshot.config.listeners.http3 {
+      snapshot.config.listeners.https_binds.clone()
     } else {
-      (None, false)
+      Vec::new()
     };
+    let (http3, refresh_http3_config) =
+      listener_sets::prepare_http3_listener_set_update(&self.http3, desired_http3, snapshot)?;
 
     let admin = if snapshot.config.admin.enabled {
       let bind = snapshot.config.admin.bind;
@@ -1365,53 +1336,37 @@ impl ListenerSupervisor {
     state: AppHandle,
   ) {
     let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
-    match pending.tcp {
-      Some(Some(tcp)) => {
-        let tcp = tcp.start(state.clone(), self.error_tx.clone(), drain_timeouts);
-        if let Some(old) = self.tcp.replace(tcp) {
-          old.drain_background();
-        }
-      }
-      Some(None) => {
-        if let Some(old) = self.tcp.take() {
-          old.drain_background();
-        }
-      }
-      None => {}
+    if let Some(tcp) = pending.tcp {
+      listener_sets::commit_tcp_listener_set_update(
+        &mut self.tcp,
+        tcp,
+        state.clone(),
+        self.error_tx.clone(),
+        drain_timeouts,
+      );
     }
-    match pending.http {
-      Some(Some(http)) => {
-        let http = http.start(state.clone(), self.error_tx.clone(), drain_timeouts);
-        if let Some(old) = self.http.replace(http) {
-          old.drain_background();
-        }
-      }
-      Some(None) => {
-        if let Some(old) = self.http.take() {
-          old.drain_background();
-        }
-      }
-      None => {}
+    if let Some(http) = pending.http {
+      listener_sets::commit_tcp_listener_set_update(
+        &mut self.http,
+        http,
+        state.clone(),
+        self.error_tx.clone(),
+        drain_timeouts,
+      );
     }
     match pending.http3 {
-      Some(Some(http3)) => {
-        let http3 = http3.start(state.clone(), self.error_tx.clone(), drain_timeouts);
-        if let Some(old) = self.http3.replace(http3) {
-          old.drain_background();
-        }
-      }
-      Some(None) => {
-        if let Some(old) = self.http3.take() {
-          old.drain_background();
-        }
+      Some(http3) => {
+        listener_sets::commit_http3_listener_set_update(
+          &mut self.http3,
+          http3,
+          snapshot,
+          state.clone(),
+          self.error_tx.clone(),
+          drain_timeouts,
+        );
       }
       None if pending.refresh_http3_config => {
-        if let (Some(task), Some(config)) = (&self.http3, &snapshot.quic_server_config) {
-          for endpoint in &task.endpoints {
-            endpoint.set_server_config(Some(config.clone()));
-          }
-          info!(bind = %task.bind, "downstream HTTP/3 TLS config refreshed");
-        }
+        listener_sets::refresh_http3_server_config(&self.http3, snapshot);
       }
       None => {}
     }
@@ -1484,13 +1439,13 @@ impl ListenerSupervisor {
   async fn shutdown(&mut self, snapshot: &AppSnapshot) {
     let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
     let mut tasks = Vec::new();
-    if let Some(task) = self.tcp.take() {
+    for task in std::mem::take(&mut self.tcp).into_values() {
       tasks.push(task.drain());
     }
-    if let Some(task) = self.http.take() {
+    for task in std::mem::take(&mut self.http).into_values() {
       tasks.push(task.drain());
     }
-    if let Some(task) = self.http3.take() {
+    for task in std::mem::take(&mut self.http3).into_values() {
       tasks.push(task.drain());
     }
     if let Some(task) = self.admin.take() {
@@ -1515,13 +1470,13 @@ impl ListenerSupervisor {
 
 impl Drop for ListenerSupervisor {
   fn drop(&mut self) {
-    if let Some(task) = self.tcp.take() {
+    for task in std::mem::take(&mut self.tcp).into_values() {
       task.drain_background();
     }
-    if let Some(task) = self.http.take() {
+    for task in std::mem::take(&mut self.http).into_values() {
       task.drain_background();
     }
-    if let Some(task) = self.http3.take() {
+    for task in std::mem::take(&mut self.http3).into_values() {
       task.drain_background();
     }
     if let Some(task) = self.admin.take() {
@@ -1576,7 +1531,6 @@ impl BoundTcpListener {
     drain_timeouts: DrainTimeouts,
   ) -> TcpListenerTask {
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let bind = self.bind;
     let options = self.options;
     let kind = self.kind;
     let accept_error_backoff = self.accept_error_backoff;
@@ -1609,7 +1563,6 @@ impl BoundTcpListener {
       })
       .collect();
     TcpListenerTask {
-      bind,
       options,
       shutdown,
       connections,

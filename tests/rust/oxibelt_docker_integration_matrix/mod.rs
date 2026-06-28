@@ -36,6 +36,7 @@ pub(crate) fn docker_cases() -> Vec<crate::DockerCase> {
 const CASE_ORDER: &[(&str, &str)] = &[
   ("config-valid", "minimal-http1"),
   ("config-valid", "modular-include-glob"),
+  ("config-valid", "multi-listener-binds"),
   ("config-valid", "root-netport-switcher-https-443"),
   ("config-valid", "static-ocsp-compression-off"),
   ("config-valid", "static-only-route-startup"),

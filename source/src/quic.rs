@@ -255,6 +255,11 @@ fn bind_udp_socket_with_worker_index(
   }
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))
     .with_context(|| format!("failed to create UDP socket for {bind}"))?;
+  if bind.is_ipv6() {
+    socket
+      .set_only_v6(true)
+      .with_context(|| format!("failed to set UDP IPV6_V6ONLY for {bind}"))?;
+  }
   if config.receive_buffer_bytes > 0 {
     socket
       .set_recv_buffer_size(config.receive_buffer_bytes)

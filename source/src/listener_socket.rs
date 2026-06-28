@@ -4,7 +4,8 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use tokio::net::{TcpListener, TcpSocket};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use tokio::net::TcpListener;
 
 use crate::config::RuntimeAcceptConfig;
 use crate::netport_switcher::SwitcherTcpOptions;
@@ -72,28 +73,36 @@ fn bind_tcp_listener(
   )? {
     return Ok(listener);
   }
-  let socket = match bind {
-    SocketAddr::V4(_) => TcpSocket::new_v4(),
-    SocketAddr::V6(_) => TcpSocket::new_v6(),
-  }
-  .with_context(|| format!("failed to create {purpose} TCP socket"))?;
+  let socket = Socket::new(Domain::for_address(bind), Type::STREAM, Some(Protocol::TCP))
+    .with_context(|| format!("failed to create {purpose} TCP socket"))?;
   socket
-    .set_reuseaddr(true)
+    .set_reuse_address(true)
     .with_context(|| format!("failed to set {purpose} TCP SO_REUSEADDR"))?;
+  if bind.is_ipv6() {
+    socket
+      .set_only_v6(true)
+      .with_context(|| format!("failed to set {purpose} TCP IPV6_V6ONLY"))?;
+  }
   if options.reuse_port {
     socket
-      .set_reuseport(true)
+      .set_reuse_port(true)
       .with_context(|| format!("failed to set {purpose} TCP SO_REUSEPORT"))?;
   }
-  socket.bind(bind).with_context(|| {
+  socket.bind(&SockAddr::from(bind)).with_context(|| {
     format!("failed to bind {purpose} listener worker {worker_index} to {bind}")
   })?;
-  socket.listen(options.backlog).with_context(|| {
+  socket.listen(options.backlog as i32).with_context(|| {
     format!(
       "failed to listen on {purpose} listener worker {worker_index} with backlog {}",
       options.backlog
     )
-  })
+  })?;
+  let listener: std::net::TcpListener = socket.into();
+  listener
+    .set_nonblocking(true)
+    .with_context(|| format!("failed to set {purpose} TCP listener nonblocking"))?;
+  TcpListener::from_std(listener)
+    .with_context(|| format!("failed to register {purpose} TCP listener"))
 }
 
 #[cfg(test)]
@@ -122,5 +131,23 @@ mod tests {
     assert_eq!(first.ip(), second.ip());
     assert_ne!(first.port(), 0);
     assert_eq!(first.port(), second.port());
+  }
+
+  #[tokio::test]
+  async fn ipv6_listener_sets_v6_only() {
+    let options = TcpListenOptions {
+      workers: 1,
+      reuse_port: false,
+      backlog: 16,
+    };
+    let listeners = bind_tcp_listeners(
+      "[::1]:0".parse().expect("loopback address should parse"),
+      options,
+      "test",
+    )
+    .expect("IPv6 listener should bind");
+    let socket = socket2::SockRef::from(&listeners[0]);
+
+    assert!(socket.only_v6().expect("IPV6_V6ONLY should be readable"));
   }
 }

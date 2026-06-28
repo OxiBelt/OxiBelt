@@ -106,6 +106,91 @@ async fn same_listener_reload_drains_keepalive_and_new_connections_use_new_snaps
     .expect("new path echo upstream task should not panic");
 }
 
+#[tokio::test]
+async fn listener_reload_adds_plain_http_bind_without_rebinding_existing_listener() {
+  let temp_dir = common::TempDir::new("plain-http-add-bind");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "plain-http-add-bind");
+  let https_bind = unused_loopback_port().await;
+  let first_http = unused_loopback_port().await;
+  let second_http = unused_loopback_port().await;
+  let (upstream_addr, upstream_task) = start_path_echo_http_upstream(3).await;
+  let initial_config = plain_http_listener_config_with_http_binds(
+    &cert_path,
+    &key_path,
+    https_bind,
+    &[first_http],
+    upstream_addr,
+  );
+  let state = AppHandle::new(
+    AppSnapshot::new(initial_config)
+      .await
+      .expect("initial snapshot should initialize"),
+  );
+  let (error_tx, _error_rx) = mpsc::unbounded_channel();
+  let mut supervisor = ListenerSupervisor::start(
+    state.clone(),
+    error_tx,
+    test_admin_control(),
+    test_admin_operations(),
+  )
+  .await
+  .expect("listener supervisor should start");
+
+  let initial_response = raw_http_response(first_http, "/before")
+    .await
+    .expect("first plain HTTP bind should serve before reload");
+  assert!(
+    initial_response.starts_with("HTTP/1.1 200 OK")
+      && initial_response.contains("path=/origin/before"),
+    "first bind should serve before reload: {}",
+    log_safe_test_text(&initial_response)
+  );
+
+  let active = state.snapshot();
+  let reloaded_config = plain_http_listener_config_with_http_binds(
+    &cert_path,
+    &key_path,
+    https_bind,
+    &[first_http, second_http],
+    upstream_addr,
+  );
+  let reloaded = AppSnapshot::new_with_previous(reloaded_config, Some(active.as_ref()))
+    .await
+    .expect("additional-bind snapshot should initialize");
+  let pending = supervisor
+    .prepare(&reloaded)
+    .await
+    .expect("adding a listener bind should not rebind the existing address");
+  state.replace(reloaded);
+  let active = state.snapshot();
+  supervisor.commit(pending, active.as_ref(), state.clone());
+
+  let retained_response = raw_http_response(first_http, "/after-retained")
+    .await
+    .expect("retained plain HTTP bind should serve after reload");
+  assert!(
+    retained_response.starts_with("HTTP/1.1 200 OK")
+      && retained_response.contains("path=/origin/after-retained"),
+    "retained bind should serve after reload: {}",
+    log_safe_test_text(&retained_response)
+  );
+  let added_response = raw_http_response(second_http, "/after-added")
+    .await
+    .expect("added plain HTTP bind should serve after reload");
+  assert!(
+    added_response.starts_with("HTTP/1.1 200 OK")
+      && added_response.contains("path=/origin/after-added"),
+    "added bind should serve after reload: {}",
+    log_safe_test_text(&added_response)
+  );
+
+  supervisor.shutdown(state.snapshot().as_ref()).await;
+  upstream_task
+    .await
+    .expect("path echo upstream task should not panic");
+}
+
 fn plain_http_listener_config(
   cert_path: &Path,
   key_path: &Path,
@@ -118,6 +203,41 @@ fn plain_http_listener_config(
     .replace(
       "https_bind = \"127.0.0.1:8443\"",
       &format!("https_bind = \"{https_bind}\"\nhttp_bind = \"{http_bind}\"\nhttp_mode = \"proxy\""),
+    )
+    .replace(
+      "origin = \"https://app.internal.example\"",
+      &format!("origin = \"http://{upstream_addr}/origin\""),
+    )
+    .replace("max_http_version = \"h2\"", "max_http_version = \"h1\"");
+  raw.push_str(
+    r#"
+
+[runtime.drain]
+graceful_timeout_ms = 1000
+long_connection_close_delay_ms = 1000
+shutdown_delay_ms = 0
+"#,
+  );
+  parse_test_config(&raw)
+}
+
+fn plain_http_listener_config_with_http_binds(
+  cert_path: &Path,
+  key_path: &Path,
+  https_bind: SocketAddr,
+  http_binds: &[SocketAddr],
+  upstream_addr: SocketAddr,
+) -> Config {
+  let http_binds = http_binds
+    .iter()
+    .map(|bind| format!("\"{bind}\""))
+    .collect::<Vec<_>>()
+    .join(", ");
+  let mut raw = common::minimal_config_toml(cert_path, key_path)
+    .replace("unprivileged_mode = true", "unprivileged_mode = false")
+    .replace(
+      "https_bind = \"127.0.0.1:8443\"",
+      &format!("https_bind = \"{https_bind}\"\nhttp_binds = [{http_binds}]\nhttp_mode = \"proxy\""),
     )
     .replace(
       "origin = \"https://app.internal.example\"",

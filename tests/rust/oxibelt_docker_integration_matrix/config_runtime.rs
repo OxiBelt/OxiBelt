@@ -24,6 +24,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     ),
+    docker_case(
+      "config-valid",
+      "multi-listener-binds",
+      "plural HTTPS and plain HTTP listener binds serve on every configured port",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
     root_netport_switcher_case(docker_case(
       "config-valid",
       "root-netport-switcher-https-443",

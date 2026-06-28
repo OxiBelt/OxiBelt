@@ -225,15 +225,13 @@ fn diagnose_low_port_capability(config: &Config, report: &mut DiagnosticReport) 
 
 fn low_port_binds(config: &Config) -> Vec<String> {
   let mut binds = Vec::new();
-  push_low_port(
-    &mut binds,
-    "listeners.https_bind",
-    config.listeners.https_bind,
-  );
-  if config.listeners.http_mode != HttpListenerMode::Off
-    && let Some(bind) = config.listeners.http_bind
-  {
-    push_low_port(&mut binds, "listeners.http_bind", bind);
+  for bind in &config.listeners.https_binds {
+    push_low_port(&mut binds, "listeners.https_binds", *bind);
+  }
+  if config.listeners.http_mode != HttpListenerMode::Off {
+    for bind in &config.listeners.http_binds {
+      push_low_port(&mut binds, "listeners.http_binds", *bind);
+    }
   }
   if config.admin.enabled {
     push_low_port(&mut binds, "admin.bind", config.admin.bind);

@@ -8,13 +8,6 @@ memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
 
-[runtime.netport_switcher]
-enabled = true
-socket_dir = "/run/oxibelt-netport-switcher"
-main_uid = 10001
-main_gid = 10001
-io_timeout_ms = 5000
-
 [runtime.accept]
 workers = "auto"
 reuse_port = true
@@ -22,7 +15,9 @@ backlog = 8192
 accept_error_backoff_ms = 10
 
 [listeners]
-https_binds = ["0.0.0.0:443", "0.0.0.0:444"]
+https_binds = ["0.0.0.0:8443", "0.0.0.0:9443"]
+http_binds = ["0.0.0.0:8080", "0.0.0.0:8081"]
+http_mode = "proxy"
 http1 = true
 http2 = true
 http3 = false

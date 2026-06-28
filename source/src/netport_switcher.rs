@@ -413,25 +413,24 @@ fn allowlist_from_config(config: &Config) -> HashSet<AllowedBind> {
   };
 
   if config.needs_https_listener() {
-    insert_tcp(
-      &mut allowlist,
-      config.listeners.https_bind,
-      tcp_options,
-      "downstream HTTPS",
-    );
+    for bind in &config.listeners.https_binds {
+      insert_tcp(&mut allowlist, *bind, tcp_options, "downstream HTTPS");
+    }
   }
-  if config.listeners.http_mode != crate::config::HttpListenerMode::Off
-    && let Some(bind) = config.listeners.http_bind
-  {
-    insert_tcp(&mut allowlist, bind, tcp_options, "downstream plain HTTP");
+  if config.listeners.http_mode != crate::config::HttpListenerMode::Off {
+    for bind in &config.listeners.http_binds {
+      insert_tcp(&mut allowlist, *bind, tcp_options, "downstream plain HTTP");
+    }
   }
   if config.listeners.http3 {
-    insert_udp(
-      &mut allowlist,
-      config.listeners.https_bind,
-      SwitcherUdpOptions::quic(&config.quic.socket),
-      "downstream HTTP/3",
-    );
+    for bind in &config.listeners.https_binds {
+      insert_udp(
+        &mut allowlist,
+        *bind,
+        SwitcherUdpOptions::quic(&config.quic.socket),
+        "downstream HTTP/3",
+      );
+    }
   }
   for listener in &config.stream_listeners {
     match listener.network {
@@ -518,6 +517,11 @@ fn bind_tcp_socket(request: &BindRequest) -> anyhow::Result<StdTcpListener> {
   socket
     .set_reuse_address(true)
     .context("failed to set broker TCP SO_REUSEADDR")?;
+  if request.bind.is_ipv6() {
+    socket
+      .set_only_v6(true)
+      .context("failed to set broker TCP IPV6_V6ONLY")?;
+  }
   if request.reuse_port {
     socket
       .set_reuse_port(true)
@@ -551,6 +555,11 @@ fn bind_udp_socket_for_request(request: &BindRequest) -> anyhow::Result<StdUdpSo
     socket
       .set_reuse_address(true)
       .context("failed to set broker UDP SO_REUSEADDR")?;
+  }
+  if request.bind.is_ipv6() {
+    socket
+      .set_only_v6(true)
+      .context("failed to set broker UDP IPV6_V6ONLY")?;
   }
   if options.receive_buffer_bytes > 0 {
     socket
