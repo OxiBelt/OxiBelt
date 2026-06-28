@@ -60,6 +60,7 @@ mod route_action_runtime;
 mod route_actions;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
+mod tls_policy;
 pub(crate) mod upstream;
 pub(crate) mod uri;
 pub(crate) mod version;
@@ -118,6 +119,7 @@ pub(crate) use self::waf_body_capture::{
 };
 use self::waf_body_coding::has_non_identity_content_encoding;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
+pub(crate) use tls_policy::route_matches_selected_tls_negotiation_policy;
 
 #[derive(Clone, Copy)]
 pub(crate) struct EffectiveTimeouts {
@@ -184,6 +186,7 @@ impl EffectiveTimeouts {
     )
   }
 }
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
   request: Request<Incoming>,
@@ -494,6 +497,15 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  if !route_matches_selected_tls_negotiation_policy(state.as_ref(), tls.as_ref(), resolved.route) {
+    warn!(
+      sni = ?tls.sni,
+      host = %host,
+      route = %resolved.route.name,
+      "rejected downstream request with mismatched SNI-selected TLS policy"
+    );
+    return text_response(StatusCode::MISDIRECTED_REQUEST, "misdirected request");
+  }
   if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
   {
     return response;

@@ -443,6 +443,139 @@ async fn alt_svc_applies_only_to_https_h1_h2_non_switching_responses() {
   ));
 }
 
+#[tokio::test]
+async fn route_tls_policy_rejects_sni_host_downgrade() {
+  let (state, _temp_dir) = route_tls_policy_state().await;
+
+  assert_eq!(
+    route_tls_policy_status(
+      state.clone(),
+      "secure.example.com",
+      Some("legacy.example.com")
+    )
+    .await,
+    StatusCode::MISDIRECTED_REQUEST
+  );
+  assert_eq!(
+    route_tls_policy_status(state.clone(), "legacy.example.com", None).await,
+    StatusCode::MISDIRECTED_REQUEST
+  );
+  assert_eq!(
+    route_tls_policy_status(
+      state.clone(),
+      "legacy.example.com",
+      Some("unknown.example.com")
+    )
+    .await,
+    StatusCode::MISDIRECTED_REQUEST
+  );
+  assert_eq!(
+    route_tls_policy_status(
+      state.clone(),
+      "alias.example.com",
+      Some("secure.example.com")
+    )
+    .await,
+    StatusCode::OK
+  );
+  assert_eq!(
+    route_tls_policy_status(state, "legacy.example.com", Some("legacy.example.com")).await,
+    StatusCode::OK
+  );
+}
+
+async fn route_tls_policy_state() -> (Arc<AppSnapshot>, common::TempDir) {
+  let temp_dir = common::TempDir::new("route-tls-policy-binding");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-tls-policy-binding");
+  let static_root = temp_dir.path().join("static");
+  std::fs::create_dir(&static_root).expect("static root should be created");
+  std::fs::write(static_root.join("ok.txt"), "ok").expect("static fixture should be written");
+  let base = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      "hosts = [\"example.com\"]",
+      "hosts = [\"secure.example.com\"]",
+    )
+    .replace(
+      "upstream = \"app\"",
+      &format!("static_root = \"{}\"", static_root.display()),
+    );
+  let raw = format!(
+    r#"{base}
+
+[[routes]]
+name = "alias-root"
+hosts = ["alias.example.com"]
+path_prefix = "/"
+static_root = "{static_root}"
+
+[[routes]]
+name = "legacy-root"
+hosts = ["legacy.example.com"]
+path_prefix = "/"
+static_root = "{static_root}"
+
+[routes.tls]
+min_version = "tls1.2"
+max_version = "tls1.2"
+"#,
+    static_root = static_root.display()
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  (Arc::new(state), temp_dir)
+}
+
+async fn route_tls_policy_status(
+  state: Arc<AppSnapshot>,
+  host: &str,
+  sni: Option<&str>,
+) -> StatusCode {
+  let request = Request::builder()
+    .method(Method::GET)
+    .uri("/ok.txt")
+    .version(http::Version::HTTP_11)
+    .header(http::header::HOST, host)
+    .body(empty_test_body())
+    .expect("request should build");
+  let tls = WafTlsMetadata {
+    enabled: true,
+    version: Some("TLSv1_2".to_string()),
+    sni: sni.map(str::to_string),
+    ..WafTlsMetadata::default()
+  };
+
+  handle_inner(
+    request,
+    "203.0.113.10:49152".parse().unwrap(),
+    None,
+    WafTransportMetadataInput::default(),
+    Arc::new(tls),
+    None,
+    None,
+    state,
+    WafProtocol::Http,
+    WafTransportNetwork::Tcp,
+    true,
+    "https",
+    test_drain(),
+  )
+  .await
+  .status()
+}
+
+fn empty_test_body()
+-> impl Body<Data = bytes::Bytes, Error = body::BoxError> + Send + Sync + Unpin + 'static {
+  Full::new(bytes::Bytes::new()).map_err(|never| -> body::BoxError { match never {} })
+}
+
+fn test_drain() -> ConnectionDrain {
+  let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
+  let (_lifecycle_tx, lifecycle_rx) = tokio::sync::watch::channel(false);
+  ConnectionDrain::new(listener_rx, lifecycle_rx, Duration::ZERO)
+}
+
 struct PersonProofRequestFixture {
   method: Method,
   uri: http::Uri,

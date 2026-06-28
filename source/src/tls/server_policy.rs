@@ -17,6 +17,8 @@ use super::{CrliteRuntime, OcspStapleRuntime, TlsResumptionState};
 pub struct DownstreamTlsServerConfig {
   default: Arc<TlsServerConfigSet>,
   by_sni: Arc<HashMap<String, Arc<TlsServerConfigSet>>>,
+  default_policy: TlsNegotiationPolicy,
+  by_sni_policy: Arc<HashMap<String, TlsNegotiationPolicy>>,
 }
 
 impl DownstreamTlsServerConfig {
@@ -26,6 +28,12 @@ impl DownstreamTlsServerConfig {
       .and_then(|name| self.by_sni.get(&name.to_ascii_lowercase()))
       .unwrap_or(&self.default);
     config_set.select(client_hello)
+  }
+
+  pub(crate) fn selected_negotiation_policy(&self, sni: Option<&str>) -> &TlsNegotiationPolicy {
+    sni
+      .and_then(|name| self.by_sni_policy.get(&name.to_ascii_lowercase()))
+      .unwrap_or(&self.default_policy)
   }
 }
 
@@ -134,6 +142,7 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
   );
   let default = build_or_get_tcp_policy(&mut policies, tcp_build, &default_policy)?;
   let mut by_sni = HashMap::new();
+  let mut by_sni_policy = HashMap::new();
   for route in routes {
     if !route.tls.has_negotiation_overrides() {
       continue;
@@ -142,12 +151,16 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
     let config_set = build_or_get_tcp_policy(&mut policies, tcp_build, &policy)
       .with_context(|| format!("failed to build route {} downstream TLS policy", route.name))?;
     for host in &route.hosts {
-      by_sni.insert(host.to_ascii_lowercase(), config_set.clone());
+      let normalized_host = host.to_ascii_lowercase();
+      by_sni.insert(normalized_host.clone(), config_set.clone());
+      by_sni_policy.insert(normalized_host, policy.clone());
     }
   }
   Ok(DownstreamTlsServerConfig {
     default,
     by_sni: Arc::new(by_sni),
+    default_policy,
+    by_sni_policy: Arc::new(by_sni_policy),
   })
 }
 
@@ -397,7 +410,7 @@ fn named_group(group: TlsKeyExchangeGroup) -> NamedGroup {
 
 #[cfg(test)]
 mod tests {
-  use std::path::Path;
+  use std::path::{Path, PathBuf};
   use std::sync::Arc;
 
   use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
@@ -414,9 +427,40 @@ mod tests {
     ));
   }
 
+  #[test]
+  fn sni_version_policy_lookup_tracks_route_policy() {
+    let temp_dir = common::TempDir::new("sni-version-policy-lookup");
+    let (config, _) = sni_version_policy_config(&temp_dir);
+    let server_config = downstream_tls_server_config(&config);
+    assert_sni_policy_lookup(&server_config);
+  }
+
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn sni_version_policy_selects_tcp_tls_versions() {
     let temp_dir = common::TempDir::new("sni-version-policy");
+    let (config, ca_cert_path) = sni_version_policy_config(&temp_dir);
+    let server_config = downstream_tls_server_config(&config);
+
+    let legacy_version = selected_tcp_tls_version(
+      server_config.clone(),
+      &ca_cert_path,
+      "legacy.example.com",
+      &[&rustls::version::TLS12],
+    )
+    .await;
+    let default_version = selected_tcp_tls_version(
+      server_config,
+      &ca_cert_path,
+      "example.com",
+      &[&rustls::version::TLS13],
+    )
+    .await;
+
+    assert_eq!(legacy_version, ProtocolVersion::TLSv1_2);
+    assert_eq!(default_version, ProtocolVersion::TLSv1_3);
+  }
+
+  fn sni_version_policy_config(temp_dir: &common::TempDir) -> (crate::config::Config, PathBuf) {
     let (ca_cert_path, ca_key_path) =
       common::create_self_signed_cert(temp_dir.path(), "sni-version-policy-ca");
     let (default_cert, default_key) = common::create_ca_signed_server_cert(
@@ -462,7 +506,11 @@ max_version = "tls1.2"
 "#;
     let config: crate::config::Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
-    let server_config = build_downstream_tls_server_config_with_resumption_and_ocsp(
+    (config, ca_cert_path)
+  }
+
+  fn downstream_tls_server_config(config: &crate::config::Config) -> DownstreamTlsServerConfig {
+    build_downstream_tls_server_config_with_resumption_and_ocsp(
       &config.tls,
       &config.listeners,
       &config.routes,
@@ -471,25 +519,24 @@ max_version = "tls1.2"
       None,
       None,
     )
-    .expect("server config should build");
+    .expect("server config should build")
+  }
 
-    let legacy_version = selected_tcp_tls_version(
-      server_config.clone(),
-      &ca_cert_path,
-      "legacy.example.com",
-      &[&rustls::version::TLS12],
-    )
-    .await;
-    let default_version = selected_tcp_tls_version(
-      server_config,
-      &ca_cert_path,
-      "example.com",
-      &[&rustls::version::TLS13],
-    )
-    .await;
-
-    assert_eq!(legacy_version, ProtocolVersion::TLSv1_2);
-    assert_eq!(default_version, ProtocolVersion::TLSv1_3);
+  fn assert_sni_policy_lookup(server_config: &DownstreamTlsServerConfig) {
+    let legacy_policy = server_config.selected_negotiation_policy(Some("legacy.example.com"));
+    assert_eq!(legacy_policy.min_version, TlsVersion::Tls12);
+    assert_eq!(legacy_policy.max_version, TlsVersion::Tls12);
+    let default_policy = server_config.selected_negotiation_policy(Some("example.com"));
+    assert_eq!(default_policy.min_version, TlsVersion::Tls13);
+    assert_eq!(default_policy.max_version, TlsVersion::Tls13);
+    assert_eq!(
+      server_config.selected_negotiation_policy(Some("unknown.example.com")),
+      default_policy
+    );
+    assert_eq!(
+      server_config.selected_negotiation_policy(None),
+      default_policy
+    );
   }
 
   async fn selected_tcp_tls_version(

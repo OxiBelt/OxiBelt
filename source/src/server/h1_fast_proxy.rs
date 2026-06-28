@@ -118,7 +118,9 @@ pub(super) async fn try_handle_connection(
       ReadRequestOutcome::Request(request) => request,
     };
 
-    let Some(prepared) = prepare_fast_proxy_request(&parsed, snapshot.as_ref(), peer_addr) else {
+    let Some(prepared) =
+      prepare_fast_proxy_request(&parsed, snapshot.as_ref(), peer_addr, tls.as_ref())
+    else {
       trace!("TLS H1 pre-Hyper proxy request fell back");
       return Ok(H1FastProxyPreflight::Continue {
         io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
@@ -255,6 +257,7 @@ fn prepare_fast_proxy_request<'a>(
   parsed: &ParsedPlainRequest,
   snapshot: &'a AppSnapshot,
   peer_addr: SocketAddr,
+  tls: &WafTlsMetadata,
 ) -> Option<PreparedFastProxyRequest<'a>> {
   if parsed.version != 1 || (parsed.method != Method::GET && parsed.method != Method::HEAD) {
     return None;
@@ -341,6 +344,9 @@ fn prepare_fast_proxy_request<'a>(
         &snapshot.upstreams,
       )
     })?;
+  if !proxy_http::route_matches_selected_tls_negotiation_policy(snapshot, tls, resolved.route) {
+    return None;
+  }
   if resolved.execution_plan.features.ipm || resolved.execution_plan.features.cache {
     return None;
   }
@@ -675,29 +681,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::proxy::http::response::{silent_close_response, text_response};
-
-  #[test]
-  fn silent_close_response_stops_before_h1_fast_writer() {
-    let response = silent_close_response();
-
-    assert!(
-      response_write_plan(&response, &Method::GET, false, Duration::from_secs(1)).is_none(),
-      "silent_close sentinel must close before serializing a 204 response"
-    );
-  }
-
-  #[test]
-  fn ordinary_no_content_response_is_still_serialized_without_body() {
-    let response = text_response(StatusCode::NO_CONTENT, "");
-
-    let write_plan = response_write_plan(&response, &Method::GET, false, Duration::from_secs(1))
-      .expect("ordinary 204 should still be serialized");
-
-    assert!(write_plan.keep_alive);
-    assert!(write_plan.skip_body);
-    assert_eq!(write_plan.response_send_timeout, Duration::from_secs(1));
-  }
-}
+mod tests;
