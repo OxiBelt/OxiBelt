@@ -11,7 +11,7 @@ default = []
 fuzzing = []
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 aho-corasick = "1.1.4"
 arc-swap = "1.9.1"
 argon2 = { version = "0.5.3", features = ["std"] }

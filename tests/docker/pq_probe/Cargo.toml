@@ -7,5 +7,5 @@ publish = false
 [workspace]
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
