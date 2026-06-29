@@ -18,6 +18,7 @@ pub struct CacheBodyFile {
 pub struct CacheEntry {
   pub status: StatusCode,
   pub headers: HeaderMap,
+  pub security_headers_neutral: bool,
   pub body: Bytes,
   pub body_file: Option<CacheBodyFile>,
   pub(crate) _body_file_guard: Option<Arc<tempfile::NamedTempFile>>,
@@ -31,6 +32,7 @@ impl CacheEntry {
     Self {
       status,
       headers,
+      security_headers_neutral: true,
       body,
       body_file: None,
       _body_file_guard: None,
@@ -54,6 +56,7 @@ impl CacheEntry {
     Self {
       status,
       headers,
+      security_headers_neutral: true,
       body: Bytes::new(),
       body_file: Some(CacheBodyFile {
         path,
@@ -77,6 +80,7 @@ impl CacheEntry {
     Self {
       status,
       headers,
+      security_headers_neutral: true,
       body: Bytes::new(),
       body_file: Some(CacheBodyFile {
         path,

@@ -445,6 +445,9 @@ impl SharedState {
   }
 
   fn shared_cache_entry_to_cache_entry(&self, entry: &SharedCacheEntry) -> Option<CacheEntry> {
+    if !entry.security_headers_neutral {
+      return None;
+    }
     if entry.body_chunks.is_empty() {
       return entry.to_cache_entry();
     }
@@ -500,6 +503,9 @@ impl Drop for SharedCacheLock {
 
 impl SharedCacheEntry {
   pub fn to_cache_entry(&self) -> Option<CacheEntry> {
+    if !self.security_headers_neutral {
+      return None;
+    }
     Some(
       CacheEntry::memory(
         http::StatusCode::from_u16(self.status).ok()?,

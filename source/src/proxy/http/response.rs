@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use http::header::HeaderMap;
-use http::{HeaderValue, Method, Response, StatusCode, Uri};
+use http::{HeaderName, HeaderValue, Method, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 use std::error::Error;
 use std::fmt;
@@ -315,20 +315,87 @@ pub(crate) fn apply_route_security_headers(
   apply_effective_security_headers(headers, security, route.security_headers.as_deref());
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedRouteSecurityHeaders {
+  before: Vec<ManagedSecurityHeaderValues>,
+  after: Vec<ManagedSecurityHeaderValues>,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedSecurityHeaderValues {
+  name: HeaderName,
+  values: Vec<HeaderValue>,
+}
+
+pub(crate) fn apply_effective_security_headers_with_snapshot(
+  headers: &mut http::HeaderMap,
+  security: &SecurityConfig,
+  route_security_headers: Option<&str>,
+) -> AppliedRouteSecurityHeaders {
+  let before = managed_security_header_values(headers);
+  apply_effective_security_headers(headers, security, route_security_headers);
+  let after = managed_security_header_values(headers);
+  AppliedRouteSecurityHeaders { before, after }
+}
+
+pub(crate) fn apply_route_security_headers_with_snapshot(
+  headers: &mut http::HeaderMap,
+  security: &SecurityConfig,
+  route: &RouteConfig,
+) -> AppliedRouteSecurityHeaders {
+  apply_effective_security_headers_with_snapshot(
+    headers,
+    security,
+    route.security_headers.as_deref(),
+  )
+}
+
+pub(crate) fn neutralize_applied_route_security_headers(
+  headers: &mut http::HeaderMap,
+  applied: &AppliedRouteSecurityHeaders,
+) {
+  for (before, after) in applied.before.iter().zip(&applied.after) {
+    if before.values == after.values {
+      continue;
+    }
+    if header_values(headers, &after.name) == after.values {
+      replace_header_values(headers, &before.name, &before.values);
+    }
+  }
+}
+
 pub(crate) fn reconcile_route_security_headers(
   headers: &mut http::HeaderMap,
   security: &SecurityConfig,
   route: &RouteConfig,
 ) {
-  for name in [
-    "strict-transport-security",
-    "x-content-type-options",
-    "referrer-policy",
-    "permissions-policy",
-  ] {
-    headers.remove(name);
-  }
   apply_route_security_headers(headers, security, route);
+}
+
+fn managed_security_header_values(headers: &http::HeaderMap) -> Vec<ManagedSecurityHeaderValues> {
+  [
+    HeaderName::from_static("strict-transport-security"),
+    HeaderName::from_static("x-content-type-options"),
+    HeaderName::from_static("referrer-policy"),
+    HeaderName::from_static("permissions-policy"),
+  ]
+  .into_iter()
+  .map(|name| ManagedSecurityHeaderValues {
+    values: header_values(headers, &name),
+    name,
+  })
+  .collect()
+}
+
+fn header_values(headers: &http::HeaderMap, name: &HeaderName) -> Vec<HeaderValue> {
+  headers.get_all(name).iter().cloned().collect()
+}
+
+fn replace_header_values(headers: &mut http::HeaderMap, name: &HeaderName, values: &[HeaderValue]) {
+  headers.remove(name);
+  for value in values {
+    headers.append(name.clone(), value.clone());
+  }
 }
 
 pub(crate) fn with_route_security_headers(

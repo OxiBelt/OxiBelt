@@ -66,6 +66,9 @@ impl ResponseCache {
     if !cacheable_status(&operation.policy, status) {
       return None;
     }
+    if !metadata.security_headers_neutral {
+      return None;
+    }
     let headers = external_headers(&metadata.headers)?;
     let vary = external_vary_matchers(&metadata.vary)?;
     if !external_vary_allowed(&vary) || !vary_matches(&vary, ctx.request_headers) {
@@ -110,6 +113,7 @@ impl ResponseCache {
           uri: operation.uri.clone(),
           status,
           headers: headers.clone(),
+          security_headers_neutral: metadata.security_headers_neutral,
           body: StoredBody::Memory(body),
           expires_at,
           stale_if_error_until,
@@ -221,6 +225,7 @@ impl ResponseCache {
             ExternalCacheHeader::new(name.as_str().to_string(), value.as_bytes())
           })
           .collect(),
+        security_headers_neutral: entry.security_headers_neutral,
         body_len,
         stored_at_ms: system_time_ms(entry.stored_at),
         expires_at_ms: system_time_ms(entry.expires_at),

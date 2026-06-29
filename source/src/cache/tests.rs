@@ -11,6 +11,8 @@ mod fill;
 mod index;
 #[path = "tests_revalidation.rs"]
 mod revalidation;
+#[path = "tests_security.rs"]
+mod security;
 #[path = "tests_semantics.rs"]
 mod semantics;
 #[path = "tests_shared.rs"]

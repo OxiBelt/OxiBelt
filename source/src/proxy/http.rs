@@ -39,6 +39,7 @@ mod alt_svc;
 pub(crate) mod body;
 mod body_capture;
 pub(crate) mod buffering;
+mod cache_refresh;
 mod cache_status;
 mod cache_streaming;
 mod cache_wait;
@@ -97,8 +98,9 @@ use self::request_framing::{
   positive_content_length, request_body_framing,
 };
 use self::response::{
-  RouteSecurityHeaders, apply_effective_security_headers, apply_route_security_headers,
-  apply_sticky_cookie, draining_response, external_auth_response, proxy_error_response,
+  AppliedRouteSecurityHeaders, RouteSecurityHeaders, apply_route_security_headers_with_snapshot,
+  apply_sticky_cookie, draining_response, external_auth_response,
+  neutralize_applied_route_security_headers, proxy_error_response,
   request_buffering_error_response, response_buffering_error_response, silent_close_response,
   text_response, upstream_error_response, upstream_selection_error_response,
   with_pending_dynamic_person_proof_response_mutations,
@@ -1821,7 +1823,11 @@ where
     parts.headers.remove(http::header::TRAILER);
   }
   semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-  apply_route_security_headers(&mut parts.headers, &state.config.security, resolved.route);
+  let applied_route_security_headers = apply_route_security_headers_with_snapshot(
+    &mut parts.headers,
+    &state.config.security,
+    resolved.route,
+  );
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   let (body, captured_response_body) = if response_body_need != BodyNeed::None {
@@ -1938,6 +1944,7 @@ where
     Some(resolved.route),
     cache_store_allowed,
     _cache_fill_guard.take(),
+    Some(&applied_route_security_headers),
   )
   .await;
   let response = compression::maybe_compress_response(
@@ -2893,8 +2900,12 @@ fn handle_cache_lookup_result(
         cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &stale.entry);
       if stale.background_refresh
         && !stale_blocked_by_transform
-        && can_background_refresh(resolved.execution_plan.waf, upstream, upstream_version)
-        && spawn_background_refresh(
+        && cache_refresh::can_background_refresh(
+          resolved.execution_plan.waf,
+          upstream,
+          upstream_version,
+        )
+        && cache_refresh::spawn_background_refresh(
           state.clone(),
           outbound,
           upstream,
@@ -2996,16 +3007,6 @@ fn handle_cache_lookup_result(
   }
 }
 
-fn can_background_refresh(
-  waf: crate::routes::RouteWafExecutionPlan,
-  upstream: &UpstreamConfig,
-  upstream_version: HttpVersion,
-) -> bool {
-  upstream_version != HttpVersion::H3
-    && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
-    && !waf.response.enabled()
-}
-
 fn cache_entry_blocked_by_waf_body_transform(
   state: &AppSnapshot,
   resolved: &crate::routes::ResolvedRoute<'_>,
@@ -3014,205 +3015,6 @@ fn cache_entry_blocked_by_waf_body_transform(
   crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route)
     && resolved.execution_plan.waf.response.body_need() != BodyNeed::None
     && has_non_identity_content_encoding(&entry.headers)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_background_refresh(
-  state: Arc<AppSnapshot>,
-  outbound: &Request<ProxyBody>,
-  upstream: &UpstreamConfig,
-  upstream_version: HttpVersion,
-  timeouts: EffectiveTimeouts,
-  route_cache: Option<&str>,
-  route_security_headers: Option<&str>,
-  scheme: &'static str,
-  host: String,
-  method: Method,
-  uri: http::Uri,
-  request_headers: HeaderMap,
-  request_version: http::Version,
-  stale: crate::cache::StaleEntry,
-) -> bool {
-  let Some(permit) = state.cache.try_background_refresh_permit(route_cache) else {
-    state.metrics.record_cache_background_refresh_skip();
-    return false;
-  };
-  let Some(fill_permit) = state.cache.begin_fill(crate::cache::CacheLookupContext {
-    policy_name: route_cache,
-    scheme,
-    host: &host,
-    method: &method,
-    uri: &uri,
-    request_headers: &request_headers,
-  }) else {
-    state.metrics.record_cache_background_refresh_skip();
-    return false;
-  };
-  let guard = match fill_permit {
-    crate::cache::CacheFillPermit::Leader(guard) => guard,
-    crate::cache::CacheFillPermit::Follower(_) => {
-      state.metrics.record_cache_background_refresh_skip();
-      return false;
-    }
-    crate::cache::CacheFillPermit::SharedConflict => {
-      state.metrics.record_cache_fill_lock_conflict();
-      state.metrics.record_cache_background_refresh_skip();
-      return false;
-    }
-  };
-  let route_cache = route_cache.map(str::to_string);
-  let route_security_headers = route_security_headers.map(str::to_string);
-  let upstream = upstream.clone();
-  let mut outbound = empty_request_from(outbound);
-  for (name, value) in &stale.request_headers {
-    outbound.headers_mut().insert(name.clone(), value.clone());
-  }
-  tokio::spawn(async move {
-    let _guard = guard;
-    let _permit = permit;
-    if let Err(error) = background_refresh(
-      state.clone(),
-      outbound,
-      upstream,
-      upstream_version,
-      timeouts,
-      route_cache,
-      route_security_headers,
-      scheme,
-      host,
-      method,
-      uri,
-      request_headers,
-      request_version,
-      stale.entry,
-    )
-    .await
-    {
-      state.metrics.record_cache_background_refresh_error();
-      warn!(error = %error, "cache background refresh failed");
-    }
-  });
-  true
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn background_refresh(
-  state: Arc<AppSnapshot>,
-  outbound: Request<ProxyBody>,
-  upstream: UpstreamConfig,
-  upstream_version: HttpVersion,
-  timeouts: EffectiveTimeouts,
-  route_cache: Option<String>,
-  route_security_headers: Option<String>,
-  scheme: &'static str,
-  host: String,
-  method: Method,
-  uri: http::Uri,
-  request_headers: HeaderMap,
-  request_version: http::Version,
-  cached_entry: crate::cache::CacheEntry,
-) -> anyhow::Result<()> {
-  let Some(client) =
-    state
-      .clients
-      .for_upstream_version(&upstream.name, upstream.origin.scheme(), upstream_version)
-  else {
-    state.metrics.record_cache_background_refresh_skip();
-    return Ok(());
-  };
-  let retry_policy = EffectiveRetryPolicy::disabled_direct();
-  let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy).await?;
-  let (mut parts, body) = response.into_parts();
-  if parts.status == StatusCode::NOT_MODIFIED {
-    state.cache.update_from_not_modified(
-      crate::cache::CacheInsertContext {
-        policy_name: route_cache.as_deref(),
-        scheme,
-        host: &host,
-        method: &method,
-        uri: &uri,
-        request_headers: &request_headers,
-      },
-      &cached_entry,
-      &parts.headers,
-    );
-    state.metrics.record_cache_background_refresh_success();
-    return Ok(());
-  }
-  strip_hop_by_hop_headers(&mut parts.headers);
-  semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
-  apply_effective_security_headers(
-    &mut parts.headers,
-    &state.config.security,
-    route_security_headers.as_deref(),
-  );
-  apply_alt_svc_header(
-    &mut parts.headers,
-    parts.status,
-    state.as_ref(),
-    scheme,
-    request_version,
-  );
-  if body
-    .size_hint()
-    .upper()
-    .is_none_or(|upper| upper as usize > state.config.proxy.buffering.max_memory_body_bytes)
-  {
-    state.metrics.record_cache_background_refresh_skip();
-    return Ok(());
-  }
-  let body = body::with_read_timeout(
-    body.map_err(boxed_error).boxed(),
-    timeouts.upstream_read,
-    BodyTimeoutKind::UpstreamResponseRead,
-  );
-  let bytes = body
-    .collect()
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to read background refresh body: {error}"))?
-    .to_bytes();
-  match state.cache.insert(
-    crate::cache::CacheInsertContext {
-      policy_name: route_cache.as_deref(),
-      scheme,
-      host: &host,
-      method: &method,
-      uri: &uri,
-      request_headers: &request_headers,
-    },
-    crate::cache::CacheEntry::memory(parts.status, parts.headers, bytes),
-  ) {
-    crate::cache::CacheInsertOutcome::Stored => {
-      state.metrics.record_cache_background_refresh_success();
-    }
-    crate::cache::CacheInsertOutcome::Rejected => {
-      state.metrics.record_cache_admission_rejection();
-      state.metrics.record_cache_background_refresh_skip();
-    }
-    crate::cache::CacheInsertOutcome::AdmissionWarming => {
-      state.metrics.record_cache_admission_rejection();
-      state.metrics.record_cache_background_refresh_skip();
-    }
-    crate::cache::CacheInsertOutcome::StoreFailed => {
-      state.metrics.record_cache_fill_error();
-      state.metrics.record_cache_background_refresh_error();
-    }
-    crate::cache::CacheInsertOutcome::NotCacheable => {
-      state.metrics.record_cache_background_refresh_skip();
-    }
-  }
-  Ok(())
-}
-
-fn empty_request_from<B>(request: &Request<B>) -> Request<ProxyBody> {
-  let mut builder = Request::builder()
-    .method(request.method().clone())
-    .uri(request.uri().clone())
-    .version(request.version());
-  *builder.headers_mut().expect("request builder headers") = request.headers().clone();
-  builder
-    .body(full_body(bytes::Bytes::new()))
-    .expect("request clone builds")
 }
 
 #[cfg(test)]
@@ -3240,6 +3042,7 @@ async fn maybe_cache_response(
     route,
     true,
     None,
+    None,
   )
   .await
 }
@@ -3257,6 +3060,7 @@ async fn maybe_cache_response_with_store_permission(
   route: Option<&RouteConfig>,
   allow_store: bool,
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
+  applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
 ) -> Response<ProxyBody> {
   if !state.request_path_features.cache || !state.cache.policy_enabled(route_cache, method) {
     let mut response = response;
@@ -3265,6 +3069,10 @@ async fn maybe_cache_response_with_store_permission(
   }
   let (mut parts, mut body) = response.into_parts();
   cache_status::strip_headers(&mut parts.headers);
+  let mut cache_headers = parts.headers.clone();
+  if let Some(applied) = applied_route_security_headers {
+    neutralize_applied_route_security_headers(&mut cache_headers, applied);
+  }
   if !allow_store {
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
@@ -3277,7 +3085,7 @@ async fn maybe_cache_response_with_store_permission(
     );
     return response;
   }
-  let content_length = cache_streaming::exact_response_content_length(&parts.headers);
+  let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
     policy_name: route_cache,
     scheme,
@@ -3295,7 +3103,7 @@ async fn maybe_cache_response_with_store_permission(
   let prepared =
     match state
       .cache
-      .prepare_insert(insert_ctx(), parts.status, &parts.headers, content_length)
+      .prepare_insert(insert_ctx(), parts.status, &cache_headers, content_length)
     {
       crate::cache::CachePreparedInsertDecision::Cacheable(prepared) => {
         record_fill_stage("head_decision", "cacheable", head_started);
@@ -3371,6 +3179,7 @@ async fn maybe_cache_response_with_store_permission(
     );
     if state.cache.strip_surrogate_control(route_cache) {
       parts.headers.remove("surrogate-control");
+      cache_headers.remove("surrogate-control");
     }
     let mut response = Response::from_parts(parts, body);
     cache_status::apply(&mut response, CacheOutcome::Miss, CacheReason::TooLarge);
@@ -3382,11 +3191,12 @@ async fn maybe_cache_response_with_store_permission(
       record_fill_stage("body_collect", "ok", collect_started);
       if state.cache.strip_surrogate_control(route_cache) {
         parts.headers.remove("surrogate-control");
+        cache_headers.remove("surrogate-control");
       }
       let store_started = Instant::now();
       let reason = match state.cache.insert_prepared(
         *prepared,
-        crate::cache::CacheEntry::memory(parts.status, parts.headers.clone(), bytes.clone()),
+        crate::cache::CacheEntry::memory(parts.status, cache_headers.clone(), bytes.clone()),
       ) {
         crate::cache::CacheInsertOutcome::Rejected => {
           record_fill_stage("local_store", "rejected", store_started);

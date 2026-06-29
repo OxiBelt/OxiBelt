@@ -721,6 +721,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
     uri: "/asset/poison.css".to_string(),
     status: StatusCode::OK,
     headers: HeaderMap::new(),
+    security_headers_neutral: true,
     body: StoredBody::Disk(outside_path.clone()),
     expires_at: UNIX_EPOCH + Duration::from_secs(1),
     stale_if_error_until: None,

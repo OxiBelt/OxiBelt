@@ -342,6 +342,7 @@ impl ResponseCache {
       uri: prepared.uri,
       status: prepared.status,
       headers: prepared.stored_headers,
+      security_headers_neutral: true,
       body: StoredBody::Disk(body_path.clone()),
       expires_at: prepared.metadata.expires_at,
       stale_if_error_until: prepared.metadata.stale_if_error_until,

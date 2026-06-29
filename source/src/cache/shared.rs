@@ -32,6 +32,7 @@ pub(in crate::cache) fn shared_cache_entry_metadata(
       .iter()
       .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
       .collect(),
+    security_headers_neutral: entry.security_headers_neutral,
     body_len,
     body_chunks: Vec::new(),
     body: Vec::new(),

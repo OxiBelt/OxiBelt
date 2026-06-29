@@ -120,6 +120,8 @@ pub struct SharedCacheEntry {
   pub status: u16,
   pub headers: Vec<(String, Vec<u8>)>,
   #[serde(default)]
+  pub security_headers_neutral: bool,
+  #[serde(default)]
   pub body: Vec<u8>,
   #[serde(default)]
   pub body_len: usize,

@@ -47,6 +47,7 @@ fn external_hit(
         "cache-control".to_string(),
         b"public, max-age=60",
       )],
+      security_headers_neutral: true,
       body_len: body.len(),
       stored_at_ms: system_time_ms(now),
       expires_at_ms: system_time_ms(now + Duration::from_secs(60)),
@@ -102,6 +103,41 @@ fn external_memory_hit_is_promoted_after_validation() {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"body")),
     other => panic!("expected promoted local hit, got {other:?}"),
   }
+}
+
+#[test]
+fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
+  let cache = cache_with_external_handler();
+  let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
+  let request_headers = HeaderMap::new();
+  let ctx = CacheLookupContext {
+    policy_name: None,
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+  };
+  let operation = cache
+    .operation_context(
+      ctx.policy_name,
+      ctx.scheme,
+      ctx.host,
+      ctx.method,
+      ctx.uri,
+      ctx.request_headers,
+    )
+    .expect("operation context should build");
+
+  let mut hit = external_hit(
+    &operation,
+    Bytes::from_static(b"body"),
+    "/asset.css",
+    Vec::new(),
+  );
+  hit.metadata.security_headers_neutral = false;
+
+  assert!(cache.external_lookup_result(operation, ctx, hit).is_none());
 }
 
 #[test]

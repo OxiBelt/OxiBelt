@@ -48,6 +48,8 @@ pub(crate) struct ExternalCacheEntryMetadata {
   pub uri: String,
   pub status: u16,
   pub headers: Vec<ExternalCacheHeader>,
+  #[serde(default)]
+  pub security_headers_neutral: bool,
   pub body_len: usize,
   pub stored_at_ms: i64,
   pub expires_at_ms: i64,
@@ -229,6 +231,7 @@ mod tests {
         "content-type".to_string(),
         b"text/plain",
       )],
+      security_headers_neutral: true,
       body_len: 4,
       stored_at_ms: 1,
       expires_at_ms: 2,
