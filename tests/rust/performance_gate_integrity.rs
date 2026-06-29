@@ -985,7 +985,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -999,6 +999,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "remote-signer",
     "pool-concurrency",
     "runtime-direct-h1",
+    "metrics-mode",
     "oxibelt-aggressive-long-run",
   ] {
     assert!(
@@ -1026,6 +1027,54 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     assert!(
       script.contains(expected),
       "performance script should include runtime-direct-h1 experiment evidence: {expected}"
+    );
+  }
+}
+
+#[test]
+fn metrics_mode_serving_type_runs_metrics_overhead_rows() {
+  let script = performance_script_text();
+  let start_function = extract_bash_function(&script, "start_oxibelt");
+  let group_function = extract_bash_function(&script, "run_metrics_mode_group");
+
+  for expected in [
+    "metrics-mode)",
+    "run_metrics_mode_group()",
+    "run_metrics_mode_loads_for_host nginx nginx off",
+    "run_metrics_mode_loads_for_host nginx nginx basic",
+    "run_metrics_mode_loads_for_host nginx nginx detailed",
+    "start_oxibelt \"${oxibelt_baseline_scenario}\" oxibelt --metrics-disabled",
+    "start_oxibelt \"${oxibelt_baseline_scenario}\" oxibelt --detailed-hot-path-diagnostics",
+    "oxibelt-metrics-*-h2:h2",
+    "oxibelt-metrics-basic-h2",
+    "oxibelt-metrics-detailed-h3",
+    "metrics_mode_diagnostic_load_label",
+  ] {
+    assert!(
+      script.contains(expected),
+      "performance script should include metrics-mode evidence: {expected}"
+    );
+  }
+
+  for expected in [
+    "--metrics-disabled",
+    "in_metrics = ($0 ~ /^[[:space:]]*\\[metrics\\][[:space:]]*$/)",
+    "sub(/=.*/, \"= false\")",
+  ] {
+    assert!(
+      start_function.contains(expected),
+      "start_oxibelt should support scoped metrics disable: {expected}"
+    );
+  }
+
+  for expected in [
+    "run_metrics_mode_loads_for_host oxibelt oxibelt off required",
+    "run_metrics_mode_loads_for_host oxibelt oxibelt basic required",
+    "run_metrics_mode_loads_for_host oxibelt oxibelt detailed required",
+  ] {
+    assert!(
+      group_function.contains(expected),
+      "metrics-mode group should contain {expected:?}"
     );
   }
 }

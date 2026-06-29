@@ -1,7 +1,8 @@
 //! Downstream HTTP/3 response send helpers.
 //! Fast branches stay limited to responses already proven safe by the HTTP fast path.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ::http::Response;
 use anyhow::Context;
@@ -9,15 +10,63 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::body::Body as _;
 
+use crate::metrics::fast_path::labels::FastPathMetricStage;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::body::{
   CompiledKnownSmallNoopResponse, InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES,
   KnownSmallResponseBody, ProxyBody,
 };
+use crate::proxy::http::fast_path::stage_timing as timing;
+use crate::state::AppSnapshot;
+
+#[derive(Clone)]
+pub(super) struct H3ResponseTiming {
+  state: Arc<AppSnapshot>,
+  enabled: bool,
+}
+
+impl H3ResponseTiming {
+  pub(super) fn from_state(state: &Arc<AppSnapshot>) -> Self {
+    Self {
+      state: state.clone(),
+      enabled: state.request_path_features.stage_timing_metrics,
+    }
+  }
+
+  fn start(&self) -> Option<Instant> {
+    timing::start(self.enabled)
+  }
+
+  fn record(&self, stage: FastPathMetricStage, success: bool, started_at: Option<Instant>) {
+    timing::record(
+      self.state.as_ref(),
+      timing::PATH_H3_DOWNSTREAM,
+      timing::protocol(::http::Version::HTTP_3),
+      stage,
+      if success {
+        timing::OUTCOME_OK
+      } else {
+        timing::OUTCOME_ERROR
+      },
+      started_at,
+    );
+  }
+}
 
 pub(super) async fn respond_to_h3_request<S>(
+  stream: h3::server::RequestStream<S, Bytes>,
+  response: Response<ProxyBody>,
+) -> anyhow::Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
+  respond_to_h3_request_with_timing(stream, response, None).await
+}
+
+pub(super) async fn respond_to_h3_request_with_timing<S>(
   mut stream: h3::server::RequestStream<S, Bytes>,
   response: Response<ProxyBody>,
+  response_timing: Option<H3ResponseTiming>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
@@ -57,24 +106,71 @@ where
 
   match known_small_body_plan {
     H3KnownSmallBodyPlan::CompiledNoopNoTrailers(data) => {
-      return respond_to_h3_compiled_known_small_no_trailers(stream, data, response_send_timeout)
-        .await;
+      let finalize_started = response_timing_start(response_timing.as_ref());
+      let result =
+        respond_to_h3_compiled_known_small_no_trailers(stream, data, response_send_timeout).await;
+      response_timing_record(
+        response_timing.as_ref(),
+        timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
+        result.is_ok(),
+        finalize_started,
+      );
+      return result;
     }
     H3KnownSmallBodyPlan::Inlined(inlined) => {
-      return respond_to_h3_inlined_known_small_body(stream, inlined, response_send_timeout).await;
+      let finalize_started = response_timing_start(response_timing.as_ref());
+      let result =
+        respond_to_h3_inlined_known_small_body(stream, inlined, response_send_timeout).await;
+      response_timing_record(
+        response_timing.as_ref(),
+        timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
+        result.is_ok(),
+        finalize_started,
+      );
+      return result;
     }
     H3KnownSmallBodyPlan::None => {}
   }
 
   if use_known_small_response_body {
-    return respond_to_h3_known_small_body(stream, body, response_send_timeout).await;
+    let finalize_started = response_timing_start(response_timing.as_ref());
+    let result = respond_to_h3_known_small_body(stream, body, response_send_timeout).await;
+    response_timing_record(
+      response_timing.as_ref(),
+      timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
+      result.is_ok(),
+      finalize_started,
+    );
+    return result;
   }
 
-  while let Some(frame) = body.frame().await {
-    let frame = frame.map_err(|error| {
-      anyhow::anyhow!("failed to read downstream HTTP/3 response body: {error}")
-    })?;
-    match frame.into_data() {
+  loop {
+    let frame_started = response_timing_start(response_timing.as_ref());
+    let Some(frame) = body.frame().await else {
+      break;
+    };
+    let frame = match frame {
+      Ok(frame) => frame,
+      Err(error) => {
+        response_timing_record(
+          response_timing.as_ref(),
+          timing::STAGE_H3_RESPONSE_BODY_FRAME,
+          false,
+          frame_started,
+        );
+        return Err(anyhow::anyhow!(
+          "failed to read downstream HTTP/3 response body: {error}"
+        ));
+      }
+    };
+    let frame = frame.into_data();
+    response_timing_record(
+      response_timing.as_ref(),
+      timing::STAGE_H3_RESPONSE_BODY_FRAME,
+      true,
+      frame_started,
+    );
+    match frame {
       Ok(data) => {
         maybe_timeout(response_send_timeout, stream.send_data(data))
           .await
@@ -94,6 +190,21 @@ where
     .context("failed to finish downstream HTTP/3 response")?;
 
   Ok(())
+}
+
+fn response_timing_start(response_timing: Option<&H3ResponseTiming>) -> Option<Instant> {
+  response_timing.and_then(H3ResponseTiming::start)
+}
+
+fn response_timing_record(
+  response_timing: Option<&H3ResponseTiming>,
+  stage: FastPathMetricStage,
+  success: bool,
+  started_at: Option<Instant>,
+) {
+  if let Some(response_timing) = response_timing {
+    response_timing.record(stage, success, started_at);
+  }
 }
 
 pub(super) fn use_h3_known_small_body_path(marked_known_small: bool, body: &ProxyBody) -> bool {

@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 27;
+const COMPARISON_SCHEMA_VERSION: u32 = 28;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -49,7 +49,7 @@ const SERVING_TYPES: [&str; 6] = [
   "accept-multipliers",
   "remote-signer",
 ];
-const RECOGNIZED_SERVING_TYPES: [&str; 8] = [
+const RECOGNIZED_SERVING_TYPES: [&str; 9] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
@@ -58,6 +58,7 @@ const RECOGNIZED_SERVING_TYPES: [&str; 8] = [
   "remote-signer",
   "pool-concurrency",
   "runtime-direct-h1",
+  "metrics-mode",
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -3980,13 +3981,27 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
     ScenarioGroup::AcceptMultipliers
   } else if remote_signer_base_scenario(scenario).is_some() {
     ScenarioGroup::RemoteSigner
-  } else if matches!(scenario, "h1-keepalive" | "h2" | "h3" | "tls-handshake-h2") {
+  } else if matches!(scenario, "h1-keepalive" | "h2" | "h3" | "tls-handshake-h2")
+    || metrics_mode_reverse_proxy_scenario(scenario)
+  {
     ScenarioGroup::ReverseProxy
   } else if comparator == Comparator::Oxibelt {
     ScenarioGroup::OxibeltOnly
   } else {
     ScenarioGroup::Unclassified
   }
+}
+
+fn metrics_mode_reverse_proxy_scenario(scenario: &str) -> bool {
+  matches!(
+    scenario,
+    "metrics-off-h2"
+      | "metrics-off-h3"
+      | "metrics-basic-h2"
+      | "metrics-basic-h3"
+      | "metrics-detailed-h2"
+      | "metrics-detailed-h3"
+  )
 }
 
 fn accept_multiplier_base_scenario(scenario: &str) -> Option<&str> {
@@ -7161,6 +7176,11 @@ fn collect_missing_row(
   ratio: &RatioResult,
   rows: &mut Vec<MissingComparatorRow>,
 ) {
+  if metrics_mode_reverse_proxy_scenario(&comparison.scenario)
+    && matches!(comparator, Comparator::Caddy | Comparator::OpenResty)
+  {
+    return;
+  }
   if ratio.status == "ok" {
     return;
   }
@@ -7905,6 +7925,7 @@ fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
         .as_ref()
         .and_then(|fast_path| fast_path.stage_timing.as_ref())?;
       if !matches!(aggregate.scenario.as_str(), "h2" | "h3")
+        && !metrics_mode_reverse_proxy_scenario(&aggregate.scenario)
         && !stage_timing.contains_key("static_files")
       {
         return None;
@@ -8035,20 +8056,38 @@ fn write_comparison_table(markdown: &mut String, title: &str, comparisons: &[Sce
       format_number(comparison.nginx.as_ref().and_then(|stats| stats.median_rps)),
       comparison.oxibelt_vs_nginx.text,
       format_number(comparison.caddy.as_ref().and_then(|stats| stats.median_rps)),
-      comparison.oxibelt_vs_caddy.text,
+      comparison_ratio_text(comparison, Comparator::Caddy, &comparison.oxibelt_vs_caddy),
       format_number(
         comparison
           .openresty
           .as_ref()
           .and_then(|stats| stats.median_rps)
       ),
-      comparison.oxibelt_vs_openresty.text,
+      comparison_ratio_text(
+        comparison,
+        Comparator::OpenResty,
+        &comparison.oxibelt_vs_openresty,
+      ),
       format_number(oxibelt.and_then(|stats| stats.median_p95_ms)),
       format_number(oxibelt.and_then(|stats| stats.median_p99_ms)),
     )
     .unwrap();
   }
   writeln!(markdown).unwrap();
+}
+
+fn comparison_ratio_text(
+  comparison: &ScenarioComparison,
+  comparator: Comparator,
+  ratio: &RatioResult,
+) -> String {
+  if metrics_mode_reverse_proxy_scenario(&comparison.scenario)
+    && matches!(comparator, Comparator::Caddy | Comparator::OpenResty)
+  {
+    "n/a".to_owned()
+  } else {
+    ratio.text.clone()
+  }
 }
 
 fn write_accept_multiplier_table(
@@ -9246,6 +9285,105 @@ mod tests {
     assert_eq!(h2_return_sample.sample_count, 1);
     assert_eq!(h2_return_sample.total_ns, 12);
     assert_eq!(h2_return_sample.median_avg_ns, Some(3.0));
+  }
+
+  #[test]
+  fn metrics_mode_rows_compare_as_reverse_proxy_diagnostics() {
+    let input_dir = temp_dir("metrics-mode-diagnostics");
+    let run_dir = input_dir.path().join("run-1");
+    std::fs::create_dir_all(&run_dir).expect("run dir should be created");
+    std::fs::write(
+      run_dir.join("results.json"),
+      r#"[{
+              "type": "load",
+              "label": "nginx-metrics-detailed-h3",
+              "protocol": "h3",
+              "requests": 100,
+              "rps": 2000.0,
+              "p99_ms": 2.0,
+              "errors": 0
+            },
+            {
+              "type": "load",
+              "label": "oxibelt-metrics-detailed-h3",
+              "protocol": "h3",
+              "requests": 100,
+              "rps": 1500.0,
+              "p99_ms": 3.0,
+              "errors": 0,
+              "diagnostic": true,
+              "diagnostic_status": "pass",
+              "fast_path": {
+                "stage_timing": {
+                  "h3_downstream": {
+                    "h3": {
+                      "h3_request_task_spawn": {
+                        "ok": {
+                          "count": 100,
+                          "total_ns": 900,
+                          "avg_ns": 9.0
+                        }
+                      },
+                      "h3_known_small_finalize": {
+                        "ok": {
+                          "count": 100,
+                          "total_ns": 1200,
+                          "avg_ns": 12.0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }]"#,
+    )
+    .expect("results should be written");
+
+    let report = aggregate(
+      input_dir.path(),
+      AggregateOptions {
+        profile: None,
+        expected_runs: None,
+        expected_shards: None,
+        expected_target_cpus: Vec::new(),
+        primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+        baseline_report: None,
+        baseline_context: None,
+        accepted_regression_reason: None,
+      },
+    );
+
+    let aggregate = report
+      .aggregates
+      .iter()
+      .find(|aggregate| {
+        aggregate.comparator == "oxibelt" && aggregate.scenario == "metrics-detailed-h3"
+      })
+      .expect("metrics detailed H3 aggregate should exist");
+    assert_eq!(aggregate.group, ScenarioGroup::ReverseProxy.as_str());
+    assert!(
+      report
+        .comparisons
+        .reverse_proxy
+        .iter()
+        .any(|comparison| comparison.scenario == "metrics-detailed-h3"
+          && comparison.oxibelt.is_some()
+          && comparison.nginx.is_some()),
+      "metrics-mode rows should produce an OxiBelt/nginx reverse-proxy comparison"
+    );
+    assert!(
+      !report
+        .skipped_or_missing_comparator_rows
+        .iter()
+        .any(|row| row.scenario == "metrics-detailed-h3"
+          && matches!(row.comparator.as_str(), "caddy" | "openresty")),
+      "metrics-mode rows should not warn about non-nginx comparators"
+    );
+
+    let markdown = render_markdown(&report);
+    assert!(markdown.contains("metrics-detailed-h3"));
+    assert!(markdown.contains("h3_request_task_spawn"));
+    assert!(markdown.contains("h3_known_small_finalize"));
   }
 
   #[test]

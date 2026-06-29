@@ -364,6 +364,8 @@ pub(crate) async fn handle_downstream_connection(
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
+  let metric_protocol = timing::protocol(::http::Version::HTTP_3);
+  let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
   let downstream_request_context = H3DownstreamRequestContext {
     peer_addr,
     udp_connection_id: udp_connection_id.clone(),
@@ -382,7 +384,18 @@ pub(crate) async fn handle_downstream_connection(
     .context("failed to establish downstream HTTP/3 connection")?;
 
   loop {
+    let reap_started = timing::start(timing_enabled);
     request_tasks.reap_completed();
+    if timing_enabled {
+      timing::record(
+        snapshot.as_ref(),
+        timing::PATH_H3_DOWNSTREAM,
+        metric_protocol,
+        timing::STAGE_H3_REQUEST_TASK_REAP,
+        timing::OUTCOME_OK,
+        reap_started,
+      );
+    }
     if *shutdown.borrow() || *data_plane_drain.borrow() {
       request_tasks.abort_all().await;
       return Ok(());
@@ -460,27 +473,62 @@ pub(crate) async fn handle_downstream_connection(
       continue;
     }
 
+    let permit_started = timing::start(timing_enabled);
     let request_task_permit = if let Some(permit) = request_tasks.try_acquire_permit() {
       permit
     } else {
-      let Some(permit) = request_tasks::acquire_permit_or_stop(
+      match request_tasks::acquire_permit_or_stop(
         &mut request_tasks,
         &mut shutdown,
         &mut data_plane_drain,
       )
-      .await?
-      else {
-        return Ok(());
-      };
-      permit
+      .await
+      {
+        Ok(Some(permit)) => permit,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+          if timing_enabled {
+            timing::record(
+              snapshot.as_ref(),
+              timing::PATH_H3_DOWNSTREAM,
+              metric_protocol,
+              timing::STAGE_H3_REQUEST_PERMIT_ACQUIRE,
+              timing::OUTCOME_ERROR,
+              permit_started,
+            );
+          }
+          return Err(error);
+        }
+      }
     };
+    if timing_enabled {
+      timing::record(
+        snapshot.as_ref(),
+        timing::PATH_H3_DOWNSTREAM,
+        metric_protocol,
+        timing::STAGE_H3_REQUEST_PERMIT_ACQUIRE,
+        timing::OUTCOME_OK,
+        permit_started,
+      );
+    }
 
+    let spawn_started = timing::start(timing_enabled);
     request_tasks.spawn(
       request,
       stream,
       downstream_request_context.clone(),
       request_task_permit,
     );
+    if timing_enabled {
+      timing::record(
+        snapshot.as_ref(),
+        timing::PATH_H3_DOWNSTREAM,
+        metric_protocol,
+        timing::STAGE_H3_REQUEST_TASK_SPAWN,
+        timing::OUTCOME_OK,
+        spawn_started,
+      );
+    }
   }
 }
 
@@ -663,7 +711,9 @@ async fn handle_h3_request(
   }
   let status = response.status();
   let send_started = timing::start(timing_enabled);
-  let send_result = respond_to_h3_request(send_stream, response).await;
+  let response_timing = timing_enabled.then(|| fast_response::H3ResponseTiming::from_state(&state));
+  let send_result =
+    fast_response::respond_to_h3_request_with_timing(send_stream, response, response_timing).await;
   timing::record(
     state.as_ref(),
     timing::PATH_H3_DOWNSTREAM,

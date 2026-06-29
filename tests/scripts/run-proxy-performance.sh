@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -117,7 +117,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|oxibelt-aggressive-long-run) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -1509,13 +1509,30 @@ direct_h2_diagnostic_load_label() {
   esac
 }
 
+metrics_mode_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  if [[ "${host}" != "oxibelt" ]]; then
+    return 1
+  fi
+  case "${label}:${protocol}" in
+    oxibelt-metrics-*-h2:h2|oxibelt-metrics-*-h3:h3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+diagnostic_load_label() {
+  direct_h2_diagnostic_load_label "$@" || metrics_mode_diagnostic_load_label "$@"
+}
+
 normalize_diagnostic_load_result() {
   local json="$1"
   local label protocol host reason
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
   protocol="$(jq -r '.protocol // empty' <<<"${json}")"
   host="$(diagnostic_profile_comparator_from_label "${label}")"
-  if ! direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+  if ! diagnostic_load_label "${label}" "${protocol}" "${host}"; then
     printf '%s\n' "${json}"
     return
   fi
@@ -2054,8 +2071,8 @@ run_load() {
         record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
         sample_stats "${label}"
         return
-      elif direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
-        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic direct-H2 probe failed before producing a valid result"
+      elif diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic probe failed before producing a valid result"
         sample_stats "${label}"
         return
       fi
@@ -2067,8 +2084,8 @@ run_load() {
         record_diagnostic_comparator_skip "${label}" load "${protocol}" "diagnostic comparator probe failed before producing a valid result"
         sample_stats "${label}"
         return
-      elif direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
-        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic direct-H2 probe failed before producing a valid result"
+      elif diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+        record_diagnostic_load_skip "${label}" load "${protocol}" "diagnostic probe failed before producing a valid result"
         sample_stats "${label}"
         return
       fi
@@ -2114,11 +2131,15 @@ run_load() {
     if [[ "${stage_timing_delta_json}" != "{}" ]]; then
       json="$(jq -c --argjson stage_timing "${stage_timing_delta_json}" '. + {fast_path: ((.fast_path // {}) + {stage_timing: $stage_timing})}' <<<"${json}")"
     fi
-    if ! direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+    if ! diagnostic_load_label "${label}" "${protocol}" "${host}"; then
       assert_plain_proxy_fast_path_hit_rate "${label}" "${fast_path_protocol}" "${fast_path_delta}"
     fi
     case "${direct_transport}" in
-      direct_h1) assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h1_delta}" ;;
+      direct_h1)
+        if ! diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+          assert_direct_transport_hit_rate "${label}" "${fast_path_protocol}" "${direct_transport}" "${direct_h1_delta}"
+        fi
+        ;;
       direct_h2) ;;
       "") ;;
       *) fail_with_diagnostics "invalid direct transport gate for ${label}: ${direct_transport}" ;;
@@ -2131,7 +2152,7 @@ run_load() {
   fi
   json="$(normalize_diagnostic_load_result "$(normalize_diagnostic_comparator_result "${json}")")"
   append_result "${json}"
-  if direct_h2_diagnostic_load_label "${label}" "${protocol}" "${host}"; then
+  if diagnostic_load_label "${label}" "${protocol}" "${host}"; then
     assert_diagnostic_result "${json}"
   else
     assert_result "${json}"
@@ -2617,6 +2638,10 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-runtime-direct-h1-*-h1:h1) printf 'h1' ;;
     oxibelt-runtime-direct-h1-*-h2:h2) printf 'h2' ;;
     oxibelt-runtime-direct-h1-*-h3:h3) printf 'h3' ;;
+    oxibelt-metrics-basic-h2:h2) printf 'h2' ;;
+    oxibelt-metrics-basic-h3:h3) printf 'h3' ;;
+    oxibelt-metrics-detailed-h2:h2) printf 'h2' ;;
+    oxibelt-metrics-detailed-h3:h3) printf 'h3' ;;
     oxibelt-pool*-conc*-h2:h2) printf 'h2' ;;
     oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
     oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
@@ -2634,7 +2659,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
@@ -2865,12 +2890,18 @@ start_oxibelt() {
   local remote_signer_cert_volume="oxibelt-perf-keysigner-cert-${scenario}-${run_id}"
   local remote_signer_cert_seed_container="oxibelt-perf-keysigner-cert-seed-${scenario}-${run_id}"
   local detailed_hot_path_diagnostics=0
+  local metrics_disabled=0
+  local oxibelt_config
   local -a oxibelt_env_args=()
   local -a remote_signer_args=()
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --detailed-hot-path-diagnostics)
         detailed_hot_path_diagnostics=1
+        shift
+        ;;
+      --metrics-disabled)
+        metrics_disabled=1
         shift
         ;;
       *)
@@ -2885,9 +2916,22 @@ start_oxibelt() {
   fi
   mkdir -p "${configs_dir}/oxibelt-${scenario}"
   cp -R "${fixture_dir}/." "${configs_dir}/oxibelt-${scenario}/"
+  oxibelt_config="${configs_dir}/oxibelt-${scenario}/config/oxibelt.toml"
   if [[ "${detailed_hot_path_diagnostics}" == "1" ]]; then
     sed -i 's/^[[:space:]]*detail = "basic"[[:space:]]*$/detail = "detailed"/' \
-      "${configs_dir}/oxibelt-${scenario}/config/oxibelt.toml"
+      "${oxibelt_config}"
+  fi
+  if [[ "${metrics_disabled}" == "1" ]]; then
+    awk '
+      /^[[:space:]]*\[/ {
+        in_metrics = ($0 ~ /^[[:space:]]*\[metrics\][[:space:]]*$/)
+      }
+      in_metrics && /^[[:space:]]*enabled[[:space:]]*=/ {
+        sub(/=.*/, "= false")
+      }
+      { print }
+    ' "${oxibelt_config}" >"${oxibelt_config}.tmp"
+    mv "${oxibelt_config}.tmp" "${oxibelt_config}"
   fi
   if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
     remote_signer=1
@@ -3135,6 +3179,43 @@ run_common_loads() {
       fail_with_diagnostics "invalid HTTP/3 performance mode for ${comparator}: ${h3_mode}"
       ;;
   esac
+}
+
+run_metrics_mode_h3_load() {
+  local label="$1"
+  local host="$2"
+  local h3_mode="$3"
+  case "${h3_mode}" in
+    required)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${label}" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+      else
+        fail_with_diagnostics "mandatory HTTP/3 probe failed for ${label}: functional QUIC probe did not complete"
+      fi
+      ;;
+    optional)
+      if h3_probe_succeeds "${host}"; then
+        run_load "${label}" h3 "${host}" "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+      else
+        record_skip "${label}" load h3 "optional HTTP/3 support was detected, but a functional QUIC probe did not complete"
+      fi
+      ;;
+    disabled)
+      record_skip "${label}" load h3 "HTTP/3 is not available for this comparator image"
+      ;;
+    *)
+      fail_with_diagnostics "invalid HTTP/3 performance mode for ${label}: ${h3_mode}"
+      ;;
+  esac
+}
+
+run_metrics_mode_loads_for_host() {
+  local comparator="$1"
+  local host="$2"
+  local mode="$3"
+  local h3_mode="$4"
+  run_load "${comparator}-metrics-${mode}-h2" h2 "${host}" "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
+  run_metrics_mode_h3_load "${comparator}-metrics-${mode}-h3" "${host}" "${h3_mode}"
 }
 
 run_oxibelt_h2_split_loads() {
@@ -3575,6 +3656,28 @@ run_runtime_direct_h1_group() {
   fi
 }
 
+run_metrics_mode_group() {
+  local nginx_h3_mode=disabled
+  if has_comparator nginx; then
+    start_nginx
+    nginx_h3_mode="$(resolve_nginx_h3_mode)"
+    run_metrics_mode_loads_for_host nginx nginx off "${nginx_h3_mode}"
+    run_metrics_mode_loads_for_host nginx nginx basic "${nginx_h3_mode}"
+    run_metrics_mode_loads_for_host nginx nginx detailed "${nginx_h3_mode}"
+  fi
+
+  if has_comparator oxibelt; then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt --metrics-disabled
+    run_metrics_mode_loads_for_host oxibelt oxibelt off required
+
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
+    run_metrics_mode_loads_for_host oxibelt oxibelt basic required
+
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt --detailed-hot-path-diagnostics
+    run_metrics_mode_loads_for_host oxibelt oxibelt detailed required
+  fi
+}
+
 run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
@@ -3750,6 +3853,9 @@ case "${serving_type}" in
     ;;
   runtime-direct-h1)
     run_runtime_direct_h1_group
+    ;;
+  metrics-mode)
+    run_metrics_mode_group
     ;;
   oxibelt-aggressive-long-run)
     run_oxibelt_aggressive_long_run

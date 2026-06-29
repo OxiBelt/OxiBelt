@@ -36,6 +36,16 @@ pub(crate) const STAGE_H3_DOWNSTREAM_SEND: FastPathMetricStage =
   FastPathMetricStage::H3DownstreamSend;
 pub(crate) const STAGE_H3_INGRESS_PREPARE: FastPathMetricStage =
   FastPathMetricStage::H3IngressPrepare;
+pub(crate) const STAGE_H3_KNOWN_SMALL_FINALIZE: FastPathMetricStage =
+  FastPathMetricStage::H3KnownSmallFinalize;
+pub(crate) const STAGE_H3_REQUEST_PERMIT_ACQUIRE: FastPathMetricStage =
+  FastPathMetricStage::H3RequestPermitAcquire;
+pub(crate) const STAGE_H3_REQUEST_TASK_REAP: FastPathMetricStage =
+  FastPathMetricStage::H3RequestTaskReap;
+pub(crate) const STAGE_H3_REQUEST_TASK_SPAWN: FastPathMetricStage =
+  FastPathMetricStage::H3RequestTaskSpawn;
+pub(crate) const STAGE_H3_RESPONSE_BODY_FRAME: FastPathMetricStage =
+  FastPathMetricStage::H3ResponseBodyFrame;
 pub(crate) const STAGE_REQUEST_BODY_PREPARE: FastPathMetricStage =
   FastPathMetricStage::RequestBodyPrepare;
 pub(crate) const STAGE_RESPONSE_BODY_PREPARE: FastPathMetricStage =

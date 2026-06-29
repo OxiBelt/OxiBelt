@@ -191,6 +191,41 @@ mod tests {
       19,
     );
     metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3RequestTaskReap,
+      FastPathMetricOutcome::Ok,
+      37,
+    );
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3RequestPermitAcquire,
+      FastPathMetricOutcome::Ok,
+      41,
+    );
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3RequestTaskSpawn,
+      FastPathMetricOutcome::Ok,
+      43,
+    );
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3KnownSmallFinalize,
+      FastPathMetricOutcome::Ok,
+      47,
+    );
+    metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3ResponseBodyFrame,
+      FastPathMetricOutcome::Ok,
+      53,
+    );
+    metrics.record_duration_ns_id(
       FastPathMetricPath::StaticFiles,
       FastPathMetricProtocol::H1,
       FastPathMetricStage::StaticWriteBody,
@@ -219,6 +254,26 @@ mod tests {
       stage_counter_index("h3_downstream", "h3", "h3_downstream_send", "error").unwrap();
     assert_eq!(metrics.observations[h3_index].load(), 1);
     assert_eq!(metrics.duration_ns[h3_index].load(), 19);
+    let h3_reap_index =
+      stage_counter_index("h3_downstream", "h3", "h3_request_task_reap", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_reap_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_reap_index].load(), 37);
+    let h3_permit_index =
+      stage_counter_index("h3_downstream", "h3", "h3_request_permit_acquire", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_permit_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_permit_index].load(), 41);
+    let h3_spawn_index =
+      stage_counter_index("h3_downstream", "h3", "h3_request_task_spawn", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_spawn_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_spawn_index].load(), 43);
+    let h3_known_small_index =
+      stage_counter_index("h3_downstream", "h3", "h3_known_small_finalize", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_known_small_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_known_small_index].load(), 47);
+    let h3_response_frame_index =
+      stage_counter_index("h3_downstream", "h3", "h3_response_body_frame", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_response_frame_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_response_frame_index].load(), 53);
     let static_write_body_index =
       stage_counter_index("static_files", "h1", "static_write_body", "ok").unwrap();
     assert_eq!(metrics.observations[static_write_body_index].load(), 1);

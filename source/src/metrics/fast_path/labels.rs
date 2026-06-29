@@ -140,10 +140,15 @@ pub(crate) enum FastPathMetricStage {
   StaticWriteHead = 21,
   StaticWriteBody = 22,
   StaticSendfileBody = 23,
+  H3RequestTaskReap = 24,
+  H3RequestPermitAcquire = 25,
+  H3RequestTaskSpawn = 26,
+  H3KnownSmallFinalize = 27,
+  H3ResponseBodyFrame = 28,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 24] = [
+  pub(crate) const ALL: [Self; 29] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -168,6 +173,11 @@ impl FastPathMetricStage {
     Self::StaticWriteHead,
     Self::StaticWriteBody,
     Self::StaticSendfileBody,
+    Self::H3RequestTaskReap,
+    Self::H3RequestPermitAcquire,
+    Self::H3RequestTaskSpawn,
+    Self::H3KnownSmallFinalize,
+    Self::H3ResponseBodyFrame,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -197,6 +207,11 @@ impl FastPathMetricStage {
       Self::StaticWriteHead => "static_write_head",
       Self::StaticWriteBody => "static_write_body",
       Self::StaticSendfileBody => "static_sendfile_body",
+      Self::H3RequestTaskReap => "h3_request_task_reap",
+      Self::H3RequestPermitAcquire => "h3_request_permit_acquire",
+      Self::H3RequestTaskSpawn => "h3_request_task_spawn",
+      Self::H3KnownSmallFinalize => "h3_known_small_finalize",
+      Self::H3ResponseBodyFrame => "h3_response_body_frame",
     }
   }
 
@@ -226,6 +241,11 @@ impl FastPathMetricStage {
       "static_write_head" => Some(Self::StaticWriteHead),
       "static_write_body" => Some(Self::StaticWriteBody),
       "static_sendfile_body" => Some(Self::StaticSendfileBody),
+      "h3_request_task_reap" => Some(Self::H3RequestTaskReap),
+      "h3_request_permit_acquire" => Some(Self::H3RequestPermitAcquire),
+      "h3_request_task_spawn" => Some(Self::H3RequestTaskSpawn),
+      "h3_known_small_finalize" => Some(Self::H3KnownSmallFinalize),
+      "h3_response_body_frame" => Some(Self::H3ResponseBodyFrame),
       _ => None,
     }
   }
