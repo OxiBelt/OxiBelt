@@ -21,7 +21,10 @@ use crate::proxy::http::body::ProxyBody;
 use crate::state::AppSnapshot;
 use crate::waf::WafTransportNetwork;
 
-use super::{EffectiveTimeouts, body, compression, full_body, with_downstream_response_timeout};
+use super::{
+  EffectiveTimeouts, body, compression, full_body, response::reconcile_route_security_headers,
+  with_downstream_response_timeout,
+};
 
 const CACHE_HEADER: &str = "x-oxibelt-cache";
 const CACHE_REASON_HEADER: &str = "x-oxibelt-cache-reason";
@@ -154,17 +157,21 @@ pub(crate) fn cached_status_response(
 }
 
 pub(crate) fn stale_if_error_response(
+  state: &AppSnapshot,
+  route: &RouteConfig,
   entry: CacheEntry,
   method: &Method,
   request_headers: &HeaderMap,
 ) -> Response<ProxyBody> {
-  cached_status_response(
+  let mut response = cached_status_response(
     entry,
     method,
     request_headers,
     CacheHeaderOutcome::Stale,
     CacheHeaderReason::StaleIfError,
-  )
+  );
+  reconcile_cached_security(&mut response, state, route);
+  response
 }
 
 pub(crate) fn store_failed_response(mut response: Response<ProxyBody>) -> Response<ProxyBody> {
@@ -188,7 +195,9 @@ pub(crate) fn cached_downstream_response(
   outcome: CacheHeaderOutcome,
   reason: CacheHeaderReason,
 ) -> Response<ProxyBody> {
-  let response = cached_status_response(entry, request_method, request_headers, outcome, reason);
+  let mut response =
+    cached_status_response(entry, request_method, request_headers, outcome, reason);
+  reconcile_cached_security(&mut response, state, route);
   let response = compression::maybe_compress_response(
     response,
     request_method,
@@ -198,6 +207,14 @@ pub(crate) fn cached_downstream_response(
     &state.compression,
   );
   with_downstream_response_timeout(response, timeouts.response_send, transport_network)
+}
+
+pub(crate) fn reconcile_cached_security(
+  response: &mut Response<ProxyBody>,
+  state: &AppSnapshot,
+  route: &RouteConfig,
+) {
+  reconcile_route_security_headers(response.headers_mut(), &state.config.security, route);
 }
 
 fn body_from_entry(entry: &CacheEntry) -> Option<ProxyBody> {

@@ -315,6 +315,22 @@ pub(crate) fn apply_route_security_headers(
   apply_effective_security_headers(headers, security, route.security_headers.as_deref());
 }
 
+pub(crate) fn reconcile_route_security_headers(
+  headers: &mut http::HeaderMap,
+  security: &SecurityConfig,
+  route: &RouteConfig,
+) {
+  for name in [
+    "strict-transport-security",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+  ] {
+    headers.remove(name);
+  }
+  apply_route_security_headers(headers, security, route);
+}
+
 pub(crate) fn with_route_security_headers(
   mut response: Response<ProxyBody>,
   security: &SecurityConfig,

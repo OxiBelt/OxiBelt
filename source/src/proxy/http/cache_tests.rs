@@ -5,6 +5,8 @@ mod common {
   ));
 }
 
+#[path = "cache_tests_security.rs"]
+mod security;
 #[path = "cache_tests_streaming.rs"]
 mod streaming;
 

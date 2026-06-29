@@ -1274,6 +1274,15 @@ where
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
+  let stale_if_error_response = |entry| {
+    cache_status::stale_if_error_response(
+      state,
+      resolved.route,
+      entry,
+      &request_method,
+      &request_headers,
+    )
+  };
   let initial_cache_lookup = crate::cache::CacheLookupContext {
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
@@ -1502,7 +1511,7 @@ where
             .stale_if_error_allows_read_timeout(resolved.route.cache.as_deref())
         {
           state.metrics.record_cache_stale();
-          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
+          return stale_if_error_response(entry);
         }
         return upstream_error_response(
           state,
@@ -1549,7 +1558,7 @@ where
             .stale_if_error_allows_connect(resolved.route.cache.as_deref())
         {
           state.metrics.record_cache_stale();
-          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
+          return stale_if_error_response(entry);
         }
         return upstream_error_response(
           state,
@@ -1706,7 +1715,7 @@ where
           }
         {
           state.metrics.record_cache_stale();
-          return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
+          return stale_if_error_response(entry);
         }
         return upstream_error_response(
           state,
@@ -1759,7 +1768,7 @@ where
       .stale_if_error_allows_status(resolved.route.cache.as_deref(), parts.status)
   {
     state.metrics.record_cache_stale();
-    return cache_status::stale_if_error_response(entry, &request_method, &request_headers);
+    return stale_if_error_response(entry);
   }
   if parts.status == StatusCode::NOT_MODIFIED
     && let Some(entry) = revalidation_entry.clone()
@@ -1785,6 +1794,7 @@ where
     state.metrics.record_cache_hit();
     let mut response =
       cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
+    cache_status::reconcile_cached_security(&mut response, state, resolved.route);
     route_runtime::apply_response_actions(response.headers_mut(), resolved.route, &request_headers);
     cache_status::apply(
       &mut response,
