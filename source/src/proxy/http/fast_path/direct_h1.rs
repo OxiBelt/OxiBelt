@@ -17,7 +17,6 @@ use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
-use url::{Position, Url};
 
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
@@ -29,8 +28,10 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 
 use super::stage_timing as timing;
 
+mod origin;
 mod runtime_backend;
 mod send_attempt;
+use self::origin::DirectH1Origin;
 use self::runtime_backend::DirectH1RuntimeBackend;
 use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
 
@@ -190,31 +191,6 @@ impl DirectH1Pool {
   }
 }
 
-struct DirectH1Origin {
-  host: String,
-  port: u16,
-  authority: String,
-}
-
-impl DirectH1Origin {
-  fn from_url(origin: &Url) -> Option<Self> {
-    if origin.scheme() != "http" {
-      return None;
-    }
-    let host = origin.host_str()?.to_owned();
-    let port = origin.port_or_known_default()?;
-    let authority = match origin.port() {
-      Some(_) => origin[Position::BeforeHost..Position::AfterPort].to_owned(),
-      None => host.clone(),
-    };
-    Some(Self {
-      host,
-      port,
-      authority,
-    })
-  }
-}
-
 struct DirectH1IdleConnection {
   sender: SendRequest<ProxyBody>,
   idle_since: Instant,
@@ -223,6 +199,13 @@ struct DirectH1IdleConnection {
 pub(super) enum DirectH1SendResult {
   Fallback(Request<ProxyBody>),
   Sent(Result<DirectH1Response, anyhow::Error>),
+}
+
+#[derive(Clone, Copy)]
+struct DirectH1SendMetricOptions {
+  hot_path_metrics: bool,
+  diagnostic_metrics: bool,
+  timing_enabled: bool,
 }
 
 pub(super) struct DirectH1Response {
@@ -351,6 +334,7 @@ pub(super) async fn try_send_direct_h1(
   request_body_proven_empty: bool,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
+  hot_path_metrics: bool,
   diagnostic_metrics: bool,
   timing_enabled: bool,
 ) -> DirectH1SendResult {
@@ -363,25 +347,31 @@ pub(super) async fn try_send_direct_h1(
     request_body_proven_empty,
     &outbound,
   ) {
-    metrics.record_direct_h1_transport_miss_id(protocol, reason);
+    if hot_path_metrics {
+      metrics.record_direct_h1_transport_miss_id(protocol, reason);
+    }
     return DirectH1SendResult::Fallback(outbound);
   }
 
   let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_direct_h1_transport_miss_id(
-      protocol,
-      FastPathTransportMissReason::UnsupportedUpstream,
-    );
+    if hot_path_metrics {
+      metrics.record_direct_h1_transport_miss_id(
+        protocol,
+        FastPathTransportMissReason::UnsupportedUpstream,
+      );
+    }
     return DirectH1SendResult::Fallback(outbound);
   };
 
   let prepared = match PreparedDirectH1Request::from_request(outbound, &pool.origin) {
     Ok(prepared) => prepared,
     Err(error) => {
-      metrics.record_direct_h1_transport_miss_id(
-        protocol,
-        FastPathTransportMissReason::UnsupportedRequest,
-      );
+      if hot_path_metrics {
+        metrics.record_direct_h1_transport_miss_id(
+          protocol,
+          FastPathTransportMissReason::UnsupportedRequest,
+        );
+      }
       return DirectH1SendResult::Sent(Err(error));
     }
   };
@@ -392,18 +382,24 @@ pub(super) async fn try_send_direct_h1(
     protocol,
     prepared,
     timeouts,
-    diagnostic_metrics,
-    timing_enabled,
+    DirectH1SendMetricOptions {
+      hot_path_metrics,
+      diagnostic_metrics,
+      timing_enabled,
+    },
   )
   .await;
-  match &result {
-    Ok(_) => metrics.record_direct_h1_transport_hit_id(protocol),
-    Err(error) if error.to_string().contains("timed out") => {
-      metrics
-        .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::ConnectError);
-    }
-    Err(_) => {
-      metrics.record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::SendError);
+  if hot_path_metrics {
+    match &result {
+      Ok(_) => metrics.record_direct_h1_transport_hit_id(protocol),
+      Err(error) if error.to_string().contains("timed out") => {
+        metrics
+          .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::ConnectError);
+      }
+      Err(_) => {
+        metrics
+          .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::SendError);
+      }
     }
   }
   DirectH1SendResult::Sent(result)
@@ -443,15 +439,16 @@ async fn send_prepared_request(
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
-  diagnostic_metrics: bool,
-  timing_enabled: bool,
+  metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
-  metrics.record_http_upstream_h1_http_primary_request();
-  if diagnostic_metrics {
+  if metric_options.hot_path_metrics {
+    metrics.record_http_upstream_h1_http_primary_request();
+  }
+  if metric_options.diagnostic_metrics {
     DirectH1RuntimeBackend::current().record_attempt(metrics, protocol);
   }
 
-  let pool_take_started = timing::start(timing_enabled);
+  let pool_take_started = timing::start(metric_options.timing_enabled);
   let reused_sender = pool.take_sender();
   timing::record_metrics_plain_result(
     metrics,
@@ -460,11 +457,11 @@ async fn send_prepared_request(
     true,
     pool_take_started,
   );
-  if diagnostic_metrics {
+  if metric_options.diagnostic_metrics {
     record_stale_direct_h1_senders(metrics, reused_sender.stale_pruned);
   }
   let reused = reused_sender.sender.is_some();
-  if diagnostic_metrics {
+  if metric_options.diagnostic_metrics {
     if reused {
       metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Hit);
     } else {
@@ -482,7 +479,16 @@ async fn send_prepared_request(
   }
   let mut sender = match reused_sender.sender {
     Some(sender) => sender,
-    None => connect_sender(&pool, metrics, protocol, timing_enabled).await?,
+    None => {
+      connect_sender(
+        &pool,
+        metrics,
+        protocol,
+        metric_options.hot_path_metrics,
+        metric_options.timing_enabled,
+      )
+      .await?
+    }
   };
 
   let mut retry = reused.then(|| prepared.retry_request());
@@ -492,17 +498,24 @@ async fn send_prepared_request(
     metrics,
     protocol,
     timeouts.upstream_first_byte,
-    timing_enabled,
+    metric_options.timing_enabled,
   )
   .await;
   let response = match send_result {
     Ok(response) => response,
     Err(DirectH1SendAttemptError::Hyper(error)) if reused => {
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
-      if diagnostic_metrics {
+      if metric_options.diagnostic_metrics {
         metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
       }
-      sender = connect_sender(&pool, metrics, protocol, timing_enabled).await?;
+      sender = connect_sender(
+        &pool,
+        metrics,
+        protocol,
+        metric_options.hot_path_metrics,
+        metric_options.timing_enabled,
+      )
+      .await?;
       let retry = retry
         .take()
         .expect("reused direct H1 sends should retain one retry request");
@@ -512,7 +525,7 @@ async fn send_prepared_request(
         metrics,
         protocol,
         timeouts.upstream_first_byte,
-        timing_enabled,
+        metric_options.timing_enabled,
       )
       .await;
       match retry_result {
@@ -536,7 +549,7 @@ async fn send_prepared_request(
       pool,
       metrics: metrics.clone(),
       sender,
-      diagnostic_metrics,
+      diagnostic_metrics: metric_options.diagnostic_metrics,
       reusable_by_headers,
     }),
   })
@@ -552,10 +565,11 @@ async fn connect_sender(
   pool: &Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
   protocol: FastPathMetricProtocol,
+  hot_path_metrics: bool,
   timing_enabled: bool,
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
   let connect_started = timing::start(timing_enabled);
-  let result = connect_sender_inner(pool, metrics).await;
+  let result = connect_sender_inner(pool, metrics, hot_path_metrics).await;
   timing::record_metrics_plain_result(
     metrics,
     protocol,
@@ -569,8 +583,11 @@ async fn connect_sender(
 async fn connect_sender_inner(
   pool: &Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
+  hot_path_metrics: bool,
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
-  metrics.record_http_upstream_h1_http_primary_pool_miss();
+  if hot_path_metrics {
+    metrics.record_http_upstream_h1_http_primary_pool_miss();
+  }
   let stream = tokio::time::timeout(
     pool.connect_timeout,
     TcpStream::connect((pool.origin.host.as_str(), pool.origin.port)),
@@ -589,7 +606,9 @@ async fn connect_sender_inner(
   let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
     .await
     .context("failed to establish direct H1 upstream connection")?;
-  metrics.record_http_upstream_h1_http_primary_connection_created();
+  if hot_path_metrics {
+    metrics.record_http_upstream_h1_http_primary_connection_created();
+  }
   tokio::spawn(async move {
     if let Err(error) = connection.await {
       warn!(error = %error, "direct H1 upstream connection closed with error");
@@ -679,9 +698,12 @@ fn ensure_host_header(
   if headers.contains_key(HOST) {
     return Ok(());
   }
-  let authority = upstream_authority.unwrap_or(origin.authority.as_str());
-  let value =
-    HeaderValue::from_str(authority).context("upstream authority is not a header value")?;
+  let value = match upstream_authority {
+    Some(authority) => {
+      HeaderValue::from_str(authority).context("upstream authority is not a header value")?
+    }
+    None => origin.authority_header.clone(),
+  };
   headers.insert(HOST, value);
   Ok(())
 }

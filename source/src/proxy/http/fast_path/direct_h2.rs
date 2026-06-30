@@ -8,30 +8,43 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use http::{Method, Request, Response};
-use hyper::body::{Body, Incoming};
+#[cfg(test)]
+use http::Method;
+use http::Response;
+use hyper::body::Incoming;
 use hyper::client::conn::http2::SendRequest;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::debug;
 
-use crate::config::{HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, UpstreamConfig};
+#[cfg(test)]
+use crate::config::{HttpVersion, ProxyProtocolEgressMode};
+use crate::config::{ProxyHttp2Config, UpstreamConfig};
 use crate::metrics::Metrics;
-use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathTransportMissReason};
+#[cfg(test)]
+use crate::metrics::fast_path::labels::FastPathTransportMissReason;
+#[cfg(test)]
 use crate::proxy::http::EffectiveTimeouts;
-use crate::proxy::http::body::{self, ProxyBody};
+use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
 mod connection;
+mod metrics;
 mod request;
+mod send;
 
 use self::connection::{
   DirectH2Origin, build_h2_tls_config, connect_tls_h2, h2_handshake_with_timeout,
 };
+use self::metrics as metric_record;
+#[cfg(test)]
 use self::request::PreparedDirectH2Request;
 #[cfg(test)]
 use self::request::empty_body;
-use super::helpers::fast_path_metric_protocol;
+pub(in crate::proxy::http::fast_path) use self::send::{
+  DirectH2SendResult, release_response_body, try_send_direct_h2,
+};
+#[cfg(test)]
+use self::send::{direct_h2_guard_miss, sender_with_first_byte_timeout};
 
 const DIRECT_H2_MAX_SLOTS: usize = 16;
 const DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT: usize = 32;
@@ -200,11 +213,6 @@ impl Drop for DirectH2Lease {
   }
 }
 
-pub(super) enum DirectH2SendResult {
-  Fallback(Request<ProxyBody>),
-  Sent(Result<DirectH2Response, anyhow::Error>),
-}
-
 impl DirectH2Pool {
   fn new(
     upstream: &UpstreamConfig,
@@ -245,33 +253,46 @@ impl DirectH2Pool {
     }))
   }
 
-  async fn sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<Option<DirectH2Sender>> {
+  async fn sender(
+    &self,
+    metrics: &Arc<Metrics>,
+    hot_path_metrics: bool,
+  ) -> anyhow::Result<Option<DirectH2Sender>> {
     self
-      .sender_with(metrics, || self.connect_sender(metrics))
+      .sender_with(metrics, hot_path_metrics, || {
+        self.connect_sender(metrics, hot_path_metrics)
+      })
       .await
   }
 
   async fn sender_with<F, Fut>(
     &self,
     metrics: &Arc<Metrics>,
+    hot_path_metrics: bool,
     connect_sender: F,
   ) -> anyhow::Result<Option<DirectH2Sender>>
   where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<SendRequest<ProxyBody>>>,
   {
-    let reusable = self.take_reusable_sender(metrics);
+    let reusable = self.take_reusable_sender(metrics, hot_path_metrics);
     if let Some(sender) = reusable.sender {
-      metrics.record_direct_h2_pool_event("hit");
+      metric_record::pool_event(metrics, hot_path_metrics, "hit");
       return Ok(Some(sender));
     }
 
-    metrics.record_direct_h2_pool_event("miss");
+    metric_record::pool_event(metrics, hot_path_metrics, "miss");
     match reusable.miss_reason {
       DirectH2TakeMissReason::None => {}
-      DirectH2TakeMissReason::Empty => metrics.record_direct_h2_pool_event("miss_empty"),
-      DirectH2TakeMissReason::Locked => metrics.record_direct_h2_pool_event("miss_locked"),
-      DirectH2TakeMissReason::Saturated => metrics.record_direct_h2_pool_event("miss_saturated"),
+      DirectH2TakeMissReason::Empty => {
+        metric_record::pool_event(metrics, hot_path_metrics, "miss_empty");
+      }
+      DirectH2TakeMissReason::Locked => {
+        metric_record::pool_event(metrics, hot_path_metrics, "miss_locked");
+      }
+      DirectH2TakeMissReason::Saturated => {
+        metric_record::pool_event(metrics, hot_path_metrics, "miss_saturated");
+      }
     }
     if reusable.miss_reason == DirectH2TakeMissReason::Saturated && reusable.empty_slot.is_none() {
       return Ok(None);
@@ -280,10 +301,16 @@ impl DirectH2Pool {
     let slot_index = reusable
       .empty_slot
       .unwrap_or_else(|| self.next_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len());
-    self.connect_slot(metrics, slot_index, connect_sender).await
+    self
+      .connect_slot(metrics, hot_path_metrics, slot_index, connect_sender)
+      .await
   }
 
-  fn take_reusable_sender(&self, metrics: &Arc<Metrics>) -> DirectH2TakeSender {
+  fn take_reusable_sender(
+    &self,
+    metrics: &Arc<Metrics>,
+    hot_path_metrics: bool,
+  ) -> DirectH2TakeSender {
     let start = self.next_slot.fetch_add(1, Ordering::Relaxed);
     let mut empty_slot = None;
     let mut locked_slots = 0;
@@ -301,8 +328,7 @@ impl DirectH2Pool {
         continue;
       };
       if candidate.stale(self.idle_timeout, self.max_lifetime) {
-        metrics.record_direct_h2_pool_event("stale");
-        metrics.record_direct_h2_pool_event("drop");
+        metric_record::pool_stale_drop(metrics, hot_path_metrics);
         *connection = None;
         empty_slot.get_or_insert(slot_index);
         continue;
@@ -360,6 +386,7 @@ impl DirectH2Pool {
   async fn connect_slot<F, Fut>(
     &self,
     metrics: &Arc<Metrics>,
+    hot_path_metrics: bool,
     slot_index: usize,
     connect_sender: F,
   ) -> anyhow::Result<Option<DirectH2Sender>>
@@ -371,34 +398,29 @@ impl DirectH2Pool {
     let mut slot_connection = slot.connection.lock().await;
     if let Some(candidate) = slot_connection.as_ref() {
       if candidate.stale(self.idle_timeout, self.max_lifetime) {
-        metrics.record_direct_h2_pool_event("stale");
-        metrics.record_direct_h2_pool_event("drop");
+        metric_record::pool_stale_drop(metrics, hot_path_metrics);
         *slot_connection = None;
       } else if let Some((sender, lease)) =
         DirectH2Connection::reserve(candidate, self.max_streams_per_slot)
       {
-        metrics.record_direct_h2_pool_event("hit");
+        metric_record::pool_event(metrics, hot_path_metrics, "hit");
         return Ok(Some(DirectH2Sender {
           sender,
           lease,
           reused: true,
         }));
       } else {
-        metrics.record_direct_h2_pool_event("miss_saturated");
+        metric_record::pool_event(metrics, hot_path_metrics, "miss_saturated");
         return Ok(None);
       }
     }
 
-    metrics.record_http_upstream_client_pool_miss(
-      self.metric_version(),
-      self.origin.scheme,
-      "primary",
-    );
-    metrics.record_direct_h2_pool_event("connect");
+    metric_record::upstream_pool_miss(self, metrics, hot_path_metrics);
+    metric_record::pool_event(metrics, hot_path_metrics, "connect");
     let sender = match connect_sender().await {
       Ok(sender) => sender,
       Err(error) => {
-        metrics.record_direct_h2_pool_event("connect_error");
+        metric_record::pool_event(metrics, hot_path_metrics, "connect_error");
         return Err(error);
       }
     };
@@ -429,7 +451,11 @@ impl DirectH2Pool {
     }
   }
 
-  async fn connect_sender(&self, metrics: &Arc<Metrics>) -> anyhow::Result<SendRequest<ProxyBody>> {
+  async fn connect_sender(
+    &self,
+    metrics: &Arc<Metrics>,
+    hot_path_metrics: bool,
+  ) -> anyhow::Result<SendRequest<ProxyBody>> {
     let stream = tokio::time::timeout(
       self.connect_timeout,
       TcpStream::connect((self.origin.host.as_str(), self.origin.port)),
@@ -459,11 +485,7 @@ impl DirectH2Pool {
       h2_handshake_with_timeout(stream, &self.http2_config, self.connect_timeout).await?
     };
 
-    metrics.record_http_upstream_client_connection_created(
-      self.metric_version(),
-      self.origin.scheme,
-      "primary",
-    );
+    metric_record::upstream_connection_created(self, metrics, hot_path_metrics);
     Ok(sender)
   }
 
@@ -474,243 +496,6 @@ impl DirectH2Pool {
       "h2"
     }
   }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn try_send_direct_h2(
-  pools: &DirectH2Pools,
-  metrics: &Arc<Metrics>,
-  upstream_index: usize,
-  upstream: &UpstreamConfig,
-  upstream_version: HttpVersion,
-  request_version: http::Version,
-  direct_selection_used: bool,
-  request_body_proven_empty: bool,
-  outbound: Request<ProxyBody>,
-  timeouts: EffectiveTimeouts,
-) -> DirectH2SendResult {
-  let protocol = fast_path_metric_protocol(request_version);
-  if let Some(reason) = direct_h2_guard_miss(
-    upstream,
-    upstream_version,
-    request_version,
-    direct_selection_used,
-    request_body_proven_empty,
-    &outbound,
-  ) {
-    metrics.record_direct_h2_transport_miss_id(protocol, reason);
-    return DirectH2SendResult::Fallback(outbound);
-  }
-
-  let Some(pool) = pools.for_upstream_index(upstream_index) else {
-    metrics.record_direct_h2_transport_miss_id(
-      protocol,
-      FastPathTransportMissReason::UnsupportedUpstream,
-    );
-    return DirectH2SendResult::Fallback(outbound);
-  };
-
-  let prepared = match PreparedDirectH2Request::from_request(outbound) {
-    Ok(prepared) => prepared,
-    Err(error) => {
-      metrics.record_direct_h2_transport_miss_id(
-        protocol,
-        FastPathTransportMissReason::UnsupportedRequest,
-      );
-      return DirectH2SendResult::Sent(Err(error));
-    }
-  };
-
-  send_prepared_request(pool, metrics, protocol, prepared, timeouts).await
-}
-
-fn direct_h2_guard_miss(
-  upstream: &UpstreamConfig,
-  upstream_version: HttpVersion,
-  request_version: http::Version,
-  direct_selection_used: bool,
-  request_body_proven_empty: bool,
-  outbound: &Request<ProxyBody>,
-) -> Option<FastPathTransportMissReason> {
-  if !matches!(
-    request_version,
-    http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
-  ) || !direct_selection_used
-    || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
-  {
-    return Some(FastPathTransportMissReason::UnsupportedRequest);
-  }
-  if upstream_version != HttpVersion::H2
-    || !matches!(upstream.origin.scheme(), "http" | "https")
-    || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
-  {
-    return Some(FastPathTransportMissReason::UnsupportedUpstream);
-  }
-  if !request_body_proven_empty || !outbound.body().is_end_stream() {
-    return Some(FastPathTransportMissReason::RequestBody);
-  }
-  None
-}
-
-async fn send_prepared_request(
-  pool: Arc<DirectH2Pool>,
-  metrics: &Arc<Metrics>,
-  protocol: FastPathMetricProtocol,
-  prepared: PreparedDirectH2Request,
-  timeouts: EffectiveTimeouts,
-) -> DirectH2SendResult {
-  metrics.record_http_upstream_client_request(pool.metric_version(), pool.origin.scheme, "primary");
-
-  let direct_sender = match sender_with_first_byte_timeout(
-    pool.sender(metrics),
-    timeouts.upstream_first_byte,
-  )
-  .await
-  {
-    Ok(Some(direct_sender)) => direct_sender,
-    Ok(None) => return saturated_fallback(metrics, protocol, prepared.into_fallback_request()),
-    Err(error) => return direct_h2_send_error(metrics, protocol, error),
-  };
-  let reused = direct_sender.reused;
-  let mut sender = direct_sender.sender;
-  let lease = direct_sender.lease;
-  let mut retry = reused.then(|| prepared.retry_request());
-  let send_result = tokio::time::timeout(
-    timeouts.upstream_first_byte,
-    sender.send_request(prepared.into_request()),
-  )
-  .await;
-  match send_result {
-    Ok(Ok(response)) => {
-      metrics.record_direct_h2_transport_hit_id(protocol);
-      DirectH2SendResult::Sent(Ok(DirectH2Response {
-        response,
-        lease: Some(lease),
-      }))
-    }
-    Ok(Err(error)) if reused => {
-      debug!(error = %error, "direct H2 upstream sender failed; reconnecting once");
-      metrics.record_direct_h2_pool_event("reconnect");
-      pool.clear_connection(&lease.connection).await;
-      drop(lease);
-      let direct_sender =
-        match sender_with_first_byte_timeout(pool.sender(metrics), timeouts.upstream_first_byte)
-          .await
-        {
-          Ok(Some(direct_sender)) => direct_sender,
-          Ok(None) => {
-            return saturated_fallback(
-              metrics,
-              protocol,
-              retry
-                .take()
-                .expect("reused direct H2 sends should retain one retry request")
-                .into_fallback_request(),
-            );
-          }
-          Err(error) => return direct_h2_send_error(metrics, protocol, error),
-        };
-      let mut sender = direct_sender.sender;
-      let lease = direct_sender.lease;
-      let retry = retry
-        .take()
-        .expect("reused direct H2 sends should retain one retry request");
-      match tokio::time::timeout(
-        timeouts.upstream_first_byte,
-        sender.send_request(retry.into_request()),
-      )
-      .await
-      {
-        Ok(Ok(response)) => {
-          metrics.record_direct_h2_transport_hit_id(protocol);
-          DirectH2SendResult::Sent(Ok(DirectH2Response {
-            response,
-            lease: Some(lease),
-          }))
-        }
-        Ok(Err(error)) => {
-          pool.clear_connection(&lease.connection).await;
-          drop(lease);
-          direct_h2_send_error(
-            metrics,
-            protocol,
-            anyhow::Error::new(error).context("direct H2 upstream retry request failed"),
-          )
-        }
-        Err(_) => {
-          pool.clear_connection(&lease.connection).await;
-          drop(lease);
-          direct_h2_send_error(
-            metrics,
-            protocol,
-            anyhow::anyhow!("direct H2 upstream first-byte timed out"),
-          )
-        }
-      }
-    }
-    Ok(Err(error)) => {
-      pool.clear_connection(&lease.connection).await;
-      drop(lease);
-      direct_h2_send_error(metrics, protocol, error.into())
-    }
-    Err(_) => {
-      pool.clear_connection(&lease.connection).await;
-      drop(lease);
-      direct_h2_send_error(
-        metrics,
-        protocol,
-        anyhow::anyhow!("direct H2 upstream first-byte timed out"),
-      )
-    }
-  }
-}
-
-fn saturated_fallback(
-  metrics: &Metrics,
-  protocol: FastPathMetricProtocol,
-  outbound: Request<ProxyBody>,
-) -> DirectH2SendResult {
-  metrics.record_direct_h2_transport_miss_id(protocol, FastPathTransportMissReason::PoolFull);
-  DirectH2SendResult::Fallback(outbound)
-}
-
-fn direct_h2_send_error(
-  metrics: &Metrics,
-  protocol: FastPathMetricProtocol,
-  error: anyhow::Error,
-) -> DirectH2SendResult {
-  let reason = if error.to_string().contains("timed out") {
-    FastPathTransportMissReason::ConnectError
-  } else {
-    FastPathTransportMissReason::SendError
-  };
-  metrics.record_direct_h2_transport_miss_id(protocol, reason);
-  DirectH2SendResult::Sent(Err(error))
-}
-
-async fn sender_with_first_byte_timeout<F>(
-  sender: F,
-  timeout: Duration,
-) -> anyhow::Result<Option<DirectH2Sender>>
-where
-  F: Future<Output = anyhow::Result<Option<DirectH2Sender>>>,
-{
-  match tokio::time::timeout(timeout, sender).await {
-    Ok(result) => result,
-    Err(_) => anyhow::bail!("direct H2 upstream first-byte timed out"),
-  }
-}
-
-pub(super) fn release_response_body(
-  body: ProxyBody,
-  lease: DirectH2Lease,
-  body_consumed: bool,
-) -> ProxyBody {
-  if body_consumed {
-    drop(lease);
-    return body;
-  }
-  body::with_drop_guard(body, lease)
 }
 
 #[cfg(test)]

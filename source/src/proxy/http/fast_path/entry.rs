@@ -17,6 +17,7 @@ use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTran
 
 use super::PlainProxyFastPath;
 use super::decision::{plain_proxy_fast_path_decision, record_plain_proxy_fast_path_decision};
+use super::stage_timing as timing;
 use super::waf::{PlainFastPathWaf, plain_fast_path_waf_required, prepare_plain_fast_path_waf};
 
 #[allow(clippy::too_many_arguments)]
@@ -43,9 +44,25 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
+  let eligibility_started = timing::start(state.request_path_features.stage_timing_metrics);
+  let metric_protocol = timing::protocol(request_version);
   match plain_proxy_fast_path_decision(&request, state.as_ref(), resolved) {
-    Ok(()) => record_plain_proxy_fast_path_decision(state.as_ref(), request_version, None),
+    Ok(()) => {
+      timing::record_fast_path_eligibility(
+        state.as_ref(),
+        metric_protocol,
+        true,
+        eligibility_started,
+      );
+      record_plain_proxy_fast_path_decision(state.as_ref(), request_version, None);
+    }
     Err(reason) => {
+      timing::record_fast_path_eligibility(
+        state.as_ref(),
+        metric_protocol,
+        false,
+        eligibility_started,
+      );
       record_plain_proxy_fast_path_decision(state.as_ref(), request_version, Some(reason));
       return Err(request);
     }

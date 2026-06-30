@@ -173,6 +173,10 @@ mod tests {
     metrics.record_duration_ns("plain_proxy", "h2", "transport_direct_h1", "ok", 5);
     metrics.record_duration_ns("plain_proxy", "h2", "direct_h1_pool_take", "ok", 7);
     metrics.record_duration_ns("plain_proxy", "h2", "direct_h1_response_head", "ok", 3);
+    metrics.record_duration_ns("plain_proxy", "h2", "route_resolution", "ok", 11);
+    metrics.record_duration_ns("plain_proxy", "h2", "fast_path_eligibility", "fallback", 13);
+    metrics.record_duration_ns("plain_proxy", "h2", "transport_selection", "ok", 17);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h2_send_request", "error", 19);
     metrics.record_duration_ns(
       "plain_proxy",
       "h2",
@@ -226,6 +230,13 @@ mod tests {
       53,
     );
     metrics.record_duration_ns_id(
+      FastPathMetricPath::H3Downstream,
+      FastPathMetricProtocol::H3,
+      FastPathMetricStage::H3StreamFinish,
+      FastPathMetricOutcome::Ok,
+      59,
+    );
+    metrics.record_duration_ns_id(
       FastPathMetricPath::StaticFiles,
       FastPathMetricProtocol::H1,
       FastPathMetricStage::StaticWriteBody,
@@ -246,6 +257,22 @@ mod tests {
       stage_counter_index("plain_proxy", "h2", "direct_h1_response_head", "ok").unwrap();
     assert_eq!(metrics.observations[response_head_index].load(), 1);
     assert_eq!(metrics.duration_ns[response_head_index].load(), 3);
+    let route_resolution_index =
+      stage_counter_index("plain_proxy", "h2", "route_resolution", "ok").unwrap();
+    assert_eq!(metrics.observations[route_resolution_index].load(), 1);
+    assert_eq!(metrics.duration_ns[route_resolution_index].load(), 11);
+    let eligibility_index =
+      stage_counter_index("plain_proxy", "h2", "fast_path_eligibility", "fallback").unwrap();
+    assert_eq!(metrics.observations[eligibility_index].load(), 1);
+    assert_eq!(metrics.duration_ns[eligibility_index].load(), 13);
+    let transport_selection_index =
+      stage_counter_index("plain_proxy", "h2", "transport_selection", "ok").unwrap();
+    assert_eq!(metrics.observations[transport_selection_index].load(), 1);
+    assert_eq!(metrics.duration_ns[transport_selection_index].load(), 17);
+    let direct_h2_send_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h2_send_request", "error").unwrap();
+    assert_eq!(metrics.observations[direct_h2_send_index].load(), 1);
+    assert_eq!(metrics.duration_ns[direct_h2_send_index].load(), 19);
     let h2_return_index =
       stage_counter_index("plain_proxy", "h2", "h2_downstream_response_return", "ok").unwrap();
     assert_eq!(metrics.observations[h2_return_index].load(), 1);
@@ -274,6 +301,10 @@ mod tests {
       stage_counter_index("h3_downstream", "h3", "h3_response_body_frame", "ok").unwrap();
     assert_eq!(metrics.observations[h3_response_frame_index].load(), 1);
     assert_eq!(metrics.duration_ns[h3_response_frame_index].load(), 53);
+    let h3_stream_finish_index =
+      stage_counter_index("h3_downstream", "h3", "h3_stream_finish", "ok").unwrap();
+    assert_eq!(metrics.observations[h3_stream_finish_index].load(), 1);
+    assert_eq!(metrics.duration_ns[h3_stream_finish_index].load(), 59);
     let static_write_body_index =
       stage_counter_index("static_files", "h1", "static_write_body", "ok").unwrap();
     assert_eq!(metrics.observations[static_write_body_index].load(), 1);

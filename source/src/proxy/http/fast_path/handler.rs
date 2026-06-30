@@ -441,7 +441,14 @@ impl PlainProxyFastPath {
     let mut report_pool_success = false;
     let mut direct_h1_lease = None;
     let mut direct_h2_lease = None;
+    let transport_selection_started = timing::start(timing_enabled);
     let direct_transport = direct_fast_path_transport(upstream_version, direct_candidate);
+    timing::record_transport_selection(
+      snapshot,
+      metric_protocol,
+      direct_transport,
+      transport_selection_started,
+    );
     let transport_started = timing::start(timing_enabled);
     let direct_attempt = match direct_transport {
       Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
@@ -455,6 +462,7 @@ impl PlainProxyFastPath {
         request_body_proven_empty,
         outbound,
         timeouts,
+        snapshot.request_path_features.hot_path_metrics,
         snapshot.request_path_features.hot_path_diagnostic_metrics,
         timing_enabled,
       )
@@ -479,6 +487,8 @@ impl PlainProxyFastPath {
         request_body_proven_empty,
         outbound,
         timeouts,
+        snapshot.request_path_features.hot_path_metrics,
+        timing_enabled,
       )
       .await
       {

@@ -145,10 +145,15 @@ pub(crate) enum FastPathMetricStage {
   H3RequestTaskSpawn = 26,
   H3KnownSmallFinalize = 27,
   H3ResponseBodyFrame = 28,
+  RouteResolution = 29,
+  FastPathEligibility = 30,
+  TransportSelection = 31,
+  DirectH2SendRequest = 32,
+  H3StreamFinish = 33,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 29] = [
+  pub(crate) const ALL: [Self; 34] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -178,6 +183,11 @@ impl FastPathMetricStage {
     Self::H3RequestTaskSpawn,
     Self::H3KnownSmallFinalize,
     Self::H3ResponseBodyFrame,
+    Self::RouteResolution,
+    Self::FastPathEligibility,
+    Self::TransportSelection,
+    Self::DirectH2SendRequest,
+    Self::H3StreamFinish,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -212,6 +222,11 @@ impl FastPathMetricStage {
       Self::H3RequestTaskSpawn => "h3_request_task_spawn",
       Self::H3KnownSmallFinalize => "h3_known_small_finalize",
       Self::H3ResponseBodyFrame => "h3_response_body_frame",
+      Self::RouteResolution => "route_resolution",
+      Self::FastPathEligibility => "fast_path_eligibility",
+      Self::TransportSelection => "transport_selection",
+      Self::DirectH2SendRequest => "direct_h2_send_request",
+      Self::H3StreamFinish => "h3_stream_finish",
     }
   }
 
@@ -246,6 +261,11 @@ impl FastPathMetricStage {
       "h3_request_task_spawn" => Some(Self::H3RequestTaskSpawn),
       "h3_known_small_finalize" => Some(Self::H3KnownSmallFinalize),
       "h3_response_body_frame" => Some(Self::H3ResponseBodyFrame),
+      "route_resolution" => Some(Self::RouteResolution),
+      "fast_path_eligibility" => Some(Self::FastPathEligibility),
+      "transport_selection" => Some(Self::TransportSelection),
+      "direct_h2_send_request" => Some(Self::DirectH2SendRequest),
+      "h3_stream_finish" => Some(Self::H3StreamFinish),
       _ => None,
     }
   }

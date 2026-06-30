@@ -107,8 +107,13 @@ where
   match known_small_body_plan {
     H3KnownSmallBodyPlan::CompiledNoopNoTrailers(data) => {
       let finalize_started = response_timing_start(response_timing.as_ref());
-      let result =
-        respond_to_h3_compiled_known_small_no_trailers(stream, data, response_send_timeout).await;
+      let result = respond_to_h3_compiled_known_small_no_trailers(
+        stream,
+        data,
+        response_send_timeout,
+        response_timing.as_ref(),
+      )
+      .await;
       response_timing_record(
         response_timing.as_ref(),
         timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
@@ -119,8 +124,13 @@ where
     }
     H3KnownSmallBodyPlan::Inlined(inlined) => {
       let finalize_started = response_timing_start(response_timing.as_ref());
-      let result =
-        respond_to_h3_inlined_known_small_body(stream, inlined, response_send_timeout).await;
+      let result = respond_to_h3_inlined_known_small_body(
+        stream,
+        inlined,
+        response_send_timeout,
+        response_timing.as_ref(),
+      )
+      .await;
       response_timing_record(
         response_timing.as_ref(),
         timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
@@ -134,7 +144,13 @@ where
 
   if use_known_small_response_body {
     let finalize_started = response_timing_start(response_timing.as_ref());
-    let result = respond_to_h3_known_small_body(stream, body, response_send_timeout).await;
+    let result = respond_to_h3_known_small_body(
+      stream,
+      body,
+      response_send_timeout,
+      response_timing.as_ref(),
+    )
+    .await;
     response_timing_record(
       response_timing.as_ref(),
       timing::STAGE_H3_KNOWN_SMALL_FINALIZE,
@@ -185,9 +201,7 @@ where
       }
     }
   }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
+  finish_h3_stream_with_timing(stream, response_send_timeout, response_timing.as_ref()).await?;
 
   Ok(())
 }
@@ -243,6 +257,7 @@ async fn respond_to_h3_compiled_known_small_no_trailers<S>(
   stream: h3::server::RequestStream<S, Bytes>,
   data: Bytes,
   response_send_timeout: Option<Duration>,
+  response_timing: Option<&H3ResponseTiming>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
@@ -255,7 +270,7 @@ where
   }
   timeout_h3_compiled_known_small_send(
     response_send_timeout,
-    send_h3_compiled_known_small_no_trailers(stream, data),
+    send_h3_compiled_known_small_no_trailers(stream, data, response_timing),
   )
   .await
 }
@@ -263,6 +278,7 @@ where
 async fn send_h3_compiled_known_small_no_trailers<S>(
   mut stream: h3::server::RequestStream<S, Bytes>,
   data: Bytes,
+  response_timing: Option<&H3ResponseTiming>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
@@ -273,10 +289,7 @@ where
       .await
       .context("failed to send downstream HTTP/3 response data")?;
   }
-  stream
-    .finish()
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
+  finish_h3_stream_with_timing(stream, None, response_timing).await?;
   Ok(())
 }
 
@@ -299,6 +312,7 @@ async fn respond_to_h3_known_small_body<S>(
   mut stream: h3::server::RequestStream<S, Bytes>,
   body: ProxyBody,
   response_send_timeout: Option<Duration>,
+  response_timing: Option<&H3ResponseTiming>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
@@ -316,9 +330,7 @@ where
       .await
       .context("failed to send downstream HTTP/3 response trailers")?;
   }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
+  finish_h3_stream_with_timing(stream, response_send_timeout, response_timing).await?;
   Ok(())
 }
 
@@ -326,6 +338,7 @@ async fn respond_to_h3_inlined_known_small_body<S>(
   mut stream: h3::server::RequestStream<S, Bytes>,
   inlined: InlinedKnownSmallResponseBody,
   response_send_timeout: Option<Duration>,
+  response_timing: Option<&H3ResponseTiming>,
 ) -> anyhow::Result<()>
 where
   S: h3::quic::SendStream<Bytes>,
@@ -347,10 +360,29 @@ where
       .await
       .context("failed to send downstream HTTP/3 response trailers")?;
   }
-  maybe_timeout(response_send_timeout, stream.finish())
-    .await
-    .context("failed to finish downstream HTTP/3 response")?;
+  finish_h3_stream_with_timing(stream, response_send_timeout, response_timing).await?;
   Ok(())
+}
+
+async fn finish_h3_stream_with_timing<S>(
+  mut stream: h3::server::RequestStream<S, Bytes>,
+  response_send_timeout: Option<Duration>,
+  response_timing: Option<&H3ResponseTiming>,
+) -> anyhow::Result<()>
+where
+  S: h3::quic::SendStream<Bytes>,
+{
+  let finish_started = response_timing_start(response_timing);
+  let result = maybe_timeout(response_send_timeout, stream.finish())
+    .await
+    .context("failed to finish downstream HTTP/3 response");
+  response_timing_record(
+    response_timing,
+    timing::STAGE_H3_STREAM_FINISH,
+    result.is_ok(),
+    finish_started,
+  );
+  result
 }
 
 #[derive(Debug)]

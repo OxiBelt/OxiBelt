@@ -191,7 +191,7 @@ async fn sender_single_flights_cold_pool_connection_creation() {
     handles.push(tokio::spawn(async move {
       start.wait().await;
       pool
-        .sender_with(&metrics, move || async move {
+        .sender_with(&metrics, true, move || async move {
           let attempt = connect_attempts.fetch_add(1, Ordering::SeqCst) + 1;
           if attempt == 1
             && let Some(sender) = first_connect_tx.lock().unwrap().take()
@@ -275,7 +275,7 @@ async fn sender_bounds_cold_pool_connection_creation_by_slots() {
     handles.push(tokio::spawn(async move {
       start.wait().await;
       pool
-        .sender_with(&metrics, move || async move {
+        .sender_with(&metrics, true, move || async move {
           let attempt = connect_attempts.fetch_add(1, Ordering::SeqCst) + 1;
           if attempt == 1
             && let Some(sender) = first_connect_tx.lock().unwrap().take()
@@ -324,7 +324,7 @@ async fn sender_lease_tracks_active_streams_until_drop() {
   let metrics = Metrics::new();
 
   let sender = pool
-    .sender_with(&metrics, successful_test_sender)
+    .sender_with(&metrics, true, successful_test_sender)
     .await
     .expect("sender acquisition should succeed")
     .expect("sender should be acquired");
@@ -348,7 +348,7 @@ async fn saturated_pool_falls_back_instead_of_failing_request() {
     .clone();
   let metrics = Metrics::new();
   let held = pool
-    .sender_with(&metrics, successful_test_sender)
+    .sender_with(&metrics, true, successful_test_sender)
     .await
     .expect("initial sender acquisition should succeed")
     .expect("initial sender should reserve the only stream slot");
@@ -375,6 +375,8 @@ async fn saturated_pool_falls_back_instead_of_failing_request() {
     true,
     request,
     direct_h2_test_timeouts(),
+    true,
+    false,
   )
   .await;
 
@@ -414,7 +416,7 @@ async fn sender_timeout_bounds_single_flight_wait() {
     let release_rx = release_rx.clone();
     tokio::spawn(async move {
       pool
-        .sender_with(&metrics, move || async move {
+        .sender_with(&metrics, true, move || async move {
           if let Some(sender) = leader_started_tx.lock().unwrap().take() {
             let _ = sender.send(());
           }
@@ -440,7 +442,7 @@ async fn sender_timeout_bounds_single_flight_wait() {
     let metrics = metrics.clone();
     async move {
       sender_with_first_byte_timeout(
-        pool.sender_with(&metrics, successful_test_sender),
+        pool.sender_with(&metrics, true, successful_test_sender),
         Duration::from_millis(100),
       )
       .await
@@ -496,7 +498,7 @@ async fn sender_acquisition_timeout_releases_pool_lock() {
     let release_rx = release_rx.clone();
     async move {
       sender_with_first_byte_timeout(
-        pool.sender_with(&metrics, move || async move {
+        pool.sender_with(&metrics, true, move || async move {
           if let Some(sender) = connector_started_tx.lock().unwrap().take() {
             let _ = sender.send(());
           }
@@ -532,7 +534,11 @@ async fn sender_acquisition_timeout_releases_pool_lock() {
   let successful = tokio::time::timeout(Duration::from_secs(1), {
     let pool = pool.clone();
     let metrics = metrics.clone();
-    async move { pool.sender_with(&metrics, successful_test_sender).await }
+    async move {
+      pool
+        .sender_with(&metrics, true, successful_test_sender)
+        .await
+    }
   })
   .await
   .expect("pool lock should be available after handshake timeout")

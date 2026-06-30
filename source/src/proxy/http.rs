@@ -479,6 +479,9 @@ where
     return text_response(status, "rate limit exceeded");
   }
 
+  let route_resolution_started =
+    fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
+  let metric_protocol = fast_path::stage_timing::protocol(request_version);
   let resolved = state
     .route_table
     .try_resolve_simple_exact_host(host, path, &state.upstreams)
@@ -497,6 +500,12 @@ where
         &state.upstreams,
       )
     });
+  fast_path::stage_timing::record_route_resolution(
+    state.as_ref(),
+    metric_protocol,
+    resolved.is_some(),
+    route_resolution_started,
+  );
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };

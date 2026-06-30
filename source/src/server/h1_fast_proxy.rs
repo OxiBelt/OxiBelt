@@ -326,6 +326,9 @@ fn prepare_fast_proxy_request<'a>(
     client_addr,
     snapshot.config.proxy.forwarded_headers.client_ip_source,
   );
+  let route_resolution_started =
+    proxy_http::fast_path::stage_timing::start(snapshot.request_path_features.stage_timing_metrics);
+  let metric_protocol = proxy_http::fast_path::stage_timing::protocol(Version::HTTP_11);
   let resolved = snapshot
     .route_table
     .try_resolve_simple_exact_host(&host, request_path, &snapshot.upstreams)
@@ -343,7 +346,14 @@ fn prepare_fast_proxy_request<'a>(
         },
         &snapshot.upstreams,
       )
-    })?;
+    });
+  proxy_http::fast_path::stage_timing::record_route_resolution(
+    snapshot,
+    metric_protocol,
+    resolved.is_some(),
+    route_resolution_started,
+  );
+  let resolved = resolved?;
   if !proxy_http::route_matches_selected_tls_negotiation_policy(snapshot, tls, resolved.route) {
     return None;
   }

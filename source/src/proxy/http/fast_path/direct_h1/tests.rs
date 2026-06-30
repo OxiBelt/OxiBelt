@@ -5,6 +5,7 @@ use http::{HeaderValue, Request};
 use http_body_util::Full;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use url::Url;
 
 use super::*;
 
@@ -590,8 +591,11 @@ async fn send_and_recycle_direct_get(
     FastPathMetricProtocol::H1,
     prepared,
     timeouts,
-    false,
-    timing_enabled,
+    DirectH1SendMetricOptions {
+      hot_path_metrics: true,
+      diagnostic_metrics: false,
+      timing_enabled,
+    },
   )
   .await?;
   let lease = direct

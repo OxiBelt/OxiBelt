@@ -9330,6 +9330,13 @@ mod tests {
                           "total_ns": 1200,
                           "avg_ns": 12.0
                         }
+                      },
+                      "h3_stream_finish": {
+                        "ok": {
+                          "count": 100,
+                          "total_ns": 700,
+                          "avg_ns": 7.0
+                        }
                       }
                     }
                   }
@@ -9384,6 +9391,7 @@ mod tests {
     assert!(markdown.contains("metrics-detailed-h3"));
     assert!(markdown.contains("h3_request_task_spawn"));
     assert!(markdown.contains("h3_known_small_finalize"));
+    assert!(markdown.contains("h3_stream_finish"));
   }
 
   #[test]
