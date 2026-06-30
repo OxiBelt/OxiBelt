@@ -3044,6 +3044,14 @@ oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
 oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"transport_direct_h1\",outcome=\"ok\"} 100
 # TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"downstream_protocol_receive\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"downstream_protocol_receive\",outcome=\"ok\"} 40
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"upstream_request_rebuild\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"upstream_request_rebuild\",outcome=\"ok\"} 44
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
 oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"direct_h1_response_head\",outcome=\"ok\"} 4
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
 oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"direct_h1_response_head\",outcome=\"ok\"} 80
@@ -3051,6 +3059,18 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h
 oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_downstream_response_return\",outcome=\"ok\"} 4
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
 oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_downstream_response_return\",outcome=\"ok\"} 12
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_response_send\",outcome=\"ok\"} 4
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"plain_proxy\",protocol=\"h2\",stage=\"h2_response_send\",outcome=\"ok\"} 16
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"downstream_protocol_receive\",outcome=\"ok\"} 2
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"downstream_protocol_receive\",outcome=\"ok\"} 60
+# TYPE oxibelt_http_fast_path_stage_observations_total counter
+oxibelt_http_fast_path_stage_observations_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_request_task_join\",outcome=\"ok\"} 2
+# TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
+oxibelt_http_fast_path_stage_duration_ns_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_request_task_join\",outcome=\"ok\"} 70
 # TYPE oxibelt_http_fast_path_stage_observations_total counter
 oxibelt_http_fast_path_stage_observations_total{path=\"h3_downstream\",protocol=\"h3\",stage=\"h3_downstream_send\",outcome=\"error\"} 2
 # TYPE oxibelt_http_fast_path_stage_duration_ns_total counter
@@ -3117,12 +3137,32 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
       25.0
     );
     assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["downstream_protocol_receive"]["ok"]["avg_ns"],
+      10.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["upstream_request_rebuild"]["ok"]["avg_ns"],
+      11.0
+    );
+    assert_eq!(
       parsed["stage_timing"]["plain_proxy"]["h2"]["direct_h1_response_head"]["ok"]["avg_ns"],
       20.0
     );
     assert_eq!(
       parsed["stage_timing"]["plain_proxy"]["h2"]["h2_downstream_response_return"]["ok"]["avg_ns"],
       3.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["plain_proxy"]["h2"]["h2_response_send"]["ok"]["avg_ns"],
+      4.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["h3_downstream"]["h3"]["downstream_protocol_receive"]["ok"]["avg_ns"],
+      30.0
+    );
+    assert_eq!(
+      parsed["stage_timing"]["h3_downstream"]["h3"]["h3_request_task_join"]["ok"]["avg_ns"],
+      35.0
     );
     assert_eq!(
       parsed["stage_timing"]["h3_downstream"]["h3"]["h3_downstream_send"]["error"]["avg_ns"],

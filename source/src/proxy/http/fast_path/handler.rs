@@ -197,6 +197,15 @@ impl PlainProxyFastPath {
     let verified_early_data = crate::proxy::http::early_data::is_verified(&request);
     let (parts, body) = request.into_parts();
     let forwarded_request_header_values = ForwardedRequestHeaderValues::new(host, downstream_port);
+    let upstream_rebuild_started = timing::start(timing_enabled);
+    let record_upstream_rebuild = |success| {
+      timing::record_upstream_request_rebuild(
+        snapshot,
+        metric_protocol,
+        success,
+        upstream_rebuild_started,
+      );
+    };
     let direct_h1_build_started = timing::start(timing_enabled);
     let preparation = match prepare_downstream_direct_h1_or_generic(
       parts,
@@ -225,6 +234,7 @@ impl PlainProxyFastPath {
     ) {
       Ok(preparation) => preparation,
       Err(error) => {
+        record_upstream_rebuild(false);
         warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
         return with_route_security_headers(
           text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
@@ -241,6 +251,7 @@ impl PlainProxyFastPath {
           .telemetry
           .inject_trace_context(outbound.headers_mut(), trace_context);
         timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+        record_upstream_rebuild(true);
         let request_body_started = timing::start(timing_enabled);
         record_empty_request_body(snapshot, metric_protocol, outbound.extensions());
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
@@ -254,6 +265,7 @@ impl PlainProxyFastPath {
           match compiled.target_uri(&parts.uri) {
             Ok(uri) => uri,
             Err(error) => {
+              record_upstream_rebuild(false);
               warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
               return with_route_security_headers(
                 text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
@@ -264,6 +276,7 @@ impl PlainProxyFastPath {
           }
         } else {
           let Some(upstream_uri) = state.upstream_uri_parts_by_index.get(upstream_index) else {
+            record_upstream_rebuild(false);
             warn!(
               upstream = %upstream.name,
               upstream_index,
@@ -278,6 +291,7 @@ impl PlainProxyFastPath {
           match fast_path_target_uri(upstream_uri, resolved, downstream_scheme, host, &parts.uri) {
             Ok(uri) => uri,
             Err(error) => {
+              record_upstream_rebuild(false);
               warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
               return with_route_security_headers(
                 text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
@@ -366,6 +380,7 @@ impl PlainProxyFastPath {
                 parts = Some(returned_parts);
               }
               Err(error) => {
+                record_upstream_rebuild(false);
                 warn!(error = %error, route = %resolved.route.name, "failed to rewrite upstream URI");
                 return with_route_security_headers(
                   text_response(StatusCode::BAD_REQUEST, "invalid upstream URI rewrite"),
@@ -382,6 +397,7 @@ impl PlainProxyFastPath {
           timing::direct_h1_build_fallback(snapshot, metric_protocol, direct_h1_build_started);
         }
         if let Some(outbound) = post_probe_outbound {
+          record_upstream_rebuild(true);
           (outbound, true)
         } else {
           let mut parts =
@@ -414,6 +430,7 @@ impl PlainProxyFastPath {
             .telemetry
             .inject_trace_context(&mut parts.headers, trace_context);
           timing::record_fast_path_prepare(snapshot, metric_protocol, prepare_started);
+          record_upstream_rebuild(true);
           let outbound_body = if request_body_proven_empty {
             request_body.into_body()
           } else {

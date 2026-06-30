@@ -4004,6 +4004,10 @@ fn metrics_mode_reverse_proxy_scenario(scenario: &str) -> bool {
   )
 }
 
+fn h3_inline_fast_path_scenario(scenario: &str) -> bool {
+  scenario == "h3-inline-fast-path-experiment"
+}
+
 fn accept_multiplier_base_scenario(scenario: &str) -> Option<&str> {
   scenario
     .strip_prefix("accept-0_5-")
@@ -7926,6 +7930,7 @@ fn write_fast_path_stage_timing_table(markdown: &mut String, report: &Report) {
         .and_then(|fast_path| fast_path.stage_timing.as_ref())?;
       if !matches!(aggregate.scenario.as_str(), "h2" | "h3")
         && !metrics_mode_reverse_proxy_scenario(&aggregate.scenario)
+        && !h3_inline_fast_path_scenario(&aggregate.scenario)
         && !stage_timing.contains_key("static_files")
       {
         return None;
@@ -9214,6 +9219,20 @@ mod tests {
                           "avg_ns": 25.0
                         }
                       },
+                      "downstream_protocol_receive": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 28,
+                          "avg_ns": 7.0
+                        }
+                      },
+                      "upstream_request_rebuild": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 32,
+                          "avg_ns": 8.0
+                        }
+                      },
                       "direct_h1_pool_take": {
                         "ok": {
                           "count": 4,
@@ -9233,6 +9252,13 @@ mod tests {
                           "count": 4,
                           "total_ns": 12,
                           "avg_ns": 3.0
+                        }
+                      },
+                      "h2_response_send": {
+                        "ok": {
+                          "count": 4,
+                          "total_ns": 44,
+                          "avg_ns": 11.0
                         }
                       }
                     }
@@ -9270,6 +9296,14 @@ mod tests {
     assert_eq!(sample.total_ns, 100);
     assert_eq!(sample.median_avg_ns, Some(25.0));
     assert_eq!(sample.max_avg_ns, Some(25.0));
+    let receive_sample = &stage_timing["plain_proxy"]["h2"]["downstream_protocol_receive"]["ok"];
+    assert_eq!(receive_sample.sample_count, 1);
+    assert_eq!(receive_sample.total_ns, 28);
+    assert_eq!(receive_sample.median_avg_ns, Some(7.0));
+    let rebuild_sample = &stage_timing["plain_proxy"]["h2"]["upstream_request_rebuild"]["ok"];
+    assert_eq!(rebuild_sample.sample_count, 1);
+    assert_eq!(rebuild_sample.total_ns, 32);
+    assert_eq!(rebuild_sample.median_avg_ns, Some(8.0));
     let pool_take_sample = &stage_timing["plain_proxy"]["h2"]["direct_h1_pool_take"]["ok"];
     assert_eq!(pool_take_sample.sample_count, 1);
     assert_eq!(pool_take_sample.count, 4);
@@ -9285,6 +9319,10 @@ mod tests {
     assert_eq!(h2_return_sample.sample_count, 1);
     assert_eq!(h2_return_sample.total_ns, 12);
     assert_eq!(h2_return_sample.median_avg_ns, Some(3.0));
+    let h2_send_sample = &stage_timing["plain_proxy"]["h2"]["h2_response_send"]["ok"];
+    assert_eq!(h2_send_sample.sample_count, 1);
+    assert_eq!(h2_send_sample.total_ns, 44);
+    assert_eq!(h2_send_sample.median_avg_ns, Some(11.0));
   }
 
   #[test]
@@ -9317,11 +9355,25 @@ mod tests {
                 "stage_timing": {
                   "h3_downstream": {
                     "h3": {
+                      "downstream_protocol_receive": {
+                        "ok": {
+                          "count": 100,
+                          "total_ns": 800,
+                          "avg_ns": 8.0
+                        }
+                      },
                       "h3_request_task_spawn": {
                         "ok": {
                           "count": 100,
                           "total_ns": 900,
                           "avg_ns": 9.0
+                        }
+                      },
+                      "h3_request_task_join": {
+                        "ok": {
+                          "count": 100,
+                          "total_ns": 1000,
+                          "avg_ns": 10.0
                         }
                       },
                       "h3_known_small_finalize": {
@@ -9389,7 +9441,9 @@ mod tests {
 
     let markdown = render_markdown(&report);
     assert!(markdown.contains("metrics-detailed-h3"));
+    assert!(markdown.contains("downstream_protocol_receive"));
     assert!(markdown.contains("h3_request_task_spawn"));
+    assert!(markdown.contains("h3_request_task_join"));
     assert!(markdown.contains("h3_known_small_finalize"));
     assert!(markdown.contains("h3_stream_finish"));
   }

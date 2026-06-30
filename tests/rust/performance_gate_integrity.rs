@@ -179,13 +179,16 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
 fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun {
   let script = performance_script_text();
   let functions = format!(
-    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
     extract_bash_function(&script, "diagnostic_profile_comparator_from_label"),
     extract_bash_function(&script, "load_errors_within_budget"),
     extract_bash_function(&script, "diagnostic_comparator_label"),
     extract_bash_function(&script, "result_failure_reason"),
     extract_bash_function(&script, "normalize_diagnostic_comparator_result"),
     extract_bash_function(&script, "direct_h2_diagnostic_load_label"),
+    extract_bash_function(&script, "metrics_mode_diagnostic_load_label"),
+    extract_bash_function(&script, "h3_inline_diagnostic_load_label"),
+    extract_bash_function(&script, "diagnostic_load_label"),
     extract_bash_function(&script, "normalize_diagnostic_load_result"),
     extract_bash_function(&script, "assert_diagnostic_result"),
     extract_bash_function(&script, "should_profile_load"),
@@ -1018,8 +1021,12 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "runtime-direct-h1)",
     "oxibelt-runtime-direct-h1-control-h2",
     "oxibelt-runtime-direct-h1-experiment-h2",
+    "oxibelt-h3-inline-fast-path-experiment",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only",
+    "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH=benchmark-only",
+    "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH_ACK=benchmark-only",
+    "h3_inline_diagnostic_load_label",
     "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
     "fast_path.io_backend.direct_h1",
@@ -2772,6 +2779,10 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
   assert!(
     script.contains("oxibelt-h3:h3"),
     "oxibelt-h3 rows should be selected for H3 fast-path gating"
+  );
+  assert!(
+    script.contains("oxibelt-h3-inline-fast-path-experiment:h3"),
+    "H3 inline experiment rows should collect fast-path diagnostics"
   );
   assert!(
     script.contains("{($protocol): $fast_path}"),

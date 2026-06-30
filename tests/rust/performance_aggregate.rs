@@ -235,6 +235,20 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                                 "avg_ns": 25.0
                             }
                         },
+                        "downstream_protocol_receive": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 28,
+                                "avg_ns": 7.0
+                            }
+                        },
+                        "upstream_request_rebuild": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 32,
+                                "avg_ns": 8.0
+                            }
+                        },
                         "direct_h1_response_head": {
                             "ok": {
                                 "count": 4,
@@ -247,6 +261,13 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                                 "count": 4,
                                 "total_ns": 12,
                                 "avg_ns": 3.0
+                            }
+                        },
+                        "h2_response_send": {
+                            "ok": {
+                                "count": 4,
+                                "total_ns": 44,
+                                "avg_ns": 11.0
                             }
                         }
                     }
@@ -306,6 +327,20 @@ fn load_row(label: &str, protocol: &str, rps: f64, p50_ms: f64, p99_ms: f64) -> 
                 },
                 "h3_downstream": {
                     "h3": {
+                        "downstream_protocol_receive": {
+                            "ok": {
+                                "count": 2,
+                                "total_ns": 18,
+                                "avg_ns": 9.0
+                            }
+                        },
+                        "h3_request_task_join": {
+                            "ok": {
+                                "count": 2,
+                                "total_ns": 26,
+                                "avg_ns": 13.0
+                            }
+                        },
                         "h3_downstream_send": {
                             "ok": {
                                 "count": 2,
@@ -370,6 +405,20 @@ struct PoolConcurrencyRowInput<'a> {
 fn pool_concurrency_row(input: PoolConcurrencyRowInput<'_>) -> Value {
   let mut row = load_row(input.label, input.protocol, input.rps, 1.0, input.p99_ms);
   let mut protocol_stage_timing = json!({
+      "downstream_protocol_receive": {
+          "ok": {
+              "count": 4,
+              "total_ns": 28,
+              "avg_ns": 7.0
+          }
+      },
+      "upstream_request_rebuild": {
+          "ok": {
+              "count": 4,
+              "total_ns": 32,
+              "avg_ns": 8.0
+          }
+      },
       "direct_h1_pool_take": {
           "ok": {
               "count": 4,
@@ -420,6 +469,19 @@ fn pool_concurrency_row(input: PoolConcurrencyRowInput<'_>) -> Value {
             }
         }),
       );
+    protocol_stage_timing
+      .as_object_mut()
+      .expect("stage timing should be an object")
+      .insert(
+        "h2_response_send".to_owned(),
+        json!({
+            "ok": {
+                "count": 4,
+                "total_ns": 44,
+                "avg_ns": 11.0
+            }
+        }),
+      );
     json!({
         "plain_proxy": {
             "h2": protocol_stage_timing
@@ -432,6 +494,20 @@ fn pool_concurrency_row(input: PoolConcurrencyRowInput<'_>) -> Value {
         },
         "h3_downstream": {
             "h3": {
+                "downstream_protocol_receive": {
+                        "ok": {
+                            "count": 4,
+                            "total_ns": 36,
+                            "avg_ns": 9.0
+                        }
+                },
+                "h3_request_task_join": {
+                        "ok": {
+                            "count": 4,
+                            "total_ns": 52,
+                            "avg_ns": 13.0
+                        }
+                },
                 "h3_downstream_send": {
                         "ok": {
                             "count": 4,
@@ -1374,12 +1450,32 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
     &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["direct_h1_response_head"]["ok"];
   assert_eq!(h2_response_head_timing["sample_count"], 25);
   assert_eq!(h2_response_head_timing["median_avg_ns"], json!(20.0));
+  let h2_receive_timing = &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["downstream_protocol_receive"]
+    ["ok"];
+  assert_eq!(h2_receive_timing["sample_count"], 25);
+  assert_eq!(h2_receive_timing["median_avg_ns"], json!(7.0));
+  let h2_rebuild_timing =
+    &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["upstream_request_rebuild"]["ok"];
+  assert_eq!(h2_rebuild_timing["sample_count"], 25);
+  assert_eq!(h2_rebuild_timing["median_avg_ns"], json!(8.0));
   let h2_return_timing = &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["h2_downstream_response_return"]
     ["ok"];
   assert_eq!(h2_return_timing["sample_count"], 25);
   assert_eq!(h2_return_timing["median_avg_ns"], json!(3.0));
+  let h2_send_timing =
+    &oxibelt_h2["fast_path"]["stage_timing"]["plain_proxy"]["h2"]["h2_response_send"]["ok"];
+  assert_eq!(h2_send_timing["sample_count"], 25);
+  assert_eq!(h2_send_timing["median_avg_ns"], json!(11.0));
 
   let oxibelt_h3 = find_aggregate(&report, "oxibelt", "h3");
+  let h3_receive_timing = &oxibelt_h3["fast_path"]["stage_timing"]["h3_downstream"]["h3"]["downstream_protocol_receive"]
+    ["ok"];
+  assert_eq!(h3_receive_timing["sample_count"], 25);
+  assert_eq!(h3_receive_timing["median_avg_ns"], json!(9.0));
+  let h3_join_timing =
+    &oxibelt_h3["fast_path"]["stage_timing"]["h3_downstream"]["h3"]["h3_request_task_join"]["ok"];
+  assert_eq!(h3_join_timing["sample_count"], 25);
+  assert_eq!(h3_join_timing["median_avg_ns"], json!(13.0));
   let h3_downstream_timing =
     &oxibelt_h3["fast_path"]["stage_timing"]["h3_downstream"]["h3"]["h3_downstream_send"]["ok"];
   assert_eq!(h3_downstream_timing["sample_count"], 25);
@@ -1401,7 +1497,11 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
   assert!(markdown.contains("## Fast-path stage timing diagnostics"));
   assert!(markdown.contains("`direct_h1_response_head`"));
   assert!(markdown.contains("`static_write_body`"));
+  assert!(markdown.contains("`downstream_protocol_receive`"));
+  assert!(markdown.contains("`upstream_request_rebuild`"));
+  assert!(markdown.contains("`h2_response_send`"));
   assert!(markdown.contains("`h2_downstream_response_return`"));
+  assert!(markdown.contains("`h3_request_task_join`"));
   assert!(markdown.contains("`h3_downstream_send`"));
 
   let h1_comparison = find_comparison(&report, "reverse_proxy", "h1-keepalive");

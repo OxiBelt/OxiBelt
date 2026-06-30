@@ -33,6 +33,7 @@ use super::helpers::{
   fast_path_downstream_response_timeout,
 };
 use super::response_body::fast_path_filter_trailers;
+use super::response_send_timing::maybe_wrap_h2_response_send_timing;
 use super::stage_timing as timing;
 
 #[allow(clippy::too_many_arguments)]
@@ -110,7 +111,9 @@ pub(super) fn finalize_response(
     );
     state.record_hot_path_response(response.status());
     timing::record_finalize(state, metric_protocol, request_version, finalize_started);
-    return response;
+    return response.map(|body| {
+      maybe_wrap_h2_response_send_timing(state, request_version, metric_protocol, body)
+    });
   }
 
   materialize_h2_inlined_known_small_body(
@@ -227,6 +230,7 @@ pub(super) fn finalize_response(
   state.record_hot_path_response(response.status());
   timing::record_finalize(state, metric_protocol, request_version, finalize_started);
   response
+    .map(|body| maybe_wrap_h2_response_send_timing(state, request_version, metric_protocol, body))
 }
 
 fn can_use_compiled_known_small_noop_response(
@@ -364,7 +368,6 @@ mod tests {
 
   use super::super::compiled::select_compiled_proxy_action;
   use super::*;
-
   mod common {
     include!(concat!(
       env!("CARGO_MANIFEST_DIR"),

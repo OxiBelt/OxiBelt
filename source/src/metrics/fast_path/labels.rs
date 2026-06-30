@@ -150,10 +150,14 @@ pub(crate) enum FastPathMetricStage {
   TransportSelection = 31,
   DirectH2SendRequest = 32,
   H3StreamFinish = 33,
+  DownstreamProtocolReceive = 34,
+  UpstreamRequestRebuild = 35,
+  H2ResponseSend = 36,
+  H3RequestTaskJoin = 37,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 34] = [
+  pub(crate) const ALL: [Self; 38] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -188,6 +192,10 @@ impl FastPathMetricStage {
     Self::TransportSelection,
     Self::DirectH2SendRequest,
     Self::H3StreamFinish,
+    Self::DownstreamProtocolReceive,
+    Self::UpstreamRequestRebuild,
+    Self::H2ResponseSend,
+    Self::H3RequestTaskJoin,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -227,6 +235,10 @@ impl FastPathMetricStage {
       Self::TransportSelection => "transport_selection",
       Self::DirectH2SendRequest => "direct_h2_send_request",
       Self::H3StreamFinish => "h3_stream_finish",
+      Self::DownstreamProtocolReceive => "downstream_protocol_receive",
+      Self::UpstreamRequestRebuild => "upstream_request_rebuild",
+      Self::H2ResponseSend => "h2_response_send",
+      Self::H3RequestTaskJoin => "h3_request_task_join",
     }
   }
 
@@ -266,6 +278,10 @@ impl FastPathMetricStage {
       "transport_selection" => Some(Self::TransportSelection),
       "direct_h2_send_request" => Some(Self::DirectH2SendRequest),
       "h3_stream_finish" => Some(Self::H3StreamFinish),
+      "downstream_protocol_receive" => Some(Self::DownstreamProtocolReceive),
+      "upstream_request_rebuild" => Some(Self::UpstreamRequestRebuild),
+      "h2_response_send" => Some(Self::H2ResponseSend),
+      "h3_request_task_join" => Some(Self::H3RequestTaskJoin),
       _ => None,
     }
   }

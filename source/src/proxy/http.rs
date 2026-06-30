@@ -299,7 +299,20 @@ where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
+  let request_version = request.version();
+  let downstream_receive_started =
+    fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
   early_data::strip_untrusted_header(request.headers_mut());
+  if transport_network != WafTransportNetwork::Udp {
+    fast_path::stage_timing::record(
+      state.as_ref(),
+      fast_path::stage_timing::PATH_PLAIN_PROXY,
+      fast_path::stage_timing::protocol(request_version),
+      fast_path::stage_timing::STAGE_DOWNSTREAM_PROTOCOL_RECEIVE,
+      fast_path::stage_timing::OUTCOME_OK,
+      downstream_receive_started,
+    );
+  }
   let system_access_log_enabled = state.request_path_features.system_access_log;
   let trace_context = if state.request_path_features.telemetry {
     state.telemetry.context_from_headers(request.headers())

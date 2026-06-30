@@ -95,7 +95,10 @@ pub(super) async fn try_handle_connection(
       return Ok(H1FastProxyPreflight::Done);
     }
 
-    let parsed = match super::plain_http::parse::read_request(
+    let downstream_receive_started = proxy_http::fast_path::stage_timing::start(
+      snapshot.request_path_features.stage_timing_metrics,
+    );
+    let read_outcome = super::plain_http::parse::read_request(
       &mut stream,
       buffer,
       snapshot.config.limits.max_total_header_bytes.max(8192),
@@ -105,8 +108,22 @@ pub(super) async fn try_handle_connection(
       shutdown,
       data_plane_drain,
     )
-    .await?
-    {
+    .await?;
+    let receive_outcome = match &read_outcome {
+      ReadRequestOutcome::Request(_) | ReadRequestOutcome::Closed => {
+        proxy_http::fast_path::stage_timing::OUTCOME_OK
+      }
+      ReadRequestOutcome::Fallback { .. } => proxy_http::fast_path::stage_timing::OUTCOME_FALLBACK,
+    };
+    proxy_http::fast_path::stage_timing::record(
+      snapshot.as_ref(),
+      proxy_http::fast_path::stage_timing::PATH_PLAIN_PROXY,
+      proxy_http::fast_path::stage_timing::protocol(Version::HTTP_11),
+      proxy_http::fast_path::stage_timing::STAGE_DOWNSTREAM_PROTOCOL_RECEIVE,
+      receive_outcome,
+      downstream_receive_started,
+    );
+    let parsed = match read_outcome {
       ReadRequestOutcome::Closed => return Ok(H1FastProxyPreflight::Done),
       ReadRequestOutcome::Fallback { prefix, reason } => {
         trace!(reason, "TLS H1 pre-Hyper proxy parser fell back");

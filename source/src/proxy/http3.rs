@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
@@ -34,6 +34,12 @@ type H3RequestRecvStream =
   h3::server::RequestStream<<H3BidiStream as h3::quic::BidiStream<Bytes>>::RecvStream, Bytes>;
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
+
+const H3_INLINE_FAST_PATH_EXPERIMENT_ENV: &str = "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH";
+const H3_INLINE_FAST_PATH_EXPERIMENT_ACK_ENV: &str = "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH_ACK";
+const H3_INLINE_FAST_PATH_EXPERIMENT_ACK: &str = "benchmark-only";
+
+static H3_INLINE_FAST_PATH_EXPERIMENT: OnceLock<bool> = OnceLock::new();
 
 mod fast_response;
 mod request_body;
@@ -366,6 +372,7 @@ pub(crate) async fn handle_downstream_connection(
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
   let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
+  let request_task_timing = request_tasks::RequestTaskTiming::new(snapshot.clone(), timing_enabled);
   let downstream_request_context = H3DownstreamRequestContext {
     peer_addr,
     udp_connection_id: udp_connection_id.clone(),
@@ -400,6 +407,7 @@ pub(crate) async fn handle_downstream_connection(
       request_tasks.abort_all().await;
       return Ok(());
     }
+    let receive_started = timing::start(timing_enabled);
     let resolver = tokio::select! {
       biased;
       changed = shutdown.changed() => {
@@ -436,8 +444,30 @@ pub(crate) async fn handle_downstream_connection(
     };
 
     let (mut request, stream) = match resolver.resolve_request().await {
-      Ok(resolved) => resolved,
+      Ok(resolved) => {
+        if timing_enabled {
+          timing::record(
+            snapshot.as_ref(),
+            timing::PATH_H3_DOWNSTREAM,
+            metric_protocol,
+            timing::STAGE_DOWNSTREAM_PROTOCOL_RECEIVE,
+            timing::OUTCOME_OK,
+            receive_started,
+          );
+        }
+        resolved
+      }
       Err(error) => {
+        if timing_enabled {
+          timing::record(
+            snapshot.as_ref(),
+            timing::PATH_H3_DOWNSTREAM,
+            metric_protocol,
+            timing::STAGE_DOWNSTREAM_PROTOCOL_RECEIVE,
+            timing::OUTCOME_ERROR,
+            receive_started,
+          );
+        }
         request_tasks.abort_all().await;
         return Err(error).context("failed to resolve downstream HTTP/3 request");
       }
@@ -481,6 +511,7 @@ pub(crate) async fn handle_downstream_connection(
         &mut request_tasks,
         &mut shutdown,
         &mut data_plane_drain,
+        Some(&request_task_timing),
       )
       .await
       {
@@ -512,6 +543,28 @@ pub(crate) async fn handle_downstream_connection(
       );
     }
 
+    if h3_inline_fast_path_candidate(&request) {
+      let inline_spawn_started = timing::start(timing_enabled);
+      if timing_enabled {
+        timing::record(
+          snapshot.as_ref(),
+          timing::PATH_H3_DOWNSTREAM,
+          metric_protocol,
+          timing::STAGE_H3_REQUEST_TASK_SPAWN,
+          timing::OUTCOME_FALLBACK,
+          inline_spawn_started,
+        );
+      }
+      request_tasks::handle_inline(
+        request,
+        stream,
+        downstream_request_context.clone(),
+        request_task_permit,
+      )
+      .await;
+      continue;
+    }
+
     let spawn_started = timing::start(timing_enabled);
     request_tasks.spawn(
       request,
@@ -530,6 +583,44 @@ pub(crate) async fn handle_downstream_connection(
       );
     }
   }
+}
+
+fn h3_inline_fast_path_candidate(request: &Request<()>) -> bool {
+  h3_inline_fast_path_experiment_enabled()
+    && http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+      request.method(),
+      ::http::Version::HTTP_3,
+      request.headers(),
+    )
+}
+
+fn h3_inline_fast_path_experiment_enabled() -> bool {
+  *H3_INLINE_FAST_PATH_EXPERIMENT.get_or_init(|| {
+    let requested = std::env::var(H3_INLINE_FAST_PATH_EXPERIMENT_ENV).ok();
+    let ack = std::env::var(H3_INLINE_FAST_PATH_EXPERIMENT_ACK_ENV).ok();
+    let enabled = h3_inline_fast_path_experiment_enabled_from(requested.as_deref(), ack.as_deref());
+    if h3_inline_fast_path_experiment_requested(requested.as_deref()) && !enabled {
+      tracing::warn!(
+        env = H3_INLINE_FAST_PATH_EXPERIMENT_ENV,
+        ack_env = H3_INLINE_FAST_PATH_EXPERIMENT_ACK_ENV,
+        expected_ack = H3_INLINE_FAST_PATH_EXPERIMENT_ACK,
+        "ignoring benchmark-only HTTP/3 inline fast-path experiment without acknowledgement"
+      );
+    }
+    enabled
+  })
+}
+
+fn h3_inline_fast_path_experiment_enabled_from(
+  value: Option<&str>,
+  acknowledgement: Option<&str>,
+) -> bool {
+  h3_inline_fast_path_experiment_requested(value)
+    && acknowledgement == Some(H3_INLINE_FAST_PATH_EXPERIMENT_ACK)
+}
+
+fn h3_inline_fast_path_experiment_requested(value: Option<&str>) -> bool {
+  matches!(value, Some("1" | "true")) || value == Some(H3_INLINE_FAST_PATH_EXPERIMENT_ACK)
 }
 
 pub(crate) async fn forward_request(

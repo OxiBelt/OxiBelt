@@ -1,6 +1,7 @@
 //! Per-connection HTTP/3 request task lifecycle and admission limits.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use ::http::{Request, Response, StatusCode};
 use anyhow::Context;
@@ -10,9 +11,12 @@ use tracing::{debug, warn};
 
 use super::{H3DownstreamRequestContext, H3RequestStream, handle_h3_request};
 use crate::config::Config;
+use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathMetricStage};
 use crate::proxy::http::body::ProxyBody;
+use crate::proxy::http::fast_path::stage_timing as timing;
 use crate::proxy::http::response::text_response;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::state::AppSnapshot;
 
 pub(super) struct RequestAdmission {
   accepted: usize,
@@ -50,6 +54,51 @@ pub(super) struct RequestTaskSet {
   tasks: JoinSet<()>,
 }
 
+pub(super) struct RequestTaskTiming {
+  state: Arc<AppSnapshot>,
+  enabled: bool,
+  protocol: FastPathMetricProtocol,
+}
+
+impl RequestTaskTiming {
+  pub(super) fn new(state: Arc<AppSnapshot>, enabled: bool) -> Self {
+    Self {
+      state,
+      enabled,
+      protocol: timing::protocol(::http::Version::HTTP_3),
+    }
+  }
+
+  pub(super) fn start(&self) -> Option<Instant> {
+    timing::start(self.enabled)
+  }
+
+  pub(super) fn record(
+    &self,
+    stage: FastPathMetricStage,
+    success: bool,
+    started_at: Option<Instant>,
+  ) {
+    let outcome = if success {
+      timing::OUTCOME_OK
+    } else {
+      timing::OUTCOME_ERROR
+    };
+    timing::record(
+      self.state.as_ref(),
+      timing::PATH_H3_DOWNSTREAM,
+      self.protocol,
+      stage,
+      outcome,
+      started_at,
+    );
+  }
+
+  fn record_join(&self, success: bool, started_at: Option<Instant>) {
+    self.record(timing::STAGE_H3_REQUEST_TASK_JOIN, success, started_at);
+  }
+}
+
 impl RequestTaskSet {
   pub(super) fn new(config: &Config) -> Self {
     Self::with_active_limit(active_limit_from_config(config))
@@ -83,6 +132,15 @@ impl RequestTaskSet {
 
   pub(super) async fn join_next(&mut self) {
     let completed = self.tasks.join_next().await;
+    log_result(completed);
+  }
+
+  pub(super) async fn join_next_with_timing(&mut self, timing: Option<&RequestTaskTiming>) {
+    let started_at = timing.and_then(RequestTaskTiming::start);
+    let completed = self.tasks.join_next().await;
+    if let Some(timing) = timing {
+      timing.record_join(completed.as_ref().is_some_and(Result::is_ok), started_at);
+    }
     log_result(completed);
   }
 
@@ -122,6 +180,7 @@ pub(super) async fn acquire_permit_or_stop(
   request_tasks: &mut RequestTaskSet,
   shutdown: &mut tokio::sync::watch::Receiver<bool>,
   data_plane_drain: &mut tokio::sync::watch::Receiver<bool>,
+  timing: Option<&RequestTaskTiming>,
 ) -> anyhow::Result<Option<OwnedSemaphorePermit>> {
   let permit = request_tasks.acquire_permit();
   tokio::pin!(permit);
@@ -143,7 +202,7 @@ pub(super) async fn acquire_permit_or_stop(
         }
         continue;
       }
-      _ = request_tasks.join_next(), if !request_tasks.is_empty() => {
+      _ = request_tasks.join_next_with_timing(timing), if !request_tasks.is_empty() => {
         continue;
       }
       acquired = &mut permit => {
@@ -153,6 +212,15 @@ pub(super) async fn acquire_permit_or_stop(
       }
     }
   }
+}
+
+pub(super) async fn handle_inline(
+  request: Request<()>,
+  stream: H3RequestStream,
+  context: H3DownstreamRequestContext,
+  permit: OwnedSemaphorePermit,
+) {
+  handle(request, stream, context, permit).await;
 }
 
 pub(super) fn too_many_requests_response() -> Response<ProxyBody> {

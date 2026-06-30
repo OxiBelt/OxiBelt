@@ -1522,8 +1522,17 @@ metrics_mode_diagnostic_load_label() {
   esac
 }
 
+h3_inline_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  [[ "${host}" == "oxibelt" && "${label}:${protocol}" == "oxibelt-h3-inline-fast-path-experiment:h3" ]]
+}
+
 diagnostic_load_label() {
-  direct_h2_diagnostic_load_label "$@" || metrics_mode_diagnostic_load_label "$@"
+  direct_h2_diagnostic_load_label "$@" \
+    || metrics_mode_diagnostic_load_label "$@" \
+    || h3_inline_diagnostic_load_label "$@"
 }
 
 normalize_diagnostic_load_result() {
@@ -2642,6 +2651,7 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-metrics-basic-h3:h3) printf 'h3' ;;
     oxibelt-metrics-detailed-h2:h2) printf 'h2' ;;
     oxibelt-metrics-detailed-h3:h3) printf 'h3' ;;
+    oxibelt-h3-inline-fast-path-experiment:h3) printf 'h3' ;;
     oxibelt-pool*-conc*-h2:h2) printf 'h2' ;;
     oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
     oxibelt-h2-upstream-h2c:h2) printf 'h2' ;;
@@ -2659,7 +2669,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
@@ -3653,6 +3663,16 @@ run_runtime_direct_h1_group() {
     run_load "oxibelt-runtime-direct-h1-experiment-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
   else
     fail_with_diagnostics "mandatory HTTP/3 probe failed for direct-H1 runtime experiment rows"
+  fi
+
+  start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
+    --detailed-hot-path-diagnostics \
+    -e OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH=benchmark-only \
+    -e OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH_ACK=benchmark-only
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-h3-inline-fast-path-experiment" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for H3 inline fast-path experiment row"
   fi
 }
 

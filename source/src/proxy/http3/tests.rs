@@ -117,6 +117,86 @@ fn h3_accept_protocol_errors_remain_warnable() {
 }
 
 #[test]
+fn h3_inline_fast_path_experiment_requires_benchmark_acknowledgement() {
+  for value in [Some("1"), Some("true"), Some("benchmark-only")] {
+    assert!(h3_inline_fast_path_experiment_enabled_from(
+      value,
+      Some("benchmark-only")
+    ));
+    assert!(!h3_inline_fast_path_experiment_enabled_from(value, None));
+    assert!(!h3_inline_fast_path_experiment_enabled_from(
+      value,
+      Some("production")
+    ));
+  }
+
+  assert!(!h3_inline_fast_path_experiment_enabled_from(
+    None,
+    Some("benchmark-only")
+  ));
+  assert!(!h3_inline_fast_path_experiment_enabled_from(
+    Some("0"),
+    Some("benchmark-only")
+  ));
+}
+
+#[test]
+fn h3_inline_fast_path_request_filter_stays_bodyless_get_head_only() {
+  let get = Request::builder()
+    .method(Method::GET)
+    .uri("https://example.com/read")
+    .body(())
+    .unwrap();
+  assert!(
+    http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+      get.method(),
+      http::Version::HTTP_3,
+      get.headers(),
+    )
+  );
+
+  let head = Request::builder()
+    .method(Method::HEAD)
+    .uri("https://example.com/read")
+    .body(())
+    .unwrap();
+  assert!(
+    http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+      head.method(),
+      http::Version::HTTP_3,
+      head.headers(),
+    )
+  );
+
+  let post = Request::builder()
+    .method(Method::POST)
+    .uri("https://example.com/write")
+    .body(())
+    .unwrap();
+  assert!(
+    !http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+      post.method(),
+      http::Version::HTTP_3,
+      post.headers(),
+    )
+  );
+
+  let framed_get = Request::builder()
+    .method(Method::GET)
+    .uri("https://example.com/read")
+    .header(http::header::CONTENT_LENGTH, "0")
+    .body(())
+    .unwrap();
+  assert!(
+    !http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+      framed_get.method(),
+      http::Version::HTTP_3,
+      framed_get.headers(),
+    )
+  );
+}
+
+#[test]
 fn h3_known_small_path_requires_marker_and_small_upper_bound() {
   let small = full_test_body(Bytes::from_static(b"ok"));
   assert!(use_h3_known_small_body_path(true, &small));

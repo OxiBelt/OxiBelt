@@ -30,12 +30,15 @@ pub(crate) const STAGE_DIRECT_H1_RESPONSE_BODY_FIRST_FRAME: FastPathMetricStage 
   FastPathMetricStage::DirectH1ResponseBodyFirstFrame;
 pub(crate) const STAGE_DIRECT_H2_SEND_REQUEST: FastPathMetricStage =
   FastPathMetricStage::DirectH2SendRequest;
+pub(crate) const STAGE_DOWNSTREAM_PROTOCOL_RECEIVE: FastPathMetricStage =
+  FastPathMetricStage::DownstreamProtocolReceive;
 pub(crate) const STAGE_FAST_PATH_ELIGIBILITY: FastPathMetricStage =
   FastPathMetricStage::FastPathEligibility;
 pub(crate) const STAGE_FAST_PATH_PREPARE: FastPathMetricStage =
   FastPathMetricStage::FastPathPrepare;
 pub(crate) const STAGE_H2_DOWNSTREAM_RESPONSE_RETURN: FastPathMetricStage =
   FastPathMetricStage::H2DownstreamResponseReturn;
+pub(crate) const STAGE_H2_RESPONSE_SEND: FastPathMetricStage = FastPathMetricStage::H2ResponseSend;
 pub(crate) const STAGE_H3_DOWNSTREAM_SEND: FastPathMetricStage =
   FastPathMetricStage::H3DownstreamSend;
 pub(crate) const STAGE_H3_INGRESS_PREPARE: FastPathMetricStage =
@@ -48,6 +51,8 @@ pub(crate) const STAGE_H3_REQUEST_TASK_REAP: FastPathMetricStage =
   FastPathMetricStage::H3RequestTaskReap;
 pub(crate) const STAGE_H3_REQUEST_TASK_SPAWN: FastPathMetricStage =
   FastPathMetricStage::H3RequestTaskSpawn;
+pub(crate) const STAGE_H3_REQUEST_TASK_JOIN: FastPathMetricStage =
+  FastPathMetricStage::H3RequestTaskJoin;
 pub(crate) const STAGE_H3_RESPONSE_BODY_FRAME: FastPathMetricStage =
   FastPathMetricStage::H3ResponseBodyFrame;
 pub(crate) const STAGE_H3_STREAM_FINISH: FastPathMetricStage = FastPathMetricStage::H3StreamFinish;
@@ -71,6 +76,8 @@ pub(crate) const STAGE_STATIC_WRITE_HEAD: FastPathMetricStage =
   FastPathMetricStage::StaticWriteHead;
 pub(crate) const STAGE_TRANSPORT_SELECTION: FastPathMetricStage =
   FastPathMetricStage::TransportSelection;
+pub(crate) const STAGE_UPSTREAM_REQUEST_REBUILD: FastPathMetricStage =
+  FastPathMetricStage::UpstreamRequestRebuild;
 
 pub(crate) const OUTCOME_ERROR: FastPathMetricOutcome = FastPathMetricOutcome::Error;
 pub(crate) const OUTCOME_FALLBACK: FastPathMetricOutcome = FastPathMetricOutcome::Fallback;
@@ -229,6 +236,21 @@ pub(crate) fn record_request_body_prepare(
   started_at: Option<Instant>,
 ) {
   record_plain_ok(state, protocol, STAGE_REQUEST_BODY_PREPARE, started_at);
+}
+
+pub(crate) fn record_upstream_request_rebuild(
+  state: &AppSnapshot,
+  protocol: FastPathMetricProtocol,
+  success: bool,
+  started_at: Option<Instant>,
+) {
+  record_plain_result(
+    state,
+    protocol,
+    STAGE_UPSTREAM_REQUEST_REBUILD,
+    success,
+    started_at,
+  );
 }
 
 pub(crate) fn direct_h1_build_ok(
