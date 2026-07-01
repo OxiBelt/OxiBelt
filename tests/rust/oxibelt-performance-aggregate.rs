@@ -30,7 +30,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 28;
+const COMPARISON_SCHEMA_VERSION: u32 = 29;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -41,13 +41,15 @@ const EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC: &str = "benchmark_infrastructure
 const PROFILE_CLASSIFICATION_VALIDATION: &str = "diagnostic_profile_validation";
 const PROFILE_CLASSIFICATION_ENV_UNAVAILABLE: &str = "profiling_environment_unavailable";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
-const SERVING_TYPES: [&str; 6] = [
+const SERVING_TYPES: [&str; 8] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
   "oxibelt-soak-stress",
   "accept-multipliers",
   "remote-signer",
+  "runtime-direct-h1",
+  "metrics-mode",
 ];
 const RECOGNIZED_SERVING_TYPES: [&str; 9] = [
   "reverse-proxy",
@@ -1097,6 +1099,24 @@ struct Amd64IsaVariantComparison {
 }
 
 #[derive(Serialize)]
+struct ProbeH2loadComparison {
+  amd64_target_cpu: String,
+  scenario: String,
+  protocol: String,
+  oxibelt_perf_probe_rps: Option<f64>,
+  nginx_perf_probe_rps: Option<f64>,
+  perf_probe_ratio_vs_nginx: Option<f64>,
+  oxibelt_h2load_rps: Option<f64>,
+  nginx_h2load_rps: Option<f64>,
+  h2load_ratio_vs_nginx: Option<f64>,
+  ratio_delta: Option<f64>,
+  classification: String,
+  reason: String,
+  perf_probe_client_model: String,
+  h2load_client_model: String,
+}
+
+#[derive(Serialize)]
 struct Report {
   schema_version: u32,
   profile: Option<String>,
@@ -1115,6 +1135,7 @@ struct Report {
   pool_concurrency_experiments: Vec<PoolConcurrencyExperiment>,
   direct_h2_promotion_evidence: Vec<DirectH2PromotionEvidence>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
+  probe_h2load_comparisons: Vec<ProbeH2loadComparison>,
   external_benchmarks: Vec<ExternalBenchmarkStats>,
   profiling: Vec<DiagnosticProfileStats>,
   oxibelt_only_results: Vec<AggregateStats>,
@@ -2037,6 +2058,8 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     expected_shards,
     regression_gate_thresholds.h1_fast_path_min_hit_rate,
   );
+  let probe_h2load_comparisons =
+    build_probe_h2load_comparisons(&aggregate_map, &external_benchmarks, &primary_target_cpu);
   let primary_reverse_proxy = primary_scenario_comparisons(&reverse_proxy, &primary_target_cpu);
   let primary_static_files = primary_scenario_comparisons(&static_files, &primary_target_cpu);
   let primary_accept_multiplier_comparisons =
@@ -2111,6 +2134,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     pool_concurrency_experiments,
     direct_h2_promotion_evidence,
     amd64_isa_comparisons,
+    probe_h2load_comparisons,
     external_benchmarks,
     profiling,
     oxibelt_only_results,
@@ -4338,6 +4362,172 @@ fn pool_concurrency_scenario_parts(scenario: &str) -> Option<(u64, u64, &str)> {
     return None;
   }
   Some((pool_cap.parse().ok()?, concurrency.parse().ok()?, protocol))
+}
+
+fn build_probe_h2load_comparisons(
+  aggregates: &AggregateMap,
+  external_benchmarks: &[ExternalBenchmarkStats],
+  primary_target_cpu: &str,
+) -> Vec<ProbeH2loadComparison> {
+  let scenarios = [("h2", "h2"), ("h3", "h3")];
+  let mut rows = Vec::new();
+
+  for (scenario, protocol) in scenarios {
+    let oxibelt_perf_probe = aggregates.get(&(
+      primary_target_cpu.to_owned(),
+      Comparator::Oxibelt,
+      scenario.to_owned(),
+    ));
+    let nginx_perf_probe = aggregates.get(&(
+      primary_target_cpu.to_owned(),
+      Comparator::Nginx,
+      scenario.to_owned(),
+    ));
+    let oxibelt_h2load = external_h2load_row(
+      external_benchmarks,
+      primary_target_cpu,
+      "oxibelt",
+      scenario,
+      protocol,
+    );
+    let nginx_h2load = external_h2load_row(
+      external_benchmarks,
+      primary_target_cpu,
+      "nginx",
+      scenario,
+      protocol,
+    );
+
+    if oxibelt_perf_probe.is_none()
+      && nginx_perf_probe.is_none()
+      && oxibelt_h2load.is_none()
+      && nginx_h2load.is_none()
+    {
+      continue;
+    }
+
+    let oxibelt_perf_probe_rps = oxibelt_perf_probe.and_then(|row| row.median_rps);
+    let nginx_perf_probe_rps = nginx_perf_probe.and_then(|row| row.median_rps);
+    let perf_probe_ratio_vs_nginx = ratio(oxibelt_perf_probe_rps, nginx_perf_probe_rps);
+    let oxibelt_h2load_rps = external_h2load_validation_rps(oxibelt_h2load);
+    let nginx_h2load_rps = external_h2load_validation_rps(nginx_h2load);
+    let h2load_ratio_vs_nginx = ratio(oxibelt_h2load_rps, nginx_h2load_rps);
+    let ratio_delta = match (h2load_ratio_vs_nginx, perf_probe_ratio_vs_nginx) {
+      (Some(h2load), Some(perf_probe)) => Some(h2load - perf_probe),
+      _ => None,
+    };
+    let (classification, reason) = probe_h2load_status(
+      protocol,
+      oxibelt_perf_probe,
+      nginx_perf_probe,
+      oxibelt_h2load,
+      nginx_h2load,
+      perf_probe_ratio_vs_nginx,
+      h2load_ratio_vs_nginx,
+    );
+
+    rows.push(ProbeH2loadComparison {
+      amd64_target_cpu: primary_target_cpu.to_owned(),
+      scenario: scenario.to_owned(),
+      protocol: protocol.to_owned(),
+      oxibelt_perf_probe_rps,
+      nginx_perf_probe_rps,
+      perf_probe_ratio_vs_nginx,
+      oxibelt_h2load_rps,
+      nginx_h2load_rps,
+      h2load_ratio_vs_nginx,
+      ratio_delta,
+      classification,
+      reason,
+      perf_probe_client_model: "one sequential request per worker connection".to_owned(),
+      h2load_client_model:
+        "-c <concurrency> connections with -m 16 concurrent streams per connection".to_owned(),
+    });
+  }
+
+  rows
+}
+
+fn external_h2load_row<'a>(
+  rows: &'a [ExternalBenchmarkStats],
+  target_cpu: &str,
+  comparator: &str,
+  scenario: &str,
+  protocol: &str,
+) -> Option<&'a ExternalBenchmarkStats> {
+  rows.iter().find(|row| {
+    row.amd64_target_cpu == target_cpu
+      && row.serving_type == "reverse-proxy"
+      && row.tool == "h2load"
+      && row.comparator == comparator
+      && row.scenario == scenario
+      && row.protocol == protocol
+  })
+}
+
+fn external_h2load_validation_rps(row: Option<&ExternalBenchmarkStats>) -> Option<f64> {
+  let row = row?;
+  if row.classification == EXTERNAL_CLASSIFICATION_VALIDATION
+    && row.pass_count > 0
+    && row.fail_count == 0
+    && row.total_requests.unwrap_or(0.0) > 0.0
+  {
+    row.median_rps
+  } else {
+    None
+  }
+}
+
+fn probe_h2load_status(
+  protocol: &str,
+  oxibelt_perf_probe: Option<&AggregateStats>,
+  nginx_perf_probe: Option<&AggregateStats>,
+  oxibelt_h2load: Option<&ExternalBenchmarkStats>,
+  nginx_h2load: Option<&ExternalBenchmarkStats>,
+  perf_probe_ratio_vs_nginx: Option<f64>,
+  h2load_ratio_vs_nginx: Option<f64>,
+) -> (String, String) {
+  if protocol == "h3"
+    && [oxibelt_h2load, nginx_h2load]
+      .into_iter()
+      .flatten()
+      .any(|row| row.classification == EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC)
+  {
+    return (
+      "external_invalid".to_owned(),
+      "h2load h3 is invalid in this environment because the cross-comparator group completed zero requests".to_owned(),
+    );
+  }
+  if oxibelt_perf_probe.is_none() || nginx_perf_probe.is_none() {
+    return (
+      "missing_evidence".to_owned(),
+      "matching internal perf_probe OxiBelt/nginx rows are missing".to_owned(),
+    );
+  }
+  if oxibelt_h2load.is_none() || nginx_h2load.is_none() {
+    return (
+      "missing_evidence".to_owned(),
+      "matching external h2load OxiBelt/nginx rows are missing".to_owned(),
+    );
+  }
+  if perf_probe_ratio_vs_nginx.is_none() {
+    return (
+      "missing_evidence".to_owned(),
+      "internal perf_probe ratio is unavailable".to_owned(),
+    );
+  }
+  if h2load_ratio_vs_nginx.is_none() {
+    return (
+      "external_invalid".to_owned(),
+      "external h2load ratio is unavailable because at least one row failed or completed zero requests".to_owned(),
+    );
+  }
+
+  (
+    "client_model_mismatch".to_owned(),
+    "perf_probe sends one sequential request stream per worker connection, while h2load uses -m 16 multiplexed streams per connection; compare as diagnostic evidence only"
+      .to_owned(),
+  )
 }
 
 fn build_direct_h2_promotion_evidence(
@@ -7676,6 +7866,7 @@ fn render_markdown(report: &Report) -> String {
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
+  write_probe_h2load_comparison_table(&mut markdown, &report.probe_h2load_comparisons);
   write_external_benchmark_table(&mut markdown, &report.external_benchmarks);
   write_diagnostic_profile_table(&mut markdown, &report.profiling);
   write_oxibelt_only_table(&mut markdown, &report.oxibelt_only_results);
@@ -7888,6 +8079,49 @@ fn write_direct_h2_promotion_evidence_table(
       row.direct_h2_pool_reconnect,
       row.status,
       markdown_escape_cell(&row.reason)
+    )
+    .unwrap();
+  }
+  writeln!(markdown).unwrap();
+}
+
+fn write_probe_h2load_comparison_table(markdown: &mut String, rows: &[ProbeH2loadComparison]) {
+  if rows.is_empty() {
+    return;
+  }
+
+  writeln!(markdown, "\n## Internal perf_probe vs external h2load\n").unwrap();
+  writeln!(
+    markdown,
+    "| Target CPU | Scenario | Protocol | perf_probe RPS OxiBelt / nginx | perf_probe ratio | h2load RPS OxiBelt / nginx | h2load ratio | Ratio delta | Status | Reason | Client model |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | --- | ---: | --- | ---: | --- | --- | --- | --- | --- |"
+  )
+  .unwrap();
+  for row in rows {
+    let client_model = format!(
+      "{}; {}",
+      row.perf_probe_client_model, row.h2load_client_model
+    );
+    writeln!(
+      markdown,
+      "| `{}` | `{}` | `{}` | {} / {} | {} | {} / {} | {} | {} | `{}` | {} | {} |",
+      row.amd64_target_cpu,
+      row.scenario,
+      row.protocol,
+      format_number(row.oxibelt_perf_probe_rps),
+      format_number(row.nginx_perf_probe_rps),
+      format_ratio_value(row.perf_probe_ratio_vs_nginx),
+      format_number(row.oxibelt_h2load_rps),
+      format_number(row.nginx_h2load_rps),
+      format_ratio_value(row.h2load_ratio_vs_nginx),
+      format_ratio_value(row.ratio_delta),
+      row.classification,
+      markdown_escape_cell(&row.reason),
+      markdown_escape_cell(&client_model)
     )
     .unwrap();
   }
@@ -9446,6 +9680,173 @@ mod tests {
     assert!(markdown.contains("h3_request_task_join"));
     assert!(markdown.contains("h3_known_small_finalize"));
     assert!(markdown.contains("h3_stream_finish"));
+  }
+
+  #[test]
+  fn probe_h2load_comparison_explains_internal_client_model_gap() {
+    let input_dir = temp_dir("probe-h2load-comparison");
+    let run_dir = input_dir.path().join("run-1");
+    std::fs::create_dir_all(&run_dir).expect("run dir should be created");
+    std::fs::write(
+      run_dir.join("results.json"),
+      r#"[{
+              "type": "load",
+              "label": "oxibelt-h2",
+              "protocol": "h2",
+              "requests": 100,
+              "rps": 727.1,
+              "p99_ms": 2.5,
+              "errors": 0
+            },
+            {
+              "type": "load",
+              "label": "nginx-h2",
+              "protocol": "h2",
+              "requests": 100,
+              "rps": 1000.0,
+              "p99_ms": 2.0,
+              "errors": 0
+            },
+            {
+              "type": "load",
+              "label": "oxibelt-h3",
+              "protocol": "h3",
+              "requests": 100,
+              "rps": 511.6,
+              "p99_ms": 3.3,
+              "errors": 0
+            },
+            {
+              "type": "load",
+              "label": "nginx-h3",
+              "protocol": "h3",
+              "requests": 100,
+              "rps": 1000.0,
+              "p99_ms": 2.3,
+              "errors": 0
+            }]"#,
+    )
+    .expect("results should be written");
+    std::fs::write(
+      run_dir.join("external-results.json"),
+      r#"[{
+              "label": "oxibelt-external-h2load-h2",
+              "tool": "h2load",
+              "comparator": "oxibelt",
+              "scenario": "h2",
+              "protocol": "h2",
+              "serving_type": "reverse-proxy",
+              "status": "pass",
+              "amd64_target_cpu": "x86-64-v3",
+              "rps": 830.0,
+              "p99_ms": 2.2,
+              "error_rate": 0.0,
+              "requests": 10000
+            },
+            {
+              "label": "nginx-external-h2load-h2",
+              "tool": "h2load",
+              "comparator": "nginx",
+              "scenario": "h2",
+              "protocol": "h2",
+              "serving_type": "reverse-proxy",
+              "status": "pass",
+              "amd64_target_cpu": "x86-64-v3",
+              "rps": 1000.0,
+              "p99_ms": 2.0,
+              "error_rate": 0.0,
+              "requests": 10000
+            },
+            {
+              "label": "oxibelt-external-h2load-h3",
+              "tool": "h2load",
+              "comparator": "oxibelt",
+              "scenario": "h3",
+              "protocol": "h3",
+              "serving_type": "reverse-proxy",
+              "status": "fail",
+              "amd64_target_cpu": "x86-64-v3",
+              "requests": 0,
+              "reason": "h2load produced no completed requests"
+            },
+            {
+              "label": "nginx-external-h2load-h3",
+              "tool": "h2load",
+              "comparator": "nginx",
+              "scenario": "h3",
+              "protocol": "h3",
+              "serving_type": "reverse-proxy",
+              "status": "fail",
+              "amd64_target_cpu": "x86-64-v3",
+              "requests": 0,
+              "reason": "h2load produced no completed requests"
+            },
+            {
+              "label": "caddy-external-h2load-h3",
+              "tool": "h2load",
+              "comparator": "caddy",
+              "scenario": "h3",
+              "protocol": "h3",
+              "serving_type": "reverse-proxy",
+              "status": "fail",
+              "amd64_target_cpu": "x86-64-v3",
+              "requests": 0,
+              "reason": "h2load produced no completed requests"
+            }]"#,
+    )
+    .expect("external results should be written");
+
+    let report = aggregate(
+      input_dir.path(),
+      AggregateOptions {
+        profile: Some("smoke".to_owned()),
+        expected_runs: None,
+        expected_shards: None,
+        expected_target_cpus: Vec::new(),
+        primary_target_cpu: DEFAULT_AMD64_TARGET_CPU.to_owned(),
+        baseline_report: None,
+        baseline_context: None,
+        accepted_regression_reason: None,
+      },
+    );
+
+    assert_eq!(report.schema_version, COMPARISON_SCHEMA_VERSION);
+    let h2 = report
+      .probe_h2load_comparisons
+      .iter()
+      .find(|row| row.scenario == "h2")
+      .expect("H2 probe/h2load comparison should be reported");
+    assert_eq!(h2.classification, "client_model_mismatch");
+    assert!(
+      h2.h2load_ratio_vs_nginx.unwrap_or_default() > h2.perf_probe_ratio_vs_nginx.unwrap_or(1.0),
+      "external h2load should show OxiBelt closer to nginx than the internal probe"
+    );
+    assert!(
+      h2.reason.contains("-m 16"),
+      "H2 diagnostic reason should name h2load multiplexing"
+    );
+    assert_eq!(
+      h2.perf_probe_client_model,
+      "one sequential request per worker connection"
+    );
+
+    let h3 = report
+      .probe_h2load_comparisons
+      .iter()
+      .find(|row| row.scenario == "h3")
+      .expect("H3 probe/h2load comparison should be reported");
+    assert_eq!(h3.classification, "external_invalid");
+    assert!(h3.h2load_ratio_vs_nginx.is_none());
+    assert!(
+      h3.reason.contains("completed zero requests"),
+      "H3 diagnostic reason should reject the external h2load row"
+    );
+
+    let markdown = render_markdown(&report);
+    assert!(markdown.contains("## Internal perf_probe vs external h2load"));
+    assert!(markdown.contains("one sequential request per worker connection"));
+    assert!(markdown.contains("-m 16 concurrent streams per connection"));
+    assert!(markdown.contains("h2load h3 is invalid"));
   }
 
   #[test]
