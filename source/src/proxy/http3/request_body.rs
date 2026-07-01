@@ -16,10 +16,22 @@ use crate::proxy::http::request_framing::{
 
 use super::H3RequestRecvStream;
 
+pub(super) struct PreparedH3RequestBody {
+  pub(super) request: Request<ProxyBody>,
+  pub(super) verified_empty: bool,
+}
+
 pub(super) async fn prepare_h3_request_body(
   request: Request<()>,
   stream: H3RequestRecvStream,
 ) -> Request<ProxyBody> {
+  prepare_h3_request_body_inner(request, stream).await.request
+}
+
+pub(super) async fn prepare_h3_request_body_with_verification(
+  request: Request<()>,
+  stream: H3RequestRecvStream,
+) -> PreparedH3RequestBody {
   prepare_h3_request_body_inner(request, stream).await
 }
 
@@ -54,7 +66,10 @@ impl H3RequestBodyStream for H3RequestRecvStream {
   }
 }
 
-async fn prepare_h3_request_body_inner<S>(request: Request<()>, mut stream: S) -> Request<ProxyBody>
+async fn prepare_h3_request_body_inner<S>(
+  request: Request<()>,
+  mut stream: S,
+) -> PreparedH3RequestBody
 where
   S: H3RequestBodyStream,
 {
@@ -115,7 +130,7 @@ where
   .await
 }
 
-fn direct_h3_request_body<S>(request: Request<()>, stream: S) -> Request<ProxyBody>
+fn direct_h3_request_body<S>(request: Request<()>, stream: S) -> PreparedH3RequestBody
 where
   S: H3RequestBodyStream,
 {
@@ -126,7 +141,7 @@ fn direct_h3_request_body_with_initial<S>(
   request: Request<()>,
   stream: S,
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
-) -> Request<ProxyBody>
+) -> PreparedH3RequestBody
 where
   S: H3RequestBodyStream,
 {
@@ -137,7 +152,10 @@ where
     ended: false,
   }
   .boxed();
-  Request::from_parts(parts, body)
+  PreparedH3RequestBody {
+    request: Request::from_parts(parts, body),
+    verified_empty: false,
+  }
 }
 
 struct H3DirectRequestBody<S> {
@@ -217,10 +235,13 @@ fn empty_body() -> ProxyBody {
     .boxed()
 }
 
-fn verified_empty_request(parts: http::request::Parts) -> Request<ProxyBody> {
+fn verified_empty_request(parts: http::request::Parts) -> PreparedH3RequestBody {
   let mut request = Request::from_parts(parts, empty_body());
   request.extensions_mut().insert(VerifiedEmptyRequestBody);
-  request
+  PreparedH3RequestBody {
+    request,
+    verified_empty: true,
+  }
 }
 
 #[cfg(test)]
@@ -257,7 +278,7 @@ mod tests {
       FakeStreamEvent::End,
     ]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     let body = request
       .into_body()
@@ -274,7 +295,7 @@ mod tests {
     let stream = FakeRequestStream::new([FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     let body = request
@@ -292,7 +313,7 @@ mod tests {
     let stream = FakeRequestStream::pending();
     let poll_count = stream.poll_count();
 
-    let _request = prepare_h3_request_body_inner(request, stream).await;
+    let _request = prepare_h3_request_body_inner(request, stream).await.request;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
   }
@@ -302,7 +323,7 @@ mod tests {
     let request = request(Method::GET);
     let stream = FakeRequestStream::pending();
 
-    let _request = prepare_h3_request_body_inner(request, stream).await;
+    let _request = prepare_h3_request_body_inner(request, stream).await.request;
   }
 
   #[tokio::test]
@@ -312,9 +333,11 @@ mod tests {
       let stream = FakeRequestStream::new([FakeStreamEvent::End]);
       let poll_count = stream.poll_count();
 
-      let request = prepare_h3_request_body_inner(request, stream).await;
+      let prepared = prepare_h3_request_body_inner(request, stream).await;
 
       assert_eq!(poll_count.load(Ordering::SeqCst), 0);
+      assert!(prepared.verified_empty);
+      let request = prepared.request;
       assert!(
         request
           .extensions()
@@ -338,7 +361,7 @@ mod tests {
       let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
       let poll_count = stream.poll_count();
 
-      let request = prepare_h3_request_body_inner(request, stream).await;
+      let request = prepare_h3_request_body_inner(request, stream).await.request;
 
       assert_eq!(poll_count.load(Ordering::SeqCst), 1);
       assert!(
@@ -362,7 +385,7 @@ mod tests {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     let body = request
       .into_body()
@@ -379,7 +402,7 @@ mod tests {
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     assert!(
@@ -408,7 +431,9 @@ mod tests {
 
     let prepared = prepare_h3_request_body_inner(request, stream).await;
 
+    assert!(!prepared.verified_empty);
     let body = prepared
+      .request
       .into_body()
       .collect()
       .await
@@ -422,7 +447,7 @@ mod tests {
       FakeStreamEvent::Error("stream reset"),
     ]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     let error = request
       .into_body()
@@ -441,7 +466,7 @@ mod tests {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     let error = request
       .into_body()
@@ -465,7 +490,7 @@ mod tests {
     ]);
     let drop_count = stream.drop_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     drop(request);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -486,7 +511,7 @@ mod tests {
     let stream = FakeRequestStream::pending();
     let drop_count = stream.drop_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     drop(request);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -509,7 +534,7 @@ mod tests {
     ]);
     let poll_count = stream.poll_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await;
+    let request = prepare_h3_request_body_inner(request, stream).await.request;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
     let body = request

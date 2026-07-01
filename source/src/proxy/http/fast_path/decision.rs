@@ -1,7 +1,6 @@
 //! Plain proxy fast-path eligibility decisions and low-cardinality telemetry.
 
 use http::{Method, Request};
-use hyper::body::Body;
 
 use crate::proxy::http::headers::is_upgrade_request;
 use crate::proxy::http::semantics;
@@ -12,14 +11,11 @@ use super::helpers::plain_proxy_fast_path_supported_route;
 
 pub(super) use crate::metrics::fast_path::labels::FastPathPlainProxyMissReason as PlainProxyFastPathMissReason;
 
-pub(super) fn plain_proxy_fast_path_decision<B>(
+pub(crate) fn plain_proxy_fast_path_decision<B>(
   request: &Request<B>,
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
-) -> Result<(), PlainProxyFastPathMissReason>
-where
-  B: Body,
-{
+) -> Result<(), PlainProxyFastPathMissReason> {
   let plan_enabled = match request.version() {
     http::Version::HTTP_10 | http::Version::HTTP_11 => {
       resolved.execution_plan.fast_path.plain_proxy_h1

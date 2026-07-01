@@ -53,8 +53,7 @@ use self::compiled::select_compiled_proxy_action;
 pub(crate) use self::compiled::{CompiledRouteFastPathActions, build_compiled_fast_path_actions};
 #[cfg(test)]
 use self::decision::PlainProxyFastPathMissReason;
-#[cfg(test)]
-use self::decision::plain_proxy_fast_path_decision;
+pub(crate) use self::decision::plain_proxy_fast_path_decision;
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
 use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};

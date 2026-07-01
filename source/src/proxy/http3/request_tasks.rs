@@ -9,7 +9,10 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-use super::{H3DownstreamRequestContext, H3RequestStream, handle_h3_request};
+use super::{
+  H3DownstreamRequestContext, H3RequestSendStream, H3RequestStream, handle_h3_request,
+  handle_prepared_h3_request,
+};
 use crate::config::Config;
 use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathMetricStage};
 use crate::proxy::http::body::ProxyBody;
@@ -126,6 +129,16 @@ impl RequestTaskSet {
     self.spawn_task(handle(request, stream, context, permit));
   }
 
+  pub(super) fn spawn_prepared(
+    &mut self,
+    request: Request<ProxyBody>,
+    stream: H3RequestSendStream,
+    context: H3DownstreamRequestContext,
+    permit: OwnedSemaphorePermit,
+  ) {
+    self.spawn_task(handle_prepared(request, stream, context, permit));
+  }
+
   pub(super) fn is_empty(&self) -> bool {
     self.tasks.is_empty()
   }
@@ -161,7 +174,7 @@ impl RequestTaskSet {
     self.wait_all().await;
   }
 
-  fn with_active_limit(limit: usize) -> Self {
+  pub(super) fn with_active_limit(limit: usize) -> Self {
     Self {
       permits: Arc::new(Semaphore::new(limit.max(1))),
       tasks: JoinSet::new(),
@@ -214,13 +227,13 @@ pub(super) async fn acquire_permit_or_stop(
   }
 }
 
-pub(super) async fn handle_inline(
-  request: Request<()>,
-  stream: H3RequestStream,
+pub(super) async fn handle_inline_prepared(
+  request: Request<ProxyBody>,
+  stream: H3RequestSendStream,
   context: H3DownstreamRequestContext,
   permit: OwnedSemaphorePermit,
 ) {
-  handle(request, stream, context, permit).await;
+  handle_prepared(request, stream, context, permit).await;
 }
 
 pub(super) fn too_many_requests_response() -> Response<ProxyBody> {
@@ -241,6 +254,26 @@ async fn handle(
     .state
     .runtime_introspection_guard(RuntimeCounter::Http3Request);
   match handle_h3_request(request, stream, context).await {
+    Ok(status) => {
+      debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
+    }
+    Err(error) => {
+      warn!(peer = %peer_addr, error = %error, "downstream HTTP/3 request failed");
+    }
+  }
+}
+
+async fn handle_prepared(
+  request: Request<ProxyBody>,
+  stream: H3RequestSendStream,
+  context: H3DownstreamRequestContext,
+  _permit: OwnedSemaphorePermit,
+) {
+  let peer_addr = context.peer_addr;
+  let _request_guard = context
+    .state
+    .runtime_introspection_guard(RuntimeCounter::Http3Request);
+  match handle_prepared_h3_request(request, stream, context).await {
     Ok(status) => {
       debug!(peer = %peer_addr, %status, "handled downstream HTTP/3 request");
     }

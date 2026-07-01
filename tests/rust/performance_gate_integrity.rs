@@ -1024,8 +1024,8 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "oxibelt-h3-inline-fast-path-experiment",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only",
-    "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH=benchmark-only",
-    "OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH_ACK=benchmark-only",
+    "--inline-bodyless-h3-fast-path",
+    "inline_bodyless_fast_path = true",
     "h3_inline_diagnostic_load_label",
     "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
@@ -2783,6 +2783,12 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
   assert!(
     script.contains("oxibelt-h3-inline-fast-path-experiment:h3"),
     "H3 inline experiment rows should collect fast-path diagnostics"
+  );
+  assert!(
+    script.contains("oxibelt-h2-multiplexed:h2")
+      && script.contains("nginx:nginx-h2-multiplexed:h2")
+      && script.contains("--h2-streams-per-connection 16"),
+    "H2 multiplexed rows should be diagnostic perf-probe evidence"
   );
   assert!(
     script.contains("{($protocol): $fast_path}"),

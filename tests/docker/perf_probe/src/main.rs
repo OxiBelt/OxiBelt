@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use bytes::{Buf, Bytes};
+use futures_util::stream::FuturesUnordered;
 use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
 use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
 use hdrhistogram::Histogram;
@@ -108,6 +109,7 @@ struct LoadArgs {
   duration: Duration,
   warmup: Duration,
   concurrency: usize,
+  h2_streams_per_connection: usize,
   expect_status: u16,
   unique_query_param: Option<String>,
   request_serial: Arc<AtomicU64>,
@@ -375,7 +377,7 @@ fn usage() {
   eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
-  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close|slow-post|slow-response|h2-rapid-stream-churn|h2-cl0-data|h3-cl0-data> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>] [--protocol <h1c|h1|h2|h3>] [--server-name <name>] [--ca-cert <pem>] [--path <path>] [--expect-status <status>] [--chunk-bytes <n>] [--chunk-delay-ms <n>] [--streams-per-connection <n>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
@@ -415,6 +417,21 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     .get("--unique-query-param")
     .map(|value| validate_unique_query_param(value))
     .transpose()?;
+  let h2_streams_per_connection = values
+    .get("--h2-streams-per-connection")
+    .map(|value| {
+      value
+        .parse()
+        .context("invalid --h2-streams-per-connection value")
+    })
+    .transpose()?
+    .unwrap_or(1usize);
+  if h2_streams_per_connection == 0 {
+    bail!("--h2-streams-per-connection must be greater than zero");
+  }
+  if h2_streams_per_connection != 1 && protocol != Protocol::H2 {
+    bail!("--h2-streams-per-connection is only supported for protocol h2");
+  }
   Ok(LoadArgs {
     label: values
       .get("--label")
@@ -430,6 +447,7 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     duration: Duration::from_secs(parse_u64(&values, "--duration-seconds")?),
     warmup: Duration::from_secs(parse_u64(&values, "--warmup-seconds")?),
     concurrency: parse_usize(&values, "--concurrency")?,
+    h2_streams_per_connection,
     expect_status: values
       .get("--expect-status")
       .map(|value| value.parse().context("invalid --expect-status value"))
@@ -929,6 +947,7 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "duration_seconds": args.duration.as_secs(),
         "warmup_seconds": args.warmup.as_secs(),
         "concurrency": args.concurrency,
+        "h2_streams_per_connection": args.h2_streams_per_connection,
         "requests": snapshot.requests,
         "errors": snapshot.errors,
         "rps": rate(snapshot.requests, elapsed),
@@ -1170,6 +1189,9 @@ async fn h2_connection_loop(
   stats: &SharedStats,
   record: bool,
 ) -> anyhow::Result<()> {
+  if args.h2_streams_per_connection > 1 {
+    return h2_multiplexed_connection_loop(args, remote_addr, deadline, stats, record).await;
+  }
   let tls_stream = tls_connect_to_addr(
     remote_addr,
     &args.host,
@@ -1207,6 +1229,77 @@ async fn h2_connection_loop(
   drop(sender);
   let _ = connection_task.await;
   Ok(())
+}
+
+async fn h2_multiplexed_connection_loop(
+  args: &LoadArgs,
+  remote_addr: SocketAddr,
+  deadline: Instant,
+  stats: &SharedStats,
+  record: bool,
+) -> anyhow::Result<()> {
+  let tls_stream = tls_connect_to_addr(
+    remote_addr,
+    &args.host,
+    args.port,
+    &args.server_name,
+    &args.ca_cert,
+    args.protocol.alpn(),
+  )
+  .await?;
+  let (mut sender, connection) = h2::client::handshake(tls_stream)
+    .await
+    .context("failed to establish multiplexed HTTP/2 client")?;
+  let connection_task = tokio::spawn(async move {
+    let _ = connection.await;
+  });
+  let mut responses = FuturesUnordered::new();
+
+  loop {
+    while Instant::now() < deadline && responses.len() < args.h2_streams_per_connection {
+      let started = Instant::now();
+      let (response, _) = sender
+        .send_request(request(args, Version::HTTP_2, ())?, true)
+        .context("failed to send multiplexed HTTP/2 request")?;
+      responses.push(collect_h2_multiplexed_response(response, started));
+    }
+
+    if responses.is_empty() {
+      break;
+    }
+
+    let Some(result) = futures_util::StreamExt::next(&mut responses).await else {
+      break;
+    };
+    let (status, elapsed) = result?;
+    if record {
+      stats.record_response(status, elapsed, args.expect_status);
+    }
+
+    if Instant::now() >= deadline && responses.is_empty() {
+      break;
+    }
+  }
+
+  drop(sender);
+  connection_task.abort();
+  let _ = connection_task.await;
+  Ok(())
+}
+
+async fn collect_h2_multiplexed_response(
+  response: h2::client::ResponseFuture,
+  started: Instant,
+) -> anyhow::Result<(u16, Duration)> {
+  let response = response
+    .await
+    .context("failed to receive multiplexed HTTP/2 response")?;
+  let status = response.status().as_u16();
+  let mut body = response.into_body();
+  while let Some(chunk) = body.data().await {
+    let _ = chunk.context("failed to read multiplexed HTTP/2 response body")?;
+  }
+  Ok((status, started.elapsed()))
 }
 
 async fn h3_load_worker(args: LoadArgs, deadline: Instant, stats: SharedStats, record: bool) {
@@ -2788,6 +2881,7 @@ mod tests {
     .expect("load args should parse");
 
     assert_eq!(args.unique_query_param.as_deref(), Some("fill_id"));
+    assert_eq!(args.h2_streams_per_connection, 1);
     let first =
       request(&args, Version::HTTP_2, Full::new(Bytes::new())).expect("first request should build");
     let second = request(&args, Version::HTTP_2, Full::new(Bytes::new()))
@@ -2800,6 +2894,78 @@ mod tests {
       second.uri().to_string(),
       "https://example.test/perf/cache-cold-fill?cache_control=public&fill_id=1"
     );
+  }
+
+  #[test]
+  fn load_args_accept_h2_streams_per_connection_for_h2_only() {
+    let args = parse_load_args(
+      [
+        "--label",
+        "h2-multiplexed",
+        "--protocol",
+        "h2",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/h2?body=ok",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--h2-streams-per-connection",
+        "16",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    )
+    .expect("load args should parse");
+
+    assert_eq!(args.h2_streams_per_connection, 16);
+
+    let error = match parse_load_args(
+      [
+        "--protocol",
+        "h3",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/h3?body=ok",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--h2-streams-per-connection",
+        "16",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    ) {
+      Ok(_) => panic!("non-H2 load should reject H2 multiplexing"),
+      Err(error) => error,
+    };
+    assert!(error
+      .to_string()
+      .contains("--h2-streams-per-connection is only supported for protocol h2"));
   }
 
   #[test]

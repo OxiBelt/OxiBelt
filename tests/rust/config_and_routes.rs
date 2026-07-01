@@ -1792,6 +1792,30 @@ keep_alive_while_idle = true
 }
 
 #[test]
+fn proxy_http3_inline_bodyless_fast_path_defaults_and_custom_values_parse() {
+  let temp_dir = common::TempDir::new("proxy-http3");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "proxy-http3");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let default_config: Config = toml::from_str(&base).expect("config should parse");
+  default_config.validate().expect("config should validate");
+  assert!(!default_config.proxy.http3.inline_bodyless_fast_path);
+
+  let raw = format!(
+    r#"
+{}
+
+[proxy.http3]
+inline_bodyless_fast_path = true
+"#,
+    base
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  assert!(config.proxy.http3.inline_bodyless_fast_path);
+}
+
+#[test]
 fn proxy_http2_rejects_invalid_numeric_values() {
   let temp_dir = common::TempDir::new("proxy-http2-invalid");
   let (cert_path, key_path) =

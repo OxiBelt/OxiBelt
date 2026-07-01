@@ -710,6 +710,9 @@ keep_alive_interval_ms = 0
 keep_alive_timeout_ms = 20000
 keep_alive_while_idle = false
 
+[proxy.http3]
+inline_bodyless_fast_path = false
+
 [proxy.http.grpc]
 enabled = true
 respect_grpc_timeout = true
@@ -732,6 +735,8 @@ mode = "legacy_plain" # legacy_plain | plain | json
 Static hot-object caching is opt-in. Set `open_file_cache_max_entries`, `open_file_cache_ttl_ms`, and `hot_object_cache_max_bytes` to enable a bounded TTL cache for verified small static responses. `open_file_cache_max_entries` and `open_file_cache_ttl_ms` bound the entry count and freshness window; `hot_object_cache_max_bytes` and `hot_object_cache_max_file_bytes` bound body memory globally and per file. Cache fill and cached-hit refresh open the current file through the secure static-root resolution path. Cached hits preserve validators and range behavior only when the current validator still matches the cached object. Deleted, inaccessible, or replaced files do not continue serving stale cached bodies; they refresh or fail closed from the current filesystem state. Use `0` values to keep the default no-cache behavior.
 
 `proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
+
+`proxy.http3.inline_bodyless_fast_path = true` lets HTTP/3 requests that are already plain-proxy fast-path eligible skip per-request task spawning after OxiBelt proves the downstream request body is empty. The optimization is limited to HTTP/3 `GET` and `HEAD` requests without request-body framing headers; unsafe methods, DATA, trailers, delayed bodies, cache policies, body-inspecting WAF rules, dynamic policy, external auth, buffering, upgrades, CONNECT, WebTransport, and non-fast-path routes remain on the general spawned path. The default is `false`.
 
 `proxy.http2` applies to downstream HTTP/2 connections and upstream HTTP/2 clients. `adaptive_window = true` lets Hyper tune flow-control windows dynamically and is the default recommended performance path. Manual `initial_stream_window_bytes`, `initial_connection_window_bytes`, and `max_frame_size_bytes` values are accepted only when `adaptive_window = false`; they are intended as an escape hatch for controlled deployments that need fixed HTTP/2 windows. `max_concurrent_streams` is the advertised remote-initiated stream cap for downstream H2 and the initial locally initiated stream cap for upstream H2. `max_send_buf_size` caps the per-stream HTTP/2 send buffer. `keep_alive_interval_ms = 0` disables HTTP/2 ping keep-alives; when set, `keep_alive_timeout_ms` is the ping acknowledgement timeout and `keep_alive_while_idle` also allows upstream clients to ping idle pooled H2 connections.
 

@@ -25,6 +25,7 @@ mod database;
 mod dynamic_policy;
 mod external_auth;
 mod http2;
+mod http3;
 mod ipm;
 mod lb_policy_compat;
 mod limits;
@@ -64,6 +65,7 @@ pub use database::*;
 pub use dynamic_policy::*;
 pub use external_auth::*;
 pub use http2::*;
+pub use http3::*;
 pub use ipm::*;
 pub use lb_policy_compat::*;
 use limits::{
@@ -2728,6 +2730,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "grpc_web",
       "http",
       "http2",
+      "http3",
       "real_ip",
       "retry",
       "static_files",
@@ -2792,6 +2795,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_concurrent_streams",
       "max_send_buf_size",
     ][..],
+    "proxy.http3" => &["inline_bodyless_fast_path"][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
     "proxy.http.errors" => &["mode"][..],
     "proxy.static_files" => &[
@@ -4079,6 +4083,8 @@ pub struct ProxyConfig {
   pub http: ProxyHttpConfig,
   #[serde(default)]
   pub http2: ProxyHttp2Config,
+  #[serde(default)]
+  pub http3: ProxyHttp3Config,
   #[serde(default)]
   pub static_files: ProxyStaticFilesConfig,
   #[serde(default)]

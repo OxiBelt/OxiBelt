@@ -1529,10 +1529,21 @@ h3_inline_diagnostic_load_label() {
   [[ "${host}" == "oxibelt" && "${label}:${protocol}" == "oxibelt-h3-inline-fast-path-experiment:h3" ]]
 }
 
+h2_multiplex_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  case "${host}:${label}:${protocol}" in
+    oxibelt:oxibelt-h2-multiplexed:h2|nginx:nginx-h2-multiplexed:h2) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 diagnostic_load_label() {
   direct_h2_diagnostic_load_label "$@" \
     || metrics_mode_diagnostic_load_label "$@" \
-    || h3_inline_diagnostic_load_label "$@"
+    || h3_inline_diagnostic_load_label "$@" \
+    || h2_multiplex_diagnostic_load_label "$@"
 }
 
 normalize_diagnostic_load_result() {
@@ -2651,6 +2662,7 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-metrics-basic-h3:h3) printf 'h3' ;;
     oxibelt-metrics-detailed-h2:h2) printf 'h2' ;;
     oxibelt-metrics-detailed-h3:h3) printf 'h3' ;;
+    oxibelt-h2-multiplexed:h2) printf 'h2' ;;
     oxibelt-h3-inline-fast-path-experiment:h3) printf 'h3' ;;
     oxibelt-pool*-conc*-h2:h2) printf 'h2' ;;
     oxibelt-pool*-conc*-h3:h3) printf 'h3' ;;
@@ -2669,7 +2681,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h2-multiplexed:h2|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
@@ -2901,6 +2913,7 @@ start_oxibelt() {
   local remote_signer_cert_seed_container="oxibelt-perf-keysigner-cert-seed-${scenario}-${run_id}"
   local detailed_hot_path_diagnostics=0
   local metrics_disabled=0
+  local inline_bodyless_h3_fast_path=0
   local oxibelt_config
   local -a oxibelt_env_args=()
   local -a remote_signer_args=()
@@ -2912,6 +2925,10 @@ start_oxibelt() {
         ;;
       --metrics-disabled)
         metrics_disabled=1
+        shift
+        ;;
+      --inline-bodyless-h3-fast-path)
+        inline_bodyless_h3_fast_path=1
         shift
         ;;
       *)
@@ -2942,6 +2959,13 @@ start_oxibelt() {
       { print }
     ' "${oxibelt_config}" >"${oxibelt_config}.tmp"
     mv "${oxibelt_config}.tmp" "${oxibelt_config}"
+  fi
+  if [[ "${inline_bodyless_h3_fast_path}" == "1" ]]; then
+    cat >>"${oxibelt_config}" <<'EOF'
+
+[proxy.http3]
+inline_bodyless_fast_path = true
+EOF
   fi
   if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
     remote_signer=1
@@ -3189,6 +3213,12 @@ run_common_loads() {
       fail_with_diagnostics "invalid HTTP/3 performance mode for ${comparator}: ${h3_mode}"
       ;;
   esac
+}
+
+run_h2_multiplex_diagnostic_load() {
+  local comparator="$1"
+  local host="$2"
+  run_load "${comparator}-h2-multiplexed" h2 "${host}" "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}" --h2-streams-per-connection 16
 }
 
 run_metrics_mode_h3_load() {
@@ -3477,6 +3507,16 @@ run_reverse_proxy_group() {
   fi
 
   if (( ran_oxibelt )); then
+    start_oxibelt "${oxibelt_baseline_scenario}" oxibelt --detailed-hot-path-diagnostics
+    run_h2_multiplex_diagnostic_load oxibelt oxibelt
+  fi
+
+  if (( ran_nginx )); then
+    start_nginx
+    run_h2_multiplex_diagnostic_load nginx nginx
+  fi
+
+  if (( ran_oxibelt )); then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_external_benchmarks_for_comparator oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
@@ -3667,8 +3707,7 @@ run_runtime_direct_h1_group() {
 
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
     --detailed-hot-path-diagnostics \
-    -e OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH=benchmark-only \
-    -e OXIBELT_EXPERIMENTAL_H3_INLINE_FAST_PATH_ACK=benchmark-only
+    --inline-bodyless-h3-fast-path
   if h3_probe_succeeds oxibelt; then
     run_load "oxibelt-h3-inline-fast-path-experiment" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
   else
