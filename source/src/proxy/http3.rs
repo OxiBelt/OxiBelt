@@ -678,6 +678,12 @@ fn h3_inline_bodyless_fast_path_candidate(
   if http_proxy::headers::validate_authority_host_consistency(request).is_err() {
     return false;
   }
+  let path = request.uri().path();
+  if http_proxy::validate_request_limits(request, &context.state.config.limits).is_err()
+    || http_proxy::uri::validate_downstream_path(path).is_err()
+  {
+    return false;
+  }
   let client_addr = match crate::identity::resolve_client_addr(
     request.headers(),
     context.peer_addr,
@@ -688,7 +694,6 @@ fn h3_inline_bodyless_fast_path_candidate(
   };
   let host_snapshot = http_proxy::headers::extract_host_snapshot(request);
   let host = host_snapshot.as_str();
-  let path = request.uri().path();
   let resolved = context
     .state
     .route_table

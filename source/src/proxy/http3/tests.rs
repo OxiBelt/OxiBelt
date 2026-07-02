@@ -107,6 +107,49 @@ fn h3_request(method: Method) -> Request<()> {
     .unwrap()
 }
 
+fn assert_h3_inline_route_would_match_without_prevalidation(
+  request: &Request<()>,
+  context: &H3DownstreamRequestContext,
+) {
+  let client_addr = crate::identity::resolve_client_addr(
+    request.headers(),
+    context.peer_addr,
+    &context.state.config.proxy.real_ip,
+  )
+  .expect("test request should resolve client identity");
+  let host_snapshot = http_proxy::headers::extract_host_snapshot(request);
+  let host = host_snapshot.as_str();
+  let path = request.uri().path();
+  let resolved = context
+    .state
+    .route_table
+    .try_resolve_simple_exact_host(host, path, &context.state.upstreams)
+    .or_else(|| {
+      context
+        .state
+        .route_table
+        .resolve_normalized_host_with_context(
+          host,
+          RouteMatchContext {
+            path,
+            method: Some(request.method()),
+            headers: Some(request.headers()),
+            query: request.uri().query(),
+            source_ip: Some(client_addr.ip()),
+            protocol: Some(RouteRequestProtocol::from_http(
+              http::Version::HTTP_3,
+              WafProtocol::Http,
+            )),
+            tls: Some(context.tls_metadata.as_ref()),
+          },
+          &context.state.upstreams,
+        )
+    })
+    .expect("test request should route without the pre-validation guard");
+  http_proxy::fast_path::plain_proxy_fast_path_decision(request, context.state.as_ref(), &resolved)
+    .expect("test request should be fast-path eligible without the pre-validation guard");
+}
+
 #[test]
 fn detects_webtransport_extended_connect() {
   let mut request = Request::builder()
@@ -221,6 +264,106 @@ async fn h3_inline_bodyless_fast_path_requires_config_gate() {
   let context = inline_candidate_context("", true).await;
   let request = h3_request(Method::GET);
 
+  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+}
+
+#[tokio::test]
+async fn h3_inline_bodyless_fast_path_rejects_uri_limits_before_route_matchers() {
+  let context = inline_candidate_context(
+    r#"
+[routes.match]
+
+[[routes.match.queries]]
+name = "token"
+exact = "ok"
+
+[limits]
+max_uri_bytes = 64
+
+[proxy.http3]
+inline_bodyless_fast_path = true
+"#,
+    true,
+  )
+  .await;
+  let request = Request::builder()
+    .method(Method::GET)
+    .version(http::Version::HTTP_3)
+    .uri(format!(
+      "https://example.com/read?token=ok&padding={}",
+      "a".repeat(96)
+    ))
+    .body(())
+    .unwrap();
+
+  assert_eq!(
+    http_proxy::validate_request_limits(&request, &context.state.config.limits),
+    Err((StatusCode::URI_TOO_LONG, "request URI is too large"))
+  );
+  assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
+  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+}
+
+#[tokio::test]
+async fn h3_inline_bodyless_fast_path_rejects_header_limits_before_route_matchers() {
+  let header_value = "route-value-that-exceeds-the-configured-header-limit";
+  let context = inline_candidate_context(
+    &format!(
+      r#"
+[routes.match]
+
+[[routes.match.headers]]
+name = "x-route"
+exact = "{header_value}"
+
+[limits]
+max_header_value_bytes = 8
+
+[proxy.http3]
+inline_bodyless_fast_path = true
+"#
+    ),
+    true,
+  )
+  .await;
+  let request = Request::builder()
+    .method(Method::GET)
+    .version(http::Version::HTTP_3)
+    .uri("https://example.com/read")
+    .header("x-route", header_value)
+    .body(())
+    .unwrap();
+
+  assert_eq!(
+    http_proxy::validate_request_limits(&request, &context.state.config.limits),
+    Err((
+      StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+      "header value is too large"
+    ))
+  );
+  assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
+  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+}
+
+#[tokio::test]
+async fn h3_inline_bodyless_fast_path_rejects_unsafe_path_before_route_lookup() {
+  let context = inline_candidate_context(
+    r#"
+[proxy.http3]
+inline_bodyless_fast_path = true
+"#,
+    true,
+  )
+  .await;
+  let request = Request::builder()
+    .method(Method::GET)
+    .version(http::Version::HTTP_3)
+    .uri("https://example.com/safe/%2fadmin")
+    .body(())
+    .unwrap();
+
+  assert!(http_proxy::uri::validate_downstream_path(request.uri().path()).is_err());
+  assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
   assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
 }
 
