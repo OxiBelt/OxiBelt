@@ -21,6 +21,7 @@ mod cache_sections;
 mod client_identity;
 mod compression;
 mod crlite;
+mod crypto;
 mod database;
 mod dynamic_policy;
 mod external_auth;
@@ -61,6 +62,7 @@ pub use cache_sections::{
 pub use client_identity::*;
 pub use compression::*;
 pub use crlite::*;
+pub use crypto::*;
 pub use database::*;
 pub use dynamic_policy::*;
 pub use external_auth::*;
@@ -104,6 +106,7 @@ pub struct Config {
   pub config: ConfigBehaviorConfig,
   pub logging: LoggingConfig,
   pub runtime: RuntimeConfig,
+  pub crypto: CryptoConfig,
   pub listeners: ListenerConfig,
   pub tls: TlsConfig,
   pub quic: QuicConfig,
@@ -144,6 +147,8 @@ struct RawConfig {
   logging: LoggingConfig,
   #[serde(default)]
   runtime: RawRuntimeConfig,
+  #[serde(default)]
+  crypto: CryptoConfig,
   listeners: RawListenerConfig,
   tls: TlsConfig,
   #[serde(default)]
@@ -219,6 +224,7 @@ impl TryFrom<RawConfig> for Config {
       config: raw.config,
       logging: raw.logging,
       runtime,
+      crypto: raw.crypto,
       listeners,
       tls: raw.tls,
       quic,
@@ -856,6 +862,7 @@ impl Config {
     self.validate_metrics_and_health()?;
     self.telemetry.validate()?;
     security_headers::validate_security_headers(self)?;
+    crypto::validate_crypto(self)?;
     self.validate_tls()?;
     self.quic.validate(self.listeners.http3)?;
     self.validate_http3_alt_svc_binds()?;
@@ -2611,6 +2618,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "client_identity.asn.iana_registry" => {
       client_identity::CLIENT_IDENTITY_ASN_IANA_REGISTRY_CONFIG_KEYS
     }
+    "crypto" => crypto::CRYPTO_CONFIG_KEYS,
+    "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => allowed_keys::TLS_CONFIG_KEYS,

@@ -59,6 +59,25 @@ enabled = false
 version = "any"
 trusted_sources = []
 
+[crypto]
+# TLS uses rustls' AWS-LC provider by default. `ring` is available only when
+# OxiBelt is built with the `crypto-ring` Cargo feature and does not support the
+# default post-quantum hybrid x25519mlkem768 key exchange group.
+tls_provider = "aws_lc_rs" # aws_lc_rs | ring
+# Direct OxiBelt primitives default to RustCrypto. Set the global provider here,
+# then override individual primitives below when needed.
+primitive_provider = "rustcrypto" # rustcrypto | aws_lc_rs
+# `auto` is the only portable backend mode in the default build. Hardware or
+# software forcing fails closed unless a future target-specific build supports it.
+primitive_backend = "auto" # auto | hardware | software
+
+[crypto.primitives]
+aes_gcm = "rustcrypto" # rustcrypto | aws_lc_rs
+chacha20poly1305 = "rustcrypto" # rustcrypto | aws_lc_rs
+hkdf = "rustcrypto" # rustcrypto | aws_lc_rs
+hmac_sha256 = "rustcrypto" # rustcrypto | aws_lc_rs
+sha2 = "rustcrypto" # rustcrypto | aws_lc_rs
+
 [tls]
 cert_chain = "fullchain.pem"
 private_key = "privkey.pem"

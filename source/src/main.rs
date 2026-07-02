@@ -130,7 +130,8 @@ fn main() -> anyhow::Result<()> {
     tracing::warn!("{warning}");
   }
   config.validate()?;
-  oxibelt::tls::install_default_provider()?;
+  oxibelt::configure_crypto_runtime(&config);
+  oxibelt::tls::install_configured_provider(&config.crypto)?;
 
   if cli.dump_effective_config {
     let value = Config::load_effective_toml_redacted(config_path)
@@ -277,6 +278,8 @@ fn load_command_config(config_path: Option<&PathBuf>) -> anyhow::Result<Config> 
   let config = Config::load(config_path)
     .with_context(|| format!("failed to load {}", config_path.display()))?;
   config.validate()?;
+  oxibelt::configure_crypto_runtime(&config);
+  oxibelt::tls::install_configured_provider(&config.crypto)?;
   Ok(config)
 }
 

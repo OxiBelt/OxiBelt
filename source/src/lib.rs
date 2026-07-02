@@ -83,9 +83,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   let observability = runtime::init_observability(&config)?;
   config.validate()?;
+  configure_crypto_runtime(&config);
   netport_switcher::ensure_required_runtime_socket(&config)?;
   config.log_worker_resolution();
-  tls::install_default_provider()?;
+  tls::install_configured_provider(&config.crypto)?;
 
   let state = AppHandle::new(
     AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
@@ -93,4 +94,9 @@ pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Re
       .context("failed to initialize application state")?,
   );
   server::serve(state, options.config_path, options.runtime_overrides).await
+}
+
+/// Applies the process-wide crypto primitive provider choices from a loaded config.
+pub fn configure_crypto_runtime(config: &Config) {
+  crypto::configure_runtime(&config.crypto);
 }

@@ -10,7 +10,7 @@ use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
 use url::Url;
 
-use crate::config::{OcspMode, TlsConfig};
+use crate::config::{CryptoConfig, OcspMode, TlsConfig};
 use crate::control_http::{ControlHttpClient, full_body, uri_from_url};
 use crate::metrics::Metrics;
 
@@ -55,6 +55,7 @@ impl Drop for OcspStapleRuntimeInner {
 
 impl OcspStapleRuntime {
   pub(crate) async fn new(
+    crypto: &CryptoConfig,
     tls: &TlsConfig,
     control_http: &ControlHttpClient,
     metrics: Arc<Metrics>,
@@ -65,7 +66,7 @@ impl OcspStapleRuntime {
         .iter()
         .any(|certificate| certificate.ocsp.mode == OcspMode::LiveFetch)
     {
-      return Self::live_fetch(tls, control_http.clone(), metrics).await;
+      return Self::live_fetch(crypto, tls, control_http.clone(), metrics).await;
     }
 
     match tls.ocsp.mode {
@@ -88,13 +89,15 @@ impl OcspStapleRuntime {
   }
 
   async fn live_fetch(
+    crypto: &CryptoConfig,
     tls: &TlsConfig,
     control_http: ControlHttpClient,
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
     let provider = Arc::new(super::negotiation::downstream_crypto_provider_for_policy(
+      crypto,
       &tls.negotiation_policy(),
-    ));
+    )?);
     let mut workers = Vec::new();
 
     let base_key = super::load_downstream_certified_key(tls, &provider)

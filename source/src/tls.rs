@@ -15,8 +15,9 @@ use self::negotiation::{
   downstream_crypto_provider_for_tls13,
 };
 use crate::config::{
-  AdminTlsConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig, TlsClientAuthMode, TlsConfig,
-  TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion, TurnListenerTlsConfig,
+  AdminTlsConfig, CryptoConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
+  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion,
+  TurnListenerTlsConfig,
 };
 
 mod admin_quic;
@@ -32,11 +33,13 @@ mod downstream_tcp;
 mod negotiation;
 mod ocsp;
 mod outbound_revocation;
+mod provider;
 mod resumption;
 mod server_policy;
 mod upstream_client;
 pub(crate) use cert_metadata::client_certificate_metadata;
 
+pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resumption;
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
@@ -66,14 +69,25 @@ pub use upstream_client::{
   build_upstream_quic_client_config, build_upstream_quic_client_config_with_resumption,
 };
 pub(crate) use upstream_client::{
-  build_upstream_client_config_with_resumption_and_revocation,
-  build_upstream_quic_client_config_with_resumption_and_revocation, build_webpki_client_config,
+  build_upstream_client_config_with_crypto_resumption_and_revocation,
+  build_upstream_quic_client_config_with_crypto_resumption_and_revocation,
+  build_webpki_client_config_with_crypto,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
-  let provider = rustls::crypto::aws_lc_rs::default_provider();
+  let provider = provider::default_crypto_provider();
   let _ = provider.install_default();
   Ok(())
+}
+
+pub fn install_configured_provider(config: &crate::config::CryptoConfig) -> anyhow::Result<()> {
+  let provider = provider::crypto_provider(config)?;
+  let _ = provider.install_default();
+  Ok(())
+}
+
+pub(crate) fn default_crypto_provider() -> rustls::crypto::CryptoProvider {
+  provider::default_crypto_provider()
 }
 
 /// Builds the downstream QUIC server configuration used by HTTP/3 listeners.
@@ -82,7 +96,14 @@ pub fn build_quic_server_config(
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  build_quic_server_config_with_resumption(tls, quic, quic_host_key_base_dir, None)
+  let crypto = CryptoConfig::default();
+  build_quic_server_config_with_crypto_and_resumption(
+    &crypto,
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    None,
+  )
 }
 
 pub fn build_quic_server_config_with_resumption(
@@ -91,7 +112,25 @@ pub fn build_quic_server_config_with_resumption(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  build_quic_server_config_with_resumption_and_ocsp(
+  let crypto = CryptoConfig::default();
+  build_quic_server_config_with_crypto_and_resumption(
+    &crypto,
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    resumption_state,
+  )
+}
+
+pub(crate) fn build_quic_server_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  tls: &TlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<QuinnServerConfig> {
+  build_quic_server_config_with_crypto_resumption_and_ocsp(
+    crypto,
     tls,
     quic,
     quic_host_key_base_dir,
@@ -101,7 +140,8 @@ pub fn build_quic_server_config_with_resumption(
   )
 }
 
-pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
+pub(crate) fn build_quic_server_config_with_crypto_resumption_and_ocsp(
+  crypto: &CryptoConfig,
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&std::path::Path>,
@@ -113,6 +153,7 @@ pub(crate) fn build_quic_server_config_with_resumption_and_ocsp(
     tls,
     quic,
     quic_host_key_base_dir,
+    crypto,
     &tls.tls13.key_exchange_groups,
     &tls.tls13.ciphers,
     None,
@@ -127,6 +168,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&std::path::Path>,
+  crypto: &CryptoConfig,
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls13CipherSuite],
   certificate_partition_identity: Option<&str>,
@@ -135,9 +177,10 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(downstream_crypto_provider_for_tls13(
+    crypto,
     key_exchange_groups,
     ciphers,
-  ));
+  )?);
   let (server_identity, mut cert_resolver) = ocsp::downstream_cert_resolver_for_identity(
     tls,
     &provider,
@@ -167,6 +210,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
       server_identity,
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "h3",
+      tls_provider: crypto.tls_provider,
     },
     resumption_state,
   )?;
@@ -181,7 +225,8 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
 
 /// Builds the TCP TLS server configuration for the admin listener.
 pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
-  build_admin_server_config_with_resumption(tls, None)
+  let crypto = CryptoConfig::default();
+  build_admin_server_config_with_crypto_and_resumption(&crypto, tls, None)
 }
 
 /// Builds the admin TCP TLS server configuration with optional shared resumption storage.
@@ -189,7 +234,16 @@ pub fn build_admin_server_config_with_resumption(
   tls: &AdminTlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let crypto = CryptoConfig::default();
+  build_admin_server_config_with_crypto_and_resumption(&crypto, tls, resumption_state)
+}
+
+pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  tls: &AdminTlsConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  let provider = Arc::new(provider::crypto_provider(crypto)?);
   let mut certificates = Vec::new();
   let mut default = None;
   let mut identity_certs = Vec::new();
@@ -237,6 +291,7 @@ pub fn build_admin_server_config_with_resumption(
       server_identity: certificate_identity(&identity_certs),
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "admin-http1",
+      tls_provider: crypto.tls_provider,
     },
     resumption_state,
   )?;
@@ -248,7 +303,8 @@ pub fn build_turn_server_config(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_turn_server_config_with_resumption(listener_tls, default_tls, None)
+  let crypto = CryptoConfig::default();
+  build_turn_server_config_with_crypto_and_resumption(&crypto, listener_tls, default_tls, None)
 }
 
 pub fn build_turn_server_config_with_resumption(
@@ -256,9 +312,25 @@ pub fn build_turn_server_config_with_resumption(
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
+  let crypto = CryptoConfig::default();
+  build_turn_server_config_with_crypto_and_resumption(
+    &crypto,
+    listener_tls,
+    default_tls,
+    resumption_state,
+  )
+}
+
+pub(crate) fn build_turn_server_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  listener_tls: &TurnListenerTlsConfig,
+  default_tls: &TlsConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
   build_turn_server_config_for_policy(
     listener_tls,
     default_tls,
+    crypto,
     &default_tls.negotiation_policy(),
     &tls_protocol_versions(default_tls.min_version, default_tls.max_version),
     resumption_state,
@@ -268,6 +340,7 @@ pub fn build_turn_server_config_with_resumption(
 pub(super) fn build_turn_server_config_for_policy(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
+  crypto: &CryptoConfig,
   policy: &TlsNegotiationPolicy,
   versions: &[&'static rustls::SupportedProtocolVersion],
   resumption_state: Option<&TlsResumptionState>,
@@ -275,7 +348,8 @@ pub(super) fn build_turn_server_config_for_policy(
   build_turn_server_config_with_provider(
     listener_tls,
     default_tls,
-    downstream_crypto_provider_for_policy(policy),
+    downstream_crypto_provider_for_policy(crypto, policy)?,
+    crypto,
     versions,
     resumption_state,
   )
@@ -284,6 +358,7 @@ pub(super) fn build_turn_server_config_for_policy(
 pub(super) fn build_turn_server_config_for_tls13(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
+  crypto: &CryptoConfig,
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls13CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
@@ -292,7 +367,8 @@ pub(super) fn build_turn_server_config_for_tls13(
   build_turn_server_config_with_provider(
     listener_tls,
     default_tls,
-    downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
+    downstream_crypto_provider_for_tls13(crypto, key_exchange_groups, ciphers)?,
+    crypto,
     versions,
     resumption_state,
   )
@@ -301,6 +377,7 @@ pub(super) fn build_turn_server_config_for_tls13(
 pub(super) fn build_turn_server_config_for_tls12(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
+  crypto: &CryptoConfig,
   key_exchange_groups: &[TlsKeyExchangeGroup],
   ciphers: &[crate::config::Tls12CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
@@ -309,7 +386,8 @@ pub(super) fn build_turn_server_config_for_tls12(
   build_turn_server_config_with_provider(
     listener_tls,
     default_tls,
-    downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
+    downstream_crypto_provider_for_tls12(crypto, key_exchange_groups, ciphers)?,
+    crypto,
     versions,
     resumption_state,
   )
@@ -319,6 +397,7 @@ fn build_turn_server_config_with_provider(
   listener_tls: &TurnListenerTlsConfig,
   default_tls: &TlsConfig,
   provider: rustls::crypto::CryptoProvider,
+  crypto: &CryptoConfig,
   versions: &[&'static rustls::SupportedProtocolVersion],
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
@@ -357,6 +436,7 @@ fn build_turn_server_config_with_provider(
       server_identity,
       client_auth_identity: "client-auth:off".to_string(),
       alpn_family: "turn",
+      tls_provider: crypto.tls_provider,
     },
     resumption_state,
   )?;

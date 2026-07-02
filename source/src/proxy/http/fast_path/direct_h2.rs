@@ -16,9 +16,9 @@ use hyper::client::conn::http2::SendRequest;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::config::{CryptoConfig, ProxyHttp2Config, UpstreamConfig};
 #[cfg(test)]
 use crate::config::{HttpVersion, ProxyProtocolEgressMode};
-use crate::config::{ProxyHttp2Config, UpstreamConfig};
 use crate::metrics::Metrics;
 #[cfg(test)]
 use crate::metrics::fast_path::labels::FastPathTransportMissReason;
@@ -58,6 +58,7 @@ impl DirectH2Pools {
   pub(crate) fn new(
     upstreams: &[UpstreamConfig],
     extra_root_certs: &[PathBuf],
+    crypto: &CryptoConfig,
     tls_resumption: &TlsResumptionState,
     http2_config: &ProxyHttp2Config,
     outbound_revocation: &OutboundRevocationRuntime,
@@ -68,6 +69,7 @@ impl DirectH2Pools {
         DirectH2Pool::new(
           upstream,
           extra_root_certs,
+          crypto,
           tls_resumption,
           http2_config,
           outbound_revocation,
@@ -217,6 +219,7 @@ impl DirectH2Pool {
   fn new(
     upstream: &UpstreamConfig,
     extra_root_certs: &[PathBuf],
+    crypto: &CryptoConfig,
     tls_resumption: &TlsResumptionState,
     http2_config: &ProxyHttp2Config,
     outbound_revocation: &OutboundRevocationRuntime,
@@ -226,6 +229,7 @@ impl DirectH2Pool {
       Some(build_h2_tls_config(
         upstream,
         extra_root_certs,
+        crypto,
         tls_resumption,
         outbound_revocation,
       ))

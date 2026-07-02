@@ -166,6 +166,7 @@ impl AppSnapshot {
     previous: Option<&AppSnapshot>,
     initial_telemetry: Option<TelemetryRuntime>,
   ) -> anyhow::Result<Self> {
+    crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
@@ -181,6 +182,7 @@ impl AppSnapshot {
     let clients = build_clients(
       &upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
@@ -192,6 +194,7 @@ impl AppSnapshot {
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
@@ -201,6 +204,7 @@ impl AppSnapshot {
     let health_check_clients = build_clients(
       &health_check_upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
@@ -211,14 +215,16 @@ impl AppSnapshot {
     let h3_clients =
       UpstreamH3Pools::new(&upstreams, &config, &tls_resumption, &outbound_revocation)
         .context("failed to build upstream HTTP/3 pools")?;
-    let control_http = ControlHttpClient::new_with_revocation(
+    let control_http = ControlHttpClient::new_with_crypto_and_revocation(
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &outbound_revocation,
       outbound_revocation.default_policy(),
     )
     .context("failed to build control-plane HTTP client")?;
-    let bootstrap_control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
-      .context("failed to build revocation bootstrap HTTP client")?;
+    let bootstrap_control_http =
+      ControlHttpClient::new_with_crypto(&config.proxy.trusted_ca_certs, &config.crypto)
+        .context("failed to build revocation bootstrap HTTP client")?;
     let shared_state = SharedState::new(&config)
       .await
       .context("failed to build shared state")?;
@@ -285,11 +291,16 @@ impl AppSnapshot {
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
-    let ocsp_staple =
-      tls::OcspStapleRuntime::new(&config.tls, &bootstrap_control_http, metrics.clone())
-        .await
-        .context("failed to build OCSP staple runtime")?;
+    let ocsp_staple = tls::OcspStapleRuntime::new(
+      &config.crypto,
+      &config.tls,
+      &bootstrap_control_http,
+      metrics.clone(),
+    )
+    .await
+    .context("failed to build OCSP staple runtime")?;
     let tls_server_config = tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
+      &config.crypto,
       &config.tls,
       &config.listeners,
       &config.routes,
@@ -305,8 +316,12 @@ impl AppSnapshot {
     .context("failed to build downstream TLS config")?;
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
       Some(
-        tls::build_admin_server_config_with_resumption(&config.admin.tls, Some(&tls_resumption))
-          .context("failed to build admin TLS config")?,
+        tls::build_admin_server_config_with_crypto_and_resumption(
+          &config.crypto,
+          &config.admin.tls,
+          Some(&tls_resumption),
+        )
+        .context("failed to build admin TLS config")?,
       )
     } else {
       None
@@ -314,6 +329,7 @@ impl AppSnapshot {
     let quic_server_config = if config.listeners.http3 {
       Some(
         tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
+          &config.crypto,
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
@@ -329,7 +345,8 @@ impl AppSnapshot {
     };
     let admin_quic_server_config = if config.admin.enabled && config.admin.http3.enabled {
       Some(
-        tls::build_admin_quic_server_config_with_resumption(
+        tls::build_admin_quic_server_config_with_crypto_and_resumption(
+          &config.crypto,
           &config.admin.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),
@@ -434,6 +451,7 @@ impl AppSnapshot {
     config: Config,
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
+    crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let route_table = RouteTable::new_with_waf(&config, &previous.waf);
@@ -443,6 +461,7 @@ impl AppSnapshot {
     let clients = build_clients(
       &upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
@@ -454,6 +473,7 @@ impl AppSnapshot {
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
@@ -463,6 +483,7 @@ impl AppSnapshot {
     let health_check_clients = build_clients(
       &health_check_upstreams,
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
@@ -477,8 +498,9 @@ impl AppSnapshot {
       &previous.outbound_revocation,
     )
     .context("failed to build upstream HTTP/3 pools")?;
-    let control_http = ControlHttpClient::new_with_revocation(
+    let control_http = ControlHttpClient::new_with_crypto_and_revocation(
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       &previous.outbound_revocation,
       previous.outbound_revocation.default_policy(),
     )

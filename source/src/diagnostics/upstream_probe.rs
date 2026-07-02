@@ -36,8 +36,9 @@ pub(super) async fn probe_upstreams(config: &Config, report: &mut DiagnosticRepo
       return;
     }
   };
-  let http_client = match ControlHttpClient::new_with_revocation(
+  let http_client = match ControlHttpClient::new_with_crypto_and_revocation(
     &config.proxy.trusted_ca_certs,
+    &config.crypto,
     &revocation,
     revocation.default_policy(),
   ) {
@@ -94,8 +95,9 @@ async fn probe_direct_upstream(
   url.set_fragment(None);
   let upstream_client;
   let client = if upstream.origin.scheme() == "https" {
-    match ControlHttpClient::new_with_revocation(
+    match ControlHttpClient::new_with_crypto_and_revocation(
       &config.proxy.trusted_ca_certs,
+      &config.crypto,
       revocation,
       revocation.policy_for_upstream(upstream),
     ) {
@@ -247,7 +249,7 @@ fn build_pool_health_probe_client(
     .as_ref()
     .map(|policy| Arc::new(policy.clone()))
     .unwrap_or_else(|| revocation.default_policy());
-  ControlHttpClient::new_with_revocation(&roots, revocation, policy)
+  ControlHttpClient::new_with_crypto_and_revocation(&roots, &config.crypto, revocation, policy)
 }
 
 async fn probe_http_health(
@@ -323,14 +325,16 @@ async fn probe_connect(
     .await
     .context("upstream connect timed out")??;
   if url.scheme() == "https" {
-    let tls_config = crate::tls::build_upstream_client_config_with_resumption_and_revocation(
-      &config.proxy.trusted_ca_certs,
-      &crate::config::UpstreamEchConfig::default(),
-      &crate::config::UpstreamTlsResumptionConfig::default(),
-      None,
-      "diagnostics-probe",
-      Some((revocation, revocation.default_policy())),
-    )?;
+    let tls_config =
+      crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+        &config.crypto,
+        &config.proxy.trusted_ca_certs,
+        &crate::config::UpstreamEchConfig::default(),
+        &crate::config::UpstreamTlsResumptionConfig::default(),
+        None,
+        "diagnostics-probe",
+        Some((revocation, revocation.default_policy())),
+      )?;
     let host = url
       .host_str()
       .ok_or_else(|| anyhow!("upstream origin has no host: {url}"))?
@@ -356,15 +360,17 @@ async fn probe_h3_get(
 ) -> anyhow::Result<http::StatusCode> {
   let url = &upstream.origin;
   let remote = resolve_url_addr(url).await?;
-  let quic_config = crate::tls::build_upstream_quic_client_config_with_resumption_and_revocation(
-    &config.proxy.trusted_ca_certs,
-    &upstream.tls.ech,
-    &config.quic,
-    &upstream.tls.resumption,
-    None,
-    &upstream.name,
-    Some((revocation, revocation.policy_for_upstream(upstream))),
-  )?;
+  let quic_config =
+    crate::tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+      &config.crypto,
+      &config.proxy.trusted_ca_certs,
+      &upstream.tls.ech,
+      &config.quic,
+      &upstream.tls.resumption,
+      None,
+      &upstream.name,
+      Some((revocation, revocation.policy_for_upstream(upstream))),
+    )?;
   let endpoint = crate::quic::bind_client_endpoint(
     remote,
     &config.quic,

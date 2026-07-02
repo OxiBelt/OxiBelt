@@ -1307,6 +1307,7 @@ impl ListenerSupervisor {
           listener.clone(),
           tcp_options,
           Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
+          &snapshot.config.crypto,
           &snapshot.config.tls,
           &snapshot.tls_resumption,
         )?);

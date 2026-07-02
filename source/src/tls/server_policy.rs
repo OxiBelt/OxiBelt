@@ -7,8 +7,8 @@ use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use rustls::{CipherSuite, NamedGroup, ServerConfig};
 
 use crate::config::{
-  ListenerConfig, QuicConfig, RouteConfig, Tls13NegotiationConfig, TlsConfig, TlsKeyExchangeGroup,
-  TlsMultiCertificateResumptionMode, TlsNegotiationPolicy, TlsVersion,
+  CryptoConfig, ListenerConfig, QuicConfig, RouteConfig, Tls13NegotiationConfig, TlsConfig,
+  TlsKeyExchangeGroup, TlsMultiCertificateResumptionMode, TlsNegotiationPolicy, TlsVersion,
 };
 
 use super::certificate_partition::{
@@ -166,7 +166,9 @@ struct TlsServerVersionConfig {
   cipher_suites: Vec<CipherSuite>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
+  crypto: &CryptoConfig,
   tls: &TlsConfig,
   listeners: &ListenerConfig,
   routes: &[RouteConfig],
@@ -182,6 +184,7 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
     .map(|partitions| partitions.default_identity().to_string());
   let mut policies = HashMap::<TcpServerConfigKey, Arc<TlsServerConfigSet>>::new();
   let tcp_build = super::DownstreamTcpTlsBuild::new(
+    crypto,
     tls,
     listeners,
     max_early_data_size,
@@ -241,6 +244,7 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
 }
 
 pub(crate) fn build_turn_tls_server_config_with_resumption(
+  crypto: &CryptoConfig,
   listener_tls: &crate::config::TurnListenerTlsConfig,
   default_tls: &TlsConfig,
   resumption_state: Option<&TlsResumptionState>,
@@ -251,13 +255,14 @@ pub(crate) fn build_turn_tls_server_config_with_resumption(
       config: super::build_turn_server_config_for_tls13(
         listener_tls,
         default_tls,
+        crypto,
         &policy.tls13.key_exchange_groups,
         &policy.tls13.ciphers,
         &[&rustls::version::TLS13],
         resumption_state,
       )?,
       key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
-      cipher_suites: tls13_cipher_suites(&policy.tls13.ciphers),
+      cipher_suites: tls13_cipher_suites(crypto, &policy.tls13.ciphers)?,
     })
   } else {
     None
@@ -267,13 +272,14 @@ pub(crate) fn build_turn_tls_server_config_with_resumption(
       config: super::build_turn_server_config_for_tls12(
         listener_tls,
         default_tls,
+        crypto,
         &policy.tls12.key_exchange_groups,
         &policy.tls12.groups,
         &[&rustls::version::TLS12],
         resumption_state,
       )?,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
-      cipher_suites: tls12_cipher_suites(&policy.tls12.groups),
+      cipher_suites: tls12_cipher_suites(crypto, &policy.tls12.groups)?,
     })
   } else {
     None
@@ -286,7 +292,9 @@ pub(crate) fn build_turn_tls_server_config_with_resumption(
   })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
+  crypto: &CryptoConfig,
   tls: &TlsConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&Path>,
@@ -309,6 +317,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
     &mut policy_indices,
     &mut configs,
     tls,
+    crypto,
     quic,
     quic_host_key_base_dir,
     default_key,
@@ -323,6 +332,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
         &mut policy_indices,
         &mut configs,
         tls,
+        crypto,
         quic,
         quic_host_key_base_dir,
         QuicServerConfigKey {
@@ -360,6 +370,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
         &mut policy_indices,
         &mut configs,
         tls,
+        crypto,
         quic,
         quic_host_key_base_dir,
         QuicServerConfigKey {
@@ -395,6 +406,7 @@ fn build_or_get_quic_policy(
   policy_indices: &mut HashMap<QuicServerConfigKey, usize>,
   configs: &mut Vec<QuinnServerConfig>,
   tls: &TlsConfig,
+  crypto: &CryptoConfig,
   quic: &QuicConfig,
   quic_host_key_base_dir: Option<&Path>,
   key: QuicServerConfigKey,
@@ -409,6 +421,7 @@ fn build_or_get_quic_policy(
     tls,
     quic,
     quic_host_key_base_dir,
+    crypto,
     &key.policy.key_exchange_groups,
     &key.policy.ciphers,
     key.certificate_identity.as_deref(),
@@ -453,6 +466,7 @@ fn build_tcp_policy(
     .clone()
     .with_certificate_partition_identity(key.certificate_identity.clone());
   let tls13 = if policy.allows_tls13() {
+    let cipher_suites = tls13_cipher_suites(build.crypto, &policy.tls13.ciphers)?;
     Some(TlsServerVersionConfig {
       config: super::build_downstream_tcp_server_config_for_tls13(
         build.clone(),
@@ -461,12 +475,13 @@ fn build_tcp_policy(
         &[&rustls::version::TLS13],
       )?,
       key_exchange_groups: policy.tls13.key_exchange_groups.clone(),
-      cipher_suites: tls13_cipher_suites(&policy.tls13.ciphers),
+      cipher_suites,
     })
   } else {
     None
   };
   let tls12 = if policy.allows_tls12() {
+    let cipher_suites = tls12_cipher_suites(build.crypto, &policy.tls12.groups)?;
     Some(TlsServerVersionConfig {
       config: super::build_downstream_tcp_server_config_for_tls12(
         build.with_max_early_data_size(0),
@@ -475,7 +490,7 @@ fn build_tcp_policy(
         &[&rustls::version::TLS12],
       )?,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
-      cipher_suites: tls12_cipher_suites(&policy.tls12.groups),
+      cipher_suites,
     })
   } else {
     None
@@ -486,21 +501,27 @@ fn build_tcp_policy(
   Ok(TlsServerConfigSet { tls13, tls12 })
 }
 
-fn tls13_cipher_suites(ciphers: &[crate::config::Tls13CipherSuite]) -> Vec<CipherSuite> {
+fn tls13_cipher_suites(
+  crypto: &CryptoConfig,
+  ciphers: &[crate::config::Tls13CipherSuite],
+) -> anyhow::Result<Vec<CipherSuite>> {
   ciphers
     .iter()
     .copied()
-    .map(super::negotiation::supported_tls13_cipher_suite)
-    .map(|suite| suite.suite())
+    .map(|cipher| super::negotiation::supported_tls13_cipher_suite(crypto.tls_provider, cipher))
+    .map(|suite| suite.map(|suite| suite.suite()))
     .collect()
 }
 
-fn tls12_cipher_suites(ciphers: &[crate::config::Tls12CipherSuite]) -> Vec<CipherSuite> {
+fn tls12_cipher_suites(
+  crypto: &CryptoConfig,
+  ciphers: &[crate::config::Tls12CipherSuite],
+) -> anyhow::Result<Vec<CipherSuite>> {
   ciphers
     .iter()
     .copied()
-    .map(super::negotiation::supported_tls12_cipher_suite)
-    .map(|suite| suite.suite())
+    .map(|cipher| super::negotiation::supported_tls12_cipher_suite(crypto.tls_provider, cipher))
+    .map(|suite| suite.map(|suite| suite.suite()))
     .collect()
 }
 

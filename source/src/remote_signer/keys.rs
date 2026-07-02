@@ -79,7 +79,9 @@ fn load_signing_key(path: &Path) -> anyhow::Result<Arc<dyn SigningKey>> {
       path.display()
     ),
   })?;
-  rustls::crypto::aws_lc_rs::sign::any_supported_type(&private_key_to_static(key))
+  crate::tls::default_crypto_provider()
+    .key_provider
+    .load_private_key(private_key_to_static(key))
     .map_err(|error| anyhow!("failed to load private key: {error}"))
 }
 

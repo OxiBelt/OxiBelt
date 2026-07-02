@@ -17,8 +17,8 @@ use tracing::{info, warn};
 use url::Url;
 
 use crate::config::{
-  TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig, WebRtcTurnListenerConfig,
-  WebRtcTurnListenerMode,
+  CryptoConfig, TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig,
+  WebRtcTurnListenerConfig, WebRtcTurnListenerMode,
 };
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
@@ -59,6 +59,7 @@ impl BoundTurnListener {
     config: WebRtcTurnListenerConfig,
     tcp_options: TcpListenOptions,
     accept_error_backoff: Duration,
+    crypto: &CryptoConfig,
     default_tls: &crate::config::TlsConfig,
     tls_resumption: &TlsResumptionState,
   ) -> anyhow::Result<Self> {
@@ -87,6 +88,7 @@ impl BoundTurnListener {
     };
     let tls_config = if config.bind_tls.is_some() {
       Some(tls::build_turn_tls_server_config_with_resumption(
+        crypto,
         &config.tls,
         default_tls,
         Some(tls_resumption),
@@ -512,7 +514,8 @@ async fn connect_turn_stream(origin: &Url, snapshot: &AppSnapshot) -> anyhow::Re
   if origin.scheme() != "turns" {
     return Ok(Box::new(tcp));
   }
-  let client_config = tls::build_upstream_client_config_with_resumption_and_revocation(
+  let client_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+    &snapshot.config.crypto,
     &snapshot.config.proxy.trusted_ca_certs,
     &UpstreamEchConfig::default(),
     &UpstreamTlsResumptionConfig::default(),

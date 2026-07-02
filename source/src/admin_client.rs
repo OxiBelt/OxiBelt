@@ -203,7 +203,7 @@ fn build_tls_config(
   client_cert: Option<&Path>,
   client_key: Option<&Path>,
 ) -> anyhow::Result<ClientConfig> {
-  let provider = rustls::crypto::aws_lc_rs::default_provider();
+  let provider = crate::tls::default_crypto_provider();
   let roots = load_root_store(extra_roots)?;
   let builder = ClientConfig::builder_with_provider(provider.into())
     .with_safe_default_protocol_versions()

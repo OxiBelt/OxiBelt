@@ -7,15 +7,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use rustls::client::{Resumption, Tls12Resumption};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, ServerConfig};
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-  TlsClientAuthConfig, TlsServerResumptionConfig, TlsServerResumptionMode, UpstreamEchConfig,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig, UpstreamTlsResumptionMode,
+  TlsClientAuthConfig, TlsCryptoProvider, TlsServerResumptionConfig, TlsServerResumptionMode,
+  UpstreamEchConfig, UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig,
+  UpstreamTlsResumptionMode,
 };
 
 use super::certificate_io::{load_certs, read_existing_file};
@@ -69,11 +70,13 @@ pub(super) struct TlsServerResumptionKey {
   pub(super) server_identity: String,
   pub(super) client_auth_identity: String,
   pub(super) alpn_family: &'static str,
+  pub(super) tls_provider: TlsCryptoProvider,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct TlsClientConfigKey {
   scope: &'static str,
+  tls_provider: TlsCryptoProvider,
   upstream_name: String,
   roots_identity: String,
   ech_identity: String,
@@ -319,10 +322,9 @@ pub(super) fn configure_server_resumption(
       server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
       let runtime = match state {
         Some(state) => state.server_resumption_runtime(key, resumption)?,
-        None => TlsServerResumptionRuntime::Stateless(
-          rustls::crypto::aws_lc_rs::Ticketer::new()
-            .context("failed to create TLS session ticket producer")?,
-        ),
+        None => TlsServerResumptionRuntime::Stateless(super::provider::ticketer_for_provider(
+          key.tls_provider,
+        )?),
       };
       let TlsServerResumptionRuntime::Stateless(ticketer) = runtime else {
         bail!("TLS resumption ticketer kind changed unexpectedly");
@@ -357,8 +359,7 @@ impl TlsResumptionState {
         )))
       }
       TlsServerResumptionMode::Stateless => TlsServerResumptionRuntime::Stateless(
-        rustls::crypto::aws_lc_rs::Ticketer::new()
-          .context("failed to create TLS session ticket producer")?,
+        super::provider::ticketer_for_provider(key.tls_provider)?,
       ),
     };
     server.insert(key, runtime.clone());
@@ -411,6 +412,7 @@ pub(super) fn upstream_client_resumption(config: &UpstreamTlsResumptionConfig) -
 
 pub(super) fn upstream_client_config_key(
   scope: &'static str,
+  tls_provider: TlsCryptoProvider,
   upstream_name: &str,
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
@@ -418,6 +420,7 @@ pub(super) fn upstream_client_config_key(
 ) -> anyhow::Result<TlsClientConfigKey> {
   Ok(TlsClientConfigKey {
     scope,
+    tls_provider,
     upstream_name: upstream_name.to_string(),
     roots_identity: upstream_roots_identity(extra_root_certificates)?,
     ech_identity: upstream_ech_identity(ech)?,

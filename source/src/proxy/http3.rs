@@ -87,19 +87,21 @@ impl UpstreamH3Pools {
       if upstream.max_http_version != HttpVersion::H3 {
         continue;
       }
-      let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
-        &config.proxy.trusted_ca_certs,
-        &upstream.tls.ech,
-        &config.quic,
-        &upstream.tls.resumption,
-        Some(tls_resumption),
-        &upstream.name,
-        Some((
-          outbound_revocation,
-          outbound_revocation.policy_for_upstream(upstream),
-        )),
-      )
-      .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
+      let quic_config =
+        tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+          &config.crypto,
+          &config.proxy.trusted_ca_certs,
+          &upstream.tls.ech,
+          &config.quic,
+          &upstream.tls.resumption,
+          Some(tls_resumption),
+          &upstream.name,
+          Some((
+            outbound_revocation,
+            outbound_revocation.policy_for_upstream(upstream),
+          )),
+        )
+        .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
       by_upstream.insert(
         upstream.name.clone(),
         Arc::new(UpstreamH3Pool {
@@ -754,7 +756,8 @@ pub(crate) async fn forward_one_shot_request(
   state
     .metrics
     .record_http_upstream_client_pool_miss("h3", "https", "primary");
-  let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
+  let quic_config = tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+    &state.config.crypto,
     &state.config.proxy.trusted_ca_certs,
     &upstream.tls.ech,
     &state.config.quic,
@@ -956,7 +959,8 @@ async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
 ) -> anyhow::Result<web_transport_quinn::Session> {
-  let quic_config = tls::build_upstream_quic_client_config_with_resumption_and_revocation(
+  let quic_config = tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+    &state.config.crypto,
     &state.config.proxy.trusted_ca_certs,
     &prepared.upstream.tls.ech,
     &state.config.quic,

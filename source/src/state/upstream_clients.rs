@@ -17,7 +17,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use tower_service::Service;
 
-use crate::config::{HttpVersion, ProxyHttp2Config, UpstreamConfig};
+use crate::config::{CryptoConfig, HttpVersion, ProxyHttp2Config, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::tls;
 
@@ -200,9 +200,11 @@ where
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_clients(
   upstreams: &[UpstreamConfig],
   extra_root_certs: &[std::path::PathBuf],
+  crypto: &CryptoConfig,
   tls_resumption: &tls::TlsResumptionState,
   http2_config: &ProxyHttp2Config,
   outbound_revocation: &tls::OutboundRevocationRuntime,
@@ -217,6 +219,7 @@ pub(super) fn build_clients(
     let pool = build_client_pool(
       upstream,
       extra_root_certs,
+      crypto,
       tls_resumption,
       http2_config,
       outbound_revocation,
@@ -231,9 +234,11 @@ pub(super) fn build_clients(
   Ok(UpstreamClientPools { by_upstream, pools })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_client_pool(
   upstream: &UpstreamConfig,
   extra_root_certs: &[std::path::PathBuf],
+  crypto: &CryptoConfig,
   tls_resumption: &tls::TlsResumptionState,
   http2_config: &ProxyHttp2Config,
   outbound_revocation: &tls::OutboundRevocationRuntime,
@@ -252,7 +257,8 @@ fn build_client_pool(
       .collect::<Vec<PathBuf>>();
     &root_certs
   };
-  let h1_tls_config = tls::build_upstream_client_config_with_resumption_and_revocation(
+  let h1_tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+    crypto,
     extra_root_certs,
     &upstream.tls.ech,
     &upstream.tls.resumption,
@@ -261,15 +267,17 @@ fn build_client_pool(
     Some((outbound_revocation, revocation_policy.clone())),
   )
   .context("failed to build HTTP/1.1 upstream TLS client")?;
-  let negotiated_tls_config = tls::build_upstream_client_config_with_resumption_and_revocation(
-    extra_root_certs,
-    &upstream.tls.ech,
-    &upstream.tls.resumption,
-    Some(tls_resumption),
-    &upstream.name,
-    Some((outbound_revocation, revocation_policy)),
-  )
-  .context("failed to build negotiated upstream TLS client")?;
+  let negotiated_tls_config =
+    tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+      crypto,
+      extra_root_certs,
+      &upstream.tls.ech,
+      &upstream.tls.resumption,
+      Some(tls_resumption),
+      &upstream.name,
+      Some((outbound_revocation, revocation_policy)),
+    )
+    .context("failed to build negotiated upstream TLS client")?;
 
   let mut h1_http = HttpConnector::new();
   h1_http.enforce_http(false);

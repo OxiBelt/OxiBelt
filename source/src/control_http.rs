@@ -15,7 +15,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
-use crate::config::{OutboundTlsRevocationConfig, UpstreamEchConfig};
+use crate::config::{CryptoConfig, OutboundTlsRevocationConfig, UpstreamEchConfig};
 use crate::tls;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -40,18 +40,35 @@ pub struct ControlHttpStreamResponse {
 
 impl ControlHttpClient {
   pub fn new(extra_root_certs: &[std::path::PathBuf]) -> anyhow::Result<Self> {
-    let tls_config =
-      tls::build_upstream_client_config(extra_root_certs, &UpstreamEchConfig::default())
-        .context("failed to build control-plane TLS client config")?;
+    let crypto = CryptoConfig::default();
+    Self::new_with_crypto(extra_root_certs, &crypto)
+  }
+
+  pub(crate) fn new_with_crypto(
+    extra_root_certs: &[std::path::PathBuf],
+    crypto: &CryptoConfig,
+  ) -> anyhow::Result<Self> {
+    let tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+      crypto,
+      extra_root_certs,
+      &UpstreamEchConfig::default(),
+      &crate::config::UpstreamTlsResumptionConfig::default(),
+      None,
+      "control-plane",
+      None,
+    )
+    .context("failed to build control-plane TLS client config")?;
     Ok(Self::from_tls_config(tls_config))
   }
 
-  pub(crate) fn new_with_revocation(
+  pub(crate) fn new_with_crypto_and_revocation(
     extra_root_certs: &[std::path::PathBuf],
+    crypto: &CryptoConfig,
     revocation: &tls::OutboundRevocationRuntime,
     policy: std::sync::Arc<OutboundTlsRevocationConfig>,
   ) -> anyhow::Result<Self> {
-    let tls_config = tls::build_upstream_client_config_with_resumption_and_revocation(
+    let tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+      crypto,
       extra_root_certs,
       &UpstreamEchConfig::default(),
       &crate::config::UpstreamTlsResumptionConfig::default(),
@@ -64,7 +81,12 @@ impl ControlHttpClient {
   }
 
   pub(crate) fn new_webpki_only() -> anyhow::Result<Self> {
-    let tls_config = tls::build_webpki_client_config()
+    let crypto = CryptoConfig::default();
+    Self::new_webpki_only_with_crypto(&crypto)
+  }
+
+  pub(crate) fn new_webpki_only_with_crypto(crypto: &CryptoConfig) -> anyhow::Result<Self> {
+    let tls_config = tls::build_webpki_client_config_with_crypto(crypto)
       .context("failed to build WebPKI-only control-plane TLS client config")?;
     Ok(Self::from_tls_config(tls_config))
   }

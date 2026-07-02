@@ -10,7 +10,7 @@ use rustls::{ServerConfig, sign::CertifiedKey};
 
 use super::certificate_io::{load_certs, load_private_key};
 use super::*;
-use crate::config::{AdminTlsConfig, QuicConfig};
+use crate::config::{AdminTlsConfig, CryptoConfig, QuicConfig};
 
 pub fn build_admin_quic_server_config_with_resumption(
   tls: &AdminTlsConfig,
@@ -18,7 +18,24 @@ pub fn build_admin_quic_server_config_with_resumption(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let crypto = CryptoConfig::default();
+  build_admin_quic_server_config_with_crypto_and_resumption(
+    &crypto,
+    tls,
+    quic,
+    quic_host_key_base_dir,
+    resumption_state,
+  )
+}
+
+pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  tls: &AdminTlsConfig,
+  quic: &QuicConfig,
+  quic_host_key_base_dir: Option<&std::path::Path>,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<QuinnServerConfig> {
+  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
   let mut certificates = Vec::new();
   let mut default = None;
   let mut identity_certs = Vec::new();
@@ -65,6 +82,7 @@ pub fn build_admin_quic_server_config_with_resumption(
       server_identity: certificate_identity(&identity_certs),
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "admin-h3",
+      tls_provider: crypto.tls_provider,
     },
     resumption_state,
   )?;

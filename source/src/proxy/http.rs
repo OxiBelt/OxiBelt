@@ -2569,15 +2569,17 @@ async fn send_one_shot_with_proxy_protocol(
   if upstream.origin.scheme() == "https" {
     let revocation_policy = state.outbound_revocation.policy_for_upstream(upstream);
     let revocation = Some((&state.outbound_revocation, revocation_policy));
-    let mut tls_config = crate::tls::build_upstream_client_config_with_resumption_and_revocation(
-      &state.config.proxy.trusted_ca_certs,
-      &upstream.tls.ech,
-      &upstream.tls.resumption,
-      Some(&state.tls_resumption),
-      &upstream.name,
-      revocation,
-    )
-    .context("failed to build one-shot upstream TLS config")?;
+    let mut tls_config =
+      crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+        &state.config.crypto,
+        &state.config.proxy.trusted_ca_certs,
+        &upstream.tls.ech,
+        &upstream.tls.resumption,
+        Some(&state.tls_resumption),
+        &upstream.name,
+        revocation,
+      )
+      .context("failed to build one-shot upstream TLS config")?;
     tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];
     let Some(host) = upstream.origin.host_str() else {
       anyhow::bail!("upstream origin has no host");

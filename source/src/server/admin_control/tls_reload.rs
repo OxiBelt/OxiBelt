@@ -15,11 +15,16 @@ pub(super) async fn build_downstream_tls_reload_configs(
   let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
     .await
     .context("failed to build CRLite runtime")?;
-  let ocsp_staple =
-    crate::tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
-      .await
-      .context("failed to build OCSP staple runtime")?;
+  let ocsp_staple = crate::tls::OcspStapleRuntime::new(
+    &config.crypto,
+    &config.tls,
+    &active.control_http,
+    active.metrics.clone(),
+  )
+  .await
+  .context("failed to build OCSP staple runtime")?;
   let tls_server_config = crate::tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
+    &config.crypto,
     &config.tls,
     &config.listeners,
     &config.routes,
@@ -36,6 +41,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
   let quic_server_config = if config.listeners.http3 {
     Some(
       crate::tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
+        &config.crypto,
         &config.tls,
         &config.quic,
         config.source_paths.cert_dir.as_deref(),

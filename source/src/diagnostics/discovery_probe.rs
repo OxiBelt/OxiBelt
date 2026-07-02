@@ -31,8 +31,9 @@ pub(super) async fn probe_discovery(
       return;
     }
   };
-  let client = match ControlHttpClient::new_with_revocation(
+  let client = match ControlHttpClient::new_with_crypto_and_revocation(
     &config.proxy.trusted_ca_certs,
+    &config.crypto,
     &revocation,
     revocation.default_policy(),
   ) {

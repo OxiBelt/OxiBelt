@@ -8,6 +8,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "compression",
   "config",
   "connection_limits",
+  "crypto",
   "database",
   "dynamic_policy",
   "external_auth",

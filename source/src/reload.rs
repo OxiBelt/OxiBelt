@@ -242,11 +242,16 @@ impl ReloadManager {
     let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
-    let ocsp_staple =
-      tls::OcspStapleRuntime::new(&config.tls, &active.control_http, active.metrics.clone())
-        .await
-        .context("failed to build OCSP staple runtime")?;
+    let ocsp_staple = tls::OcspStapleRuntime::new(
+      &config.crypto,
+      &config.tls,
+      &active.control_http,
+      active.metrics.clone(),
+    )
+    .await
+    .context("failed to build OCSP staple runtime")?;
     let tls_server_config = tls::build_downstream_tls_server_config_with_resumption_and_ocsp(
+      &config.crypto,
       &config.tls,
       &config.listeners,
       &config.routes,
@@ -263,6 +268,7 @@ impl ReloadManager {
     let quic_server_config = if config.listeners.http3 {
       Some(
         tls::build_downstream_quic_server_config_with_resumption_and_ocsp(
+          &config.crypto,
           &config.tls,
           &config.quic,
           config.source_paths.cert_dir.as_deref(),

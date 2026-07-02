@@ -5,7 +5,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use rustls::ServerConfig;
 
-use crate::config::{ListenerConfig, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy};
+use crate::config::{
+  CryptoConfig, ListenerConfig, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy,
+};
 
 use super::negotiation::{
   downstream_crypto_provider_for_policy, downstream_crypto_provider_for_tls12,
@@ -21,6 +23,7 @@ use super::{
 
 #[derive(Clone)]
 pub(super) struct DownstreamTcpTlsBuild<'a> {
+  pub(super) crypto: &'a CryptoConfig,
   tls: &'a TlsConfig,
   listeners: &'a ListenerConfig,
   max_early_data_size: u32,
@@ -32,6 +35,7 @@ pub(super) struct DownstreamTcpTlsBuild<'a> {
 
 impl<'a> DownstreamTcpTlsBuild<'a> {
   pub(super) fn new(
+    crypto: &'a CryptoConfig,
     tls: &'a TlsConfig,
     listeners: &'a ListenerConfig,
     max_early_data_size: u32,
@@ -40,6 +44,7 @@ impl<'a> DownstreamTcpTlsBuild<'a> {
     crlite_runtime: Option<&'a CrliteRuntime>,
   ) -> Self {
     Self {
+      crypto,
       tls,
       listeners,
       max_early_data_size,
@@ -73,7 +78,8 @@ pub fn build_server_config(
   tls: &TlsConfig,
   listeners: &ListenerConfig,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption(tls, listeners, None)
+  let crypto = CryptoConfig::default();
+  build_server_config_with_crypto_and_resumption(&crypto, tls, listeners, None)
 }
 
 /// Builds the downstream TCP TLS server configuration with optional shared resumption storage.
@@ -82,10 +88,29 @@ pub fn build_server_config_with_resumption(
   listeners: &ListenerConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_server_config_with_resumption_and_ocsp(tls, listeners, 0, resumption_state, None, None)
+  let crypto = CryptoConfig::default();
+  build_server_config_with_crypto_and_resumption(&crypto, tls, listeners, resumption_state)
 }
 
-pub(crate) fn build_server_config_with_resumption_and_ocsp(
+pub(crate) fn build_server_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  tls: &TlsConfig,
+  listeners: &ListenerConfig,
+  resumption_state: Option<&TlsResumptionState>,
+) -> anyhow::Result<Arc<ServerConfig>> {
+  build_server_config_with_crypto_resumption_and_ocsp(
+    crypto,
+    tls,
+    listeners,
+    0,
+    resumption_state,
+    None,
+    None,
+  )
+}
+
+pub(crate) fn build_server_config_with_crypto_resumption_and_ocsp(
+  crypto: &CryptoConfig,
   tls: &TlsConfig,
   listeners: &ListenerConfig,
   max_early_data_size: u32,
@@ -94,6 +119,7 @@ pub(crate) fn build_server_config_with_resumption_and_ocsp(
   crlite_runtime: Option<&CrliteRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let build = DownstreamTcpTlsBuild::new(
+    crypto,
     tls,
     listeners,
     max_early_data_size,
@@ -113,11 +139,8 @@ pub(super) fn build_downstream_tcp_server_config_for_policy(
   policy: &TlsNegotiationPolicy,
   versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    build,
-    downstream_crypto_provider_for_policy(policy),
-    versions,
-  )
+  let provider = downstream_crypto_provider_for_policy(build.crypto, policy)?;
+  build_downstream_tcp_server_config_with_provider(build, provider, versions)
 }
 
 pub(super) fn build_downstream_tcp_server_config_for_tls13(
@@ -126,11 +149,8 @@ pub(super) fn build_downstream_tcp_server_config_for_tls13(
   ciphers: &[crate::config::Tls13CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    build,
-    downstream_crypto_provider_for_tls13(key_exchange_groups, ciphers),
-    versions,
-  )
+  let provider = downstream_crypto_provider_for_tls13(build.crypto, key_exchange_groups, ciphers)?;
+  build_downstream_tcp_server_config_with_provider(build, provider, versions)
 }
 
 pub(super) fn build_downstream_tcp_server_config_for_tls12(
@@ -139,11 +159,8 @@ pub(super) fn build_downstream_tcp_server_config_for_tls12(
   ciphers: &[crate::config::Tls12CipherSuite],
   versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  build_downstream_tcp_server_config_with_provider(
-    build,
-    downstream_crypto_provider_for_tls12(key_exchange_groups, ciphers),
-    versions,
-  )
+  let provider = downstream_crypto_provider_for_tls12(build.crypto, key_exchange_groups, ciphers)?;
+  build_downstream_tcp_server_config_with_provider(build, provider, versions)
 }
 
 fn build_downstream_tcp_server_config_with_provider(
@@ -180,6 +197,7 @@ fn build_downstream_tcp_server_config_with_provider(
       server_identity,
       client_auth_identity: client_auth_identity(&build.tls.client_auth)?,
       alpn_family: "http1-http2",
+      tls_provider: build.crypto.tls_provider,
     },
     build.resumption_state,
   )?;

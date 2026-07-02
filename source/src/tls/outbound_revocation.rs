@@ -75,8 +75,9 @@ impl OutboundRevocationRuntime {
   pub(crate) async fn new(config: &Config, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
     let default_policy = Arc::new(config.proxy.upstream_revocation.clone());
     let enabled = outbound_revocation_enabled(config);
-    let control_http = ControlHttpClient::new(&config.proxy.trusted_ca_certs)
-      .context("failed to build outbound revocation bootstrap HTTP client")?;
+    let control_http =
+      ControlHttpClient::new_with_crypto(&config.proxy.trusted_ca_certs, &config.crypto)
+        .context("failed to build outbound revocation bootstrap HTTP client")?;
     let (managed_filters, initial_crlite_error_code) =
       load_managed_crlite_filters(config, &metrics).await?;
     let crlite_managed_filters = managed_filters.len();

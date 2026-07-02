@@ -6,8 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use anyhow::{Context, bail};
 use base64::Engine;
 use h3_quinn::quinn::crypto::{AeadKey, CryptoError, HandshakeTokenKey, HmacKey};
@@ -15,8 +13,6 @@ use h3_quinn::quinn::{
   Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TokioRuntime,
   TransportConfig, VarInt,
 };
-use hkdf::Hkdf;
-use sha2::Sha256;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::config::{
@@ -314,9 +310,8 @@ fn quic_host_key(
 
 fn derive_host_key(host_key: &[u8; QUIC_HOST_KEY_BYTES], label: &[u8]) -> anyhow::Result<[u8; 32]> {
   let mut out = [0u8; 32];
-  Hkdf::<Sha256>::new(Some(label), host_key)
-    .expand(b"oxibelt", &mut out)
-    .map_err(|_| anyhow::anyhow!("failed to fill QUIC host key material"))?;
+  crate::crypto::hkdf_sha256(label, host_key, b"oxibelt", &mut out)
+    .context("failed to fill QUIC host key material")?;
   Ok(out)
 }
 
@@ -359,23 +354,27 @@ impl RetryTokenKey {
 impl HandshakeTokenKey for RetryTokenKey {
   fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn AeadKey> {
     let mut key_buffer = [0u8; 32];
-    Hkdf::<Sha256>::new(Some(QUIC_RETRY_TOKEN_AEAD_LABEL), &self.key)
-      .expand(random_bytes, &mut key_buffer)
-      .expect("HKDF output buffer length is valid");
+    crate::crypto::hkdf_sha256(
+      QUIC_RETRY_TOKEN_AEAD_LABEL,
+      &self.key,
+      random_bytes,
+      &mut key_buffer,
+    )
+    .expect("HKDF output buffer length is valid");
     Box::new(RetryAeadKey(
-      Aes256Gcm::new_from_slice(&key_buffer).expect("AES-256-GCM accepts 32 byte keys"),
+      crate::crypto::Aes256GcmKey::new_from_slice(&key_buffer)
+        .expect("AES-256-GCM accepts 32 byte keys"),
     ))
   }
 }
 
-struct RetryAeadKey(Aes256Gcm);
+struct RetryAeadKey(crate::crypto::Aes256GcmKey);
 
 impl AeadKey for RetryAeadKey {
   fn seal(&self, data: &mut Vec<u8>, additional_data: &[u8]) -> Result<(), CryptoError> {
-    let nonce = Nonce::from_slice(&QUIC_RETRY_TOKEN_NONCE);
     self
       .0
-      .encrypt_in_place(nonce, additional_data, data)
+      .seal_in_place_append_tag(QUIC_RETRY_TOKEN_NONCE, additional_data, data)
       .map_err(|_| CryptoError)
   }
 
@@ -384,18 +383,10 @@ impl AeadKey for RetryAeadKey {
     data: &'a mut [u8],
     additional_data: &[u8],
   ) -> Result<&'a mut [u8], CryptoError> {
-    if data.len() < 16 {
-      return Err(CryptoError);
-    }
-    let tag_start = data.len() - 16;
-    let (ciphertext, tag) = data.split_at_mut(tag_start);
-    let nonce = Nonce::from_slice(&QUIC_RETRY_TOKEN_NONCE);
-    let tag = Tag::from_slice(tag);
     self
       .0
-      .decrypt_in_place_detached(nonce, additional_data, ciphertext, tag)
-      .map_err(|_| CryptoError)?;
-    Ok(ciphertext)
+      .open_in_place(QUIC_RETRY_TOKEN_NONCE, additional_data, data)
+      .map_err(|_| CryptoError)
   }
 }
 

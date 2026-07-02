@@ -85,6 +85,8 @@ include = ["conf.d/*.toml"]
 [runtime.drain]
 [runtime.hot_reload]
 [runtime.netport_switcher]
+[crypto]
+[crypto.primitives]
 [listeners]
 [listeners.proxy_protocol]
 [sni_forward]
@@ -328,6 +330,28 @@ Reload modes:
 Reload failures keep the previous active state.
 
 Successful full reloads start replacement listeners before draining old listener generations. Successful OxiRule, downstream TLS, full, and runtime pool snapshot replacements drain previous HTTP connection generations as well. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`. Full reload and admin config load rebuild telemetry tracing from the replacement configuration, though old-generation connections may keep the previous telemetry runtime until their captured snapshot drains. During that grace period, new WebTransport CONNECT or ordinary HTTP/3 request streams on a drained WebTransport connection are rejected with `503` instead of using the previous snapshot.
+
+## Crypto Providers
+
+```toml
+[crypto]
+tls_provider = "aws_lc_rs" # aws_lc_rs | ring
+primitive_provider = "rustcrypto" # rustcrypto | aws_lc_rs
+primitive_backend = "auto" # auto | hardware | software
+
+[crypto.primitives]
+aes_gcm = "rustcrypto"
+chacha20poly1305 = "rustcrypto"
+hkdf = "rustcrypto"
+hmac_sha256 = "rustcrypto"
+sha2 = "rustcrypto"
+```
+
+`tls_provider` selects the rustls crypto provider used by downstream TLS, upstream TLS, HTTP/3, Admin QUIC, TURN TLS, ticket encryption, certificate verification, and QUIC client/server configuration. The default is `aws_lc_rs`. `ring` requires an OxiBelt build with the `crypto-ring` Cargo feature. The `ring` provider does not support the default post-quantum hybrid `x25519mlkem768` TLS 1.3 key exchange group, so configurations that set `tls_provider = "ring"` must omit that group from global and route-specific TLS 1.3 negotiation policies. Upstream ECH requires `aws_lc_rs`.
+
+`primitive_provider` selects the default provider for OxiBelt's direct primitive helpers outside rustls. `rustcrypto` is the default. `aws_lc_rs` is available for SHA-256, HKDF-SHA256, HMAC-SHA256, and AES-256-GCM call sites. `[crypto.primitives]` can override `aes_gcm`, `chacha20poly1305`, `hkdf`, `hmac_sha256`, and `sha2` individually; omitted overrides inherit `primitive_provider`.
+
+`primitive_backend` is reserved for forcing hardware or software implementations where a target-specific build exposes that control. The portable build supports only `auto`; `hardware` and `software` fail startup rather than silently selecting an unknown backend.
 
 ## Listeners and TLS
 

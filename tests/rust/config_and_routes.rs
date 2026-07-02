@@ -9,19 +9,19 @@ use oxibelt::config::{
   ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
   CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
   ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
-  CrliteMode, DatabaseMitigationMode, DatabaseTlsMode, DnsDiscoveryRecordType,
-  DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
-  ExternalAuthProvider, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
-  ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode,
-  IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm,
-  MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode,
-  ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
-  RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
+  CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
+  DatabaseTlsMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode,
+  ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
+  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
+  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
+  OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode,
-  TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider,
-  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
-  resolve_auto_worker_count,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
+  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+  UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -85,6 +85,160 @@ fn protocol_operations_defaults_are_disabled() {
   assert_eq!(
     config.sni_forward.client_hello_parse_methods,
     vec![SniForwardClientHelloParseMethod::SingleRecord]
+  );
+}
+
+#[test]
+fn crypto_config_defaults_validate() {
+  let temp_dir = common::TempDir::new("crypto-defaults");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-defaults");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  assert_eq!(config.crypto.tls_provider, TlsCryptoProvider::AwsLcRs);
+  assert_eq!(
+    config.crypto.primitive_provider,
+    CryptoPrimitiveProvider::RustCrypto
+  );
+  assert_eq!(
+    config.crypto.primitive_backend,
+    CryptoPrimitiveBackend::Auto
+  );
+}
+
+#[test]
+fn crypto_config_parses_global_and_per_primitive_providers() {
+  let temp_dir = common::TempDir::new("crypto-providers");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-providers");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+tls_provider = "aws_lc_rs"
+primitive_provider = "aws_lc_rs"
+primitive_backend = "auto"
+
+[crypto.primitives]
+aes_gcm = "rustcrypto"
+chacha20poly1305 = "aws_lc_rs"
+hkdf = "aws_lc_rs"
+hmac_sha256 = "rustcrypto"
+sha2 = "aws_lc_rs"
+
+[tls]"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  assert_eq!(config.crypto.tls_provider, TlsCryptoProvider::AwsLcRs);
+  assert_eq!(
+    config.crypto.primitive_provider,
+    CryptoPrimitiveProvider::AwsLcRs
+  );
+  assert_eq!(
+    config.crypto.primitives.aes_gcm,
+    Some(CryptoPrimitiveProvider::RustCrypto)
+  );
+  assert_eq!(
+    config.crypto.primitives.chacha20poly1305,
+    Some(CryptoPrimitiveProvider::AwsLcRs)
+  );
+  assert_eq!(
+    config.crypto.primitives.hkdf,
+    Some(CryptoPrimitiveProvider::AwsLcRs)
+  );
+  assert_eq!(
+    config.crypto.primitives.hmac_sha256,
+    Some(CryptoPrimitiveProvider::RustCrypto)
+  );
+  assert_eq!(
+    config.crypto.primitives.sha2,
+    Some(CryptoPrimitiveProvider::AwsLcRs)
+  );
+}
+
+#[test]
+fn crypto_config_rejects_unavailable_backend_selection() {
+  let temp_dir = common::TempDir::new("crypto-backend");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-backend");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for backend in ["hardware", "software"] {
+    let raw = base.replace(
+      "[tls]",
+      &format!(
+        r#"[crypto]
+primitive_backend = "{backend}"
+
+[tls]"#
+      ),
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("unsupported crypto backend should fail");
+    assert!(
+      error.to_string().contains(&format!(
+        "crypto.primitive_backend = \"{backend}\" is not supported"
+      )),
+      "unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn crypto_ring_tls_provider_validates_build_and_tls_compatibility() {
+  let temp_dir = common::TempDir::new("crypto-ring");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-ring");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+tls_provider = "ring"
+
+[tls]"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("ring TLS provider should require compatible build and groups");
+  let expected = if cfg!(feature = "crypto-ring") {
+    "tls.1_3.key_exchange_groups cannot include x25519mlkem768"
+  } else {
+    "crypto.tls_provider = \"ring\" requires the crypto-ring build feature"
+  };
+  assert!(
+    error.to_string().contains(expected),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn crypto_unknown_fields_fail_strict_shape_validation() {
+  let temp_dir = common::TempDir::new("crypto-unknown");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-unknown");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+primitive_provider = "rustcrypto"
+
+[crypto.primitives]
+sha2 = "aws_lc_rs"
+unexpected = "rustcrypto"
+
+[tls]"#,
+  );
+  let config_path = temp_dir.path().join("oxibelt.toml");
+  std::fs::write(&config_path, raw).expect("failed to write test config");
+
+  let error = Config::load(&config_path).expect_err("unknown crypto field should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("configuration contains unknown field(s): crypto.primitives.unexpected"),
+    "unexpected error: {error}"
   );
 }
 

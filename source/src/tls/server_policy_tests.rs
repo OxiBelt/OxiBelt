@@ -42,6 +42,7 @@ fn partitioned_quic_policy_index_includes_certificate_identity() {
   let temp_dir = common::TempDir::new("quic-cert-partition-index");
   let config = partitioned_certificate_config(&temp_dir);
   let quic_config = build_downstream_quic_server_config_with_resumption_and_ocsp(
+    &config.crypto,
     &config.tls,
     &config.quic,
     None,
@@ -169,6 +170,7 @@ private_key = "{}"
 
 fn downstream_tls_server_config(config: &crate::config::Config) -> DownstreamTlsServerConfig {
   build_downstream_tls_server_config_with_resumption_and_ocsp(
+    &config.crypto,
     &config.tls,
     &config.listeners,
     &config.routes,

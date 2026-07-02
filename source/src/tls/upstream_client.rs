@@ -9,7 +9,7 @@ use rustls::crypto::hpke::Hpke;
 use rustls::pki_types::EchConfigListBytes;
 
 use crate::config::{
-  OutboundTlsRevocationConfig, QuicConfig, UpstreamEchConfig, UpstreamEchMode,
+  CryptoConfig, OutboundTlsRevocationConfig, QuicConfig, UpstreamEchConfig, UpstreamEchMode,
   UpstreamTlsResumptionConfig,
 };
 
@@ -25,7 +25,9 @@ pub fn build_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
 ) -> anyhow::Result<ClientConfig> {
-  build_upstream_client_config_with_resumption(
+  let crypto = CryptoConfig::default();
+  build_upstream_client_config_with_crypto_and_resumption(
+    &crypto,
     extra_root_certificates,
     ech,
     &UpstreamTlsResumptionConfig::default(),
@@ -34,8 +36,10 @@ pub fn build_upstream_client_config(
   )
 }
 
-pub(crate) fn build_webpki_client_config() -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+pub(crate) fn build_webpki_client_config_with_crypto(
+  crypto: &CryptoConfig,
+) -> anyhow::Result<ClientConfig> {
+  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
   let roots = load_webpki_root_store();
   let builder = ClientConfig::builder_with_provider(provider)
     .with_safe_default_protocol_versions()
@@ -52,17 +56,19 @@ pub fn build_upstream_client_config_with_resumption(
   state: Option<&TlsResumptionState>,
   upstream_name: &str,
 ) -> anyhow::Result<ClientConfig> {
-  build_upstream_client_config_with_resumption_and_revocation(
+  let crypto = CryptoConfig::default();
+  build_upstream_client_config_with_crypto_and_resumption(
+    &crypto,
     extra_root_certificates,
     ech,
     resumption,
     state,
     upstream_name,
-    None,
   )
 }
 
-pub(crate) fn build_upstream_client_config_with_resumption_and_revocation(
+pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation(
+  crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
@@ -72,6 +78,7 @@ pub(crate) fn build_upstream_client_config_with_resumption_and_revocation(
 ) -> anyhow::Result<ClientConfig> {
   let key = upstream_client_config_key(
     "tcp",
+    crypto.tls_provider,
     upstream_name,
     extra_root_certificates,
     ech,
@@ -84,20 +91,35 @@ pub(crate) fn build_upstream_client_config_with_resumption_and_revocation(
     && !revocation_enabled
   {
     return state.upstream_client_config(key, || {
-      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false, None)
+      build_uncached_upstream_client_config(
+        crypto,
+        extra_root_certificates,
+        ech,
+        resumption,
+        false,
+        None,
+      )
     });
   }
-  build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, false, revocation)
+  build_uncached_upstream_client_config(
+    crypto,
+    extra_root_certificates,
+    ech,
+    resumption,
+    false,
+    revocation,
+  )
 }
 
 fn build_uncached_upstream_client_config(
+  crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   quic_only: bool,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
   let roots = Arc::new(load_upstream_root_store(extra_root_certificates)?);
   let revocation_enabled = revocation
     .as_ref()
@@ -148,13 +170,34 @@ pub fn build_upstream_quic_client_config(
   ech: &UpstreamEchConfig,
   quic: &QuicConfig,
 ) -> anyhow::Result<QuinnClientConfig> {
-  build_upstream_quic_client_config_with_resumption(
+  let crypto = CryptoConfig::default();
+  build_upstream_quic_client_config_with_crypto_and_resumption(
+    &crypto,
     extra_root_certificates,
     ech,
     quic,
     &UpstreamTlsResumptionConfig::default(),
     None,
     "default",
+  )
+}
+
+pub(crate) fn build_upstream_client_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+) -> anyhow::Result<ClientConfig> {
+  build_upstream_client_config_with_crypto_resumption_and_revocation(
+    crypto,
+    extra_root_certificates,
+    ech,
+    resumption,
+    state,
+    upstream_name,
+    None,
   )
 }
 
@@ -166,7 +209,29 @@ pub fn build_upstream_quic_client_config_with_resumption(
   state: Option<&TlsResumptionState>,
   upstream_name: &str,
 ) -> anyhow::Result<QuinnClientConfig> {
-  build_upstream_quic_client_config_with_resumption_and_revocation(
+  let crypto = CryptoConfig::default();
+  build_upstream_quic_client_config_with_crypto_and_resumption(
+    &crypto,
+    extra_root_certificates,
+    ech,
+    quic,
+    resumption,
+    state,
+    upstream_name,
+  )
+}
+
+pub(crate) fn build_upstream_quic_client_config_with_crypto_and_resumption(
+  crypto: &CryptoConfig,
+  extra_root_certificates: &[std::path::PathBuf],
+  ech: &UpstreamEchConfig,
+  quic: &QuicConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+) -> anyhow::Result<QuinnClientConfig> {
+  build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+    crypto,
     extra_root_certificates,
     ech,
     quic,
@@ -177,7 +242,9 @@ pub fn build_upstream_quic_client_config_with_resumption(
   )
 }
 
-pub(crate) fn build_upstream_quic_client_config_with_resumption_and_revocation(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+  crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   ech: &UpstreamEchConfig,
   quic: &QuicConfig,
@@ -188,6 +255,7 @@ pub(crate) fn build_upstream_quic_client_config_with_resumption_and_revocation(
 ) -> anyhow::Result<QuinnClientConfig> {
   let key = upstream_client_config_key(
     "quic",
+    crypto.tls_provider,
     upstream_name,
     extra_root_certificates,
     ech,
@@ -200,10 +268,18 @@ pub(crate) fn build_upstream_quic_client_config_with_resumption_and_revocation(
     && !revocation_enabled
   {
     state.upstream_client_config(key, || {
-      build_uncached_upstream_client_config(extra_root_certificates, ech, resumption, true, None)
+      build_uncached_upstream_client_config(
+        crypto,
+        extra_root_certificates,
+        ech,
+        resumption,
+        true,
+        None,
+      )
     })?
   } else {
     build_uncached_upstream_client_config(
+      crypto,
       extra_root_certificates,
       ech,
       resumption,
@@ -326,7 +402,9 @@ mod tests {
     let revocation = OutboundRevocationRuntime::new(&revocation_config, Metrics::new())
       .await
       .expect("outbound revocation runtime should build");
-    let revocation_client = build_upstream_client_config_with_resumption_and_revocation(
+    let crypto = CryptoConfig::default();
+    let revocation_client = build_upstream_client_config_with_crypto_resumption_and_revocation(
+      &crypto,
       std::slice::from_ref(&ca_cert_path),
       &UpstreamEchConfig::default(),
       &UpstreamTlsResumptionConfig::default(),
