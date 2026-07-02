@@ -36,7 +36,7 @@ h3 = "0.0.8"
 h3-datagram = "0.0.2"
 h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }
 h3-webtransport = "0.1.2"
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 httparse = "1.10.1"

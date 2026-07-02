@@ -2610,7 +2610,7 @@ dependencies = [
  "fastwebsockets",
  "flate2",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "glob",
  "h3",
  "h3-datagram",
