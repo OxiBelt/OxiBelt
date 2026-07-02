@@ -18,7 +18,7 @@ arc-swap = "1.9.1"
 aws-lc-rs = { version = "1.17.0", default-features = false }
 argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.42", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
-aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+aes-gcm = { version = "0.11.0", default-features = false, features = ["aes", "alloc"] }
 base64 = "0.22.1"
 brotli = "8.0.4"
 bytes = "1.12.0"
