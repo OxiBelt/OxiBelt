@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use base64::Engine;
 use md5::{Digest, Md5};
-use ring::hmac;
 
 use crate::config::{TurnAuthConfig, TurnAuthMode};
 
@@ -208,8 +207,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[allow(dead_code)]
 fn _hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
-  let key = hmac::Key::new(hmac::HMAC_SHA256, key);
-  hmac::sign(&key, value).as_ref().to_vec()
+  crate::crypto::hmac_sha256(key, value).to_vec()
 }
 
 #[cfg(test)]

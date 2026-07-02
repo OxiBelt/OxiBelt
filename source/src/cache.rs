@@ -13,7 +13,6 @@ use http::header::{
   IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, VARY,
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
-use ring::digest;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
@@ -2421,9 +2420,9 @@ fn total_size(inner: &CacheInner) -> usize {
 }
 
 fn cache_file_name(key: &str) -> String {
-  let digest = digest::digest(&digest::SHA256, key.as_bytes());
-  let mut name = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
+  let digest = crate::crypto::sha256(key.as_bytes());
+  let mut name = String::with_capacity(digest.len() * 2);
+  for byte in digest {
     use std::fmt::Write;
     let _ = write!(&mut name, "{byte:02x}");
   }
@@ -2455,7 +2454,7 @@ fn safe_child_path(dir: &Path, file_name: &str) -> Option<PathBuf> {
 }
 
 fn is_cache_file_stem(stem: &str) -> bool {
-  stem.len() == digest::SHA256_OUTPUT_LEN * 2 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+  stem.len() == crate::crypto::SHA256_HEX_LEN && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn header_size(headers: &HeaderMap) -> usize {

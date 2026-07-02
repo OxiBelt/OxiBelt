@@ -8,7 +8,6 @@ use online_dsl_forge::{
   VerifiedExpression,
 };
 use regex::{Regex, RegexBuilder};
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
@@ -2480,9 +2479,7 @@ pub fn new_access_log_id() -> String {
 
 fn new_uuid_like_id(label: &str) -> anyhow::Result<String> {
   let mut bytes = [0u8; 16];
-  SystemRandom::new()
-    .fill(&mut bytes)
-    .map_err(|_| anyhow!("failed to generate {label}"))?;
+  crate::crypto::random_fill(&mut bytes).map_err(|_| anyhow!("failed to generate {label}"))?;
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   Ok(format!(

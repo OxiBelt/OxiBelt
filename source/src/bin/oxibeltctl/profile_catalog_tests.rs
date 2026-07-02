@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, DEFAULT_ADMIN_URL};
-use ring::digest;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -269,9 +269,9 @@ fn assert_request_header(request: &str, name: &str, expected_value: &str) {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-  let digest = digest::digest(&digest::SHA256, bytes);
-  let mut out = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
+  let digest = Sha256::digest(bytes);
+  let mut out = String::with_capacity(digest.len() * 2);
+  for byte in digest {
     use std::fmt::Write;
     write!(&mut out, "{byte:02x}").expect("hex write should succeed");
   }

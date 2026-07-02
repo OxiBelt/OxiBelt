@@ -642,13 +642,10 @@ fn bearer_matches_env(env_name: &str, actual: &str) -> bool {
     if expected.is_empty() {
       return false;
     }
-    let expected_digest = ring::digest::digest(&ring::digest::SHA256, expected.as_bytes());
-    let actual_digest = ring::digest::digest(&ring::digest::SHA256, actual.as_bytes());
+    let expected_digest = crate::crypto::sha256(expected.as_bytes());
+    let actual_digest = crate::crypto::sha256(actual.as_bytes());
     use subtle::ConstantTimeEq;
-    expected_digest
-      .as_ref()
-      .ct_eq(actual_digest.as_ref())
-      .into()
+    expected_digest.ct_eq(&actual_digest).into()
   })
 }
 

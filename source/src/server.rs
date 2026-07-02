@@ -15,7 +15,6 @@ use anyhow::{Context, bail};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use ring::digest;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -2372,8 +2371,7 @@ fn tls_fingerprint(
     sni,
     alpn,
   );
-  let hash = digest::digest(&digest::SHA256, payload.as_bytes());
-  hex_encode(hash.as_ref())
+  hex_encode(&crate::crypto::sha256(payload.as_bytes()))
 }
 
 fn tls_fingerprint_payload(
@@ -2412,8 +2410,7 @@ struct QuicTlsFingerprintInput<'a> {
 
 fn quic_tls_fingerprint(input: QuicTlsFingerprintInput<'_>) -> String {
   let payload = quic_tls_fingerprint_payload(input);
-  let hash = digest::digest(&digest::SHA256, payload.as_bytes());
-  hex_encode(hash.as_ref())
+  hex_encode(&crate::crypto::sha256(payload.as_bytes()))
 }
 
 fn quic_tls_fingerprint_payload(input: QuicTlsFingerprintInput<'_>) -> String {

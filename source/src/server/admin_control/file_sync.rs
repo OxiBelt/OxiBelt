@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use ::http::StatusCode;
 use anyhow::{Context, anyhow, bail};
-use ring::digest;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -549,9 +548,9 @@ fn restore_committed_files(files: &[CommittedFile]) -> anyhow::Result<()> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-  let digest = digest::digest(&digest::SHA256, bytes);
-  let mut out = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
+  let digest = crate::crypto::sha256(bytes);
+  let mut out = String::with_capacity(digest.len() * 2);
+  for byte in digest {
     use std::fmt::Write as _;
     let _ = write!(&mut out, "{byte:02x}");
   }

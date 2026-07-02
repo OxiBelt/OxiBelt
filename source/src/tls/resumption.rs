@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use rustls::client::{Resumption, Tls12Resumption};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, ServerConfig};
+use sha2::{Digest, Sha256};
 
 use crate::config::{
   TlsClientAuthConfig, TlsServerResumptionConfig, TlsServerResumptionMode, UpstreamEchConfig,
@@ -427,48 +428,48 @@ pub(super) fn upstream_client_config_key(
 }
 
 pub(in crate::tls) fn certificate_identity(certs: &[CertificateDer<'static>]) -> String {
-  let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+  let mut context = Sha256::new();
   context.update(b"certs");
   for cert in certs {
-    context.update(&(cert.as_ref().len() as u64).to_be_bytes());
+    context.update((cert.as_ref().len() as u64).to_be_bytes());
     context.update(cert.as_ref());
   }
-  hex_encode(context.finish().as_ref())
+  hex_encode(&context.finalize())
 }
 
 pub(super) fn client_auth_identity(client_auth: &TlsClientAuthConfig) -> anyhow::Result<String> {
-  let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+  let mut context = Sha256::new();
   context.update(format!("mode:{:?}", client_auth.mode).as_bytes());
   context.update(format!("verify_depth:{}", client_auth.verify_depth).as_bytes());
   for path in &client_auth.ca_certs {
     for cert in load_certs(path)? {
-      context.update(&(cert.as_ref().len() as u64).to_be_bytes());
+      context.update((cert.as_ref().len() as u64).to_be_bytes());
       context.update(cert.as_ref());
     }
   }
-  Ok(hex_encode(context.finish().as_ref()))
+  Ok(hex_encode(&context.finalize()))
 }
 
 fn upstream_roots_identity(paths: &[std::path::PathBuf]) -> anyhow::Result<String> {
-  let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+  let mut context = Sha256::new();
   context.update(b"webpki-roots");
   for path in paths {
     for cert in load_certs(path)? {
       context.update(path.to_string_lossy().as_bytes());
-      context.update(&(cert.as_ref().len() as u64).to_be_bytes());
+      context.update((cert.as_ref().len() as u64).to_be_bytes());
       context.update(cert.as_ref());
     }
   }
-  Ok(hex_encode(context.finish().as_ref()))
+  Ok(hex_encode(&context.finalize()))
 }
 
 fn upstream_ech_identity(ech: &UpstreamEchConfig) -> anyhow::Result<String> {
-  let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+  let mut context = Sha256::new();
   context.update(format!("mode:{:?}", ech.mode).as_bytes());
   if let Some(path) = &ech.config_list_file {
     context.update(&read_existing_file("upstream ECH config list file", path)?);
   }
-  Ok(hex_encode(context.finish().as_ref()))
+  Ok(hex_encode(&context.finalize()))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -2,7 +2,6 @@
 //! Serialized cache entries keep HTTP metadata separate from backend storage details.
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
-use ring::digest;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -592,5 +591,5 @@ fn shared_no_vary_variant_key(partition: &str, base_key: &str) -> String {
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
-  super::hex_encode(digest::digest(&digest::SHA256, bytes).as_ref())
+  super::hex_encode(&crate::crypto::sha256(bytes))
 }

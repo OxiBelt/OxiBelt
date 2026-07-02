@@ -6,7 +6,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
 
 use crate::config::{
@@ -371,8 +370,7 @@ fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> anyhow::Result<()> {
 
 fn random_dns_transaction_id() -> anyhow::Result<u16> {
   let mut bytes = [0_u8; 2];
-  SystemRandom::new()
-    .fill(&mut bytes)
+  crate::crypto::random_fill(&mut bytes)
     .map_err(|_| anyhow!("failed to generate DNS transaction ID"))?;
   Ok(u16::from_be_bytes(bytes))
 }

@@ -3,7 +3,6 @@
 
 use anyhow::{Context, bail};
 use base64::Engine;
-use ring::hmac;
 
 pub const SIGNATURE_VERSION: &str = "hmac-sha256-v1";
 
@@ -44,8 +43,7 @@ pub fn load_key(env_name: &str) -> anyhow::Result<[u8; 32]> {
 
 pub fn sign(key: &[u8; 32], fields: &DynamicPolicySignatureFields<'_>) -> String {
   let payload = payload(fields);
-  let key = hmac::Key::new(hmac::HMAC_SHA256, key);
-  hex_encode(hmac::sign(&key, payload.as_bytes()).as_ref())
+  hex_encode(&crate::crypto::hmac_sha256(key, payload.as_bytes()))
 }
 
 pub fn verify(
@@ -55,9 +53,10 @@ pub fn verify(
 ) -> anyhow::Result<()> {
   let signature = hex_decode(signature)?;
   let payload = payload(fields);
-  let key = hmac::Key::new(hmac::HMAC_SHA256, key);
-  hmac::verify(&key, payload.as_bytes(), &signature)
-    .map_err(|_| anyhow::anyhow!("dynamic policy row signature is invalid"))
+  if !crate::crypto::verify_hmac_sha256(key, payload.as_bytes(), &signature) {
+    anyhow::bail!("dynamic policy row signature is invalid");
+  }
+  Ok(())
 }
 
 fn payload(fields: &DynamicPolicySignatureFields<'_>) -> String {

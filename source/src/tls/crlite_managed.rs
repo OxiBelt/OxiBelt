@@ -4,7 +4,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use http::header::ACCEPT;
-use ring::digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -395,7 +394,7 @@ fn normalize_sha256(raw: &str) -> anyhow::Result<String> {
 }
 
 fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
-  let actual = hex_digest(digest::digest(&digest::SHA256, bytes).as_ref());
+  let actual = hex_digest(&crate::crypto::sha256(bytes));
   if !actual.eq_ignore_ascii_case(expected) {
     bail!("crlite_managed_sha256_mismatch");
   }
@@ -450,7 +449,7 @@ mod tests {
     tls.crlite.max_filter_age_seconds = 60;
     let bytes = b"filter bytes".to_vec();
     let filter = RemoteFilter {
-      sha256: hex_digest(digest::digest(&digest::SHA256, &bytes).as_ref()),
+      sha256: hex_digest(&crate::crypto::sha256(&bytes)),
       size: bytes.len(),
       bytes: bytes.clone(),
       record_last_modified: Some(42),

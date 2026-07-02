@@ -21,7 +21,7 @@ use oxibelt::waf::{
   cost_oxirule, crs_compatibility_matrix, explain_oxirule, plan_oxirule_hardening, replay_oxirule,
   test_oxirule,
 };
-use ring::digest;
+use sha2::{Digest, Sha256};
 
 static TEST_DYNAMIC_POLICY: OnceLock<DynamicPolicyContext> = OnceLock::new();
 
@@ -11730,8 +11730,8 @@ fn complete_pow_person_proof_issued(
 fn solve_pow_nonce(token: &str, difficulty: u8) -> u64 {
   for nonce in 0u64.. {
     let input = format!("{token}.{nonce}");
-    let hash = digest::digest(&digest::SHA256, input.as_bytes());
-    if leading_zero_bits(hash.as_ref()) >= u32::from(difficulty) {
+    let hash = Sha256::digest(input.as_bytes());
+    if leading_zero_bits(&hash) >= u32::from(difficulty) {
       return nonce;
     }
   }
@@ -11741,8 +11741,8 @@ fn solve_pow_nonce(token: &str, difficulty: u8) -> u64 {
 fn unsolved_pow_nonce(token: &str, difficulty: u8) -> u64 {
   for nonce in 0u64.. {
     let input = format!("{token}.{nonce}");
-    let hash = digest::digest(&digest::SHA256, input.as_bytes());
-    if leading_zero_bits(hash.as_ref()) < u32::from(difficulty) {
+    let hash = Sha256::digest(input.as_bytes());
+    if leading_zero_bits(&hash) < u32::from(difficulty) {
       return nonce;
     }
   }
@@ -11830,9 +11830,9 @@ fn extract_cookie_value(set_cookie: &str) -> String {
 
 fn sha256_hex(value: &str) -> String {
   const HEX: &[u8; 16] = b"0123456789abcdef";
-  let digest = digest::digest(&digest::SHA256, value.as_bytes());
+  let digest = Sha256::digest(value.as_bytes());
   let mut out = String::with_capacity(64);
-  for byte in digest.as_ref() {
+  for byte in digest {
     out.push(HEX[(byte >> 4) as usize] as char);
     out.push(HEX[(byte & 0x0f) as usize] as char);
   }

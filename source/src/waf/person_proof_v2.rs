@@ -1,10 +1,9 @@
 //! Person proof provider challenge state.
 //! Provider responses are validated before they can issue local clearance material.
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use http::header::{CACHE_CONTROL, LOCATION};
 use http::{HeaderName, HeaderValue, StatusCode};
-use ring::{digest, hmac};
 use url::form_urlencoded;
 
 use super::person_proof::{
@@ -381,10 +380,7 @@ fn sign_clearance_token(
     state.expires,
     &state.random,
   );
-  let mac = hmac::sign(
-    &hmac::Key::new(hmac::HMAC_SHA256, &engine.secret),
-    payload.as_bytes(),
-  );
+  let mac = crate::crypto::hmac_sha256(&engine.secret, payload.as_bytes());
   format!(
     "clearance.v2.{}.{}.{}.{}.{}.{}.{}.{}.{}",
     state.issued,
@@ -395,7 +391,7 @@ fn sign_clearance_token(
     hex_encode(state.route_name.as_bytes()),
     state.binding_hash,
     state.random,
-    hex_encode(mac.as_ref())
+    hex_encode(&mac)
   )
 }
 
@@ -488,12 +484,10 @@ fn clearance_payload(
 
 fn verify_mac(engine: &PersonProofEngine, payload: &str, mac: &str) -> anyhow::Result<()> {
   let mac = hex_decode(mac)?;
-  hmac::verify(
-    &hmac::Key::new(hmac::HMAC_SHA256, &engine.secret),
-    payload.as_bytes(),
-    &mac,
-  )
-  .map_err(|_| anyhow!("person proof v2 token signature is invalid"))
+  if !crate::crypto::verify_hmac_sha256(&engine.secret, payload.as_bytes(), &mac) {
+    bail!("person proof v2 token signature is invalid");
+  }
+  Ok(())
 }
 
 fn parse_challenge_token(token: &str) -> anyhow::Result<ChallengeFields> {
@@ -558,7 +552,7 @@ fn token_binding_hash(
   route_name: &str,
 ) -> String {
   let payload = token_binding_payload_for_route(input, policy, route_name);
-  hex_encode(digest::digest(&digest::SHA256, payload.as_bytes()).as_ref())
+  hex_encode(&crate::crypto::sha256(payload.as_bytes()))
 }
 
 fn append_query(base: &str, pairs: Vec<(&str, &str)>) -> String {

@@ -4,7 +4,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use clubcard_crlite::{CRLiteClubcard, CRLiteKey, CRLiteStatus, IssuerSpkiHash, LogId, Timestamp};
-use ring::digest;
 use x509_cert::Certificate;
 use x509_cert::der::{
   Decode, Encode,
@@ -204,7 +203,7 @@ fn filter_age_is_stale(age: Duration, max_age_seconds: u64) -> bool {
 }
 
 fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
-  let actual = hex_digest(digest::digest(&digest::SHA256, bytes).as_ref());
+  let actual = hex_digest(&crate::crypto::sha256(bytes));
   if !actual.eq_ignore_ascii_case(expected) {
     bail!("crlite_filter_sha256_mismatch");
   }
@@ -248,7 +247,7 @@ pub(super) fn crlite_query_material_from_der(
     .to_der()
     .context("crlite_issuer_spki_encode")?;
   let mut issuer_spki_hash = [0_u8; 32];
-  issuer_spki_hash.copy_from_slice(digest::digest(&digest::SHA256, &issuer_spki_der).as_ref());
+  issuer_spki_hash.copy_from_slice(&crate::crypto::sha256(&issuer_spki_der));
   let serial = leaf.tbs_certificate.serial_number.as_bytes().to_vec();
   let scts = embedded_scts(&leaf)?;
   Ok(CrliteQueryMaterial {

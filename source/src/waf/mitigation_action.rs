@@ -7,7 +7,6 @@ use std::net::IpAddr;
 use anyhow::{Context, bail};
 use http::StatusCode;
 use http::header::USER_AGENT;
-use ring::digest;
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
@@ -626,9 +625,9 @@ fn mitigation_dedupe_key(
     bucket,
     ctx.request.route_name
   );
-  let digest = digest::digest(&digest::SHA256, material.as_bytes());
+  let digest = crate::crypto::sha256(material.as_bytes());
   let mut out = String::with_capacity(64);
-  for byte in digest.as_ref() {
+  for byte in digest {
     write!(&mut out, "{byte:02x}").expect("hex write should succeed");
   }
   out

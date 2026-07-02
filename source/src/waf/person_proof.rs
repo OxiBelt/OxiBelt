@@ -6,8 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
 use http::{HeaderName, HeaderValue, StatusCode};
-use ring::digest;
-use ring::rand::{SecureRandom, SystemRandom};
 
 use super::person_proof_reuse::is_reuse_capacity_error;
 use super::{
@@ -380,8 +378,7 @@ impl PersonProofEngine {
         previous.revoked_clearances.clone(),
       )
     } else {
-      SystemRandom::new()
-        .fill(&mut secret)
+      crate::crypto::random_fill(&mut secret)
         .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
       (
         Arc::new(Mutex::new(HashMap::new())),
@@ -647,7 +644,7 @@ pub(super) fn clearance_hash(proof: &str) -> String {
 }
 
 pub(super) fn token_hash(value: &str) -> String {
-  hex_encode(digest::digest(&digest::SHA256, value.as_bytes()).as_ref())
+  hex_encode(&crate::crypto::sha256(value.as_bytes()))
 }
 
 pub(super) fn purge_expired_reuse_tokens(active: &mut HashMap<String, i64>, now: i64) {
@@ -736,8 +733,7 @@ fn header_set(name: &'static str, value: &str) -> anyhow::Result<HeaderMutation>
 
 pub(super) fn random_hex(bytes: usize) -> anyhow::Result<String> {
   let mut value = vec![0u8; bytes];
-  SystemRandom::new()
-    .fill(&mut value)
+  crate::crypto::random_fill(&mut value)
     .map_err(|_| anyhow!("failed to generate person proof challenge random data"))?;
   Ok(hex_encode(&value))
 }

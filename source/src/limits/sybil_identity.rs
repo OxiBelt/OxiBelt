@@ -4,7 +4,6 @@
 use std::net::IpAddr;
 
 use http::HeaderMap;
-use ring::digest;
 
 use crate::config::RateLimitIdentityPart;
 use crate::waf::PersonProofTokenBinding;
@@ -133,9 +132,9 @@ pub(crate) fn asn_identity(context: SybilIdentityContext<'_>) -> Option<String> 
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-  let digest = digest::digest(&digest::SHA256, bytes);
-  let mut output = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
+  let digest = crate::crypto::sha256(bytes);
+  let mut output = String::with_capacity(digest.len() * 2);
+  for byte in digest {
     use std::fmt::Write as _;
     let _ = write!(&mut output, "{byte:02x}");
   }

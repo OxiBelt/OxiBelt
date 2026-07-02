@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use http::{HeaderValue, Request};
 use oxibelt::control_http::{ControlHttpClient, empty_body};
-use ring::digest;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::cli::MitigateArgs;
 
@@ -165,7 +165,7 @@ fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
   if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
     bail!("--profile-sha256 must be a 64-character hex SHA-256 digest");
   }
-  let actual = hex_encode(digest::digest(&digest::SHA256, bytes).as_ref());
+  let actual = hex_encode(&Sha256::digest(bytes));
   if !actual.eq_ignore_ascii_case(expected) {
     bail!("mitigation profile SHA-256 mismatch: expected {expected}, got {actual}");
   }

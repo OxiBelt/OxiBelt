@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -321,8 +320,7 @@ fn snapshot_locked(
 
 fn new_session_id() -> anyhow::Result<String> {
   let mut bytes = [0_u8; 16];
-  SystemRandom::new()
-    .fill(&mut bytes)
+  crate::crypto::random_fill(&mut bytes)
     .map_err(|_| anyhow::anyhow!("failed to generate WebTransport session ID"))?;
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;

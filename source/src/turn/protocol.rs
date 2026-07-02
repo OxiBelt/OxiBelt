@@ -4,7 +4,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{Context, bail};
-use ring::hmac;
 
 pub const MAGIC_COOKIE: u32 = 0x2112_A442;
 pub const HEADER_LEN: usize = 20;
@@ -317,8 +316,7 @@ pub fn verify_message_integrity(message: &StunMessage<'_>, key: &[u8]) -> anyhow
   let mut bytes = message.raw[..attr.offset].to_vec();
   let len = (attr.offset + 24 - HEADER_LEN) as u16;
   bytes[2..4].copy_from_slice(&len.to_be_bytes());
-  let hmac_key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
-  Ok(hmac::verify(&hmac_key, &bytes, attr.value).is_ok())
+  Ok(crate::crypto::verify_hmac_sha1(key, &bytes, attr.value))
 }
 
 pub fn verify_fingerprint(message: &StunMessage<'_>) -> anyhow::Result<bool> {
@@ -340,11 +338,7 @@ pub fn verify_fingerprint(message: &StunMessage<'_>) -> anyhow::Result<bool> {
 }
 
 pub fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; 20] {
-  let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
-  let tag = hmac::sign(&key, value);
-  let mut out = [0u8; 20];
-  out.copy_from_slice(tag.as_ref());
-  out
+  crate::crypto::hmac_sha1(key, value)
 }
 
 fn append_attr(out: &mut Vec<u8>, kind: u16, value: &[u8]) {

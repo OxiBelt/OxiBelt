@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use http::{HeaderMap, Method};
-use ring::{digest, hmac};
 
 use crate::config::AdminCachePurgeSigningConfig;
 
@@ -75,10 +74,10 @@ fn verify_cache_purge_signature_with_key_bytes(
   let signature = base64::engine::general_purpose::STANDARD
     .decode(header_str(headers, SIGNATURE_HEADER)?.trim())
     .context("invalid cache purge signature encoding")?;
-  let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
   let canonical = canonical_message(method, path_and_query, body, timestamp, &nonce);
-  hmac::verify(&key, canonical.as_bytes(), &signature)
-    .map_err(|_| anyhow!("cache purge signature mismatch"))?;
+  if !crate::crypto::verify_hmac_sha256(key_bytes, canonical.as_bytes(), &signature) {
+    return Err(anyhow!("cache purge signature mismatch"));
+  }
   Ok(VerifiedCachePurgeSignature {
     nonce,
     timestamp_unix_seconds: timestamp,
@@ -92,12 +91,12 @@ pub fn canonical_message(
   timestamp: u64,
   nonce: &str,
 ) -> String {
-  let body_hash = digest::digest(&digest::SHA256, body);
+  let body_hash = crate::crypto::sha256(body);
   format!(
     "{SIGNING_VERSION}\n{}\n{}\n{}\n{}\n{}",
     method.as_str(),
     path_and_query,
-    hex(body_hash.as_ref()),
+    hex(&body_hash),
     timestamp,
     nonce
   )
@@ -153,35 +152,29 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
   use super::*;
   use http::HeaderValue;
-  use ring::rand::SystemRandom;
   use std::time::Duration;
 
   #[test]
   fn verifies_valid_cache_purge_signature() {
-    let rng = SystemRandom::new();
-    let key = ring::rand::generate::<[u8; 32]>(&rng)
-      .expect("test RNG should generate a cache purge signing key")
-      .expose();
+    let mut key = [0u8; 32];
+    crate::crypto::random_fill(&mut key)
+      .expect("test RNG should generate a cache purge signing key");
     let timestamp = 1_700_000_000;
-    let nonce_bytes = ring::rand::generate::<[u8; 16]>(&rng)
-      .expect("test RNG should generate a cache purge nonce")
-      .expose();
+    let mut nonce_bytes = [0u8; 16];
+    crate::crypto::random_fill(&mut nonce_bytes)
+      .expect("test RNG should generate a cache purge nonce");
     let nonce = base64::engine::general_purpose::STANDARD_NO_PAD.encode(nonce_bytes);
     let method = Method::POST;
     let path = "/cache/purge?policy=default";
     let body = b"";
     let canonical = canonical_message(&method, path, body, timestamp, &nonce);
-    let signature = hmac::sign(
-      &hmac::Key::new(hmac::HMAC_SHA256, &key),
-      canonical.as_bytes(),
-    );
+    let signature = crate::crypto::hmac_sha256(&key, canonical.as_bytes());
     let mut headers = HeaderMap::new();
     headers.insert(TIMESTAMP_HEADER, HeaderValue::from_static("1700000000"));
     headers.insert(NONCE_HEADER, HeaderValue::from_str(&nonce).unwrap());
     headers.insert(
       SIGNATURE_HEADER,
-      HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(signature.as_ref()))
-        .unwrap(),
+      HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(signature)).unwrap(),
     );
 
     let verified = verify_cache_purge_signature_with_key_bytes(

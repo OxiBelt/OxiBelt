@@ -16,6 +16,7 @@ aho-corasick = "1.1.4"
 arc-swap = "1.9.1"
 argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.42", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 base64 = "0.22.1"
 brotli = "8.0.4"
 bytes = "1.12.0"
@@ -31,8 +32,11 @@ fastwebsockets = { version = "0.10.0", features = ["unstable-split"] }
 flate2 = "1.1.9"
 h3 = "0.0.8"
 h3-datagram = "0.0.2"
-h3-quinn = { version = "0.0.10", features = ["datagram"] }
+h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }
 h3-webtransport = "0.1.2"
+getrandom = "0.3.4"
+hkdf = "0.13.0"
+hmac = "0.13.0"
 httparse = "1.10.1"
 hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
@@ -43,7 +47,6 @@ libc = "0.2.186"
 md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "zerocopy"] }
 regex = "1.12.4"
-ring = "0.17.14"
 rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "std"] }
 sequoia-openpgp = { version = "2.3.0", default-features = false, features = ["crypto-openssl"] }
@@ -52,6 +55,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde-saphyr = { version = "0.0.28", default-features = false, features = ["deserialize"] }
 sha1 = { version = "0.11.0", features = ["oid"] }
+sha2 = "0.11.0"
 socket2 = "0.6.4"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 subtle = "2.6.1"
@@ -67,7 +71,7 @@ unicode-normalization = "0.1.25"
 url = { version = "2.5.8", features = ["serde"] }
 webpki-roots = "1.0.8"
 web-transport-quinn = { version = "0.11.9", default-features = false, features = ["aws-lc-rs"] }
-quic-parser = { version = "0.1.5", features = ["ring"] }
+quic-parser = { version = "0.1.5", default-features = false, features = ["aws-lc-rs"] }
 x509-cert = "0.2.5"
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"

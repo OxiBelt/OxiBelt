@@ -5,7 +5,7 @@ use anyhow::{Context, bail};
 use http::{HeaderValue, Method, Request};
 use oxibelt::control_http::{ControlHttpClient, empty_body};
 use oxibelt::waf::{RULEPACK_FILE_SUFFIX, RulepackSourceProvenance};
-use ring::digest;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::cli::RulepackSourceArgs;
@@ -218,7 +218,7 @@ fn verify_sha256_digest(expected: &str, actual: &str) -> anyhow::Result<()> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-  hex_encode(digest::digest(&digest::SHA256, bytes).as_ref())
+  hex_encode(&Sha256::digest(bytes))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

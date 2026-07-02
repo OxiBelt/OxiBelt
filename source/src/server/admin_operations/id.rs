@@ -2,14 +2,12 @@
 //! IDs stay constrained so operation lookups cannot become path or log injection surfaces.
 
 use anyhow::bail;
-use ring::rand::{SecureRandom, SystemRandom};
 
 const OPERATION_ID_PREFIX: &str = "op_";
 
 pub(super) fn new_operation_id() -> String {
   let mut bytes = [0_u8; 16];
-  SystemRandom::new()
-    .fill(&mut bytes)
+  crate::crypto::random_fill(&mut bytes)
     .expect("system random generator should produce admin operation IDs");
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;

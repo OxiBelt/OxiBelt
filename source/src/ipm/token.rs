@@ -2,7 +2,6 @@
 //! Token material is compared through hashes so plaintext credentials do not enter snapshots.
 
 use base64::Engine;
-use ring::rand::SecureRandom;
 use subtle::ConstantTimeEq;
 
 pub(super) const TOKEN_HASH_ALG: &str = "sha256-v1";
@@ -12,8 +11,7 @@ const TOKEN_LIST_PREFIX_BYTES: usize = 18;
 
 pub(super) fn generate_token() -> anyhow::Result<GeneratedToken> {
   let mut bytes = [0_u8; TOKEN_BYTES];
-  ring::rand::SystemRandom::new()
-    .fill(&mut bytes)
+  crate::crypto::random_fill(&mut bytes)
     .map_err(|_| anyhow::anyhow!("failed to generate IPM credential token"))?;
   let token = format!(
     "{TOKEN_PREFIX}{}",
@@ -27,8 +25,7 @@ pub(super) fn generate_token() -> anyhow::Result<GeneratedToken> {
 }
 
 pub(super) fn hash_token(token: &str) -> String {
-  let digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
-  hex_encode(digest.as_ref())
+  hex_encode(&crate::crypto::sha256(token.as_bytes()))
 }
 
 pub(super) fn token_prefix(token: &str) -> String {

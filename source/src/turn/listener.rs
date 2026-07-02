@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use ring::rand::{SecureRandom, SystemRandom};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -704,8 +703,7 @@ async fn turn_health_check(
 
 fn random_transaction_id() -> anyhow::Result<[u8; 12]> {
   let mut txid = [0u8; 12];
-  SystemRandom::new()
-    .fill(&mut txid)
+  crate::crypto::random_fill(&mut txid)
     .map_err(|_| anyhow::anyhow!("failed to generate TURN transaction id"))?;
   Ok(txid)
 }

@@ -4,7 +4,6 @@
 use std::net::IpAddr;
 
 use anyhow::bail;
-use ring::digest;
 use rustls::pki_types::CertificateDer;
 
 use crate::waf::metadata::WafClientCertificateMetadata;
@@ -205,8 +204,7 @@ fn parse_der_len(input: &[u8]) -> anyhow::Result<(usize, &[u8])> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-  let hash = digest::digest(&digest::SHA256, bytes);
-  hex_encode(hash.as_ref())
+  hex_encode(&crate::crypto::sha256(bytes))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

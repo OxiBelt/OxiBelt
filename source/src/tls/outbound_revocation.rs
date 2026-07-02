@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use http::header::{ACCEPT, CONTENT_TYPE};
-use ring::digest;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
@@ -563,7 +562,7 @@ fn revocation_error(error: anyhow::Error) -> Error {
 }
 
 fn certificate_cache_key(der: &[u8]) -> Vec<u8> {
-  digest::digest(&digest::SHA256, der).as_ref().to_vec()
+  crate::crypto::sha256(der).to_vec()
 }
 
 fn outbound_revocation_enabled(config: &Config) -> bool {

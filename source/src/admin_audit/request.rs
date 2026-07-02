@@ -1,7 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{Method, StatusCode};
-use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 
 pub(super) struct AdminAuditDescriptor {
@@ -305,7 +304,7 @@ fn sanitize_audit_text(value: &str) -> String {
 
 pub(super) fn random_request_id() -> String {
   let mut bytes = [0_u8; 16];
-  if SystemRandom::new().fill(&mut bytes).is_ok() {
+  if crate::crypto::random_fill(&mut bytes).is_ok() {
     return hex(&bytes);
   }
   let fallback = SystemTime::now()

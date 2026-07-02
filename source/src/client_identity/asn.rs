@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use http::header::ACCEPT;
-use ring::digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -473,9 +472,9 @@ fn verify_sha256(expected: &str, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-  let digest = digest::digest(&digest::SHA256, bytes);
-  let mut output = String::with_capacity(digest.as_ref().len() * 2);
-  for byte in digest.as_ref() {
+  let digest = crate::crypto::sha256(bytes);
+  let mut output = String::with_capacity(digest.len() * 2);
+  for byte in digest {
     use std::fmt::Write as _;
     let _ = write!(&mut output, "{byte:02x}");
   }

@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use http::StatusCode;
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Pool, Postgres};
@@ -712,8 +711,7 @@ impl MemoryBackend {
     ttl: Option<Duration>,
   ) -> anyhow::Result<Vec<u8>> {
     let mut random = vec![0u8; len];
-    SystemRandom::new()
-      .fill(&mut random)
+    crate::crypto::random_fill(&mut random)
       .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
     let mut values = self
       .values
@@ -1048,8 +1046,7 @@ return 1
     ttl: Option<Duration>,
   ) -> anyhow::Result<Vec<u8>> {
     let mut value = vec![0u8; len];
-    SystemRandom::new()
-      .fill(&mut value)
+    crate::crypto::random_fill(&mut value)
       .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
     let _ = self.put_if_absent(key, &value, ttl)?;
     match self.command(&[b"GET".to_vec(), key.as_bytes().to_vec()])? {
@@ -1359,8 +1356,7 @@ impl PostgresBackend {
     ttl: Option<Duration>,
   ) -> anyhow::Result<Vec<u8>> {
     let mut random = vec![0u8; len];
-    SystemRandom::new()
-      .fill(&mut random)
+    crate::crypto::random_fill(&mut random)
       .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
     let _ = self.put_if_absent(key, &random, ttl)?;
     block_on_timeout(self.timeout, async {
@@ -1785,8 +1781,7 @@ pub fn now_unix_ms() -> i64 {
 
 fn random_hex(bytes: usize) -> anyhow::Result<String> {
   let mut value = vec![0u8; bytes];
-  SystemRandom::new()
-    .fill(&mut value)
+  crate::crypto::random_fill(&mut value)
     .map_err(|_| anyhow!("failed to generate shared cache lock token"))?;
   Ok(hex_encode(&value))
 }
@@ -1802,6 +1797,5 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn config_hash(config: &Config) -> String {
-  let digest = ring::digest::digest(&ring::digest::SHA256, format!("{config:?}").as_bytes());
-  hex_encode(digest.as_ref())
+  hex_encode(&crate::crypto::sha256(format!("{config:?}").as_bytes()))
 }

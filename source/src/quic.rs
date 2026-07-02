@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use anyhow::{Context, bail};
 use base64::Engine;
 use h3_quinn::quinn::crypto::{AeadKey, CryptoError, HandshakeTokenKey, HmacKey};
@@ -13,7 +15,8 @@ use h3_quinn::quinn::{
   Endpoint, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig, TokioRuntime,
   TransportConfig, VarInt,
 };
-use ring::{aead, hkdf, hmac};
+use hkdf::Hkdf;
+use sha2::Sha256;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::config::{
@@ -25,6 +28,8 @@ pub(crate) mod h3;
 const QUIC_HOST_KEY_BYTES: usize = 64;
 const QUIC_HOST_KEY_RESET_LABEL: &[u8] = b"oxibelt quic stateless reset v1";
 const QUIC_HOST_KEY_TOKEN_LABEL: &[u8] = b"oxibelt quic retry token v1";
+const QUIC_RETRY_TOKEN_AEAD_LABEL: &[u8] = b"oxibelt quic token aead";
+const QUIC_RETRY_TOKEN_NONCE: [u8; 12] = [0u8; 12];
 
 pub fn transport_config(
   config: &QuicTransportConfig,
@@ -308,33 +313,26 @@ fn quic_host_key(
 }
 
 fn derive_host_key(host_key: &[u8; QUIC_HOST_KEY_BYTES], label: &[u8]) -> anyhow::Result<[u8; 32]> {
-  let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, label);
-  let prk = salt.extract(host_key);
-  let okm = prk
-    .expand(&[b"oxibelt"], hkdf::HKDF_SHA256)
-    .map_err(|_| anyhow::anyhow!("failed to derive QUIC host key material"))?;
   let mut out = [0u8; 32];
-  okm
-    .fill(&mut out)
+  Hkdf::<Sha256>::new(Some(label), host_key)
+    .expand(b"oxibelt", &mut out)
     .map_err(|_| anyhow::anyhow!("failed to fill QUIC host key material"))?;
   Ok(out)
 }
 
 struct ResetHmacKey {
-  key: hmac::Key,
+  key: [u8; 32],
 }
 
 impl ResetHmacKey {
   fn new(key: [u8; 32]) -> Self {
-    Self {
-      key: hmac::Key::new(hmac::HMAC_SHA256, &key),
-    }
+    Self { key }
   }
 }
 
 impl HmacKey for ResetHmacKey {
   fn sign(&self, data: &[u8], signature_out: &mut [u8]) {
-    signature_out.copy_from_slice(hmac::sign(&self.key, data).as_ref());
+    signature_out.copy_from_slice(&crate::crypto::hmac_sha256(&self.key, data));
   }
 
   fn signature_len(&self) -> usize {
@@ -342,48 +340,42 @@ impl HmacKey for ResetHmacKey {
   }
 
   fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
-    hmac::verify(&self.key, data, signature).map_err(|_| CryptoError)
+    crate::crypto::verify_hmac_sha256(&self.key, data, signature)
+      .then_some(())
+      .ok_or(CryptoError)
   }
 }
 
 struct RetryTokenKey {
-  prk: hkdf::Prk,
+  key: [u8; 32],
 }
 
 impl RetryTokenKey {
   fn new(key: [u8; 32]) -> Self {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"oxibelt quic token aead");
-    Self {
-      prk: salt.extract(&key),
-    }
+    Self { key }
   }
 }
 
 impl HandshakeTokenKey for RetryTokenKey {
   fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn AeadKey> {
-    let info = [random_bytes];
-    let okm = self
-      .prk
-      .expand(&info, hkdf::HKDF_SHA256)
-      .expect("HKDF-SHA256 accepts 32 byte output");
     let mut key_buffer = [0u8; 32];
-    okm
-      .fill(&mut key_buffer)
+    Hkdf::<Sha256>::new(Some(QUIC_RETRY_TOKEN_AEAD_LABEL), &self.key)
+      .expand(random_bytes, &mut key_buffer)
       .expect("HKDF output buffer length is valid");
-    let key = aead::UnboundKey::new(&aead::AES_256_GCM, &key_buffer)
-      .expect("AES-256-GCM accepts 32 byte keys");
-    Box::new(RetryAeadKey(aead::LessSafeKey::new(key)))
+    Box::new(RetryAeadKey(
+      Aes256Gcm::new_from_slice(&key_buffer).expect("AES-256-GCM accepts 32 byte keys"),
+    ))
   }
 }
 
-struct RetryAeadKey(aead::LessSafeKey);
+struct RetryAeadKey(Aes256Gcm);
 
 impl AeadKey for RetryAeadKey {
   fn seal(&self, data: &mut Vec<u8>, additional_data: &[u8]) -> Result<(), CryptoError> {
-    let nonce = aead::Nonce::assume_unique_for_key([0u8; 12]);
+    let nonce = Nonce::from_slice(&QUIC_RETRY_TOKEN_NONCE);
     self
       .0
-      .seal_in_place_append_tag(nonce, aead::Aad::from(additional_data), data)
+      .encrypt_in_place(nonce, additional_data, data)
       .map_err(|_| CryptoError)
   }
 
@@ -392,11 +384,18 @@ impl AeadKey for RetryAeadKey {
     data: &'a mut [u8],
     additional_data: &[u8],
   ) -> Result<&'a mut [u8], CryptoError> {
-    let nonce = aead::Nonce::assume_unique_for_key([0u8; 12]);
+    if data.len() < 16 {
+      return Err(CryptoError);
+    }
+    let tag_start = data.len() - 16;
+    let (ciphertext, tag) = data.split_at_mut(tag_start);
+    let nonce = Nonce::from_slice(&QUIC_RETRY_TOKEN_NONCE);
+    let tag = Tag::from_slice(tag);
     self
       .0
-      .open_in_place(nonce, aead::Aad::from(additional_data), data)
-      .map_err(|_| CryptoError)
+      .decrypt_in_place_detached(nonce, additional_data, ciphertext, tag)
+      .map_err(|_| CryptoError)?;
+    Ok(ciphertext)
   }
 }
 
@@ -404,6 +403,48 @@ impl AeadKey for RetryAeadKey {
 mod tests {
   use super::*;
   use crate::config::{QuicMtuDiscoveryConfig, QuicTransportConfig};
+
+  #[test]
+  fn reset_hmac_key_signs_and_verifies() {
+    let key = ResetHmacKey::new([7; 32]);
+    let data = b"stateless reset material";
+    let mut signature = vec![0u8; key.signature_len()];
+
+    key.sign(data, &mut signature);
+
+    assert!(key.verify(data, &signature).is_ok());
+    assert!(key.verify(b"tampered", &signature).is_err());
+    signature[0] ^= 0xff;
+    assert!(key.verify(data, &signature).is_err());
+  }
+
+  #[test]
+  fn retry_token_key_seals_and_opens_with_additional_data() {
+    let key = RetryTokenKey::new([9; 32]);
+    let aead = key.aead_from_hkdf(b"retry random");
+    let additional_data = b"client address";
+    let mut token = b"opaque retry token".to_vec();
+
+    assert!(aead.seal(&mut token, additional_data).is_ok());
+    assert_ne!(token, b"opaque retry token");
+
+    let opened = match aead.open(&mut token, additional_data) {
+      Ok(opened) => opened,
+      Err(_) => panic!("retry token should decrypt with matching additional data"),
+    };
+    assert_eq!(opened, b"opaque retry token");
+  }
+
+  #[test]
+  fn retry_token_key_rejects_wrong_additional_data() {
+    let key = RetryTokenKey::new([9; 32]);
+    let aead = key.aead_from_hkdf(b"retry random");
+    let mut token = b"opaque retry token".to_vec();
+
+    assert!(aead.seal(&mut token, b"client address").is_ok());
+
+    assert!(aead.open(&mut token, b"other client").is_err());
+  }
 
   #[test]
   fn transport_config_maps_keep_alive_and_window_settings() {

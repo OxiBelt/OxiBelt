@@ -20,6 +20,7 @@ use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use h3_quinn::quinn::{
   ClientConfig as QuinnClientConfig, Endpoint, ServerConfig as QuinnServerConfig,
 };
+use hmac::{Hmac, KeyInit, Mac};
 use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
@@ -28,12 +29,12 @@ use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use md5::{Digest, Md5};
-use ring::hmac;
 use rustls::client::Resumption;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{
   ClientConfig, ClientConnection, HandshakeKind, ProtocolVersion, RootCertStore, ServerConfig,
 };
+use sha1::Sha1;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -1248,10 +1249,10 @@ fn parse_http_status(head: &str) -> anyhow::Result<u16> {
 }
 
 fn websocket_accept_key(key: &str) -> String {
-  let mut context = ring::digest::Context::new(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY);
+  let mut context = Sha1::new();
   context.update(key.as_bytes());
   context.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-  base64::engine::general_purpose::STANDARD.encode(context.finish().as_ref())
+  base64::engine::general_purpose::STANDARD.encode(context.finalize())
 }
 
 struct WebSocketFrame {
@@ -3402,10 +3403,11 @@ fn turn_padding(len: usize) -> usize {
 }
 
 fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; 20] {
-  let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
-  let tag = hmac::sign(&key, value);
+  let mut mac = Hmac::<Sha1>::new_from_slice(key).expect("HMAC-SHA1 accepts keys of any length");
+  mac.update(value);
+  let tag = mac.finalize().into_bytes();
   let mut out = [0u8; 20];
-  out.copy_from_slice(tag.as_ref());
+  out.copy_from_slice(&tag);
   out
 }
 

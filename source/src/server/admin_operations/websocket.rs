@@ -8,7 +8,6 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use ring::digest;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 
@@ -86,8 +85,8 @@ fn websocket_accept_key<B>(request: &hyper::Request<B>) -> Option<::http::Header
   let mut input = Vec::with_capacity(key.len() + WEBSOCKET_GUID.len());
   input.extend_from_slice(key.as_bytes());
   input.extend_from_slice(WEBSOCKET_GUID);
-  let digest = digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, &input);
-  let encoded = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+  let digest = crate::crypto::sha1(&input);
+  let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
   ::http::HeaderValue::from_str(&encoded).ok()
 }
 

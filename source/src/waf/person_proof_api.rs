@@ -1,5 +1,4 @@
-use anyhow::{Context, anyhow, bail};
-use ring::{digest, hmac};
+use anyhow::{Context, bail};
 use serde::Serialize;
 
 use super::person_proof::{
@@ -183,10 +182,7 @@ pub(super) fn sign_session_token(
     expires,
     random,
   );
-  let mac = hmac::sign(
-    &hmac::Key::new(hmac::HMAC_SHA256, &engine.secret),
-    payload.as_bytes(),
-  );
+  let mac = crate::crypto::hmac_sha256(&engine.secret, payload.as_bytes());
   format!(
     "session.v1.{issued}.{expires}.{}.{}.{}.{}.{}.{}.{}.{}",
     policy.mode.as_str(),
@@ -196,7 +192,7 @@ pub(super) fn sign_session_token(
     hex_encode(return_path.as_bytes()),
     binding_hash,
     random,
-    hex_encode(mac.as_ref())
+    hex_encode(&mac)
   )
 }
 
@@ -570,12 +566,10 @@ fn session_payload(
 
 fn verify_mac(engine: &PersonProofEngine, payload: &str, mac: &str) -> anyhow::Result<()> {
   let mac = hex_decode(mac)?;
-  hmac::verify(
-    &hmac::Key::new(hmac::HMAC_SHA256, &engine.secret),
-    payload.as_bytes(),
-    &mac,
-  )
-  .map_err(|_| anyhow!("person proof session token signature is invalid"))
+  if !crate::crypto::verify_hmac_sha256(&engine.secret, payload.as_bytes(), &mac) {
+    bail!("person proof session token signature is invalid");
+  }
+  Ok(())
 }
 
 fn parse_session_token(token: &str) -> anyhow::Result<SessionFields> {
@@ -618,5 +612,5 @@ fn token_binding_hash(
   route_name: &str,
 ) -> String {
   let payload = token_binding_payload_for_route(input, policy, route_name);
-  hex_encode(digest::digest(&digest::SHA256, payload.as_bytes()).as_ref())
+  hex_encode(&crate::crypto::sha256(payload.as_bytes()))
 }

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use http::{HeaderMap, HeaderValue};
-use ring::rand::{SecureRandom, SystemRandom};
 use url::Url;
 
 use crate::config::TelemetryTracingConfig;
@@ -592,9 +591,7 @@ fn sample_trace(sample_ratio: f64) -> bool {
     return false;
   }
   let mut bytes = [0u8; 8];
-  SystemRandom::new()
-    .fill(&mut bytes)
-    .expect("system random should be available");
+  crate::crypto::random_fill(&mut bytes).expect("system random should be available");
   let value = u64::from_be_bytes(bytes) as f64 / u64::MAX as f64;
   value < sample_ratio
 }
@@ -602,9 +599,7 @@ fn sample_trace(sample_ratio: f64) -> bool {
 fn random_trace_id() -> [u8; 16] {
   loop {
     let mut bytes = [0u8; 16];
-    SystemRandom::new()
-      .fill(&mut bytes)
-      .expect("system random should be available");
+    crate::crypto::random_fill(&mut bytes).expect("system random should be available");
     if bytes.iter().any(|byte| *byte != 0) {
       return bytes;
     }
@@ -614,9 +609,7 @@ fn random_trace_id() -> [u8; 16] {
 fn random_span_id() -> [u8; 8] {
   loop {
     let mut bytes = [0u8; 8];
-    SystemRandom::new()
-      .fill(&mut bytes)
-      .expect("system random should be available");
+    crate::crypto::random_fill(&mut bytes).expect("system random should be available");
     if bytes.iter().any(|byte| *byte != 0) {
       return bytes;
     }

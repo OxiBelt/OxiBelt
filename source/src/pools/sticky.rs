@@ -8,8 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use http::HeaderValue;
-use ring::rand::SecureRandom;
-use ring::{hmac, rand};
 
 use crate::config::{LoadBalancingAlgorithm, UpstreamPoolConfig};
 use crate::shared_state::SharedState;
@@ -75,14 +73,13 @@ pub(super) fn sticky_secret_for_pool(
     }
   }
   let mut secret = [0u8; 32];
-  if rand::SystemRandom::new().fill(&mut secret).is_err() {
+  if crate::crypto::random_fill(&mut secret).is_err() {
     tracing::warn!(
       pool = %config.name,
       "failed to generate sticky cookie secret with system random; using process-local fallback"
     );
     let fallback = format!("{}:{}", config.name, now_unix_seconds());
-    let digest = ring::digest::digest(&ring::digest::SHA256, fallback.as_bytes());
-    secret.copy_from_slice(digest.as_ref());
+    secret.copy_from_slice(&crate::crypto::sha256(fallback.as_bytes()));
   }
   secret
 }
@@ -130,8 +127,9 @@ fn verify_sticky_cookie(pool: &Arc<PoolRuntime>, value: &str) -> Option<String> 
   let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
     .decode(signature)
     .ok()?;
-  let key = hmac::Key::new(hmac::HMAC_SHA256, &pool.sticky_secret);
-  hmac::verify(&key, signed.as_bytes(), &signature).ok()?;
+  if !crate::crypto::verify_hmac_sha256(&pool.sticky_secret, signed.as_bytes(), &signature) {
+    return None;
+  }
   let server_id = base64::engine::general_purpose::URL_SAFE_NO_PAD
     .decode(encoded_server_id)
     .ok()?;
@@ -143,9 +141,8 @@ fn build_sticky_cookie(pool: &Arc<PoolRuntime>, server_id: &str) -> Option<Heade
   let expires = now_unix_seconds().saturating_add(cookie.ttl_seconds);
   let encoded_server_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(server_id);
   let signed = format!("v1.{encoded_server_id}.{expires}");
-  let key = hmac::Key::new(hmac::HMAC_SHA256, &pool.sticky_secret);
-  let signature = hmac::sign(&key, signed.as_bytes());
-  let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_ref());
+  let signature = crate::crypto::hmac_sha256(&pool.sticky_secret, signed.as_bytes());
+  let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
   let mut value = format!(
     "{}={signed}.{signature}; Max-Age={}; Path={}; SameSite={}",
     cookie.cookie_name,

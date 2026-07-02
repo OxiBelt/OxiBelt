@@ -9,7 +9,6 @@ use anyhow::Context;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Body;
-use ring::digest;
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -550,8 +549,8 @@ fn pow_response_is_valid(session: &str, nonce: &str, difficulty: u8) -> bool {
     return false;
   }
   let input = format!("{session}.{nonce}");
-  let digest = digest::digest(&digest::SHA256, input.as_bytes());
-  leading_zero_bits(digest.as_ref()) >= u32::from(difficulty)
+  let digest = crate::crypto::sha256(input.as_bytes());
+  leading_zero_bits(&digest) >= u32::from(difficulty)
 }
 
 fn leading_zero_bits(bytes: &[u8]) -> u32 {
