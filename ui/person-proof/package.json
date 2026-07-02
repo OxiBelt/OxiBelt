@@ -10,7 +10,7 @@
     "lint": "eslint source/**/*.ts"
   },
   "devDependencies": {
-    "@types/node": "24.10.2",
+    "@types/node": "26.1.0",
     "tsx": "4.22.4",
     "typescript": "6.0.3"
   },
