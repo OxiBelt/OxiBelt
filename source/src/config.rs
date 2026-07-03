@@ -481,6 +481,7 @@ impl Config {
     self.logging == other.logging
       && self.config == other.config
       && self.runtime == other.runtime
+      && self.crypto == other.crypto
       && self.listeners == other.listeners
       && self.tls == other.tls
       && self.quic == other.quic

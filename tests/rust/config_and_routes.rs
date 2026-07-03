@@ -10713,6 +10713,45 @@ body = "blocked"
 }
 
 #[test]
+fn oxirule_reload_equivalence_rejects_crypto_smuggled_with_waf_changes() {
+  let temp_dir = common::TempDir::new("hot-reload-crypto-non-waf");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload-crypto");
+  let base_raw = common::minimal_config_toml(&cert_path, &key_path);
+  let changed_raw = base_raw.replace(
+    "[[upstreams]]",
+    r#"[crypto]
+primitive_provider = "aws_lc_rs"
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-smuggled-crypto"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/blocked'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked"
+
+[[upstreams]]"#,
+  );
+
+  let base: Config = toml::from_str(&base_raw).expect("base config should parse");
+  let changed: Config = toml::from_str(&changed_raw).expect("changed config should parse");
+
+  base.validate().expect("base config should validate");
+  changed.validate().expect("changed config should validate");
+  assert_ne!(base.crypto, changed.crypto);
+  assert!(!base.waf_equivalent(&changed));
+  assert!(!base.non_waf_equivalent(&changed));
+}
+
+#[test]
 fn oxirule_reload_equivalence_accepts_udf_only_changes() {
   let temp_dir = common::TempDir::new("hot-reload-waf-udf-only");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload-udf");
