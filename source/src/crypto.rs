@@ -3,15 +3,16 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use aes_gcm::aead::{AeadInPlace, KeyInit as AeadKeyInit};
-use aes_gcm::{Aes256Gcm as RustCryptoAes256Gcm, Nonce as RustCryptoNonce, Tag};
+use aes_gcm::Aes256Gcm as RustCryptoAes256Gcm;
+use aes_gcm::aead::{AeadInOut, KeyInit as AeadKeyInit};
+use aes_gcm::aead::{Nonce as RustCryptoNonce, Tag as RustCryptoTag};
 use anyhow::Context;
 use aws_lc_rs::aead::{
   AES_256_GCM, Aad as AwsAad, LessSafeKey as AwsLessSafeKey, Nonce as AwsNonce,
   UnboundKey as AwsUnboundKey,
 };
 use aws_lc_rs::{digest as aws_digest, hkdf as aws_hkdf, hmac as aws_hmac};
-use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
+use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
@@ -175,9 +176,12 @@ impl Aes256GcmKey {
     data: &mut Vec<u8>,
   ) -> Result<(), ()> {
     match self {
-      Self::RustCrypto(key) => key
-        .encrypt_in_place(RustCryptoNonce::from_slice(&nonce), additional_data, data)
-        .map_err(|_| ()),
+      Self::RustCrypto(key) => {
+        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..]).map_err(|_| ())?;
+        key
+          .encrypt_in_place(&nonce, additional_data, data)
+          .map_err(|_| ())
+      }
       Self::AwsLcRs(key) => key
         .seal_in_place_append_tag(
           AwsNonce::assume_unique_for_key(nonce),
@@ -201,10 +205,10 @@ impl Aes256GcmKey {
         }
         let tag_start = data.len() - 16;
         let (ciphertext, tag) = data.split_at_mut(tag_start);
-        let nonce = RustCryptoNonce::from_slice(&nonce);
-        let tag = Tag::from_slice(tag);
+        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..]).map_err(|_| ())?;
+        let tag = RustCryptoTag::<RustCryptoAes256Gcm>::try_from(&*tag).map_err(|_| ())?;
         key
-          .decrypt_in_place_detached(nonce, additional_data, ciphertext, tag)
+          .decrypt_inout_detached(&nonce, additional_data, ciphertext.into(), &tag)
           .map_err(|_| ())?;
         Ok(ciphertext)
       }

@@ -1483,7 +1483,7 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
     "OXIBELT_DOCKER_IMAGE_CREATED",
     "OXIBELT_DOCKER_IMAGE_REF_NAME",
     "OXIBELT_DOCKER_IMAGE_SOURCE",
-    "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0",
+    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
     "pattern: oxibelt-alpine-musl-*-image",
     ":latest",
@@ -1500,7 +1500,7 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
 fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let workflow = workflow_text();
   let script = docker_pull_retry_script_text();
-  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # 4.1.0";
+  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
   let prepull_command = "tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1";
   let setup_count = workflow.matches(setup_marker).count();
