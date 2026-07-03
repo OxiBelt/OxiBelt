@@ -337,7 +337,7 @@ Successful full reloads start replacement listeners before draining old listener
 [crypto]
 tls_provider = "aws_lc_rs" # aws_lc_rs | ring
 primitive_provider = "rustcrypto" # rustcrypto | aws_lc_rs
-primitive_backend = "auto" # auto | hardware | software
+primitive_backend = "auto" # auto | hardware | software | soft | exact backend
 
 [crypto.primitives]
 aes_gcm = "rustcrypto"
@@ -345,13 +345,28 @@ chacha20poly1305 = "rustcrypto"
 hkdf = "rustcrypto"
 hmac_sha256 = "rustcrypto"
 sha2 = "rustcrypto"
+
+[crypto.primitive_backends]
+aes_gcm = "auto"
+chacha20poly1305 = "auto"
+hkdf = "auto"
+hmac_sha256 = "auto"
+sha2 = "auto"
 ```
 
 `tls_provider` selects the rustls crypto provider used by downstream TLS, upstream TLS, HTTP/3, Admin QUIC, TURN TLS, ticket encryption, certificate verification, and QUIC client/server configuration. The default is `aws_lc_rs`. `ring` requires an OxiBelt build with the `crypto-ring` Cargo feature. The `ring` provider does not support the default post-quantum hybrid `x25519mlkem768` TLS 1.3 key exchange group, so configurations that set `tls_provider = "ring"` must omit that group from global and route-specific TLS 1.3 negotiation policies. Upstream ECH requires `aws_lc_rs`.
 
-`primitive_provider` selects the default provider for OxiBelt's direct primitive helpers outside rustls. `rustcrypto` is the default. `aws_lc_rs` is available for SHA-256, HKDF-SHA256, HMAC-SHA256, and AES-256-GCM call sites. `[crypto.primitives]` can override `aes_gcm`, `chacha20poly1305`, `hkdf`, `hmac_sha256`, and `sha2` individually; omitted overrides inherit `primitive_provider`.
+`primitive_provider` selects the default provider for OxiBelt's direct primitive helpers outside rustls. `rustcrypto` is the default. `aws_lc_rs` is available for SHA-256, HKDF-SHA256, HMAC-SHA256, AES-256-GCM, and ChaCha20-Poly1305 call sites. `[crypto.primitives]` can override `aes_gcm`, `chacha20poly1305`, `hkdf`, `hmac_sha256`, and `sha2` individually; omitted overrides inherit `primitive_provider`.
 
-`primitive_backend` is reserved for forcing hardware or software implementations where a target-specific build exposes that control. The portable build supports only `auto`; `hardware` and `software` fail startup rather than silently selecting an unknown backend.
+`primitive_backend` selects the default RustCrypto backend contract for direct primitive helpers. `[crypto.primitive_backends]` can override the same primitive keys individually; omitted overrides inherit `primitive_backend`. Backend forcing applies only when the effective primitive provider is `rustcrypto`. With `aws_lc_rs`, use `auto` because AWS-LC backend dispatch is provider-owned.
+
+`auto` preserves the binary's normal provider behavior. Forced values are fail-closed: OxiBelt accepts them only when the running binary was built with matching dependency cfgs and, for hardware variants, when startup CPU detection confirms the required feature. `software` maps to the exact `soft` backend for that primitive. `hardware` maps to the hardware backend compiled into the binary for that primitive. Exact backend values are primitive-specific:
+
+- `sha2`, `hkdf`, and `hmac_sha256`: `soft`, `x86-sha`, `aarch64-sha2`, or `riscv-zknh`. These direct helpers use SHA-256; SHA-512-only cfgs such as `x86-avx2` are not accepted for OxiBelt's direct SHA-256 paths.
+- `aes_gcm`: `soft`, `aes-avx256`, or `aes-avx512`.
+- `chacha20poly1305`: `soft`, `chacha20-sse2`, `chacha20-avx2`, or `chacha20-avx512`.
+
+Use `tests/scripts/build-crypto-backend-variant.sh` to run Cargo with the matching `RUSTFLAGS` cfgs for default, all-software, and x86 hardware variants. Build scripts advertise the accepted cfg names for linting, but the build command must set cfgs before Cargo compiles dependencies.
 
 ## Listeners and TLS
 

@@ -67,9 +67,9 @@ tls_provider = "aws_lc_rs" # aws_lc_rs | ring
 # Direct OxiBelt primitives default to RustCrypto. Set the global provider here,
 # then override individual primitives below when needed.
 primitive_provider = "rustcrypto" # rustcrypto | aws_lc_rs
-# `auto` is the only portable backend mode in the default build. Hardware or
-# software forcing fails closed unless a future target-specific build supports it.
-primitive_backend = "auto" # auto | hardware | software
+# `auto` is the portable default. Forcing software or hardware backends requires
+# an OxiBelt binary built with the matching RustCrypto dependency cfgs.
+primitive_backend = "auto" # auto | hardware | software | soft | exact backend
 
 [crypto.primitives]
 aes_gcm = "rustcrypto" # rustcrypto | aws_lc_rs
@@ -77,6 +77,13 @@ chacha20poly1305 = "rustcrypto" # rustcrypto | aws_lc_rs
 hkdf = "rustcrypto" # rustcrypto | aws_lc_rs
 hmac_sha256 = "rustcrypto" # rustcrypto | aws_lc_rs
 sha2 = "rustcrypto" # rustcrypto | aws_lc_rs
+
+[crypto.primitive_backends]
+aes_gcm = "auto" # auto | software | hardware | soft | aes-avx256 | aes-avx512
+chacha20poly1305 = "auto" # auto | software | hardware | soft | chacha20-sse2 | chacha20-avx2 | chacha20-avx512
+hkdf = "auto" # auto | software | hardware | soft | x86-sha | aarch64-sha2 | riscv-zknh
+hmac_sha256 = "auto" # auto | software | hardware | soft | x86-sha | aarch64-sha2 | riscv-zknh
+sha2 = "auto" # auto | software | hardware | soft | x86-sha | aarch64-sha2 | riscv-zknh
 
 [tls]
 cert_chain = "fullchain.pem"

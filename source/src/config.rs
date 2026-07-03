@@ -2621,6 +2621,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     }
     "crypto" => crypto::CRYPTO_CONFIG_KEYS,
     "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
+    "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => allowed_keys::TLS_CONFIG_KEYS,

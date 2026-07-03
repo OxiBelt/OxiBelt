@@ -106,6 +106,11 @@ fn crypto_config_defaults_validate() {
     config.crypto.primitive_backend,
     CryptoPrimitiveBackend::Auto
   );
+  assert_eq!(config.crypto.primitive_backends.aes_gcm, None);
+  assert_eq!(config.crypto.primitive_backends.chacha20poly1305, None);
+  assert_eq!(config.crypto.primitive_backends.hkdf, None);
+  assert_eq!(config.crypto.primitive_backends.hmac_sha256, None);
+  assert_eq!(config.crypto.primitive_backends.sha2, None);
 }
 
 #[test]
@@ -160,6 +165,55 @@ sha2 = "aws_lc_rs"
 }
 
 #[test]
+fn crypto_config_parses_global_and_per_primitive_backends() {
+  let temp_dir = common::TempDir::new("crypto-backends-parse");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-backends-parse");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+primitive_provider = "rustcrypto"
+primitive_backend = "soft"
+
+[crypto.primitive_backends]
+aes_gcm = "aes-avx256"
+chacha20poly1305 = "chacha20-avx2"
+hkdf = "x86-sha"
+hmac_sha256 = "aarch64-sha2"
+sha2 = "riscv-zknh"
+
+[tls]"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  assert_eq!(
+    config.crypto.primitive_backend,
+    CryptoPrimitiveBackend::Soft
+  );
+  assert_eq!(
+    config.crypto.primitive_backends.aes_gcm,
+    Some(CryptoPrimitiveBackend::AesAvx256)
+  );
+  assert_eq!(
+    config.crypto.primitive_backends.chacha20poly1305,
+    Some(CryptoPrimitiveBackend::Chacha20Avx2)
+  );
+  assert_eq!(
+    config.crypto.primitive_backends.hkdf,
+    Some(CryptoPrimitiveBackend::X86Sha)
+  );
+  assert_eq!(
+    config.crypto.primitive_backends.hmac_sha256,
+    Some(CryptoPrimitiveBackend::Aarch64Sha2)
+  );
+  assert_eq!(
+    config.crypto.primitive_backends.sha2,
+    Some(CryptoPrimitiveBackend::RiscvZknh)
+  );
+}
+
+#[test]
 fn crypto_config_rejects_unavailable_backend_selection() {
   let temp_dir = common::TempDir::new("crypto-backend");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "crypto-backend");
@@ -180,10 +234,110 @@ primitive_backend = "{backend}"
       .validate()
       .expect_err("unsupported crypto backend should fail");
     assert!(
-      error.to_string().contains(&format!(
-        "crypto.primitive_backend = \"{backend}\" is not supported"
-      )),
+      error
+        .to_string()
+        .contains(&format!("crypto.primitive_backend = \"{backend}\"")),
       "unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn crypto_config_rejects_unavailable_per_primitive_backend_selection() {
+  let temp_dir = common::TempDir::new("crypto-backend-overrides");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-backend-overrides");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for primitive in ["aes_gcm", "chacha20poly1305", "hkdf", "hmac_sha256", "sha2"] {
+    for backend in ["hardware", "software"] {
+      let raw = base.replace(
+        "[tls]",
+        &format!(
+          r#"[crypto]
+primitive_provider = "rustcrypto"
+
+[crypto.primitive_backends]
+{primitive} = "{backend}"
+
+[tls]"#
+        ),
+      );
+      let config: Config = toml::from_str(&raw).expect("config should parse");
+      let error = config
+        .validate()
+        .expect_err("unsupported crypto backend should fail");
+      assert!(
+        error.to_string().contains(&format!(
+          "crypto.primitive_backends.{primitive} = \"{backend}\""
+        )),
+        "unexpected error for {primitive} {backend}: {error}"
+      );
+    }
+  }
+}
+
+#[test]
+fn crypto_config_rejects_backend_selection_for_aws_lc_primitives() {
+  let temp_dir = common::TempDir::new("crypto-backend-aws");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-backend-aws");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+primitive_provider = "aws_lc_rs"
+
+[crypto.primitive_backends]
+sha2 = "soft"
+
+[tls]"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("AWS-LC primitive backend forcing should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("crypto.primitive_backends.sha2 = \"soft\" is not supported for sha2 with provider \"aws_lc_rs\""),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn crypto_config_rejects_backend_for_wrong_primitive_family() {
+  let temp_dir = common::TempDir::new("crypto-backend-family");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-backend-family");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (primitive, backend) in [
+    ("sha2", "x86-avx2"),
+    ("hkdf", "aes-avx256"),
+    ("aes_gcm", "x86-sha"),
+    ("chacha20poly1305", "aes-avx512"),
+  ] {
+    let raw = base.replace(
+      "[tls]",
+      &format!(
+        r#"[crypto]
+primitive_provider = "rustcrypto"
+
+[crypto.primitive_backends]
+{primitive} = "{backend}"
+
+[tls]"#
+      ),
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("backend from the wrong primitive family should fail");
+    assert!(
+      error.to_string().contains(&format!(
+        "crypto.primitive_backends.{primitive} = \"{backend}\" is not a supported backend"
+      )),
+      "unexpected error for {primitive} {backend}: {error}"
     );
   }
 }
@@ -238,6 +392,34 @@ unexpected = "rustcrypto"
     error
       .to_string()
       .contains("configuration contains unknown field(s): crypto.primitives.unexpected"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn crypto_backend_unknown_fields_fail_strict_shape_validation() {
+  let temp_dir = common::TempDir::new("crypto-backend-unknown");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-backend-unknown");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[tls]",
+    r#"[crypto]
+primitive_provider = "rustcrypto"
+
+[crypto.primitive_backends]
+sha2 = "auto"
+unexpected = "auto"
+
+[tls]"#,
+  );
+  let config_path = temp_dir.path().join("oxibelt.toml");
+  std::fs::write(&config_path, raw).expect("failed to write test config");
+
+  let error = Config::load(&config_path).expect_err("unknown crypto backend field should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("configuration contains unknown field(s): crypto.primitive_backends.unexpected"),
     "unexpected error: {error}"
   );
 }
