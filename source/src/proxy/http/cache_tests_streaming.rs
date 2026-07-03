@@ -185,6 +185,80 @@ stream_large_objects = true
 }
 
 #[tokio::test]
+async fn streaming_fill_commits_when_body_drops_after_last_data_frame() {
+  let temp_dir = common::TempDir::new("cache-fill-streaming-disk-drop-after-data");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-fill-streaming-disk-drop-after-data");
+  let raw = format!(
+    r#"
+{}
+
+[proxy.buffering]
+max_memory_body_bytes = 16
+
+[cache]
+enabled = true
+store = "disk"
+disk_dir = "{}"
+max_size_bytes = 4096
+disk_max_size_bytes = 4096
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+stream_large_objects = true
+"#,
+    common::minimal_config_toml(&cert_path, &key_path),
+    temp_dir.path().display()
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/large-disk-drop-after-data"
+    .parse()
+    .expect("URI should parse");
+  let request_headers = HeaderMap::new();
+  let body = bytes::Bytes::from(vec![b'F'; 96]);
+
+  let mut response = maybe_cache_response(
+    cacheable_streaming_response(body.clone()),
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+  )
+  .await;
+  assert_cache_status(&response, "miss", "stored");
+
+  let frame = response
+    .body_mut()
+    .frame()
+    .await
+    .expect("streaming response should yield a frame")
+    .expect("streaming frame should be readable");
+  assert_eq!(
+    frame.into_data().expect("streaming frame should be data"),
+    body
+  );
+  drop(response);
+
+  let entry = wait_for_fresh_cache_entry(
+    &state,
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+  )
+  .await;
+  assert!(entry.body_file.is_some());
+}
+
+#[tokio::test]
 async fn streaming_fill_reserves_disk_budget_for_inflight_files() {
   let temp_dir = common::TempDir::new("cache-fill-streaming-disk-reservation");
   let (cert_path, key_path) =

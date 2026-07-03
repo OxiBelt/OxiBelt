@@ -174,6 +174,14 @@ impl Body for CacheStreamingBody {
   }
 }
 
+impl Drop for CacheStreamingBody {
+  fn drop(&mut self) {
+    if let Some(mut insert) = self.insert.take() {
+      insert.finish();
+    }
+  }
+}
+
 fn streaming_response(
   state: &AppSnapshot,
   route_cache: Option<&str>,
