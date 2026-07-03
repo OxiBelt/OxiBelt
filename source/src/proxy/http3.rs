@@ -2,10 +2,11 @@
 //! QUIC session state stays explicit because stream lifetimes differ from TCP request lifetimes.
 
 use std::collections::HashMap;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
@@ -544,7 +545,7 @@ pub(crate) async fn handle_downstream_connection(
       );
     }
 
-    if h3_inline_bodyless_fast_path_candidate(&request, &downstream_request_context) {
+    if h3_inline_fast_path_candidate(&request, &downstream_request_context) {
       let (send_stream, recv_stream) = stream.split();
       let ingress_started = timing::start(timing_enabled);
       let prepared =
@@ -557,8 +558,14 @@ pub(crate) async fn handle_downstream_connection(
         timing::OUTCOME_OK,
         ingress_started,
       );
+      if prepared.verified_empty {
+        debug_assert_eq!(
+          prepared.inline_readiness,
+          request_body::PreparedH3RequestBodyReadiness::InlineReady
+        );
+      }
       let inline_spawn_started = timing::start(timing_enabled);
-      if !prepared.verified_empty {
+      if prepared.inline_readiness == request_body::PreparedH3RequestBodyReadiness::Spawn {
         request_tasks.spawn_prepared(
           prepared.request,
           send_stream,
@@ -593,7 +600,7 @@ pub(crate) async fn handle_downstream_connection(
         downstream_request_context.clone(),
         request_task_permit,
       );
-      if !run_h3_inline_until_stop(
+      if !run_h3_inline_until_blocked_or_stop(
         inline,
         &mut request_tasks,
         &mut shutdown,
@@ -626,41 +633,65 @@ pub(crate) async fn handle_downstream_connection(
   }
 }
 
-async fn run_h3_inline_until_stop<F>(
+async fn run_h3_inline_until_blocked_or_stop<F>(
   inline: F,
   request_tasks: &mut request_tasks::RequestTaskSet,
   shutdown: &mut tokio::sync::watch::Receiver<bool>,
   data_plane_drain: &mut tokio::sync::watch::Receiver<bool>,
 ) -> bool
 where
-  F: Future<Output = ()>,
+  F: Future<Output = ()> + Send + 'static,
 {
-  tokio::pin!(inline);
-  loop {
-    tokio::select! {
-      biased;
-      changed = shutdown.changed() => {
-        if changed.is_ok() && *shutdown.borrow() {
-          request_tasks.abort_all().await;
-          return false;
-        }
-        continue;
+  let mut inline = Box::pin(inline);
+  enum InlinePollOutcome {
+    Complete,
+    Blocked,
+    Stop,
+  }
+
+  let outcome = tokio::select! {
+    biased;
+    changed = shutdown.changed() => {
+      if changed.is_ok() && *shutdown.borrow() {
+        InlinePollOutcome::Stop
+      } else {
+        InlinePollOutcome::Blocked
       }
-      changed = data_plane_drain.changed() => {
-        if changed.is_ok() && *data_plane_drain.borrow() {
-          request_tasks.abort_all().await;
-          return false;
-        }
-        continue;
+    }
+    changed = data_plane_drain.changed() => {
+      if changed.is_ok() && *data_plane_drain.borrow() {
+        InlinePollOutcome::Stop
+      } else {
+        InlinePollOutcome::Blocked
       }
-      () = &mut inline => {
-        return true;
+    }
+    completed_inline = poll_fn(|cx| {
+      match inline.as_mut().poll(cx) {
+        Poll::Ready(()) => Poll::Ready(true),
+        Poll::Pending => Poll::Ready(false),
       }
+    }) => {
+      if completed_inline {
+        InlinePollOutcome::Complete
+      } else {
+        InlinePollOutcome::Blocked
+      }
+    }
+  };
+  match outcome {
+    InlinePollOutcome::Complete => true,
+    InlinePollOutcome::Blocked => {
+      request_tasks.spawn_inline_future(inline);
+      true
+    }
+    InlinePollOutcome::Stop => {
+      request_tasks.abort_all().await;
+      false
     }
   }
 }
 
-fn h3_inline_bodyless_fast_path_candidate(
+fn h3_inline_fast_path_candidate(
   request: &Request<()>,
   context: &H3DownstreamRequestContext,
 ) -> bool {
@@ -668,13 +699,6 @@ fn h3_inline_bodyless_fast_path_candidate(
     return false;
   }
   if request.version() != ::http::Version::HTTP_3 {
-    return false;
-  }
-  if !http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
-    request.method(),
-    ::http::Version::HTTP_3,
-    request.headers(),
-  ) {
     return false;
   }
   if http_proxy::headers::validate_authority_host_consistency(request).is_err() {

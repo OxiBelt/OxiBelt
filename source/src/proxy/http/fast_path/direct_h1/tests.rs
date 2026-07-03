@@ -9,6 +9,8 @@ use url::Url;
 
 use super::*;
 
+mod streaming;
+
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
 
 #[test]
@@ -27,6 +29,7 @@ fn guard_accepts_direct_empty_http11_get_to_plain_h1_upstream() {
       http::Version::HTTP_11,
       true,
       true,
+      false,
       &request,
     ),
     None
@@ -49,6 +52,7 @@ fn guard_accepts_direct_empty_http2_get_to_plain_h1_upstream() {
       http::Version::HTTP_2,
       true,
       true,
+      false,
       &request,
     ),
     None
@@ -71,6 +75,7 @@ fn guard_accepts_direct_empty_http3_get_to_plain_h1_upstream() {
       http::Version::HTTP_3,
       true,
       true,
+      false,
       &request,
     ),
     None
@@ -92,6 +97,7 @@ fn guard_rejects_http2_when_empty_body_is_not_proven() {
       HttpVersion::H1,
       http::Version::HTTP_2,
       true,
+      false,
       false,
       &request,
     ),
@@ -115,6 +121,7 @@ fn guard_rejects_http3_when_empty_body_is_not_proven() {
       http::Version::HTTP_3,
       true,
       false,
+      false,
       &request,
     ),
     Some(FastPathTransportMissReason::RequestBody)
@@ -136,6 +143,7 @@ fn guard_rejects_non_get_head_or_non_plain_upstream() {
       http::Version::HTTP_11,
       true,
       true,
+      false,
       &post,
     ),
     Some(FastPathTransportMissReason::UnsupportedRequest)
@@ -154,6 +162,7 @@ fn guard_rejects_non_get_head_or_non_plain_upstream() {
       http::Version::HTTP_11,
       true,
       true,
+      false,
       &get,
     ),
     Some(FastPathTransportMissReason::UnsupportedUpstream)

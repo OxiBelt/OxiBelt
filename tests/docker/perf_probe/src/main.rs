@@ -96,6 +96,22 @@ impl ClientResumptionMode {
   }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestBodyKind {
+  Bytes,
+  Json,
+}
+
+impl RequestBodyKind {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "bytes" => Ok(Self::Bytes),
+      "json" => Ok(Self::Json),
+      _ => bail!("unsupported request body kind: {raw}"),
+    }
+  }
+}
+
 #[derive(Clone)]
 struct LoadArgs {
   label: String,
@@ -110,6 +126,10 @@ struct LoadArgs {
   warmup: Duration,
   concurrency: usize,
   h2_streams_per_connection: usize,
+  method: Method,
+  request_body: Bytes,
+  request_content_type: Option<String>,
+  chunked_request_body: bool,
   expect_status: u16,
   unique_query_param: Option<String>,
   request_serial: Arc<AtomicU64>,
@@ -377,7 +397,7 @@ fn usage() {
   eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
-  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>] [--method <method>] [--request-body-bytes <n>] [--request-body-kind bytes|json] [--chunked-request-body 0|1]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close|slow-post|slow-response|h2-rapid-stream-churn|h2-cl0-data|h3-cl0-data> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>] [--protocol <h1c|h1|h2|h3>] [--server-name <name>] [--ca-cert <pem>] [--path <path>] [--expect-status <status>] [--chunk-bytes <n>] [--chunk-delay-ms <n>] [--streams-per-connection <n>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
@@ -432,6 +452,44 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
   if h2_streams_per_connection != 1 && protocol != Protocol::H2 {
     bail!("--h2-streams-per-connection is only supported for protocol h2");
   }
+  let method = values
+    .get("--method")
+    .map(|value| value.parse().context("invalid --method value"))
+    .transpose()?
+    .unwrap_or(Method::GET);
+  let request_body_bytes = values
+    .get("--request-body-bytes")
+    .map(|value| value.parse().context("invalid --request-body-bytes value"))
+    .transpose()?
+    .unwrap_or(0usize);
+  let request_body_kind = values
+    .get("--request-body-kind")
+    .map(|value| RequestBodyKind::parse(value))
+    .transpose()?
+    .unwrap_or(RequestBodyKind::Bytes);
+  let chunked_request_body = values
+    .get("--chunked-request-body")
+    .map(|value| parse_bool_flag(value, "--chunked-request-body"))
+    .transpose()?
+    .unwrap_or(false);
+  if chunked_request_body && !matches!(protocol, Protocol::H1 | Protocol::H1c) {
+    bail!("--chunked-request-body is only supported for HTTP/1.1 protocols");
+  }
+  if chunked_request_body && request_body_bytes == 0 {
+    bail!("--chunked-request-body requires --request-body-bytes greater than zero");
+  }
+  let request_body = build_request_body(request_body_bytes, request_body_kind);
+  let request_content_type = if request_body.is_empty() {
+    None
+  } else {
+    Some(
+      match request_body_kind {
+        RequestBodyKind::Bytes => "application/octet-stream",
+        RequestBodyKind::Json => "application/json",
+      }
+      .to_owned(),
+    )
+  };
   Ok(LoadArgs {
     label: values
       .get("--label")
@@ -448,6 +506,10 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     warmup: Duration::from_secs(parse_u64(&values, "--warmup-seconds")?),
     concurrency: parse_usize(&values, "--concurrency")?,
     h2_streams_per_connection,
+    method,
+    request_body,
+    request_content_type,
+    chunked_request_body,
     expect_status: values
       .get("--expect-status")
       .map(|value| value.parse().context("invalid --expect-status value"))
@@ -665,6 +727,36 @@ fn validate_unique_query_param(value: &str) -> anyhow::Result<String> {
   Ok(value.to_owned())
 }
 
+fn parse_bool_flag(value: &str, flag: &str) -> anyhow::Result<bool> {
+  match value {
+    "1" | "true" | "yes" => Ok(true),
+    "0" | "false" | "no" => Ok(false),
+    _ => bail!("{flag} must be 1 or 0"),
+  }
+}
+
+fn build_request_body(size: usize, kind: RequestBodyKind) -> Bytes {
+  match kind {
+    RequestBodyKind::Bytes => Bytes::from(vec![b'x'; size]),
+    RequestBodyKind::Json => json_payload(size),
+  }
+}
+
+fn json_payload(size: usize) -> Bytes {
+  if size == 0 {
+    return Bytes::new();
+  }
+  const JSON_OVERHEAD: usize = br#"{"payload":""}"#.len();
+  if size <= JSON_OVERHEAD {
+    return Bytes::from_static(b"{}");
+  }
+  let mut body = Vec::with_capacity(size);
+  body.extend_from_slice(br#"{"payload":""#);
+  body.extend(std::iter::repeat_n(b'x', size - JSON_OVERHEAD));
+  body.extend_from_slice(br#""}"#);
+  Bytes::from(body)
+}
+
 async fn serve_upstream(args: UpstreamArgs) -> anyhow::Result<()> {
   let listener = TcpListener::bind(args.listen)
     .await
@@ -870,6 +962,12 @@ fn response_body(
   request_body: &[u8],
   name: &str,
 ) -> String {
+  if let Some(bytes) = query
+    .get("json_body_bytes")
+    .and_then(|value| value.parse::<usize>().ok())
+  {
+    return String::from_utf8(json_payload(bytes).to_vec()).unwrap_or_default();
+  }
   if let Some(repeat) = query.get("body_repeat") {
     if let Ok(count) = repeat.parse::<usize>() {
       let byte = query
@@ -948,6 +1046,9 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "warmup_seconds": args.warmup.as_secs(),
         "concurrency": args.concurrency,
         "h2_streams_per_connection": args.h2_streams_per_connection,
+        "method": args.method.as_str(),
+        "request_body_bytes": args.request_body.len(),
+        "chunked_request_body": args.chunked_request_body,
         "requests": snapshot.requests,
         "errors": snapshot.errors,
         "rps": rate(snapshot.requests, elapsed),
@@ -1102,7 +1203,7 @@ async fn h1c_connection_loop(
   while Instant::now() < deadline {
     let started = Instant::now();
     let response = sender
-      .send_request(request(args, Version::HTTP_11, Full::new(Bytes::new()))?)
+      .send_request(request(args, Version::HTTP_11, load_request_body(args))?)
       .await
       .context("failed to send cleartext HTTP/1.1 request")?;
     let status = response.status().as_u16();
@@ -1147,7 +1248,7 @@ async fn h1_connection_loop(
   while Instant::now() < deadline {
     let started = Instant::now();
     let response = sender
-      .send_request(request(args, Version::HTTP_11, Full::new(Bytes::new()))?)
+      .send_request(request(args, Version::HTTP_11, load_request_body(args))?)
       .await
       .context("failed to send HTTP/1.1 request")?;
     let status = response.status().as_u16();
@@ -1212,7 +1313,7 @@ async fn h2_connection_loop(
   while Instant::now() < deadline {
     let started = Instant::now();
     let response = sender
-      .send_request(request(args, Version::HTTP_2, Full::new(Bytes::new()))?)
+      .send_request(request(args, Version::HTTP_2, load_request_body(args))?)
       .await
       .context("failed to send HTTP/2 request")?;
     let status = response.status().as_u16();
@@ -1258,9 +1359,15 @@ async fn h2_multiplexed_connection_loop(
   loop {
     while Instant::now() < deadline && responses.len() < args.h2_streams_per_connection {
       let started = Instant::now();
-      let (response, _) = sender
-        .send_request(request(args, Version::HTTP_2, ())?, true)
+      let end_stream = args.request_body.is_empty();
+      let (response, mut body_stream) = sender
+        .send_request(request(args, Version::HTTP_2, ())?, end_stream)
         .context("failed to send multiplexed HTTP/2 request")?;
+      if !end_stream {
+        body_stream
+          .send_data(args.request_body.clone(), true)
+          .context("failed to send multiplexed HTTP/2 request body")?;
+      }
       responses.push(collect_h2_multiplexed_response(response, started));
     }
 
@@ -1344,6 +1451,12 @@ async fn h3_connection_loop(
       .send_request(request(args, Version::HTTP_3, ())?)
       .await
       .context("failed to send HTTP/3 request")?;
+    if !args.request_body.is_empty() {
+      stream
+        .send_data(args.request_body.clone())
+        .await
+        .context("failed to send HTTP/3 request body")?;
+    }
     stream
       .finish()
       .await
@@ -1384,13 +1497,35 @@ fn request<B>(args: &LoadArgs, version: Version, body: B) -> anyhow::Result<Requ
       .context("failed to build request URI")?
   };
   let mut request = Request::builder()
-    .method(Method::GET)
+    .method(args.method.clone())
     .uri(uri)
     .version(version);
   if version == Version::HTTP_11 {
     request = request.header(HOST, args.authority.as_str());
   }
+  if !args.request_body.is_empty() {
+    if let Some(content_type) = args.request_content_type.as_deref() {
+      request = request.header(CONTENT_TYPE, content_type);
+    }
+    if !args.chunked_request_body {
+      request = request.header(CONTENT_LENGTH, args.request_body.len().to_string());
+    }
+  }
   request.body(body).map_err(Into::into)
+}
+
+fn load_request_body(args: &LoadArgs) -> BoxBody<Bytes, Infallible> {
+  if args.request_body.is_empty() {
+    return Full::new(Bytes::new()).boxed();
+  }
+  if args.chunked_request_body {
+    let body = args.request_body.clone();
+    return StreamBody::new(futures_util::stream::once(async move {
+      Ok::<_, Infallible>(Frame::data(body))
+    }))
+    .boxed();
+  }
+  Full::new(args.request_body.clone()).boxed()
 }
 
 fn request_path(args: &LoadArgs) -> String {
@@ -2966,6 +3101,112 @@ mod tests {
     assert!(error
       .to_string()
       .contains("--h2-streams-per-connection is only supported for protocol h2"));
+  }
+
+  #[test]
+  fn load_args_accept_bodyful_json_and_chunked_h1() {
+    let args = parse_load_args(
+      [
+        "--label",
+        "post-json",
+        "--protocol",
+        "h1",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/post?json_body_bytes=1024",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--method",
+        "POST",
+        "--request-body-bytes",
+        "1024",
+        "--request-body-kind",
+        "json",
+        "--chunked-request-body",
+        "1",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    )
+    .expect("load args should parse");
+
+    assert_eq!(args.method, Method::POST);
+    assert_eq!(args.request_body.len(), 1024);
+    assert_eq!(
+      args.request_content_type.as_deref(),
+      Some("application/json")
+    );
+    assert!(args.chunked_request_body);
+    let request =
+      request(&args, Version::HTTP_11, load_request_body(&args)).expect("request should build");
+    assert_eq!(request.method(), Method::POST);
+    assert!(request.headers().get(CONTENT_LENGTH).is_none());
+    assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
+  }
+
+  #[test]
+  fn load_args_reject_chunked_request_body_for_h2() {
+    let error = match parse_load_args(
+      [
+        "--protocol",
+        "h2",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/post",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--method",
+        "POST",
+        "--request-body-bytes",
+        "1024",
+        "--chunked-request-body",
+        "1",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    ) {
+      Ok(_) => panic!("H2 should reject chunked request body mode"),
+      Err(error) => error,
+    };
+
+    assert!(error
+      .to_string()
+      .contains("--chunked-request-body is only supported for HTTP/1.1 protocols"));
+  }
+
+  #[test]
+  fn json_payload_uses_exact_size_for_perf_rows() {
+    for size in [1024, 16 * 1024] {
+      let payload = json_payload(size);
+      assert_eq!(payload.len(), size);
+      serde_json::from_slice::<serde_json::Value>(&payload).expect("payload should be valid JSON");
+    }
   }
 
   #[test]

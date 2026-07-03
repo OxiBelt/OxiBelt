@@ -262,7 +262,6 @@ pub(super) fn compiled_known_small_noop_static_candidate(
   request_waf: &RequestWafDecision,
   pool_selection: Option<&PoolSelection>,
   sticky_cookie: Option<&HeaderValue>,
-  request_body_proven_empty: bool,
 ) -> bool {
   let Some(compiled) = compiled_proxy else {
     return false;
@@ -276,8 +275,7 @@ pub(super) fn compiled_known_small_noop_static_candidate(
   matches!(
     request_version,
     http::Version::HTTP_2 | http::Version::HTTP_3
-  ) && request_body_proven_empty
-    && request_waf.request_header_mutations.is_empty()
+  ) && request_waf.request_header_mutations.is_empty()
     && request_waf.response_header_mutations.is_empty()
     && pool_selection.is_none()
     && sticky_cookie.is_none()
@@ -457,7 +455,6 @@ reuse_port = true
   fn can_use_h2_known_small_noop(
     state: &AppSnapshot,
     request_waf: &RequestWafDecision,
-    request_body_proven_empty: bool,
     known_small_response_body: bool,
     known_no_trailers: bool,
     trailers_handled: bool,
@@ -482,7 +479,6 @@ reuse_port = true
       request_waf,
       None,
       None,
-      request_body_proven_empty,
     );
 
     can_use_compiled_known_small_noop_response(
@@ -504,7 +500,6 @@ reuse_port = true
       true,
       true,
       true,
-      true,
     ));
   }
 
@@ -513,16 +508,14 @@ reuse_port = true
     let state = h2_direct_h1_state("").await;
     let request_waf = RequestWafDecision::default();
 
-    for (request_empty, known_small, no_trailers, trailers_handled) in [
-      (false, true, true, true),
-      (true, false, true, true),
-      (true, true, false, true),
-      (true, true, true, false),
+    for (known_small, no_trailers, trailers_handled) in [
+      (false, true, true),
+      (true, false, true),
+      (true, true, false),
     ] {
       assert!(!can_use_h2_known_small_noop(
         &state,
         &request_waf,
-        request_empty,
         known_small,
         no_trailers,
         trailers_handled,
@@ -547,7 +540,6 @@ reuse_port = true
       true,
       true,
       true,
-      true,
     ));
   }
 
@@ -565,7 +557,6 @@ x_content_type_options = "nosniff"
     assert!(!can_use_h2_known_small_noop(
       &state,
       &RequestWafDecision::default(),
-      true,
       true,
       true,
       true,

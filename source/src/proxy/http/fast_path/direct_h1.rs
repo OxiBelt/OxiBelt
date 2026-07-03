@@ -1,5 +1,5 @@
 //! Direct upstream HTTP/1.1 transport for the plain-proxy fast path.
-//! It bypasses the legacy pooled client only for tightly guarded empty-body H1 requests.
+//! It bypasses the legacy pooled client only for tightly guarded H1 requests.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bytes::Bytes;
-use http::header::{CONNECTION, HOST};
-use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
-use http_body_util::{BodyExt, Empty};
+use http::header::CONNECTION;
+use http::{HeaderMap, Method, Request, Response};
+use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
@@ -29,9 +29,14 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 use super::stage_timing as timing;
 
 mod origin;
+mod request;
 mod runtime_backend;
 mod send_attempt;
 use self::origin::DirectH1Origin;
+use self::request::PreparedDirectH1Request;
+pub(super) use self::request::mark_prevalidated_direct_h1_request;
+#[cfg(test)]
+use self::request::{PrevalidatedDirectH1Request, empty_body};
 use self::runtime_backend::DirectH1RuntimeBackend;
 use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
 
@@ -332,6 +337,7 @@ pub(super) async fn try_send_direct_h1(
   request_version: http::Version,
   direct_selection_used: bool,
   request_body_proven_empty: bool,
+  retry_policy_enabled: bool,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
   hot_path_metrics: bool,
@@ -345,6 +351,7 @@ pub(super) async fn try_send_direct_h1(
     request_version,
     direct_selection_used,
     request_body_proven_empty,
+    retry_policy_enabled,
     &outbound,
   ) {
     if hot_path_metrics {
@@ -411,14 +418,18 @@ fn direct_h1_guard_miss(
   request_version: http::Version,
   direct_selection_used: bool,
   request_body_proven_empty: bool,
+  retry_policy_enabled: bool,
   outbound: &Request<ProxyBody>,
 ) -> Option<FastPathTransportMissReason> {
   if !matches!(
     request_version,
     http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
   ) || !direct_selection_used
-    || !matches!(outbound.method(), &Method::GET | &Method::HEAD)
   {
+    return Some(FastPathTransportMissReason::UnsupportedRequest);
+  }
+  let request_body_streaming = !outbound.body().is_end_stream();
+  if !matches!(outbound.method(), &Method::GET | &Method::HEAD) && !request_body_streaming {
     return Some(FastPathTransportMissReason::UnsupportedRequest);
   }
   if upstream_version != HttpVersion::H1
@@ -427,7 +438,13 @@ fn direct_h1_guard_miss(
   {
     return Some(FastPathTransportMissReason::UnsupportedUpstream);
   }
-  if !request_body_proven_empty || !outbound.body().is_end_stream() {
+  if request_body_streaming {
+    if request_body_proven_empty || retry_policy_enabled {
+      return Some(FastPathTransportMissReason::RequestBody);
+    }
+    return None;
+  }
+  if !request_body_proven_empty {
     return Some(FastPathTransportMissReason::RequestBody);
   }
   None
@@ -491,7 +508,7 @@ async fn send_prepared_request(
     }
   };
 
-  let mut retry = reused.then(|| prepared.retry_request());
+  let mut retry = reused.then(|| prepared.retry_request()).flatten();
   let send_result = send_request_with_timing(
     &mut sender,
     prepared.into_request(),
@@ -504,6 +521,9 @@ async fn send_prepared_request(
   let response = match send_result {
     Ok(response) => response,
     Err(DirectH1SendAttemptError::Hyper(error)) if reused => {
+      let Some(retry) = retry.take() else {
+        return Err(error.into());
+      };
       debug!(error = %error, "direct H1 upstream sender failed; reconnecting once");
       if metric_options.diagnostic_metrics {
         metrics.record_direct_h1_pool_event_id(DirectH1PoolEvent::Reconnect);
@@ -516,9 +536,6 @@ async fn send_prepared_request(
         metric_options.timing_enabled,
       )
       .await?;
-      let retry = retry
-        .take()
-        .expect("reused direct H1 sends should retain one retry request");
       let retry_result = send_request_with_timing(
         &mut sender,
         retry.into_request(),
@@ -615,103 +632,6 @@ async fn connect_sender_inner(
     }
   });
   Ok(sender)
-}
-
-struct PreparedDirectH1Request {
-  request: Request<ProxyBody>,
-}
-
-#[derive(Clone)]
-struct PrevalidatedDirectH1Request;
-
-struct RetryDirectH1Request {
-  method: Method,
-  uri: Uri,
-  headers: HeaderMap,
-}
-
-pub(super) fn mark_prevalidated_direct_h1_request(request: &mut Request<ProxyBody>) {
-  request.extensions_mut().insert(PrevalidatedDirectH1Request);
-}
-
-impl PreparedDirectH1Request {
-  fn from_request(request: Request<ProxyBody>, origin: &DirectH1Origin) -> anyhow::Result<Self> {
-    let (mut parts, body) = request.into_parts();
-    let prevalidated = parts
-      .extensions
-      .remove::<PrevalidatedDirectH1Request>()
-      .is_some();
-    let upstream_authority = if prevalidated {
-      None
-    } else {
-      parts.uri.authority().map(|authority| authority.as_str())
-    };
-    ensure_host_header(&mut parts.headers, upstream_authority, origin)?;
-    if !prevalidated {
-      let path_and_query = parts
-        .uri
-        .path_and_query()
-        .cloned()
-        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
-      let mut uri_parts = http::uri::Parts::default();
-      uri_parts.path_and_query = Some(path_and_query);
-      parts.uri =
-        Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
-    }
-    parts.version = http::Version::HTTP_11;
-    Ok(Self {
-      request: Request::from_parts(parts, body),
-    })
-  }
-
-  fn retry_request(&self) -> RetryDirectH1Request {
-    RetryDirectH1Request {
-      method: self.request.method().clone(),
-      uri: self.request.uri().clone(),
-      headers: self.request.headers().clone(),
-    }
-  }
-
-  fn into_request(self) -> Request<ProxyBody> {
-    self.request
-  }
-}
-
-impl RetryDirectH1Request {
-  fn into_request(self) -> Request<ProxyBody> {
-    let mut request = Request::builder()
-      .method(self.method)
-      .version(http::Version::HTTP_11)
-      .uri(self.uri)
-      .body(empty_body())
-      .expect("direct H1 retry request parts should be valid");
-    *request.headers_mut() = self.headers;
-    request
-  }
-}
-
-fn ensure_host_header(
-  headers: &mut HeaderMap,
-  upstream_authority: Option<&str>,
-  origin: &DirectH1Origin,
-) -> anyhow::Result<()> {
-  if headers.contains_key(HOST) {
-    return Ok(());
-  }
-  let value = match upstream_authority {
-    Some(authority) => {
-      HeaderValue::from_str(authority).context("upstream authority is not a header value")?
-    }
-    None => origin.authority_header.clone(),
-  };
-  headers.insert(HOST, value);
-  Ok(())
-}
-
-fn empty_body() -> ProxyBody {
-  Empty::<Bytes>::new()
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed()
 }
 
 fn h1_response_allows_reuse(headers: &HeaderMap) -> bool {

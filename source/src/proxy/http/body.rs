@@ -4,7 +4,6 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -19,9 +18,7 @@ use tokio::time::Sleep;
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 pub(crate) type ProxyBodyFrame = Result<Frame<Bytes>, BoxError>;
-const TIMEOUT_BODY_CHANNEL_CAPACITY: usize = 16;
 pub(crate) const KNOWN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
-type TerminalBodyError = Arc<Mutex<Option<BoxError>>>;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KnownSmallResponseBody;
@@ -144,21 +141,12 @@ fn channel_body_with_size_hint(
   capacity: usize,
   size_hint: SizeHint,
 ) -> (mpsc::Sender<ProxyBodyFrame>, ProxyBody) {
-  channel_body_with_size_hint_and_terminal_error(capacity, size_hint, None)
-}
-
-fn channel_body_with_size_hint_and_terminal_error(
-  capacity: usize,
-  size_hint: SizeHint,
-  terminal_error: Option<TerminalBodyError>,
-) -> (mpsc::Sender<ProxyBodyFrame>, ProxyBody) {
   let (sender, receiver) = mpsc::channel(capacity);
   (
     sender,
     ChannelBody {
       receiver,
       size_hint,
-      terminal_error,
     }
     .boxed(),
   )
@@ -206,7 +194,7 @@ pub(crate) fn error_indicates_body_timeout(error: &anyhow::Error, kind: BodyTime
 }
 
 pub(crate) fn with_send_timeout(
-  mut body: ProxyBody,
+  body: ProxyBody,
   timeout: Duration,
   kind: BodyTimeoutKind,
 ) -> ProxyBody {
@@ -215,30 +203,14 @@ pub(crate) fn with_send_timeout(
   }
 
   let size_hint = body.size_hint();
-
-  let terminal_error = Arc::new(Mutex::new(None));
-  let (sender, wrapped) = channel_body_with_size_hint_and_terminal_error(
-    TIMEOUT_BODY_CHANNEL_CAPACITY,
+  SendTimeoutBody {
+    body,
+    timeout,
+    kind,
+    sleep: None,
     size_hint,
-    Some(Arc::clone(&terminal_error)),
-  );
-  tokio::spawn(async move {
-    while let Some(frame) = body.frame().await {
-      let stop_after_send = frame.is_err();
-      match tokio::time::timeout(timeout, sender.send(frame)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => break,
-        Err(_) => {
-          store_terminal_error(&terminal_error, boxed_error(BodyTimeoutError::new(kind)));
-          break;
-        }
-      }
-      if stop_after_send {
-        break;
-      }
-    }
-  });
-  wrapped
+  }
+  .boxed()
 }
 
 pub(crate) fn with_drop_guard<T>(body: ProxyBody, guard: T) -> ProxyBody
@@ -252,23 +224,21 @@ where
   .boxed()
 }
 
-fn store_terminal_error(terminal_error: &TerminalBodyError, error: BoxError) {
-  let mut terminal_error = terminal_error
-    .lock()
-    .unwrap_or_else(|poisoned| poisoned.into_inner());
-  if terminal_error.is_none() {
-    *terminal_error = Some(error);
-  }
-}
-
 struct ChannelBody {
   receiver: mpsc::Receiver<ProxyBodyFrame>,
   size_hint: SizeHint,
-  terminal_error: Option<TerminalBodyError>,
 }
 
 struct ReadTimeoutBody<B> {
   body: Pin<Box<B>>,
+  timeout: Duration,
+  kind: BodyTimeoutKind,
+  sleep: Option<Pin<Box<Sleep>>>,
+  size_hint: SizeHint,
+}
+
+struct SendTimeoutBody {
+  body: ProxyBody,
   timeout: Duration,
   kind: BodyTimeoutKind,
   sleep: Option<Pin<Box<Sleep>>>,
@@ -292,16 +262,6 @@ impl KnownSmallNoTrailersBody {
   }
 }
 
-impl ChannelBody {
-  fn take_terminal_error(&self) -> Option<BoxError> {
-    let terminal_error = self.terminal_error.as_ref()?;
-    terminal_error
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner())
-      .take()
-  }
-}
-
 impl Body for ChannelBody {
   type Data = Bytes;
   type Error = BoxError;
@@ -310,10 +270,7 @@ impl Body for ChannelBody {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    match self.receiver.poll_recv(cx) {
-      Poll::Ready(None) => Poll::Ready(self.take_terminal_error().map(Err)),
-      poll => poll,
-    }
+    self.receiver.poll_recv(cx)
   }
 
   fn size_hint(&self) -> SizeHint {
@@ -342,6 +299,46 @@ where
       Poll::Ready(frame) => {
         self.sleep = None;
         return Poll::Ready(frame.map(|result| result.map_err(Into::into)));
+      }
+      Poll::Pending => {}
+    }
+
+    if let Some(sleep) = self.sleep.as_mut()
+      && sleep.as_mut().poll(cx).is_ready()
+    {
+      self.sleep = None;
+      return Poll::Ready(Some(Err(boxed_error(BodyTimeoutError::new(self.kind)))));
+    }
+
+    Poll::Pending
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.size_hint.clone()
+  }
+}
+
+impl Body for SendTimeoutBody {
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    if self.sleep.is_none() {
+      let timeout = self.timeout;
+      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
+    }
+
+    match Pin::new(&mut self.body).poll_frame(cx) {
+      Poll::Ready(frame) => {
+        self.sleep = None;
+        return Poll::Ready(frame);
       }
       Poll::Pending => {}
     }
@@ -412,12 +409,12 @@ mod tests {
   use bytes::Bytes;
   use http::Request;
   use http_body_util::{BodyExt, Empty, Full};
-  use hyper::body::{Body as _, Frame, SizeHint};
+  use hyper::body::{Body as _, SizeHint};
   use std::time::Duration;
 
   use super::{
-    BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body,
-    error_is_timeout, known_small_no_trailers_body, with_read_timeout, with_send_timeout,
+    BodyTimeoutKind, BoxError, capture_prefix, channel_body, error_is_timeout,
+    known_small_no_trailers_body, with_read_timeout, with_send_timeout,
   };
 
   #[tokio::test]
@@ -561,27 +558,18 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn send_timeout_body_returns_typed_timeout_after_buffered_frames() {
-    let (sender, pending_body) = channel_body(TIMEOUT_BODY_CHANNEL_CAPACITY + 1);
-    for _ in 0..=TIMEOUT_BODY_CHANNEL_CAPACITY {
-      sender
-        .send(Ok(Frame::data(Bytes::from_static(b"x"))))
-        .await
-        .expect("source body should accept queued frame");
-    }
-    drop(sender);
-
+  async fn send_timeout_body_returns_typed_timeout_for_pending_body() {
+    let (_sender, pending_body) = channel_body(1);
     let timed_body = with_send_timeout(
       pending_body,
       Duration::from_millis(5),
       BodyTimeoutKind::UpstreamRequestSend,
     );
-    tokio::time::sleep(Duration::from_millis(25)).await;
 
     let error = timed_body
       .collect()
       .await
-      .expect_err("send timeout should propagate after buffered frames");
+      .expect_err("pending send body should time out");
     assert!(error_is_timeout(
       &error,
       BodyTimeoutKind::UpstreamRequestSend
@@ -590,27 +578,17 @@ mod tests {
 
   #[tokio::test]
   async fn send_timeout_body_applies_to_zero_size_hint_source_body() {
-    let (sender, pending_body) =
-      super::channel_body_with_size_hint(TIMEOUT_BODY_CHANNEL_CAPACITY + 1, exact_zero_size_hint());
-    for _ in 0..=TIMEOUT_BODY_CHANNEL_CAPACITY {
-      sender
-        .send(Ok(Frame::data(Bytes::from_static(b"x"))))
-        .await
-        .expect("source body should accept queued frame");
-    }
-    drop(sender);
-
+    let (_sender, pending_body) = super::channel_body_with_size_hint(1, exact_zero_size_hint());
     let timed_body = with_send_timeout(
       pending_body,
       Duration::from_millis(5),
       BodyTimeoutKind::UpstreamRequestSend,
     );
-    tokio::time::sleep(Duration::from_millis(25)).await;
 
     let error = timed_body
       .collect()
       .await
-      .expect_err("send timeout should apply even when size hint is exact zero");
+      .expect_err("zero-size-hint pending send body should time out");
     assert!(error_is_timeout(
       &error,
       BodyTimeoutKind::UpstreamRequestSend

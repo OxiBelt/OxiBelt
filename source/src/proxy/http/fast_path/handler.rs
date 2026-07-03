@@ -477,6 +477,7 @@ impl PlainProxyFastPath {
         request_version,
         true,
         request_body_proven_empty,
+        retry_policy.enabled,
         outbound,
         timeouts,
         snapshot.request_path_features.hot_path_metrics,
@@ -644,7 +645,6 @@ impl PlainProxyFastPath {
       &request_waf,
       pool_selection.as_ref(),
       sticky_cookie.as_ref(),
-      request_body_proven_empty,
     );
     let FastPathResponseBody {
       body: response_body,

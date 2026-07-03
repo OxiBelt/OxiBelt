@@ -19,7 +19,16 @@ use super::H3RequestRecvStream;
 pub(super) struct PreparedH3RequestBody {
   pub(super) request: Request<ProxyBody>,
   pub(super) verified_empty: bool,
+  pub(super) inline_readiness: PreparedH3RequestBodyReadiness,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreparedH3RequestBodyReadiness {
+  InlineReady,
+  Spawn,
+}
+
+const INLINE_REQUEST_BODY_MAX_BYTES: usize = 16 * 1024;
 
 pub(super) async fn prepare_h3_request_body(
   request: Request<()>,
@@ -108,12 +117,23 @@ where
       verified_empty_request(parts)
     }
     Some(Ok(Some(chunk))) => {
-      direct_h3_request_body_with_initial(request, stream, Some(Ok(Frame::data(chunk))))
+      let inline_readiness = if chunk.len() <= INLINE_REQUEST_BODY_MAX_BYTES {
+        PreparedH3RequestBodyReadiness::InlineReady
+      } else {
+        PreparedH3RequestBodyReadiness::Spawn
+      };
+      direct_h3_request_body_with_initial(
+        request,
+        stream,
+        Some(Ok(Frame::data(chunk))),
+        inline_readiness,
+      )
     }
     Some(Err(error)) => direct_h3_request_body_with_initial(
       request,
       stream,
       Some(Err(downstream_h3_request_body_error(error))),
+      PreparedH3RequestBodyReadiness::Spawn,
     ),
     None => direct_h3_request_body(request, stream),
   }
@@ -134,13 +154,14 @@ fn direct_h3_request_body<S>(request: Request<()>, stream: S) -> PreparedH3Reque
 where
   S: H3RequestBodyStream,
 {
-  direct_h3_request_body_with_initial(request, stream, None)
+  direct_h3_request_body_with_initial(request, stream, None, PreparedH3RequestBodyReadiness::Spawn)
 }
 
 fn direct_h3_request_body_with_initial<S>(
   request: Request<()>,
   stream: S,
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
+  inline_readiness: PreparedH3RequestBodyReadiness,
 ) -> PreparedH3RequestBody
 where
   S: H3RequestBodyStream,
@@ -155,6 +176,7 @@ where
   PreparedH3RequestBody {
     request: Request::from_parts(parts, body),
     verified_empty: false,
+    inline_readiness,
   }
 }
 
@@ -241,6 +263,7 @@ fn verified_empty_request(parts: http::request::Parts) -> PreparedH3RequestBody 
   PreparedH3RequestBody {
     request,
     verified_empty: true,
+    inline_readiness: PreparedH3RequestBodyReadiness::InlineReady,
   }
 }
 
@@ -260,6 +283,20 @@ mod tests {
 
   use super::*;
 
+  fn assert_inline_ready(prepared: &PreparedH3RequestBody) {
+    assert_eq!(
+      prepared.inline_readiness,
+      PreparedH3RequestBodyReadiness::InlineReady
+    );
+  }
+
+  fn assert_spawn(prepared: &PreparedH3RequestBody) {
+    assert_eq!(
+      prepared.inline_readiness,
+      PreparedH3RequestBodyReadiness::Spawn
+    );
+  }
+
   #[tokio::test]
   async fn get_content_length_zero_data_is_streamed_into_proxy_body() {
     assert_content_length_zero_data_is_streamed(Method::GET).await;
@@ -278,7 +315,9 @@ mod tests {
       FakeStreamEvent::End,
     ]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_inline_ready(&prepared);
+    let request = prepared.request;
 
     let body = request
       .into_body()
@@ -290,14 +329,36 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn large_initial_body_uses_spawn_path() {
+    let request = request(Method::POST);
+    let large = Bytes::from(vec![b'x'; INLINE_REQUEST_BODY_MAX_BYTES + 1]);
+    let stream =
+      FakeRequestStream::new([FakeStreamEvent::Data(large.clone()), FakeStreamEvent::End]);
+
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+
+    assert_spawn(&prepared);
+    let body = prepared
+      .request
+      .into_body()
+      .collect()
+      .await
+      .expect("large body should collect")
+      .to_bytes();
+    assert_eq!(body, large);
+  }
+
+  #[tokio::test]
   async fn content_length_zero_end_stream_returns_empty_body_after_polling_stream() {
     let request = request_with_content_length(Method::GET, &["0"]);
     let stream = FakeRequestStream::new([FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert_inline_ready(&prepared);
+    let request = prepared.request;
     let body = request
       .into_body()
       .collect()
@@ -313,9 +374,10 @@ mod tests {
     let stream = FakeRequestStream::pending();
     let poll_count = stream.poll_count();
 
-    let _request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert_spawn(&prepared);
   }
 
   #[tokio::test]
@@ -323,7 +385,8 @@ mod tests {
     let request = request(Method::GET);
     let stream = FakeRequestStream::pending();
 
-    let _request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_spawn(&prepared);
   }
 
   #[tokio::test]
@@ -337,6 +400,7 @@ mod tests {
 
       assert_eq!(poll_count.load(Ordering::SeqCst), 0);
       assert!(prepared.verified_empty);
+      assert_inline_ready(&prepared);
       let request = prepared.request;
       assert!(
         request
@@ -361,9 +425,11 @@ mod tests {
       let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
       let poll_count = stream.poll_count();
 
-      let request = prepare_h3_request_body_inner(request, stream).await.request;
+      let prepared = prepare_h3_request_body_inner(request, stream).await;
 
       assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+      assert_inline_ready(&prepared);
+      let request = prepared.request;
       assert!(
         request
           .extensions()
@@ -385,7 +451,9 @@ mod tests {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_spawn(&prepared);
+    let request = prepared.request;
 
     let body = request
       .into_body()
@@ -402,9 +470,11 @@ mod tests {
     let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
     let poll_count = stream.poll_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
 
     assert_eq!(poll_count.load(Ordering::SeqCst), 1);
+    assert_spawn(&prepared);
+    let request = prepared.request;
     assert!(
       request
         .extensions()
@@ -432,6 +502,7 @@ mod tests {
     let prepared = prepare_h3_request_body_inner(request, stream).await;
 
     assert!(!prepared.verified_empty);
+    assert_spawn(&prepared);
     let body = prepared
       .request
       .into_body()
@@ -447,7 +518,9 @@ mod tests {
       FakeStreamEvent::Error("stream reset"),
     ]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_spawn(&prepared);
+    let request = prepared.request;
 
     let error = request
       .into_body()
@@ -466,7 +539,9 @@ mod tests {
     let request = request(Method::POST);
     let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_spawn(&prepared);
+    let request = prepared.request;
 
     let error = request
       .into_body()
@@ -490,7 +565,9 @@ mod tests {
     ]);
     let drop_count = stream.drop_count();
 
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
+    let prepared = prepare_h3_request_body_inner(request, stream).await;
+    assert_inline_ready(&prepared);
+    let request = prepared.request;
 
     drop(request);
     tokio::time::timeout(Duration::from_secs(1), async {

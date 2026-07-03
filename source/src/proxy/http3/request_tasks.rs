@@ -1,5 +1,6 @@
 //! Per-connection HTTP/3 request task lifecycle and admission limits.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -137,6 +138,13 @@ impl RequestTaskSet {
     permit: OwnedSemaphorePermit,
   ) {
     self.spawn_task(handle_prepared(request, stream, context, permit));
+  }
+
+  pub(super) fn spawn_inline_future(
+    &mut self,
+    future: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+  ) {
+    self.spawn_task(future);
   }
 
   pub(super) fn is_empty(&self) -> bool {

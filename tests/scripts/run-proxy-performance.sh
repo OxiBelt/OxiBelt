@@ -2655,6 +2655,16 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-h1-keepalive:h1) printf 'h1' ;;
     oxibelt-h2:h2) printf 'h2' ;;
     oxibelt-h3:h3) printf 'h3' ;;
+    oxibelt-post-1k-json-h2:h2) printf 'h2' ;;
+    oxibelt-post-16k-json-h2:h2) printf 'h2' ;;
+    oxibelt-upload-1m-post-h2:h2) printf 'h2' ;;
+    oxibelt-upload-1m-put-h2:h2) printf 'h2' ;;
+    oxibelt-stream-1m-h2:h2) printf 'h2' ;;
+    oxibelt-stream-10m-h2:h2) printf 'h2' ;;
+    oxibelt-chunked-post-16k-h1:h1) printf 'h1' ;;
+    oxibelt-h2-multiplexed-bodyful:h2) printf 'h2' ;;
+    oxibelt-post-1k-json-h3:h3) printf 'h3' ;;
+    oxibelt-h3-concurrent-bodyful:h3) printf 'h3' ;;
     oxibelt-runtime-direct-h1-*-h1:h1) printf 'h1' ;;
     oxibelt-runtime-direct-h1-*-h2:h2) printf 'h2' ;;
     oxibelt-runtime-direct-h1-*-h3:h3) printf 'h3' ;;
@@ -2681,7 +2691,7 @@ direct_transport_gate_transport() {
     return
   fi
   case "${label}:${protocol}" in
-    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h2-multiplexed:h2|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
+    oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-post-1k-json-h2:h2|oxibelt-post-16k-json-h2:h2|oxibelt-upload-1m-post-h2:h2|oxibelt-upload-1m-put-h2:h2|oxibelt-stream-1m-h2:h2|oxibelt-stream-10m-h2:h2|oxibelt-chunked-post-16k-h1:h1|oxibelt-h2-multiplexed-bodyful:h2|oxibelt-post-1k-json-h3:h3|oxibelt-h3-concurrent-bodyful:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h2-multiplexed:h2|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
     oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
   esac
 }
@@ -3221,6 +3231,68 @@ run_h2_multiplex_diagnostic_load() {
   run_load "${comparator}-h2-multiplexed" h2 "${host}" "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}" --h2-streams-per-connection 16
 }
 
+run_oxibelt_bodyful_performance_gates() {
+  run_load "oxibelt-post-1k-json-h2" h2 oxibelt "/perf/post-1k-json?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 1024 \
+    --request-body-kind json
+  run_load "oxibelt-post-16k-json-h2" h2 oxibelt "/perf/post-16k-json?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --request-body-kind json
+  run_load "oxibelt-upload-1m-post-h2" h2 oxibelt "/status/204?body=" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 1048576 \
+    --expect-status 204
+  run_load "oxibelt-upload-1m-put-h2" h2 oxibelt "/status/204?body=" "${duration_seconds}" "${concurrency}" \
+    --method PUT \
+    --request-body-bytes 1048576 \
+    --expect-status 204
+  run_load "oxibelt-stream-1m-h2" h2 oxibelt "/perf/stream-1m?body_repeat=1048576&response_chunk_delay_ms=0&response_chunk_bytes=16384" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-stream-10m-h2" h2 oxibelt "/perf/stream-10m?body_repeat=10485760&response_chunk_delay_ms=0&response_chunk_bytes=65536" "${duration_seconds}" "${concurrency}"
+  run_load "oxibelt-chunked-post-16k-h1" h1 oxibelt "/perf/chunked-post?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --chunked-request-body 1
+  run_load "oxibelt-h2-multiplexed-bodyful" h2 oxibelt "/perf/h2-multiplexed-bodyful?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --h2-streams-per-connection 16 \
+    --method POST \
+    --request-body-bytes 1024 \
+    --request-body-kind json
+  if h3_probe_succeeds oxibelt; then
+    run_load "oxibelt-post-1k-json-h3" h3 oxibelt "/perf/post-1k-json-h3?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+      --method POST \
+      --request-body-bytes 1024 \
+      --request-body-kind json
+    run_load "oxibelt-h3-concurrent-bodyful" h3 oxibelt "/perf/h3-concurrent-bodyful?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+      --method POST \
+      --request-body-bytes 1024 \
+      --request-body-kind json
+  else
+    fail_with_diagnostics "mandatory HTTP/3 probe failed for OxiBelt bodyful gates: functional QUIC probe did not complete"
+  fi
+}
+
+run_oxibelt_waf_body_mode_gates() {
+  start_oxibelt waf-enforcing oxibelt
+  run_load "oxibelt-waf-header-only-bodyful" h2 oxibelt "/perf/waf-header-only?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 1024 \
+    --request-body-kind json
+
+  start_oxibelt waf-size-only oxibelt
+  run_load "oxibelt-waf-size-only-bodyful" h2 oxibelt "/perf/waf-size-only?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --request-body-kind json
+
+  start_oxibelt waf-prefix-inspection oxibelt
+  run_load "oxibelt-waf-prefix-inspection-bodyful" h2 oxibelt "/perf/waf-prefix?json_body_bytes=1024&content_type=application/json" "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --request-body-kind json
+}
+
 run_metrics_mode_h3_load() {
   local label="$1"
   local host="$2"
@@ -3484,6 +3556,8 @@ run_reverse_proxy_group() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
+    run_oxibelt_bodyful_performance_gates
+    run_oxibelt_waf_body_mode_gates
     ran_oxibelt=1
   fi
 
@@ -3741,6 +3815,7 @@ run_all_serving_types() {
   if has_comparator oxibelt; then
     start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
     run_common_loads oxibelt oxibelt required
+    run_oxibelt_bodyful_performance_gates
     run_external_benchmarks_for_comparator oxibelt oxibelt required
     run_static_loads oxibelt oxibelt required
     assert_oxibelt_tcp_baseline
@@ -3752,6 +3827,7 @@ run_all_serving_types() {
     if [[ "${profile}" == "smoke" ]]; then
       run_load "oxibelt-smoke-soak" h1 oxibelt "/perf/smoke-soak?body=ok" "${soak_seconds}" "${concurrency}"
     fi
+    run_oxibelt_waf_body_mode_gates
   fi
 
   if has_comparator nginx; then

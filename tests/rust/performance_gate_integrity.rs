@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use oxibelt::config::{Config, MetricsDetail};
-use oxibelt::routes::RouteTable;
+use oxibelt::routes::{RouteTable, WafExecutionPlan};
 use oxibelt::waf::WafEngine;
 
 fn repo_root() -> PathBuf {
@@ -1013,6 +1013,61 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
 }
 
 #[test]
+fn oxibelt_bodyful_performance_gates_are_wired() {
+  let script = performance_script_text();
+  let bodyful_function = extract_bash_function(&script, "run_oxibelt_bodyful_performance_gates");
+  let waf_function = extract_bash_function(&script, "run_oxibelt_waf_body_mode_gates");
+
+  for expected in [
+    "run_load \"oxibelt-post-1k-json-h2\" h2",
+    "run_load \"oxibelt-post-16k-json-h2\" h2",
+    "run_load \"oxibelt-upload-1m-post-h2\" h2",
+    "run_load \"oxibelt-upload-1m-put-h2\" h2",
+    "run_load \"oxibelt-stream-1m-h2\" h2",
+    "run_load \"oxibelt-stream-10m-h2\" h2",
+    "run_load \"oxibelt-chunked-post-16k-h1\" h1",
+    "run_load \"oxibelt-h2-multiplexed-bodyful\" h2",
+    "run_load \"oxibelt-post-1k-json-h3\" h3",
+    "run_load \"oxibelt-h3-concurrent-bodyful\" h3",
+    "--request-body-kind json",
+    "--request-body-bytes 1048576",
+    "--chunked-request-body 1",
+    "--h2-streams-per-connection 16",
+    "--expect-status 204",
+  ] {
+    assert!(
+      bodyful_function.contains(expected),
+      "bodyful performance gates should contain {expected:?}"
+    );
+  }
+
+  for expected in [
+    "start_oxibelt waf-enforcing oxibelt",
+    "start_oxibelt waf-size-only oxibelt",
+    "start_oxibelt waf-prefix-inspection oxibelt",
+    "run_load \"oxibelt-waf-header-only-bodyful\" h2",
+    "run_load \"oxibelt-waf-size-only-bodyful\" h2",
+    "run_load \"oxibelt-waf-prefix-inspection-bodyful\" h2",
+    "--request-body-kind json",
+  ] {
+    assert!(
+      waf_function.contains(expected),
+      "WAF body-mode gates should contain {expected:?}"
+    );
+  }
+
+  for expected in [
+    "run_oxibelt_bodyful_performance_gates",
+    "run_oxibelt_waf_body_mode_gates",
+  ] {
+    assert!(
+      script.contains(expected),
+      "performance script should call {expected}"
+    );
+  }
+}
+
+#[test]
 fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
   let script = performance_script_text();
 
@@ -1400,6 +1455,8 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
     ("crs-enforcing", 0.5),
     ("crs-monitor", 0.5),
     ("waf-enforcing", 0.5),
+    ("waf-prefix-inspection", 0.5),
+    ("waf-size-only", 0.5),
     ("waf-monitor", 0.5),
     ("remote-signer", 0.5),
     ("baseline-accept-1", 1.0),
@@ -1711,6 +1768,37 @@ fn oxibelt_baseline_fixture_enables_h1_fast_path_metrics() {
     resolved.execution_plan.fast_path.plain_proxy_h1,
     "/perf/h1 should keep the H1 plain-proxy fast-path plan"
   );
+}
+
+#[test]
+fn oxibelt_waf_body_mode_fixtures_pin_body_access_plans() {
+  for (scenario, expected_request_plan, expected_plain_proxy_h2) in [
+    ("waf-enforcing", WafExecutionPlan::HeaderOnly, true),
+    ("waf-size-only", WafExecutionPlan::SizeOnly, false),
+    ("waf-prefix-inspection", WafExecutionPlan::PrefixBody, false),
+  ] {
+    let path = oxibelt_performance_fixture_root()
+      .join(scenario)
+      .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+      .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let config: Config = toml::from_str(&config_text)
+      .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    let waf = WafEngine::new(&config).expect("WAF engine should build");
+    let table = RouteTable::new_with_waf(&config, &waf);
+    let resolved = table
+      .resolve("example.test", "/perf/waf-body-mode", &config.upstreams)
+      .unwrap_or_else(|| panic!("{scenario} should resolve /perf/waf-body-mode"));
+
+    assert_eq!(
+      resolved.execution_plan.waf.request, expected_request_plan,
+      "{scenario} should preserve the intended request WAF body plan"
+    );
+    assert_eq!(
+      resolved.execution_plan.fast_path.plain_proxy_h2, expected_plain_proxy_h2,
+      "{scenario} should keep the expected plain-proxy eligibility"
+    );
+  }
 }
 
 #[test]

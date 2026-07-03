@@ -84,7 +84,7 @@ async fn assert_inline_stop_releases_permit(signal: InlineStopSignal) {
   };
 
   assert!(
-    !run_h3_inline_until_stop(
+    !run_h3_inline_until_blocked_or_stop(
       inline,
       &mut request_tasks,
       &mut shutdown,
@@ -95,6 +95,39 @@ async fn assert_inline_stop_releases_permit(signal: InlineStopSignal) {
   assert!(
     request_tasks.try_acquire_permit().is_some(),
     "stopped inline request should release its active permit"
+  );
+}
+
+#[tokio::test]
+async fn h3_inline_request_hands_off_pending_future() {
+  let mut request_tasks = request_tasks::RequestTaskSet::with_active_limit(1);
+  let held_permit = request_tasks
+    .try_acquire_permit()
+    .expect("held permit should be available");
+  let (_shutdown_tx, mut shutdown) = watch::channel(false);
+  let (_drain_tx, mut data_plane_drain) = watch::channel(false);
+  let inline = async move {
+    let _permit = held_permit;
+    futures_util::future::pending::<()>().await;
+  };
+
+  assert!(
+    run_h3_inline_until_blocked_or_stop(
+      inline,
+      &mut request_tasks,
+      &mut shutdown,
+      &mut data_plane_drain,
+    )
+    .await
+  );
+  assert!(
+    request_tasks.try_acquire_permit().is_none(),
+    "pending inline future should continue in the request task set"
+  );
+  request_tasks.abort_all().await;
+  assert!(
+    request_tasks.try_acquire_permit().is_some(),
+    "aborting handed-off inline future should release its active permit"
   );
 }
 
@@ -260,15 +293,15 @@ fn h3_accept_protocol_errors_remain_warnable() {
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_requires_config_gate() {
+async fn h3_inline_fast_path_requires_config_gate() {
   let context = inline_candidate_context("", true).await;
   let request = h3_request(Method::GET);
 
-  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+  assert!(!h3_inline_fast_path_candidate(&request, &context));
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_rejects_uri_limits_before_route_matchers() {
+async fn h3_inline_fast_path_rejects_uri_limits_before_route_matchers() {
   let context = inline_candidate_context(
     r#"
 [routes.match]
@@ -301,11 +334,11 @@ inline_bodyless_fast_path = true
     Err((StatusCode::URI_TOO_LONG, "request URI is too large"))
   );
   assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
-  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+  assert!(!h3_inline_fast_path_candidate(&request, &context));
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_rejects_header_limits_before_route_matchers() {
+async fn h3_inline_fast_path_rejects_header_limits_before_route_matchers() {
   let header_value = "route-value-that-exceeds-the-configured-header-limit";
   let context = inline_candidate_context(
     &format!(
@@ -342,11 +375,11 @@ inline_bodyless_fast_path = true
     ))
   );
   assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
-  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+  assert!(!h3_inline_fast_path_candidate(&request, &context));
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_rejects_unsafe_path_before_route_lookup() {
+async fn h3_inline_fast_path_rejects_unsafe_path_before_route_lookup() {
   let context = inline_candidate_context(
     r#"
 [proxy.http3]
@@ -364,11 +397,11 @@ inline_bodyless_fast_path = true
 
   assert!(http_proxy::uri::validate_downstream_path(request.uri().path()).is_err());
   assert_h3_inline_route_would_match_without_prevalidation(&request, &context);
-  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+  assert!(!h3_inline_fast_path_candidate(&request, &context));
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_allows_safe_get_and_head() {
+async fn h3_inline_fast_path_allows_safe_get_and_head() {
   let context = inline_candidate_context(
     r#"
 [proxy.http3]
@@ -380,12 +413,12 @@ inline_bodyless_fast_path = true
 
   for method in [Method::GET, Method::HEAD] {
     let request = h3_request(method);
-    assert!(h3_inline_bodyless_fast_path_candidate(&request, &context));
+    assert!(h3_inline_fast_path_candidate(&request, &context));
   }
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_rejects_unsafe_or_framed_requests() {
+async fn h3_inline_fast_path_allows_bodyful_or_framed_requests() {
   let context = inline_candidate_context(
     r#"
 [proxy.http3]
@@ -403,15 +436,12 @@ inline_bodyless_fast_path = true
     .body(())
     .unwrap();
 
-  assert!(!h3_inline_bodyless_fast_path_candidate(&post, &context));
-  assert!(!h3_inline_bodyless_fast_path_candidate(
-    &framed_get,
-    &context
-  ));
+  assert!(h3_inline_fast_path_candidate(&post, &context));
+  assert!(h3_inline_fast_path_candidate(&framed_get, &context));
 }
 
 #[tokio::test]
-async fn h3_inline_bodyless_fast_path_rejects_non_fast_path_routes() {
+async fn h3_inline_fast_path_rejects_non_fast_path_routes() {
   let context = inline_candidate_context(
     r#"
 [proxy.http3]
@@ -422,7 +452,7 @@ inline_bodyless_fast_path = true
   .await;
   let request = h3_request(Method::GET);
 
-  assert!(!h3_inline_bodyless_fast_path_candidate(&request, &context));
+  assert!(!h3_inline_fast_path_candidate(&request, &context));
 }
 
 #[tokio::test]
