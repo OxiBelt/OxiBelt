@@ -16,7 +16,10 @@ use super::super::{
 use crate::config::TrailerMode;
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
-use crate::proxy::http::DownstreamResponseSendTimeout;
+use crate::proxy::http::{
+  DownstreamResponseSendTimeout, DownstreamResponseTimeoutSelected,
+  DownstreamResponseTimeoutSelection, with_downstream_response_timeout,
+};
 use crate::waf::WafTransportNetwork;
 
 fn response_headers_with_content_length(length: &str) -> HeaderMap {
@@ -322,6 +325,34 @@ fn known_small_tcp_fast_path_response_skips_downstream_timeout_metadata() {
   );
 }
 
+#[test]
+fn known_small_tcp_response_timeout_selector_skips_backpressure_body() {
+  let mut response = Response::builder()
+    .status(StatusCode::OK)
+    .body(proxy_body(b"ok"))
+    .expect("response should build");
+  response
+    .extensions_mut()
+    .insert(body::KnownSmallResponseBody);
+
+  let response =
+    with_downstream_response_timeout(response, Duration::from_millis(1), WafTransportNetwork::Tcp);
+
+  assert!(
+    response
+      .extensions()
+      .get::<DownstreamResponseSendTimeout>()
+      .is_none()
+  );
+  assert_eq!(
+    response
+      .extensions()
+      .get::<DownstreamResponseTimeoutSelected>()
+      .map(|selected| selected.0),
+    Some(DownstreamResponseTimeoutSelection::SkippedKnownSmall)
+  );
+}
+
 #[tokio::test]
 async fn known_small_response_body_reports_trailer_presence() {
   let mut trailers = HeaderMap::new();
@@ -463,6 +494,13 @@ async fn streaming_tcp_fast_path_response_keeps_downstream_timeout_metadata() {
       .get::<DownstreamResponseSendTimeout>()
       .is_some()
   );
+  assert_eq!(
+    response
+      .extensions()
+      .get::<DownstreamResponseTimeoutSelected>()
+      .map(|selected| selected.0),
+    Some(DownstreamResponseTimeoutSelection::BackpressureBody)
+  );
 }
 
 #[test]
@@ -484,5 +522,12 @@ fn udp_fast_path_response_keeps_downstream_timeout_metadata() {
       .extensions()
       .get::<DownstreamResponseSendTimeout>()
       .is_some()
+  );
+  assert_eq!(
+    response
+      .extensions()
+      .get::<DownstreamResponseTimeoutSelected>()
+      .map(|selected| selected.0),
+    Some(DownstreamResponseTimeoutSelection::MarkedOnly)
   );
 }

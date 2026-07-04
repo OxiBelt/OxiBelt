@@ -11,6 +11,16 @@ use super::body::{self, BodyTimeoutKind, ProxyBody};
 #[derive(Clone, Copy)]
 pub(crate) struct DownstreamResponseSendTimeout(pub(crate) Duration);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DownstreamResponseTimeoutSelection {
+  MarkedOnly,
+  SkippedKnownSmall,
+  BackpressureBody,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DownstreamResponseTimeoutSelected(pub(crate) DownstreamResponseTimeoutSelection);
+
 pub(crate) fn downstream_response_send_timeout(response: &Response<ProxyBody>) -> Option<Duration> {
   response
     .extensions()
@@ -33,12 +43,19 @@ pub(crate) fn with_downstream_response_timeout(
     .get::<body::KnownSmallResponseBody>()
     .is_some()
   {
+    parts.extensions.insert(DownstreamResponseTimeoutSelected(
+      DownstreamResponseTimeoutSelection::SkippedKnownSmall,
+    ));
     return Response::from_parts(parts, body);
   }
   parts
     .extensions
     .insert(DownstreamResponseSendTimeout(timeout));
-  let body = body::with_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
+  parts.extensions.insert(DownstreamResponseTimeoutSelected(
+    DownstreamResponseTimeoutSelection::BackpressureBody,
+  ));
+  let body =
+    body::with_backpressure_send_timeout(body, timeout, BodyTimeoutKind::DownstreamResponseSend);
   Response::from_parts(parts, body)
 }
 
@@ -50,5 +67,8 @@ fn mark_downstream_response_timeout(
   parts
     .extensions
     .insert(DownstreamResponseSendTimeout(timeout));
+  parts.extensions.insert(DownstreamResponseTimeoutSelected(
+    DownstreamResponseTimeoutSelection::MarkedOnly,
+  ));
   Response::from_parts(parts, body)
 }

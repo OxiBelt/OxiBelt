@@ -81,9 +81,15 @@ use self::request_body::fast_path_empty_request_body;
 use self::request_body::fast_path_request_body;
 #[cfg(test)]
 use self::request_body::fast_path_request_body_is_definitely_empty;
+#[cfg(test)]
+use self::request_body::fast_path_small_exact_request_body;
 use self::request_body::{
-  FastPathRequestBody, FastPathRequestBodyMetrics, fast_path_request_body_empty_probe_allowed,
-  fast_path_request_body_with_metrics,
+  FastPathRequestBody, fast_path_prepare_nonempty_request_body, fast_path_request_body_error_status,
+};
+#[cfg(test)]
+use self::request_body::{
+  fast_path_request_body_empty_probe_allowed, fast_path_request_body_with_metrics,
+  fast_path_small_request_body_options,
 };
 use self::response_body::{
   FastPathResponseBody, FastPathResponseBodyOptions, FastPathResponseSemantics,

@@ -1435,6 +1435,9 @@ impl Config {
         "proxy.retry.backoff_max_ms must be 0 or greater than or equal to proxy.retry.backoff_base_ms"
       );
     }
+    if self.proxy.http.direct_h1_small_request_body_max_bytes == 0 {
+      bail!("proxy.http.direct_h1_small_request_body_max_bytes must be greater than 0");
+    }
     if self.proxy.http2.max_concurrent_streams == 0
       || self.proxy.http2.max_send_buf_size == 0
       || self.proxy.http2.keep_alive_timeout_ms == 0
@@ -2792,6 +2795,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "expect_continue",
       "priority",
       "sse_auto_streaming",
+      "direct_h1_small_request_body_max_bytes",
       "grpc",
       "errors",
     ][..],
@@ -4286,6 +4290,8 @@ pub struct ProxyHttpConfig {
   pub priority: PriorityMode,
   #[serde(default = "default_true")]
   pub sse_auto_streaming: bool,
+  #[serde(default = "default_direct_h1_small_request_body_max_bytes")]
+  pub direct_h1_small_request_body_max_bytes: usize,
   #[serde(default)]
   pub grpc: ProxyHttpGrpcConfig,
   #[serde(default)]
@@ -4300,10 +4306,15 @@ impl Default for ProxyHttpConfig {
       expect_continue: ExpectContinueMode::Auto,
       priority: PriorityMode::Pass,
       sse_auto_streaming: true,
+      direct_h1_small_request_body_max_bytes: default_direct_h1_small_request_body_max_bytes(),
       grpc: ProxyHttpGrpcConfig::default(),
       errors: ProxyHttpErrorsConfig::default(),
     }
   }
+}
+
+pub(crate) fn default_direct_h1_small_request_body_max_bytes() -> usize {
+  16 * 1024
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]

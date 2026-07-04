@@ -52,6 +52,12 @@ Environment:
                                       minimum OxiBelt WAF enforcing RPS (default: 10000)
   OXIBELT_PERF_CRS_ENFORCING_MIN_RPS
                                       minimum OxiBelt CRS enforcing RPS (default: 8000)
+  OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS
+                                      minimum OxiBelt post-1k-json-h2 RPS (default: 5000)
+  OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS
+                                      minimum OxiBelt waf-header-only-bodyful RPS (default: 5000)
+  OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS
+                                      minimum OxiBelt h3-inline-fast-path-experiment RPS (default: 12000)
   OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO
                                       maximum enforcing/monitor p99 ratio for WAF and CRS rows (default: 1.30)
   OXIBELT_PERF_REGRESSION_GATE_MODE   fail or warn for targeted regression gates (default: fail)
@@ -204,6 +210,9 @@ static_16k_h1c_min_caddy_ratio="${OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO:-0
 h1_fast_path_min_hit_rate="${OXIBELT_PERF_H1_FAST_PATH_MIN_HIT_RATE:-0.99}"
 waf_enforcing_min_rps="${OXIBELT_PERF_WAF_ENFORCING_MIN_RPS:-10000}"
 crs_enforcing_min_rps="${OXIBELT_PERF_CRS_ENFORCING_MIN_RPS:-8000}"
+post_1k_json_h2_min_rps="${OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS:-5000}"
+waf_header_only_bodyful_min_rps="${OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS:-5000}"
+h3_inline_fast_path_experiment_min_rps="${OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS:-12000}"
 waf_crs_max_enforce_p99_ratio="${OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO:-1.30}"
 regression_gate_mode="${OXIBELT_PERF_REGRESSION_GATE_MODE:-fail}"
 external_benchmarks="${OXIBELT_EXTERNAL_BENCHMARKS:-1}"
@@ -294,6 +303,18 @@ if [[ ! "${waf_enforcing_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
 fi
 if [[ ! "${crs_enforcing_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
   echo "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS must be a non-negative number; got '${crs_enforcing_min_rps}'" >&2
+  exit 2
+fi
+if [[ ! "${post_1k_json_h2_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS must be a non-negative number; got '${post_1k_json_h2_min_rps}'" >&2
+  exit 2
+fi
+if [[ ! "${waf_header_only_bodyful_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS must be a non-negative number; got '${waf_header_only_bodyful_min_rps}'" >&2
+  exit 2
+fi
+if [[ ! "${h3_inline_fast_path_experiment_min_rps}" =~ ^(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; then
+  echo "OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS must be a non-negative number; got '${h3_inline_fast_path_experiment_min_rps}'" >&2
   exit 2
 fi
 if [[ ! "${waf_crs_max_enforce_p99_ratio}" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]]; then
@@ -1936,6 +1957,23 @@ assert_static_16k_h1c_caddy_ratio() {
   fi
 }
 
+assert_min_rps_regression_gate() {
+  local label="$1"
+  local threshold="$2"
+  local json rps
+  json="$(jq -c --arg label "${label}" 'select(.label == $label and ((.skipped // false) | not))' "${results_jsonl}" | tail -n 1)"
+  if [[ -z "${json}" ]]; then
+    fail_with_diagnostics "missing OxiBelt performance result for RPS regression gate: ${label}"
+  fi
+  rps="$(jq -r '.rps // 0' <<<"${json}")"
+  if jq -n -e --argjson rps "${rps}" '$rps <= 0' >/dev/null; then
+    fail_with_diagnostics "OxiBelt ${label} RPS must be positive; got ${rps}"
+  fi
+  if jq -n -e --argjson rps "${rps}" --argjson min "${threshold}" '$rps < $min' >/dev/null; then
+    handle_regression_gate_violation "OxiBelt ${label} regression gate failed: RPS ${rps} < ${threshold}"
+  fi
+}
+
 assert_waf_crs_regression_gates() {
   local waf_monitor_json waf_enforcing_json crs_monitor_json crs_enforcing_json
   local waf_enforcing_rps crs_enforcing_rps
@@ -3271,6 +3309,7 @@ run_oxibelt_bodyful_performance_gates() {
   else
     fail_with_diagnostics "mandatory HTTP/3 probe failed for OxiBelt bodyful gates: functional QUIC probe did not complete"
   fi
+  assert_min_rps_regression_gate "oxibelt-post-1k-json-h2" "${post_1k_json_h2_min_rps}"
 }
 
 run_oxibelt_waf_body_mode_gates() {
@@ -3291,6 +3330,7 @@ run_oxibelt_waf_body_mode_gates() {
     --method POST \
     --request-body-bytes 16384 \
     --request-body-kind json
+  assert_min_rps_regression_gate "oxibelt-waf-header-only-bodyful" "${waf_header_only_bodyful_min_rps}"
 }
 
 run_metrics_mode_h3_load() {
@@ -3784,6 +3824,7 @@ run_runtime_direct_h1_group() {
     --inline-bodyless-h3-fast-path
   if h3_probe_succeeds oxibelt; then
     run_load "oxibelt-h3-inline-fast-path-experiment" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
+    assert_min_rps_regression_gate "oxibelt-h3-inline-fast-path-experiment" "${h3_inline_fast_path_experiment_min_rps}"
   else
     fail_with_diagnostics "mandatory HTTP/3 probe failed for H3 inline fast-path experiment row"
   fi

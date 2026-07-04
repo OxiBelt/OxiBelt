@@ -58,7 +58,7 @@ pub(super) fn fast_path_outbound_request_body(
   if body.is_end_stream() {
     return body;
   }
-  body::with_send_timeout(body, timeout, BodyTimeoutKind::UpstreamRequestSend)
+  body::with_backpressure_send_timeout(body, timeout, BodyTimeoutKind::UpstreamRequestSend)
 }
 
 pub(super) fn fast_path_upstream_timing_required(

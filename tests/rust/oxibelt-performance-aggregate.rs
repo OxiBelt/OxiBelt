@@ -21,6 +21,9 @@ const DEFAULT_STATIC_16K_H1C_MIN_NGINX_RATIO: f64 = 0.90;
 const DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO: f64 = 0.90;
 const DEFAULT_WAF_ENFORCING_MIN_RPS: f64 = 10000.0;
 const DEFAULT_CRS_ENFORCING_MIN_RPS: f64 = 8000.0;
+const DEFAULT_POST_1K_JSON_H2_MIN_RPS: f64 = 5000.0;
+const DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS: f64 = 5000.0;
+const DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS: f64 = 12000.0;
 const DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO: f64 = 1.30;
 const BASELINE_RPS_REGRESSION_TOLERANCE_PERCENT: f64 = -3.0;
 const BASELINE_P99_REGRESSION_TOLERANCE_PERCENT: f64 = 5.0;
@@ -747,6 +750,9 @@ struct RegressionGateThresholds {
   remote_signer_handshake_min_local_ratio: f64,
   waf_enforcing_min_rps: f64,
   crs_enforcing_min_rps: f64,
+  post_1k_json_h2_min_rps: f64,
+  waf_header_only_bodyful_min_rps: f64,
+  h3_inline_fast_path_experiment_min_rps: f64,
   waf_crs_max_enforce_p99_ratio: f64,
 }
 
@@ -5183,6 +5189,24 @@ fn regression_gate_thresholds(warnings: &mut WarningBag) -> RegressionGateThresh
       ThresholdKind::NonNegative,
       warnings,
     ),
+    post_1k_json_h2_min_rps: env_threshold(
+      "OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS",
+      DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+      ThresholdKind::NonNegative,
+      warnings,
+    ),
+    waf_header_only_bodyful_min_rps: env_threshold(
+      "OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS",
+      DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+      ThresholdKind::NonNegative,
+      warnings,
+    ),
+    h3_inline_fast_path_experiment_min_rps: env_threshold(
+      "OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS",
+      DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
+      ThresholdKind::NonNegative,
+      warnings,
+    ),
     waf_crs_max_enforce_p99_ratio: env_threshold(
       "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO",
       DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
@@ -5367,6 +5391,33 @@ fn build_regression_gate_report(
     "crs_enforcing_min_rps",
     "crs-enforcing",
     thresholds.crs_enforcing_min_rps,
+    &mut findings,
+  );
+  collect_min_rps_regression_gate(
+    aggregates,
+    baseline,
+    primary_target_cpu,
+    "post_1k_json_h2_min_rps",
+    "post-1k-json-h2",
+    thresholds.post_1k_json_h2_min_rps,
+    &mut findings,
+  );
+  collect_min_rps_regression_gate(
+    aggregates,
+    baseline,
+    primary_target_cpu,
+    "waf_header_only_bodyful_min_rps",
+    "waf-header-only-bodyful",
+    thresholds.waf_header_only_bodyful_min_rps,
+    &mut findings,
+  );
+  collect_min_rps_regression_gate(
+    aggregates,
+    baseline,
+    primary_target_cpu,
+    "h3_inline_fast_path_experiment_min_rps",
+    "h3-inline-fast-path-experiment",
+    thresholds.h3_inline_fast_path_experiment_min_rps,
     &mut findings,
   );
   collect_p99_ratio_regression_gate(
@@ -9995,6 +10046,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       None,
@@ -10060,6 +10114,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       None,
@@ -10124,6 +10181,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       None,
@@ -10197,6 +10257,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       None,
@@ -10263,6 +10326,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       Some(&baseline),
@@ -10336,6 +10402,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       Some(&baseline),
@@ -10411,6 +10480,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       Some(&baseline),
@@ -10472,6 +10544,9 @@ mod tests {
         remote_signer_handshake_min_local_ratio: DEFAULT_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO,
         waf_enforcing_min_rps: DEFAULT_WAF_ENFORCING_MIN_RPS,
         crs_enforcing_min_rps: DEFAULT_CRS_ENFORCING_MIN_RPS,
+        post_1k_json_h2_min_rps: DEFAULT_POST_1K_JSON_H2_MIN_RPS,
+        waf_header_only_bodyful_min_rps: DEFAULT_WAF_HEADER_ONLY_BODYFUL_MIN_RPS,
+        h3_inline_fast_path_experiment_min_rps: DEFAULT_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS,
         waf_crs_max_enforce_p99_ratio: DEFAULT_WAF_CRS_MAX_ENFORCE_P99_RATIO,
       },
       Some(&baseline),

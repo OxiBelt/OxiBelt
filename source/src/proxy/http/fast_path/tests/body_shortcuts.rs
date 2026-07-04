@@ -5,15 +5,37 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::proxy::http::body;
 
 use super::super::{
   fast_path_empty_request_body, fast_path_request_body, fast_path_request_body_empty_probe_allowed,
-  fast_path_request_body_is_definitely_empty,
+  fast_path_request_body_is_definitely_empty, fast_path_small_exact_request_body,
+  fast_path_small_request_body_options,
 };
+
+fn small_post_body_options(
+  content_length: usize,
+  max_body_bytes: usize,
+  small_body_max_bytes: usize,
+) -> super::super::request_body::FastPathSmallRequestBodyOptions {
+  let mut headers = http::HeaderMap::new();
+  headers.insert(
+    http::header::CONTENT_LENGTH,
+    content_length.to_string().parse().unwrap(),
+  );
+  fast_path_small_request_body_options(
+    &http::Method::POST,
+    true,
+    false,
+    &headers,
+    max_body_bytes,
+    small_body_max_bytes,
+  )
+  .expect("small POST body options should be selected")
+}
 
 struct EndStreamPanicBody;
 
@@ -285,6 +307,163 @@ async fn actual_end_stream_request_body_shortcut_does_not_poll_body() {
     .await
     .expect("end-stream fast-path body should collect");
   assert!(body.to_bytes().is_empty());
+}
+
+#[tokio::test]
+async fn small_post_request_body_uses_exact_body_shortcut() {
+  let bytes = Bytes::from_static(br#"{"ok":true}"#);
+  let body = fast_path_small_exact_request_body(
+    Full::new(bytes.clone()).map_err(|never| -> body::BoxError { match never {} }),
+    16 * 1024,
+    Duration::from_millis(100),
+    small_post_body_options(bytes.len(), 16 * 1024, 16 * 1024),
+    None,
+  )
+  .await
+  .expect("small POST body should collect");
+
+  assert!(!body.proven_empty());
+  assert!(body.is_small_exact());
+  assert_eq!(body.size_hint().exact(), Some(bytes.len() as u64));
+  let collected = body
+    .collect()
+    .await
+    .expect("small exact body should collect");
+  assert_eq!(collected.to_bytes(), bytes);
+}
+
+#[tokio::test]
+async fn small_post_request_body_with_trailers_remains_streaming() {
+  let mut trailers = http::HeaderMap::new();
+  trailers.insert("x-trailer", "kept".parse().unwrap());
+  let bytes = Bytes::from_static(b"data");
+  let source = Full::new(bytes.clone())
+    .with_trailers(std::future::ready(Some(Ok::<_, std::convert::Infallible>(
+      trailers,
+    ))))
+    .map_err(|never| -> body::BoxError { match never {} });
+  let body = fast_path_small_exact_request_body(
+    source,
+    16 * 1024,
+    Duration::from_millis(100),
+    small_post_body_options(bytes.len(), 16 * 1024, 16 * 1024),
+    None,
+  )
+  .await
+  .expect("small POST body with trailers should collect");
+
+  assert!(!body.proven_empty());
+  assert!(!body.is_small_exact());
+  let collected = body
+    .collect()
+    .await
+    .expect("materialized streaming body should collect");
+  assert_eq!(collected.trailers().unwrap()["x-trailer"], "kept");
+  assert_eq!(collected.to_bytes(), bytes);
+}
+
+#[test]
+fn small_post_request_body_options_are_strictly_guarded() {
+  let mut headers = http::HeaderMap::new();
+  headers.insert(http::header::CONTENT_LENGTH, "1024".parse().unwrap());
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::POST,
+      true,
+      false,
+      &headers,
+      16 * 1024,
+      16 * 1024
+    )
+    .is_some()
+  );
+
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::POST,
+      true,
+      true,
+      &headers,
+      16 * 1024,
+      16 * 1024
+    )
+    .is_none(),
+    "retry replay keeps bodyful direct-H1 out of the small exact shortcut"
+  );
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::POST,
+      false,
+      false,
+      &headers,
+      16 * 1024,
+      16 * 1024
+    )
+    .is_none(),
+    "only direct-H1 candidates should use the small exact shortcut"
+  );
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::PUT,
+      true,
+      false,
+      &headers,
+      16 * 1024,
+      16 * 1024
+    )
+    .is_none(),
+    "the shortcut is scoped to the small POST benchmark path"
+  );
+
+  let mut trailer_headers = headers.clone();
+  trailer_headers.insert(http::header::TRAILER, "x-trailer".parse().unwrap());
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::POST,
+      true,
+      false,
+      &trailer_headers,
+      16 * 1024,
+      16 * 1024
+    )
+    .is_none()
+  );
+
+  let mut large_headers = http::HeaderMap::new();
+  large_headers.insert(http::header::CONTENT_LENGTH, "32768".parse().unwrap());
+  assert!(
+    fast_path_small_request_body_options(
+      &http::Method::POST,
+      true,
+      false,
+      &large_headers,
+      64 * 1024,
+      16 * 1024
+    )
+    .is_none(),
+    "large request bodies must continue to stream"
+  );
+}
+
+#[tokio::test]
+async fn large_post_request_body_stays_streaming() {
+  let bytes = Bytes::from(vec![b'x'; 32 * 1024]);
+  let body = fast_path_request_body(
+    Full::new(bytes.clone()).map_err(|never| -> body::BoxError { match never {} }),
+    64 * 1024,
+    Duration::from_millis(100),
+    false,
+    false,
+  )
+  .await;
+
+  assert!(!body.proven_empty());
+  assert!(!body.is_small_exact());
+  let collected = body
+    .collect()
+    .await
+    .expect("large streaming request body should collect");
+  assert_eq!(collected.to_bytes(), bytes);
 }
 
 #[tokio::test]

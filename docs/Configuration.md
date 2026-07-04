@@ -737,6 +737,7 @@ trailers = "pass"    # pass | drop
 expect_continue = "auto" # auto | reject
 priority = "pass"    # pass | ignore
 sse_auto_streaming = true
+direct_h1_small_request_body_max_bytes = 16384
 
 [proxy.http2]
 adaptive_window = true
@@ -773,7 +774,7 @@ mode = "legacy_plain" # legacy_plain | plain | json
 
 Static hot-object caching is opt-in. Set `open_file_cache_max_entries`, `open_file_cache_ttl_ms`, and `hot_object_cache_max_bytes` to enable a bounded TTL cache for verified small static responses. `open_file_cache_max_entries` and `open_file_cache_ttl_ms` bound the entry count and freshness window; `hot_object_cache_max_bytes` and `hot_object_cache_max_file_bytes` bound body memory globally and per file. Cache fill and cached-hit refresh open the current file through the secure static-root resolution path. Cached hits preserve validators and range behavior only when the current validator still matches the cached object. Deleted, inaccessible, or replaced files do not continue serving stale cached bodies; they refresh or fail closed from the current filesystem state. Use `0` values to keep the default no-cache behavior.
 
-`proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled.
+`proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses; `drop` keeps the legacy behavior. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled. `direct_h1_small_request_body_max_bytes` is the maximum `Content-Length` that the guarded direct-H1 fast path may read into memory before sending as an exact-size upstream request body; route/global request body limits, downstream body read timeouts, WAF body planning, retry replay gates, and trailer handling still apply.
 
 `proxy.http3.inline_bodyless_fast_path = true` lets HTTP/3 requests that are already plain-proxy fast-path eligible skip per-request task spawning after OxiBelt proves the downstream request body is empty. The optimization is limited to HTTP/3 `GET` and `HEAD` requests without request-body framing headers; unsafe methods, DATA, trailers, delayed bodies, cache policies, body-inspecting WAF rules, dynamic policy, external auth, buffering, upgrades, CONNECT, WebTransport, and non-fast-path routes remain on the general spawned path. The default is `false`.
 

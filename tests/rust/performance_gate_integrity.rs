@@ -362,6 +362,36 @@ fn waf_crs_gate_harness(
   HarnessRun { output, events }
 }
 
+fn min_rps_gate_harness(rows: &[&str], label: &str, min_rps: &str) -> HarnessRun {
+  let functions = format!(
+    "{}\n\n{}",
+    extract_bash_function(
+      &performance_script_text(),
+      "handle_regression_gate_violation"
+    ),
+    extract_bash_function(&performance_script_text(), "assert_min_rps_regression_gate")
+  );
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-min-rps-gate-");
+  let harness_path = temp_dir.join("harness.sh");
+  let events_path = temp_dir.join("events.log");
+  let results_path = temp_dir.join("results.jsonl");
+  fs::write(&results_path, format!("{}\n", rows.join("\n")))
+    .expect("results fixture should be writable");
+  write_min_rps_gate_harness(&harness_path, &functions);
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .env("EVENTS_FILE", &events_path)
+    .env("RESULTS_JSONL", &results_path)
+    .env("LABEL", label)
+    .env("MIN_RPS", min_rps)
+    .output()
+    .expect("Bash harness should execute");
+  let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+  HarnessRun { output, events }
+}
+
 fn external_benchmark_failure_harness(gate_mode: &str) -> HarnessRun {
   let function = extract_bash_function(
     &performance_script_text(),
@@ -767,6 +797,29 @@ assert_waf_crs_regression_gates
   fs::write(path, harness).expect("Bash harness should be writable");
 }
 
+fn write_min_rps_gate_harness(path: &Path, functions: &str) {
+  let harness = format!(
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+results_jsonl="${{RESULTS_JSONL:?}}"
+regression_gate_mode="fail"
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{functions}
+
+assert_min_rps_regression_gate "${{LABEL:?}}" "${{MIN_RPS:?}}"
+"#
+  );
+  fs::write(path, harness).expect("Bash harness should be writable");
+}
+
 fn write_external_benchmark_failure_harness(path: &Path, function: &str) {
   let harness = format!(
     r#"#!/usr/bin/env bash
@@ -1034,6 +1087,7 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
     "--chunked-request-body 1",
     "--h2-streams-per-connection 16",
     "--expect-status 204",
+    "assert_min_rps_regression_gate \"oxibelt-post-1k-json-h2\"",
   ] {
     assert!(
       bodyful_function.contains(expected),
@@ -1048,6 +1102,7 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
     "run_load \"oxibelt-waf-header-only-bodyful\" h2",
     "run_load \"oxibelt-waf-size-only-bodyful\" h2",
     "run_load \"oxibelt-waf-prefix-inspection-bodyful\" h2",
+    "assert_min_rps_regression_gate \"oxibelt-waf-header-only-bodyful\"",
     "--request-body-kind json",
   ] {
     assert!(
@@ -1077,6 +1132,7 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "oxibelt-runtime-direct-h1-control-h2",
     "oxibelt-runtime-direct-h1-experiment-h2",
     "oxibelt-h3-inline-fast-path-experiment",
+    "assert_min_rps_regression_gate \"oxibelt-h3-inline-fast-path-experiment\"",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio",
     "OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only",
     "--inline-bodyless-h3-fast-path",
@@ -2066,6 +2122,46 @@ fn waf_crs_regression_gate_fails_when_required_rows_are_missing() {
 }
 
 #[test]
+fn min_rps_regression_gate_passes_at_floor() {
+  let run = min_rps_gate_harness(
+    &[r#"{"type":"load","label":"oxibelt-post-1k-json-h2","requests":1000,"rps":5000,"p99_ms":8}"#],
+    "oxibelt-post-1k-json-h2",
+    "5000",
+  );
+
+  assert!(
+    run.output.status.success(),
+    "RPS exactly at the configured floor should pass"
+  );
+  assert!(
+    !run.events.contains("FAIL"),
+    "passing min-RPS row should not trip diagnostics"
+  );
+}
+
+#[test]
+fn min_rps_regression_gate_fails_below_floor() {
+  let run = min_rps_gate_harness(
+    &[
+      r#"{"type":"load","label":"oxibelt-waf-header-only-bodyful","requests":1000,"rps":391,"p99_ms":42}"#,
+    ],
+    "oxibelt-waf-header-only-bodyful",
+    "5000",
+  );
+
+  assert!(
+    !run.output.status.success(),
+    "RPS near the observed 391 regression should fail"
+  );
+  assert!(
+    run.events.contains(
+      "FAIL OxiBelt oxibelt-waf-header-only-bodyful regression gate failed: RPS 391 < 5000"
+    ),
+    "failure should identify the low-RPS row"
+  );
+}
+
+#[test]
 fn invalid_serving_type_fails_with_usage_before_docker_setup() {
   let output = Command::new("bash")
     .arg(performance_script_path())
@@ -2974,6 +3070,16 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     script.contains("OXIBELT_PERF_STATIC_16K_H1C_MIN_CADDY_RATIO"),
     "static 16KiB H1C regression threshold should be configurable"
   );
+  for variable in [
+    "OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS",
+    "OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS",
+    "OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS",
+  ] {
+    assert!(
+      script.contains(variable),
+      "bodyful/H3 inline regression threshold {variable} should be configurable"
+    );
+  }
   assert!(
     script.contains("OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO"),
     "TLS handshake rows should be able to use an explicit fixture override"

@@ -106,7 +106,10 @@ use self::response::{
   with_pending_dynamic_person_proof_response_mutations,
 };
 #[cfg(test)]
-pub(crate) use self::response_timeout::DownstreamResponseSendTimeout;
+pub(crate) use self::response_timeout::{
+  DownstreamResponseSendTimeout, DownstreamResponseTimeoutSelected,
+  DownstreamResponseTimeoutSelection,
+};
 pub(crate) use self::response_timeout::{
   downstream_response_send_timeout, with_downstream_response_timeout,
 };
@@ -1274,7 +1277,7 @@ where
     outbound
   } else {
     outbound.map(|body| {
-      body::with_send_timeout(
+      body::with_backpressure_send_timeout(
         body,
         timeouts.upstream_send,
         BodyTimeoutKind::UpstreamRequestSend,
@@ -2419,7 +2422,7 @@ async fn handle_upgrade_request(
     .inject_trace_context(&mut parts.headers, trace_context);
   let outbound = Request::from_parts(parts, body);
   let outbound = outbound.map(|body| {
-    body::with_send_timeout(
+    body::with_backpressure_send_timeout(
       body,
       timeouts.upstream_send,
       BodyTimeoutKind::UpstreamRequestSend,

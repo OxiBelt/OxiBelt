@@ -47,6 +47,9 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
     "OXIBELT_PERF_REMOTE_SIGNER_HANDSHAKE_MIN_LOCAL_RATIO",
     "OXIBELT_PERF_WAF_ENFORCING_MIN_RPS",
     "OXIBELT_PERF_CRS_ENFORCING_MIN_RPS",
+    "OXIBELT_PERF_POST_1K_JSON_H2_MIN_RPS",
+    "OXIBELT_PERF_WAF_HEADER_ONLY_BODYFUL_MIN_RPS",
+    "OXIBELT_PERF_H3_INLINE_FAST_PATH_EXPERIMENT_MIN_RPS",
     "OXIBELT_PERF_WAF_CRS_MAX_ENFORCE_P99_RATIO",
   ] {
     command.env_remove(name);
@@ -890,6 +893,15 @@ fn write_feature_gate_rows(
     &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
     vec![
       load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, monitor_p99),
+      load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+      load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
+      load_row(
+        "oxibelt-h3-inline-fast-path-experiment",
+        "h3",
+        13000.0,
+        1.0,
+        8.0,
+      ),
       load_row(
         "oxibelt-waf-enforcing",
         "h2",
@@ -986,6 +998,15 @@ fn write_required_quorum_evidence_with_h2_p99(
         )),
         vec![
           load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
+          load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+          load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
+          load_row(
+            "oxibelt-h3-inline-fast-path-experiment",
+            "h3",
+            13000.0,
+            1.0,
+            8.0,
+          ),
           load_row("oxibelt-waf-enforcing", "h2", 13000.0, 1.0, 4.0),
           load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 4.0),
           load_row("oxibelt-crs-enforcing", "h2", 10000.0, 1.0, 4.0),
@@ -1055,6 +1076,15 @@ fn write_required_quorum_h1_evidence_with_p99_distribution(
       )),
       vec![
         load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
+        load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+        load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
+        load_row(
+          "oxibelt-h3-inline-fast-path-experiment",
+          "h3",
+          13000.0,
+          1.0,
+          8.0,
+        ),
         load_row("oxibelt-waf-enforcing", "h2", 13000.0, 1.0, 4.0),
         load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 4.0),
         load_row("oxibelt-crs-enforcing", "h2", 10000.0, 1.0, 4.0),
@@ -2794,6 +2824,15 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
     &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
     vec![
       load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
+      load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+      load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
+      load_row(
+        "oxibelt-h3-inline-fast-path-experiment",
+        "h3",
+        13000.0,
+        1.0,
+        8.0,
+      ),
       load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 11.0),
       load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
       load_row("oxibelt-crs-enforcing", "h2", 8600.0, 1.0, 11.0),
@@ -2835,6 +2874,24 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
       .as_f64()
       .expect("remote signer threshold should be emitted"),
     0.90,
+  );
+  assert_close(
+    report["regression_gates"]["thresholds"]["post_1k_json_h2_min_rps"]
+      .as_f64()
+      .expect("POST 1KiB H2 threshold should be emitted"),
+    5000.0,
+  );
+  assert_close(
+    report["regression_gates"]["thresholds"]["waf_header_only_bodyful_min_rps"]
+      .as_f64()
+      .expect("WAF header-only bodyful threshold should be emitted"),
+    5000.0,
+  );
+  assert_close(
+    report["regression_gates"]["thresholds"]["h3_inline_fast_path_experiment_min_rps"]
+      .as_f64()
+      .expect("H3 inline threshold should be emitted"),
+    12000.0,
   );
   assert_eq!(
     report["regression_gates"]["violations"]
@@ -4055,6 +4112,77 @@ fn oxibelt_only_rps_and_p99_gates_become_advisories_when_baseline_stable() {
   find_regression_advisory(&report, "crs_enforcing_min_rps", "crs-enforcing");
   find_regression_advisory(&report, "waf_enforce_p99_ratio", "waf-enforcing");
   find_regression_advisory(&report, "crs_enforce_p99_ratio", "crs-enforcing");
+}
+
+#[test]
+fn bodyful_and_h3_inline_min_rps_gates_fail_below_floor() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 4.0);
+  write_static_gate_rows(&input_dir, 100.0, 100.0, 100.0);
+  write_remote_signer_gate_rows(&input_dir, 1000.0, 1000.0);
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+    vec![
+      load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
+      load_row("oxibelt-waf-enforcing", "h2", 12000.0, 1.0, 11.0),
+      load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
+      load_row("oxibelt-crs-enforcing", "h2", 9200.0, 1.0, 11.0),
+      load_row("oxibelt-post-1k-json-h2", "h2", 391.0, 1.0, 42.0),
+      load_row("oxibelt-waf-header-only-bodyful", "h2", 391.0, 1.0, 42.0),
+      load_row(
+        "oxibelt-h3-inline-fast-path-experiment",
+        "h3",
+        8000.0,
+        1.0,
+        14.0,
+      ),
+    ],
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  assert_eq!(report["regression_gates"]["status"], "fail");
+
+  let post = find_regression_violation(&report, "post_1k_json_h2_min_rps", "post-1k-json-h2");
+  assert_eq!(post["metric"], "median_rps");
+  assert_close(
+    post["observed"].as_f64().expect("POST RPS should exist"),
+    391.0,
+  );
+  assert_close(
+    post["threshold"]
+      .as_f64()
+      .expect("POST threshold should exist"),
+    5000.0,
+  );
+
+  let header_only = find_regression_violation(
+    &report,
+    "waf_header_only_bodyful_min_rps",
+    "waf-header-only-bodyful",
+  );
+  assert_eq!(header_only["metric"], "median_rps");
+  assert_close(
+    header_only["observed"]
+      .as_f64()
+      .expect("WAF header-only RPS should exist"),
+    391.0,
+  );
+
+  let h3_inline = find_regression_violation(
+    &report,
+    "h3_inline_fast_path_experiment_min_rps",
+    "h3-inline-fast-path-experiment",
+  );
+  assert_eq!(h3_inline["metric"], "median_rps");
+  assert_close(
+    h3_inline["observed"]
+      .as_f64()
+      .expect("H3 inline RPS should exist"),
+    8000.0,
+  );
 }
 
 #[test]

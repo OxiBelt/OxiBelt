@@ -2039,6 +2039,7 @@ early_hints = "pass"
 expect_continue = "reject"
 priority = "ignore"
 sse_auto_streaming = false
+direct_h1_small_request_body_max_bytes = 32768
 
 [proxy.http.grpc]
 enabled = true
@@ -2059,6 +2060,10 @@ mode = "json"
   );
   assert_eq!(config.proxy.http.priority, PriorityMode::Ignore);
   assert!(!config.proxy.http.sse_auto_streaming);
+  assert_eq!(
+    config.proxy.http.direct_h1_small_request_body_max_bytes,
+    32768
+  );
   assert!(config.proxy.http.grpc.enabled);
   assert!(!config.proxy.http.grpc.respect_grpc_timeout);
   assert_eq!(config.proxy.http.grpc.retry, GrpcRetryMode::SafeUnary);

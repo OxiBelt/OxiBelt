@@ -307,33 +307,34 @@ impl PlainProxyFastPath {
           record_empty_request_body(snapshot, metric_protocol, &parts.extensions);
           FastPathRequestBody::empty()
         } else {
-          let client_body_timeout =
-            EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-          let request_body_empty_probe_allowed = fast_path_request_body_empty_probe_allowed(
+          match fast_path_prepare_nonempty_request_body(
+            body,
             &parts.method,
             request_version,
             &parts.headers,
-          );
-          let metrics =
-            state
-              .request_path_features
-              .hot_path_metrics
-              .then_some(FastPathRequestBodyMetrics {
-                metrics: state.metrics.as_ref(),
-                protocol: metric_protocol,
-              });
-          let max_request_body_bytes = resolved
-            .route
-            .effective_max_request_body_bytes(&state.config.limits);
-          fast_path_request_body_with_metrics(
-            body,
-            max_request_body_bytes as usize,
-            client_body_timeout,
-            false,
-            request_body_empty_probe_allowed,
-            metrics,
+            state.as_ref(),
+            resolved,
+            upstream_version,
+            direct_candidate,
+            retry_policy.enabled,
+            metric_protocol,
           )
           .await
+          {
+            Ok(request_body) => request_body,
+            Err(error) => {
+              record_upstream_rebuild(false);
+              let (status, message) = fast_path_request_body_error_status(&error);
+              if status == StatusCode::BAD_REQUEST {
+                warn!(error = %error, route = %resolved.route.name, "failed to read small direct-H1 request body");
+              }
+              return with_route_security_headers(
+                text_response(status, message),
+                &state.config.security,
+                resolved.route,
+              );
+            }
+          }
         };
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
         let request_body_proven_empty = request_body.proven_empty();
@@ -433,6 +434,12 @@ impl PlainProxyFastPath {
           record_upstream_rebuild(true);
           let outbound_body = if request_body_proven_empty {
             request_body.into_body()
+          } else if request_body.is_small_exact() {
+            body::with_poll_send_timeout(
+              request_body.into_body(),
+              timeouts.upstream_send,
+              BodyTimeoutKind::UpstreamRequestSend,
+            )
           } else {
             let body = request_body.into_body();
             fast_path_outbound_request_body(

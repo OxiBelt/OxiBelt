@@ -359,8 +359,11 @@ mod tests {
   use http_body_util::{BodyExt, Full};
 
   use crate::config::Config;
-  use crate::proxy::http::DownstreamResponseSendTimeout;
   use crate::proxy::http::body::{self, ProxyBody};
+  use crate::proxy::http::{
+    DownstreamResponseSendTimeout, DownstreamResponseTimeoutSelected,
+    DownstreamResponseTimeoutSelection,
+  };
   use crate::state::AppSnapshot;
   use crate::waf::{HeaderMutation, RequestWafDecision};
 
@@ -600,8 +603,14 @@ x_content_type_options = "nosniff"
       response
         .extensions()
         .get::<DownstreamResponseSendTimeout>()
-        .is_some(),
-      "H3/UDP known-small responses should keep downstream send timeout metadata"
+        .is_some()
+    );
+    assert_eq!(
+      response
+        .extensions()
+        .get::<DownstreamResponseTimeoutSelected>()
+        .map(|selected| selected.0),
+      Some(DownstreamResponseTimeoutSelection::MarkedOnly)
     );
   }
 

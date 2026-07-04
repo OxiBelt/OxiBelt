@@ -348,6 +348,7 @@ trailers = "pass"
 expect_continue = "auto"
 priority = "pass"
 sse_auto_streaming = true
+direct_h1_small_request_body_max_bytes = 16384
 
 [proxy.http2]
 adaptive_window = true
