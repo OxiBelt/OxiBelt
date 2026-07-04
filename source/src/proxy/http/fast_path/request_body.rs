@@ -319,7 +319,16 @@ where
     while let Some(frame) = body.frame().await {
       let frame = frame?;
       match frame.into_data() {
-        Ok(data) => bytes.extend_from_slice(&data),
+        Ok(data) => {
+          let actual = bytes.len().saturating_add(data.len());
+          if actual > expected {
+            return Err(body::boxed_error(RequestBodyLengthMismatch {
+              expected,
+              actual,
+            }));
+          }
+          bytes.extend_from_slice(&data);
+        }
         Err(frame) => {
           if let Ok(frame_trailers) = frame.into_trailers() {
             trailers = Some(frame_trailers);
