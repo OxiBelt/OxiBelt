@@ -26,6 +26,7 @@ pub(crate) mod pools;
 mod sni;
 mod target;
 mod udp;
+mod udp_batch;
 
 const STREAM_TLS_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
 const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_millis(10);

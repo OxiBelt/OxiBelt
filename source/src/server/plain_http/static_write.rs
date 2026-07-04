@@ -2,6 +2,8 @@
 
 use std::future::Future;
 use std::io::{self, IoSlice};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use ::http::{HeaderMap, StatusCode};
@@ -11,6 +13,7 @@ use tokio::net::TcpStream;
 use tracing::debug;
 
 use super::{TimedStaticResponsePlan, response_head::response_head_bytes, sendfile};
+use crate::config::StaticFilesSendfileWriteStrategy;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
 use crate::proxy::http::fast_path::stage_timing;
@@ -18,8 +21,6 @@ use crate::proxy::http::static_files::{
   StaticBodyPlan, StaticResponseHeadBytes, StaticResponsePlan,
 };
 use crate::state::AppSnapshot;
-
-const SENDFILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 pub(super) async fn write_static_plan(
   stream: &mut TcpStream,
@@ -183,9 +184,14 @@ pub(super) async fn write_static_plan(
         head_started_at,
       );
       let head_write_started_at = stage_timing::start(stage_timing_metrics);
-      let head_result = write_all_tcp(
+      let write_strategy = snapshot.config.proxy.static_files.sendfile_write_strategy;
+      let chunk_bytes = snapshot.config.proxy.static_files.sendfile_chunk_bytes;
+      let corked = write_strategy == StaticFilesSendfileWriteStrategy::TcpCork
+        && set_tcp_cork(stream, true).is_ok();
+      let head_result = write_static_file_head(
         stream,
         head,
+        write_strategy,
         response_send_timeout,
         "static sendfile response head write failed",
       )
@@ -202,16 +208,25 @@ pub(super) async fn write_static_plan(
         },
         head_write_started_at,
       );
-      head_result?;
+      if let Err(error) = head_result {
+        if corked {
+          let _ = set_tcp_cork(stream, false);
+        }
+        return Err(error);
+      }
       let sendfile_started_at = stage_timing::start(stage_timing_metrics);
       let sendfile_result = sendfile_all(
         stream,
         &file.file,
         file.offset,
         file.len,
+        chunk_bytes,
         response_send_timeout,
       )
       .await;
+      if corked {
+        let _ = set_tcp_cork(stream, false);
+      }
       stage_timing::record_metrics(
         &snapshot.metrics,
         stage_timing::PATH_STATIC_FILES,
@@ -249,12 +264,14 @@ async fn sendfile_all(
   file: &tokio::fs::File,
   offset: u64,
   len: u64,
+  chunk_bytes: usize,
   response_send_timeout: Duration,
 ) -> anyhow::Result<()> {
   let mut remaining = len;
   let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
+  let chunk_bytes = chunk_bytes.max(1);
   while remaining > 0 {
-    let count = remaining.min(SENDFILE_CHUNK_BYTES as u64) as usize;
+    let count = remaining.min(chunk_bytes as u64) as usize;
     let stream_ref: &TcpStream = &*stream;
     match sendfile::sendfile_once(stream_ref, file, &mut offset, count) {
       Ok(0) => bail!("static sendfile wrote zero bytes"),
@@ -288,9 +305,105 @@ async fn sendfile_all(
   _file: &tokio::fs::File,
   _offset: u64,
   _len: u64,
+  _chunk_bytes: usize,
   _response_send_timeout: Duration,
 ) -> anyhow::Result<()> {
   bail!("kernel sendfile is not available on this platform")
+}
+
+async fn write_static_file_head(
+  stream: &mut TcpStream,
+  bytes: &[u8],
+  strategy: StaticFilesSendfileWriteStrategy,
+  response_send_timeout: Duration,
+  context: &'static str,
+) -> anyhow::Result<()> {
+  match strategy {
+    StaticFilesSendfileWriteStrategy::MsgMore => {
+      write_all_tcp_msg_more(stream, bytes, response_send_timeout, context).await
+    }
+    StaticFilesSendfileWriteStrategy::Auto
+    | StaticFilesSendfileWriteStrategy::Split
+    | StaticFilesSendfileWriteStrategy::TcpCork => {
+      write_all_tcp(stream, bytes, response_send_timeout, context).await
+    }
+  }
+}
+
+#[cfg(target_os = "linux")]
+async fn write_all_tcp_msg_more(
+  stream: &mut TcpStream,
+  mut bytes: &[u8],
+  response_send_timeout: Duration,
+  context: &'static str,
+) -> anyhow::Result<()> {
+  while !bytes.is_empty() {
+    match send_with_flags(stream, bytes, libc::MSG_MORE) {
+      Ok(0) => bail!("{context}"),
+      Ok(written) => bytes = &bytes[written..],
+      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+        downstream_send_timeout(response_send_timeout, stream.writable(), context).await?;
+      }
+      Err(error) => return Err(error).context(context),
+    }
+  }
+  Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn write_all_tcp_msg_more(
+  stream: &mut TcpStream,
+  bytes: &[u8],
+  response_send_timeout: Duration,
+  context: &'static str,
+) -> anyhow::Result<()> {
+  write_all_tcp(stream, bytes, response_send_timeout, context).await
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn send_with_flags(stream: &TcpStream, bytes: &[u8], flags: libc::c_int) -> io::Result<usize> {
+  let result = unsafe {
+    libc::send(
+      stream.as_raw_fd(),
+      bytes.as_ptr().cast(),
+      bytes.len(),
+      flags,
+    )
+  };
+  if result < 0 {
+    Err(io::Error::last_os_error())
+  } else {
+    Ok(result as usize)
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn set_tcp_cork(stream: &TcpStream, enabled: bool) -> io::Result<()> {
+  let value: libc::c_int = i32::from(enabled);
+  let result = unsafe {
+    libc::setsockopt(
+      stream.as_raw_fd(),
+      libc::IPPROTO_TCP,
+      libc::TCP_CORK,
+      (&value as *const libc::c_int).cast(),
+      std::mem::size_of_val(&value) as libc::socklen_t,
+    )
+  };
+  if result == 0 {
+    Ok(())
+  } else {
+    Err(io::Error::last_os_error())
+  }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_tcp_cork(_stream: &TcpStream, _enabled: bool) -> io::Result<()> {
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "TCP_CORK is Linux-only",
+  ))
 }
 
 async fn write_all_tcp(

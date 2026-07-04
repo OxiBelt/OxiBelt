@@ -28,6 +28,7 @@ pub mod external_auth;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 mod h2_tuning;
+pub mod hardening;
 pub mod identity;
 pub mod ipm;
 pub mod lifecycle;
@@ -83,6 +84,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   let observability = runtime::init_observability(&config)?;
   config.validate()?;
+  hardening::apply_runtime_hardening(&config.runtime.hardening)?;
   configure_crypto_runtime(&config);
   netport_switcher::ensure_required_runtime_socket(&config)?;
   config.log_worker_resolution();

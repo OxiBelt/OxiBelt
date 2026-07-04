@@ -139,7 +139,7 @@ fn prometheus_output_includes_direct_h2_pool_events() {
 fn prometheus_output_includes_direct_h1_io_backend_evidence() {
   let metrics = Metrics::new();
   metrics.record_direct_h1_io_backend("tokio_hyper", "h2", "selected");
-  metrics.record_direct_h1_io_backend("compio_experiment", "h2", "fallback");
+  metrics.record_direct_h1_io_backend("compio", "h2", "fallback");
   metrics.record_direct_h1_io_backend("unknown", "h2", "selected");
 
   let body = metrics.prometheus(
@@ -152,9 +152,37 @@ fn prometheus_output_includes_direct_h1_io_backend_evidence() {
     "oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 1"
   ));
   assert!(body.contains(
-    "oxibelt_http_direct_h1_io_backend_total{backend=\"compio_experiment\",protocol=\"h2\",outcome=\"fallback\"} 1"
+    "oxibelt_http_direct_h1_io_backend_total{backend=\"compio\",protocol=\"h2\",outcome=\"fallback\"} 1"
   ));
   assert!(!body.contains("backend=\"unknown\""));
+}
+
+#[test]
+fn prometheus_output_includes_fast_path_selection_evidence() {
+  let metrics = Metrics::new();
+  metrics.record_fast_path_selection("static_sendfile_like", "h1", "selected", "used");
+  metrics.record_fast_path_selection("plain_proxy_h2", "h2", "selected", "used");
+  metrics.record_fast_path_selection("cache_hit", "h3", "selected", "used");
+  metrics.record_fast_path_selection("plain_proxy_h2", "h9", "selected", "used");
+  metrics.record_fast_path_selection("plain_proxy_h2", "h2", "maybe", "used");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains(
+    "oxibelt_http_fast_path_selections_total{path=\"static_sendfile_like\",protocol=\"h1\",outcome=\"selected\",reason=\"used\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_selections_total{path=\"plain_proxy_h2\",protocol=\"h2\",outcome=\"selected\",reason=\"used\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_http_fast_path_selections_total{path=\"cache_hit\",protocol=\"h3\",outcome=\"selected\",reason=\"used\"} 1"
+  ));
+  assert!(!body.contains("protocol=\"h9\""));
+  assert!(!body.contains("outcome=\"maybe\""));
 }
 
 #[test]

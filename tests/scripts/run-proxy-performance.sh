@@ -2962,6 +2962,7 @@ start_oxibelt() {
   local detailed_hot_path_diagnostics=0
   local metrics_disabled=0
   local inline_bodyless_h3_fast_path=0
+  local direct_h1_io_compio=0
   local oxibelt_config
   local -a oxibelt_env_args=()
   local -a remote_signer_args=()
@@ -2977,6 +2978,10 @@ start_oxibelt() {
         ;;
       --inline-bodyless-h3-fast-path)
         inline_bodyless_h3_fast_path=1
+        shift
+        ;;
+      --direct-h1-io-compio)
+        direct_h1_io_compio=1
         shift
         ;;
       *)
@@ -3013,6 +3018,13 @@ start_oxibelt() {
 
 [proxy.http3]
 inline_bodyless_fast_path = true
+EOF
+  fi
+  if [[ "${direct_h1_io_compio}" == "1" ]]; then
+    cat >>"${oxibelt_config}" <<'EOF'
+
+[runtime]
+direct_h1_io = "compio"
 EOF
   fi
   if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
@@ -3809,8 +3821,7 @@ run_runtime_direct_h1_group() {
 
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
     --detailed-hot-path-diagnostics \
-    -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO=compio \
-    -e OXIBELT_EXPERIMENTAL_DIRECT_H1_IO_ACK=benchmark-only
+    --direct-h1-io-compio
   run_load "oxibelt-runtime-direct-h1-experiment-h1" h1 oxibelt "/perf/h1?body=ok" "${duration_seconds}" "${concurrency}"
   run_load "oxibelt-runtime-direct-h1-experiment-h2" h2 oxibelt "/perf/h2?body=ok" "${duration_seconds}" "${concurrency}"
   if h3_probe_succeeds oxibelt; then

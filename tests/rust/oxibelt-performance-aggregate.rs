@@ -9307,7 +9307,7 @@ mod tests {
                       "tokio_hyper": {
                         "selected": 96
                       },
-                      "compio_experiment": {
+                      "compio": {
                         "fallback": 96
                       }
                     }
@@ -9379,7 +9379,7 @@ mod tests {
       .expect("direct-H1 I/O backend diagnostics should aggregate");
     assert_eq!(io_backend.sample_count, 1);
     assert_eq!(io_backend.values["h2"]["tokio_hyper"]["selected"], 96);
-    assert_eq!(io_backend.values["h2"]["compio_experiment"]["fallback"], 96);
+    assert_eq!(io_backend.values["h2"]["compio"]["fallback"], 96);
   }
 
   #[test]

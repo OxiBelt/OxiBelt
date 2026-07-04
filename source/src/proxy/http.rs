@@ -1819,6 +1819,7 @@ where
     merge_not_modified_headers(&mut headers, &parts.headers);
     cached_entry.headers = headers;
     state.metrics.record_cache_hit();
+    record_cache_hit_fast_path_selection(state, request_version);
     let mut response =
       cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
     cache_status::reconcile_cached_security(&mut response, state, resolved.route);
@@ -2901,6 +2902,7 @@ fn handle_cache_lookup_result(
         return None;
       }
       state.metrics.record_cache_hit();
+      record_cache_hit_fast_path_selection(state, request_version);
       if record_events {
         record_route_cache_event(state, resolved.route, "hit", "fresh");
       }
@@ -2991,6 +2993,7 @@ fn handle_cache_lookup_result(
           return None;
         }
         state.metrics.record_cache_hit();
+        record_cache_hit_fast_path_selection(state, request_version);
         if record_events {
           record_route_cache_event(state, resolved.route, "hit", "stale_without_validators");
         }
@@ -3032,6 +3035,18 @@ fn handle_cache_lookup_result(
       None
     }
   }
+}
+
+fn record_cache_hit_fast_path_selection(state: &AppSnapshot, request_version: http::Version) {
+  let protocol = match request_version {
+    http::Version::HTTP_10 | http::Version::HTTP_11 => "h1",
+    http::Version::HTTP_2 => "h2",
+    http::Version::HTTP_3 => "h3",
+    _ => "other",
+  };
+  state
+    .metrics
+    .record_fast_path_selection("cache_hit", protocol, "selected", "used");
 }
 
 fn cache_entry_blocked_by_waf_body_transform(

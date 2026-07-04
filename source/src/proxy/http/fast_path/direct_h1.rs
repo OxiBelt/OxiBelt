@@ -12,13 +12,13 @@ use bytes::Bytes;
 use http::header::CONNECTION;
 use http::{HeaderMap, Method, Request, Response};
 use http_body_util::BodyExt;
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::{Body, Frame};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
+use crate::config::{HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
   DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
@@ -28,6 +28,8 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 
 use super::stage_timing as timing;
 
+#[cfg(target_os = "linux")]
+mod compio_transport;
 mod origin;
 mod request;
 mod runtime_backend;
@@ -214,7 +216,7 @@ struct DirectH1SendMetricOptions {
 }
 
 pub(super) struct DirectH1Response {
-  pub(super) response: Response<Incoming>,
+  pub(super) response: Response<ProxyBody>,
   lease: Option<DirectH1Lease>,
 }
 
@@ -338,6 +340,7 @@ pub(super) async fn try_send_direct_h1(
   direct_selection_used: bool,
   request_body_proven_empty: bool,
   retry_policy_enabled: bool,
+  direct_h1_io_mode: RuntimeDirectH1IoMode,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
   hot_path_metrics: bool,
@@ -389,6 +392,7 @@ pub(super) async fn try_send_direct_h1(
     protocol,
     prepared,
     timeouts,
+    DirectH1RuntimeBackend::from_config(direct_h1_io_mode),
     DirectH1SendMetricOptions {
       hot_path_metrics,
       diagnostic_metrics,
@@ -398,7 +402,10 @@ pub(super) async fn try_send_direct_h1(
   .await;
   if hot_path_metrics {
     match &result {
-      Ok(_) => metrics.record_direct_h1_transport_hit_id(protocol),
+      Ok(_) => {
+        metrics.record_direct_h1_transport_hit_id(protocol);
+        metrics.record_fast_path_selection("direct_h1", protocol.as_str(), "selected", "used");
+      }
       Err(error) if error.to_string().contains("timed out") => {
         metrics
           .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::ConnectError);
@@ -456,13 +463,49 @@ async fn send_prepared_request(
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
+  runtime_backend: DirectH1RuntimeBackend,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
   if metric_options.hot_path_metrics {
     metrics.record_http_upstream_h1_http_primary_request();
   }
   if metric_options.diagnostic_metrics {
-    DirectH1RuntimeBackend::current().record_attempt(metrics, protocol);
+    match runtime_backend {
+      DirectH1RuntimeBackend::TokioHyper => runtime_backend.record_selected(metrics, protocol),
+      DirectH1RuntimeBackend::Compio if prepared.compio_empty_body_wire_eligible() => {
+        runtime_backend.record_selected(metrics, protocol);
+      }
+      DirectH1RuntimeBackend::Compio => {
+        runtime_backend.record_fallback(metrics, protocol);
+        DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
+      }
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  if runtime_backend == DirectH1RuntimeBackend::Compio && prepared.compio_empty_body_wire_eligible()
+  {
+    let result = compio_transport::send_prepared_request(
+      pool,
+      metrics.clone(),
+      protocol,
+      prepared,
+      timeouts,
+      metric_options,
+    )
+    .await;
+    if result.is_err() && metric_options.diagnostic_metrics {
+      runtime_backend.record_error(metrics, protocol);
+    }
+    return result;
+  }
+
+  #[cfg(not(target_os = "linux"))]
+  if runtime_backend == DirectH1RuntimeBackend::Compio {
+    if metric_options.diagnostic_metrics {
+      runtime_backend.record_error(metrics, protocol);
+    }
+    anyhow::bail!("runtime.direct_h1_io = \"compio\" is Linux-only");
   }
 
   let pool_take_started = timing::start(metric_options.timing_enabled);
@@ -561,7 +604,11 @@ async fn send_prepared_request(
 
   let reusable_by_headers = h1_response_allows_reuse(response.headers());
   Ok(DirectH1Response {
-    response,
+    response: response.map(|body| {
+      body
+        .map_err(|error| -> BoxError { Box::new(error) })
+        .boxed()
+    }),
     lease: Some(DirectH1Lease {
       pool,
       metrics: metrics.clone(),

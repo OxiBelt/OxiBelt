@@ -73,6 +73,11 @@ pub(super) fn record_plain_proxy_fast_path_decision(
       state
         .metrics
         .record_plain_proxy_fast_path_decision_hit_id(protocol);
+      if let Some(path) = plain_proxy_selection_path(protocol) {
+        state
+          .metrics
+          .record_fast_path_selection(path, protocol.as_str(), "selected", "used");
+      }
     }
   }
 }
@@ -87,5 +92,18 @@ fn plain_proxy_fast_path_protocol(
     http::Version::HTTP_2 => FastPathMetricProtocol::H2,
     http::Version::HTTP_3 => FastPathMetricProtocol::H3,
     _ => FastPathMetricProtocol::Other,
+  }
+}
+
+fn plain_proxy_selection_path(
+  protocol: crate::metrics::fast_path::labels::FastPathMetricProtocol,
+) -> Option<&'static str> {
+  use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+
+  match protocol {
+    FastPathMetricProtocol::H1 => Some("plain_proxy_h1"),
+    FastPathMetricProtocol::H2 => Some("plain_proxy_h2"),
+    FastPathMetricProtocol::H3 => Some("plain_proxy_h3"),
+    FastPathMetricProtocol::Other => None,
   }
 }

@@ -68,8 +68,8 @@ mod tests {
   fn records_only_known_direct_h1_io_backends() {
     let metrics = FastPathMetrics::default();
     metrics.record_direct_h1_io_backend("tokio_hyper", "h2", "selected");
-    metrics.record_direct_h1_io_backend("compio_experiment", "h3", "fallback");
-    metrics.record_direct_h1_io_backend("compio_experiment", "h3", "error");
+    metrics.record_direct_h1_io_backend("compio", "h3", "fallback");
+    metrics.record_direct_h1_io_backend("compio", "h3", "error");
     metrics.record_direct_h1_io_backend("monoio", "h2", "selected");
     metrics.record_direct_h1_io_backend("tokio_hyper", "h9", "selected");
     metrics.record_direct_h1_io_backend_id(
@@ -89,7 +89,7 @@ mod tests {
     );
     assert_eq!(
       metrics.direct_h1_io_backend_counters[counter_index_id(
-        DirectH1IoBackend::CompioExperiment,
+        DirectH1IoBackend::Compio,
         FastPathMetricProtocol::H3,
         DirectH1IoBackendOutcome::Fallback,
       )]
@@ -98,7 +98,7 @@ mod tests {
     );
     assert_eq!(
       metrics.direct_h1_io_backend_counters[counter_index_id(
-        DirectH1IoBackend::CompioExperiment,
+        DirectH1IoBackend::Compio,
         FastPathMetricProtocol::H3,
         DirectH1IoBackendOutcome::Error,
       )]

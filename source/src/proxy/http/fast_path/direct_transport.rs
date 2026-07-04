@@ -1,5 +1,4 @@
 use http::{Request, Response};
-use hyper::body::Incoming;
 
 use crate::config::HttpVersion;
 use crate::proxy::http::body::ProxyBody;
@@ -25,7 +24,7 @@ pub(super) fn direct_fast_path_transport(
 }
 
 pub(super) enum DirectTransportAttempt {
-  Sent(anyhow::Result<Response<Incoming>>),
+  Sent(anyhow::Result<Response<ProxyBody>>),
   Fallback(Request<ProxyBody>),
 }
 

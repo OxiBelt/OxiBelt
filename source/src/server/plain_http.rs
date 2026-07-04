@@ -338,6 +338,11 @@ async fn try_sendfile_fast_path_inner(
     snapshot
       .metrics
       .record_static_fast_path_response(static_body_source_label(&plan.response.body), "served");
+    if matches!(plan.response.body, StaticBodyPlan::File(_)) {
+      snapshot
+        .metrics
+        .record_fast_path_selection("static_sendfile_like", "h1", "selected", "used");
+    }
     if close_after_response {
       return Ok(SendfilePreflight::Done);
     }

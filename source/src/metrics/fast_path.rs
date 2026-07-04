@@ -8,7 +8,9 @@ use super::StripedCounter;
 mod api;
 mod direct_h1_io;
 pub(crate) mod labels;
+mod selection;
 mod stage;
+mod static_response;
 mod typed;
 const PATH_PLAIN_PROXY: &str = "plain_proxy";
 const HIT_REASON: &str = "eligible";
@@ -78,10 +80,6 @@ const DIRECT_H2_POOL_EVENTS: [&str; 10] = [
   "stale",
   "drop",
 ];
-const STATIC_FAST_PATH_SOURCES: [&str; 4] = ["hot_object", "sendfile", "empty", "text"];
-const STATIC_FAST_PATH_OUTCOMES: [&str; 2] = ["served", "fallback"];
-const STATIC_FAST_PATH_COUNTER_COUNT: usize =
-  STATIC_FAST_PATH_SOURCES.len() * STATIC_FAST_PATH_OUTCOMES.len();
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
@@ -91,7 +89,8 @@ pub(super) struct FastPathMetrics {
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
   direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
   direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
-  static_fast_path_counters: [StripedCounter; STATIC_FAST_PATH_COUNTER_COUNT],
+  static_fast_path_counters: [StripedCounter; static_response::COUNTER_COUNT],
+  selection_counters: [StripedCounter; selection::COUNTER_COUNT],
   stage: stage::FastPathStageMetrics,
 }
 
@@ -106,6 +105,7 @@ impl Default for FastPathMetrics {
       direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_io_backend_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
+      selection_counters: std::array::from_fn(|_| StripedCounter::default()),
       stage: stage::FastPathStageMetrics::default(),
     }
   }
@@ -199,10 +199,11 @@ impl FastPathMetrics {
   }
 
   pub(super) fn record_static_fast_path_response(&self, source: &str, outcome: &str) {
-    let Some(index) = static_fast_path_counter_index(source, outcome) else {
-      return;
-    };
-    self.static_fast_path_counters[index].increment();
+    static_response::record(self, source, outcome);
+  }
+
+  pub(super) fn record_selection(&self, path: &str, protocol: &str, outcome: &str, reason: &str) {
+    selection::record(self, path, protocol, outcome, reason);
   }
 
   pub(super) fn record_stage_duration_ns(
@@ -314,18 +315,8 @@ impl FastPathMetrics {
       );
     }
     direct_h1_io::append_prometheus(self, output);
-    for source in STATIC_FAST_PATH_SOURCES {
-      for outcome in STATIC_FAST_PATH_OUTCOMES {
-        append_static_fast_path_counter(
-          output,
-          source,
-          outcome,
-          self.static_fast_path_counters[static_fast_path_counter_index(source, outcome)
-            .expect("static fast path counter exists")]
-          .load(),
-        );
-      }
-    }
+    static_response::append_prometheus(self, output);
+    selection::append_prometheus(self, output);
     self.stage.append_prometheus(output);
   }
 }
@@ -423,16 +414,6 @@ fn direct_h2_pool_event_index(event: &str) -> Option<usize> {
     .position(|candidate| *candidate == event)
 }
 
-fn static_fast_path_counter_index(source: &str, outcome: &str) -> Option<usize> {
-  let source_index = STATIC_FAST_PATH_SOURCES
-    .iter()
-    .position(|candidate| *candidate == source)?;
-  let outcome_index = STATIC_FAST_PATH_OUTCOMES
-    .iter()
-    .position(|candidate| *candidate == outcome)?;
-  Some(source_index * STATIC_FAST_PATH_OUTCOMES.len() + outcome_index)
-}
-
 fn append_labeled_counter(
   output: &mut String,
   protocol: &str,
@@ -519,17 +500,6 @@ fn append_direct_h2_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("# TYPE oxibelt_http_direct_h2_pool_events_total counter\n");
   output.push_str("oxibelt_http_direct_h2_pool_events_total{event=\"");
   output.push_str(event);
-  output.push_str("\"} ");
-  append_u64(output, value);
-  output.push('\n');
-}
-
-fn append_static_fast_path_counter(output: &mut String, source: &str, outcome: &str, value: u64) {
-  output.push_str("# TYPE oxibelt_http_static_fast_path_responses_total counter\n");
-  output.push_str("oxibelt_http_static_fast_path_responses_total{source=\"");
-  output.push_str(source);
-  output.push_str("\",outcome=\"");
-  output.push_str(outcome);
   output.push_str("\"} ");
   append_u64(output, value);
   output.push('\n');
@@ -717,28 +687,6 @@ mod tests {
     );
     assert_eq!(
       metrics.direct_h2_pool_counters[direct_h2_pool_event_index("connect").unwrap()].load(),
-      1
-    );
-  }
-
-  #[test]
-  fn records_only_known_static_fast_path_responses() {
-    let metrics = FastPathMetrics::default();
-    metrics.record_static_fast_path_response("hot_object", "served");
-    metrics.record_static_fast_path_response("sendfile", "fallback");
-    metrics.record_static_fast_path_response("bytes", "served");
-    metrics.record_static_fast_path_response("sendfile", "unknown");
-
-    assert_eq!(
-      metrics.static_fast_path_counters
-        [static_fast_path_counter_index("hot_object", "served").unwrap()]
-      .load(),
-      1
-    );
-    assert_eq!(
-      metrics.static_fast_path_counters
-        [static_fast_path_counter_index("sendfile", "fallback").unwrap()]
-      .load(),
       1
     );
   }

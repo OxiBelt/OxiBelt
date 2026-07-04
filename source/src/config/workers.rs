@@ -8,8 +8,9 @@ use serde::Deserialize;
 
 use super::{
   Config, HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
-  QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDrainConfig,
-  default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
+  QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDirectH1IoMode,
+  RuntimeDrainConfig, RuntimeHardeningConfig, default_accept_error_backoff_ms,
+  default_runtime_accept_backlog, default_true,
 };
 
 pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
@@ -17,6 +18,7 @@ pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
   "io_timeout_ms",
   "main_gid",
   "main_uid",
+  "pidfd_supervision",
   "socket_dir",
 ];
 
@@ -223,6 +225,10 @@ pub(super) struct RawRuntimeConfig {
   #[serde(default)]
   hot_reload: HotReloadConfig,
   #[serde(default)]
+  direct_h1_io: RuntimeDirectH1IoMode,
+  #[serde(default)]
+  hardening: RuntimeHardeningConfig,
+  #[serde(default)]
   netport_switcher: NetportSwitcherConfig,
 }
 
@@ -238,6 +244,8 @@ impl Default for RawRuntimeConfig {
       accept: RawRuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
+      direct_h1_io: RuntimeDirectH1IoMode::Auto,
+      hardening: RuntimeHardeningConfig::default(),
       netport_switcher: NetportSwitcherConfig::default(),
     }
   }
@@ -254,6 +262,8 @@ pub struct RuntimeConfig {
   pub accept: RuntimeAcceptConfig,
   pub drain: RuntimeDrainConfig,
   pub hot_reload: HotReloadConfig,
+  pub direct_h1_io: RuntimeDirectH1IoMode,
+  pub hardening: RuntimeHardeningConfig,
   pub netport_switcher: NetportSwitcherConfig,
   #[serde(skip)]
   pub worker_resolution: WorkerResolutionConfig,
@@ -271,6 +281,8 @@ impl Default for RuntimeConfig {
       accept: RuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
+      direct_h1_io: RuntimeDirectH1IoMode::Auto,
+      hardening: RuntimeHardeningConfig::default(),
       netport_switcher: NetportSwitcherConfig::default(),
       worker_resolution: WorkerResolutionConfig::default(),
     }
@@ -304,6 +316,8 @@ impl RuntimeConfig {
       accept,
       drain: raw.drain,
       hot_reload: raw.hot_reload,
+      direct_h1_io: raw.direct_h1_io,
+      hardening: raw.hardening,
       netport_switcher: raw.netport_switcher,
       worker_resolution: WorkerResolutionConfig {
         available_parallelism: parallelism.available,
@@ -323,6 +337,7 @@ impl RuntimeConfig {
     self.accept.validate()?;
     self.drain.validate()?;
     self.hot_reload.validate()?;
+    self.hardening.validate()?;
     self.netport_switcher.validate()
   }
 }
@@ -339,6 +354,8 @@ pub struct NetportSwitcherConfig {
   pub main_gid: u32,
   #[serde(default = "default_netport_switcher_io_timeout_ms")]
   pub io_timeout_ms: u64,
+  #[serde(default = "default_true")]
+  pub pidfd_supervision: bool,
 }
 
 impl Default for NetportSwitcherConfig {
@@ -349,6 +366,7 @@ impl Default for NetportSwitcherConfig {
       main_uid: default_netport_switcher_main_uid(),
       main_gid: default_netport_switcher_main_gid(),
       io_timeout_ms: default_netport_switcher_io_timeout_ms(),
+      pidfd_supervision: true,
     }
   }
 }

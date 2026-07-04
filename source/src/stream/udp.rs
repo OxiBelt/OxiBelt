@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{StreamListenerConfig, StreamNetwork};
+use crate::config::{StreamListenerConfig, StreamNetwork, UdpBatchMode};
 use crate::lifecycle::TaskRegistry;
 use crate::limits::ConnectionPermit;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
@@ -54,6 +54,7 @@ pub(super) async fn serve_udp_listener(
   let mut flows: HashMap<SocketAddr, UdpFlowSession> = HashMap::new();
   let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
   let mut expire = tokio::time::interval(Duration::from_secs(5));
+  let mut udp_batch = udp_batch_enabled(config.udp_batch);
 
   loop {
     tokio::select! {
@@ -67,15 +68,48 @@ pub(super) async fn serve_udp_listener(
       _ = expire.tick() => {
         expire_udp_flows(&mut flows, Duration::from_millis(config.idle_timeout_ms), &state, &config.name);
       }
-      received = socket.recv_from(&mut buffer) => {
-        let (len, peer_addr) = received.context("failed to receive UDP stream datagram")?;
-        let datagram = &buffer[..len];
-        if let Err(error) = proxy_udp_datagram(&socket, &mut flows, &config, &state, peer_addr, datagram).await {
-          warn!(name = %config.name, peer = %peer_addr, error = %error, "UDP stream datagram failed");
+      received = recv_udp_datagrams(&socket, &mut buffer, &config, udp_batch) => {
+        let datagrams = match received {
+          Ok(datagrams) => datagrams,
+          Err(error) if config.udp_batch == UdpBatchMode::Auto && udp_batch => {
+            warn!(name = %config.name, error = %error, "UDP batch receive failed; falling back to tokio UdpSocket");
+            udp_batch = false;
+            continue;
+          }
+          Err(error) => return Err(error).context("failed to receive UDP stream datagram"),
+        };
+        for (peer_addr, datagram) in datagrams {
+          if let Err(error) = proxy_udp_datagram(&socket, &mut flows, &config, &state, peer_addr, &datagram).await {
+            warn!(name = %config.name, peer = %peer_addr, error = %error, "UDP stream datagram failed");
+          }
         }
       }
     }
   }
+}
+
+async fn recv_udp_datagrams(
+  socket: &UdpSocket,
+  buffer: &mut [u8],
+  config: &StreamListenerConfig,
+  udp_batch: bool,
+) -> anyhow::Result<Vec<(SocketAddr, Vec<u8>)>> {
+  if udp_batch {
+    let datagrams = crate::stream::udp_batch::recv_from_batch(
+      socket,
+      config.udp_batch_size,
+      MAX_UDP_DATAGRAM_BYTES,
+    )
+    .await?;
+    return Ok(
+      datagrams
+        .into_iter()
+        .map(|datagram| (datagram.peer, datagram.bytes))
+        .collect(),
+    );
+  }
+  let (len, peer_addr) = socket.recv_from(buffer).await?;
+  Ok(vec![(peer_addr, buffer[..len].to_vec())])
 }
 
 struct UdpFlowSession {
@@ -128,15 +162,53 @@ async fn proxy_udp_datagram(
     let downstream_writer = downstream.clone();
     let target_label = resolved.label;
     let listener_name = config.name.clone();
+    let upstream_udp_batch = udp_batch_enabled(config.udp_batch);
+    let upstream_udp_batch_required = config.udp_batch == UdpBatchMode::Required;
+    let udp_batch_size = config.udp_batch_size;
     let upstream_task = tokio::spawn(async move {
       let mut buf = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
-      while let Ok(len) = upstream_reader.recv(&mut buf).await {
-        if downstream_writer
-          .send_to(&buf[..len], peer_addr)
+      let mut upstream_udp_batch = upstream_udp_batch;
+      loop {
+        if upstream_udp_batch {
+          match crate::stream::udp_batch::recv_connected_batch(
+            &upstream_reader,
+            udp_batch_size,
+            MAX_UDP_DATAGRAM_BYTES,
+          )
           .await
-          .is_err()
-        {
-          break;
+          {
+            Ok(datagrams) if !datagrams.is_empty() => {
+              let sent =
+                crate::stream::udp_batch::sendmmsg_to(&downstream_writer, peer_addr, &datagrams)
+                  .await
+                  .unwrap_or(0);
+              for datagram in datagrams.iter().skip(sent) {
+                if downstream_writer
+                  .send_to(datagram, peer_addr)
+                  .await
+                  .is_err()
+                {
+                  return;
+                }
+              }
+              continue;
+            }
+            Ok(_) => continue,
+            Err(_) if upstream_udp_batch_required => return,
+            Err(_) => upstream_udp_batch = false,
+          }
+        }
+        match upstream_reader.recv(&mut buf).await {
+          Ok(len) => {
+            if downstream_writer
+              .send_to(&buf[..len], peer_addr)
+              .await
+              .is_err()
+            {
+              break;
+            }
+          }
+          Err(_) => break,
         }
       }
     });
@@ -303,6 +375,13 @@ fn client_bind_addr(remote: SocketAddr) -> SocketAddr {
   }
 }
 
+fn udp_batch_enabled(mode: UdpBatchMode) -> bool {
+  match mode {
+    UdpBatchMode::Off => false,
+    UdpBatchMode::Auto | UdpBatchMode::Required => cfg!(target_os = "linux"),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -348,6 +427,8 @@ mod tests {
       max_udp_flows,
       udp_datagram_rate: None,
       udp_datagram_burst: 1,
+      udp_batch: crate::config::UdpBatchMode::Auto,
+      udp_batch_size: 16,
       sni_rules: vec![StreamSniRuleConfig {
         name: "tenant-a".to_string(),
         server_names: vec!["tenant-a.example.com".to_string()],

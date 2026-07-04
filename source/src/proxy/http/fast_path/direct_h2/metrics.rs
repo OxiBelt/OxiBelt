@@ -59,6 +59,7 @@ pub(super) fn transport_hit(
 ) {
   if enabled {
     metrics.record_direct_h2_transport_hit_id(protocol);
+    metrics.record_fast_path_selection("direct_h2", protocol.as_str(), "selected", "used");
   }
 }
 

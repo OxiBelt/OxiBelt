@@ -1,5 +1,7 @@
 //! Plain-proxy fast-path handler.
 
+use http_body_util::BodyExt;
+
 use super::*;
 
 pub(crate) struct PlainProxyFastPath;
@@ -485,6 +487,7 @@ impl PlainProxyFastPath {
         true,
         request_body_proven_empty,
         retry_policy.enabled,
+        state.config.runtime.direct_h1_io,
         outbound,
         timeouts,
         snapshot.request_path_features.hot_path_metrics,
@@ -520,7 +523,9 @@ impl PlainProxyFastPath {
         DirectH2SendResult::Sent(result) => {
           DirectTransportAttempt::Sent(result.map(|mut direct| {
             direct_h2_lease = direct.take_lease();
-            direct.response
+            direct
+              .response
+              .map(|body| body.map_err(body::boxed_error).boxed())
           }))
         }
         DirectH2SendResult::Fallback(outbound) => DirectTransportAttempt::Fallback(outbound),
@@ -595,7 +600,7 @@ impl PlainProxyFastPath {
           send_one_shot(client, outbound, timeouts).await
         };
         timing::general_result(snapshot, metric_protocol, result.is_ok(), general_started);
-        result
+        result.map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))
       }
     };
     let upstream_response = match upstream_response_result {

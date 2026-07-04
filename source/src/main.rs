@@ -141,6 +141,7 @@ fn main() -> anyhow::Result<()> {
   }
   if !cli.check {
     oxibelt::netport_switcher::ensure_required_runtime_socket(&config)?;
+    oxibelt::hardening::apply_runtime_hardening(&config.runtime.hardening)?;
   }
 
   config.log_worker_resolution();

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bytes::Bytes;
-use http::header::HOST;
+use http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use http::{HeaderMap, HeaderValue, Method, Request, Uri};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Body;
@@ -72,6 +72,17 @@ impl PreparedDirectH1Request {
 
   pub(super) fn retry_request(&self) -> Option<RetryDirectH1Request> {
     self.retry_request.clone()
+  }
+
+  pub(super) fn compio_empty_body_wire_eligible(&self) -> bool {
+    self.request.body().is_end_stream()
+      && !self.request.headers().contains_key(TRANSFER_ENCODING)
+      && self
+        .request
+        .headers()
+        .get_all(CONTENT_LENGTH)
+        .iter()
+        .all(|value| value.as_bytes().trim_ascii() == b"0")
   }
 
   pub(super) fn into_request(self) -> Request<ProxyBody> {

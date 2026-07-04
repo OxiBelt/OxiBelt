@@ -342,24 +342,24 @@ impl FastPathMetricTransport {
 #[repr(usize)]
 pub(crate) enum DirectH1IoBackend {
   TokioHyper = 0,
-  CompioExperiment = 1,
+  Compio = 1,
 }
 
 impl DirectH1IoBackend {
-  pub(crate) const ALL: [Self; 2] = [Self::TokioHyper, Self::CompioExperiment];
+  pub(crate) const ALL: [Self; 2] = [Self::TokioHyper, Self::Compio];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
   pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::TokioHyper => "tokio_hyper",
-      Self::CompioExperiment => "compio_experiment",
+      Self::Compio => "compio",
     }
   }
 
   pub(crate) fn from_str(value: &str) -> Option<Self> {
     match value {
       "tokio_hyper" => Some(Self::TokioHyper),
-      "compio_experiment" => Some(Self::CompioExperiment),
+      "compio" => Some(Self::Compio),
       _ => None,
     }
   }

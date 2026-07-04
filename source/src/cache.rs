@@ -2,6 +2,7 @@
 //! Cache admission remains separate from HTTP forwarding so policy decisions stay auditable.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,6 +27,7 @@ use crate::shared_state::SharedState;
 mod entry;
 mod external;
 mod external_handler;
+mod file_clone;
 mod fill;
 mod index;
 mod metadata;
@@ -756,7 +758,8 @@ impl ResponseCache {
     entry: CacheEntry,
     publish_external: bool,
   ) -> CacheInsertOutcome {
-    let size = match entry.body.len().checked_add(prepared.header_bytes) {
+    let body_len = entry.body_len();
+    let size = match body_len.checked_add(prepared.header_bytes) {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
     };
@@ -775,7 +778,7 @@ impl ResponseCache {
         &mut inner,
         &prepared.policy,
         &prepared.variant_key,
-        entry.body.len(),
+        body_len,
       ) {
         PreparedBodyAdmission::Admitted => {}
         PreparedBodyAdmission::Warming => return CacheInsertOutcome::AdmissionWarming,
@@ -786,7 +789,7 @@ impl ResponseCache {
         &prepared.policy,
         selected_store,
         &prepared.variant_key,
-        &entry.body,
+        &entry,
         size,
       ) else {
         return CacheInsertOutcome::StoreFailed;
@@ -1278,7 +1281,7 @@ impl ResponseCache {
     policy: &CachePolicyRuntime,
     store: CacheStore,
     key: &str,
-    body: &Bytes,
+    entry: &CacheEntry,
     size: usize,
   ) -> Option<StoredBody> {
     match store {
@@ -1286,28 +1289,28 @@ impl ResponseCache {
         if size > policy.memory_max_size_bytes {
           return None;
         }
-        Some(StoredBody::Memory(body.clone()))
+        entry_body_bytes(entry).map(StoredBody::Memory)
       }
       CacheStore::Tmpfs => {
         if size > policy.memory_max_size_bytes {
           return None;
         }
         let dir = self.tmpfs_dir.as_ref()?;
-        write_body_file(dir, key, body).map(StoredBody::Tmpfs)
+        write_body_file_from_entry(&self.config, dir, key, entry).map(StoredBody::Tmpfs)
       }
       CacheStore::Disk => {
         if policy.disk_max_size_bytes.is_some_and(|limit| size > limit) {
           return None;
         }
         let dir = self.disk_dir.as_ref()?;
-        write_body_file(dir, key, body).map(StoredBody::Disk)
+        write_body_file_from_entry(&self.config, dir, key, entry).map(StoredBody::Disk)
       }
       CacheStore::MemoryThenDisk => {
         if policy.disk_max_size_bytes.is_some_and(|limit| size > limit) {
           return None;
         }
         let dir = self.disk_dir.as_ref()?;
-        write_body_file(dir, key, body).map(StoredBody::Disk)
+        write_body_file_from_entry(&self.config, dir, key, entry).map(StoredBody::Disk)
       }
     }
   }
@@ -2397,6 +2400,45 @@ fn write_body_file(dir: &Path, key: &str, body: &Bytes) -> Option<PathBuf> {
     return None;
   }
   Some(path)
+}
+
+fn write_body_file_from_entry(
+  config: &CacheConfig,
+  dir: &Path,
+  key: &str,
+  entry: &CacheEntry,
+) -> Option<PathBuf> {
+  let path = cache_file_path(dir, key, CacheFileKind::Body)?;
+  let tmp = cache_file_path(dir, key, CacheFileKind::BodyTmp)?;
+  if let Some(file) = &entry.body_file {
+    match file_clone::materialize_cache_file(
+      &file.path,
+      file.offset,
+      file.len,
+      &tmp,
+      &path,
+      config.copy_file_range,
+    ) {
+      Ok(_) => return Some(path),
+      Err(error) => {
+        warn!(error = %error, "failed to materialize file-backed cache body");
+        let _ = std::fs::remove_file(tmp);
+        return None;
+      }
+    }
+  }
+  write_body_file(dir, key, &entry.body)
+}
+
+fn entry_body_bytes(entry: &CacheEntry) -> Option<Bytes> {
+  let Some(file) = &entry.body_file else {
+    return Some(entry.body.clone());
+  };
+  let mut source = std::fs::File::open(&file.path).ok()?;
+  source.seek(SeekFrom::Start(file.offset)).ok()?;
+  let mut body = vec![0_u8; file.len];
+  source.read_exact(&mut body).ok()?;
+  Some(Bytes::from(body))
 }
 
 fn add_size(inner: &mut CacheInner, entry: &StoredEntry) {

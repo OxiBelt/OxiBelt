@@ -600,6 +600,7 @@ async fn send_and_recycle_direct_get(
     FastPathMetricProtocol::H1,
     prepared,
     timeouts,
+    DirectH1RuntimeBackend::TokioHyper,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: false,
@@ -610,7 +611,12 @@ async fn send_and_recycle_direct_get(
   let lease = direct
     .take_lease()
     .expect("direct H1 response should retain its lease");
-  direct.response.into_body().collect().await?;
+  direct
+    .response
+    .into_body()
+    .collect()
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
   lease.recycle_if_reusable(true);
   Ok(())
 }

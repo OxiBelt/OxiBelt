@@ -18,6 +18,7 @@ read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
+direct_h1_io = "auto" # auto | tokio_hyper | compio
 
 [runtime.worker_multipliers]
 runtime = 1.0
@@ -45,6 +46,18 @@ socket_dir = "/run/oxibelt-netport-switcher"
 main_uid = 10001
 main_gid = 10001
 io_timeout_ms = 5000
+pidfd_supervision = true
+
+[runtime.hardening]
+close_range = "auto" # auto | off | required
+
+[runtime.hardening.seccomp]
+mode = "off" # off | log | enforce
+
+[runtime.hardening.landlock]
+mode = "off" # off | enforce
+read_paths = []
+read_write_paths = []
 
 [listeners]
 https_binds = ["0.0.0.0:8443"]
@@ -336,6 +349,8 @@ max_temp_file_bytes = 0
 
 [proxy.static_files]
 sendfile = "off" # off | auto
+sendfile_write_strategy = "auto" # auto | split | msg_more | tcp_cork
+sendfile_chunk_bytes = 1048576
 inline_max_bytes = 16384
 open_file_cache_max_entries = 0
 open_file_cache_ttl_ms = 0
@@ -515,6 +530,7 @@ partition_key = ""
 respect_cache_control = true
 stream_large_objects = true
 stream_chunk_bytes = 1048576
+copy_file_range = "auto" # auto | off | required
 stale_if_error_seconds = 30
 stale_while_revalidate_seconds = 30
 lock = true
@@ -1293,6 +1309,8 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # max_udp_flows = 4096
 # udp_datagram_rate = "200r/s"
 # udp_datagram_burst = 400
+# udp_batch = "auto" # auto | off | required
+# udp_batch_size = 16
 
 #[[turn_upstream_pools]]
 # name = "turn-udp"

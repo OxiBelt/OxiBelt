@@ -15,6 +15,7 @@ mod auth;
 mod crlite;
 mod detail;
 pub(crate) mod fast_path;
+mod fast_path_methods;
 mod http_io;
 mod ocsp;
 mod outbound_revocation;
@@ -192,12 +193,6 @@ impl Metrics {
 
   pub fn record_direct_h2_pool_event(&self, event: &str) {
     self.fast_path.record_direct_h2_pool_event(event);
-  }
-
-  pub fn record_direct_h1_io_backend(&self, backend: &str, protocol: &str, outcome: &str) {
-    self
-      .fast_path
-      .record_direct_h1_io_backend(backend, protocol, outcome);
   }
 
   pub fn record_static_fast_path_response(&self, source: &str, outcome: &str) {

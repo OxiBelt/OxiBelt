@@ -1,5 +1,7 @@
 //! Root wrapper that brokers privileged data-plane binds for an unprivileged OxiBelt child.
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
@@ -68,9 +70,12 @@ async fn run() -> anyhow::Result<i32> {
   };
 
   let mut child = spawn_child(&cli, &config, broker.socket_path(), &overrides)?;
-  let child_pid = child.id();
+  let signal_target = ChildSignalTarget::new(
+    child.id(),
+    config.runtime.netport_switcher.pidfd_supervision,
+  );
   let wait = tokio::task::spawn_blocking(move || child.wait());
-  let exit_code = wait_for_child_with_signal_forwarding(wait, child_pid).await;
+  let exit_code = wait_for_child_with_signal_forwarding(wait, signal_target).await;
   stopped.store(true, Ordering::Relaxed);
   broker_thread
     .join()
@@ -111,7 +116,7 @@ fn spawn_child(
 
 async fn wait_for_child_with_signal_forwarding(
   mut wait: tokio::task::JoinHandle<std::io::Result<ExitStatus>>,
-  child_pid: u32,
+  child: ChildSignalTarget,
 ) -> anyhow::Result<i32> {
   let mut terminate = signal(SignalKind::terminate()).context("failed to register SIGTERM")?;
   let mut interrupt = signal(SignalKind::interrupt()).context("failed to register SIGINT")?;
@@ -122,18 +127,78 @@ async fn wait_for_child_with_signal_forwarding(
         let status = status.context("failed to join OxiBelt child wait task")??;
         return Ok(exit_code_for_status(status));
       }
-      _ = terminate.recv() => forward_signal(child_pid, Signal::SIGTERM)?,
-      _ = interrupt.recv() => forward_signal(child_pid, Signal::SIGINT)?,
-      _ = hangup.recv() => forward_signal(child_pid, Signal::SIGHUP)?,
+      _ = terminate.recv() => child.forward(Signal::SIGTERM)?,
+      _ = interrupt.recv() => child.forward(Signal::SIGINT)?,
+      _ = hangup.recv() => child.forward(Signal::SIGHUP)?,
     }
   }
 }
 
-fn forward_signal(child_pid: u32, signal: Signal) -> anyhow::Result<()> {
-  match kill(Pid::from_raw(child_pid as i32), signal) {
-    Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-    Err(error) => Err(error)
-      .with_context(|| format!("failed to forward {signal:?} to OxiBelt child {child_pid}")),
+struct ChildSignalTarget {
+  pid: u32,
+  #[cfg(target_os = "linux")]
+  pidfd: Option<OwnedFd>,
+}
+
+impl ChildSignalTarget {
+  fn new(pid: u32, pidfd_enabled: bool) -> Self {
+    Self {
+      pid,
+      #[cfg(target_os = "linux")]
+      pidfd: pidfd_enabled.then(|| pidfd_open(pid)).and_then(Result::ok),
+    }
+  }
+
+  fn forward(&self, signal: Signal) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(pidfd) = &self.pidfd {
+      match pidfd_send_signal(pidfd, signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => return Ok(()),
+        Err(error) => {
+          tracing::warn!(
+            error = %error,
+            child_pid = self.pid,
+            signal = ?signal,
+            "pidfd signal forwarding failed; falling back to pid"
+          );
+        }
+      }
+    }
+    match kill(Pid::from_raw(self.pid as i32), signal) {
+      Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+      Err(error) => Err(error)
+        .with_context(|| format!("failed to forward {signal:?} to OxiBelt child {}", self.pid)),
+    }
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
+  let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
+  if fd < 0 {
+    Err(std::io::Error::last_os_error())
+  } else {
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn pidfd_send_signal(pidfd: &OwnedFd, signal: Signal) -> Result<(), nix::errno::Errno> {
+  let result = unsafe {
+    libc::syscall(
+      libc::SYS_pidfd_send_signal,
+      pidfd.as_raw_fd(),
+      signal as libc::c_int,
+      std::ptr::null::<libc::siginfo_t>(),
+      0_u32,
+    )
+  };
+  if result == 0 {
+    Ok(())
+  } else {
+    Err(nix::errno::Errno::last())
   }
 }
 

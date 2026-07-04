@@ -42,9 +42,11 @@ mod route_actions;
 mod route_header_policy;
 mod route_static_files;
 mod route_tls_policy;
+mod runtime_hardening;
 mod security_headers;
 mod sni_forward;
 mod source_paths;
+mod static_files;
 mod stream;
 mod telemetry;
 mod tls;
@@ -89,9 +91,11 @@ pub use route::*;
 pub use route_actions::*;
 pub use route_header_policy::*;
 pub use route_static_files::*;
+pub use runtime_hardening::*;
 pub use security_headers::*;
 pub use sni_forward::*;
 pub use source_paths::{ConfigSourcePaths, DownstreamTlsCertificateSourcePaths};
+pub use static_files::*;
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;
@@ -1438,6 +1442,10 @@ impl Config {
     if self.proxy.http.direct_h1_small_request_body_max_bytes == 0 {
       bail!("proxy.http.direct_h1_small_request_body_max_bytes must be greater than 0");
     }
+    #[cfg(not(target_os = "linux"))]
+    if self.runtime.direct_h1_io == RuntimeDirectH1IoMode::Compio {
+      bail!("runtime.direct_h1_io = \"compio\" is Linux-only");
+    }
     if self.proxy.http2.max_concurrent_streams == 0
       || self.proxy.http2.max_send_buf_size == 0
       || self.proxy.http2.keep_alive_timeout_ms == 0
@@ -1499,6 +1507,9 @@ impl Config {
       bail!(
         "proxy.static_files.open_file_cache_ttl_ms must be greater than 0 when open_file_cache_max_entries is set"
       );
+    }
+    if self.proxy.static_files.sendfile_chunk_bytes == 0 {
+      bail!("proxy.static_files.sendfile_chunk_bytes must be greater than 0");
     }
     if self.proxy.static_files.hot_object_cache_max_bytes > 0 {
       if self.proxy.static_files.open_file_cache_max_entries == 0 {
@@ -1683,6 +1694,10 @@ impl Config {
     }
     if self.cache.lock_wait_timeout_ms == 0 {
       bail!("cache.lock_wait_timeout_ms must be greater than 0");
+    }
+    #[cfg(not(target_os = "linux"))]
+    if self.cache.copy_file_range == CacheCopyFileRangeMode::Required {
+      bail!("cache.copy_file_range = \"required\" is Linux-only");
     }
     validate_cache_admission("cache.admission", &self.cache.admission, &self.cache)?;
     validate_cache_stale_if_error("cache.stale_if_error", &self.cache.stale_if_error)?;
@@ -2580,7 +2595,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "logging.access_log.database.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "runtime" => &[
       "accept",
+      "direct_h1_io",
       "drain",
+      "hardening",
       "hot_reload",
       "linux_only",
       "memory_only_state",
@@ -2603,6 +2620,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "shutdown_delay_ms",
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
+    "runtime.hardening" => &["close_range", "landlock", "seccomp"][..],
+    "runtime.hardening.seccomp" => &["mode"][..],
+    "runtime.hardening.landlock" => &["mode", "read_paths", "read_write_paths"][..],
     "runtime.netport_switcher" => workers::NETPORT_SWITCHER_CONFIG_KEYS,
     "listeners" => &[
       "http1",
@@ -2820,6 +2840,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "open_file_cache_max_entries",
       "open_file_cache_ttl_ms",
       "sendfile",
+      "sendfile_chunk_bytes",
+      "sendfile_write_strategy",
     ][..],
     "limits" => &[
       "client_body_timeout_ms",
@@ -2889,6 +2911,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "external_handlers",
       "lock",
       "lock_wait_timeout_ms",
+      "copy_file_range",
       "max_tag_bytes",
       "max_tags_per_entry",
       "max_vary_fields",
@@ -3478,6 +3501,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "target",
       "udp_datagram_burst",
       "udp_datagram_rate",
+      "udp_batch",
+      "udp_batch_size",
       "upstream_pool",
     ][..],
     "stream_listeners.sni_rules" => &[
@@ -4108,43 +4133,6 @@ pub struct ProxyConfig {
   pub upstream_revocation: OutboundTlsRevocationConfig,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
-pub struct ProxyStaticFilesConfig {
-  #[serde(default)]
-  pub sendfile: StaticFilesSendfileMode,
-  #[serde(default = "default_static_files_inline_max_bytes")]
-  pub inline_max_bytes: usize,
-  #[serde(default)]
-  pub open_file_cache_max_entries: usize,
-  #[serde(default)]
-  pub open_file_cache_ttl_ms: u64,
-  #[serde(default)]
-  pub hot_object_cache_max_bytes: usize,
-  #[serde(default = "default_static_files_hot_object_cache_max_file_bytes")]
-  pub hot_object_cache_max_file_bytes: usize,
-}
-
-impl Default for ProxyStaticFilesConfig {
-  fn default() -> Self {
-    Self {
-      sendfile: StaticFilesSendfileMode::Off,
-      inline_max_bytes: default_static_files_inline_max_bytes(),
-      open_file_cache_max_entries: 0,
-      open_file_cache_ttl_ms: 0,
-      hot_object_cache_max_bytes: 0,
-      hot_object_cache_max_file_bytes: default_static_files_hot_object_cache_max_file_bytes(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum StaticFilesSendfileMode {
-  #[default]
-  Off,
-  Auto,
-}
-
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 pub struct ForwardedHeadersConfig {
   #[serde(default)]
@@ -4577,6 +4565,8 @@ pub struct CacheConfig {
   #[serde(default = "default_cache_lock_wait_timeout_ms")]
   pub lock_wait_timeout_ms: u64,
   #[serde(default)]
+  pub copy_file_range: CacheCopyFileRangeMode,
+  #[serde(default)]
   pub admission: CacheAdmissionConfig,
   #[serde(default)]
   pub stale_if_error: CacheStaleIfErrorConfig,
@@ -4621,6 +4611,7 @@ impl Default for CacheConfig {
       background_refresh: true,
       background_refresh_max_concurrent: default_cache_background_refresh_max_concurrent(),
       lock_wait_timeout_ms: default_cache_lock_wait_timeout_ms(),
+      copy_file_range: CacheCopyFileRangeMode::Auto,
       admission: CacheAdmissionConfig::default(),
       stale_if_error: CacheStaleIfErrorConfig::default(),
       policies: Vec::new(),
@@ -4638,6 +4629,15 @@ pub enum CacheStore {
   Tmpfs,
   Disk,
   MemoryThenDisk,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheCopyFileRangeMode {
+  #[default]
+  Auto,
+  Off,
+  Required,
 }
 
 impl CacheStore {
@@ -5566,14 +5566,6 @@ fn default_max_uri_bytes() -> usize {
 
 fn default_max_request_body_bytes() -> u64 {
   10_485_760
-}
-
-fn default_static_files_inline_max_bytes() -> usize {
-  16 * 1024
-}
-
-fn default_static_files_hot_object_cache_max_file_bytes() -> usize {
-  64 * 1024
 }
 
 fn default_buffering_max_memory_body_bytes() -> usize {

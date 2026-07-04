@@ -99,6 +99,19 @@ impl Config {
           listener.name
         );
       }
+      if listener.udp_batch_size == 0 {
+        bail!(
+          "stream listener {} udp_batch_size must be greater than 0",
+          listener.name
+        );
+      }
+      #[cfg(not(target_os = "linux"))]
+      if listener.udp_batch == UdpBatchMode::Required {
+        bail!(
+          "stream listener {} udp_batch = \"required\" is Linux-only",
+          listener.name
+        );
+      }
       if let Some(rate) = listener.udp_datagram_rate.as_deref() {
         crate::limits::parse_rate(rate)
           .with_context(|| format!("stream listener {} udp_datagram_rate", listener.name))?;
@@ -145,6 +158,10 @@ pub struct StreamListenerConfig {
   #[serde(default = "default_udp_rate_limit_burst")]
   pub udp_datagram_burst: u32,
   #[serde(default)]
+  pub udp_batch: UdpBatchMode,
+  #[serde(default = "default_udp_batch_size")]
+  pub udp_batch_size: usize,
+  #[serde(default)]
   pub sni_rules: Vec<StreamSniRuleConfig>,
 }
 
@@ -154,6 +171,15 @@ pub enum StreamNetwork {
   #[default]
   Tcp,
   Udp,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UdpBatchMode {
+  #[default]
+  Auto,
+  Off,
+  Required,
 }
 
 pub const STREAM_NETWORK_WIRE_VALUES: &[&str] = &["tcp", "udp"];
@@ -407,6 +433,10 @@ fn default_max_udp_flows() -> usize {
 
 fn default_udp_rate_limit_burst() -> u32 {
   DEFAULT_UDP_RATE_LIMIT_BURST
+}
+
+fn default_udp_batch_size() -> usize {
+  16
 }
 
 pub fn parse_stream_target(target: &str) -> anyhow::Result<(String, u16)> {

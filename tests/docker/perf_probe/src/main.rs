@@ -3439,7 +3439,7 @@ oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 5
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
 oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 19
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
-oxibelt_http_direct_h1_io_backend_total{backend=\"compio_experiment\",protocol=\"h2\",outcome=\"fallback\"} 19
+oxibelt_http_direct_h1_io_backend_total{backend=\"compio\",protocol=\"h2\",outcome=\"fallback\"} 19
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
 oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h3\",outcome=\"selected\"} 29
 # TYPE oxibelt_http_static_fast_path_responses_total counter
@@ -3522,7 +3522,7 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
       19
     );
     assert_eq!(
-      parsed["io_backend"]["direct_h1"]["h2"]["compio_experiment"]["fallback"],
+      parsed["io_backend"]["direct_h1"]["h2"]["compio"]["fallback"],
       19
     );
     assert_eq!(
