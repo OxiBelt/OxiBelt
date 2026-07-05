@@ -400,7 +400,7 @@ fn small_post_request_body_options_are_strictly_guarded() {
       16 * 1024
     )
     .is_none(),
-    "only direct-H1 candidates should use the small exact shortcut"
+    "only eligible small-body candidates should use the small exact shortcut"
   );
   assert!(
     fast_path_small_request_body_options(

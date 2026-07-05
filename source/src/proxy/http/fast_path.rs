@@ -89,7 +89,7 @@ use self::request_body::{
 #[cfg(test)]
 use self::request_body::{
   fast_path_request_body_empty_probe_allowed, fast_path_request_body_with_metrics,
-  fast_path_small_request_body_options,
+  fast_path_small_request_body_candidate, fast_path_small_request_body_options,
 };
 use self::response_body::{
   FastPathResponseBody, FastPathResponseBodyOptions, FastPathResponseSemantics,

@@ -317,7 +317,6 @@ impl PlainProxyFastPath {
             state.as_ref(),
             resolved,
             upstream_version,
-            direct_candidate,
             retry_policy.enabled,
             metric_protocol,
           )

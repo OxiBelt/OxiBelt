@@ -17,6 +17,7 @@ mod h3;
 mod person_proof;
 mod post_probe_direct_h1;
 mod response_body;
+mod small_body_candidate;
 mod small_exact_security;
 
 mod common {

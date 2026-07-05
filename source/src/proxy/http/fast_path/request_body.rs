@@ -17,6 +17,7 @@ use crate::proxy::http::request_framing::{
 };
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
+use crate::waf::BodyNeed;
 
 #[cfg(test)]
 pub(super) fn fast_path_empty_request_body() -> ProxyBody {
@@ -101,13 +102,13 @@ impl FastPathSmallRequestBodyOptions {
 
 pub(super) fn fast_path_small_request_body_options(
   method: &Method,
-  direct_h1_candidate: bool,
+  small_body_candidate: bool,
   retry_policy_enabled: bool,
   headers: &HeaderMap,
   max_body_bytes: usize,
   small_body_max_bytes: usize,
 ) -> Option<FastPathSmallRequestBodyOptions> {
-  if !direct_h1_candidate
+  if !small_body_candidate
     || retry_policy_enabled
     || method != Method::POST
     || headers.contains_key(TRANSFER_ENCODING)
@@ -128,6 +129,13 @@ pub(super) fn fast_path_small_request_body_options(
     return None;
   }
   Some(FastPathSmallRequestBodyOptions::new(content_length))
+}
+
+pub(super) fn fast_path_small_request_body_candidate(
+  upstream_version: HttpVersion,
+  request_waf_body_need: BodyNeed,
+) -> bool {
+  upstream_version == HttpVersion::H1 && request_waf_body_need == BodyNeed::None
 }
 
 impl Body for FastPathRequestBody {
@@ -207,7 +215,6 @@ pub(super) fn fast_path_prepare_nonempty_request_body<'a, B>(
   state: &'a AppSnapshot,
   resolved: &ResolvedRoute<'_>,
   upstream_version: HttpVersion,
-  direct_candidate: bool,
   retry_policy_enabled: bool,
   metric_protocol: FastPathMetricProtocol,
 ) -> impl std::future::Future<Output = Result<FastPathRequestBody, body::BoxError>> + Send + 'a
@@ -230,7 +237,10 @@ where
     .effective_max_request_body_bytes(&state.config.limits) as usize;
   let small_options = fast_path_small_request_body_options(
     method,
-    direct_candidate && upstream_version == HttpVersion::H1,
+    fast_path_small_request_body_candidate(
+      upstream_version,
+      resolved.execution_plan.waf.request.body_need(),
+    ),
     retry_policy_enabled,
     headers,
     max_body_bytes,

@@ -2947,6 +2947,61 @@ assert_active_proxy_container_running() {
   fi
 }
 
+upsert_oxibelt_config_scalar() {
+  local config_path="$1"
+  local table="$2"
+  local key="$3"
+  local value="$4"
+  local tmp="${config_path}.tmp"
+
+  awk -v table="${table}" -v key="${key}" -v value="${value}" '
+    function section_name(line, section) {
+      section = line
+      sub(/^[[:space:]]*\[\[?/, "", section)
+      sub(/\]\]?[[:space:]]*$/, "", section)
+      return section
+    }
+
+    function simple_table(line) {
+      return line ~ /^[[:space:]]*\[[^][]+\][[:space:]]*$/
+    }
+
+    /^[[:space:]]*\[\[?[^]]+\]\]?[[:space:]]*$/ {
+      if (in_table && !inserted) {
+        print key " = " value
+        inserted = 1
+      }
+      in_table = (simple_table($0) && section_name($0) == table)
+      found_table = found_table || in_table
+      print
+      next
+    }
+
+    in_table && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      if (!inserted) {
+        print key " = " value
+        inserted = 1
+      }
+      next
+    }
+
+    { print }
+
+    END {
+      if (in_table && !inserted) {
+        print key " = " value
+        inserted = 1
+      }
+      if (!found_table) {
+        print ""
+        print "[" table "]"
+        print key " = " value
+      }
+    }
+  ' "${config_path}" >"${tmp}"
+  mv "${tmp}" "${config_path}"
+}
+
 start_oxibelt() {
   local scenario="$1"
   local alias_name="$2"
@@ -3014,18 +3069,10 @@ start_oxibelt() {
     mv "${oxibelt_config}.tmp" "${oxibelt_config}"
   fi
   if [[ "${inline_bodyless_h3_fast_path}" == "1" ]]; then
-    cat >>"${oxibelt_config}" <<'EOF'
-
-[proxy.http3]
-inline_bodyless_fast_path = true
-EOF
+    upsert_oxibelt_config_scalar "${oxibelt_config}" "proxy.http3" "inline_bodyless_fast_path" "true"
   fi
   if [[ "${direct_h1_io_compio}" == "1" ]]; then
-    cat >>"${oxibelt_config}" <<'EOF'
-
-[runtime]
-direct_h1_io = "compio"
-EOF
+    upsert_oxibelt_config_scalar "${oxibelt_config}" "runtime" "direct_h1_io" '"compio"'
   fi
   if grep -Eq '^[[:space:]]*\[tls[.]remote_signer\]' "${fixture_dir}/config/oxibelt.toml"; then
     remote_signer=1

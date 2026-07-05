@@ -1134,9 +1134,10 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "oxibelt-h3-inline-fast-path-experiment",
     "assert_min_rps_regression_gate \"oxibelt-h3-inline-fast-path-experiment\"",
     "--direct-h1-io-compio",
-    "direct_h1_io = \"compio\"",
+    "upsert_oxibelt_config_scalar",
+    "\"runtime\" \"direct_h1_io\" '\"compio\"'",
     "--inline-bodyless-h3-fast-path",
-    "inline_bodyless_fast_path = true",
+    "\"proxy.http3\" \"inline_bodyless_fast_path\" \"true\"",
     "h3_inline_diagnostic_load_label",
     "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
@@ -1147,6 +1148,76 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
       "performance script should include runtime-direct-h1 experiment evidence: {expected}"
     );
   }
+}
+
+#[test]
+fn runtime_direct_h1_config_overrides_upsert_existing_toml_tables() {
+  let temp = HarnessTempDir::new("oxibelt-config-upsert-");
+  let config_path = temp.join("oxibelt.toml");
+  let harness_path = temp.join("upsert.sh");
+  fs::write(
+    &config_path,
+    r#"[runtime]
+worker_threads = 2
+
+[proxy.http3]
+enabled = true
+"#,
+  )
+  .expect("config fixture should be writable");
+  fs::write(
+    &harness_path,
+    format!(
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+
+{}
+
+upsert_oxibelt_config_scalar "$1" "runtime" "direct_h1_io" '"compio"'
+upsert_oxibelt_config_scalar "$1" "proxy.http3" "inline_bodyless_fast_path" "true"
+"#,
+      extract_bash_function(&performance_script_text(), "upsert_oxibelt_config_scalar")
+    ),
+  )
+  .expect("Bash harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .arg(&config_path)
+    .output()
+    .expect("Bash harness should run");
+  assert!(
+    output.status.success(),
+    "Bash harness failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let config_text = fs::read_to_string(&config_path).expect("config should be readable");
+  assert_eq!(config_text.matches("[runtime]").count(), 1);
+  assert_eq!(config_text.matches("[proxy.http3]").count(), 1);
+  assert_eq!(config_text.matches("direct_h1_io").count(), 1);
+  assert_eq!(config_text.matches("inline_bodyless_fast_path").count(), 1);
+
+  let value: toml::Value =
+    toml::from_str(&config_text).expect("mutated config should remain valid TOML");
+  assert_eq!(
+    value
+      .get("runtime")
+      .and_then(toml::Value::as_table)
+      .and_then(|runtime| runtime.get("direct_h1_io"))
+      .and_then(toml::Value::as_str),
+    Some("compio")
+  );
+  assert_eq!(
+    value
+      .get("proxy")
+      .and_then(toml::Value::as_table)
+      .and_then(|proxy| proxy.get("http3"))
+      .and_then(toml::Value::as_table)
+      .and_then(|http3| http3.get("inline_bodyless_fast_path"))
+      .and_then(toml::Value::as_bool),
+    Some(true)
+  );
 }
 
 #[test]
