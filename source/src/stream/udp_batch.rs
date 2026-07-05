@@ -11,6 +11,12 @@ use std::os::fd::AsRawFd;
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+const UDP_BATCH_MSG_DONTWAIT: libc::c_uint = libc::MSG_DONTWAIT as libc::c_uint;
+
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+const UDP_BATCH_MSG_DONTWAIT: libc::c_int = libc::MSG_DONTWAIT;
+
 #[derive(Debug)]
 pub(super) struct UdpBatchDatagram {
   pub(super) peer: SocketAddr,
@@ -159,7 +165,7 @@ fn recvmmsg_from_once(
       fd,
       messages.as_mut_ptr(),
       batch_size as libc::c_uint,
-      libc::MSG_DONTWAIT,
+      UDP_BATCH_MSG_DONTWAIT,
       std::ptr::null_mut(),
     )
   };
@@ -205,7 +211,7 @@ fn recvmmsg_connected_once(
       fd,
       messages.as_mut_ptr(),
       batch_size as libc::c_uint,
-      libc::MSG_DONTWAIT,
+      UDP_BATCH_MSG_DONTWAIT,
       std::ptr::null_mut(),
     )
   };
@@ -249,7 +255,7 @@ fn sendmmsg_to_once(
       fd,
       messages.as_mut_ptr(),
       messages.len() as libc::c_uint,
-      libc::MSG_DONTWAIT,
+      UDP_BATCH_MSG_DONTWAIT,
     )
   };
   if sent < 0 {
