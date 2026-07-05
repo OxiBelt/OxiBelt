@@ -469,22 +469,14 @@ async fn send_prepared_request(
   if metric_options.hot_path_metrics {
     metrics.record_http_upstream_h1_http_primary_request();
   }
+  let use_compio_transport = runtime_backend == DirectH1RuntimeBackend::Compio
+    && compio_transport_eligible(protocol, &prepared);
   if metric_options.diagnostic_metrics {
-    match runtime_backend {
-      DirectH1RuntimeBackend::TokioHyper => runtime_backend.record_selected(metrics, protocol),
-      DirectH1RuntimeBackend::Compio if prepared.compio_empty_body_wire_eligible() => {
-        runtime_backend.record_selected(metrics, protocol);
-      }
-      DirectH1RuntimeBackend::Compio => {
-        runtime_backend.record_fallback(metrics, protocol);
-        DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
-      }
-    }
+    record_runtime_backend_selection(metrics, protocol, runtime_backend, use_compio_transport);
   }
 
   #[cfg(target_os = "linux")]
-  if runtime_backend == DirectH1RuntimeBackend::Compio && prepared.compio_empty_body_wire_eligible()
-  {
+  if use_compio_transport {
     let result = compio_transport::send_prepared_request(
       pool,
       metrics.clone(),
@@ -501,7 +493,7 @@ async fn send_prepared_request(
   }
 
   #[cfg(not(target_os = "linux"))]
-  if runtime_backend == DirectH1RuntimeBackend::Compio {
+  if use_compio_transport {
     if metric_options.diagnostic_metrics {
       runtime_backend.record_error(metrics, protocol);
     }
@@ -679,6 +671,31 @@ async fn connect_sender_inner(
     }
   });
   Ok(sender)
+}
+
+fn compio_transport_eligible(
+  protocol: FastPathMetricProtocol,
+  prepared: &PreparedDirectH1Request,
+) -> bool {
+  protocol == FastPathMetricProtocol::H1 && prepared.compio_empty_body_wire_eligible()
+}
+
+fn record_runtime_backend_selection(
+  metrics: &Metrics,
+  protocol: FastPathMetricProtocol,
+  runtime_backend: DirectH1RuntimeBackend,
+  use_compio_transport: bool,
+) {
+  match runtime_backend {
+    DirectH1RuntimeBackend::TokioHyper => runtime_backend.record_selected(metrics, protocol),
+    DirectH1RuntimeBackend::Compio if use_compio_transport => {
+      runtime_backend.record_selected(metrics, protocol);
+    }
+    DirectH1RuntimeBackend::Compio => {
+      runtime_backend.record_fallback(metrics, protocol);
+      DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
+    }
+  }
 }
 
 fn h1_response_allows_reuse(headers: &HeaderMap) -> bool {

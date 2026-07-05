@@ -9,6 +9,7 @@ use url::Url;
 
 use super::*;
 
+mod runtime_backend;
 mod streaming;
 
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
