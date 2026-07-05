@@ -25,6 +25,9 @@ use crate::proxy::http::body::{self, BoxError, ProxyBody, ProxyBodyFrame};
 use super::request::PreparedDirectH1Request;
 use super::{DirectH1Pool, DirectH1Response, DirectH1SendMetricOptions, timing};
 
+#[cfg(test)]
+mod tests;
+
 const RESPONSE_HEAD_BUFFER_LIMIT: usize = 64 * 1024;
 const RESPONSE_IO_BUFFER_BYTES: usize = 16 * 1024;
 const BODY_CHANNEL_CAPACITY: usize = 16;
@@ -367,10 +370,15 @@ fn response_body_mode(
   {
     return Ok(ResponseBodyMode::None);
   }
-  if transfer_encoding_is_chunked(headers) {
+  let chunked = transfer_encoding_is_chunked(headers);
+  let length = content_length(headers)?;
+  if chunked {
+    if length.is_some() {
+      bail!("ambiguous upstream response framing: transfer-encoding chunked with content-length");
+    }
     return Ok(ResponseBodyMode::Chunked);
   }
-  if let Some(length) = content_length(headers)? {
+  if let Some(length) = length {
     return Ok(ResponseBodyMode::ContentLength(length));
   }
   Ok(ResponseBodyMode::UntilClose)
