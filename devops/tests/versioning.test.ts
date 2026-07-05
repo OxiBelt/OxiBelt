@@ -27,7 +27,7 @@ type ReleasePlanSummary = {
 }
 /* eslint-enable @typescript-eslint/naming-convention */
 
-function CreateWorkspace(ManifestVersion = '0.1.0', LockVersion = '0.1.0'): Workspace {
+function CreateWorkspace(ManifestVersion = '0.0.0', LockVersion = '0.0.0'): Workspace {
   const Root = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-versioning-'))
   const SourceDir = Path.join(Root, 'source')
   Fs.mkdirSync(SourceDir)
@@ -170,12 +170,12 @@ test('check mode accepts matching committed Cargo versions', TestContext => {
   Assert.deepEqual(Result, {
     mode: 'check',
     packageName: PackageName,
-    version: '0.1.0'
+    version: '0.0.0'
   })
 })
 
 test('check mode rejects mismatched committed Cargo versions', TestContext => {
-  const WorkspaceValue = CreateWorkspace('0.1.0', '0.2.0')
+  const WorkspaceValue = CreateWorkspace('0.0.0', '0.2.0')
   TestContext.after(() => Cleanup(WorkspaceValue))
 
   Assert.throws(

@@ -27,12 +27,8 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(chart["apiVersion"], "v2");
   assert_eq!(chart["name"], "oxibelt");
   assert_eq!(chart["type"], "application");
-  assert!(
-    chart["version"]
-      .as_str()
-      .is_some_and(|version| version != "0.0.0"),
-    "chart version should be a real semver"
-  );
+  assert_eq!(chart["version"], "0.0.0");
+  assert_eq!(chart["appVersion"], "0.0.0");
 
   let values = read_yaml("deploy/helm/oxibelt/values.yaml");
   assert_eq!(values["workload"]["kind"], "Deployment");
@@ -115,6 +111,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
 
 #[test]
 fn gateway_controller_chart_exposes_controller_runtime_options() {
+  let chart = read_yaml("deploy/helm/oxibelt-gateway-controller/Chart.yaml");
+  assert_eq!(chart["apiVersion"], "v2");
+  assert_eq!(chart["name"], "oxibelt-gateway-controller");
+  assert_eq!(chart["type"], "application");
+  assert_eq!(chart["version"], "0.0.0");
+  assert_eq!(chart["appVersion"], "0.0.0");
+
   let values = read_yaml("deploy/helm/oxibelt-gateway-controller/values.yaml");
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
   assert_eq!(values["backendResolution"], "cluster_dns");

@@ -86,7 +86,7 @@ case "${artifact_arch}" in
 esac
 
 if [[ -z "${oxibelt_version}" ]]; then
-  oxibelt_version="dev"
+  oxibelt_version="0.0.0"
 fi
 
 if [[ -z "${oxibelt_revision}" ]]; then

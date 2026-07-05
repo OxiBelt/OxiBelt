@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "oxibelt"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",

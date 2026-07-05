@@ -31,7 +31,7 @@ source = "https://packs.example.test/vaultwarden/0.3.0/rulepack.oxirule-rulepack
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 signature_type = "openpgp"
 signature = "https://packs.example.test/vaultwarden/0.3.0/rulepack.sig"
-min_oxibelt_version = "0.1.0"
+min_oxibelt_version = "0.0.0"
 license = "Apache-2.0"
 maintainers = ["example-security"]
 description = "Vaultwarden hardening"
@@ -499,7 +499,7 @@ fn catalog_selection(
       sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
       signature_type: Some("openpgp".to_string()),
       signature: Some(Url::parse(signature_url).expect("signature url")),
-      min_oxibelt_version: Some("0.1.0".to_string()),
+      min_oxibelt_version: Some("0.0.0".to_string()),
       license: Some("Apache-2.0".to_string()),
       maintainers: vec!["example-security".to_string()],
       description: Some("Vaultwarden hardening".to_string()),
@@ -529,7 +529,7 @@ source = "http://{addr}/rulepack.oxirule-rulepack.toml"
 sha256 = "{}"
 signature_type = "openpgp"
 signature = "http://{addr}/rulepack.sig"
-min_oxibelt_version = "0.1.0"
+min_oxibelt_version = "0.0.0"
 "#,
     sha256_hex(rulepack)
   )
@@ -594,7 +594,7 @@ source = "{source_url}"
 sha256 = "{sha256}"
 signature_type = "openpgp"
 signature = "{signature_url}"
-min_oxibelt_version = "0.1.0"
+min_oxibelt_version = "0.0.0"
 "#
   )
   .into_bytes();

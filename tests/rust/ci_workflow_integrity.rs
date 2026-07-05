@@ -630,10 +630,11 @@ fn alpine_dockerfile_records_release_ref_name_label() {
   let script = docker_image_artifact_build_script_text();
 
   assert!(
-    dockerfile.contains("ARG OXIBELT_REF_NAME=dev")
+    dockerfile.contains("ARG OXIBELT_VERSION=0.0.0")
+      && dockerfile.contains("ARG OXIBELT_REF_NAME=0.0.0")
       && dockerfile.contains("ARG OXIBELT_REF_NAME")
       && dockerfile.contains("org.opencontainers.image.ref.name=\"${OXIBELT_REF_NAME}\""),
-    "source/ops/Dockerfile.alpine should expose the validated release tag as an OCI ref.name label"
+    "source/ops/Dockerfile.alpine should default direct image builds to 0.0.0 and expose the validated release tag as an OCI ref.name label"
   );
   for expected in [
     "OXIBELT_DOCKER_IMAGE_VERSION",
