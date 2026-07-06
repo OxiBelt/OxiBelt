@@ -74,6 +74,16 @@ impl PreparedDirectH1Request {
     self.retry_request.clone()
   }
 
+  pub(super) fn retry_prepared(&self) -> Option<Self> {
+    self.retry_request.clone().map(|retry_request| {
+      let request = retry_request.clone().into_request();
+      Self {
+        request,
+        retry_request: Some(retry_request),
+      }
+    })
+  }
+
   pub(super) fn compio_empty_body_wire_eligible(&self) -> bool {
     self.request.body().is_end_stream()
       && !self.request.headers().contains_key(TRANSFER_ENCODING)

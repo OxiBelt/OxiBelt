@@ -1550,6 +1550,16 @@ h3_inline_diagnostic_load_label() {
   [[ "${host}" == "oxibelt" && "${label}:${protocol}" == "oxibelt-h3-inline-fast-path-experiment:h3" ]]
 }
 
+runtime_direct_h1_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  case "${host}:${label}:${protocol}" in
+    oxibelt:oxibelt-runtime-direct-h1-experiment-h1:h1|oxibelt:oxibelt-runtime-direct-h1-experiment-h2:h2|oxibelt:oxibelt-runtime-direct-h1-experiment-h3:h3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 h2_multiplex_diagnostic_load_label() {
   local label="$1"
   local protocol="$2"
@@ -1564,6 +1574,7 @@ diagnostic_load_label() {
   direct_h2_diagnostic_load_label "$@" \
     || metrics_mode_diagnostic_load_label "$@" \
     || h3_inline_diagnostic_load_label "$@" \
+    || runtime_direct_h1_diagnostic_load_label "$@" \
     || h2_multiplex_diagnostic_load_label "$@"
 }
 

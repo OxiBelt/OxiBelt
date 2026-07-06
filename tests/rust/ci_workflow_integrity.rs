@@ -2288,8 +2288,8 @@ fn docker_performance_job_uses_sharded_repeated_sampling() {
     workflow.contains("diagnostic_warning_count=0")
       && workflow.contains("diagnostic_warning_count=\"$(jq '[.[] | select((.diagnostic // false) == true and (.diagnostic_status // \"\") != \"pass\")] | length'")
       && workflow.contains("iteration_status=\"diagnostic_warning\"")
-      && workflow.contains("completed with ${diagnostic_warning_count} diagnostic comparator warning(s)"),
-    "docker-performance should distinguish non-blocking diagnostic comparator warnings from primary iteration failures"
+      && workflow.contains("completed with ${diagnostic_warning_count} diagnostic performance warning(s)"),
+    "docker-performance should distinguish non-blocking diagnostic warnings from primary iteration failures"
   );
   assert!(
     workflow.contains("::warning title=Docker performance iteration failed::")

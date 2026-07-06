@@ -1920,7 +1920,7 @@ jobs:
               fi
               if [[ "${status}" == "0" && "${diagnostic_warning_count}" != "0" ]]; then
                 iteration_status="diagnostic_warning"
-                iteration_reason="completed with ${diagnostic_warning_count} diagnostic comparator warning(s)"
+                iteration_reason="completed with ${diagnostic_warning_count} diagnostic performance warning(s)"
               elif [[ "${status}" == "0" ]]; then
                 iteration_status="ok"
                 iteration_reason="completed"

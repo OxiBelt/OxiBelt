@@ -177,9 +177,17 @@ fn accept_multiplier_profile_harness(probe_result: &str) -> HarnessRun {
 }
 
 fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun {
+  run_load_profile_harness_with_errors(profile_label, load_label, "0")
+}
+
+fn run_load_profile_harness_with_errors(
+  profile_label: &str,
+  load_label: &str,
+  probe_errors: &str,
+) -> HarnessRun {
   let script = performance_script_text();
   let functions = format!(
-    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
     extract_bash_function(&script, "diagnostic_profile_comparator_from_label"),
     extract_bash_function(&script, "load_errors_within_budget"),
     extract_bash_function(&script, "diagnostic_comparator_label"),
@@ -188,6 +196,7 @@ fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun
     extract_bash_function(&script, "direct_h2_diagnostic_load_label"),
     extract_bash_function(&script, "metrics_mode_diagnostic_load_label"),
     extract_bash_function(&script, "h3_inline_diagnostic_load_label"),
+    extract_bash_function(&script, "runtime_direct_h1_diagnostic_load_label"),
     extract_bash_function(&script, "diagnostic_load_label"),
     extract_bash_function(&script, "normalize_diagnostic_load_result"),
     extract_bash_function(&script, "assert_diagnostic_result"),
@@ -204,6 +213,7 @@ fn run_load_profile_harness(profile_label: &str, load_label: &str) -> HarnessRun
     .env("EVENTS_FILE", &events_path)
     .env("PROFILE_LABEL", profile_label)
     .env("LOAD_LABEL", load_label)
+    .env("PROBE_ERRORS", probe_errors)
     .output()
     .expect("Bash harness should execute");
   let events = fs::read_to_string(&events_path).unwrap_or_default();
@@ -617,10 +627,12 @@ duration_seconds=1
 warmup_seconds=0
 concurrency=1
 events="${{EVENTS_FILE:?}}"
+max_p99_ms=10000
+max_load_errors_per_million=100
 
 run_probe_json() {{
   printf 'PROBE %s\n' "$*" >>"${{events}}"
-  printf '{{"type":"load","label":"%s","protocol":"h2","requests":1,"rps":1,"p99_ms":1,"errors":0}}\n' "${{LOAD_LABEL:?}}"
+  printf '{{"type":"load","label":"%s","protocol":"h2","requests":1,"rps":1,"p99_ms":1,"errors":%s}}\n' "${{LOAD_LABEL:?}}" "${{PROBE_ERRORS:-0}}"
 }}
 
 run_profiled_probe_json() {{
@@ -1139,6 +1151,7 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "--inline-bodyless-h3-fast-path",
     "\"proxy.http3\" \"inline_bodyless_fast_path\" \"true\"",
     "h3_inline_diagnostic_load_label",
+    "runtime_direct_h1_diagnostic_load_label",
     "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
     "fast_path.io_backend.direct_h1",
@@ -1148,6 +1161,49 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
       "performance script should include runtime-direct-h1 experiment evidence: {expected}"
     );
   }
+}
+
+#[test]
+fn runtime_direct_h1_experiment_request_errors_are_diagnostic() {
+  let diagnostic =
+    run_load_profile_harness_with_errors("", "oxibelt-runtime-direct-h1-experiment-h2", "1");
+  assert!(
+    diagnostic.output.status.success(),
+    "runtime-direct-h1 diagnostic experiment should not fail the harness: {}",
+    String::from_utf8_lossy(&diagnostic.output.stderr)
+  );
+  assert!(
+    diagnostic
+      .events
+      .contains("\"label\":\"oxibelt-runtime-direct-h1-experiment-h2\"")
+      && diagnostic.events.contains("\"diagnostic\":true")
+      && diagnostic.events.contains("\"diagnostic_status\":\"fail\"")
+      && diagnostic.events.contains(
+        "performance probe reported request errors: oxibelt-runtime-direct-h1-experiment-h2"
+      ),
+    "experiment row should be appended as diagnostic failure evidence:\n{}",
+    diagnostic.events
+  );
+  assert!(
+    !diagnostic.events.contains("ASSERT "),
+    "diagnostic experiment rows should bypass the primary assertion path"
+  );
+
+  let primary =
+    run_load_profile_harness_with_errors("", "oxibelt-runtime-direct-h1-control-h2", "1");
+  assert!(
+    primary.output.status.success(),
+    "primary-boundary harness uses a stub assertion and should complete"
+  );
+  assert!(
+    primary.events.contains("ASSERT ")
+      && primary
+        .events
+        .contains("\"label\":\"oxibelt-runtime-direct-h1-control-h2\"")
+      && !primary.events.contains("\"diagnostic_status\":\"fail\""),
+    "control rows should remain on the primary assertion path:\n{}",
+    primary.events
+  );
 }
 
 #[test]

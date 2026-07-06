@@ -23,7 +23,9 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, BoxError, ProxyBody, ProxyBodyFrame};
 
 use super::request::PreparedDirectH1Request;
-use super::{DirectH1Pool, DirectH1Response, DirectH1SendMetricOptions, timing};
+use super::{
+  DirectH1Pool, DirectH1Response, DirectH1SendMetricOptions, DirectH1TransportError, timing,
+};
 
 #[cfg(test)]
 mod tests;
@@ -131,9 +133,12 @@ fn run_compio_until_head(
   timeouts: EffectiveTimeouts,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<(Proactor, SharedFd<TcpStream>, ParsedResponse)> {
-  let mut driver = Proactor::new().context("failed to build Compio direct H1 proactor")?;
+  let mut driver = Proactor::new()
+    .context("failed to build Compio direct H1 proactor")
+    .map_err(DirectH1TransportError::connect)?;
   let connect_started = timing::start(metric_options.timing_enabled);
-  let fd = connect_upstream(&mut driver, pool, timeouts.upstream_connect);
+  let fd = connect_upstream(&mut driver, pool, timeouts.upstream_connect)
+    .map_err(DirectH1TransportError::connect);
   timing::record_metrics_plain_result(
     metrics,
     protocol,
@@ -146,7 +151,7 @@ fn run_compio_until_head(
     metrics.record_http_upstream_h1_http_primary_connection_created();
   }
 
-  let serialized = serialize_empty_h1_request(&request)?;
+  let serialized = serialize_empty_h1_request(&request).map_err(DirectH1TransportError::send)?;
   let request_started = timing::start(metric_options.timing_enabled);
   let submit_started = timing::start(metric_options.timing_enabled);
   let write_result = send_all(&mut driver, &fd, &serialized, timeouts.upstream_send);
@@ -157,7 +162,9 @@ fn run_compio_until_head(
     write_result.is_ok(),
     submit_started,
   );
-  write_result?;
+  write_result
+    .map_err(anyhow::Error::new)
+    .map_err(DirectH1TransportError::send)?;
 
   let response_head_started = timing::start(metric_options.timing_enabled);
   let parsed = read_response_head(
@@ -181,7 +188,7 @@ fn run_compio_until_head(
     success,
     request_started,
   );
-  let parsed = parsed?;
+  let parsed = parsed.map_err(DirectH1TransportError::send)?;
   Ok((driver, fd, parsed))
 }
 

@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use http::header::{CONNECTION, HOST};
 use http::{HeaderValue, Request};
 use http_body_util::Full;
@@ -11,6 +12,7 @@ use super::*;
 
 mod runtime_backend;
 mod streaming;
+mod transport_error;
 
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
 
@@ -453,7 +455,7 @@ async fn streamed_body_recycles_direct_h1_sender_on_eof() -> anyhow::Result<()> 
   let body = Full::new(Bytes::from_static(b"ok"))
     .map_err(|never| -> BoxError { match never {} })
     .boxed();
-  let collected = recycle_body_on_eof(body, lease)
+  let collected = recycle_response_body(body, lease, false)
     .collect()
     .await
     .map_err(|error| anyhow::anyhow!(error))?

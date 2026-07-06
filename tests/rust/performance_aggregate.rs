@@ -1101,6 +1101,7 @@ fn write_iteration_status(
   exit_code: i64,
   status: &str,
 ) {
+  fs::create_dir_all(dir).expect("iteration status directory should be created");
   fs::write(
     dir.join("iteration-status.json"),
     serde_json::to_string_pretty(&json!({
@@ -1113,7 +1114,7 @@ fn write_iteration_status(
         "exit_code": exit_code,
         "diagnostic_warnings": if status == "diagnostic_warning" { 1 } else { 0 },
         "status": status,
-        "reason": if status == "diagnostic_warning" { "completed with 1 diagnostic comparator warning(s)" } else if exit_code == 0 { "completed" } else { "synthetic failure" }
+        "reason": if status == "diagnostic_warning" { "completed with 1 diagnostic performance warning(s)" } else if exit_code == 0 { "completed" } else { "synthetic failure" }
     }))
     .expect("iteration status should serialize"),
   )
@@ -1954,8 +1955,8 @@ fn diagnostic_warning_iteration_status_is_not_failed_sample_quality() {
   let output_dir = temp_dir.path().join("output");
   write_required_quorum_evidence(&input_dir, 16, 1, 100.0, 100.0, 4.0);
   write_iteration_status(
-    &input_dir.join("oxibelt-docker-performance-smoke-reverse-proxy-shard-1/run-1"),
-    "reverse-proxy",
+    &input_dir.join("oxibelt-docker-performance-smoke-runtime-direct-h1-shard-1/run-1"),
+    "runtime-direct-h1",
     1,
     1,
     0,
@@ -1975,9 +1976,13 @@ fn diagnostic_warning_iteration_status_is_not_failed_sample_quality() {
     ],
   );
 
-  assert_eq!(report["sample_quality"]["ok_iterations"], 16);
+  assert_eq!(report["sample_quality"]["ok_iterations"], 17);
   assert_eq!(report["sample_quality"]["diagnostic_warning_iterations"], 1);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);
+  assert_eq!(
+    report["sample_quality"]["diagnostic_warning_samples"][0]["serving_type"],
+    "runtime-direct-h1"
+  );
   assert_eq!(
     report["sample_quality"]["diagnostic_warning_samples"][0]["diagnostic_warnings"],
     1

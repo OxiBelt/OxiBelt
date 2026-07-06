@@ -1,18 +1,15 @@
 //! Direct upstream HTTP/1.1 transport for the plain-proxy fast path.
 //! It bypasses the legacy pooled client only for tightly guarded H1 requests.
 
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use bytes::Bytes;
 use http::header::CONNECTION;
-use http::{HeaderMap, Method, Request, Response};
+use http::{HeaderMap, Method, Request};
 use http_body_util::BodyExt;
-use hyper::body::{Body, Frame};
+use hyper::body::Body;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -32,17 +29,24 @@ use super::stage_timing as timing;
 mod compio_transport;
 mod origin;
 mod request;
+mod response;
 mod runtime_backend;
 mod send_attempt;
+mod transport_error;
 use self::origin::DirectH1Origin;
 use self::request::PreparedDirectH1Request;
 pub(super) use self::request::mark_prevalidated_direct_h1_request;
 #[cfg(test)]
 use self::request::{PrevalidatedDirectH1Request, empty_body};
+use self::response::DirectH1Response;
+pub(super) use self::response::{DirectH1Lease, recycle_response_body};
 use self::runtime_backend::DirectH1RuntimeBackend;
 use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
+use self::transport_error::{DirectH1TransportError, direct_h1_transport_miss_reason};
 
 const DIRECT_H1_MAX_SHARDS: usize = 16;
+#[cfg(target_os = "linux")]
+const COMPIO_CONNECT_ERROR_BACKOFF: Duration = Duration::from_secs(5);
 #[derive(Clone, Default)]
 pub(crate) struct DirectH1Pools {
   pools: Vec<Option<Arc<DirectH1Pool>>>,
@@ -75,6 +79,7 @@ struct DirectH1Pool {
   idle_count: AtomicUsize,
   next_shard: AtomicUsize,
   idle_shards: Vec<Mutex<Vec<DirectH1IdleConnection>>>,
+  compio_connect_backoff_until: Mutex<Option<Instant>>,
 }
 
 struct DirectH1TakeSender {
@@ -108,7 +113,29 @@ impl DirectH1Pool {
       idle_count: AtomicUsize::new(0),
       next_shard: AtomicUsize::new(0),
       idle_shards: (0..shard_count).map(|_| Mutex::new(Vec::new())).collect(),
+      compio_connect_backoff_until: Mutex::new(None),
     })
+  }
+
+  fn compio_connect_backoff_active(&self) -> bool {
+    let now = Instant::now();
+    let Ok(mut backoff_until) = self.compio_connect_backoff_until.lock() else {
+      return true;
+    };
+    if let Some(until) = *backoff_until {
+      if now < until {
+        return true;
+      }
+      *backoff_until = None;
+    }
+    false
+  }
+
+  #[cfg(target_os = "linux")]
+  fn note_compio_connect_error(&self) {
+    if let Ok(mut backoff_until) = self.compio_connect_backoff_until.lock() {
+      *backoff_until = Some(Instant::now() + COMPIO_CONNECT_ERROR_BACKOFF);
+    }
   }
 
   fn take_sender(&self) -> DirectH1TakeSender {
@@ -215,120 +242,6 @@ struct DirectH1SendMetricOptions {
   timing_enabled: bool,
 }
 
-pub(super) struct DirectH1Response {
-  pub(super) response: Response<ProxyBody>,
-  lease: Option<DirectH1Lease>,
-}
-
-impl DirectH1Response {
-  pub(super) fn take_lease(&mut self) -> Option<DirectH1Lease> {
-    self.lease.take()
-  }
-}
-
-pub(super) struct DirectH1Lease {
-  pool: Arc<DirectH1Pool>,
-  metrics: Arc<Metrics>,
-  sender: SendRequest<ProxyBody>,
-  diagnostic_metrics: bool,
-  reusable_by_headers: bool,
-}
-
-impl DirectH1Lease {
-  pub(super) fn recycle_if_reusable(self, body_consumed: bool) {
-    if body_consumed && self.reusable_by_headers {
-      if let Err(error) = self.pool.put_sender(self.sender)
-        && self.diagnostic_metrics
-      {
-        self
-          .metrics
-          .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
-        match error {
-          DirectH1PutError::Full => self
-            .metrics
-            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropFull),
-          DirectH1PutError::Locked => self
-            .metrics
-            .record_direct_h1_pool_event_id(DirectH1PoolEvent::DropLocked),
-        }
-      }
-    } else if self.diagnostic_metrics {
-      self
-        .metrics
-        .record_direct_h1_pool_event_id(DirectH1PoolEvent::Drop);
-    }
-  }
-}
-
-pub(super) fn recycle_response_body(
-  body: ProxyBody,
-  lease: DirectH1Lease,
-  body_consumed: bool,
-) -> ProxyBody {
-  if body_consumed {
-    lease.recycle_if_reusable(true);
-    return body;
-  }
-  recycle_body_on_eof(body, lease)
-}
-
-fn recycle_body_on_eof(body: ProxyBody, lease: DirectH1Lease) -> ProxyBody {
-  DirectH1RecycleBody {
-    body,
-    lease: Some(lease),
-  }
-  .boxed()
-}
-
-struct DirectH1RecycleBody {
-  body: ProxyBody,
-  lease: Option<DirectH1Lease>,
-}
-
-impl DirectH1RecycleBody {
-  fn recycle(&mut self, body_consumed: bool) {
-    if let Some(lease) = self.lease.take() {
-      lease.recycle_if_reusable(body_consumed);
-    }
-  }
-}
-
-impl Body for DirectH1RecycleBody {
-  type Data = Bytes;
-  type Error = BoxError;
-
-  fn poll_frame(
-    mut self: Pin<&mut Self>,
-    cx: &mut TaskContext<'_>,
-  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    match Pin::new(&mut self.body).poll_frame(cx) {
-      Poll::Ready(None) => {
-        self.recycle(true);
-        Poll::Ready(None)
-      }
-      Poll::Ready(Some(Err(error))) => {
-        self.recycle(false);
-        Poll::Ready(Some(Err(error)))
-      }
-      poll => poll,
-    }
-  }
-
-  fn is_end_stream(&self) -> bool {
-    self.body.is_end_stream()
-  }
-
-  fn size_hint(&self) -> hyper::body::SizeHint {
-    self.body.size_hint()
-  }
-}
-
-impl Drop for DirectH1RecycleBody {
-  fn drop(&mut self) {
-    self.recycle(false);
-  }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_send_direct_h1(
   pools: &DirectH1Pools,
@@ -406,13 +319,9 @@ pub(super) async fn try_send_direct_h1(
         metrics.record_direct_h1_transport_hit_id(protocol);
         metrics.record_fast_path_selection("direct_h1", protocol.as_str(), "selected", "used");
       }
-      Err(error) if error.to_string().contains("timed out") => {
+      Err(error) => {
         metrics
-          .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::ConnectError);
-      }
-      Err(_) => {
-        metrics
-          .record_direct_h1_transport_miss_id(protocol, FastPathTransportMissReason::SendError);
+          .record_direct_h1_transport_miss_id(protocol, direct_h1_transport_miss_reason(error));
       }
     }
   }
@@ -470,15 +379,17 @@ async fn send_prepared_request(
     metrics.record_http_upstream_h1_http_primary_request();
   }
   let use_compio_transport = runtime_backend == DirectH1RuntimeBackend::Compio
-    && compio_transport_eligible(protocol, &prepared);
+    && compio_transport_eligible(protocol, &prepared)
+    && !pool.compio_connect_backoff_active();
   if metric_options.diagnostic_metrics {
     record_runtime_backend_selection(metrics, protocol, runtime_backend, use_compio_transport);
   }
 
   #[cfg(target_os = "linux")]
   if use_compio_transport {
+    let fallback_prepared = prepared.retry_prepared();
     let result = compio_transport::send_prepared_request(
-      pool,
+      pool.clone(),
       metrics.clone(),
       protocol,
       prepared,
@@ -489,7 +400,34 @@ async fn send_prepared_request(
     if result.is_err() && metric_options.diagnostic_metrics {
       runtime_backend.record_error(metrics, protocol);
     }
-    return result;
+    match result {
+      Ok(response) => return Ok(response),
+      Err(error)
+        if direct_h1_transport_miss_reason(&error) == FastPathTransportMissReason::ConnectError =>
+      {
+        pool.note_compio_connect_error();
+        if let Some(prepared) = fallback_prepared {
+          if metric_options.diagnostic_metrics {
+            DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
+          }
+          debug!(
+            error = %error,
+            "Compio direct H1 failed before request write; falling back to Hyper direct H1"
+          );
+          return send_prepared_request_hyper(
+            pool,
+            metrics,
+            protocol,
+            prepared,
+            timeouts,
+            metric_options,
+          )
+          .await;
+        }
+        return Err(error);
+      }
+      Err(error) => return Err(error),
+    }
   }
 
   #[cfg(not(target_os = "linux"))]
@@ -500,6 +438,17 @@ async fn send_prepared_request(
     anyhow::bail!("runtime.direct_h1_io = \"compio\" is Linux-only");
   }
 
+  send_prepared_request_hyper(pool, metrics, protocol, prepared, timeouts, metric_options).await
+}
+
+async fn send_prepared_request_hyper(
+  pool: Arc<DirectH1Pool>,
+  metrics: &Arc<Metrics>,
+  protocol: FastPathMetricProtocol,
+  prepared: PreparedDirectH1Request,
+  timeouts: EffectiveTimeouts,
+  metric_options: DirectH1SendMetricOptions,
+) -> anyhow::Result<DirectH1Response> {
   let pool_take_started = timing::start(metric_options.timing_enabled);
   let reused_sender = pool.take_sender();
   timing::record_metrics_plain_result(
