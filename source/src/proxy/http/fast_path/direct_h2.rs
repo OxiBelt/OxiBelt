@@ -3,8 +3,8 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -48,6 +48,10 @@ use self::send::{direct_h2_guard_miss, sender_with_first_byte_timeout};
 
 const DIRECT_H2_MAX_SLOTS: usize = 16;
 const DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT: usize = 32;
+
+fn duration_nanos_u64(duration: Duration) -> u64 {
+  duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct DirectH2Pools {
@@ -111,7 +115,7 @@ struct DirectH2Slot {
 struct DirectH2Connection {
   sender: SendRequest<ProxyBody>,
   created_at: Instant,
-  last_used: Mutex<Instant>,
+  last_used_elapsed_ns: AtomicU64,
   active_streams: AtomicUsize,
 }
 
@@ -153,23 +157,23 @@ impl DirectH2Slot {
 }
 
 impl DirectH2Connection {
-  fn stale(&self, idle_timeout: Duration, max_lifetime: Duration) -> bool {
+  fn stale(&self, idle_timeout: Duration, max_lifetime: Duration, now: Instant) -> bool {
     if self.active_streams.load(Ordering::Acquire) > 0 {
       return false;
     }
-    if self.created_at.elapsed() > max_lifetime {
+    let age = now.saturating_duration_since(self.created_at);
+    if age > max_lifetime {
       return true;
     }
-    let last_used = self
-      .last_used
-      .lock()
-      .expect("direct H2 last-used lock poisoned");
-    last_used.elapsed() > idle_timeout
+    let age_ns = duration_nanos_u64(age);
+    let last_used_ns = self.last_used_elapsed_ns.load(Ordering::Acquire);
+    age_ns.saturating_sub(last_used_ns) > duration_nanos_u64(idle_timeout)
   }
 
   fn reserve(
     connection: &Arc<Self>,
     max_streams_per_slot: usize,
+    now: Instant,
   ) -> Option<(SendRequest<ProxyBody>, DirectH2Lease)> {
     let mut active = connection.active_streams.load(Ordering::Acquire);
     loop {
@@ -186,11 +190,10 @@ impl DirectH2Connection {
         Err(current) => active = current,
       }
     }
-    let mut last_used = connection
-      .last_used
-      .lock()
-      .expect("direct H2 last-used lock poisoned");
-    *last_used = Instant::now();
+    connection.last_used_elapsed_ns.store(
+      duration_nanos_u64(now.saturating_duration_since(connection.created_at)),
+      Ordering::Release,
+    );
     Some((
       connection.sender.clone(),
       DirectH2Lease {
@@ -315,6 +318,7 @@ impl DirectH2Pool {
     metrics: &Arc<Metrics>,
     hot_path_metrics: bool,
   ) -> DirectH2TakeSender {
+    let now = Instant::now();
     let start = self.next_slot.fetch_add(1, Ordering::Relaxed);
     let mut empty_slot = None;
     let mut locked_slots = 0;
@@ -331,7 +335,7 @@ impl DirectH2Pool {
         empty_slot.get_or_insert(slot_index);
         continue;
       };
-      if candidate.stale(self.idle_timeout, self.max_lifetime) {
+      if candidate.stale(self.idle_timeout, self.max_lifetime, now) {
         metric_record::pool_stale_drop(metrics, hot_path_metrics);
         *connection = None;
         empty_slot.get_or_insert(slot_index);
@@ -356,10 +360,14 @@ impl DirectH2Pool {
         best_over_target = Some((active, Arc::clone(candidate)));
       }
     }
-    let best = best_under_target.or_else(|| empty_slot.is_none().then_some(best_over_target)?);
+    let best = match (best_under_target, empty_slot) {
+      (Some((0, connection)), _) => Some((0, connection)),
+      (Some(best), None) => Some(best),
+      _ => best_over_target.filter(|_| empty_slot.is_none()),
+    };
     if let Some((_, connection)) = best
       && let Some((sender, lease)) =
-        DirectH2Connection::reserve(&connection, self.max_streams_per_slot)
+        DirectH2Connection::reserve(&connection, self.max_streams_per_slot, now)
     {
       return DirectH2TakeSender {
         sender: Some(DirectH2Sender {
@@ -400,12 +408,13 @@ impl DirectH2Pool {
   {
     let slot = &self.slots[slot_index % self.slots.len()];
     let mut slot_connection = slot.connection.lock().await;
+    let now = Instant::now();
     if let Some(candidate) = slot_connection.as_ref() {
-      if candidate.stale(self.idle_timeout, self.max_lifetime) {
+      if candidate.stale(self.idle_timeout, self.max_lifetime, now) {
         metric_record::pool_stale_drop(metrics, hot_path_metrics);
         *slot_connection = None;
       } else if let Some((sender, lease)) =
-        DirectH2Connection::reserve(candidate, self.max_streams_per_slot)
+        DirectH2Connection::reserve(candidate, self.max_streams_per_slot, now)
       {
         metric_record::pool_event(metrics, hot_path_metrics, "hit");
         return Ok(Some(DirectH2Sender {
@@ -428,10 +437,11 @@ impl DirectH2Pool {
         return Err(error);
       }
     };
+    let created_at = Instant::now();
     let connection = Arc::new(DirectH2Connection {
       sender: sender.clone(),
-      created_at: Instant::now(),
-      last_used: Mutex::new(Instant::now()),
+      created_at,
+      last_used_elapsed_ns: AtomicU64::new(0),
       active_streams: AtomicUsize::new(1),
     });
     *slot_connection = Some(Arc::clone(&connection));

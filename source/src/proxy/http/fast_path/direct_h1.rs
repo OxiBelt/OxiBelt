@@ -677,7 +677,10 @@ fn compio_transport_eligible(
   protocol: FastPathMetricProtocol,
   prepared: &PreparedDirectH1Request,
 ) -> bool {
-  protocol == FastPathMetricProtocol::H1 && prepared.compio_empty_body_wire_eligible()
+  matches!(
+    protocol,
+    FastPathMetricProtocol::H1 | FastPathMetricProtocol::H2 | FastPathMetricProtocol::H3
+  ) && prepared.compio_empty_body_wire_eligible()
 }
 
 fn record_runtime_backend_selection(

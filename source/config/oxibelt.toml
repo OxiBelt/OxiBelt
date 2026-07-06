@@ -18,7 +18,7 @@ read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
-direct_h1_io = "auto" # auto | tokio_hyper | compio
+direct_h1_io = "compio" # auto | tokio_hyper | compio
 
 [runtime.worker_multipliers]
 runtime = 1.0
@@ -348,7 +348,7 @@ max_temp_file_bytes = 0
 # temp_dir = "/var/cache/oxibelt"
 
 [proxy.static_files]
-sendfile = "off" # off | auto
+sendfile = "auto" # off | auto
 sendfile_write_strategy = "auto" # auto | split | msg_more | tcp_cork
 sendfile_chunk_bytes = 1048576
 inline_max_bytes = 16384

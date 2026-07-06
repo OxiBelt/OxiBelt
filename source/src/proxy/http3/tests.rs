@@ -418,7 +418,7 @@ inline_bodyless_fast_path = true
 }
 
 #[tokio::test]
-async fn h3_inline_fast_path_allows_bodyful_or_framed_requests() {
+async fn h3_inline_fast_path_rejects_bodyful_or_framed_requests() {
   let context = inline_candidate_context(
     r#"
 [proxy.http3]
@@ -436,8 +436,8 @@ inline_bodyless_fast_path = true
     .body(())
     .unwrap();
 
-  assert!(h3_inline_fast_path_candidate(&post, &context));
-  assert!(h3_inline_fast_path_candidate(&framed_get, &context));
+  assert!(!h3_inline_fast_path_candidate(&post, &context));
+  assert!(!h3_inline_fast_path_candidate(&framed_get, &context));
 }
 
 #[tokio::test]

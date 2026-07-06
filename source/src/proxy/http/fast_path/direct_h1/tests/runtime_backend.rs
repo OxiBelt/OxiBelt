@@ -5,7 +5,7 @@ use url::Url;
 use super::*;
 
 #[test]
-fn compio_transport_stays_h1_only_for_empty_wire_requests() {
+fn compio_transport_accepts_empty_wire_requests_for_h1_h2_h3() {
   let origin = DirectH1Origin::from_url(&Url::parse("http://backend.internal:18080").unwrap())
     .expect("origin should be direct-H1 eligible");
   let request = Request::builder()
@@ -21,11 +21,11 @@ fn compio_transport_stays_h1_only_for_empty_wire_requests() {
     FastPathMetricProtocol::H1,
     &prepared
   ));
-  assert!(!compio_transport_eligible(
+  assert!(compio_transport_eligible(
     FastPathMetricProtocol::H2,
     &prepared
   ));
-  assert!(!compio_transport_eligible(
+  assert!(compio_transport_eligible(
     FastPathMetricProtocol::H3,
     &prepared
   ));
@@ -52,7 +52,7 @@ fn compio_transport_rejects_empty_transfer_encoded_wire_request() {
 }
 
 #[test]
-fn compio_h2_fallback_records_hyper_selection() {
+fn compio_ineligible_h2_records_hyper_selection() {
   let metrics = Metrics::new();
 
   record_runtime_backend_selection(
@@ -79,6 +79,6 @@ fn compio_h2_fallback_records_hyper_selection() {
     body.contains(
       "oxibelt_http_direct_h1_io_backend_total{backend=\"compio\",protocol=\"h2\",outcome=\"selected\"} 0"
     ),
-    "compio h2 should not be selected:\n{body}"
+    "ineligible compio h2 should not be selected:\n{body}"
   );
 }

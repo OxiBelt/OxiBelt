@@ -701,6 +701,13 @@ fn h3_inline_fast_path_candidate(
   if request.version() != ::http::Version::HTTP_3 {
     return false;
   }
+  if !http_proxy::request_framing::h2_or_h3_safe_method_empty_probe_allowed(
+    request.method(),
+    ::http::Version::HTTP_3,
+    request.headers(),
+  ) {
+    return false;
+  }
   if http_proxy::headers::validate_authority_host_consistency(request).is_err() {
     return false;
   }

@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
@@ -332,6 +333,50 @@ async fn sender_lease_tracks_active_streams_until_drop() {
   assert_eq!(connection.active_streams.load(Ordering::SeqCst), 1);
   drop(sender);
   assert_eq!(connection.active_streams.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn sender_prefers_empty_slot_over_active_under_target_connection() {
+  let pool = Arc::new(direct_h2_test_pool_with_slots(Duration::from_secs(1), 2));
+  let metrics = Metrics::new();
+  let connect_attempts = Arc::new(AtomicUsize::new(0));
+
+  let first = {
+    let connect_attempts = connect_attempts.clone();
+    pool
+      .sender_with(&metrics, true, move || async move {
+        connect_attempts.fetch_add(1, Ordering::SeqCst);
+        successful_test_sender().await
+      })
+      .await
+      .expect("first sender acquisition should succeed")
+      .expect("first sender should connect")
+  };
+  let first_connection = first.lease.connection.clone();
+
+  let second = {
+    let connect_attempts = connect_attempts.clone();
+    pool
+      .sender_with(&metrics, true, move || async move {
+        connect_attempts.fetch_add(1, Ordering::SeqCst);
+        successful_test_sender().await
+      })
+      .await
+      .expect("second sender acquisition should succeed")
+      .expect("second sender should connect into the empty slot")
+  };
+
+  assert_eq!(connect_attempts.load(Ordering::SeqCst), 2);
+  assert!(!Arc::ptr_eq(&first_connection, &second.lease.connection));
+  assert_eq!(first_connection.active_streams.load(Ordering::SeqCst), 1);
+  assert_eq!(
+    second
+      .lease
+      .connection
+      .active_streams
+      .load(Ordering::SeqCst),
+    1
+  );
 }
 
 #[tokio::test]

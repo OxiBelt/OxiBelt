@@ -52,7 +52,7 @@ pub(crate) async fn capture_proxy_body_prefix(
   let hinted_upper = body.size_hint().upper();
   let known_body_len = content_length.or(hinted_upper);
   let mut body = Box::pin(body);
-  let mut captured = BytesMut::new();
+  let mut captured = PrefixCapture::default();
   let mut queued = VecDeque::new();
   let mut reached_end = false;
   let mut split_at_limit = false;
@@ -67,12 +67,14 @@ pub(crate) async fn capture_proxy_body_prefix(
       Ok(data) => {
         let remaining = limit.saturating_sub(captured.len());
         if data.len() <= remaining {
-          captured.extend_from_slice(&data);
+          captured.push(data.clone());
           queued.push_back(Frame::data(data));
         } else {
-          captured.extend_from_slice(&data[..remaining]);
-          queued.push_back(Frame::data(data.slice(..remaining)));
-          queued.push_back(Frame::data(data.slice(remaining..)));
+          let prefix = data.slice(..remaining);
+          let suffix = data.slice(remaining..);
+          captured.push(prefix.clone());
+          queued.push_back(Frame::data(prefix));
+          queued.push_back(Frame::data(suffix));
           split_at_limit = true;
           break;
         }
@@ -92,6 +94,7 @@ pub(crate) async fn capture_proxy_body_prefix(
       && known_body_len
         .map(|length| length > captured.len() as u64)
         .unwrap_or(captured.len() >= limit));
+  let captured_bytes = captured.freeze();
   let body = ProxyReplayBody {
     queued,
     inner: body,
@@ -100,10 +103,45 @@ pub(crate) async fn capture_proxy_body_prefix(
   Ok((
     body,
     CapturedBody {
-      bytes: captured.freeze(),
+      bytes: captured_bytes,
       is_truncated,
     },
   ))
+}
+
+#[derive(Default)]
+struct PrefixCapture {
+  single: Option<Bytes>,
+  multi: BytesMut,
+  len: usize,
+}
+
+impl PrefixCapture {
+  fn len(&self) -> usize {
+    self.len
+  }
+
+  fn push(&mut self, data: Bytes) {
+    if data.is_empty() {
+      return;
+    }
+    self.len += data.len();
+    if self.single.is_none() && self.multi.is_empty() {
+      self.single = Some(data);
+      return;
+    }
+    if let Some(single) = self.single.take() {
+      self.multi.extend_from_slice(&single);
+    }
+    self.multi.extend_from_slice(&data);
+  }
+
+  fn freeze(self) -> Bytes {
+    match (self.single, self.multi.is_empty()) {
+      (Some(single), true) => single,
+      (_, _) => self.multi.freeze(),
+    }
+  }
 }
 
 #[cfg(test)]
