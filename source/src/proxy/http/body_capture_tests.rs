@@ -1,5 +1,7 @@
 use std::io::Read;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -37,6 +39,29 @@ impl Body for PanicBody {
 
 fn panic_body() -> ProxyBody {
   PanicBody.boxed()
+}
+
+struct DropTrackedBytes {
+  bytes: Vec<u8>,
+  drops: Arc<AtomicUsize>,
+}
+
+impl DropTrackedBytes {
+  fn new(bytes: Vec<u8>, drops: Arc<AtomicUsize>) -> Self {
+    Self { bytes, drops }
+  }
+}
+
+impl AsRef<[u8]> for DropTrackedBytes {
+  fn as_ref(&self) -> &[u8] {
+    &self.bytes
+  }
+}
+
+impl Drop for DropTrackedBytes {
+  fn drop(&mut self) {
+    self.drops.fetch_add(1, Ordering::SeqCst);
+  }
 }
 
 fn gzip_bytes(bytes: &'static [u8]) -> bytes::Bytes {
@@ -212,6 +237,67 @@ async fn prefix_request_body_capture_reads_body() {
     captured.expect("body should be captured").bytes.as_ref(),
     b"abc"
   );
+}
+
+#[tokio::test]
+async fn truncated_request_prefix_capture_does_not_retain_oversized_frame_owner() {
+  let drops = Arc::new(AtomicUsize::new(0));
+  let owner = DropTrackedBytes::new(vec![b'x'; 1024 * 1024], Arc::clone(&drops));
+  let request = Request::builder()
+    .uri("https://example.com/upload")
+    .body(full_body(bytes::Bytes::from_owner(owner)))
+    .expect("request should build");
+
+  let (request, captured) =
+    capture_request_body_without_transform(request, BodyNeed::PrefixBytes, 8)
+      .await
+      .expect("prefix capture should succeed");
+  let captured = captured.expect("body should be captured");
+
+  assert_eq!(captured.bytes.len(), 8);
+  assert!(captured.is_truncated);
+  assert_eq!(drops.load(Ordering::SeqCst), 0);
+  drop(request);
+  assert_eq!(
+    drops.load(Ordering::SeqCst),
+    1,
+    "captured prefix must not retain the oversized original frame owner"
+  );
+  assert_eq!(captured.bytes.as_ref(), &[b'x'; 8]);
+}
+
+#[tokio::test]
+async fn truncated_response_prefix_capture_does_not_retain_oversized_frame_owner() {
+  let drops = Arc::new(AtomicUsize::new(0));
+  let owner = DropTrackedBytes::new(vec![b'y'; 1024 * 1024], Arc::clone(&drops));
+  let config = crate::waf::WafHttpBodyCompressionConfig::default();
+  let state = waf_body_coding::WafBodyCodingState::new(&config);
+  let mut headers = HeaderMap::new();
+
+  let (body, captured) = capture_response_body_for_waf(
+    http::Version::HTTP_11,
+    &mut headers,
+    full_body(bytes::Bytes::from_owner(owner)),
+    BodyNeed::PrefixBytes,
+    8,
+    false,
+    &config,
+    &state,
+  )
+  .await
+  .expect("response prefix capture should succeed");
+  let captured = captured.expect("body should be captured");
+
+  assert_eq!(captured.bytes.len(), 8);
+  assert!(captured.is_truncated);
+  assert_eq!(drops.load(Ordering::SeqCst), 0);
+  drop(body);
+  assert_eq!(
+    drops.load(Ordering::SeqCst),
+    1,
+    "captured prefix must not retain the oversized original frame owner"
+  );
+  assert_eq!(captured.bytes.as_ref(), &[b'y'; 8]);
 }
 
 #[tokio::test]

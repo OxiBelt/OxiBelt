@@ -111,36 +111,20 @@ pub(crate) async fn capture_proxy_body_prefix(
 
 #[derive(Default)]
 struct PrefixCapture {
-  single: Option<Bytes>,
-  multi: BytesMut,
-  len: usize,
+  bytes: BytesMut,
 }
 
 impl PrefixCapture {
   fn len(&self) -> usize {
-    self.len
+    self.bytes.len()
   }
 
   fn push(&mut self, data: Bytes) {
-    if data.is_empty() {
-      return;
-    }
-    self.len += data.len();
-    if self.single.is_none() && self.multi.is_empty() {
-      self.single = Some(data);
-      return;
-    }
-    if let Some(single) = self.single.take() {
-      self.multi.extend_from_slice(&single);
-    }
-    self.multi.extend_from_slice(&data);
+    self.bytes.extend_from_slice(&data);
   }
 
   fn freeze(self) -> Bytes {
-    match (self.single, self.multi.is_empty()) {
-      (Some(single), true) => single,
-      (_, _) => self.multi.freeze(),
-    }
+    self.bytes.freeze()
   }
 }
 
