@@ -37,7 +37,9 @@ mod provider;
 mod resumption;
 mod server_policy;
 mod upstream_client;
-pub(crate) use cert_metadata::client_certificate_metadata;
+pub(crate) use cert_metadata::{
+  ParsedCertificateMetadata, client_certificate_metadata, parse_certificate_metadata,
+};
 
 pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resumption;
 pub use admin_quic::build_admin_quic_server_config_with_resumption;

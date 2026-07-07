@@ -5,121 +5,119 @@ use std::net::IpAddr;
 
 use anyhow::bail;
 use rustls::pki_types::CertificateDer;
+use x509_cert::Certificate;
+use x509_cert::der::{Decode, Tag, Tagged};
 
 use crate::waf::metadata::WafClientCertificateMetadata;
+
+#[derive(Debug, Default)]
+pub(crate) struct ParsedCertificateMetadata {
+  pub(crate) not_before_unix_seconds: i64,
+  pub(crate) not_after_unix_seconds: i64,
+  pub(crate) subject_common_names: Vec<String>,
+  pub(crate) san_dns_names: Vec<String>,
+  pub(crate) san_ip_addresses: Vec<IpAddr>,
+}
 
 pub(crate) fn client_certificate_metadata(
   certificates: &[CertificateDer<'_>],
 ) -> Option<WafClientCertificateMetadata> {
   let leaf = certificates.first()?;
   let fingerprint_sha256 = sha256_hex(leaf.as_ref());
-  let parsed = parse_certificate_names(leaf.as_ref()).ok();
+  let parsed = parse_certificate_metadata(leaf.as_ref()).ok();
   Some(WafClientCertificateMetadata {
     fingerprint_sha256,
     subject_common_names: parsed
       .as_ref()
-      .map(|names| names.subject_common_names.clone())
+      .map(|metadata| metadata.subject_common_names.clone())
       .unwrap_or_default(),
     san_dns_names: parsed
       .as_ref()
-      .map(|names| names.san_dns_names.clone())
+      .map(|metadata| metadata.san_dns_names.clone())
       .unwrap_or_default(),
     san_ip_addresses: parsed
-      .map(|names| names.san_ip_addresses)
+      .map(|metadata| {
+        metadata
+          .san_ip_addresses
+          .into_iter()
+          .map(|address| address.to_string())
+          .collect()
+      })
       .unwrap_or_default(),
   })
 }
 
-#[derive(Debug, Default)]
-struct CertificateNames {
-  subject_common_names: Vec<String>,
-  san_dns_names: Vec<String>,
-  san_ip_addresses: Vec<String>,
-}
-
-fn parse_certificate_names(der: &[u8]) -> anyhow::Result<CertificateNames> {
-  let cert = DerReader::single(der, 0x30)?;
-  let tbs = DerReader::single(cert, 0x30)?;
-  let mut reader = DerReader::new(tbs);
-  if reader.peek_tag() == Some(0xa0) {
-    reader.read_any()?;
-  }
-  reader.read_any()?; // serialNumber
-  reader.read_any()?; // signature
-  reader.read_any()?; // issuer
-  reader.read_any()?; // validity
-  let subject = reader.read(0x30)?;
-  let mut names = CertificateNames::default();
-  parse_subject_common_names(subject, &mut names)?;
-  reader.read_any()?; // subjectPublicKeyInfo
-  while !reader.is_empty() {
-    let (tag, value) = reader.read_any()?;
-    if tag == 0xa3 {
-      parse_extensions(value, &mut names)?;
-    }
-  }
-  Ok(names)
-}
-
-fn parse_subject_common_names(value: &[u8], names: &mut CertificateNames) -> anyhow::Result<()> {
-  let mut reader = DerReader::new(value);
-  while !reader.is_empty() {
-    let relative_distinguished_name = reader.read(0x31)?;
-    let mut rdn_reader = DerReader::new(relative_distinguished_name);
-    while !rdn_reader.is_empty() {
-      let attribute = rdn_reader.read(0x30)?;
-      let mut attribute_reader = DerReader::new(attribute);
-      let oid = attribute_reader.read(0x06)?;
-      let (tag, value) = attribute_reader.read_any()?;
-      if oid == [0x55, 0x04, 0x03]
-        && let Some(common_name) = parse_directory_string(tag, value)
-      {
-        names.subject_common_names.push(common_name);
+pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCertificateMetadata> {
+  let cert = Certificate::from_der(der)?;
+  let validity = cert.tbs_certificate.validity;
+  let mut metadata = ParsedCertificateMetadata {
+    not_before_unix_seconds: unix_seconds(validity.not_before),
+    not_after_unix_seconds: unix_seconds(validity.not_after),
+    subject_common_names: subject_common_names(&cert),
+    san_dns_names: Vec::new(),
+    san_ip_addresses: Vec::new(),
+  };
+  if let Some(extensions) = &cert.tbs_certificate.extensions {
+    for extension in extensions {
+      if extension.extn_id.to_string() == "2.5.29.17" {
+        collect_subject_alt_names(extension.extn_value.as_bytes(), &mut metadata)?;
       }
     }
   }
-  Ok(())
+  Ok(metadata)
 }
 
-fn parse_extensions(value: &[u8], names: &mut CertificateNames) -> anyhow::Result<()> {
-  let extensions = DerReader::single(value, 0x30)?;
-  let mut reader = DerReader::new(extensions);
-  while !reader.is_empty() {
-    let extension = reader.read(0x30)?;
-    let mut extension_reader = DerReader::new(extension);
-    let oid = extension_reader.read(0x06)?;
-    if extension_reader.peek_tag() == Some(0x01) {
-      extension_reader.read_any()?;
-    }
-    let extn_value = extension_reader.read(0x04)?;
-    if oid == [0x55, 0x1d, 0x11] {
-      parse_subject_alt_names(extn_value, names)?;
-    }
-  }
-  Ok(())
+fn unix_seconds(time: x509_cert::time::Time) -> i64 {
+  let seconds = time.to_unix_duration().as_secs();
+  seconds.min(i64::MAX as u64) as i64
 }
 
-fn parse_subject_alt_names(value: &[u8], names: &mut CertificateNames) -> anyhow::Result<()> {
-  let names_der = DerReader::single(value, 0x30)?;
-  let mut reader = DerReader::new(names_der);
+fn subject_common_names(cert: &Certificate) -> Vec<String> {
+  cert
+    .tbs_certificate
+    .subject
+    .0
+    .iter()
+    .flat_map(|relative_distinguished_name| relative_distinguished_name.0.iter())
+    .filter_map(|attribute| {
+      (attribute.oid.to_string() == "2.5.4.3")
+        .then(|| directory_string_to_string(&attribute.value))
+        .flatten()
+    })
+    .collect()
+}
+
+fn directory_string_to_string(value: &x509_cert::attr::AttributeValue) -> Option<String> {
+  matches!(
+    value.tag(),
+    Tag::Utf8String | Tag::PrintableString | Tag::TeletexString | Tag::Ia5String
+  )
+  .then(|| std::str::from_utf8(value.value()).ok().map(str::to_string))
+  .flatten()
+}
+
+fn collect_subject_alt_names(
+  extension_value: &[u8],
+  metadata: &mut ParsedCertificateMetadata,
+) -> anyhow::Result<()> {
+  let names = DerReader::single(extension_value, 0x30)?;
+  let mut reader = DerReader::new(names);
   while !reader.is_empty() {
     let (tag, value) = reader.read_any()?;
     match tag {
       0x82 => {
         if let Ok(name) = std::str::from_utf8(value) {
-          names.san_dns_names.push(name.to_ascii_lowercase());
+          metadata.san_dns_names.push(name.to_ascii_lowercase());
         }
       }
       0x87 => match value {
-        [a, b, c, d] => names
+        [a, b, c, d] => metadata
           .san_ip_addresses
-          .push(IpAddr::from([*a, *b, *c, *d]).to_string()),
+          .push(IpAddr::from([*a, *b, *c, *d])),
         bytes if bytes.len() == 16 => {
           let mut octets = [0_u8; 16];
           octets.copy_from_slice(bytes);
-          names
-            .san_ip_addresses
-            .push(IpAddr::from(octets).to_string());
+          metadata.san_ip_addresses.push(IpAddr::from(octets));
         }
         _ => {}
       },
@@ -127,13 +125,6 @@ fn parse_subject_alt_names(value: &[u8], names: &mut CertificateNames) -> anyhow
     }
   }
   Ok(())
-}
-
-fn parse_directory_string(tag: u8, value: &[u8]) -> Option<String> {
-  match tag {
-    0x0c | 0x13 | 0x16 => std::str::from_utf8(value).ok().map(str::to_string),
-    _ => None,
-  }
 }
 
 #[derive(Clone, Copy)]
@@ -157,10 +148,6 @@ impl<'a> DerReader<'a> {
 
   fn is_empty(&self) -> bool {
     self.input.is_empty()
-  }
-
-  fn peek_tag(&self) -> Option<u8> {
-    self.input.first().copied()
   }
 
   fn read(&mut self, expected_tag: u8) -> anyhow::Result<&'a [u8]> {
@@ -219,9 +206,36 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
+  use std::path::{Path, PathBuf};
+  use std::process::{Command, Stdio};
+
   use rustls::pki_types::CertificateDer;
+  use rustls::pki_types::pem::PemObject;
 
   use super::*;
+
+  #[allow(dead_code)]
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  #[test]
+  fn client_certificate_metadata_extracts_x509_names() {
+    let temp_dir = common::TempDir::new("client-cert-metadata");
+    let (cert_path, _key_path) = create_self_signed_cert_with_ip_san(temp_dir.path());
+    let cert = first_pem_certificate(&cert_path);
+
+    let metadata = client_certificate_metadata(&[cert]).expect("certificate should be present");
+
+    assert_eq!(metadata.fingerprint_sha256.len(), 64);
+    assert_eq!(metadata.subject_common_names, vec!["client.example.test"]);
+    assert_eq!(metadata.san_dns_names, vec!["client.example.test"]);
+    assert_eq!(metadata.san_ip_addresses, vec!["127.0.0.1", "2001:db8::1"]);
+  }
 
   #[test]
   fn client_certificate_metadata_keeps_fingerprint_when_parse_fails() {
@@ -232,5 +246,57 @@ mod tests {
     assert!(metadata.subject_common_names.is_empty());
     assert!(metadata.san_dns_names.is_empty());
     assert!(metadata.san_ip_addresses.is_empty());
+  }
+
+  fn first_pem_certificate(path: &Path) -> CertificateDer<'static> {
+    let bytes = fs::read(path).expect("certificate should be readable");
+    CertificateDer::pem_slice_iter(&bytes)
+      .next()
+      .expect("certificate PEM should contain a certificate")
+      .expect("certificate PEM should parse")
+  }
+
+  fn create_self_signed_cert_with_ip_san(dir: &Path) -> (PathBuf, PathBuf) {
+    let key_path = dir.join("client-ip-san.key");
+    let cert_path = dir.join("client-ip-san.pem");
+    let config_path = dir.join("client-ip-san.cnf");
+    fs::write(
+      &config_path,
+      r#"[req]
+distinguished_name = req_distinguished_name
+x509_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = client.example.test
+
+[req_ext]
+subjectAltName = @alt_names
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = clientAuth
+
+[alt_names]
+DNS.1 = client.example.test
+IP.1 = 127.0.0.1
+IP.2 = 2001:db8::1
+"#,
+    )
+    .expect("failed to write certificate config");
+    let status = Command::new("openssl")
+      .args([
+        "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1", "-config",
+      ])
+      .arg(&config_path)
+      .arg("-keyout")
+      .arg(&key_path)
+      .arg("-out")
+      .arg(&cert_path)
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .expect("failed to spawn openssl");
+    assert!(status.success(), "openssl failed with status {status}");
+    (cert_path, key_path)
   }
 }

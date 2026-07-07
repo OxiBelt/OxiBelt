@@ -9,6 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 use crate::config::{Config, OcspMode, TlsKeyExchangeGroup, TlsVersion};
+use crate::tls::ParsedCertificateMetadata;
 
 use super::{DiagnosticReport, DiagnosticSeverity};
 
@@ -185,7 +186,7 @@ fn check_certificate_file(
   path: &Path,
   server_names: &[String],
 ) {
-  match read_first_cert(path).and_then(|cert| parse_certificate_info(&cert)) {
+  match read_first_cert(path).and_then(|cert| crate::tls::parse_certificate_metadata(&cert)) {
     Ok(info) => {
       check_validity(report, target, path, &info);
       for name in server_names {
@@ -218,9 +219,14 @@ fn check_certificate_file(
   }
 }
 
-fn check_validity(report: &mut DiagnosticReport, target: &str, path: &Path, info: &CertInfo) {
+fn check_validity(
+  report: &mut DiagnosticReport,
+  target: &str,
+  path: &Path,
+  info: &ParsedCertificateMetadata,
+) {
   let now = now_unix_seconds();
-  if now < info.not_before {
+  if now < info.not_before_unix_seconds {
     report.push(
       DiagnosticSeverity::Error,
       "tls.cert_not_yet_valid",
@@ -230,7 +236,7 @@ fn check_validity(report: &mut DiagnosticReport, target: &str, path: &Path, info
       "Install a certificate whose notBefore is in the past for this deployment clock.",
     );
   }
-  if now > info.not_after {
+  if now > info.not_after_unix_seconds {
     report.push(
       DiagnosticSeverity::Error,
       "tls.cert_expired",
@@ -239,7 +245,7 @@ fn check_validity(report: &mut DiagnosticReport, target: &str, path: &Path, info
       format!("certificate {} has expired", path.display()),
       "Renew the certificate before serving traffic.",
     );
-  } else if info.not_after.saturating_sub(now) < 14 * 24 * 60 * 60 {
+  } else if info.not_after_unix_seconds.saturating_sub(now) < 14 * 24 * 60 * 60 {
     report.push(
       DiagnosticSeverity::Warning,
       "tls.cert_expires_soon",
@@ -319,96 +325,12 @@ fn read_certs(path: &Path) -> anyhow::Result<Vec<Vec<u8>>> {
     .with_context(|| format!("failed to parse PEM certificates from {}", path.display()))
 }
 
-#[derive(Debug)]
-struct CertInfo {
-  not_before: i64,
-  not_after: i64,
-  dns_names: Vec<String>,
-  ip_addresses: Vec<IpAddr>,
-}
-
-fn parse_certificate_info(der: &[u8]) -> anyhow::Result<CertInfo> {
-  let cert = DerReader::single(der, 0x30)?;
-  let tbs = DerReader::single(cert, 0x30)?;
-  let mut reader = DerReader::new(tbs);
-  if reader.peek_tag() == Some(0xa0) {
-    reader.read_any()?;
-  }
-  reader.read_any()?; // serialNumber
-  reader.read_any()?; // signature
-  reader.read_any()?; // issuer
-  let validity = reader.read(0x30)?;
-  let mut validity_reader = DerReader::new(validity);
-  let not_before = parse_der_time(validity_reader.read_any()?.1)?;
-  let not_after = parse_der_time(validity_reader.read_any()?.1)?;
-  reader.read_any()?; // subject
-  reader.read_any()?; // subjectPublicKeyInfo
-
-  let mut info = CertInfo {
-    not_before,
-    not_after,
-    dns_names: Vec::new(),
-    ip_addresses: Vec::new(),
-  };
-  while !reader.is_empty() {
-    let (tag, value) = reader.read_any()?;
-    if tag == 0xa3 {
-      parse_extensions(value, &mut info)?;
-    }
-  }
-  Ok(info)
-}
-
-fn parse_extensions(value: &[u8], info: &mut CertInfo) -> anyhow::Result<()> {
-  let extensions = DerReader::single(value, 0x30)?;
-  let mut reader = DerReader::new(extensions);
-  while !reader.is_empty() {
-    let extension = reader.read(0x30)?;
-    let mut extension_reader = DerReader::new(extension);
-    let oid = extension_reader.read(0x06)?;
-    if extension_reader.peek_tag() == Some(0x01) {
-      extension_reader.read_any()?;
-    }
-    let extn_value = extension_reader.read(0x04)?;
-    if oid == [0x55, 0x1d, 0x11] {
-      parse_subject_alt_names(extn_value, info)?;
-    }
-  }
-  Ok(())
-}
-
-fn parse_subject_alt_names(value: &[u8], info: &mut CertInfo) -> anyhow::Result<()> {
-  let names = DerReader::single(value, 0x30)?;
-  let mut reader = DerReader::new(names);
-  while !reader.is_empty() {
-    let (tag, value) = reader.read_any()?;
-    match tag {
-      0x82 => {
-        if let Ok(name) = std::str::from_utf8(value) {
-          info.dns_names.push(name.to_ascii_lowercase());
-        }
-      }
-      0x87 => match value {
-        [a, b, c, d] => info.ip_addresses.push(IpAddr::from([*a, *b, *c, *d])),
-        bytes if bytes.len() == 16 => {
-          let mut octets = [0_u8; 16];
-          octets.copy_from_slice(bytes);
-          info.ip_addresses.push(IpAddr::from(octets));
-        }
-        _ => {}
-      },
-      _ => {}
-    }
-  }
-  Ok(())
-}
-
-fn name_covered_by_cert(name: &str, info: &CertInfo) -> bool {
+fn name_covered_by_cert(name: &str, info: &ParsedCertificateMetadata) -> bool {
   if let Ok(ip) = name.parse::<IpAddr>() {
-    return info.ip_addresses.contains(&ip);
+    return info.san_ip_addresses.contains(&ip);
   }
   let name = name.to_ascii_lowercase();
-  info.dns_names.iter().any(|candidate| {
+  info.san_dns_names.iter().any(|candidate| {
     candidate == &name
       || candidate
         .strip_prefix("*.")
@@ -441,15 +363,6 @@ fn collect_der_times(input: &[u8], times: &mut Vec<i64>) {
     if matches!(tag, 0x30 | 0x31 | 0xa0..=0xbf) {
       collect_der_times(value, times);
     }
-  }
-}
-
-fn parse_der_time(value: &[u8]) -> anyhow::Result<i64> {
-  let text = std::str::from_utf8(value).context("time was not ASCII")?;
-  match text.len() {
-    13 => parse_utc_time(text),
-    15 => parse_generalized_time(text),
-    _ => bail!("unsupported DER time length"),
   }
 }
 
@@ -518,31 +431,6 @@ impl<'a> DerReader<'a> {
     Self { input, offset: 0 }
   }
 
-  fn single(input: &'a [u8], expected_tag: u8) -> anyhow::Result<&'a [u8]> {
-    let mut reader = Self::new(input);
-    let value = reader.read(expected_tag)?;
-    if !reader.is_empty() {
-      bail!("DER value has trailing data");
-    }
-    Ok(value)
-  }
-
-  fn is_empty(&self) -> bool {
-    self.offset >= self.input.len()
-  }
-
-  fn peek_tag(&self) -> Option<u8> {
-    self.input.get(self.offset).copied()
-  }
-
-  fn read(&mut self, expected_tag: u8) -> anyhow::Result<&'a [u8]> {
-    let (tag, value) = self.read_any()?;
-    if tag != expected_tag {
-      bail!("unexpected DER tag 0x{tag:02x}, expected 0x{expected_tag:02x}");
-    }
-    Ok(value)
-  }
-
   fn read_any(&mut self) -> anyhow::Result<(u8, &'a [u8])> {
     if self.offset + 2 > self.input.len() {
       bail!("truncated DER value");
@@ -579,7 +467,92 @@ impl<'a> DerReader<'a> {
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
+  use std::path::Path;
+
   use super::*;
+
+  #[allow(dead_code)]
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
+
+  #[test]
+  fn certbot_and_lego_certificate_outputs_do_not_report_parse_failure() {
+    let temp_dir = common::TempDir::new("tls-acme-bundles");
+    let (ca_cert, ca_key) =
+      common::create_self_signed_cert(temp_dir.path(), "acme-ca.example.test");
+    let (leaf_cert, _leaf_key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), "example.com", &ca_cert, &ca_key);
+    let fullchain = temp_dir.path().join("fullchain.pem");
+    let chain = temp_dir.path().join("chain.pem");
+    let lego_leaf = temp_dir.path().join("example.com.crt");
+    let lego_issuer = temp_dir.path().join("example.com.issuer.crt");
+    let lego_concat = temp_dir.path().join("example.com.chain.crt");
+
+    write_pem_bundle(&fullchain, &[leaf_cert.as_path(), ca_cert.as_path()]);
+    write_pem_bundle(&chain, &[ca_cert.as_path()]);
+    write_pem_bundle(&lego_leaf, &[leaf_cert.as_path()]);
+    write_pem_bundle(&lego_issuer, &[ca_cert.as_path()]);
+    write_pem_bundle(&lego_concat, &[leaf_cert.as_path(), ca_cert.as_path()]);
+
+    for path in [&fullchain, &chain, &lego_leaf, &lego_issuer, &lego_concat] {
+      let mut report = DiagnosticReport::new();
+      check_certificate_file(&mut report, "tls.cert_chain", path, &[]);
+      assert!(
+        !has_finding(&report, "tls.cert_parse_failed"),
+        "{} should not report tls.cert_parse_failed: {:?}",
+        path.display(),
+        report.findings
+      );
+    }
+  }
+
+  #[test]
+  fn fullchain_san_check_uses_leaf_certificate() {
+    let temp_dir = common::TempDir::new("tls-fullchain-san");
+    let (ca_cert, ca_key) =
+      common::create_self_signed_cert(temp_dir.path(), "acme-ca.example.test");
+    let (leaf_cert, _leaf_key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), "example.com", &ca_cert, &ca_key);
+    let fullchain = temp_dir.path().join("fullchain.pem");
+    write_pem_bundle(&fullchain, &[leaf_cert.as_path(), ca_cert.as_path()]);
+
+    let mut covered_report = DiagnosticReport::new();
+    check_certificate_file(
+      &mut covered_report,
+      "tls.cert_chain",
+      &fullchain,
+      &["example.com".to_string()],
+    );
+    assert!(!has_finding(&covered_report, "tls.cert_parse_failed"));
+    assert!(!has_finding(&covered_report, "tls.sni_not_covered"));
+
+    let mut missing_report = DiagnosticReport::new();
+    check_certificate_file(
+      &mut missing_report,
+      "tls.cert_chain",
+      &fullchain,
+      &["missing.example.com".to_string()],
+    );
+    assert!(!has_finding(&missing_report, "tls.cert_parse_failed"));
+    assert!(has_finding(&missing_report, "tls.sni_not_covered"));
+  }
+
+  #[test]
+  fn malformed_certificate_still_reports_parse_failure() {
+    let temp_dir = common::TempDir::new("tls-malformed-cert");
+    let path = temp_dir.path().join("fullchain.pem");
+    fs::write(&path, b"not a certificate\n").expect("failed to write malformed certificate");
+
+    let mut report = DiagnosticReport::new();
+    check_certificate_file(&mut report, "tls.cert_chain", &path, &[]);
+
+    assert!(has_finding(&report, "tls.cert_parse_failed"));
+  }
 
   #[test]
   fn generalized_time_converts_to_unix_timestamp() {
@@ -593,5 +566,27 @@ mod tests {
   fn wildcard_matches_single_label_only() {
     assert!(wildcard_matches("admin.example.test", "example.test"));
     assert!(!wildcard_matches("deep.admin.example.test", "example.test"));
+  }
+
+  fn has_finding(report: &DiagnosticReport, id: &str) -> bool {
+    report.findings.iter().any(|finding| finding.id == id)
+  }
+
+  fn write_pem_bundle(path: &Path, parts: &[&Path]) {
+    let mut bundle = Vec::new();
+    for part in parts {
+      let bytes = fs::read(part).unwrap_or_else(|error| {
+        panic!(
+          "failed to read certificate fixture {}: {error}",
+          part.display()
+        )
+      });
+      bundle.extend_from_slice(&bytes);
+      if !bundle.ends_with(b"\n") {
+        bundle.push(b'\n');
+      }
+    }
+    fs::write(path, bundle)
+      .unwrap_or_else(|error| panic!("failed to write PEM bundle {}: {error}", path.display()));
   }
 }
