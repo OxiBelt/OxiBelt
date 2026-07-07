@@ -32,7 +32,7 @@ fn guard_accepts_direct_empty_get_to_h2c_upstream() {
       HttpVersion::H2,
       http::Version::HTTP_2,
       true,
-      true,
+      FastPathRequestBodyMode::Empty,
       &request,
     ),
     None
@@ -54,7 +54,7 @@ fn guard_accepts_direct_empty_head_to_tls_h2_upstream() {
       HttpVersion::H2,
       http::Version::HTTP_3,
       true,
-      true,
+      FastPathRequestBodyMode::Empty,
       &request,
     ),
     None
@@ -76,7 +76,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       HttpVersion::H1,
       http::Version::HTTP_2,
       true,
-      true,
+      FastPathRequestBodyMode::Empty,
       &request,
     ),
     Some(FastPathTransportMissReason::UnsupportedUpstream)
@@ -87,7 +87,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       HttpVersion::H2,
       http::Version::HTTP_2,
       true,
-      false,
+      FastPathRequestBodyMode::Streaming,
       &request,
     ),
     Some(FastPathTransportMissReason::RequestBody)
@@ -100,7 +100,7 @@ fn guard_rejects_non_h2_upstream_or_unproven_body() {
       HttpVersion::H2,
       http::Version::HTTP_2,
       true,
-      true,
+      FastPathRequestBodyMode::Empty,
       &request,
     ),
     Some(FastPathTransportMissReason::UnsupportedUpstream)
@@ -121,7 +121,7 @@ fn guard_rejects_method_or_non_direct_selection() {
       HttpVersion::H2,
       http::Version::HTTP_2,
       true,
-      true,
+      FastPathRequestBodyMode::Empty,
       &post,
     ),
     Some(FastPathTransportMissReason::UnsupportedRequest)
@@ -138,7 +138,7 @@ fn guard_rejects_method_or_non_direct_selection() {
       HttpVersion::H2,
       http::Version::HTTP_2,
       false,
-      true,
+      FastPathRequestBodyMode::Empty,
       &get,
     ),
     Some(FastPathTransportMissReason::UnsupportedRequest)
@@ -417,7 +417,7 @@ async fn saturated_pool_falls_back_instead_of_failing_request() {
     HttpVersion::H2,
     http::Version::HTTP_2,
     true,
-    true,
+    FastPathRequestBodyMode::Empty,
     request,
     direct_h2_test_timeouts(),
     true,

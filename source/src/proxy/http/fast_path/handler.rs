@@ -246,7 +246,7 @@ impl PlainProxyFastPath {
       }
     };
 
-    let (outbound, request_body_proven_empty) = match preparation {
+    let (outbound, request_body_mode) = match preparation {
       DownstreamDirectH1Preparation::DirectH1(mut outbound) => {
         timing::direct_h1_build_ok(snapshot, metric_protocol, direct_h1_build_started);
         state
@@ -257,7 +257,7 @@ impl PlainProxyFastPath {
         let request_body_started = timing::start(timing_enabled);
         record_empty_request_body(snapshot, metric_protocol, outbound.extensions());
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
-        (outbound, true)
+        (outbound, FastPathRequestBodyMode::Empty)
       }
       DownstreamDirectH1Preparation::Generic(parts, body) => {
         if request_body_definitely_empty {
@@ -339,6 +339,7 @@ impl PlainProxyFastPath {
         };
         timing::record_request_body_prepare(snapshot, metric_protocol, request_body_started);
         let request_body_proven_empty = request_body.proven_empty();
+        let request_body_mode = request_body.mode();
         let mut parts = Some(parts);
         let mut post_probe_outbound = None;
         if !request_body_definitely_empty && request_body_proven_empty {
@@ -400,7 +401,7 @@ impl PlainProxyFastPath {
         }
         if let Some(outbound) = post_probe_outbound {
           record_upstream_rebuild(true);
-          (outbound, true)
+          (outbound, FastPathRequestBodyMode::Empty)
         } else {
           let mut parts =
             parts.expect("generic request parts should remain after direct-H1 fallback");
@@ -449,10 +450,7 @@ impl PlainProxyFastPath {
               timeouts.upstream_send,
             )
           };
-          (
-            Request::from_parts(parts, outbound_body),
-            request_body_proven_empty,
-          )
+          (Request::from_parts(parts, outbound_body), request_body_mode)
         }
       }
     };
@@ -484,7 +482,7 @@ impl PlainProxyFastPath {
         upstream_version,
         request_version,
         true,
-        request_body_proven_empty,
+        request_body_mode,
         retry_policy.enabled,
         state.config.runtime.direct_h1_io,
         outbound,
@@ -511,7 +509,7 @@ impl PlainProxyFastPath {
         upstream_version,
         request_version,
         true,
-        request_body_proven_empty,
+        request_body_mode,
         outbound,
         timeouts,
         snapshot.request_path_features.hot_path_metrics,

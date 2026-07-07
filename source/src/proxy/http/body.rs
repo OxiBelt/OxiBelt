@@ -360,17 +360,17 @@ where
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    if self.sleep.is_none() {
-      let timeout = self.timeout;
-      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
-    }
-
     match self.body.as_mut().poll_frame(cx) {
       Poll::Ready(frame) => {
         self.sleep = None;
         return Poll::Ready(frame.map(|result| result.map_err(Into::into)));
       }
       Poll::Pending => {}
+    }
+
+    if self.sleep.is_none() {
+      let timeout = self.timeout;
+      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
     }
 
     if let Some(sleep) = self.sleep.as_mut()
@@ -400,17 +400,17 @@ impl Body for PollSendTimeoutBody {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-    if self.sleep.is_none() {
-      let timeout = self.timeout;
-      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
-    }
-
     match Pin::new(&mut self.body).poll_frame(cx) {
       Poll::Ready(frame) => {
         self.sleep = None;
         return Poll::Ready(frame);
       }
       Poll::Pending => {}
+    }
+
+    if self.sleep.is_none() {
+      let timeout = self.timeout;
+      self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
     }
 
     if let Some(sleep) = self.sleep.as_mut()

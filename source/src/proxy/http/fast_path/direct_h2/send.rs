@@ -13,6 +13,7 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, ProxyBody};
 
 use super::super::helpers::fast_path_metric_protocol;
+use super::super::request_body::FastPathRequestBodyMode;
 use super::super::stage_timing as timing;
 use super::metrics as metric_record;
 use super::request::PreparedDirectH2Request;
@@ -32,7 +33,7 @@ pub(in crate::proxy::http::fast_path) async fn try_send_direct_h2(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_proven_empty: bool,
+  request_body_mode: FastPathRequestBodyMode,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
   hot_path_metrics: bool,
@@ -44,7 +45,7 @@ pub(in crate::proxy::http::fast_path) async fn try_send_direct_h2(
     upstream_version,
     request_version,
     direct_selection_used,
-    request_body_proven_empty,
+    request_body_mode,
     &outbound,
   ) {
     metric_record::transport_miss(metrics.as_ref(), hot_path_metrics, protocol, reason);
@@ -91,7 +92,7 @@ pub(super) fn direct_h2_guard_miss(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_proven_empty: bool,
+  request_body_mode: FastPathRequestBodyMode,
   outbound: &Request<ProxyBody>,
 ) -> Option<FastPathTransportMissReason> {
   if !matches!(
@@ -108,7 +109,7 @@ pub(super) fn direct_h2_guard_miss(
   {
     return Some(FastPathTransportMissReason::UnsupportedUpstream);
   }
-  if !request_body_proven_empty || !outbound.body().is_end_stream() {
+  if request_body_mode != FastPathRequestBodyMode::Empty || !outbound.body().is_end_stream() {
     return Some(FastPathTransportMissReason::RequestBody);
   }
   None

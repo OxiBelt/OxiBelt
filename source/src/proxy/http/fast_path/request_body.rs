@@ -26,11 +26,11 @@ pub(super) fn fast_path_empty_request_body() -> ProxyBody {
 
 pub(super) struct FastPathRequestBody {
   body: ProxyBody,
-  kind: FastPathRequestBodyKind,
+  mode: FastPathRequestBodyMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FastPathRequestBodyKind {
+pub(super) enum FastPathRequestBodyMode {
   Empty,
   SmallExact,
   Streaming,
@@ -59,30 +59,34 @@ impl FastPathRequestBody {
   pub(super) fn empty() -> Self {
     Self {
       body: empty_body(),
-      kind: FastPathRequestBodyKind::Empty,
+      mode: FastPathRequestBodyMode::Empty,
     }
   }
 
   pub(super) fn streaming(body: ProxyBody) -> Self {
     Self {
       body,
-      kind: FastPathRequestBodyKind::Streaming,
+      mode: FastPathRequestBodyMode::Streaming,
     }
   }
 
   fn small_exact(bytes: Bytes) -> Self {
     Self {
       body: body::known_small_no_trailers_body(bytes),
-      kind: FastPathRequestBodyKind::SmallExact,
+      mode: FastPathRequestBodyMode::SmallExact,
     }
   }
 
   pub(super) fn proven_empty(&self) -> bool {
-    self.kind == FastPathRequestBodyKind::Empty
+    self.mode == FastPathRequestBodyMode::Empty
   }
 
   pub(super) fn is_small_exact(&self) -> bool {
-    self.kind == FastPathRequestBodyKind::SmallExact
+    self.mode == FastPathRequestBodyMode::SmallExact
+  }
+
+  pub(super) fn mode(&self) -> FastPathRequestBodyMode {
+    self.mode
   }
 
   pub(super) fn into_body(self) -> ProxyBody {

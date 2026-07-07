@@ -169,6 +169,8 @@ remove_perf_probe_image=0
 remove_external_benchmark_image=0
 remove_oxibelt_image=0
 active_proxy_container=""
+active_proxy_alias=""
+active_proxy_ip=""
 active_remote_signer_container=""
 active_remote_signer_volume=""
 active_remote_signer_cert_volume=""
@@ -1310,22 +1312,35 @@ run_profiled_probe_json() {
 
 run_probe_json() {
   local probe_container="oxibelt-perf-probe-${run_id}-${RANDOM}"
-  local output container_logs selected_output status json probe_label previous_arg probe_log_name probe_log_path arg
+  local output container_logs selected_output status json probe_label probe_host previous_arg probe_log_name probe_log_path arg
+  local -a active_proxy_host_args=()
   probe_label="probe"
+  probe_host=""
   previous_arg=""
   for arg in "$@"; do
-    if [[ "${previous_arg}" == "--label" ]]; then
-      probe_label="${arg}"
-      break
-    fi
+    case "${previous_arg}" in
+      --label)
+        probe_label="${arg}"
+        ;;
+      --host)
+        probe_host="${arg}"
+        ;;
+    esac
     previous_arg="${arg}"
   done
+  if [[ -n "${active_proxy_alias}" && "${probe_host}" == "${active_proxy_alias}" ]]; then
+    refresh_active_proxy_ip || true
+    if [[ -n "${active_proxy_ip}" ]]; then
+      active_proxy_host_args+=(--add-host "${probe_host}:${active_proxy_ip}")
+    fi
+  fi
   probe_log_name="${probe_label//[^A-Za-z0-9_.-]/_}"
   probe_log_path="${probe_logs_dir}/${probe_log_name}.log"
   docker create \
     --name "${probe_container}" \
     --label "${test_label}" \
     --network "${network_name}" \
+    "${active_proxy_host_args[@]}" \
     "${perf_probe_image}" \
     "$@" >/dev/null
   docker cp "${tls_dir}/fullchain.pem" "${probe_container}:/tls/proxy-ca.pem"
@@ -2927,11 +2942,22 @@ wait_for_tls_proxy() {
   return 1
 }
 
+refresh_active_proxy_ip() {
+  if [[ -z "${active_proxy_container}" ]]; then
+    active_proxy_ip=""
+    return 1
+  fi
+  active_proxy_ip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${network_name}\"}}{{.IPAddress}}{{end}}" "${active_proxy_container}" 2>/dev/null || true)"
+  [[ -n "${active_proxy_ip}" ]]
+}
+
 stop_active_proxy() {
   if [[ -n "${active_proxy_container}" ]]; then
     docker logs "${active_proxy_container}" >"${logs_dir}/${active_proxy_container}.log" 2>&1 || true
     docker rm -f "${active_proxy_container}" >/dev/null 2>&1 || true
     active_proxy_container=""
+    active_proxy_alias=""
+    active_proxy_ip=""
   fi
   if [[ -n "${active_remote_signer_container}" ]]; then
     docker logs "${active_remote_signer_container}" >"${logs_dir}/${active_remote_signer_container}.log" 2>&1 || true
@@ -3185,6 +3211,8 @@ start_oxibelt() {
   fi
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
+  active_proxy_alias="${alias_name}"
+  refresh_active_proxy_ip || true
   if ! wait_for_tls_proxy "${alias_name}"; then
     fail_with_diagnostics "OxiBelt performance proxy did not become ready for ${scenario}"
   fi
@@ -3213,6 +3241,8 @@ start_nginx() {
   docker cp "${static_dir}/." "${container}:/srv/static"
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
+  active_proxy_alias="nginx"
+  refresh_active_proxy_ip || true
   if ! wait_for_tls_proxy nginx; then
     fail_with_diagnostics "nginx performance proxy did not become ready"
   fi
@@ -3237,6 +3267,8 @@ start_caddy() {
   docker cp "${static_dir}/." "${container}:/srv/static"
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
+  active_proxy_alias="caddy"
+  refresh_active_proxy_ip || true
   if ! wait_for_tls_proxy caddy; then
     fail_with_diagnostics "Caddy performance proxy did not become ready"
   fi
@@ -3261,6 +3293,8 @@ start_openresty() {
   docker cp "${static_dir}/." "${container}:/srv/static"
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
+  active_proxy_alias="openresty"
+  refresh_active_proxy_ip || true
   if ! wait_for_tls_proxy openresty; then
     fail_with_diagnostics "OpenResty performance proxy did not become ready"
   fi

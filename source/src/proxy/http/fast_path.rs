@@ -84,7 +84,8 @@ use self::request_body::fast_path_request_body_is_definitely_empty;
 #[cfg(test)]
 use self::request_body::fast_path_small_exact_request_body;
 use self::request_body::{
-  FastPathRequestBody, fast_path_prepare_nonempty_request_body, fast_path_request_body_error_status,
+  FastPathRequestBody, FastPathRequestBodyMode, fast_path_prepare_nonempty_request_body,
+  fast_path_request_body_error_status,
 };
 #[cfg(test)]
 use self::request_body::{

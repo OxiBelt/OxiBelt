@@ -691,6 +691,9 @@ network_name=perf-net
 perf_probe_image=perf-probe
 tls_dir="{tls_dir}"
 probe_logs_dir="{probe_logs_dir}"
+active_proxy_container=""
+active_proxy_alias=""
+active_proxy_ip=""
 
 mkdir -p "${{tls_dir}}" "${{probe_logs_dir}}"
 printf 'cert\n' >"${{tls_dir}}/fullchain.pem"
@@ -709,6 +712,10 @@ docker() {{
       return 0
       ;;
   esac
+  return 1
+}}
+
+refresh_active_proxy_ip() {{
   return 1
 }}
 
@@ -3242,6 +3249,28 @@ fn mandatory_and_optional_call_sites_are_explicit() {
       && !script.contains("run_common_loads caddy caddy 1")
       && !script.contains("run_common_loads openresty openresty 0"),
     "mandatory HTTP/3 comparators must not use the legacy boolean supports_h3 flag"
+  );
+}
+
+#[test]
+fn performance_probe_containers_pin_active_proxy_alias_to_container_ip() {
+  let script = performance_script_text();
+  let run_probe = extract_bash_function(&script, "run_probe_json");
+
+  assert!(
+    script.contains("active_proxy_alias=\"${alias_name}\"")
+      && script.contains("active_proxy_alias=\"nginx\"")
+      && script.contains("active_proxy_alias=\"caddy\""),
+    "performance script should track the active proxy alias for OxiBelt and comparators"
+  );
+  assert!(
+    script.contains("refresh_active_proxy_ip()")
+      && script.contains("index .NetworkSettings.Networks"),
+    "performance script should inspect the active proxy container IP from its Docker network"
+  );
+  assert!(
+    run_probe.contains("--add-host \"${probe_host}:${active_proxy_ip}\""),
+    "perf-probe containers should bypass transient Docker DNS alias misses for the active proxy"
   );
 }
 

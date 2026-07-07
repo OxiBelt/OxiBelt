@@ -23,6 +23,7 @@ use crate::metrics::fast_path::labels::{
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
+use super::request_body::FastPathRequestBodyMode;
 use super::stage_timing as timing;
 
 #[cfg(target_os = "linux")]
@@ -251,7 +252,7 @@ pub(super) async fn try_send_direct_h1(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_proven_empty: bool,
+  request_body_mode: FastPathRequestBodyMode,
   retry_policy_enabled: bool,
   direct_h1_io_mode: RuntimeDirectH1IoMode,
   outbound: Request<ProxyBody>,
@@ -266,7 +267,7 @@ pub(super) async fn try_send_direct_h1(
     upstream_version,
     request_version,
     direct_selection_used,
-    request_body_proven_empty,
+    request_body_mode,
     retry_policy_enabled,
     &outbound,
   ) {
@@ -333,7 +334,7 @@ fn direct_h1_guard_miss(
   upstream_version: HttpVersion,
   request_version: http::Version,
   direct_selection_used: bool,
-  request_body_proven_empty: bool,
+  request_body_mode: FastPathRequestBodyMode,
   retry_policy_enabled: bool,
   outbound: &Request<ProxyBody>,
 ) -> Option<FastPathTransportMissReason> {
@@ -355,12 +356,12 @@ fn direct_h1_guard_miss(
     return Some(FastPathTransportMissReason::UnsupportedUpstream);
   }
   if request_body_streaming {
-    if request_body_proven_empty || retry_policy_enabled {
+    if request_body_mode == FastPathRequestBodyMode::Empty || retry_policy_enabled {
       return Some(FastPathTransportMissReason::RequestBody);
     }
     return None;
   }
-  if !request_body_proven_empty {
+  if request_body_mode != FastPathRequestBodyMode::Empty {
     return Some(FastPathTransportMissReason::RequestBody);
   }
   None

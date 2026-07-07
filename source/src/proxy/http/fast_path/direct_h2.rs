@@ -27,6 +27,9 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
+#[cfg(test)]
+use super::request_body::FastPathRequestBodyMode;
+
 mod connection;
 mod metrics;
 mod request;

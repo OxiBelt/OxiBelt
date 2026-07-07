@@ -22,7 +22,7 @@ fn guard_accepts_streaming_post_when_retry_replay_is_disabled() {
       HttpVersion::H1,
       http::Version::HTTP_2,
       true,
-      false,
+      FastPathRequestBodyMode::Streaming,
       false,
       &request,
     ),
@@ -45,11 +45,34 @@ fn guard_rejects_streaming_post_when_retry_replay_is_enabled() {
       HttpVersion::H1,
       http::Version::HTTP_2,
       true,
-      false,
+      FastPathRequestBodyMode::Streaming,
       true,
       &request,
     ),
     Some(FastPathTransportMissReason::RequestBody)
+  );
+}
+
+#[test]
+fn guard_accepts_small_exact_post_when_retry_replay_is_disabled() {
+  let upstream = upstream("http://backend.internal:18080");
+  let request = Request::builder()
+    .method(Method::POST)
+    .uri("http://backend.internal/perf/post")
+    .body(non_empty_body(b"{\"ok\":true}"))
+    .unwrap();
+
+  assert_eq!(
+    direct_h1_guard_miss(
+      &upstream,
+      HttpVersion::H1,
+      http::Version::HTTP_2,
+      true,
+      FastPathRequestBodyMode::SmallExact,
+      false,
+      &request,
+    ),
+    None
   );
 }
 
