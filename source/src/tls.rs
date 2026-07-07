@@ -600,15 +600,11 @@ fn select_admin_certificate_by_names<'a, T>(
       return Some(certificate);
     }
   }
-  for certificate in certificates {
-    if names(certificate)
+  certificates.iter().find(|&certificate| {
+    names(certificate)
       .iter()
       .any(|pattern| pattern.starts_with("*.") && sni_matches(pattern, server_name))
-    {
-      return Some(certificate);
-    }
-  }
-  None
+  })
 }
 
 pub(super) fn sni_matches(pattern: &str, server_name: &str) -> bool {

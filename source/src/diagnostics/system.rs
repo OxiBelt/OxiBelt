@@ -187,15 +187,10 @@ fn diagnose_x86_64_v3(report: &mut DiagnosticReport) {
   let Some(raw) = std::fs::read_to_string("/proc/cpuinfo").ok() else {
     return;
   };
-  let Some(flags) = raw.lines().find_map(|line| line.strip_prefix("flags")) else {
+  let Some(flags) = cpuinfo_flags(&raw) else {
     return;
   };
-  let missing = [
-    "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe",
-  ]
-  .into_iter()
-  .filter(|flag| !flags.split_whitespace().any(|value| value == *flag))
-  .collect::<Vec<_>>();
+  let missing = missing_x86_64_v3_features(flags);
   if !missing.is_empty() {
     report.push(
       DiagnosticSeverity::Info,
@@ -206,6 +201,36 @@ fn diagnose_x86_64_v3(report: &mut DiagnosticReport) {
       "Use a baseline image on this host, or deploy x86-64-v3 optimized builds only on compatible nodes.",
     );
   }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpuinfo_flags(raw: &str) -> Option<&str> {
+  raw.lines().find_map(|line| {
+    let (name, value) = line.split_once(':')?;
+    (name.trim() == "flags").then_some(value)
+  })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn missing_x86_64_v3_features(flags: &str) -> Vec<&'static str> {
+  [
+    ("avx", &["avx"][..]),
+    ("avx2", &["avx2"]),
+    ("bmi1", &["bmi1"]),
+    ("bmi2", &["bmi2"]),
+    ("f16c", &["f16c"]),
+    ("fma", &["fma"]),
+    ("lzcnt", &["lzcnt", "abm"]),
+    ("movbe", &["movbe"]),
+  ]
+  .into_iter()
+  .filter_map(|(feature, aliases)| {
+    (!aliases
+      .iter()
+      .any(|alias| flags.split_whitespace().any(|value| value == *alias)))
+    .then_some(feature)
+  })
+  .collect()
 }
 
 fn diagnose_low_port_capability(config: &Config, report: &mut DiagnosticReport) {
@@ -367,6 +392,52 @@ fn read_trimmed(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn x86_64_v3_accepts_abm_as_lzcnt_feature() {
+    let flags = "avx avx2 bmi1 bmi2 f16c fma abm movbe";
+
+    assert_eq!(
+      missing_x86_64_v3_features(flags),
+      Vec::<&'static str>::new()
+    );
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn x86_64_v3_accepts_literal_lzcnt_feature() {
+    let flags = "avx avx2 bmi1 bmi2 f16c fma lzcnt movbe";
+
+    assert_eq!(
+      missing_x86_64_v3_features(flags),
+      Vec::<&'static str>::new()
+    );
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn x86_64_v3_reports_lzcnt_when_aliases_are_missing() {
+    let flags = "avx avx2 bmi1 bmi2 f16c fma movbe";
+
+    assert_eq!(missing_x86_64_v3_features(flags), vec!["lzcnt"]);
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn x86_64_v3_flag_matching_requires_exact_tokens() {
+    let flags = "avx avx2 bmi1 bmi2 f16c fma notabm movbe";
+
+    assert_eq!(missing_x86_64_v3_features(flags), vec!["lzcnt"]);
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[test]
+  fn cpuinfo_flags_extracts_flags_field() {
+    let raw = "processor\t: 0\nflags\t\t: avx abm movbe\nbugs\t\t: none\n";
+
+    assert_eq!(cpuinfo_flags(raw), Some(" avx abm movbe"));
+  }
 
   #[cfg(unix)]
   #[test]

@@ -37,7 +37,7 @@ fn route_order_tie_can_match_same_request(
   if route_matcher_specificity(left) != route_matcher_specificity(right) {
     return Ok(false);
   }
-  Ok(route_predicates_can_overlap(left, right)?)
+  route_predicates_can_overlap(left, right)
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
