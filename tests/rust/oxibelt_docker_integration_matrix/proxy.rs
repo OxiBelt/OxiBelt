@@ -414,7 +414,7 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     docker_case(
       "proxy-routing",
       "equal-specificity-keeps-route-order",
-      "equal host and path specificity keeps the first configured route",
+      "explicit route priority disambiguates equal host and path specificity",
       ExpectStart::Success,
       Needs {
         http_upstream: true,

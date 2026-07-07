@@ -1,7 +1,8 @@
 //! Route configuration validation.
 //! Hosts, paths, upstream references, and per-route policy are checked before routing tables build.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -15,6 +16,12 @@ use super::{
   Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsVersion,
   default_hosts, default_path_prefix,
 };
+
+mod conflicts;
+
+pub(super) fn validate_route_match_conflicts(routes: &[RouteConfig]) -> anyhow::Result<()> {
+  conflicts::validate_route_match_conflicts(routes)
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RouteConfig {
@@ -279,6 +286,14 @@ pub(super) fn validate_route_path_value(
 
 pub(super) fn validate_route_match_config(route: &RouteConfig) -> anyhow::Result<()> {
   let route_name = &route.name;
+  let mut hosts = HashSet::new();
+  for host in &route.hosts {
+    let normalized = validate_route_host_pattern(route_name, host)?;
+    if !hosts.insert(normalized) {
+      bail!("route {route_name} hosts contains duplicate {host}");
+    }
+  }
+
   let path = &route.r#match.path;
   if let Some(prefix) = &path.prefix {
     validate_route_path_value(route_name, "match.path.prefix", prefix)?;
@@ -360,6 +375,49 @@ pub(super) fn validate_route_match_config(route: &RouteConfig) -> anyhow::Result
   Ok(())
 }
 
+fn validate_route_host_pattern(route_name: &str, host: &str) -> anyhow::Result<String> {
+  if host.trim() != host || host.is_empty() {
+    bail!("route {route_name} hosts entries must not be empty or padded");
+  }
+  if host.bytes().any(|byte| byte.is_ascii_control()) {
+    bail!("route {route_name} hosts entry {host} contains a control character");
+  }
+  let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+  if normalized == "*" {
+    return Ok(normalized);
+  }
+  let ip_literal = if normalized.starts_with('[') {
+    normalized
+      .find(']')
+      .filter(|end| *end == normalized.len() - 1)
+      .map(|end| &normalized[1..end])
+  } else {
+    Some(normalized.as_str())
+  };
+  if let Some(ip_literal) = ip_literal
+    && let Ok(ip) = ip_literal.parse::<IpAddr>()
+  {
+    return Ok(ip.to_string());
+  }
+  let dns_pattern = normalized.strip_prefix("*.").unwrap_or(&normalized);
+  if dns_pattern.is_empty() || dns_pattern.contains('*') {
+    bail!("route {route_name} hosts entry {host} may only use a leftmost wildcard");
+  }
+  if dns_pattern
+    .split('.')
+    .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+  {
+    bail!("route {route_name} hosts entry {host} is not a valid DNS pattern");
+  }
+  if !dns_pattern
+    .bytes()
+    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+  {
+    bail!("route {route_name} hosts entry {host} contains invalid characters");
+  }
+  Ok(normalized)
+}
+
 fn validate_named_value_match(
   route_name: &str,
   field_name: &str,
@@ -425,54 +483,6 @@ fn validate_route_regex(route_name: &str, field_name: &str, regex: &str) -> anyh
   regex::Regex::new(regex)
     .with_context(|| format!("route {route_name} {field_name} contains invalid regex"))?;
   Ok(())
-}
-
-pub(super) fn validate_route_match_conflicts(routes: &[RouteConfig]) -> anyhow::Result<()> {
-  let mut seen = HashMap::<String, &str>::new();
-  for route in routes {
-    if route.r#match.terminal {
-      continue;
-    }
-    let key = route_match_conflict_key(route);
-    if let Some(previous) = seen.insert(key, route.name.as_str()) {
-      bail!(
-        "routes {previous} and {} have indistinguishable non-terminal route matchers",
-        route.name
-      );
-    }
-  }
-  Ok(())
-}
-
-fn route_match_conflict_key(route: &RouteConfig) -> String {
-  let mut hosts = route
-    .hosts
-    .iter()
-    .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
-    .collect::<Vec<_>>();
-  hosts.sort();
-  let mut methods = route.r#match.methods.clone();
-  methods.sort();
-  let mut source_cidrs = route
-    .r#match
-    .source_cidrs
-    .iter()
-    .filter_map(|cidr| crate::identity::Cidr::parse(cidr).ok())
-    .map(|cidr| cidr.canonical())
-    .collect::<Vec<_>>();
-  source_cidrs.sort();
-  let mut protocols = route.r#match.protocols.clone();
-  protocols.sort();
-  format!(
-    "hosts={hosts:?};priority={};path_prefix={};path_exact={:?};path_regex={:?};methods={methods:?};headers={:?};queries={:?};source_cidrs={source_cidrs:?};protocols={protocols:?};tls={:?}",
-    route.r#match.priority,
-    route.effective_path_prefix(),
-    route.r#match.path.exact,
-    route.r#match.path.regex,
-    route.r#match.headers,
-    route.r#match.queries,
-    route.r#match.tls,
-  )
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

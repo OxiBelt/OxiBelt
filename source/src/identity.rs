@@ -60,6 +60,26 @@ impl Cidr {
     }
   }
 
+  pub fn overlaps(&self, other: &Self) -> bool {
+    match (self.network, other.network) {
+      (IpAddr::V4(_), IpAddr::V4(network)) => {
+        if self.prefix <= other.prefix {
+          self.contains(IpAddr::V4(network))
+        } else {
+          other.contains(self.network)
+        }
+      }
+      (IpAddr::V6(_), IpAddr::V6(network)) => {
+        if self.prefix <= other.prefix {
+          self.contains(IpAddr::V6(network))
+        } else {
+          other.contains(self.network)
+        }
+      }
+      _ => false,
+    }
+  }
+
   pub fn canonical(&self) -> String {
     format!("{}/{}", self.network, self.prefix)
   }

@@ -572,14 +572,12 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
     let Some(server_name) = client_hello.server_name() else {
       return (!self.require_sni).then(|| self.default.clone()).flatten();
     };
-    for certificate in &self.certificates {
-      if certificate
-        .server_names
-        .iter()
-        .any(|pattern| sni_matches(pattern, server_name))
-      {
-        return Some(certificate.certified_key.clone());
-      }
+    if let Some(certificate) =
+      select_admin_certificate_by_names(&self.certificates, server_name, |certificate| {
+        &certificate.server_names
+      })
+    {
+      return Some(certificate.certified_key.clone());
     }
     if self.reject_unknown_sni {
       None
@@ -587,6 +585,30 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
       self.default.clone()
     }
   }
+}
+
+fn select_admin_certificate_by_names<'a, T>(
+  certificates: &'a [T],
+  server_name: &str,
+  names: impl Fn(&'a T) -> &'a [String] + Copy,
+) -> Option<&'a T> {
+  for certificate in certificates {
+    if names(certificate)
+      .iter()
+      .any(|pattern| !pattern.starts_with("*.") && pattern.eq_ignore_ascii_case(server_name))
+    {
+      return Some(certificate);
+    }
+  }
+  for certificate in certificates {
+    if names(certificate)
+      .iter()
+      .any(|pattern| pattern.starts_with("*.") && sni_matches(pattern, server_name))
+    {
+      return Some(certificate);
+    }
+  }
+  None
 }
 
 pub(super) fn sni_matches(pattern: &str, server_name: &str) -> bool {
@@ -668,7 +690,7 @@ fn tls_protocol_versions(
 
 #[cfg(test)]
 mod tests {
-  use super::sni_matches;
+  use super::{select_admin_certificate_by_names, sni_matches};
 
   #[test]
   fn sni_matches_without_lowercase_allocation() {
@@ -676,5 +698,19 @@ mod tests {
     assert!(sni_matches("*.example.test", "Admin.Example.Test"));
     assert!(!sni_matches("*.example.test", "deep.admin.example.test"));
     assert!(!sni_matches("*.example.test", "example.test"));
+  }
+
+  #[test]
+  fn admin_certificate_selection_prefers_exact_name_before_wildcard() {
+    let certificates = vec![
+      vec!["*.example.test".to_string()],
+      vec!["admin.example.test".to_string()],
+    ];
+
+    let selected =
+      select_admin_certificate_by_names(&certificates, "Admin.Example.Test", Vec::as_slice)
+        .expect("admin certificate should match");
+
+    assert_eq!(selected, &certificates[1]);
   }
 }

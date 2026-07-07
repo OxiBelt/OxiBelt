@@ -80,6 +80,7 @@ path_prefix = "/same"
 upstream = "http-upstream"
 
 [routes.match]
+priority = 10
 
 [[routes.match.headers]]
 name = "X-Tie"

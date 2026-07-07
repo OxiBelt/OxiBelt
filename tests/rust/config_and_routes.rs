@@ -11920,16 +11920,16 @@ upstream = "other"
   assert!(
     error
       .to_string()
-      .contains("indistinguishable non-terminal route matchers"),
+      .contains("overlapping route matchers with equal precedence"),
     "unexpected error: {error}"
   );
 }
 
 #[test]
-fn routes_allow_distinguishable_equal_specificity_ties() {
-  let temp_dir = common::TempDir::new("route-match-distinguishable-tie");
+fn routes_reject_coincident_equal_specificity_matchers() {
+  let temp_dir = common::TempDir::new("route-match-coincident-tie");
   let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "route-match-distinguishable-tie");
+    common::create_self_signed_cert(temp_dir.path(), "route-match-coincident-tie");
   let raw = common::minimal_config_toml(&cert_path, &key_path)
     + r#"
 
@@ -11963,9 +11963,205 @@ exact = "yes"
 "#;
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("coincident equal-specificity routes should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping route matchers with equal precedence"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn routes_allow_priority_to_disambiguate_equal_specificity_matchers() {
+  let temp_dir = common::TempDir::new("route-match-priority-tie");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-match-priority-tie");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "header-tie"
+hosts = ["example.com"]
+path_prefix = "/same"
+upstream = "app"
+
+[routes.match]
+priority = 10
+
+[[routes.match.headers]]
+name = "X-Tie"
+exact = "yes"
+
+[[routes]]
+name = "query-tie"
+hosts = ["example.com"]
+path_prefix = "/same"
+upstream = "other"
+
+[routes.match]
+
+[[routes.match.queries]]
+name = "tie"
+exact = "yes"
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
   config
     .validate()
-    .expect("distinguishable equal-specificity routes should validate");
+    .expect("priority should disambiguate equal-specificity routes");
+}
+
+#[test]
+fn routes_allow_proven_disjoint_equal_precedence_matchers() {
+  let temp_dir = common::TempDir::new("route-match-disjoint-ties");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-match-disjoint-ties");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (name, first_match, second_match) in [
+    (
+      "methods",
+      r#"[routes.match]
+methods = ["GET"]"#,
+      r#"[routes.match]
+methods = ["POST"]"#,
+    ),
+    (
+      "protocols",
+      r#"[routes.match]
+protocols = ["http1"]"#,
+      r#"[routes.match]
+protocols = ["http2"]"#,
+    ),
+    (
+      "source cidrs",
+      r#"[routes.match]
+source_cidrs = ["203.0.113.0/24"]"#,
+      r#"[routes.match]
+source_cidrs = ["198.51.100.0/24"]"#,
+    ),
+    (
+      "exact paths",
+      r#"[routes.match.path]
+exact = "/same/a""#,
+      r#"[routes.match.path]
+exact = "/same/b""#,
+    ),
+    (
+      "header presence",
+      r#"[[routes.match.headers]]
+name = "X-Disjoint"
+present = true"#,
+      r#"[[routes.match.headers]]
+name = "X-Disjoint"
+present = false"#,
+    ),
+  ] {
+    let raw = base.replace(
+      "upstream = \"app\"",
+      &format!(
+        r#"upstream = "app"
+
+{first_match}"#,
+      ),
+    ) + &format!(
+      r#"
+
+[[upstreams]]
+name = "other-{name}"
+origin = "https://other-{name}.internal"
+
+[[routes]]
+name = "other-{name}"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "other-{name}"
+
+{second_match}
+"#,
+      name = name.replace(' ', "-")
+    );
+
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+      .validate()
+      .unwrap_or_else(|error| panic!("{name} should validate: {error}"));
+  }
+}
+
+#[test]
+fn routes_reject_equal_precedence_terminal_overlap() {
+  let temp_dir = common::TempDir::new("route-match-terminal-overlap");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-match-terminal-overlap");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "terminal-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "other"
+
+[routes.match]
+terminal = true
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("equal-precedence terminal overlap should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping route matchers with equal precedence"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn routes_allow_lower_specificity_terminal_fallback() {
+  let temp_dir = common::TempDir::new("route-match-terminal-fallback");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-match-terminal-fallback");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    r#"upstream = "app"
+
+[[routes.match.headers]]
+name = "X-App"
+exact = "yes""#,
+  ) + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "terminal-fallback"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "other"
+
+[routes.match]
+terminal = true
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("lower-specificity terminal fallback should validate");
 }
 
 #[test]
@@ -12002,6 +12198,54 @@ upstream = "app"
     .expect_err("duplicate route names should be rejected");
   assert!(
     error.to_string().contains("duplicate route name: app-root"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn routes_allow_ip_literal_hosts() {
+  let temp_dir = common::TempDir::new("route-ip-literal-hosts");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-ip-literal-hosts");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "hosts = [\"example.com\"]",
+    "hosts = [\"127.0.0.1\", \"[2001:db8::1]\"]",
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("IP literal route hosts should validate");
+}
+
+#[test]
+fn routes_reject_normalized_ip_literal_host_collisions() {
+  let temp_dir = common::TempDir::new("route-ip-literal-host-collision");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-ip-literal-host-collision");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace("hosts = [\"example.com\"]", "hosts = [\"[2001:db8::1]\"]")
+    + r#"
+
+[[upstreams]]
+name = "other"
+origin = "https://other.internal"
+
+[[routes]]
+name = "other-ip"
+hosts = ["2001:db8::1"]
+path_prefix = "/"
+upstream = "other"
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("normalized IP literal host collision should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping route matchers with equal precedence"),
     "unexpected error: {error}"
   );
 }
