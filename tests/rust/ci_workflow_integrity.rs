@@ -1472,10 +1472,7 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
   );
   assert_eq!(
     manifest_job.needs,
-    vec![
-      "validate".to_owned(),
-      "docker-alpine-musl-image".to_owned(),
-    ],
+    vec!["validate".to_owned(), "docker-alpine-musl-image".to_owned(),],
     "GHCR manifest publishing should wait for validation and pushed image rows only"
   );
   assert_eq!(
