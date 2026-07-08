@@ -11,7 +11,7 @@ use crate::access_log::{AccessLogSinks, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::{ExternalCacheRuntime, ResponseCache};
 use crate::client_identity::ClientIdentityRuntime;
-use crate::config::{Config, UpstreamConfig};
+use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -31,6 +31,9 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
+use crate::runtime::backend::{
+  RuntimeBackendSnapshot, TOKIO_HYPER_RUNTIME_NAME, runtime_backend_snapshot,
+};
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
 };
@@ -59,6 +62,7 @@ pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
 #[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,
+  pub(crate) effective_direct_h1_io: RuntimeDirectH1IoMode,
   pub route_table: RouteTable,
   pub(crate) sni_forward: SniForwardTable,
   pub upstreams: Vec<UpstreamConfig>,
@@ -387,6 +391,8 @@ impl AppSnapshot {
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
     let stream_pool_generation = next_stream_pool_generation(&config, previous);
+    let effective_direct_h1_io =
+      effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
     let compiled_fast_path_actions = build_compiled_fast_path_actions(
       &config,
       &route_table,
@@ -396,6 +402,7 @@ impl AppSnapshot {
 
     Ok(Self {
       config,
+      effective_direct_h1_io,
       route_table,
       sni_forward,
       upstreams,
@@ -534,6 +541,8 @@ impl AppSnapshot {
     let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
     let stream_pool_generation = next_stream_pool_generation(&config, Some(previous));
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
+    let effective_direct_h1_io =
+      effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       previous.cache.enabled(),
@@ -551,6 +560,7 @@ impl AppSnapshot {
 
     Ok(Self {
       config,
+      effective_direct_h1_io,
       route_table,
       sni_forward,
       upstreams,
@@ -623,6 +633,26 @@ fn next_stream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) 
   } else {
     previous.stream_pool_generation.saturating_add(1)
   }
+}
+
+fn effective_direct_h1_io_for_backend(
+  config: &Config,
+  runtime_backend: RuntimeBackendSnapshot,
+) -> RuntimeDirectH1IoMode {
+  if config.runtime.direct_h1_io != RuntimeDirectH1IoMode::Compio {
+    return config.runtime.direct_h1_io;
+  }
+  if config.runtime.main_runtime == RuntimeMainRuntimeMode::TokioHyper
+    || runtime_backend.active_runtime == TOKIO_HYPER_RUNTIME_NAME
+  {
+    tracing::warn!(
+      configured_direct_h1_io = "compio",
+      active_runtime = runtime_backend.active_runtime,
+      "runtime.direct_h1_io = \"compio\" requires an active Compio main runtime; using Tokio/Hyper direct-H1 IO"
+    );
+    return RuntimeDirectH1IoMode::TokioHyper;
+  }
+  RuntimeDirectH1IoMode::Compio
 }
 
 fn publish_upstream_pool_server_metrics(pools: &Arc<PoolState>) {

@@ -23,6 +23,73 @@ fn metrics_body(snapshot: &AppSnapshot) -> String {
   )
 }
 
+#[test]
+fn effective_direct_h1_io_falls_back_when_active_runtime_is_tokio_hyper() {
+  let temp_dir = common::TempDir::new("effective-direct-h1-fallback");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "effective-direct-h1-fallback");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "worker_threads = \"auto\"",
+    "worker_threads = 2\nmain_runtime = \"auto\"\ndirect_h1_io = \"compio\"",
+  );
+  let config = parse_config(&raw);
+  let backend = crate::runtime::backend::runtime_backend_snapshot_for(
+    crate::runtime::main_runtime::ActiveMainRuntime::TokioHyper,
+    None,
+  );
+
+  assert_eq!(config.runtime.direct_h1_io, RuntimeDirectH1IoMode::Compio);
+  assert_eq!(
+    effective_direct_h1_io_for_backend(&config, backend),
+    RuntimeDirectH1IoMode::TokioHyper
+  );
+}
+
+#[test]
+fn effective_direct_h1_io_preserves_compio_when_active_runtime_is_compio() {
+  let temp_dir = common::TempDir::new("effective-direct-h1-compio");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "effective-direct-h1-compio");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "worker_threads = \"auto\"",
+    "worker_threads = 2\nmain_runtime = \"compio\"\ndirect_h1_io = \"compio\"",
+  );
+  let config = parse_config(&raw);
+  let backend = crate::runtime::backend::runtime_backend_snapshot_for(
+    crate::runtime::main_runtime::ActiveMainRuntime::Compio,
+    Some(crate::runtime::backend::CompioDriverSelection::IoUring),
+  );
+
+  assert_eq!(
+    effective_direct_h1_io_for_backend(&config, backend),
+    RuntimeDirectH1IoMode::Compio
+  );
+}
+
+#[tokio::test]
+async fn snapshot_for_explicit_tokio_runtime_keeps_raw_config_but_disables_compio_direct_h1() {
+  let temp_dir = common::TempDir::new("snapshot-effective-direct-h1");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "snapshot-effective-direct-h1");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "worker_threads = \"auto\"",
+    "worker_threads = 2\nmain_runtime = \"tokio_hyper\"\ndirect_h1_io = \"compio\"",
+  );
+
+  let snapshot = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+
+  assert_eq!(
+    snapshot.config.runtime.direct_h1_io,
+    RuntimeDirectH1IoMode::Compio
+  );
+  assert_eq!(
+    snapshot.effective_direct_h1_io,
+    RuntimeDirectH1IoMode::TokioHyper
+  );
+}
+
 #[tokio::test]
 async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   let temp_dir = common::TempDir::new("app-generation-drain");

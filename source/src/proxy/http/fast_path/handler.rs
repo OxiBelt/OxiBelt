@@ -484,7 +484,7 @@ impl PlainProxyFastPath {
         true,
         request_body_mode,
         retry_policy.enabled,
-        state.config.runtime.direct_h1_io,
+        state.effective_direct_h1_io,
         outbound,
         timeouts,
         snapshot.request_path_features.hot_path_metrics,

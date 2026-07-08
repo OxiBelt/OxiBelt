@@ -13,6 +13,7 @@ impl AppSnapshot {
 
     Ok(Self {
       config,
+      effective_direct_h1_io: previous.effective_direct_h1_io,
       route_table: previous.route_table.clone(),
       sni_forward: previous.sni_forward.clone(),
       upstreams: previous.upstreams.clone(),
