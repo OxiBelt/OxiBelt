@@ -1,7 +1,19 @@
-use crate::{DockerCase, ExpectStart, Needs, docker_case};
+use crate::{DockerCase, ExpectStart, Needs, docker_case, hardened_runtime_case};
 
 pub(super) fn docker_cases() -> Vec<DockerCase> {
   vec![
+    hardened_runtime_case(docker_case(
+      "security",
+      "hardened-default-seccomp-runtime",
+      "hardened non-root read-only container starts H1/H2/H3 with runtime auto fallback",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    )),
     docker_case(
       "security",
       "external-auth-response-body-timeout",

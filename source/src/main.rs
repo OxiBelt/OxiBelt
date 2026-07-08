@@ -1,10 +1,22 @@
 //! Binary entrypoint for loading configuration and starting the OxiBelt runtime.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
+use oxibelt::config::{Config, HotReloadMode, RuntimeMainRuntimeMode, RuntimeOverrides};
+use oxibelt::runtime::backend::{CompioDriverSelection, RuntimeBackendSnapshot};
+use oxibelt::runtime::main_runtime::{ActiveMainRuntime, MainRuntime};
+
+mod runtime_diagnostics;
+use runtime_diagnostics::{
+  RuntimeCheckCommand, RuntimeProbeCommand, handle_runtime_check_command,
+  handle_runtime_probe_command, run_compio_main_child, run_compio_probe_child,
+};
+
+const COMPAT_RUNTIME_HINT: &str =
+  "set runtime.main_runtime = \"tokio_hyper\" or \"auto\" to avoid Compio in this environment";
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt")]
@@ -31,6 +43,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+  #[command(name = "runtime-check")]
+  RuntimeCheck(RuntimeCheckCommand),
+  #[command(name = "__runtime-probe", hide = true)]
+  RuntimeProbe(RuntimeProbeCommand),
   #[command(name = "oxirule")]
   OxiRule(OxiRuleCommand),
 }
@@ -112,6 +128,10 @@ fn main() -> anyhow::Result<()> {
     return handle_command(command, cli.config.as_ref());
   }
 
+  run_server(cli)
+}
+
+fn run_server(cli: Cli) -> anyhow::Result<()> {
   let config_path = cli
     .config
     .as_ref()
@@ -146,7 +166,15 @@ fn main() -> anyhow::Result<()> {
 
   config.log_worker_resolution();
   let worker_threads = config.runtime.worker_threads;
-  let runtime_backend = oxibelt::runtime::backend::runtime_backend_snapshot();
+  let compio_preflight = preflight_compio_for_startup(config.runtime.main_runtime, worker_threads)?;
+  let active_runtime = active_runtime_for_startup(config.runtime.main_runtime, &compio_preflight)?;
+  let runtime_backend = startup_stage("runtime_backend_snapshot", || {
+    Ok::<_, anyhow::Error>(runtime_backend_snapshot(
+      active_runtime,
+      compio_preflight.driver,
+    ))
+  })?;
+  oxibelt::runtime::backend::set_runtime_backend_snapshot(runtime_backend);
   tracing::info!(
     target_runtime = runtime_backend.target_runtime,
     target_io_driver = runtime_backend.target_io_driver,
@@ -155,30 +183,182 @@ fn main() -> anyhow::Result<()> {
     compatibility_island_count = runtime_backend.compatibility_island_count,
     "resolved async runtime backend"
   );
-  let runtime = oxibelt::runtime::compio::build_runtime(worker_threads)?;
-  runtime.block_on_tokio_island(async move {
-    let state = oxibelt::state::AppHandle::new(
+  let runtime = build_main_runtime(active_runtime, worker_threads)?;
+  let check = cli.check;
+  runtime.block_on(async move {
+    let state = startup_stage_async("app_snapshot_new_with_telemetry", async {
       oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
         .await
-        .context("failed to initialize application state")?,
-    );
-    if cli.check {
+        .context("failed to initialize application state")
+        .map(oxibelt::state::AppHandle::new)
+    })
+    .await?;
+    if check {
       return Ok(());
     }
-    oxibelt::server::serve(
-      state,
-      Some(config_path.clone()),
-      RuntimeOverrides {
-        hot_reload_mode: runtime_overrides.hot_reload_mode,
-        hot_reload_poll_interval_ms: runtime_overrides.hot_reload_poll_interval_ms,
-      },
-    )
+    startup_stage_async("server_serve", async {
+      oxibelt::server::serve(
+        state,
+        Some(config_path.clone()),
+        RuntimeOverrides {
+          hot_reload_mode: runtime_overrides.hot_reload_mode,
+          hot_reload_poll_interval_ms: runtime_overrides.hot_reload_poll_interval_ms,
+        },
+      )
+      .await
+    })
     .await
   })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompioStartupPreflight {
+  driver: Option<CompioDriverSelection>,
+  failed: bool,
+}
+
+fn preflight_compio_for_startup(
+  mode: RuntimeMainRuntimeMode,
+  worker_threads: usize,
+) -> anyhow::Result<CompioStartupPreflight> {
+  if mode == RuntimeMainRuntimeMode::TokioHyper {
+    return Ok(CompioStartupPreflight {
+      driver: None,
+      failed: false,
+    });
+  }
+  let driver = match startup_stage("compio_probe_runtime_build", run_compio_probe_child) {
+    Ok(driver) => driver,
+    Err(error) if mode == RuntimeMainRuntimeMode::Auto => {
+      tracing::warn!(
+        error = %error,
+        worker_threads,
+        "Compio runtime probe failed; falling back to Tokio/Hyper main runtime"
+      );
+      return Ok(CompioStartupPreflight {
+        driver: None,
+        failed: true,
+      });
+    }
+    Err(error) => {
+      return Err(error.context(format!(
+        "Compio runtime probe failed; {COMPAT_RUNTIME_HINT}"
+      )));
+    }
+  };
+
+  match startup_stage("main_compio_runtime_build", || {
+    run_compio_main_child(worker_threads)
+  }) {
+    Ok(()) => Ok(CompioStartupPreflight {
+      driver: Some(driver),
+      failed: false,
+    }),
+    Err(error) if mode == RuntimeMainRuntimeMode::Auto => {
+      tracing::warn!(
+        error = %error,
+        worker_threads,
+        "Compio main runtime preflight failed; falling back to Tokio/Hyper main runtime"
+      );
+      Ok(CompioStartupPreflight {
+        driver: None,
+        failed: true,
+      })
+    }
+    Err(error) => Err(error.context(format!(
+      "Compio main runtime preflight failed; {COMPAT_RUNTIME_HINT}"
+    ))),
+  }
+}
+
+fn active_runtime_for_startup(
+  mode: RuntimeMainRuntimeMode,
+  preflight: &CompioStartupPreflight,
+) -> anyhow::Result<ActiveMainRuntime> {
+  match mode {
+    RuntimeMainRuntimeMode::Compio => {
+      if preflight.failed {
+        bail!("Compio startup preflight failed");
+      }
+      Ok(ActiveMainRuntime::Compio)
+    }
+    RuntimeMainRuntimeMode::TokioHyper => Ok(ActiveMainRuntime::TokioHyper),
+    RuntimeMainRuntimeMode::Auto if preflight.failed => Ok(ActiveMainRuntime::TokioHyper),
+    RuntimeMainRuntimeMode::Auto => Ok(ActiveMainRuntime::Compio),
+  }
+}
+
+fn build_main_runtime(
+  active_runtime: ActiveMainRuntime,
+  worker_threads: usize,
+) -> anyhow::Result<MainRuntime> {
+  match active_runtime {
+    ActiveMainRuntime::Compio => startup_stage("runtime_compio_build", || {
+      MainRuntime::build_compio(worker_threads)
+    }),
+    ActiveMainRuntime::TokioHyper => startup_stage("runtime_tokio_hyper_build", || {
+      MainRuntime::build_tokio(worker_threads)
+    }),
+  }
+}
+
+fn runtime_backend_snapshot(
+  active_runtime: ActiveMainRuntime,
+  driver: Option<CompioDriverSelection>,
+) -> RuntimeBackendSnapshot {
+  oxibelt::runtime::backend::runtime_backend_snapshot_for(active_runtime, driver)
+}
+
+fn startup_stage<T>(
+  name: &'static str,
+  action: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+  let started = Instant::now();
+  tracing::info!(startup_stage = name, "startup stage started");
+  let result = action();
+  match &result {
+    Ok(_) => tracing::info!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      "startup stage completed"
+    ),
+    Err(error) => tracing::error!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      error = %error,
+      "startup stage failed"
+    ),
+  }
+  result
+}
+
+async fn startup_stage_async<T>(
+  name: &'static str,
+  future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+  let started = Instant::now();
+  tracing::info!(startup_stage = name, "startup stage started");
+  let result = future.await;
+  match &result {
+    Ok(_) => tracing::info!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      "startup stage completed"
+    ),
+    Err(error) => tracing::error!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      error = %error,
+      "startup stage failed"
+    ),
+  }
+  result
+}
+
 fn handle_command(command: &CliCommand, config_path: Option<&PathBuf>) -> anyhow::Result<()> {
   match command {
+    CliCommand::RuntimeCheck(command) => handle_runtime_check_command(command, config_path),
+    CliCommand::RuntimeProbe(command) => handle_runtime_probe_command(command),
     CliCommand::OxiRule(command) => handle_oxirule_command(command, config_path),
   }
 }

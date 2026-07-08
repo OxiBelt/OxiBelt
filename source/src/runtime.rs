@@ -8,6 +8,7 @@ use crate::telemetry::TelemetryRuntime;
 
 pub mod backend;
 pub mod compio;
+pub mod main_runtime;
 pub mod tokio_island;
 
 pub fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {

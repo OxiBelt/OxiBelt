@@ -16,12 +16,12 @@ use oxibelt::config::{
   HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
   LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
   OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeOverrides, SharedStateBackendKind,
-  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
-  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
-  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-  UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides,
+  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -1678,6 +1678,40 @@ fn accept_scaling_defaults_are_auto_workers() {
   assert_eq!(config.runtime.worker_multipliers.runtime, 1.0);
   assert_eq!(config.runtime.worker_multipliers.accept, 0.5);
   assert_eq!(config.runtime.worker_multipliers.quic_socket, 1.0);
+}
+
+#[test]
+fn runtime_main_runtime_mode_parses_and_defaults_to_compio() {
+  let temp_dir = common::TempDir::new("runtime-main-runtime");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "runtime-main-runtime");
+  let default_raw = common::minimal_config_toml(&cert_path, &key_path);
+  let auto_raw = default_raw.replace(
+    "worker_threads = \"auto\"",
+    "worker_threads = 2\nmain_runtime = \"auto\"",
+  );
+  let tokio_raw = default_raw.replace(
+    "worker_threads = \"auto\"",
+    "worker_threads = 2\nmain_runtime = \"tokio_hyper\"",
+  );
+
+  let default_config: Config = toml::from_str(&default_raw).expect("default config should parse");
+  let auto_config: Config = toml::from_str(&auto_raw).expect("auto runtime config should parse");
+  let tokio_config: Config =
+    toml::from_str(&tokio_raw).expect("tokio_hyper runtime config should parse");
+
+  assert_eq!(
+    default_config.runtime.main_runtime,
+    RuntimeMainRuntimeMode::Compio
+  );
+  assert_eq!(
+    auto_config.runtime.main_runtime,
+    RuntimeMainRuntimeMode::Auto
+  );
+  assert_eq!(
+    tokio_config.runtime.main_runtime,
+    RuntimeMainRuntimeMode::TokioHyper
+  );
 }
 
 #[test]

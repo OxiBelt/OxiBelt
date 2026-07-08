@@ -14,6 +14,7 @@ struct DockerCase {
   expect_start: ExpectStart,
   needs: Needs,
   root_netport_switcher: bool,
+  hardened_runtime: bool,
   failure_contains: Option<&'static str>,
 }
 
@@ -393,6 +394,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     bool_env(case.root_netport_switcher)
   ));
   manifest.push_str(&format!(
+    "CASE_HARDENED_RUNTIME={}\n",
+    bool_env(case.hardened_runtime)
+  ));
+  manifest.push_str(&format!(
     "CASE_EXPECT_FAILURE_CONTAINS={}\n",
     shell_quote(case.failure_contains.unwrap_or(""))
   ));
@@ -644,12 +649,18 @@ fn docker_case(
     expect_start,
     needs,
     root_netport_switcher: false,
+    hardened_runtime: false,
     failure_contains,
   }
 }
 
 fn root_netport_switcher_case(mut case: DockerCase) -> DockerCase {
   case.root_netport_switcher = true;
+  case
+}
+
+fn hardened_runtime_case(mut case: DockerCase) -> DockerCase {
+  case.hardened_runtime = true;
   case
 }
 

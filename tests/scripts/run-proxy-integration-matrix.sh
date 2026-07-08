@@ -292,6 +292,16 @@ assert_body_jq() {
   fi
 }
 
+runtime_check_failed_only_auto_compio() {
+  local output="$1"
+  jq -e '
+    ([.stages[] | select(.status == "failed") | .name]) as $failed |
+    .ok == false
+    and ($failed | length) > 0
+    and all($failed[]; . == "compio_probe_runtime_build" or . == "main_compio_runtime_build")
+  ' <<<"${output}" >/dev/null
+}
+
 response_status_matches() {
   local response="$1"
   local expected_statuses="$2"
@@ -2463,6 +2473,15 @@ if [[ "${CASE_ROOT_NETPORT_SWITCHER}" == "1" ]]; then
     --entrypoint /usr/local/bin/oxibelt-netport-switcher
   )
   proxy_command_args=(--config /etc/oxibelt/config/oxibelt.toml)
+elif [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
+  proxy_runtime_args=(
+    --user 10001:10001
+    --cap-drop=ALL
+    --read-only
+    --security-opt no-new-privileges
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    --tmpfs /run:rw,noexec,nosuid,nodev,size=64m,mode=1777
+  )
 fi
 
 docker create \
@@ -2488,6 +2507,46 @@ docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
 docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
 if [[ -d "${case_dir}/oxirule" ]]; then
   docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
+fi
+
+if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
+  runtime_check_container="$(unique_docker_container_name "oxibelt-runtime-check")"
+  docker create \
+    --name "${runtime_check_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
+    -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
+    -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
+    -e OXIBELT_SECURITY_TOKEN=matrix-security-token \
+    -e OXIBELT_DYNAMIC_POLICY_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
+    -e OXIBELT_CACHE_PURGE_HMAC_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= \
+    -e OXIBELT_INSTANCE_ID=runtime-check \
+    -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
+    -e NOMAD_TOKEN=matrix-nomad-token \
+    "${proxy_runtime_args[@]}" \
+    "${remote_signer_docker_args[@]}" \
+    "${proxy_dns_args[@]}" \
+    "${proxy_image}" \
+    runtime-check \
+    --config /etc/oxibelt/config/oxibelt.toml \
+    --format json >/dev/null
+  docker cp "${case_dir}/config/." "${runtime_check_container}:/etc/oxibelt/config"
+  docker cp "${proxy_cert_dir}/." "${runtime_check_container}:/etc/oxibelt/cert"
+  if [[ -d "${case_dir}/oxirule" ]]; then
+    docker cp "${case_dir}/oxirule/." "${runtime_check_container}:/etc/oxibelt/oxirule"
+  fi
+  runtime_check_status=0
+  runtime_check_output="$(docker_start_stdout_only "${runtime_check_container}")" || runtime_check_status=$?
+  if [[ "${runtime_check_status}" != "0" ]]; then
+    append_container_stderr "${runtime_check_container}"
+    if runtime_check_failed_only_auto_compio "${runtime_check_output}"; then
+      echo "runtime-check reported Compio unavailable under hardened container; continuing with runtime.main_runtime=auto"
+    else
+      echo "${runtime_check_output}" >&2
+      fail_with_diagnostics "runtime-check failed under hardened container"
+    fi
+  fi
 fi
 
 if [[ "${CASE_NEED_SECOND_PROXY}" == "1" ]]; then

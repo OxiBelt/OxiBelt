@@ -1,4 +1,4 @@
-//! Runtime hardening and direct-H1 runtime backend configuration.
+//! Runtime hardening and runtime backend configuration.
 
 use std::path::PathBuf;
 
@@ -12,6 +12,15 @@ pub enum RuntimeDirectH1IoMode {
   Auto,
   TokioHyper,
   Compio,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMainRuntimeMode {
+  Auto,
+  #[default]
+  Compio,
+  TokioHyper,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

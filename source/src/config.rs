@@ -2600,6 +2600,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "hardening",
       "hot_reload",
       "linux_only",
+      "main_runtime",
       "memory_only_state",
       "netport_switcher",
       "read_only_rootfs_compatible",

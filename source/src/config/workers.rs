@@ -9,8 +9,8 @@ use serde::Deserialize;
 use super::{
   Config, HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
   QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDirectH1IoMode,
-  RuntimeDrainConfig, RuntimeHardeningConfig, default_accept_error_backoff_ms,
-  default_runtime_accept_backlog, default_true,
+  RuntimeDrainConfig, RuntimeHardeningConfig, RuntimeMainRuntimeMode,
+  default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
 };
 
 pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
@@ -217,6 +217,8 @@ pub(super) struct RawRuntimeConfig {
   #[serde(default)]
   worker_threads: WorkerCountSetting,
   #[serde(default)]
+  main_runtime: RuntimeMainRuntimeMode,
+  #[serde(default)]
   worker_multipliers: WorkerMultipliersConfig,
   #[serde(default)]
   accept: RawRuntimeAcceptConfig,
@@ -240,6 +242,7 @@ impl Default for RawRuntimeConfig {
       memory_only_state: true,
       unprivileged_mode: true,
       worker_threads: WorkerCountSetting::Auto,
+      main_runtime: RuntimeMainRuntimeMode::Compio,
       worker_multipliers: WorkerMultipliersConfig::default(),
       accept: RawRuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
@@ -258,6 +261,7 @@ pub struct RuntimeConfig {
   pub memory_only_state: bool,
   pub unprivileged_mode: bool,
   pub worker_threads: usize,
+  pub main_runtime: RuntimeMainRuntimeMode,
   pub worker_multipliers: WorkerMultipliersConfig,
   pub accept: RuntimeAcceptConfig,
   pub drain: RuntimeDrainConfig,
@@ -277,6 +281,7 @@ impl Default for RuntimeConfig {
       memory_only_state: true,
       unprivileged_mode: true,
       worker_threads: 1,
+      main_runtime: RuntimeMainRuntimeMode::Compio,
       worker_multipliers: WorkerMultipliersConfig::default(),
       accept: RuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
@@ -312,6 +317,7 @@ impl RuntimeConfig {
       memory_only_state: raw.memory_only_state,
       unprivileged_mode: raw.unprivileged_mode,
       worker_threads,
+      main_runtime: raw.main_runtime,
       worker_multipliers: raw.worker_multipliers,
       accept,
       drain: raw.drain,

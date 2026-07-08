@@ -1,11 +1,15 @@
 //! Async runtime backend metadata and Compio availability checks.
 
-use anyhow::Context;
+use std::sync::OnceLock;
+
 use compio_driver::DriverType;
 use serde::Serialize;
 
+use super::main_runtime::ActiveMainRuntime;
+
 pub const TARGET_RUNTIME_NAME: &str = "compio";
 pub const ACTIVE_RUNTIME_NAME: &str = "compio";
+pub const TOKIO_HYPER_RUNTIME_NAME: &str = "tokio_hyper";
 pub const COMPATIBILITY_RUNTIME_NAME: &str = "tokio";
 const UNAVAILABLE_IO_DRIVER_NAME: &str = "unavailable";
 
@@ -45,16 +49,39 @@ pub struct RuntimeBackendSnapshot {
   pub compatibility_island_count: usize,
 }
 
+static ACTIVE_RUNTIME_BACKEND: OnceLock<RuntimeBackendSnapshot> = OnceLock::new();
+
 pub fn runtime_backend_snapshot() -> RuntimeBackendSnapshot {
+  ACTIVE_RUNTIME_BACKEND
+    .get()
+    .copied()
+    .unwrap_or_else(default_runtime_backend_snapshot)
+}
+
+pub fn set_runtime_backend_snapshot(snapshot: RuntimeBackendSnapshot) {
+  let _ = ACTIVE_RUNTIME_BACKEND.set(snapshot);
+}
+
+pub fn runtime_backend_snapshot_for(
+  active_runtime: ActiveMainRuntime,
+  target_io_driver: Option<CompioDriverSelection>,
+) -> RuntimeBackendSnapshot {
   RuntimeBackendSnapshot {
     target_runtime: TARGET_RUNTIME_NAME,
-    target_io_driver: detect_compio_driver()
+    target_io_driver: target_io_driver
       .map(CompioDriverSelection::as_str)
       .unwrap_or(UNAVAILABLE_IO_DRIVER_NAME),
-    active_runtime: ACTIVE_RUNTIME_NAME,
+    active_runtime: active_runtime.as_str(),
     compatibility_runtime: COMPATIBILITY_RUNTIME_NAME,
-    compatibility_island_count: 1,
+    compatibility_island_count: match active_runtime {
+      ActiveMainRuntime::Compio => 1,
+      ActiveMainRuntime::TokioHyper => 0,
+    },
   }
+}
+
+fn default_runtime_backend_snapshot() -> RuntimeBackendSnapshot {
+  runtime_backend_snapshot_for(ActiveMainRuntime::Compio, None)
 }
 
 pub fn detect_compio_driver() -> anyhow::Result<CompioDriverSelection> {
@@ -69,8 +96,7 @@ pub fn validate_compio_runtime_available() -> anyhow::Result<()> {
 }
 
 fn build_probe_runtime() -> anyhow::Result<compio::runtime::Runtime> {
-  let builder = compio::runtime::RuntimeBuilder::new();
-  builder.build().context("failed to build Compio runtime")
+  super::compio::build_driver_runtime()
 }
 
 #[cfg(test)]
@@ -89,6 +115,17 @@ mod tests {
     assert_eq!(snapshot.active_runtime, ACTIVE_RUNTIME_NAME);
     assert_eq!(snapshot.compatibility_runtime, COMPATIBILITY_RUNTIME_NAME);
     assert_eq!(snapshot.compatibility_island_count, 1);
+  }
+
+  #[test]
+  fn snapshot_for_tokio_hyper_reports_no_compatibility_island() {
+    let snapshot = runtime_backend_snapshot_for(ActiveMainRuntime::TokioHyper, None);
+
+    assert_eq!(snapshot.target_runtime, TARGET_RUNTIME_NAME);
+    assert_eq!(snapshot.target_io_driver, UNAVAILABLE_IO_DRIVER_NAME);
+    assert_eq!(snapshot.active_runtime, TOKIO_HYPER_RUNTIME_NAME);
+    assert_eq!(snapshot.compatibility_runtime, COMPATIBILITY_RUNTIME_NAME);
+    assert_eq!(snapshot.compatibility_island_count, 0);
   }
 
   #[test]
