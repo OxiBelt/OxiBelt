@@ -77,6 +77,28 @@ function Cleanup(WorkspaceValue: Workspace): void {
   Fs.rmSync(WorkspaceValue.root, { force: true, recursive: true })
 }
 
+function AssertRepresentativeManifestArchs(Plan: ReturnType<typeof BuildImageReleasePlan>): void {
+  const ExpectedArchs = ['amd64', 'arm64', 'riscv64']
+  const ReleaseManifest = Plan.manifests.find(Manifest => Manifest.name === 'release')
+  const AlpineMuslManifest = Plan.manifests.find(Manifest => Manifest.name === 'alpine-musl')
+  const Amd64 = Plan.artifacts.find(Artifact => Artifact.artifactArch === 'amd64')
+
+  if (ReleaseManifest === undefined || AlpineMuslManifest === undefined) {
+    throw new Error('image plan should include representative release and alpine-musl manifests')
+  }
+  if (Amd64 === undefined) {
+    throw new Error('image plan should include the amd64 artifact')
+  }
+
+  Assert.deepEqual(ReleaseManifest.artifactArchs, ExpectedArchs)
+  Assert.deepEqual(AlpineMuslManifest.artifactArchs, ExpectedArchs)
+  Assert.equal(ReleaseManifest.artifactArchs.includes('amd64v2'), false)
+  Assert.equal(AlpineMuslManifest.artifactArchs.includes('amd64v2'), false)
+  Assert.equal(Amd64.platform, 'linux/amd64')
+  Assert.equal(Amd64.dockerArchitecture, 'amd64')
+  Assert.equal(Amd64.targetCpu, 'x86-64-v3')
+}
+
 test('strict release tag parser accepts stable, beta, and build tags', () => {
   Assert.deepEqual(ParseReleaseTag('15.2.0'), {
     tag: '15.2.0',
@@ -235,9 +257,22 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
   if (Amd64 === undefined) {
     throw new Error('stable image plan should include the amd64 artifact')
   }
+  AssertRepresentativeManifestArchs(Plan)
   Assert.ok(Amd64.ghcrTags.includes('ghcr.io/oxibelt/oxibelt:5-alpine-musl-amd64'))
   Assert.ok(Plan.manifests[0].ghcrTags.includes('ghcr.io/oxibelt/oxibelt:latest'))
   Assert.ok(Plan.manifests[1].ghcrTags.includes('ghcr.io/oxibelt/oxibelt:5-alpine-musl'))
+})
+
+test('beta and build image plans use amd64 representative manifests', () => {
+  for (const Tag of ['5.2.0-beta.1', '5.2.0-build.4f43abcd']) {
+    const Plan = BuildImageReleasePlan({
+      releaseTag: ParseReleaseTag(Tag),
+      revision: '4f43abcd99999999999999999999999999999999',
+      source: 'https://github.com/OxiBelt/OxiBelt'
+    })
+
+    AssertRepresentativeManifestArchs(Plan)
+  }
 })
 
 test('beta and build image plans do not include latest or major aliases', () => {

@@ -154,8 +154,8 @@ jobs:
                   raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
 
           expected_manifests = {
-              "release": (["amd64v2", "arm64", "riscv64"], [f"{image}:{tag}"]),
-              "alpine-musl": (["amd64v2", "arm64", "riscv64"], [f"{image}:{tag}-alpine-musl"]),
+              "release": (["amd64", "arm64", "riscv64"], [f"{image}:{tag}"]),
+              "alpine-musl": (["amd64", "arm64", "riscv64"], [f"{image}:{tag}-alpine-musl"]),
           }
           if kind == "stable":
               expected_manifests["release"][1].append(f"{image}:latest")
@@ -461,8 +461,8 @@ jobs:
                   raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
 
           expected_manifests = {
-              "release": (["amd64v2", "arm64", "riscv64"], [f"{image}:{version}"]),
-              "alpine-musl": (["amd64v2", "arm64", "riscv64"], [f"{image}:{version}-alpine-musl"]),
+              "release": (["amd64", "arm64", "riscv64"], [f"{image}:{version}"]),
+              "alpine-musl": (["amd64", "arm64", "riscv64"], [f"{image}:{version}-alpine-musl"]),
           }
           if kind == "stable":
               expected_manifests["release"][1].append(f"{image}:latest")

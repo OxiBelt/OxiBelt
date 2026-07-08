@@ -246,12 +246,12 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   const Manifests: ImageManifest[] = [
     {
       name: 'release',
-      artifactArchs: ['amd64v2', 'arm64', 'riscv64'],
+      artifactArchs: ['amd64', 'arm64', 'riscv64'],
       ghcrTags: [`${Image}:${Tag}`]
     },
     {
       name: 'alpine-musl',
-      artifactArchs: ['amd64v2', 'arm64', 'riscv64'],
+      artifactArchs: ['amd64', 'arm64', 'riscv64'],
       ghcrTags: [`${Image}:${Tag}-alpine-musl`]
     }
   ]
