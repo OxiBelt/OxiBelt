@@ -88,7 +88,9 @@ pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
   )?;
   server_config.alpn_protocols = vec![b"h3".to_vec()];
 
-  let quic_crypto = QuicServerConfig::try_from(server_config)
+  let initial_suite = super::quic_initial_tls13_aes128_gcm_sha256_suite(crypto)
+    .context("failed to build admin QUIC Initial cipher suite")?;
+  let quic_crypto = QuicServerConfig::with_initial(Arc::new(server_config), initial_suite)
     .context("failed to build admin QUIC server TLS config")?;
   let mut quic_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
   crate::quic::apply_server_config(quic, quic_host_key_base_dir, &mut quic_config)?;

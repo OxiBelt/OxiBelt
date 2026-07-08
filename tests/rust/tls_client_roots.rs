@@ -654,6 +654,26 @@ fn quic_server_config_rejects_invalid_client_auth_roots() {
   );
 }
 
+#[test]
+fn quic_server_config_builds_when_tls13_aes128_is_not_configured() {
+  let temp_dir = common::TempDir::new("quic-aes128-not-configured");
+  let (ca_cert_path, ca_key_path) = common::create_self_signed_cert(temp_dir.path(), "test-ca");
+  let (cert_path, key_path) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "downstream",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let mut tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
+  tls_config.tls13.ciphers = vec![
+    Tls13CipherSuite::Aes256GcmSha384,
+    Tls13CipherSuite::Chacha20Poly1305Sha256,
+  ];
+
+  tls::build_quic_server_config(&tls_config, &QuicConfig::default(), None)
+    .expect("QUIC server config should build without AES-128 in negotiated TLS ciphers");
+}
+
 #[tokio::test]
 async fn quic_required_client_auth_rejects_client_without_certificate() {
   let temp_dir = common::TempDir::new("quic-client-auth-required");

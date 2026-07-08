@@ -92,6 +92,26 @@ pub(crate) fn default_crypto_provider() -> rustls::crypto::CryptoProvider {
   provider::default_crypto_provider()
 }
 
+fn quic_initial_tls13_aes128_gcm_sha256_suite(
+  crypto: &CryptoConfig,
+) -> anyhow::Result<rustls::quic::Suite> {
+  let provider = provider::crypto_provider(crypto)?;
+  provider
+    .cipher_suites
+    .iter()
+    .find_map(|suite| match suite.suite() {
+      rustls::CipherSuite::TLS13_AES_128_GCM_SHA256 => {
+        suite.tls13().and_then(|tls13| tls13.quic_suite())
+      }
+      _ => None,
+    })
+    .ok_or_else(|| {
+      anyhow!(
+        "failed to find QUIC Initial TLS_AES_128_GCM_SHA256 suite in selected rustls crypto provider"
+      )
+    })
+}
+
 /// Builds the downstream QUIC server configuration used by HTTP/3 listeners.
 pub fn build_quic_server_config(
   tls: &TlsConfig,
@@ -218,8 +238,10 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   )?;
   server_config.alpn_protocols = vec![b"h3".to_vec()];
 
-  let quic_crypto =
-    QuicServerConfig::try_from(server_config).context("failed to build QUIC server TLS config")?;
+  let initial_suite = quic_initial_tls13_aes128_gcm_sha256_suite(crypto)
+    .context("failed to build QUIC Initial cipher suite")?;
+  let quic_crypto = QuicServerConfig::with_initial(Arc::new(server_config), initial_suite)
+    .context("failed to build QUIC server TLS config")?;
   let mut quic_config = QuinnServerConfig::with_crypto(Arc::new(quic_crypto));
   crate::quic::apply_server_config(quic, quic_host_key_base_dir, &mut quic_config)?;
   Ok(quic_config)
