@@ -198,6 +198,41 @@ webdriver_cookie() {
     "${driver_base_url}/session/${session_id}/cookie/${name}"
 }
 
+create_webdriver_session() {
+  local session_response=""
+
+  if ! session_response="$(
+    curl --silent --show-error --fail-with-body \
+      --header "Content-Type: application/json" \
+      --request POST \
+      --data "${capabilities}" \
+      "${driver_base_url}/session"
+  )"; then
+    echo "Unable to create ${browser} WebDriver session." >&2
+    if [[ -n "${session_response}" ]]; then
+      echo "${session_response}" >&2
+    fi
+    show_diagnostics
+    exit 1
+  fi
+
+  session_id="$(jq -r '.value.sessionId // .sessionId // empty' <<<"${session_response}")"
+  if [[ -z "${session_id}" ]]; then
+    echo "Unable to create ${browser} WebDriver session." >&2
+    echo "${session_response}" >&2
+    show_diagnostics
+    exit 1
+  fi
+}
+
+delete_webdriver_session() {
+  if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
+    curl --silent --show-error --fail-with-body \
+      --request DELETE "${driver_base_url}/session/${session_id}" >/dev/null || true
+    session_id=""
+  fi
+}
+
 reload_proxy() {
   if [[ -n "${proxy_container}" ]]; then
     docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
@@ -208,11 +243,40 @@ reload_proxy() {
   fi
 }
 
-cleanup() {
-  if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
-    curl --silent --show-error --fail-with-body \
-      --request DELETE "${driver_base_url}/session/${session_id}" >/dev/null || true
+refresh_proxy_log() {
+  if [[ -n "${proxy_container}" ]]; then
+    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
   fi
+}
+
+hot_reload_applied_count() {
+  refresh_proxy_log
+
+  if [[ -s "${proxy_log}" ]]; then
+    awk 'index($0, "hot reload applied") { count++ } END { print count + 0 }' "${proxy_log}"
+  else
+    echo 0
+  fi
+}
+
+wait_for_hot_reload_applied() {
+  local previous_count="$1"
+  local current_count=""
+
+  for _ in {1..30}; do
+    current_count="$(hot_reload_applied_count)"
+    if (( current_count > previous_count )); then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  fail_with_diagnostics "OxiBelt hot reload did not apply."
+}
+
+cleanup() {
+  delete_webdriver_session
 
   if [[ -n "${proxy_pid}" ]]; then
     kill "${proxy_pid}" >/dev/null 2>&1 || true
@@ -552,21 +616,7 @@ if ! curl --silent --show-error --fail-with-body "${driver_base_url}/status" >/d
   fail_with_diagnostics "${driver_binary} did not become ready."
 fi
 
-session_response="$(
-  curl --silent --show-error --fail-with-body \
-    --header "Content-Type: application/json" \
-    --request POST \
-    --data "${capabilities}" \
-    "${driver_base_url}/session"
-)"
-session_id="$(jq -r '.value.sessionId // .sessionId // empty' <<<"${session_response}")"
-
-if [[ -z "${session_id}" ]]; then
-  echo "Unable to create ${browser} WebDriver session." >&2
-  echo "${session_response}" >&2
-  show_diagnostics
-  exit 1
-fi
+create_webdriver_session
 
 case "${scenario}" in
   basic-navigation)
@@ -645,6 +695,7 @@ case "${scenario}" in
     echo "${browser} WebDriver solved the person proof challenge and reused the clearance cookie."
     ;;
   hot-reload)
+    reload_applied_count="$(hot_reload_applied_count)"
     reload_url="https://localhost:${proxy_port}/app/hot-reload?browser=${browser}"
     webdriver_navigate "${reload_url}"
     wait_for_upstream_json "/origin/app/hot-reload?browser=${browser}" "hot reload before" >/dev/null
@@ -666,7 +717,10 @@ PY
       -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
     chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
     reload_proxy
+    wait_for_hot_reload_applied "${reload_applied_count}"
 
+    delete_webdriver_session
+    create_webdriver_session
     webdriver_navigate "${reload_url}"
     wait_for_body_contains "browser hot reloaded" "hot reload after" >/dev/null
     echo "${browser} WebDriver observed hot-reloaded config and TLS material."
