@@ -464,6 +464,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     strategy:
@@ -528,6 +529,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     timeout-minutes: 45
@@ -563,6 +565,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     timeout-minutes: 90
@@ -1568,6 +1571,7 @@ jobs:
       - docker-alpine-comparator-musl-image-amd64
       - docker-performance-probe-image
       - docker-external-benchmark-image
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       actions: read
       contents: read
@@ -1999,7 +2003,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - docker-performance
-    if: always()
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     permissions:
       actions: read
       contents: read

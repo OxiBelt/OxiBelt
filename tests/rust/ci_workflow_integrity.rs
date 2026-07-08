@@ -82,6 +82,13 @@ const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "fuzz-smoke",
 ];
 
+const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
+  "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
+const PERFORMANCE_WORKFLOW_JOB_IF: &str =
+  "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
+const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str =
+  "if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')";
+
 fn expected_needs(job_ids: &[&str]) -> Vec<String> {
   job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
 }
@@ -1209,6 +1216,7 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
     .find("  docker-alpine-musl-image-riscv64:")
     .expect("workflow should define the RISC-V image job");
   let other_job = &workflow[other_start..riscv_start];
+  let riscv64_job = workflow_job_text(&workflow, "docker-alpine-musl-image-riscv64");
 
   assert!(
     workflow.contains("riscv64gc-unknown-linux-gnu")
@@ -1229,8 +1237,7 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
     "RISC-V Docker image builds should still wait for normal test gates"
   );
   assert!(
-    !workflow
-      .contains("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"),
+    !riscv64_job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
     "RISC-V Docker image artifact should run on push, pull request, scheduled, and manual workflows"
   );
   assert!(
@@ -2000,6 +2007,56 @@ fn performance_summary_input_helper_copies_only_aggregate_inputs() {
 }
 
 #[test]
+fn docker_performance_jobs_are_scheduled_and_manual_only() {
+  let workflow = workflow_text();
+
+  assert!(
+    workflow.contains("push:")
+      && workflow.contains("pull_request:")
+      && workflow.contains("schedule:")
+      && workflow.contains("cron: \"0 0 * * *\"")
+      && workflow.contains("workflow_dispatch:"),
+    "normal CI should keep push and pull request triggers while performance jobs use cron/manual gates"
+  );
+  assert!(
+    PERFORMANCE_WORKFLOW_JOB_IF.contains(PERFORMANCE_WORKFLOW_EVENT_CONDITION)
+      && PERFORMANCE_WORKFLOW_SUMMARY_IF.contains(PERFORMANCE_WORKFLOW_EVENT_CONDITION),
+    "performance workflow assertions should use the shared schedule/manual condition"
+  );
+
+  for job_id in [
+    "docker-alpine-comparator-musl-image-amd64",
+    "docker-performance-probe-image",
+    "docker-external-benchmark-image",
+    "docker-performance",
+  ] {
+    let job = workflow_job_text(&workflow, job_id);
+    assert!(
+      job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
+      "{job_id} should run only on scheduled or manual workflows"
+    );
+  }
+
+  let summary_job = workflow_job_text(&workflow, "docker-performance-summary");
+  assert!(
+    summary_job.contains(PERFORMANCE_WORKFLOW_SUMMARY_IF),
+    "docker-performance-summary should preserve always() semantics only on scheduled or manual workflows"
+  );
+
+  for job_id in [
+    "docker-alpine-musl-image-amd64",
+    "docker-integration-proxy",
+    "docker-alpine-musl-image-riscv64",
+  ] {
+    let job = workflow_job_text(&workflow, job_id);
+    assert!(
+      !job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
+      "{job_id} should keep running on push and pull request workflows"
+    );
+  }
+}
+
+#[test]
 fn docker_performance_job_uses_sharded_repeated_sampling() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
@@ -2428,8 +2485,8 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     "summary job should have a clear display name"
   );
   assert!(
-    workflow.contains("if: always()"),
-    "summary job should run even when performance matrix entries fail"
+    summary_job.contains(PERFORMANCE_WORKFLOW_SUMMARY_IF),
+    "summary job should run even when performance matrix entries fail on scheduled or manual workflows"
   );
   assert!(
     summary_job.contains(
