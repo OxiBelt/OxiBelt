@@ -85,12 +85,20 @@ remote_signer_container="oxibelt-keysigner-${run_id}"
 remote_signer_socket_volume="oxibelt-keysigner-sock-${run_id}"
 remote_signer_cert_volume="oxibelt-keysigner-cert-${run_id}"
 remote_signer_cert_seed_container="oxibelt-keysigner-cert-seed-${run_id}"
+hardened_config_volume="oxibelt-hardened-config-${run_id}"
+hardened_cert_volume="oxibelt-hardened-cert-${run_id}"
+hardened_oxirule_volume="oxibelt-hardened-oxirule-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker volume rm "${remote_signer_socket_volume}" "${remote_signer_cert_volume}" >/dev/null 2>&1 || true
+  docker volume rm \
+    "${remote_signer_socket_volume}" \
+    "${remote_signer_cert_volume}" \
+    "${hardened_config_volume}" \
+    "${hardened_cert_volume}" \
+    "${hardened_oxirule_volume}" >/dev/null 2>&1 || true
   if [[ "${remove_mock_image}" == "1" ]]; then
     docker rmi -f "${mock_image}" >/dev/null 2>&1 || true
   fi
@@ -154,6 +162,26 @@ append_container_stderr() {
   if [[ -s "${stderr_log}" ]]; then
     cat "${stderr_log}" >&2
   fi
+}
+
+seed_hardened_fixture_volume() {
+  local volume="$1"
+  local source_dir="$2"
+  local seed_container
+
+  seed_container="$(unique_docker_container_name "oxibelt-hardened-fixture-seed")"
+  docker volume create --label "${test_label}" "${volume}" >/dev/null
+  docker create \
+    --name "${seed_container}" \
+    --label "${test_label}" \
+    --user 0:0 \
+    --mount "type=volume,src=${volume},dst=/fixture" \
+    --entrypoint sh \
+    "${proxy_image}" \
+    -c 'chown -R 10001:10001 /fixture' >/dev/null
+  docker cp "${source_dir}/." "${seed_container}:/fixture"
+  docker start -a "${seed_container}" >/dev/null
+  docker rm "${seed_container}" >/dev/null
 }
 
 docker_build_with_retry() {
@@ -2460,6 +2488,22 @@ EOF
   fi
 fi
 
+hardened_fixture_mount_args=()
+if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
+  seed_hardened_fixture_volume "${hardened_config_volume}" "${case_dir}/config"
+  seed_hardened_fixture_volume "${hardened_cert_volume}" "${proxy_cert_dir}"
+  hardened_fixture_mount_args=(
+    --mount "type=volume,src=${hardened_config_volume},dst=/etc/oxibelt/config,readonly"
+    --mount "type=volume,src=${hardened_cert_volume},dst=/etc/oxibelt/cert,readonly"
+  )
+  if [[ -d "${case_dir}/oxirule" ]]; then
+    seed_hardened_fixture_volume "${hardened_oxirule_volume}" "${case_dir}/oxirule"
+    hardened_fixture_mount_args+=(
+      --mount "type=volume,src=${hardened_oxirule_volume},dst=/etc/oxibelt/oxirule,readonly"
+    )
+  fi
+fi
+
 proxy_runtime_args=()
 proxy_command_args=()
 if [[ "${CASE_ROOT_NETPORT_SWITCHER}" == "1" ]]; then
@@ -2499,14 +2543,17 @@ docker create \
   -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
   -e NOMAD_TOKEN=matrix-nomad-token \
   "${proxy_runtime_args[@]}" \
+  "${hardened_fixture_mount_args[@]}" \
   "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" \
   "${proxy_command_args[@]}" >/dev/null
-docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
-docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
-if [[ -d "${case_dir}/oxirule" ]]; then
-  docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
+if [[ "${CASE_HARDENED_RUNTIME}" != "1" ]]; then
+  docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
+  docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+  if [[ -d "${case_dir}/oxirule" ]]; then
+    docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
+  fi
 fi
 
 if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
@@ -2525,17 +2572,13 @@ if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
     -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
     -e NOMAD_TOKEN=matrix-nomad-token \
     "${proxy_runtime_args[@]}" \
+    "${hardened_fixture_mount_args[@]}" \
     "${remote_signer_docker_args[@]}" \
     "${proxy_dns_args[@]}" \
     "${proxy_image}" \
     runtime-check \
     --config /etc/oxibelt/config/oxibelt.toml \
     --format json >/dev/null
-  docker cp "${case_dir}/config/." "${runtime_check_container}:/etc/oxibelt/config"
-  docker cp "${proxy_cert_dir}/." "${runtime_check_container}:/etc/oxibelt/cert"
-  if [[ -d "${case_dir}/oxirule" ]]; then
-    docker cp "${case_dir}/oxirule/." "${runtime_check_container}:/etc/oxibelt/oxirule"
-  fi
   runtime_check_status=0
   runtime_check_output="$(docker_start_stdout_only "${runtime_check_container}")" || runtime_check_status=$?
   if [[ "${runtime_check_status}" != "0" ]]; then

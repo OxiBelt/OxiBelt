@@ -382,6 +382,15 @@ fn docker_integration_matrix_script_text() -> String {
     .expect("Docker integration matrix script should be readable")
 }
 
+fn oxibelt_main_text() -> String {
+  fs::read_to_string(repo_root().join("source/src/main.rs"))
+    .expect("OxiBelt binary main should be readable")
+}
+
+fn source_file_text(path: &str) -> String {
+  fs::read_to_string(repo_root().join(path)).expect("source file should be readable")
+}
+
 fn workspace_members() -> Vec<String> {
   let manifest =
     fs::read_to_string(repo_root().join("Cargo.toml")).expect("root Cargo.toml should be readable");
@@ -1112,6 +1121,75 @@ fn docker_integration_matrix_cargo_invocations_are_retry_hardened() {
         ),
         "Docker integration matrix materialization should not bypass the retry helper"
     );
+}
+
+#[test]
+fn docker_integration_matrix_hardened_runtime_uses_readonly_fixture_volumes() {
+  let script = docker_integration_matrix_script_text();
+
+  assert!(
+    script.contains("seed_hardened_fixture_volume()")
+      && script.contains("docker volume create --label \"${test_label}\" \"${volume}\"")
+      && script.contains("docker cp \"${source_dir}/.\" \"${seed_container}:/fixture\"")
+      && script.contains("-c 'chown -R 10001:10001 /fixture'"),
+    "hardened runtime fixtures should be seeded into labeled Docker volumes before container start"
+  );
+  for mount in [
+    "--mount \"type=volume,src=${hardened_config_volume},dst=/etc/oxibelt/config,readonly\"",
+    "--mount \"type=volume,src=${hardened_cert_volume},dst=/etc/oxibelt/cert,readonly\"",
+    "--mount \"type=volume,src=${hardened_oxirule_volume},dst=/etc/oxibelt/oxirule,readonly\"",
+  ] {
+    assert!(
+      script.contains(mount),
+      "hardened runtime containers should include read-only fixture mount {mount}"
+    );
+  }
+  assert!(
+    script.contains("if [[ \"${CASE_HARDENED_RUNTIME}\" != \"1\" ]]; then\n  docker cp \"${case_dir}/config/.\" \"${proxy_container}:/etc/oxibelt/config\""),
+    "proxy fixture docker cp should be skipped for read-only hardened runtime containers"
+  );
+  for forbidden in [
+    "docker cp \"${case_dir}/config/.\" \"${runtime_check_container}:/etc/oxibelt/config\"",
+    "docker cp \"${proxy_cert_dir}/.\" \"${runtime_check_container}:/etc/oxibelt/cert\"",
+    "docker cp \"${case_dir}/oxirule/.\" \"${runtime_check_container}:/etc/oxibelt/oxirule\"",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "runtime-check should not copy fixture files into a read-only container"
+    );
+  }
+}
+
+#[test]
+fn oxibelt_main_builds_startup_snapshot_on_tokio_task() {
+  let main = oxibelt_main_text();
+
+  assert!(
+    main.contains("build_app_handle(config, observability.into_telemetry())"),
+    "startup should delegate application snapshot construction to the task-backed helper"
+  );
+  assert!(
+    main.contains("tokio::task::spawn(async move {\n    oxibelt::state::AppSnapshot::new_with_telemetry(config, telemetry)"),
+    "AppSnapshot startup construction should not be polled directly on the block_on caller stack"
+  );
+}
+
+#[test]
+fn tokio_runtime_builders_use_explicit_startup_stack_size() {
+  let runtime = source_file_text("source/src/runtime.rs");
+  let main_runtime = source_file_text("source/src/runtime/main_runtime.rs");
+  let tokio_island = source_file_text("source/src/runtime/tokio_island.rs");
+
+  assert!(
+    runtime.contains("TOKIO_RUNTIME_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024"),
+    "runtime should centralize the startup-safe Tokio worker stack size"
+  );
+  for source in [main_runtime, tokio_island] {
+    assert!(
+      source.contains("builder.thread_stack_size(super::TOKIO_RUNTIME_THREAD_STACK_SIZE);"),
+      "Tokio runtime builders should use the startup-safe worker stack size"
+    );
+  }
 }
 
 #[test]

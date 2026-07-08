@@ -11,6 +11,8 @@ pub mod compio;
 pub mod main_runtime;
 pub mod tokio_island;
 
+pub(crate) const TOKIO_RUNTIME_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+
 pub fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
   init_logging(config)
 }

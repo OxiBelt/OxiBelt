@@ -186,12 +186,10 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
   let runtime = build_main_runtime(active_runtime, worker_threads)?;
   let check = cli.check;
   runtime.block_on(async move {
-    let state = startup_stage_async("app_snapshot_new_with_telemetry", async {
-      oxibelt::state::AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
-        .await
-        .context("failed to initialize application state")
-        .map(oxibelt::state::AppHandle::new)
-    })
+    let state = startup_stage_async(
+      "app_snapshot_new_with_telemetry",
+      build_app_handle(config, observability.into_telemetry()),
+    )
     .await?;
     if check {
       return Ok(());
@@ -209,6 +207,20 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     })
     .await
   })
+}
+
+async fn build_app_handle(
+  config: Config,
+  telemetry: oxibelt::telemetry::TelemetryRuntime,
+) -> anyhow::Result<oxibelt::state::AppHandle> {
+  tokio::task::spawn(async move {
+    oxibelt::state::AppSnapshot::new_with_telemetry(config, telemetry)
+      .await
+      .context("failed to initialize application state")
+      .map(oxibelt::state::AppHandle::new)
+  })
+  .await
+  .context("application state initialization task failed")?
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +258,17 @@ fn preflight_compio_for_startup(
       )));
     }
   };
+  if mode == RuntimeMainRuntimeMode::Auto && !compio_driver_safe_for_auto_main_runtime(driver) {
+    tracing::warn!(
+      driver = driver.as_str(),
+      worker_threads,
+      "Compio probe selected a fallback I/O driver; falling back to Tokio/Hyper main runtime"
+    );
+    return Ok(CompioStartupPreflight {
+      driver: Some(driver),
+      failed: true,
+    });
+  }
 
   match startup_stage("main_compio_runtime_build", || {
     run_compio_main_child(worker_threads)
@@ -269,6 +292,13 @@ fn preflight_compio_for_startup(
       "Compio main runtime preflight failed; {COMPAT_RUNTIME_HINT}"
     ))),
   }
+}
+
+fn compio_driver_safe_for_auto_main_runtime(driver: CompioDriverSelection) -> bool {
+  matches!(
+    driver,
+    CompioDriverSelection::IoUring | CompioDriverSelection::Iocp
+  )
 }
 
 fn active_runtime_for_startup(
@@ -557,4 +587,51 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn auto_main_runtime_treats_polling_compio_driver_as_unsafe() {
+    assert!(!compio_driver_safe_for_auto_main_runtime(
+      CompioDriverSelection::Polling
+    ));
+
+    let selected = active_runtime_for_startup(
+      RuntimeMainRuntimeMode::Auto,
+      &CompioStartupPreflight {
+        driver: Some(CompioDriverSelection::Polling),
+        failed: true,
+      },
+    )
+    .expect("auto should fall back after an unsafe Compio preflight");
+
+    assert_eq!(selected, ActiveMainRuntime::TokioHyper);
+  }
+
+  #[test]
+  fn auto_main_runtime_allows_production_compio_drivers() {
+    assert!(compio_driver_safe_for_auto_main_runtime(
+      CompioDriverSelection::IoUring
+    ));
+    assert!(compio_driver_safe_for_auto_main_runtime(
+      CompioDriverSelection::Iocp
+    ));
+  }
+
+  #[test]
+  fn explicit_compio_runtime_still_selects_compio_after_successful_polling_preflight() {
+    let selected = active_runtime_for_startup(
+      RuntimeMainRuntimeMode::Compio,
+      &CompioStartupPreflight {
+        driver: Some(CompioDriverSelection::Polling),
+        failed: false,
+      },
+    )
+    .expect("explicit Compio should preserve the caller's selected runtime");
+
+    assert_eq!(selected, ActiveMainRuntime::Compio);
+  }
 }

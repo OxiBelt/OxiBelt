@@ -51,6 +51,7 @@ impl MainRuntime {
     let mut builder = Builder::new_multi_thread();
     builder.enable_all();
     builder.worker_threads(worker_threads);
+    builder.thread_stack_size(super::TOKIO_RUNTIME_THREAD_STACK_SIZE);
     let runtime = builder
       .build()
       .context("failed to build Tokio main runtime");
