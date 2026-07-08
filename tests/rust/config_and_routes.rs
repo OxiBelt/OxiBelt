@@ -1,6 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use base64::Engine;
@@ -583,6 +584,153 @@ reuse_port = true"#,
     error.to_string().contains(
       "listeners.https_binds entries must use the same port when listeners.http3 and quic.alt_svc.enabled are true"
     ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_http3_alt_svc_port_overrides_allow_mixed_https_ports() {
+  let temp_dir = common::TempDir::new("listener-alt-svc-port-overrides");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-alt-svc-port-overrides");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      r#"http3 = false"#,
+      r#"http3 = true
+
+[quic.alt_svc]
+enabled = true
+max_age_seconds = 60
+persist = false
+
+[[quic.alt_svc.port_overrides]]
+bind = "127.0.0.1:8443"
+advertised_port = 443
+
+[[quic.alt_svc.port_overrides]]
+bind = "[::1]:9443"
+advertised_port = 443
+
+[quic.socket]
+reuse_port = true"#,
+    )
+    .replace(
+      r#"https_bind = "127.0.0.1:8443""#,
+      r#"https_binds = ["127.0.0.1:8443", "[::1]:9443"]"#,
+    );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("port overrides should allow mixed internal HTTPS ports");
+
+  assert_eq!(config.quic.alt_svc.port_overrides.len(), 2);
+  assert_eq!(
+    config.quic.alt_svc.port_overrides[0].bind,
+    "127.0.0.1:8443".parse::<SocketAddr>().unwrap()
+  );
+  assert_eq!(config.quic.alt_svc.port_overrides[0].advertised_port, 443);
+}
+
+#[test]
+fn listener_plural_http3_alt_svc_rejects_duplicate_port_override_binds() {
+  let temp_dir = common::TempDir::new("listener-alt-svc-duplicate-overrides");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-alt-svc-duplicate-overrides");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"http3 = false"#,
+    r#"http3 = true
+
+[quic.alt_svc]
+enabled = true
+
+[[quic.alt_svc.port_overrides]]
+bind = "127.0.0.1:8443"
+advertised_port = 443
+
+[[quic.alt_svc.port_overrides]]
+bind = "127.0.0.1:8443"
+advertised_port = 8443
+
+[quic.socket]
+reuse_port = true"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("duplicate Alt-Svc override binds should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("quic.alt_svc.port_overrides contains duplicate bind 127.0.0.1:8443"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_http3_alt_svc_rejects_unknown_port_override_bind() {
+  let temp_dir = common::TempDir::new("listener-alt-svc-unknown-override");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-alt-svc-unknown-override");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"http3 = false"#,
+    r#"http3 = true
+
+[quic.alt_svc]
+enabled = true
+
+[[quic.alt_svc.port_overrides]]
+bind = "127.0.0.1:9443"
+advertised_port = 443
+
+[quic.socket]
+reuse_port = true"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("unknown Alt-Svc override bind should fail");
+
+  assert!(
+    error.to_string().contains(
+      "quic.alt_svc.port_overrides bind 127.0.0.1:9443 must match a listeners.https_binds entry"
+    ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn listener_plural_http3_alt_svc_rejects_zero_advertised_port_override() {
+  let temp_dir = common::TempDir::new("listener-alt-svc-zero-override");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "listener-alt-svc-zero-override");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    r#"http3 = false"#,
+    r#"http3 = true
+
+[quic.alt_svc]
+enabled = true
+
+[[quic.alt_svc.port_overrides]]
+bind = "127.0.0.1:8443"
+advertised_port = 0
+
+[quic.socket]
+reuse_port = true"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("zero Alt-Svc advertised port should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("quic.alt_svc.port_overrides advertised_port must be greater than 0"),
     "unexpected error: {error}"
   );
 }
@@ -7178,6 +7326,7 @@ fn quic_defaults_are_parsed() {
   assert_eq!(config.quic.zero_rtt, QuicZeroRttMode::Off);
   assert!(config.quic.alt_svc.enabled);
   assert_eq!(config.quic.alt_svc.max_age_seconds, 86_400);
+  assert!(config.quic.alt_svc.port_overrides.is_empty());
   assert_eq!(config.quic.transport.max_concurrent_bidi_streams, 100);
   assert_eq!(config.quic.transport.keep_alive_interval_ms, 0);
   assert_eq!(config.quic.transport.stream_receive_window_bytes, 1_250_000);

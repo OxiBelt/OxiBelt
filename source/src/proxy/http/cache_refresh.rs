@@ -16,7 +16,7 @@ use super::response::{
   apply_effective_security_headers_with_snapshot, neutralize_applied_route_security_headers,
 };
 use super::retry::{EffectiveRetryPolicy, send_with_retry};
-use super::{EffectiveTimeouts, apply_alt_svc_header, full_body, semantics};
+use super::{EffectiveTimeouts, full_body, semantics};
 
 pub(super) fn can_background_refresh(
   waf: crate::routes::RouteWafExecutionPlan,
@@ -42,7 +42,6 @@ pub(super) fn spawn_background_refresh(
   method: Method,
   uri: http::Uri,
   request_headers: HeaderMap,
-  request_version: http::Version,
   stale: crate::cache::StaleEntry,
 ) -> bool {
   let Some(permit) = state.cache.try_background_refresh_permit(route_cache) else {
@@ -95,7 +94,6 @@ pub(super) fn spawn_background_refresh(
       method,
       uri,
       request_headers,
-      request_version,
       stale.entry,
     )
     .await
@@ -121,7 +119,6 @@ async fn background_refresh(
   method: Method,
   uri: http::Uri,
   request_headers: HeaderMap,
-  request_version: http::Version,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
   let Some(client) =
@@ -157,13 +154,6 @@ async fn background_refresh(
     &mut parts.headers,
     &state.config.security,
     route_security_headers.as_deref(),
-  );
-  apply_alt_svc_header(
-    &mut parts.headers,
-    parts.status,
-    state.as_ref(),
-    scheme,
-    request_version,
   );
   if body
     .size_hint()

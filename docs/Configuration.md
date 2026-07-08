@@ -417,7 +417,7 @@ version = "any" # v1 | v2 | any
 trusted_sources = []
 ```
 
-At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP for every `https_binds` address. HTTP/3 listens on UDP for every `https_binds` address. `http_binds` controls the optional plain HTTP listener when `http_mode` is not `off`. Legacy scalar `https_bind` and `http_bind` remain accepted as one-address compatibility aliases, but they must not be mixed with `https_binds` or `http_binds` respectively. IPv6 listener sockets are IPv6-only; configure both `0.0.0.0:443` and `[::]:443` when you want explicit IPv4 and IPv6 exposure. Adding wildcard binds such as `0.0.0.0` or `[::]` exposes all interfaces for that IP family. PROXY protocol is accepted only from configured trusted sources. When HTTP/3 Alt-Svc is enabled, all HTTPS bind entries must use the same port because OxiBelt advertises one Alt-Svc port.
+At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP for every `https_binds` address. HTTP/3 listens on UDP for every `https_binds` address. `http_binds` controls the optional plain HTTP listener when `http_mode` is not `off`. Legacy scalar `https_bind` and `http_bind` remain accepted as one-address compatibility aliases, but they must not be mixed with `https_binds` or `http_binds` respectively. IPv6 listener sockets are IPv6-only; configure both `0.0.0.0:443` and `[::]:443` when you want explicit IPv4 and IPv6 exposure. Adding wildcard binds such as `0.0.0.0` or `[::]` exposes all interfaces for that IP family. PROXY protocol is accepted only from configured trusted sources. When HTTP/3 Alt-Svc is enabled without `quic.alt_svc.port_overrides`, all HTTPS bind entries must use the same port because OxiBelt advertises one inferred Alt-Svc port.
 
 ```toml
 [tls]
@@ -606,6 +606,10 @@ enabled = true
 max_age_seconds = 86400
 persist = false
 
+# [[quic.alt_svc.port_overrides]]
+# bind = "0.0.0.0:8443"
+# advertised_port = 443
+
 [quic.transport]
 max_concurrent_bidi_streams = 512
 max_concurrent_uni_streams = 512
@@ -656,7 +660,7 @@ max_lifetime_ms = 600000
 
 `host_key_file` is optional and is resolved under the cert directory. It must contain base64 for exactly 64 random bytes. OxiBelt derives QUIC stateless reset and Retry/validation token keys from this material. The file is included in runtime reload fingerprints and in downstream TLS reload inputs. Do not reuse a key baked into an image; generate deployment-local material, for example `openssl rand -base64 64 > /etc/oxibelt/cert/quic-host-key.b64`, then mount it with the rest of the certificate material.
 
-When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
+When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/1.1 and HTTP/2 responses advertise `Alt-Svc: h3=":<https port>"; ma=<max_age_seconds>`. `persist = true` appends `; persist=1`. `[[quic.alt_svc.port_overrides]]` entries map a configured HTTPS listener `bind` to a client-visible `advertised_port`, for example when Docker publishes `443:8443/udp`; unlisted binds still advertise their bind port. Each override bind must match a `listeners.https_binds` entry and `advertised_port` must be greater than zero. OxiBelt does not add `Alt-Svc` to downstream HTTP/3 responses, plain HTTP responses, or `101 Switching Protocols`.
 
 `[quic.transport]` is the shared QUIC transport baseline for both downstream HTTP/3 clients and upstream HTTP/3 forwarding. `[quic.downstream.transport]` and `[quic.upstream.transport]` are partial endpoint-specific overrides; unset values inherit from `[quic.transport]`, including nested `mtu_discovery` values. Existing configurations that only use `[quic.transport]` keep the same behavior for both endpoints.
 

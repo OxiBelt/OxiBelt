@@ -64,6 +64,7 @@ impl H1FastProxyPreflight {
 pub(super) async fn try_handle_connection(
   mut stream: TlsStream<TcpStream>,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   snapshot: &Arc<AppSnapshot>,
   tcp_max_hop: Option<u8>,
   tls: Arc<WafTlsMetadata>,
@@ -135,7 +136,7 @@ pub(super) async fn try_handle_connection(
       ReadRequestOutcome::Request(request) => request,
     };
 
-    let Some(prepared) =
+    let Some(mut prepared) =
       prepare_fast_proxy_request(&parsed, snapshot.as_ref(), peer_addr, tls.as_ref())
     else {
       trace!("TLS H1 pre-Hyper proxy request fell back");
@@ -153,6 +154,10 @@ pub(super) async fn try_handle_connection(
 
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
     snapshot.record_hot_path_request();
+    prepared
+      .request
+      .extensions_mut()
+      .insert(proxy_http::DownstreamListenerBind(listener_bind));
     let close_after_request = header_has_token(&parsed.headers, CONNECTION, "close");
     let request_method = prepared.request.method().clone();
     let timeout = Duration::from_millis(snapshot.config.limits.response_send_timeout_ms);

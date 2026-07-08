@@ -2061,6 +2061,27 @@ impl Config {
     if !self.listeners.http3 || !self.quic.alt_svc.enabled {
       return Ok(());
     }
+    let mut override_binds = HashSet::new();
+    for port_override in &self.quic.alt_svc.port_overrides {
+      if port_override.advertised_port == 0 {
+        bail!("quic.alt_svc.port_overrides advertised_port must be greater than 0");
+      }
+      if !override_binds.insert(port_override.bind) {
+        bail!(
+          "quic.alt_svc.port_overrides contains duplicate bind {}",
+          port_override.bind
+        );
+      }
+      if !self.listeners.https_binds.contains(&port_override.bind) {
+        bail!(
+          "quic.alt_svc.port_overrides bind {} must match a listeners.https_binds entry",
+          port_override.bind
+        );
+      }
+    }
+    if !self.quic.alt_svc.port_overrides.is_empty() {
+      return Ok(());
+    }
     let Some(first) = self.listeners.https_binds.first() else {
       return Ok(());
     };
@@ -2676,7 +2697,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "upstream_pool",
       "zero_rtt",
     ][..],
-    "quic.alt_svc" => &["enabled", "max_age_seconds", "persist"][..],
+    "quic.alt_svc" => &["enabled", "max_age_seconds", "persist", "port_overrides"][..],
+    "quic.alt_svc.port_overrides" => &["advertised_port", "bind"][..],
     "quic.transport" => &[
       "datagram_receive_buffer_bytes",
       "datagram_send_buffer_bytes",

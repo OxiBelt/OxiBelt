@@ -1,5 +1,6 @@
 //! Waiting helpers for cache fill coordination across shared backends.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,7 @@ pub(super) async fn wait_for_shared_fill(
   request_uri: &http::Uri,
   request_headers: &HeaderMap,
   request_version: http::Version,
+  listener_bind: Option<SocketAddr>,
   transport_network: WafTransportNetwork,
   stale_on_error: &mut Option<CacheEntry>,
   revalidation_entry: &mut Option<CacheEntry>,
@@ -77,6 +79,7 @@ pub(super) async fn wait_for_shared_fill(
       request_uri,
       request_headers,
       request_version,
+      listener_bind,
       transport_network,
       stale_on_error,
       revalidation_entry,

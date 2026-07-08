@@ -60,7 +60,7 @@ impl AppSnapshot {
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
       request_path_features: previous.request_path_features,
-      alt_svc_header_value: previous.alt_svc_header_value.clone(),
+      alt_svc_header_values: previous.alt_svc_header_values.clone(),
       http1_upgrades_possible: previous.http1_upgrades_possible,
     })
   }

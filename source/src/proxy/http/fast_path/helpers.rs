@@ -161,7 +161,7 @@ pub(super) fn fast_path_alt_svc_possible(
   downstream_scheme: &str,
   request_version: http::Version,
 ) -> bool {
-  state.alt_svc_header_value.is_some()
+  state.alt_svc_header_values.is_some()
     && downstream_scheme == "https"
     && matches!(
       request_version,

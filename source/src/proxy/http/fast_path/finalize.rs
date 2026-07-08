@@ -43,6 +43,7 @@ pub(super) fn finalize_response(
   request_version: http::Version,
   transport_network: WafTransportNetwork,
   downstream_scheme: &'static str,
+  listener_bind: Option<SocketAddr>,
   client_addr: SocketAddr,
   host: &str,
   tcp_max_hop: Option<u8>,
@@ -107,7 +108,7 @@ pub(super) fn finalize_response(
       request_version,
       response_send_timeout,
       transport_network,
-      compiled_known_small_alt_svc(state, downstream_scheme, request_version),
+      compiled_known_small_alt_svc(state, downstream_scheme, request_version, listener_bind),
     );
     state.record_hot_path_response(response.status());
     timing::record_finalize(state, metric_protocol, request_version, finalize_started);
@@ -200,6 +201,7 @@ pub(super) fn finalize_response(
       state,
       downstream_scheme,
       request_version,
+      listener_bind,
     );
   }
   tracing::debug!(
@@ -249,10 +251,11 @@ fn compiled_known_small_alt_svc<'a>(
   state: &'a AppSnapshot,
   downstream_scheme: &'a str,
   request_version: http::Version,
-) -> Option<(&'a AppSnapshot, &'a str)> {
+  listener_bind: Option<SocketAddr>,
+) -> Option<(&'a AppSnapshot, &'a str, Option<SocketAddr>)> {
   (request_version == http::Version::HTTP_2
     && fast_path_alt_svc_possible(state, downstream_scheme, request_version))
-  .then_some((state, downstream_scheme))
+  .then_some((state, downstream_scheme, listener_bind))
 }
 
 pub(super) fn compiled_known_small_noop_static_candidate(
@@ -289,7 +292,7 @@ fn finalize_known_small_noop_response(
   request_version: http::Version,
   response_send_timeout: Duration,
   transport_network: WafTransportNetwork,
-  alt_svc: Option<(&AppSnapshot, &str)>,
+  alt_svc: Option<(&AppSnapshot, &str, Option<SocketAddr>)>,
 ) -> Response<ProxyBody> {
   materialize_h2_inlined_known_small_body(
     request_version,
@@ -297,7 +300,7 @@ fn finalize_known_small_noop_response(
     &mut inlined_known_small_body,
   );
   if request_version == http::Version::HTTP_2
-    && let Some((state, downstream_scheme)) = alt_svc
+    && let Some((state, downstream_scheme, listener_bind)) = alt_svc
   {
     apply_alt_svc_header(
       &mut parts.headers,
@@ -305,6 +308,7 @@ fn finalize_known_small_noop_response(
       state,
       downstream_scheme,
       request_version,
+      listener_bind,
     );
   }
   let compiled_h3_noop = request_version == http::Version::HTTP_3
@@ -431,11 +435,7 @@ reuse_port = true
       .method(http::Method::GET)
       .version(http::Version::HTTP_2)
       .uri("https://example.com/perf/h2?body=ok")
-      .body(
-        Full::new(Bytes::new())
-          .map_err(|never| -> body::BoxError { match never {} })
-          .boxed(),
-      )
+      .body(empty_proxy_body())
       .expect("request should build")
   }
 
@@ -496,7 +496,7 @@ reuse_port = true
   async fn h2_known_small_noop_guard_accepts_compiled_safe_case() {
     let state = h2_direct_h1_state_with_http3("").await;
 
-    assert!(state.alt_svc_header_value.is_some());
+    assert!(state.alt_svc_header_values.is_some());
     assert!(can_use_h2_known_small_noop(
       &state,
       &RequestWafDecision::default(),
@@ -651,7 +651,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_2,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Tcp,
-      Some((&state, "https")),
+      Some((&state, "https", None)),
     );
 
     assert!(
@@ -681,7 +681,7 @@ x_content_type_options = "nosniff"
     );
     assert_eq!(
       response.headers().get(http::header::ALT_SVC),
-      state.alt_svc_header_value.as_ref()
+      state.alt_svc_header_values.default_value()
     );
     let bytes = response
       .into_body()
@@ -705,7 +705,7 @@ x_content_type_options = "nosniff"
       http::Version::HTTP_3,
       std::time::Duration::from_millis(10),
       WafTransportNetwork::Udp,
-      Some((&state, "https")),
+      Some((&state, "https", None)),
     );
 
     assert!(response.headers().get(http::header::ALT_SVC).is_none());

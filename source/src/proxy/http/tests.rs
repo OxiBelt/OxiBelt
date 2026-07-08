@@ -4,6 +4,7 @@ mod common {
     "/../tests/rust/common/mod.rs"
   ));
 }
+mod alt_svc;
 
 use pretty_assertions::assert_eq;
 
@@ -135,25 +136,6 @@ fn forwarded_client_addr_source_selects_resolved_or_direct_peer() {
       crate::config::ForwardedClientIpSource::DirectPeer
     ),
     peer_addr
-  );
-}
-
-#[tokio::test]
-async fn app_snapshot_precomputes_alt_svc_header_value() {
-  let temp_dir = common::TempDir::new("alt-svc-precompute");
-  let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "alt-svc-precompute");
-  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-    "http3 = false",
-    "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 60\npersist = true\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
-  );
-  let state = AppSnapshot::new(parse_config(&raw))
-    .await
-    .expect("snapshot should initialize");
-
-  assert_eq!(
-    state.alt_svc_header_value.as_ref().unwrap(),
-    "h3=\":8443\"; ma=60; persist=1"
   );
 }
 
@@ -403,44 +385,6 @@ async fn pending_dynamic_person_proof_rotation_applies_to_redirect_without_dupli
     .collect();
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0], "__test_person_proof=already; Path=/");
-}
-
-#[tokio::test]
-async fn alt_svc_applies_only_to_https_h1_h2_non_switching_responses() {
-  let temp_dir = common::TempDir::new("alt-svc-helper");
-  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "alt-svc-helper");
-  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
-    "http3 = false",
-    "http3 = true\n\n[quic.alt_svc]\nenabled = true\nmax_age_seconds = 120\npersist = false\n\n[quic.socket]\nworkers = \"auto\"\nreuse_port = true",
-  );
-  let state = AppSnapshot::new(parse_config(&raw))
-    .await
-    .expect("snapshot should initialize");
-
-  assert!(should_add_alt_svc(
-    StatusCode::OK,
-    &state,
-    "https",
-    http::Version::HTTP_2
-  ));
-  assert!(!should_add_alt_svc(
-    StatusCode::OK,
-    &state,
-    "https",
-    http::Version::HTTP_3
-  ));
-  assert!(!should_add_alt_svc(
-    StatusCode::OK,
-    &state,
-    "http",
-    http::Version::HTTP_2
-  ));
-  assert!(!should_add_alt_svc(
-    StatusCode::SWITCHING_PROTOCOLS,
-    &state,
-    "https",
-    http::Version::HTTP_11
-  ));
 }
 
 #[tokio::test]

@@ -12,7 +12,6 @@ use hyper::body::Body;
 use tracing::warn;
 
 use crate::config::{HttpVersion, ProxyProtocolEgressMode};
-use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody, error_indicates_body_timeout};
 use crate::proxy::http::headers::{ForwardedHeaderCache, ForwardedRequestHeaderValues};
 use crate::proxy::http::request::{RebuildRequestOptions, rebuild_request_parts};
@@ -20,6 +19,7 @@ use crate::proxy::http::response::{text_response, with_route_security_headers};
 use crate::proxy::http::semantics::{self, configured_error_response};
 use crate::proxy::http::upstream::select_request_upstream;
 use crate::proxy::http::version::select_upstream_http_version;
+use crate::proxy::http::{DownstreamListenerBind, SystemAccessLogContext};
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::telemetry::TraceContext;

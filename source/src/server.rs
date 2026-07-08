@@ -1823,6 +1823,7 @@ async fn serve_tcp(
                   TcpListenerKind::Https => handle_connection(
                     stream,
                     peer_addr,
+                    bind,
                     connection_snapshot,
                     connection_shutdown,
                     data_plane_drain,
@@ -1981,6 +1982,7 @@ pub(crate) fn downstream_quic_tls_metadata(
 async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
+  listener_bind: SocketAddr,
   handshake_state: Arc<AppSnapshot>,
   mut shutdown: watch::Receiver<bool>,
   mut data_plane_drain: watch::Receiver<bool>,
@@ -2097,6 +2099,9 @@ async fn handle_connection(
     let connection_limit_context = connection_limit_context.clone();
     let drain = drain.clone();
     async move {
+      request
+        .extensions_mut()
+        .insert(http::DownstreamListenerBind(listener_bind));
       if tcp_early_data {
         http::early_data::mark_verified(&mut request);
       }
@@ -2161,6 +2166,7 @@ async fn handle_connection(
       let Some((io, served_requests)) = h1_fast_proxy::try_handle_connection(
         tls_stream,
         peer_addr,
+        listener_bind,
         &handshake_state,
         tcp_max_hop,
         h1_tls_metadata,

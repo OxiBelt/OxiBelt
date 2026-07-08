@@ -211,6 +211,11 @@ zero_rtt = "off"
 enabled = true
 max_age_seconds = 86400
 persist = false
+# Use this when the client-visible HTTP/3 UDP port differs from the bind port,
+# for example a container published as 443:8443/udp.
+# [[quic.alt_svc.port_overrides]]
+# bind = "0.0.0.0:8443"
+# advertised_port = 443
 
 [quic.transport]
 max_concurrent_bidi_streams = 512

@@ -2,6 +2,7 @@
 //! Security-sensitive framing, header, body, and WAF decisions stay explicit in this module tree.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -118,6 +119,9 @@ use self::route_action_runtime as route_runtime;
 use self::semantics::filter_trailers;
 use self::upstream::select_request_upstream;
 use self::uri::validate_downstream_path;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DownstreamListenerBind(pub(crate) SocketAddr);
 use self::version::select_upstream_http_version;
 pub(crate) use self::waf_body_capture::{
   capture_request_body_for_waf, capture_response_body_for_waf, request_body_capture_error_response,
@@ -431,6 +435,10 @@ where
     return text_response(StatusCode::BAD_REQUEST, "invalid request path");
   }
   let request_version = request.version();
+  let listener_bind = request
+    .extensions()
+    .get::<DownstreamListenerBind>()
+    .map(|bind| bind.0);
   let mut tags: Option<HashMap<String, String>> = None;
   let client_addr = match crate::identity::resolve_client_addr(
     request.headers(),
@@ -1027,6 +1035,7 @@ where
       transport_network,
       transport_metadata,
       downstream_scheme,
+      listener_bind,
       request_body,
       tags_ref(&tags),
       access_log,
@@ -1302,13 +1311,21 @@ where
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   let stale_if_error_response = |entry| {
-    cache_status::stale_if_error_response(
+    let mut response = cache_status::stale_if_error_response(
       state,
       resolved.route,
       entry,
       &request_method,
       &request_headers,
-    )
+    );
+    apply_response_alt_svc(
+      &mut response,
+      state.as_ref(),
+      downstream_scheme,
+      request_version,
+      listener_bind,
+    );
+    response
   };
   let initial_cache_lookup = crate::cache::CacheLookupContext {
     policy_name: resolved.route.cache.as_deref(),
@@ -1345,6 +1362,7 @@ where
       &request_uri,
       &request_headers,
       request_version,
+      listener_bind,
       transport_network,
       &mut stale_on_error,
       &mut revalidation_entry,
@@ -1401,6 +1419,7 @@ where
                 &request_uri,
                 &request_headers,
                 request_version,
+                listener_bind,
                 transport_network,
                 &mut stale_on_error,
                 &mut revalidation_entry,
@@ -1463,6 +1482,7 @@ where
               &request_uri,
               &request_headers,
               request_version,
+              listener_bind,
               transport_network,
               &mut stale_on_error,
               &mut revalidation_entry,
@@ -1490,6 +1510,7 @@ where
             &request_uri,
             &request_headers,
             request_version,
+            listener_bind,
             transport_network,
             &mut stale_on_error,
             &mut revalidation_entry,
@@ -1829,6 +1850,13 @@ where
       CacheOutcome::Revalidated,
       CacheReason::NotModified,
     );
+    apply_response_alt_svc(
+      &mut response,
+      state.as_ref(),
+      downstream_scheme,
+      request_version,
+      listener_bind,
+    );
     let response = compression::maybe_compress_response(
       response,
       &request_method,
@@ -1933,13 +1961,6 @@ where
   }
   route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   cache_status::strip_headers(&mut parts.headers);
-  apply_alt_svc_header(
-    &mut parts.headers,
-    parts.status,
-    state.as_ref(),
-    downstream_scheme,
-    request_version,
-  );
   let mut response_buffering = effective_buffering.response;
   if state.config.proxy.http.sse_auto_streaming && semantics::is_sse(&parts.headers) {
     response_buffering.mode = crate::config::BufferingMode::Streaming;
@@ -1958,7 +1979,7 @@ where
     }
   };
 
-  let response = maybe_cache_response_with_store_permission(
+  let mut response = maybe_cache_response_with_store_permission(
     Response::from_parts(parts, body),
     state,
     resolved.route.cache.as_deref(),
@@ -1973,6 +1994,15 @@ where
     Some(&applied_route_security_headers),
   )
   .await;
+  let response_status = response.status();
+  apply_alt_svc_header(
+    response.headers_mut(),
+    response_status,
+    state.as_ref(),
+    downstream_scheme,
+    request_version,
+    listener_bind,
+  );
   let response = compression::maybe_compress_response(
     response,
     &request_method,
@@ -1999,6 +2029,25 @@ async fn buffer_request_body(
   let body = buffering::buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
   Ok(Request::from_parts(parts, body))
 }
+
+fn apply_response_alt_svc(
+  response: &mut Response<ProxyBody>,
+  state: &AppSnapshot,
+  downstream_scheme: &str,
+  request_version: http::Version,
+  listener_bind: Option<SocketAddr>,
+) {
+  let status = response.status();
+  apply_alt_svc_header(
+    response.headers_mut(),
+    status,
+    state,
+    downstream_scheme,
+    request_version,
+    listener_bind,
+  );
+}
+
 fn with_connection_permit(
   response: Response<ProxyBody>,
   permit: ConnectionPermit,
@@ -2891,6 +2940,7 @@ fn handle_cache_lookup_result(
   request_uri: &http::Uri,
   request_headers: &HeaderMap,
   request_version: http::Version,
+  listener_bind: Option<SocketAddr>,
   transport_network: WafTransportNetwork,
   stale_on_error: &mut Option<crate::cache::CacheEntry>,
   revalidation_entry: &mut Option<crate::cache::CacheEntry>,
@@ -2922,6 +2972,13 @@ fn handle_cache_lookup_result(
         resolved.route,
         request_headers,
       );
+      apply_response_alt_svc(
+        &mut response,
+        state.as_ref(),
+        downstream_scheme,
+        request_version,
+        listener_bind,
+      );
       Some(response)
     }
     crate::cache::CacheLookup::Stale(stale) => {
@@ -2947,7 +3004,6 @@ fn handle_cache_lookup_result(
           request_method.clone(),
           request_uri.clone(),
           request_headers.clone(),
-          request_version,
           stale.clone(),
         )
       {
@@ -2970,6 +3026,13 @@ fn handle_cache_lookup_result(
           response.headers_mut(),
           resolved.route,
           request_headers,
+        );
+        apply_response_alt_svc(
+          &mut response,
+          state.as_ref(),
+          downstream_scheme,
+          request_version,
+          listener_bind,
         );
         return Some(response);
       }
@@ -3012,6 +3075,13 @@ fn handle_cache_lookup_result(
           response.headers_mut(),
           resolved.route,
           request_headers,
+        );
+        apply_response_alt_svc(
+          &mut response,
+          state.as_ref(),
+          downstream_scheme,
+          request_version,
+          listener_bind,
         );
         Some(response)
       }

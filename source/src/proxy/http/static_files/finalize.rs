@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use http::{HeaderMap, Method, Response};
@@ -40,6 +41,7 @@ pub(in crate::proxy::http) async fn finalize_response(
   transport_network: WafTransportNetwork,
   transport_metadata: WafTransportMetadataInput<'_>,
   downstream_scheme: &'static str,
+  listener_bind: Option<SocketAddr>,
   request_body: Option<WafBodyInput<'_>>,
   tags: &HashMap<String, String>,
   access_log: &mut SystemAccessLogContext<'_>,
@@ -142,6 +144,7 @@ pub(in crate::proxy::http) async fn finalize_response(
     state,
     downstream_scheme,
     request_version,
+    listener_bind,
   );
   let response = Response::from_parts(parts, body);
   let response = compression::maybe_compress_response(
@@ -267,6 +270,7 @@ mod tests {
       WafTransportNetwork::Tcp,
       WafTransportMetadataInput::default(),
       "https",
+      None,
       None,
       &tags,
       &mut access_log,

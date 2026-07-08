@@ -289,6 +289,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "protocol-proxying",
+      "alt-svc-port-overrides",
+      "Alt-Svc can advertise an external HTTP/3 port that differs from the listener bind port",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
       "alt-svc-skip-rules",
       "Alt-Svc is not advertised on plain HTTP, downstream HTTP/3, or 101 responses",
       ExpectStart::Success,

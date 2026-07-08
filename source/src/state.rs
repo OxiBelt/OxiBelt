@@ -2,6 +2,7 @@
 //! Reloads swap snapshots so in-flight work can finish against a consistent view.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -109,8 +110,32 @@ pub struct AppSnapshot {
   pub access_logs: AccessLogSinks,
   pub system_access_log: SystemAccessLog,
   pub(crate) request_path_features: RequestPathFeaturePlan,
-  pub(crate) alt_svc_header_value: Option<HeaderValue>,
+  pub(crate) alt_svc_header_values: AltSvcHeaderValues,
   pub(crate) http1_upgrades_possible: bool,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct AltSvcHeaderValues {
+  default: Option<HeaderValue>,
+  by_listener_bind: HashMap<SocketAddr, HeaderValue>,
+}
+
+impl AltSvcHeaderValues {
+  pub(crate) fn is_some(&self) -> bool {
+    self.default.is_some()
+  }
+
+  pub(crate) fn for_listener_bind(&self, listener_bind: Option<SocketAddr>) -> Option<HeaderValue> {
+    listener_bind
+      .and_then(|bind| self.by_listener_bind.get(&bind))
+      .or(self.default.as_ref())
+      .cloned()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn default_value(&self) -> Option<&HeaderValue> {
+    self.default.as_ref()
+  }
 }
 
 impl AppSnapshot {
@@ -386,8 +411,8 @@ impl AppSnapshot {
       system_access_log.enabled(),
       waf.has_person_proof_api_paths(),
     );
-    let alt_svc_header_value = build_alt_svc_header_value(&config)
-      .context("failed to build precomputed Alt-Svc header value")?;
+    let alt_svc_header_values = build_alt_svc_header_values(&config)
+      .context("failed to build precomputed Alt-Svc header values")?;
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
     let stream_pool_generation = next_stream_pool_generation(&config, previous);
@@ -449,7 +474,7 @@ impl AppSnapshot {
       access_logs,
       system_access_log,
       request_path_features,
-      alt_svc_header_value,
+      alt_svc_header_values,
       http1_upgrades_possible,
     })
   }
@@ -525,8 +550,8 @@ impl AppSnapshot {
     publish_upstream_pool_server_metrics(&pools);
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
-    let alt_svc_header_value = build_alt_svc_header_value(&config)
-      .context("failed to build precomputed Alt-Svc header value")?;
+    let alt_svc_header_values = build_alt_svc_header_values(&config)
+      .context("failed to build precomputed Alt-Svc header values")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
     let waf_body_coding = WafBodyCodingState::new(&config.waf.http_body_compression);
@@ -607,7 +632,7 @@ impl AppSnapshot {
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
       request_path_features,
-      alt_svc_header_value,
+      alt_svc_header_values,
       http1_upgrades_possible,
     })
   }
@@ -673,22 +698,47 @@ fn build_upstream_uri_parts(
   Ok((by_name, by_index))
 }
 
-fn build_alt_svc_header_value(config: &Config) -> anyhow::Result<Option<HeaderValue>> {
+pub(crate) fn build_alt_svc_header_values(config: &Config) -> anyhow::Result<AltSvcHeaderValues> {
   if !config.listeners.http3 || !config.quic.alt_svc.enabled {
-    return Ok(None);
+    return Ok(AltSvcHeaderValues::default());
   }
 
-  let mut value = format!(
-    "h3=\":{}\"; ma={}",
-    config.listeners.https_bind.port(),
-    config.quic.alt_svc.max_age_seconds
-  );
-  if config.quic.alt_svc.persist {
+  let port_overrides = config
+    .quic
+    .alt_svc
+    .port_overrides
+    .iter()
+    .map(|port_override| (port_override.bind, port_override.advertised_port))
+    .collect::<HashMap<_, _>>();
+  let mut values = AltSvcHeaderValues::default();
+  for bind in &config.listeners.https_binds {
+    let advertised_port = port_overrides
+      .get(bind)
+      .copied()
+      .unwrap_or_else(|| bind.port());
+    let value = build_alt_svc_header_value(
+      advertised_port,
+      config.quic.alt_svc.max_age_seconds,
+      config.quic.alt_svc.persist,
+    )?;
+    if *bind == config.listeners.https_bind {
+      values.default = Some(value.clone());
+    }
+    values.by_listener_bind.insert(*bind, value);
+  }
+  Ok(values)
+}
+
+fn build_alt_svc_header_value(
+  advertised_port: u16,
+  max_age_seconds: u64,
+  persist: bool,
+) -> anyhow::Result<HeaderValue> {
+  let mut value = format!("h3=\":{}\"; ma={}", advertised_port, max_age_seconds);
+  if persist {
     value.push_str("; persist=1");
   }
-  HeaderValue::from_str(&value)
-    .map(Some)
-    .context("invalid Alt-Svc header value")
+  HeaderValue::from_str(&value).context("invalid Alt-Svc header value")
 }
 
 #[cfg(test)]

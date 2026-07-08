@@ -1,6 +1,8 @@
 //! QUIC transport configuration validation.
 //! Retry, key, and stream settings are checked before endpoint construction.
 
+use std::net::SocketAddr;
+
 use anyhow::bail;
 use serde::Deserialize;
 
@@ -22,6 +24,14 @@ pub struct QuicAltSvcConfig {
   pub max_age_seconds: u64,
   #[serde(default)]
   pub persist: bool,
+  #[serde(default)]
+  pub port_overrides: Vec<QuicAltSvcPortOverrideConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicAltSvcPortOverrideConfig {
+  pub bind: SocketAddr,
+  pub advertised_port: u16,
 }
 
 impl Default for QuicAltSvcConfig {
@@ -30,6 +40,7 @@ impl Default for QuicAltSvcConfig {
       enabled: true,
       max_age_seconds: default_quic_alt_svc_max_age_seconds(),
       persist: false,
+      port_overrides: Vec::new(),
     }
   }
 }

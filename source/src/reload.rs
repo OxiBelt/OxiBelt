@@ -141,6 +141,8 @@ impl ReloadManager {
     let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
       &config.waf.http_body_compression,
     );
+    let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
+      .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
       route_table,
       sni_forward: active.sni_forward.clone(),
@@ -190,7 +192,7 @@ impl ReloadManager {
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       request_path_features,
-      alt_svc_header_value: active.alt_svc_header_value.clone(),
+      alt_svc_header_values,
       http1_upgrades_possible: active.http1_upgrades_possible,
     };
     state.replace(snapshot);
@@ -309,6 +311,8 @@ impl ReloadManager {
     let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
       &config.waf.http_body_compression,
     );
+    let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
+      .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
@@ -358,7 +362,7 @@ impl ReloadManager {
       access_logs: active.access_logs.clone(),
       system_access_log: active.system_access_log.clone(),
       request_path_features,
-      alt_svc_header_value: active.alt_svc_header_value.clone(),
+      alt_svc_header_values,
       http1_upgrades_possible: active.http1_upgrades_possible,
     };
     let pending = listeners.prepare(&snapshot).await?;

@@ -35,6 +35,10 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
   {
+    let listener_bind = request
+      .extensions()
+      .get::<DownstreamListenerBind>()
+      .map(|bind| bind.0);
     let metric_protocol = fast_path_metric_protocol(request_version);
     let snapshot = state.as_ref();
     let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
@@ -711,6 +715,7 @@ impl PlainProxyFastPath {
       request_version,
       transport_network,
       downstream_scheme,
+      listener_bind,
       client_addr,
       host,
       tcp_max_hop,
