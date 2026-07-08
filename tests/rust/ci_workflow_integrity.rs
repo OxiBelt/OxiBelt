@@ -1433,11 +1433,13 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
   let scan_job = jobs
     .get("docker-image-trivy-scan")
     .expect("release workflow should define docker-image-trivy-scan");
-  let publish_job = jobs
-    .get("ghcr-publish")
-    .expect("release workflow should define ghcr-publish");
+  let manifest_job = jobs
+    .get("ghcr-manifest-publish")
+    .expect("release workflow should define ghcr-manifest-publish");
   let validate_job_text = workflow_job_text(&workflow, "validate");
-  let publish_job_text = workflow_job_text(&workflow, "ghcr-publish");
+  let build_job_text = workflow_job_text(&workflow, "docker-alpine-musl-image");
+  let scan_job_text = workflow_job_text(&workflow, "docker-image-trivy-scan");
+  let manifest_job_text = workflow_job_text(&workflow, "ghcr-manifest-publish");
 
   assert!(
     workflow.contains("release:")
@@ -1451,6 +1453,10 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     "release workflow should publish only strict OxiBelt tag formats and should not document v-prefixed tags"
   );
   assert!(
+    !jobs.contains_key("ghcr-publish"),
+    "release workflow should replace all-image GHCR publishing with manifest-only publishing"
+  );
+  assert!(
     validate_job.needs.is_empty(),
     "release validate job should not wait for other jobs"
   );
@@ -1462,21 +1468,20 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
   assert_eq!(
     scan_job.needs,
     vec!["docker-alpine-musl-image".to_owned()],
-    "release Trivy scans should wait for release image artifacts"
+    "release Trivy scans should wait for pushed release image rows"
   );
   assert_eq!(
-    publish_job.needs,
+    manifest_job.needs,
     vec![
       "validate".to_owned(),
       "docker-alpine-musl-image".to_owned(),
-      "docker-image-trivy-scan".to_owned(),
     ],
-    "GHCR publish should wait for validation, image artifacts, and image scans"
+    "GHCR manifest publishing should wait for validation and pushed image rows only"
   );
   assert_eq!(
     workflow.matches("packages: write").count(),
-    1,
-    "release workflow should grant packages: write only once"
+    2,
+    "release workflow should grant package writes only to image and manifest publishing jobs"
   );
   for expected in [
     "contents: read",
@@ -1502,7 +1507,39 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     );
   }
   for expected in [
+    "packages: write",
+    "Validate Docker image artifact",
+    "Push arch-specific GHCR tags",
     "github.repository == 'OxiBelt/OxiBelt'",
+    "OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}",
+    "docker load --input \"${IMAGE_TAR}\"",
+    r#"jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)'"#,
+    "jq -r '.ghcrTags[]' <<<\"${artifact_json}\"",
+    "docker push \"${ghcr_tag}\"",
+    "org.opencontainers.image.version",
+    "org.opencontainers.image.ref.name",
+    "org.opencontainers.image.revision",
+    "org.opencontainers.image.source",
+    "targetCpu",
+  ] {
+    assert!(
+      build_job_text.contains(expected),
+      "release image build job should include {expected}"
+    );
+  }
+  for expected in [
+    "packages: read",
+    "Resolve published image tag",
+    ".ghcrTags[0]",
+    "image-ref: ${{ steps.trivy-image.outputs.image_ref }}",
+    "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
+  ] {
+    assert!(
+      scan_job_text.contains(expected),
+      "release Trivy scan job should include {expected}"
+    );
+  }
+  for expected in [
     "packages: write",
     "OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}",
     "\"${OXIBELT_RELEASE_VERSION}\" \"${OXIBELT_RELEASE_KIND}\" \"${OXIBELT_RELEASE_REVISION}\"",
@@ -1510,18 +1547,27 @@ fn release_workflow_uses_strict_tag_triggers_and_scoped_publish_permissions() {
     "def expected_artifact_tags(arch):",
     "if artifact[\"ghcrTags\"] != expected_tags:",
     "if manifest[\"ghcrTags\"] != ghcr_tags:",
-    "expected_artifacts = {artifact[\"artifactName\"] for artifact in artifacts.values()}",
     "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
-    "org.opencontainers.image.version",
-    "org.opencontainers.image.ref.name",
-    "org.opencontainers.image.revision",
-    "org.opencontainers.image.source",
+    ".ghcrTags[0]",
+    "docker manifest inspect",
     "docker manifest create",
     "docker manifest push",
   ] {
     assert!(
-      publish_job_text.contains(expected),
-      "GHCR publish job should include {expected}"
+      manifest_job_text.contains(expected),
+      "GHCR manifest publish job should include {expected}"
+    );
+  }
+  for removed in [
+    "Download OxiBelt Docker image artifacts",
+    "pattern: oxibelt-alpine-musl-*-image",
+    "expected_artifacts = {artifact[\"artifactName\"] for artifact in artifacts.values()}",
+    "docker load --input",
+    "docker push \"${ghcr_tag}\"",
+  ] {
+    assert!(
+      !manifest_job_text.contains(removed),
+      "GHCR manifest publish job should not include all-artifact publishing behavior: {removed}"
     );
   }
   for removed in [
@@ -1542,24 +1588,23 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
   let build_job_text = workflow_job_text(&workflow, "docker-alpine-musl-image");
   let scan_job_text = workflow_job_text(&workflow, "docker-image-trivy-scan");
 
-  for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
+  for (artifact_arch, artifact_name, image_tar, _image_tag) in OXIBELT_IMAGE_ARTIFACTS {
     for expected in [
       format!("artifact_arch: {artifact_arch}"),
       format!("artifact_name: {artifact_name}"),
     ] {
       assert!(
-        build_job_text.contains(&expected) || scan_job_text.contains(&expected),
+        build_job_text.contains(&expected),
         "release image matrix should include {expected}"
       );
     }
     assert!(
-      scan_job_text.contains(&format!("image_tar: {image_tar}"))
-        && scan_job_text.contains(&format!("image_tag: {image_tag}")),
-      "release Trivy scan matrix should include {artifact_arch} tar and local tag"
+      scan_job_text.contains(&format!("artifact_arch: {artifact_arch}")),
+      "release Trivy scan matrix should include {artifact_arch}"
     );
     assert!(
-      workflow.contains(artifact_name) && workflow.contains(image_tar),
-      "release workflow should know {artifact_name} and {image_tar}"
+      workflow.contains(image_tar),
+      "release workflow should know {image_tar}"
     );
   }
 
@@ -1571,7 +1616,8 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
     "OXIBELT_DOCKER_IMAGE_SOURCE",
     "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "pattern: oxibelt-alpine-musl-*-image",
+    "Push arch-specific GHCR tags",
+    "ghcr-manifest-publish",
     ":latest",
     r#"tags.append(f"{image}:{major}-alpine-musl-{arch}")"#,
   ] {
@@ -1580,6 +1626,10 @@ fn release_workflow_covers_oxibelt_image_artifact_matrix() {
       "release workflow should include {expected}"
     );
   }
+  assert!(
+    !workflow.contains("pattern: oxibelt-alpine-musl-*-image"),
+    "release workflow should not download every image tar during manifest publishing"
+  );
 }
 
 #[test]

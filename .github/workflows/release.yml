@@ -218,6 +218,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -292,109 +293,11 @@ jobs:
             "${{ matrix.artifact_arch }}" \
             "${RUNNER_TEMP}/oxibelt-image"
 
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
-          if-no-files-found: error
-          retention-days: 1
-
-  docker-image-trivy-scan:
-    name: Docker image Trivy scan (${{ matrix.artifact_arch }})
-    runs-on: ubuntu-26.04
-    needs:
-      - docker-alpine-musl-image
-    permissions:
-      actions: read
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - artifact_arch: amd64v2
-            artifact_name: oxibelt-alpine-musl-amd64v2-image
-            image_tar: oxibelt-alpine-musl-amd64v2.tar
-            image_tag: oxibelt:alpine-musl-amd64v2
-          - artifact_arch: amd64
-            artifact_name: oxibelt-alpine-musl-amd64-image
-            image_tar: oxibelt-alpine-musl-amd64.tar
-            image_tag: oxibelt:alpine-musl-amd64
-          - artifact_arch: amd64v4
-            artifact_name: oxibelt-alpine-musl-amd64v4-image
-            image_tar: oxibelt-alpine-musl-amd64v4.tar
-            image_tag: oxibelt:alpine-musl-amd64v4
-          - artifact_arch: arm64
-            artifact_name: oxibelt-alpine-musl-arm64-image
-            image_tar: oxibelt-alpine-musl-arm64.tar
-            image_tag: oxibelt:alpine-musl-arm64
-          - artifact_arch: riscv64
-            artifact_name: oxibelt-alpine-musl-riscv64-image
-            image_tar: oxibelt-alpine-musl-riscv64.tar
-            image_tag: oxibelt:alpine-musl-riscv64
-
-    steps:
-      - name: Download OxiBelt Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
-
-      - name: Load OxiBelt Docker image
+      - name: Validate Docker image artifact
         env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
           OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
-          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ matrix.image_tag }}
-          format: json
-          output: trivy-results-${{ matrix.artifact_arch }}.json
-          vuln-type: os,library
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          exit-code: "0"
-
-      - name: Upload Trivy vulnerability report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: trivy-release-oxibelt-${{ matrix.artifact_arch }}-json
-          path: trivy-results-${{ matrix.artifact_arch }}.json
-          if-no-files-found: error
-          retention-days: 1
-
-  ghcr-publish:
-    name: Publish GHCR images
-    runs-on: ubuntu-26.04
-    needs:
-      - validate
-      - docker-alpine-musl-image
-      - docker-image-trivy-scan
-    if: github.repository == 'OxiBelt/OxiBelt'
-    permissions:
-      actions: read
-      contents: read
-      packages: write
-
-    steps:
-      - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-release-metadata
-          path: ${{ runner.temp }}/oxibelt-release-metadata
-
-      - name: Download OxiBelt Docker image artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          pattern: oxibelt-alpine-musl-*-image
-          path: ${{ runner.temp }}/oxibelt-images
-
-      - name: Validate Docker image artifacts
-        env:
-          IMAGE_ROOT: ${{ runner.temp }}/oxibelt-images
-          METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
           OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}
           OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
           OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -402,18 +305,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 - "${METADATA_ROOT}/image-plan.json" "${IMAGE_ROOT}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          python3 - "${IMAGE_PLAN}" "${IMAGE_TAR}" "${OXIBELT_ARTIFACT_ARCH}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
           import json
           import pathlib
           import sys
           import tarfile
 
           plan_path = pathlib.Path(sys.argv[1])
-          image_root = pathlib.Path(sys.argv[2])
-          version = sys.argv[3]
-          kind = sys.argv[4]
-          revision = sys.argv[5]
-          source = sys.argv[6]
+          image_tar = pathlib.Path(sys.argv[2])
+          artifact_arch = sys.argv[3]
+          version = sys.argv[4]
+          kind = sys.argv[5]
+          revision = sys.argv[6]
+          source = sys.argv[7]
           plan = json.loads(plan_path.read_text(encoding="utf-8"))
           image = "ghcr.io/oxibelt/oxibelt"
 
@@ -430,11 +334,11 @@ jobs:
 
           major = version.split(".", 1)[0]
           expected = {
-              "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64"),
-              "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64"),
-              "amd64v4": ("oxibelt-alpine-musl-amd64v4-image", "oxibelt-alpine-musl-amd64v4.tar", "amd64"),
-              "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64"),
-              "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64"),
+              "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64", "x86-64-v2"),
+              "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64", "x86-64-v3"),
+              "amd64v4": ("oxibelt-alpine-musl-amd64v4-image", "oxibelt-alpine-musl-amd64v4.tar", "amd64", "x86-64-v4"),
+              "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64", None),
+              "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64", None),
           }
           def expected_artifact_tags(arch):
               tags = [f"{image}:{version}-alpine-musl-{arch}"]
@@ -450,12 +354,245 @@ jobs:
               artifacts[arch] = artifact
           if set(artifacts) != set(expected):
               raise SystemExit(f"unexpected artifact matrix: {sorted(artifacts)}")
-          for arch, (artifact_name, image_tar, docker_arch) in expected.items():
+          if artifact_arch not in artifacts:
+              raise SystemExit(f"release plan is missing artifact {artifact_arch}")
+
+          artifact_name, image_tar_name, docker_arch, target_cpu = expected[artifact_arch]
+          artifact = artifacts[artifact_arch]
+          if artifact["artifactName"] != artifact_name or artifact["imageTar"] != image_tar_name:
+              raise SystemExit(f"unexpected artifact naming for {artifact_arch}")
+          if image_tar.name != image_tar_name:
+              raise SystemExit(f"unexpected image tar path for {artifact_arch}: {image_tar}")
+          if artifact["dockerArchitecture"] != docker_arch:
+              raise SystemExit(f"unexpected docker architecture for {artifact_arch}")
+          if target_cpu is None:
+              if "targetCpu" in artifact:
+                  raise SystemExit(f"{artifact_arch} should not declare targetCpu")
+          elif artifact.get("targetCpu") != target_cpu:
+              raise SystemExit(f"{artifact_arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
+          expected_tags = expected_artifact_tags(artifact_arch)
+          if artifact["ghcrTags"] != expected_tags:
+              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}: {artifact['ghcrTags']!r}")
+
+          if not image_tar.is_file():
+              raise SystemExit(f"missing Docker image tar: {image_tar}")
+          with tarfile.open(image_tar) as docker_tar:
+              manifest_member = docker_tar.extractfile("manifest.json")
+              if manifest_member is None:
+                  raise SystemExit(f"{image_tar} is missing manifest.json")
+              manifest = json.load(manifest_member)
+              if len(manifest) != 1:
+                  raise SystemExit(f"{image_tar} should contain exactly one image")
+              config_member = docker_tar.extractfile(manifest[0]["Config"])
+              if config_member is None:
+                  raise SystemExit(f"{image_tar} is missing image config")
+              config = json.load(config_member)
+
+          labels = config.get("config", {}).get("Labels", {})
+          for key, expected_value in {
+              "org.opencontainers.image.version": version,
+              "org.opencontainers.image.ref.name": version,
+              "org.opencontainers.image.revision": revision,
+              "org.opencontainers.image.source": source,
+              "org.opencontainers.image.url": source,
+          }.items():
+              if labels.get(key) != expected_value:
+                  raise SystemExit(f"{image_tar} label {key} was {labels.get(key)!r}, expected {expected_value!r}")
+          if config.get("architecture") != docker_arch:
+              raise SystemExit(f"{image_tar} architecture does not match release plan")
+          entrypoint = config.get("config", {}).get("Entrypoint")
+          if entrypoint != ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]:
+              raise SystemExit(f"{image_tar} has unexpected entrypoint: {entrypoint}")
+          exposed = config.get("config", {}).get("ExposedPorts", {})
+          if "8443/tcp" not in exposed or "8443/udp" not in exposed:
+              raise SystemExit(f"{image_tar} must expose 8443/tcp and 8443/udp")
+          PY
+
+      - name: Push arch-specific GHCR tags
+        if: github.repository == 'OxiBelt/OxiBelt'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+        run: |
+          set -euo pipefail
+
+          artifact_json="$(jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)' "${IMAGE_PLAN}")"
+          if [[ -z "${artifact_json}" ]]; then
+            echo "release plan is missing artifact ${OXIBELT_ARTIFACT_ARCH}" >&2
+            exit 1
+          fi
+
+          local_tag="$(jq -r '.localTag' <<<"${artifact_json}")"
+          docker load --input "${IMAGE_TAR}"
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+          jq -r '.ghcrTags[]' <<<"${artifact_json}" | while read -r ghcr_tag; do
+            docker tag "${local_tag}" "${ghcr_tag}"
+            docker push "${ghcr_tag}"
+          done
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-image-trivy-scan:
+    name: Docker image Trivy scan (${{ matrix.artifact_arch }})
+    runs-on: ubuntu-26.04
+    needs:
+      - docker-alpine-musl-image
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_arch: amd64v2
+          - artifact_arch: amd64
+          - artifact_arch: amd64v4
+          - artifact_arch: arm64
+          - artifact_arch: riscv64
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Resolve published image tag
+        id: trivy-image
+        env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+        run: |
+          set -euo pipefail
+
+          image_ref="$(jq -r --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch) | .ghcrTags[0]' "${IMAGE_PLAN}")"
+          if [[ -z "${image_ref}" || "${image_ref}" == "null" ]]; then
+            echo "release plan is missing first GHCR tag for ${OXIBELT_ARTIFACT_ARCH}" >&2
+            exit 1
+          fi
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.trivy-image.outputs.image_ref }}
+          format: json
+          output: trivy-results-${{ matrix.artifact_arch }}.json
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload Trivy vulnerability report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: trivy-release-oxibelt-${{ matrix.artifact_arch }}-json
+          path: trivy-results-${{ matrix.artifact_arch }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  ghcr-manifest-publish:
+    name: Publish GHCR multi-arch manifests
+    runs-on: ubuntu-26.04
+    needs:
+      - validate
+      - docker-alpine-musl-image
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Validate manifest release plan
+        env:
+          METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
+          OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}
+          OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+          OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          OXIBELT_SOURCE_URL: ${{ env.OXIBELT_SOURCE_URL }}
+        run: |
+          set -euo pipefail
+
+          python3 - "${METADATA_ROOT}/image-plan.json" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          plan_path = pathlib.Path(sys.argv[1])
+          version = sys.argv[2]
+          kind = sys.argv[3]
+          revision = sys.argv[4]
+          source = sys.argv[5]
+          plan = json.loads(plan_path.read_text(encoding="utf-8"))
+          image = "ghcr.io/oxibelt/oxibelt"
+
+          if kind not in ("stable", "beta", "build"):
+              raise SystemExit(f"invalid release kind: {kind}")
+          if plan["schemaVersion"] != 1:
+              raise SystemExit("unsupported image release plan schema")
+          if plan["image"] != image:
+              raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
+          if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
+              raise SystemExit("release plan identity does not match workflow outputs")
+          if plan["source"] != source:
+              raise SystemExit("release plan source URL does not match workflow source")
+
+          major = version.split(".", 1)[0]
+          expected = {
+              "amd64v2": ("oxibelt-alpine-musl-amd64v2-image", "oxibelt-alpine-musl-amd64v2.tar", "amd64", "x86-64-v2"),
+              "amd64": ("oxibelt-alpine-musl-amd64-image", "oxibelt-alpine-musl-amd64.tar", "amd64", "x86-64-v3"),
+              "amd64v4": ("oxibelt-alpine-musl-amd64v4-image", "oxibelt-alpine-musl-amd64v4.tar", "amd64", "x86-64-v4"),
+              "arm64": ("oxibelt-alpine-musl-arm64-image", "oxibelt-alpine-musl-arm64.tar", "arm64", None),
+              "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64", None),
+          }
+          def expected_artifact_tags(arch):
+              tags = [f"{image}:{version}-alpine-musl-{arch}"]
+              if kind == "stable":
+                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
+              return tags
+
+          artifacts = {}
+          for artifact in plan["artifacts"]:
+              arch = artifact["artifactArch"]
+              if arch in artifacts:
+                  raise SystemExit(f"duplicate release artifact for {arch}")
+              artifacts[arch] = artifact
+          if set(artifacts) != set(expected):
+              raise SystemExit(f"unexpected artifact matrix: {sorted(artifacts)}")
+          for arch, (artifact_name, image_tar, docker_arch, target_cpu) in expected.items():
               artifact = artifacts[arch]
               if artifact["artifactName"] != artifact_name or artifact["imageTar"] != image_tar:
                   raise SystemExit(f"unexpected artifact naming for {arch}")
               if artifact["dockerArchitecture"] != docker_arch:
                   raise SystemExit(f"unexpected docker architecture for {arch}")
+              if target_cpu is None:
+                  if "targetCpu" in artifact:
+                      raise SystemExit(f"{arch} should not declare targetCpu")
+              elif artifact.get("targetCpu") != target_cpu:
+                  raise SystemExit(f"{arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
               expected_tags = expected_artifact_tags(arch)
               if artifact["ghcrTags"] != expected_tags:
                   raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
@@ -481,70 +618,12 @@ jobs:
                   raise SystemExit(f"unexpected manifest architectures for {name}")
               if manifest["ghcrTags"] != ghcr_tags:
                   raise SystemExit(f"unexpected manifest GHCR tags for {name}: {manifest['ghcrTags']!r}")
-
-          expected_artifacts = {artifact["artifactName"] for artifact in artifacts.values()}
-          actual_artifacts = {path.name for path in image_root.iterdir() if path.is_dir()}
-          if actual_artifacts != expected_artifacts:
-              raise SystemExit(f"unexpected downloaded image artifacts: {sorted(actual_artifacts)}")
-
-          for artifact in artifacts.values():
-              image_tar = image_root / artifact["artifactName"] / artifact["imageTar"]
-              if not image_tar.is_file():
-                  raise SystemExit(f"missing Docker image tar: {image_tar}")
-              with tarfile.open(image_tar) as docker_tar:
-                  manifest_member = docker_tar.extractfile("manifest.json")
-                  if manifest_member is None:
-                      raise SystemExit(f"{image_tar} is missing manifest.json")
-                  manifest = json.load(manifest_member)
-                  if len(manifest) != 1:
-                      raise SystemExit(f"{image_tar} should contain exactly one image")
-                  config_member = docker_tar.extractfile(manifest[0]["Config"])
-                  if config_member is None:
-                      raise SystemExit(f"{image_tar} is missing image config")
-                  config = json.load(config_member)
-
-              labels = config.get("config", {}).get("Labels", {})
-              for key, expected in {
-                  "org.opencontainers.image.version": version,
-                  "org.opencontainers.image.ref.name": version,
-                  "org.opencontainers.image.revision": revision,
-                  "org.opencontainers.image.source": source,
-                  "org.opencontainers.image.url": source,
-              }.items():
-                  if labels.get(key) != expected:
-                      raise SystemExit(f"{image_tar} label {key} was {labels.get(key)!r}, expected {expected!r}")
-              if config.get("architecture") != artifact["dockerArchitecture"]:
-                  raise SystemExit(f"{image_tar} architecture does not match release plan")
-              entrypoint = config.get("config", {}).get("Entrypoint")
-              if entrypoint != ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]:
-                  raise SystemExit(f"{image_tar} has unexpected entrypoint: {entrypoint}")
-              exposed = config.get("config", {}).get("ExposedPorts", {})
-              if "8443/tcp" not in exposed or "8443/udp" not in exposed:
-                  raise SystemExit(f"{image_tar} must expose 8443/tcp and 8443/udp")
           PY
 
-      - name: Load, tag, and push arch images
+      - name: Login to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          IMAGE_ROOT: ${{ runner.temp }}/oxibelt-images
-        run: |
-          set -euo pipefail
-
-          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-
-          jq -r '.artifacts[] | @base64' "${IMAGE_PLAN}" | while read -r artifact_b64; do
-            artifact_json="$(printf '%s' "${artifact_b64}" | base64 --decode)"
-            artifact_name="$(jq -r '.artifactName' <<<"${artifact_json}")"
-            image_tar="$(jq -r '.imageTar' <<<"${artifact_json}")"
-            local_tag="$(jq -r '.localTag' <<<"${artifact_json}")"
-
-            docker load --input "${IMAGE_ROOT}/${artifact_name}/${image_tar}"
-            jq -r '.ghcrTags[]' <<<"${artifact_json}" | while read -r ghcr_tag; do
-              docker tag "${local_tag}" "${ghcr_tag}"
-              docker push "${ghcr_tag}"
-            done
-          done
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Publish multi-arch manifests
         env:
@@ -565,6 +644,14 @@ jobs:
                 | .ghcrTags[0]
               ' "${IMAGE_PLAN}"
             )
+
+            if [[ "${#source_tags[@]}" -eq 0 ]]; then
+              echo "manifest ${manifest_json} has no source tags" >&2
+              exit 1
+            fi
+            for source_tag in "${source_tags[@]}"; do
+              docker manifest inspect "${source_tag}" >/dev/null
+            done
 
             for manifest_tag in "${manifest_tags[@]}"; do
               docker manifest rm "${manifest_tag}" >/dev/null 2>&1 || true
