@@ -14,7 +14,7 @@ assert_same_static_response() {
 }
 
 run_case_checks() {
-  local plain https etag logged logs matching
+  local plain https etag logged logs
 
   plain="$(plain_client_request "static-equivalence.example.test" "/static/ok.txt" 200)"
   https="$(client_request "static-equivalence.example.test" "/static/ok.txt" 200)"
@@ -28,12 +28,27 @@ run_case_checks() {
   logged="$(plain_client_request_with_headers_on_port 8080 "static-equivalence.example.test" "/static/ok.txt?case=system-log" 200 "GET" "" "User-Agent: first-agent" "User-Agent: second-agent")"
   assert_response_jq "${logged}" '.body == "static ok\n"'
   logs="$(docker logs "${proxy_container}" 2>&1 || true)"
-  matching="$(grep -F '"class_uid":4002' <<<"${logs}" | grep -F '"scope":"system"' | grep -F '"path":"/static/ok.txt"' | grep -F '"status":200' | grep -F '"route":"static-equivalence"' || true)"
-  if [[ -z "${matching}" ]]; then
+  if ! jq -R -s -e '
+    [split("\n")[] | fromjson?]
+    | any(.[]; .class_uid == 4002
+      and .unmapped.oxibelt.scope == "system"
+      and .unmapped.oxibelt.path == "/static/ok.txt"
+      and .unmapped.oxibelt.status == 200
+      and .unmapped.oxibelt.route == "static-equivalence")
+  ' <<<"${logs}" >/dev/null; then
     echo "${logs}" >&2
     fail_with_diagnostics "expected static sendfile system access log JSON on stdout"
   fi
-  if ! grep -F '"user_agent":{"values":["first-agent","second-agent"],"is_truncated":false}' <<<"${matching}" >/dev/null; then
+  if ! jq -R -s -e '
+    [split("\n")[] | fromjson?]
+    | any(.[]; .class_uid == 4002
+      and .unmapped.oxibelt.scope == "system"
+      and .unmapped.oxibelt.path == "/static/ok.txt"
+      and .unmapped.oxibelt.status == 200
+      and .unmapped.oxibelt.route == "static-equivalence"
+      and .unmapped.oxibelt.user_agent.values == ["first-agent", "second-agent"]
+      and .unmapped.oxibelt.user_agent.is_truncated == false)
+  ' <<<"${logs}" >/dev/null; then
     echo "${logs}" >&2
     fail_with_diagnostics "expected static sendfile system access log to preserve duplicate User-Agent values"
   fi
