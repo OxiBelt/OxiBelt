@@ -38,7 +38,7 @@ on:
         required: true
         type: string
     secrets:
-      github_token:
+      ghcr_token:
         required: true
 
 env:
@@ -428,7 +428,7 @@ jobs:
 
       - name: Push arch-specific GHCR tags
         env:
-          GITHUB_TOKEN: ${{ secrets.github_token }}
+          GHCR_TOKEN: ${{ secrets.ghcr_token }}
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
         run: |
@@ -447,7 +447,7 @@ jobs:
           fi
 
           docker load --input "${IMAGE_TAR}"
-          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
           jq -r '.ghcrTags[]' <<<"${artifact_json}" | while read -r ghcr_tag; do
             docker tag "${local_tag}" "${ghcr_tag}"

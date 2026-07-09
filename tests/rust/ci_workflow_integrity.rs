@@ -1562,7 +1562,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "release_kind: ${{ needs.validate.outputs.kind }}",
     "release_revision: ${{ needs.validate.outputs.revision }}",
     "release_version: ${{ needs.validate.outputs.version }}",
-    "github_token: ${{ secrets.GITHUB_TOKEN }}",
+    "ghcr_token: ${{ secrets.GITHUB_TOKEN }}",
   ] {
     assert!(
       arch_caller_job_text.contains(expected),
@@ -1608,13 +1608,17 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "release_revision:",
     "release_version:",
     "source_url:",
-    "github_token:",
+    "ghcr_token:",
   ] {
     assert!(
       arch_workflow.contains(expected),
       "reusable workflow should expose input or secret {expected}"
     );
   }
+  assert!(
+    !arch_workflow.contains("github_token:"),
+    "reusable workflow should not define the reserved workflow_call secret name github_token"
+  );
 
   for expected in [
     "actions: read",
@@ -1703,8 +1707,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "if plan[\"tag\"] != version or plan[\"version\"] != version or plan[\"kind\"] != kind or plan[\"revision\"] != revision:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"ghcrTags\"] != expected_tags:",
-    "GITHUB_TOKEN: ${{ secrets.github_token }}",
-    "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
+    "GHCR_TOKEN: ${{ secrets.ghcr_token }}",
+    "printf '%s' \"${GHCR_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
     r#"jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)'"#,
     "jq -r '.ghcrTags[]' <<<\"${artifact_json}\"",
     "docker push \"${ghcr_tag}\"",

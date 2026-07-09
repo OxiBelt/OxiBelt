@@ -263,7 +263,7 @@ jobs:
       release_version: ${{ needs.validate.outputs.version }}
       source_url: https://github.com/OxiBelt/OxiBelt
     secrets:
-      github_token: ${{ secrets.GITHUB_TOKEN }}
+      ghcr_token: ${{ secrets.GITHUB_TOKEN }}
 
   ghcr-manifest-publish:
     name: Publish GHCR multi-arch manifests
