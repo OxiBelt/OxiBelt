@@ -14,7 +14,7 @@ schema = "ocsf"
 
 [access_log.otlp]
 enabled = true
-endpoint = "http://mock-otel:18092/v1/logs"
+endpoint = "http://127.0.0.1:18092/v1/logs"
 schema = "ecs"
 queue_capacity = 16
 batch_size = 1

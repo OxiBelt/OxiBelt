@@ -5,11 +5,21 @@ run_case_checks() {
   docker run -d \
     --name "${otel_container}" \
     --label "${test_label}" \
-    --network "${network_name}" \
-    --network-alias mock-otel \
+    --network "container:${proxy_container}" \
     -e LISTEN_PORT=18092 \
     -e CAPTURE_REQUESTS=1 \
     "${mock_image}" >/dev/null
+
+  for _attempt in $(seq 1 30); do
+    if docker exec "${otel_container}" python -c 'import socket; sock = socket.create_connection(("127.0.0.1", 18092), timeout=1); sock.close()' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if ! docker exec "${otel_container}" python -c 'import socket; sock = socket.create_connection(("127.0.0.1", 18092), timeout=1); sock.close()' >/dev/null 2>&1; then
+    docker logs "${otel_container}" >&2 || true
+    fail_with_diagnostics "OTLP collector did not become ready on proxy loopback"
+  fi
 
   response="$(client_request_with_headers "example.test" "/app/system-log?case=otlp-ecs" 200 "GET" "" "User-Agent: first-agent" "User-Agent: second-agent")"
   assert_body_jq "${response}" '.path == "/origin/app/system-log?case=otlp-ecs"'
