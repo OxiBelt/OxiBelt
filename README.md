@@ -147,12 +147,12 @@ docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
 The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
-CI scans each built OxiBelt release image artifact with Trivy, appends a Markdown vulnerability table to the job summary, and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs.
+CI scans each built OxiBelt image artifact with Trivy and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs. Release CI builds each ISA-specific image in an unprivileged reusable workflow row, scans the downloaded local image tar before publish, and then pushes that row's GHCR tags from an isolated package-write publish job.
 Release CI publishes validated images to GitHub Container Registry at
 `ghcr.io/oxibelt/oxibelt`. Published tags use strict OxiBelt release tags such
 as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags
 are rejected. Stable releases also update major Alpine musl aliases such as
-`5-alpine-musl-amd64`, plus the multi-arch `latest` and `alpine-musl` aliases.
+`5-alpine-musl-amd64`, plus the multi-arch `latest` and `alpine-musl` aliases after all required arch-specific tags have been published.
 
 ```sh
 docker pull ghcr.io/oxibelt/oxibelt:15.2.0-alpine-musl
