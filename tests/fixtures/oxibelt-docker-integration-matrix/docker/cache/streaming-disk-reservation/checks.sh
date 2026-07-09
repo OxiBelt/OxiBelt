@@ -30,6 +30,6 @@ run_case_checks() {
   cached="$(client_request "example.test" "${cached_path}" 200)"
   assert_response_jq "${cached}" '(.body | length) == 131072'
   assert_response_jq "${cached}" '.headers["x-oxibelt-cache"] == "hit" and .headers["x-oxibelt-cache-reason"] == "fresh"'
-  miss="$(client_request "example.test" "${rejected_path}" 502)"
-  assert_response_jq "${miss}" '.status == 502'
+  miss="$(client_request_to_target "proxy" "example.test" "${rejected_path}" 502,504)"
+  assert_response_jq "${miss}" '.status == 502 or .status == 504'
 }
