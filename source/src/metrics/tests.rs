@@ -46,6 +46,30 @@ fn prometheus_output_includes_tls_session_storage_diagnostics() {
 }
 
 #[test]
+fn prometheus_output_includes_admin_audit_metrics() {
+  let metrics = Metrics::new();
+  metrics.record_admin_audit_event("applied", "postgres");
+  metrics.record_admin_audit_event("rejected", "none");
+  metrics.record_admin_audit_store_enqueue_failure("full");
+  metrics.record_admin_audit_export_event("access_log");
+  metrics.record_admin_audit_dropped("store_queue_full");
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(
+    body.contains("oxibelt_admin_audit_events_total{outcome=\"applied\",store=\"postgres\"} 1")
+  );
+  assert!(body.contains("oxibelt_admin_audit_events_total{outcome=\"rejected\",store=\"none\"} 1"));
+  assert!(body.contains("oxibelt_admin_audit_store_enqueue_failures_total{reason=\"full\"} 1"));
+  assert!(body.contains("oxibelt_admin_audit_export_events_total{sink=\"access_log\"} 1"));
+  assert!(body.contains("oxibelt_admin_audit_dropped_total{reason=\"store_queue_full\"} 1"));
+}
+
+#[test]
 fn prometheus_output_includes_plain_proxy_fast_path_decisions() {
   let metrics = Metrics::new();
   metrics.record_plain_proxy_fast_path_decision("h1", "hit", "eligible");

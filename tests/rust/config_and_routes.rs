@@ -6,7 +6,8 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-  AccessLogSchema, AccessTokenRateLimitSource, AdminTransportMode, BufferingMode, CacheStore,
+  AccessLogSchema, AccessTokenRateLimitSource, AdminAuditExportSink, AdminAuditMode,
+  AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode, BufferingMode, CacheStore,
   ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
   CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
   ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
@@ -4872,7 +4873,23 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert!(config.admin.audit.enabled);
+  assert_eq!(config.admin.audit.mode, AdminAuditMode::Enforcing);
   assert_eq!(config.admin.audit.backend.as_deref(), Some("postgres-main"));
+  assert!(config.admin.audit.store.enabled);
+  assert_eq!(
+    config.admin.audit.store.backend.as_deref(),
+    Some("postgres-main")
+  );
+  assert_eq!(config.admin.audit.store.kind, AdminAuditStoreKind::Postgres);
+  assert!(config.admin.audit.export.enabled);
+  assert_eq!(
+    config.admin.audit.export.sinks,
+    vec![AdminAuditExportSink::AccessLog]
+  );
+  assert_eq!(
+    config.admin.audit.export.required_sinks,
+    vec![AdminAuditRequiredSink::Store]
+  );
 
   let invalid = raw.replace("kind = \"postgres\"", "kind = \"redis\"");
   let config: Config = toml::from_str(&invalid).expect("invalid config should parse");
@@ -4882,8 +4899,273 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
   assert!(
     error
       .to_string()
-      .contains("admin.audit.backend postgres-main must use kind = \"postgres\""),
+      .contains("admin.audit.store.backend postgres-main must use kind = \"postgres\""),
     "{error}"
+  );
+}
+
+#[test]
+fn admin_audit_accepts_explicit_postgres_store_config() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-explicit-store");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-explicit-store");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "enforcing"
+queue_capacity = 2048
+
+[admin.audit.store]
+enabled = true
+backend = "postgres-main"
+kind = "postgres"
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+required_sinks = ["store"]
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  assert_eq!(config.admin.audit.mode, AdminAuditMode::Enforcing);
+  assert_eq!(config.admin.audit.backend, None);
+  assert_eq!(config.admin.audit.queue_capacity, 2048);
+  assert!(config.admin.audit.store.enabled);
+  assert_eq!(
+    config.admin.audit.store.backend.as_deref(),
+    Some("postgres-main")
+  );
+  assert_eq!(
+    config.admin.audit.export.required_sinks,
+    vec![AdminAuditRequiredSink::Store]
+  );
+}
+
+#[test]
+fn admin_audit_allows_best_effort_export_without_store() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-export-only");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-export-only");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+
+[access_log.admin]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ocsf"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  assert_eq!(config.admin.audit.mode, AdminAuditMode::BestEffort);
+  assert!(!config.admin.audit.store.enabled);
+  assert_eq!(
+    config.admin.audit.export.sinks,
+    vec![AdminAuditExportSink::AccessLog]
+  );
+  assert!(config.access_log.admin.enabled);
+  assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ocsf);
+}
+
+#[test]
+fn admin_audit_rejects_enforcing_mode_without_store() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-enforcing-no-store");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-enforcing-no-store");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "enforcing"
+
+[admin.audit.store]
+enabled = false
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("enforcing admin audit without a store should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("admin.audit.mode = \"enforcing\" requires admin.audit.store.enabled = true"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn admin_audit_rejects_required_store_without_store() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-required-store");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-required-store");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "enforcing"
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.export]
+required_sinks = ["store"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("required store without store should fail");
+  assert!(
+    error.to_string().contains(
+      "admin.audit.export.required_sinks = [\"store\"] requires admin.audit.store.enabled = true"
+    ),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn admin_audit_rejects_unknown_export_sink() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-unknown-export");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-unknown-export");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.export]
+sinks = ["syslog"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("unknown export sink should fail parse");
+  assert!(
+    error.to_string().contains("unknown variant `syslog`"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn admin_audit_rejects_unsupported_required_sink() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-required-otlp");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-required-otlp");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "enforcing"
+
+[admin.audit.export]
+required_sinks = ["otlp"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error =
+    toml::from_str::<Config>(&raw).expect_err("unsupported required sink should fail parse");
+  assert!(
+    error.to_string().contains("unknown variant `otlp`"),
+    "unexpected error: {error}"
   );
 }
 

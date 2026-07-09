@@ -11,6 +11,7 @@ use crate::cache::CacheStats;
 use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 
+mod admin_audit;
 mod auth;
 mod crlite;
 mod detail;
@@ -55,6 +56,7 @@ pub struct Metrics {
   request_mirror_success_total: AtomicU64,
   request_mirror_errors_total: AtomicU64,
   request_mirror_skips_total: AtomicU64,
+  admin_audit: admin_audit::AdminAuditMetrics,
   mitigation_queued_total: AtomicU64,
   mitigation_dropped_total: AtomicU64,
   mitigation_write_errors_total: AtomicU64,
@@ -575,6 +577,7 @@ impl Metrics {
       self.dynamic_policy_active_policies.load(Ordering::Relaxed),
     );
     auth::append_auth_and_mirror_metrics(&mut output, self);
+    self.append_admin_audit_prometheus(&mut output);
     append_metric(
       &mut output,
       "oxibelt_mitigation_queued_total",

@@ -78,6 +78,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("ops", "admin-config-file-sync"),
   ("ops", "admin-operation-webtransport"),
   ("ops", "kernel-extension-installer"),
+  ("ops", "admin-audit-export-only-stdout"),
   ("ops", "system-access-log-stdout"),
   ("ops", "system-access-log-stdout-ecs"),
   ("ops", "system-access-log-otlp-ecs"),

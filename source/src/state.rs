@@ -1,5 +1,4 @@
-//! Immutable runtime snapshots and shared client pools used by request handlers.
-//! Reloads swap snapshots so in-flight work can finish against a consistent view.
+//! Immutable runtime snapshots and shared client pools; reloads swap snapshots so in-flight work can finish against a consistent view.
 use crate::access_log::{AccessLogRuntime, AccessLogSinks, AccessLogSource, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::{ExternalCacheRuntime, ResponseCache};
@@ -317,6 +316,7 @@ impl AppSnapshot {
     let admin_audit = AdminAuditRuntime::new(
       &config,
       AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Admin),
+      metrics.clone(),
     )
     .await
     .context("failed to build admin audit runtime")?;

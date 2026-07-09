@@ -14,6 +14,7 @@ use url::Url;
 use crate::waf::WafConfig;
 
 mod access_log;
+mod admin_audit;
 mod admin_legacy;
 mod admin_runtime;
 mod allowed_keys;
@@ -56,6 +57,7 @@ mod turn_queue;
 mod upstream_pool;
 mod workers;
 pub use access_log::*;
+pub use admin_audit::*;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use cache_external::{
   ExternalCacheHandlerConfig, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
@@ -1884,7 +1886,7 @@ impl Config {
 
   fn validate_admin(&self) -> anyhow::Result<()> {
     self.validate_legacy_admin_authorization()?;
-    validate_optional_non_empty("admin.audit.backend", self.admin.audit.backend.as_deref())?;
+    self.validate_admin_audit_config_fields()?;
     if self.admin.audit.queue_capacity == 0 {
       bail!("admin.audit.queue_capacity must be greater than 0");
     }
@@ -1898,25 +1900,7 @@ impl Config {
       return Ok(());
     }
     self.validate_admin_privileged_ports()?;
-    if self.admin.audit.enabled {
-      let Some(backend_name) = self.admin.audit.backend.as_deref() else {
-        bail!("admin.audit.enabled requires admin.audit.backend");
-      };
-      if !self.shared_state.enabled {
-        bail!("admin.audit.backend requires shared_state.enabled = true");
-      }
-      let Some(backend) = self
-        .shared_state
-        .backends
-        .iter()
-        .find(|backend| backend.name == backend_name)
-      else {
-        bail!("admin.audit.backend references unknown shared_state backend {backend_name}");
-      };
-      if backend.kind != SharedStateBackendKind::Postgres {
-        bail!("admin.audit.backend {backend_name} must use kind = \"postgres\"");
-      }
-    }
+    self.validate_admin_audit_runtime()?;
     if self.admin.operations.max_running == 0 {
       bail!("admin.operations.max_running must be greater than 0");
     }
@@ -3054,7 +3038,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "token_store",
       "transport",
     ][..],
-    "admin.audit" => &["backend", "enabled", "queue_capacity"][..],
+    "admin.audit" => &[
+      "backend",
+      "enabled",
+      "export",
+      "mode",
+      "queue_capacity",
+      "store",
+    ][..],
+    "admin.audit.store" => &["backend", "enabled", "kind"][..],
+    "admin.audit.export" => &["enabled", "required_sinks", "sinks"][..],
     "admin.operations" => &[
       "enabled",
       "event_buffer",
@@ -4768,26 +4761,6 @@ impl Default for AdminConfig {
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,
       legacy_token_store: None,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct AdminAuditConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub backend: Option<String>,
-  #[serde(default = "default_admin_audit_queue_capacity")]
-  pub queue_capacity: usize,
-}
-
-impl Default for AdminAuditConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      backend: None,
-      queue_capacity: default_admin_audit_queue_capacity(),
     }
   }
 }

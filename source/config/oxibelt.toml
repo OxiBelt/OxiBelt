@@ -614,8 +614,19 @@ plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
 
 [admin.audit]
 enabled = false
-# backend = "cluster" # PostgreSQL shared_state backend for oxibelt_admin_audit
+mode = "enforcing" # enforcing | best_effort
+# backend = "cluster" # legacy alias for admin.audit.store.backend
 queue_capacity = 1024
+
+[admin.audit.store]
+enabled = false
+backend = "cluster" # PostgreSQL shared_state backend for oxibelt_admin_audit
+kind = "postgres"
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+required_sinks = [] # use ["store"] with mode = "enforcing" for fail-closed durable audit
 
 [admin.operations]
 enabled = true

@@ -1465,7 +1465,78 @@ matching sessions with `503`, then closes remaining matching sessions after
 the grace period. Cancelling the drain operation removes the rule but cannot
 restore sessions that have already closed.
 
-`[admin.audit]` is an optional PostgreSQL-backed unified Admin audit log. It requires `enabled = true`, `backend = "<shared_state-postgres-backend>"`, and `[shared_state].enabled = true`; the backend must be a PostgreSQL `[[shared_state.backends]]` entry. OxiBelt creates `oxibelt_admin_audit` and writes every Admin request, including reads and rejected requests, through a bounded asynchronous queue. If the queue is full or the database writer cannot keep up, OxiBelt rejects new Admin requests with `503` before running the handler; writer failures are retried with bounded backoff. OxiBelt also emits the structured `oxibelt.admin.audit` tracing event. `GET /admin/v1/audit` requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin` and supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`, `request_id`, `path_prefix`, and `before_id` filters. Request payloads are not stored raw; the audit summary records body byte count, top-level JSON keys, and a small allowlist of safe scalar fields.
+`[admin.audit]` emits structured Admin audit events and separates standard export sinks from the optional durable query store. `[admin.audit.export]` can route events to the Access Log Admin source, which then projects OCSF or ECS JSON to stdout or OTLP according to `[access_log.stdout]`, `[access_log.otlp]`, and `[access_log.admin]`. These Access Log exports are best-effort observability/SIEM integrations, not query stores and not audit-of-record delivery acknowledgments. `[admin.audit.store]` is the durable query store for `GET /admin/v1/audit`; PostgreSQL is currently the only store kind. When the store is enabled, `backend` must name a PostgreSQL `[[shared_state.backends]]` entry and `[shared_state].enabled = true`. OxiBelt creates `oxibelt_admin_audit` and writes records through a bounded asynchronous queue. In `mode = "enforcing"` with the store enabled or required, OxiBelt reserves a durable audit queue slot before protected Admin handlers run and rejects Admin requests with `503` if the queue is full or the writer is closed. In `mode = "best_effort"`, store/export delivery failures are warned and counted but do not by themselves reject Admin requests. `GET /admin/v1/audit` requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`; without `[admin.audit.store]` it returns `409` because stdout and OTLP exports are not queryable history. The endpoint supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`, `request_id`, `path_prefix`, and `before_id` filters. Request payloads are not stored raw; the audit summary records body byte count, top-level JSON keys, and a small allowlist of safe scalar fields.
+
+Export-only Admin audit for container-native logs:
+
+```toml
+[admin]
+enabled = true
+
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+
+[access_log.admin]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ocsf"
+```
+
+Fail-closed durable Admin audit with external exports:
+
+```toml
+[admin]
+enabled = true
+
+[admin.audit]
+enabled = true
+mode = "enforcing"
+queue_capacity = 4096
+
+[admin.audit.store]
+enabled = true
+backend = "cluster"
+kind = "postgres"
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+required_sinks = ["store"]
+
+[access_log.admin]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ocsf"
+
+[access_log.otlp]
+enabled = true
+endpoint = "http://otel-collector:4318/v1/logs"
+schema = "ocsf"
+```
+
+The legacy compatibility shape remains accepted:
+
+```toml
+[admin.audit]
+enabled = true
+backend = "cluster"
+queue_capacity = 4096
+```
+
+It is treated as enforcing PostgreSQL durable audit with `[admin.audit.store]`
+enabled for `cluster` and `required_sinks = ["store"]`.
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
@@ -1950,7 +2021,7 @@ export_timeout_ms = 3000
 service_name = "oxibelt"
 ```
 
-`[access_log.system]` emits request-wide records built from `[logging.access_log].fields`. `[access_log.waf]` emits OxiRule `emit_access_log` records. `[access_log.admin]` emits Admin API records derived from the TLS/IPM-aware audit gate, including safe actor, principal, subject, group, source IP, method, path, operation, status, outcome, and request-summary metadata.
+`[access_log.system]` emits request-wide records built from `[logging.access_log].fields`. `[access_log.waf]` emits OxiRule `emit_access_log` records. `[access_log.admin]` emits Admin API records derived from the TLS/IPM-aware audit gate, including safe actor, principal, subject, group, source IP, method, path, operation, status, outcome, and request-summary metadata. For `[admin.audit.export]`, both `admin.audit.export.sinks = ["access_log"]` and `[access_log.admin].enabled = true` are required for visible Admin audit export records.
 
 `[access_log.stdout].schema = "ocsf"` writes Open Cybersecurity Schema Framework JSON and preserves the original OxiBelt record under `unmapped.oxibelt`. System and WAF records use OCSF HTTP Activity; Admin API records use OCSF API Activity so fine-grained token identity, authorization checks, TLS scheme state, and redacted request summaries stay in the access-log stream.
 

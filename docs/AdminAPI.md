@@ -42,8 +42,10 @@ full legacy array. Paginated responses preserve the existing array field and add
 `pagination` with `limit`, `has_more`, optional opaque `next_cursor`, `sort`,
 and `order`; cursors are bound to the endpoint and normalized query.
 
-When `[admin.audit]` is enabled, `/admin/v1/audit` returns unified Admin
-request audit records as `{ "audit": [...] }`; otherwise it returns `409`.
+`/admin/v1/audit` returns unified Admin request audit records from the durable
+Admin audit store as `{ "audit": [...] }`. The endpoint requires
+`[admin.audit.store]` with a PostgreSQL backend; export-only stdout or OTLP
+Admin audit configurations return `409` because exports are not query stores.
 Records include actor, peer, method, path, authorization action/resource,
 outcome, status, and a redacted request summary. Request bodies are summarized
 with byte count, top-level JSON keys, and selected safe scalar fields, not

@@ -60,6 +60,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "ops",
+      "admin-audit-export-only-stdout",
+      "Admin audit emits OCSF stdout records without a PostgreSQL store",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "ops",
       "system-access-log-stdout",
       "system-wide access log emits structured stdout records without WAF rules",
       ExpectStart::Success,

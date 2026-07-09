@@ -23,7 +23,7 @@
     },
     {
       "name": "audit",
-      "description": "Unified Admin request audit log."
+      "description": "Unified Admin request audit records from the configured durable audit store."
     },
     {
       "name": "operations",
@@ -178,7 +178,7 @@
           "audit"
         ],
         "operationId": "listAdminAudit",
-        "summary": "List unified Admin request audit records.",
+        "summary": "List unified Admin request audit records from the durable store.",
         "parameters": [
           {
             "name": "limit",

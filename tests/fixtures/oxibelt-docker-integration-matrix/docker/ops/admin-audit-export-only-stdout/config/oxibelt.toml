@@ -1,0 +1,101 @@
+[logging]
+level = "info"
+
+[access_log.admin]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ocsf"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[admin]
+enabled = true
+bind = "0.0.0.0:9092"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+transport = "plaintext_allowlist"
+plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.export]
+enabled = true
+sinks = ["access_log"]
+
+[ipm]
+enabled = true
+
+[[ipm.principals]]
+id = "admin"
+subject = "admin@example.test"
+
+[[ipm.credentials]]
+name = "admin"
+principal = "admin"
+bearer_token_env = "OXIBELT_ADMIN_TOKEN"
+
+[[ipm.policies]]
+name = "admin-full-access"
+
+[[ipm.policies.statements]]
+effect = "allow"
+actions = ["*"]
+resources = ["*"]
+
+[[ipm.bindings]]
+principal = "admin"
+policy = "admin-full-access"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "http-upstream"

@@ -15,22 +15,31 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::access_log::AccessLogSinks;
-use crate::config::Config;
+use crate::config::{AdminAuditExportSink, AdminAuditMode, AdminAuditRequiredSink, Config};
+use crate::metrics::Metrics;
 
 mod request;
 mod store;
 
 #[derive(Clone)]
 pub struct AdminAuditRuntime {
-  inner: Option<AdminAuditSink>,
-  access_logs: Option<AccessLogSinks>,
+  store: Option<PostgresAdminAuditStore>,
+  export: AdminAuditExportRuntime,
+  mode: AdminAuditMode,
+  store_required: bool,
+  metrics: Arc<Metrics>,
 }
 
 #[derive(Clone)]
-struct AdminAuditSink {
+struct PostgresAdminAuditStore {
   namespace: String,
   pool: Pool<Postgres>,
   sender: mpsc::Sender<AdminAuditEvent>,
+}
+
+#[derive(Clone, Default)]
+struct AdminAuditExportRuntime {
+  access_logs: Option<AccessLogSinks>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,121 +113,262 @@ pub struct AdminAuditHandle {
 
 pub(crate) struct AdminAuditReservation {
   permit: Option<mpsc::OwnedPermit<AdminAuditEvent>>,
-  access_logs: Option<AccessLogSinks>,
+  export: AdminAuditExportRuntime,
+  metrics: Arc<Metrics>,
 }
 
 impl AdminAuditRuntime {
   pub fn disabled() -> Self {
     Self {
-      inner: None,
-      access_logs: None,
+      store: None,
+      export: AdminAuditExportRuntime::default(),
+      mode: AdminAuditMode::BestEffort,
+      store_required: false,
+      metrics: Arc::new(Metrics::default()),
     }
   }
 
   #[cfg(test)]
   pub(crate) fn test_with_sender(sender: mpsc::Sender<AdminAuditEvent>) -> Self {
+    Self::test_with_sender_and_mode(sender, AdminAuditMode::Enforcing)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn test_with_sender_and_mode(
+    sender: mpsc::Sender<AdminAuditEvent>,
+    mode: AdminAuditMode,
+  ) -> Self {
     let options =
       sqlx::postgres::PgConnectOptions::from_str("postgres://oxibelt@localhost/oxibelt")
         .expect("lazy PostgreSQL options should parse");
     let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
     Self {
-      inner: Some(AdminAuditSink {
+      store: Some(PostgresAdminAuditStore {
         namespace: "oxibelt".to_string(),
         pool,
         sender,
       }),
-      access_logs: None,
+      export: AdminAuditExportRuntime::default(),
+      mode,
+      store_required: mode == AdminAuditMode::Enforcing,
+      metrics: Arc::new(Metrics::default()),
     }
   }
 
-  pub async fn new(config: &Config, access_logs: AccessLogSinks) -> anyhow::Result<Self> {
-    if !config.admin.enabled || !config.admin.audit.enabled {
+  #[cfg(test)]
+  pub(crate) fn test_export_only() -> Self {
+    Self {
+      store: None,
+      export: AdminAuditExportRuntime::default(),
+      mode: AdminAuditMode::BestEffort,
+      store_required: false,
+      metrics: Arc::new(Metrics::default()),
+    }
+  }
+
+  pub async fn new(
+    config: &Config,
+    access_logs: AccessLogSinks,
+    metrics: Arc<Metrics>,
+  ) -> anyhow::Result<Self> {
+    if !config.admin.enabled {
       return Ok(Self {
-        inner: None,
-        access_logs: Some(access_logs),
+        store: None,
+        export: AdminAuditExportRuntime::default(),
+        mode: AdminAuditMode::BestEffort,
+        store_required: false,
+        metrics,
       });
     }
-    let backend_name = config
-      .admin
-      .audit
-      .backend
-      .as_deref()
-      .context("admin.audit.enabled requires admin.audit.backend")?;
-    let backend = config
-      .shared_state
-      .backends
-      .iter()
-      .find(|backend| backend.name == backend_name)
-      .ok_or_else(|| anyhow::anyhow!("admin.audit.backend {backend_name} was not found"))?;
-    let pool = store::connect_pool(backend).await.with_context(|| {
-      format!("failed to connect admin audit PostgreSQL backend {backend_name}")
-    })?;
-    store::init_postgres(&pool)
-      .await
-      .context("failed to initialize admin audit PostgreSQL tables")?;
-    let (sender, receiver) = mpsc::channel(config.admin.audit.queue_capacity);
-    let namespace = config.shared_state.namespace.clone();
-    tokio::spawn(store::run_database_writer(
-      pool.clone(),
-      namespace.clone(),
-      receiver,
-    ));
-    info!(backend = backend_name, "admin audit sink initialized");
-    Ok(Self {
-      inner: Some(AdminAuditSink {
+    if !config.admin.audit.enabled {
+      return Ok(Self {
+        store: None,
+        export: AdminAuditExportRuntime {
+          access_logs: Some(access_logs),
+        },
+        mode: AdminAuditMode::BestEffort,
+        store_required: false,
+        metrics,
+      });
+    }
+
+    let export = AdminAuditExportRuntime {
+      access_logs: if config.admin.audit.export.enabled
+        && config
+          .admin
+          .audit
+          .export
+          .sinks
+          .contains(&AdminAuditExportSink::AccessLog)
+      {
+        Some(access_logs)
+      } else {
+        None
+      },
+    };
+    let mode = config.admin.audit.mode;
+    let store_required = mode == AdminAuditMode::Enforcing
+      && (config.admin.audit.store.enabled
+        || config
+          .admin
+          .audit
+          .export
+          .required_sinks
+          .contains(&AdminAuditRequiredSink::Store));
+    let store = if config.admin.audit.store.enabled {
+      let backend_name = config
+        .admin
+        .audit
+        .store
+        .backend
+        .as_deref()
+        .context("admin.audit.store.enabled requires admin.audit.store.backend")?;
+      let backend = config
+        .shared_state
+        .backends
+        .iter()
+        .find(|backend| backend.name == backend_name)
+        .ok_or_else(|| anyhow::anyhow!("admin.audit.store.backend {backend_name} was not found"))?;
+      let pool = store::connect_pool(backend).await.with_context(|| {
+        format!("failed to connect admin audit PostgreSQL backend {backend_name}")
+      })?;
+      store::init_postgres(&pool)
+        .await
+        .context("failed to initialize admin audit PostgreSQL tables")?;
+      let (sender, receiver) = mpsc::channel(config.admin.audit.queue_capacity);
+      let namespace = config.shared_state.namespace.clone();
+      tokio::spawn(store::run_database_writer(
+        pool.clone(),
+        namespace.clone(),
+        receiver,
+      ));
+      info!(
+        backend = backend_name,
+        mode = ?mode,
+        export_access_log = export.access_logs.is_some(),
+        "admin audit PostgreSQL store initialized"
+      );
+      Some(PostgresAdminAuditStore {
         namespace,
         pool,
         sender,
-      }),
-      access_logs: Some(access_logs),
+      })
+    } else {
+      info!(
+        mode = ?mode,
+        export_access_log = export.access_logs.is_some(),
+        "admin audit initialized without durable store"
+      );
+      None
+    };
+    Ok(Self {
+      store,
+      export,
+      mode,
+      store_required,
+      metrics,
     })
   }
 
   pub(crate) fn reserve(&self) -> anyhow::Result<AdminAuditReservation> {
-    let Some(inner) = &self.inner else {
+    let Some(store) = &self.store else {
       return Ok(AdminAuditReservation {
         permit: None,
-        access_logs: self.access_logs.clone(),
+        export: self.export.clone(),
+        metrics: self.metrics.clone(),
       });
     };
-    match inner.sender.clone().try_reserve_owned() {
+    match store.sender.clone().try_reserve_owned() {
       Ok(permit) => Ok(AdminAuditReservation {
         permit: Some(permit),
-        access_logs: self.access_logs.clone(),
+        export: self.export.clone(),
+        metrics: self.metrics.clone(),
       }),
       Err(mpsc::error::TrySendError::Full(_)) => {
-        bail!("admin audit queue is full");
+        self
+          .metrics
+          .record_admin_audit_store_enqueue_failure("full");
+        if self.store_required {
+          bail!("admin audit queue is full");
+        }
+        self.metrics.record_admin_audit_dropped("store_queue_full");
+        warn!(
+          mode = ?self.mode,
+          "admin audit store queue is full; continuing without durable audit row"
+        );
+        Ok(AdminAuditReservation {
+          permit: None,
+          export: self.export.clone(),
+          metrics: self.metrics.clone(),
+        })
       }
       Err(mpsc::error::TrySendError::Closed(_)) => {
-        bail!("admin audit writer is closed");
+        self
+          .metrics
+          .record_admin_audit_store_enqueue_failure("closed");
+        if self.store_required {
+          bail!("admin audit writer is closed");
+        }
+        self
+          .metrics
+          .record_admin_audit_dropped("store_writer_closed");
+        warn!(
+          mode = ?self.mode,
+          "admin audit store writer is closed; continuing without durable audit row"
+        );
+        Ok(AdminAuditReservation {
+          permit: None,
+          export: self.export.clone(),
+          metrics: self.metrics.clone(),
+        })
       }
     }
   }
 
   pub(crate) fn emit_unstored(&self, event: AdminAuditEvent, error: &anyhow::Error) {
     emit_tracing(&event);
-    if let Some(access_logs) = &self.access_logs {
-      access_logs.emit_admin_event(&event);
+    self.export.emit_admin_event(&event, self.metrics.as_ref());
+    self
+      .metrics
+      .record_admin_audit_event(&event.outcome, "none");
+    if self.store.is_some() {
+      warn!(error = %error, "admin audit unavailable; rejected admin request without durable audit row");
+    } else {
+      warn!(error = %error, "admin audit unavailable; rejected admin request");
     }
-    warn!(error = %error, "admin audit unavailable; rejected admin request without durable audit row");
   }
 
   pub async fn query(&self, query: AdminAuditQuery) -> anyhow::Result<Vec<AdminAuditRecord>> {
-    let Some(inner) = &self.inner else {
-      bail!("admin audit store is not configured");
+    let Some(store) = &self.store else {
+      bail!(
+        "admin audit store is not configured; enable [admin.audit.store] with a PostgreSQL backend to query audit history"
+      );
     };
-    store::select_records(&inner.pool, &inner.namespace, query).await
+    store::select_records(&store.pool, &store.namespace, query).await
   }
 }
 
 impl AdminAuditReservation {
   pub(crate) fn commit(self, event: AdminAuditEvent) {
     emit_tracing(&event);
-    if let Some(access_logs) = &self.access_logs {
-      access_logs.emit_admin_event(&event);
-    }
+    self.export.emit_admin_event(&event, self.metrics.as_ref());
+    let store = if self.permit.is_some() {
+      "postgres"
+    } else {
+      "none"
+    };
+    self.metrics.record_admin_audit_event(&event.outcome, store);
     if let Some(permit) = self.permit {
       drop(permit.send(event));
+    }
+  }
+}
+
+impl AdminAuditExportRuntime {
+  fn emit_admin_event(&self, event: &AdminAuditEvent, metrics: &Metrics) {
+    if let Some(access_logs) = &self.access_logs {
+      access_logs.emit_admin_event(event);
+      metrics.record_admin_audit_export_event("access_log");
     }
   }
 }
@@ -462,6 +612,23 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn audit_reservation_is_best_effort_when_queue_capacity_is_full() {
+    let (sender, _receiver) = mpsc::channel(1);
+    let held_permit = sender
+      .clone()
+      .try_reserve_owned()
+      .expect("held permit should consume the only slot");
+    let runtime = AdminAuditRuntime::test_with_sender_and_mode(sender, AdminAuditMode::BestEffort);
+
+    let reservation = runtime
+      .reserve()
+      .expect("best-effort reservation should not reject when the queue is full");
+
+    reservation.commit(sample_event());
+    drop(held_permit);
+  }
+
+  #[tokio::test]
   async fn audit_reservation_commits_event_through_reserved_slot() {
     let (sender, mut receiver) = mpsc::channel(1);
     let runtime = AdminAuditRuntime::test_with_sender(sender);
@@ -475,6 +642,22 @@ mod tests {
       .expect("committed event should be queued");
     assert_eq!(event.status, StatusCode::OK.as_u16());
     assert_eq!(event.outcome, "applied");
+  }
+
+  #[tokio::test]
+  async fn audit_query_without_store_reports_durable_store_requirement() {
+    let runtime = AdminAuditRuntime::test_export_only();
+    let error = runtime
+      .query(AdminAuditQuery::from_query(None).expect("query should parse"))
+      .await
+      .expect_err("query without a durable store should fail");
+
+    assert!(
+      error
+        .to_string()
+        .contains("enable [admin.audit.store] with a PostgreSQL backend to query audit history"),
+      "{error}"
+    );
   }
 
   #[test]
