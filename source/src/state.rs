@@ -310,7 +310,7 @@ impl AppSnapshot {
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
-    let access_log_runtime = AccessLogRuntime::new(&config.access_log)
+    let access_log_runtime = AccessLogRuntime::new(&config.access_log, &config.crypto)
       .await
       .context("failed to build access log runtime")?;
     let admin_audit = AdminAuditRuntime::new(

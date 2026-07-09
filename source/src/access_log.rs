@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::admin_audit::AdminAuditEvent;
-use crate::config::{AccessLogConfig, AccessLogSchema, LoggingAccessLogConfig};
+use crate::config::{AccessLogConfig, AccessLogSchema, CryptoConfig, LoggingAccessLogConfig};
 use crate::waf::{
   AccessLogRecord, CompiledAccessLogFields, WafEngine, WafResponseInput, compile_access_log_fields,
   current_unix_ms,
@@ -55,9 +55,9 @@ impl AccessLogRuntime {
     }
   }
 
-  pub async fn new(config: &AccessLogConfig) -> anyhow::Result<Self> {
+  pub async fn new(config: &AccessLogConfig, crypto: &CryptoConfig) -> anyhow::Result<Self> {
     let otlp = if config.otlp.enabled {
-      Some(OtlpAccessLogSink::start(&config.otlp)?)
+      Some(OtlpAccessLogSink::start(&config.otlp, crypto)?)
     } else {
       None
     };

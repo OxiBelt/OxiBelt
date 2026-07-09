@@ -269,6 +269,7 @@ schema = "ocsf"
 [access_log.otlp]
 enabled = false
 endpoint = "http://127.0.0.1:4318/v1/logs"
+trusted_ca_certs = []
 schema = "ocsf"
 queue_capacity = 1024
 batch_size = 64
@@ -278,7 +279,7 @@ service_name = "oxibelt"
 
 `strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `lb_policy_compat_profile` defaults to `strict`, which accepts only canonical OxiBelt load-balancing policy names. Set it to `nginx` or `caddy` only while migrating legacy pool-policy names; the profile converts exact safe aliases and rejects names that do not have an exact OxiBelt equivalent. `level` is passed to the tracing filter and defaults to `info`.
 
-`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited JSON and defaults to `schema = "ocsf"`. Set `schema = "ecs"` to emit Elastic Common Schema JSON instead. `[access_log.otlp]` exports OpenTelemetry Logs over OTLP HTTP/protobuf to `/v1/logs` style collector endpoints and has an independent `schema = "ocsf"` or `schema = "ecs"` projection choice.
+`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited JSON and defaults to `schema = "ocsf"`. Set `schema = "ecs"` to emit Elastic Common Schema JSON instead. `[access_log.otlp]` exports OpenTelemetry Logs over OTLP HTTP/protobuf to `/v1/logs` style collector endpoints and has an independent `schema = "ocsf"` or `schema = "ecs"` projection choice. Remote OTLP access-log collectors must use `https://`; `http://` is accepted only for loopback collectors. `trusted_ca_certs` adds private collector CA roots from the cert directory.
 
 `logging.access_log` keeps the request-wide field-expression list and legacy `enabled` compatibility flag. When enabled through either `[access_log.system]` or `logging.access_log.enabled`, OxiBelt emits one access-log record for each finalized HTTP response with `event = "oxibelt.access"` and `scope = "system"` before schema projection. The default fields include request/response IDs, transaction ID, method, URI, client IP, route, status, upstream name, upstream timing fields, and a duplicate-safe `user_agent` collection from `Request.Headers.getAll('User-Agent')`.
 
@@ -1522,7 +1523,8 @@ schema = "ocsf"
 
 [access_log.otlp]
 enabled = true
-endpoint = "http://otel-collector:4318/v1/logs"
+endpoint = "https://otel-collector:4318/v1/logs"
+trusted_ca_certs = ["otel-collector-ca.pem"]
 schema = "ocsf"
 ```
 
@@ -2014,6 +2016,7 @@ schema = "ocsf"
 [access_log.otlp]
 enabled = false
 endpoint = "http://127.0.0.1:4318/v1/logs"
+trusted_ca_certs = []
 schema = "ocsf"
 queue_capacity = 1024
 batch_size = 64
@@ -2027,7 +2030,7 @@ service_name = "oxibelt"
 
 `[access_log.stdout].schema = "ecs"` writes Elastic Common Schema JSON with `ecs.version = "9.4.0"` and preserves the original OxiBelt record under `oxibelt.access.original`. System and WAF records map HTTP, URL, client, user-agent, TLS, and WAF rule fields where present; Admin API records map API categorization, source IP, TLS scheme state, safe token identity, authorization resource metadata, and redacted request summaries.
 
-`[access_log.otlp]` exports the selected OCSF or ECS projection as the OpenTelemetry log body over OTLP HTTP/protobuf. It is disabled by default, supports only `http://` endpoints in this release, uses a bounded queue with best-effort drops on exporter backpressure or delivery failure, and does not block data-plane or Admin API enforcement decisions. OpenTelemetry trace export under `[telemetry.tracing]` is configured separately and is unaffected.
+`[access_log.otlp]` exports the selected OCSF or ECS projection as the OpenTelemetry log body over OTLP HTTP/protobuf. It is disabled by default, supports certificate-validated `https://` endpoints, accepts `http://` only for loopback collectors such as `127.0.0.1`, `127.0.0.0/8`, `::1`, and `localhost`, uses a bounded queue with best-effort drops on exporter backpressure or delivery failure, and does not block data-plane or Admin API enforcement decisions. `trusted_ca_certs` adds private collector CA roots from the cert directory to the WebPKI roots used for HTTPS verification. OpenTelemetry trace export under `[telemetry.tracing]` is configured separately and is unaffected.
 
 PostgreSQL access-log support has been removed. Configurations containing `[database.access_log]` or `[logging.access_log.database]` fail during loading so stale credentials and tables cannot silently remain configured.
 

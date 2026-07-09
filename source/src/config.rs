@@ -707,6 +707,21 @@ impl Config {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .collect::<anyhow::Result<_>>()?;
+    self.access_log.otlp.trusted_ca_certs = self
+      .access_log
+      .otlp
+      .trusted_ca_certs
+      .iter()
+      .map(|path| {
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          "access_log.otlp.trusted_ca_certs",
+          &path_roots.cert_dir,
+          path,
+        )?;
+        self.source_paths.remember_runtime_file(logical);
+        Ok::<PathBuf, anyhow::Error>(resolved)
+      })
+      .collect::<anyhow::Result<_>>()?;
     outbound_revocation::resolve_outbound_crlite_filter_file(
       &mut self.proxy.upstream_revocation,
       &mut self.source_paths,
@@ -2605,6 +2620,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "queue_capacity",
       "schema",
       "service_name",
+      "trusted_ca_certs",
     ][..],
     "access_log.stdout" => &["enabled", "schema"][..],
     "access_log.system" => &["enabled"][..],

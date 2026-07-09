@@ -52,6 +52,7 @@ schema = "ocsf"
 [access_log.otlp]
 enabled = false
 endpoint = "http://127.0.0.1:4318/v1/logs"
+trusted_ca_certs = []
 schema = "ocsf"
 queue_capacity = 1024
 batch_size = 64
@@ -77,6 +78,9 @@ cookies to access-log fields. Keep custom access-log expressions focused on
 request IDs, route names, status, client network metadata, and upstream timing.
 Access logs export OCSF or ECS JSON on stdout, and can also export the selected
 projection as OpenTelemetry Logs over OTLP HTTP/protobuf with `[access_log.otlp]`.
+Use `https://` for non-loopback collectors; `http://` is only accepted for
+loopback collectors such as local sidecars. Add private collector CAs with
+`access_log.otlp.trusted_ca_certs`.
 Trace OTLP export remains configured separately under `[telemetry.tracing]`.
 
 ## Bundle Assets

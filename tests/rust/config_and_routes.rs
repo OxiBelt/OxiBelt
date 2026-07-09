@@ -9735,7 +9735,7 @@ fn access_log_otlp_accepts_ecs_schema_and_endpoint() {
 
 [access_log.otlp]
 enabled = true
-endpoint = "http://collector.example:4318/v1/logs"
+endpoint = "https://collector.example:4318/v1/logs"
 schema = "ecs"
 queue_capacity = 8
 batch_size = 4
@@ -9751,7 +9751,7 @@ service_name = "edge-proxy"
   assert_eq!(config.access_log.otlp.schema, AccessLogSchema::Ecs);
   assert_eq!(
     config.access_log.otlp.endpoint,
-    "http://collector.example:4318/v1/logs"
+    "https://collector.example:4318/v1/logs"
   );
   assert_eq!(config.access_log.otlp.queue_capacity, 8);
   assert_eq!(config.access_log.otlp.batch_size, 4);
@@ -9760,7 +9760,7 @@ service_name = "edge-proxy"
 }
 
 #[test]
-fn access_log_otlp_rejects_non_http_endpoint_when_enabled() {
+fn access_log_otlp_accepts_https_endpoint_when_enabled() {
   let temp_dir = common::TempDir::new("access-log-otlp-https");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-https");
@@ -9775,14 +9775,97 @@ endpoint = "https://collector.example/v1/logs"
     common::minimal_config_toml(&cert_path, &key_path)
   );
   let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+  config
+    .validate()
+    .expect("HTTPS access-log OTLP endpoint should validate");
+}
+
+#[test]
+fn access_log_otlp_rejects_remote_http_endpoint_when_enabled() {
+  let temp_dir = common::TempDir::new("access-log-otlp-remote-http");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-remote-http");
+  let raw = format!(
+    r#"
+{}
+
+[access_log.otlp]
+enabled = true
+endpoint = "http://collector.example:4318/v1/logs"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
   let error = config
     .validate()
-    .expect_err("HTTPS access-log OTLP endpoint should fail validation");
+    .expect_err("remote HTTP access-log OTLP endpoint should fail validation");
   assert!(
     error
       .to_string()
-      .contains("access_log.otlp.endpoint currently supports only http:// OTLP endpoints"),
+      .contains("http:// is only supported for loopback"),
     "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn access_log_otlp_accepts_loopback_http_endpoint_when_enabled() {
+  for endpoint in [
+    "http://127.0.0.1:4318/v1/logs",
+    "http://127.42.0.9:4318/v1/logs",
+    "http://[::1]:4318/v1/logs",
+    "http://localhost:4318/v1/logs",
+  ] {
+    let temp_dir = common::TempDir::new("access-log-otlp-loopback-http");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-loopback-http");
+    let raw = format!(
+      r#"
+{}
+
+[access_log.otlp]
+enabled = true
+endpoint = "{endpoint}"
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+    config
+      .validate()
+      .unwrap_or_else(|error| panic!("loopback endpoint {endpoint} should validate: {error:#}"));
+  }
+}
+
+#[test]
+fn access_log_otlp_resolves_trusted_ca_certs_from_cert_dir() {
+  let temp_dir = common::TempDir::new("access-log-otlp-ca-roots");
+  let config_path = write_loadable_config(&temp_dir, "access-log-otlp-ca-roots", |raw| {
+    let cert_file = raw
+      .lines()
+      .find_map(|line| {
+        let line = line.trim();
+        line
+          .strip_prefix("cert_chain = \"")
+          .and_then(|rest| rest.strip_suffix('"'))
+      })
+      .expect("base config should include cert_chain")
+      .to_string();
+    format!(
+      r#"{raw}
+
+[access_log.otlp]
+enabled = true
+endpoint = "https://collector.example:4318/v1/logs"
+trusted_ca_certs = ["{cert_file}"]
+"#
+    )
+  });
+
+  let config = Config::load(&config_path).expect("access-log OTLP CA roots should load");
+
+  assert_eq!(config.access_log.otlp.trusted_ca_certs.len(), 1);
+  assert!(
+    config.access_log.otlp.trusted_ca_certs[0].is_absolute(),
+    "trusted CA path should be resolved"
   );
 }
 

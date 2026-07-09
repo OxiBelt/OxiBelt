@@ -8,9 +8,12 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use serde_json::Value;
 use tracing::warn;
-use url::Url;
+use url::{Host, Url};
 
-use crate::config::{AccessLogOtlpConfig, AccessLogSchema};
+use crate::config::{
+  AccessLogOtlpConfig, AccessLogSchema, CryptoConfig, UpstreamEchConfig,
+  UpstreamTlsResumptionConfig, validate_access_log_otlp_endpoint_url,
+};
 
 use super::AccessLogSource;
 
@@ -40,23 +43,45 @@ struct AccessLogAttribute {
   value: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct OtlpHttpEndpoint {
+  scheme: OtlpEndpointScheme,
   host: String,
   port: u16,
+  authority: String,
   path_and_query: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OtlpEndpointScheme {
+  Http,
+  Https,
+}
+
 impl OtlpAccessLogSink {
-  pub(super) fn start(config: &AccessLogOtlpConfig) -> anyhow::Result<Self> {
+  pub(super) fn start(config: &AccessLogOtlpConfig, crypto: &CryptoConfig) -> anyhow::Result<Self> {
     let endpoint = OtlpHttpEndpoint::parse(&config.endpoint)?;
+    let tls_config = if endpoint.scheme == OtlpEndpointScheme::Https {
+      Some(build_otlp_tls_config(config, crypto)?)
+    } else {
+      None
+    };
     let timeout = Duration::from_millis(config.export_timeout_ms);
     let batch_size = config.batch_size;
     let service_name = config.service_name.clone();
     let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
     let exporter = thread::Builder::new()
       .name("oxibelt-otlp-access-log-exporter".to_string())
-      .spawn(move || run_otlp_log_exporter(receiver, endpoint, timeout, service_name, batch_size))
+      .spawn(move || {
+        run_otlp_log_exporter(
+          receiver,
+          endpoint,
+          tls_config,
+          timeout,
+          service_name,
+          batch_size,
+        )
+      })
       .context("failed to start OTLP access-log exporter thread")?;
     Ok(Self {
       inner: Arc::new(OtlpAccessLogSinkInner {
@@ -155,14 +180,29 @@ impl AccessLogAttribute {
 impl OtlpHttpEndpoint {
   fn parse(value: &str) -> anyhow::Result<Self> {
     let url = Url::parse(value).context("invalid access_log.otlp.endpoint")?;
-    if url.scheme() != "http" {
-      bail!("access_log.otlp.endpoint currently supports only http://");
-    }
+    validate_access_log_otlp_endpoint_url(&url)?;
     let host = url
       .host_str()
       .ok_or_else(|| anyhow::anyhow!("access_log.otlp.endpoint must include a host"))?
       .to_string();
-    let port = url.port_or_known_default().unwrap_or(80);
+    let scheme = match url.scheme() {
+      "http" => OtlpEndpointScheme::Http,
+      "https" => OtlpEndpointScheme::Https,
+      _ => {
+        bail!("access_log.otlp.endpoint must use https://, or http:// for loopback OTLP collectors")
+      }
+    };
+    let default_port = match scheme {
+      OtlpEndpointScheme::Http => 80,
+      OtlpEndpointScheme::Https => 443,
+    };
+    let port = url.port_or_known_default().unwrap_or(default_port);
+    let host_header = host_header_base(&url)?;
+    let authority = if port == default_port {
+      host_header
+    } else {
+      format!("{host_header}:{port}")
+    };
     let path = if url.path().is_empty() {
       "/"
     } else {
@@ -173,16 +213,47 @@ impl OtlpHttpEndpoint {
       None => path.to_string(),
     };
     Ok(Self {
+      scheme,
       host,
       port,
+      authority,
       path_and_query,
     })
   }
 }
 
+fn host_header_base(url: &Url) -> anyhow::Result<String> {
+  match url.host() {
+    Some(Host::Domain(domain)) => Ok(domain.to_string()),
+    Some(Host::Ipv4(address)) => Ok(address.to_string()),
+    Some(Host::Ipv6(address)) => Ok(format!("[{address}]")),
+    None => bail!("access_log.otlp.endpoint must include a host"),
+  }
+}
+
+fn build_otlp_tls_config(
+  config: &AccessLogOtlpConfig,
+  crypto: &CryptoConfig,
+) -> anyhow::Result<Arc<rustls::ClientConfig>> {
+  let mut tls_config =
+    crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+      crypto,
+      &config.trusted_ca_certs,
+      &UpstreamEchConfig::default(),
+      &UpstreamTlsResumptionConfig::default(),
+      None,
+      "access_log.otlp",
+      None,
+    )
+    .context("failed to build OTLP access-log TLS client config")?;
+  tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+  Ok(Arc::new(tls_config))
+}
+
 fn run_otlp_log_exporter(
   receiver: mpsc::Receiver<OtlpLogRecord>,
   endpoint: OtlpHttpEndpoint,
+  tls_config: Option<Arc<rustls::ClientConfig>>,
   timeout: Duration,
   service_name: String,
   batch_size: usize,
@@ -193,7 +264,13 @@ fn run_otlp_log_exporter(
       Ok(record) => batch.push(record),
       Err(mpsc::RecvTimeoutError::Timeout) => {}
       Err(mpsc::RecvTimeoutError::Disconnected) => {
-        flush_otlp_log_batch(&mut batch, &endpoint, timeout, &service_name);
+        flush_otlp_log_batch(
+          &mut batch,
+          &endpoint,
+          tls_config.as_ref(),
+          timeout,
+          &service_name,
+        );
         return;
       }
     }
@@ -202,18 +279,31 @@ fn run_otlp_log_exporter(
         Ok(record) => batch.push(record),
         Err(mpsc::TryRecvError::Empty) => break,
         Err(mpsc::TryRecvError::Disconnected) => {
-          flush_otlp_log_batch(&mut batch, &endpoint, timeout, &service_name);
+          flush_otlp_log_batch(
+            &mut batch,
+            &endpoint,
+            tls_config.as_ref(),
+            timeout,
+            &service_name,
+          );
           return;
         }
       }
     }
-    flush_otlp_log_batch(&mut batch, &endpoint, timeout, &service_name);
+    flush_otlp_log_batch(
+      &mut batch,
+      &endpoint,
+      tls_config.as_ref(),
+      timeout,
+      &service_name,
+    );
   }
 }
 
 fn flush_otlp_log_batch(
   batch: &mut Vec<OtlpLogRecord>,
   endpoint: &OtlpHttpEndpoint,
+  tls_config: Option<&Arc<rustls::ClientConfig>>,
   timeout: Duration,
   service_name: &str,
 ) {
@@ -222,7 +312,7 @@ fn flush_otlp_log_batch(
   }
   let payload = encode_logs_export_request(service_name, batch);
   batch.clear();
-  if let Err(error) = post_otlp_http(endpoint, timeout, &payload) {
+  if let Err(error) = post_otlp_http(endpoint, timeout, &payload, tls_config) {
     warn!(error = %error, "failed to export OTLP access-log batch");
   }
 }
@@ -231,20 +321,63 @@ fn post_otlp_http(
   endpoint: &OtlpHttpEndpoint,
   timeout: Duration,
   payload: &[u8],
+  tls_config: Option<&Arc<rustls::ClientConfig>>,
 ) -> anyhow::Result<()> {
-  let address = (endpoint.host.as_str(), endpoint.port)
-    .to_socket_addrs()
-    .context("failed to resolve access_log.otlp.endpoint")?
-    .next()
-    .ok_or_else(|| anyhow::anyhow!("access_log.otlp.endpoint resolved no addresses"))?;
-  let mut stream = TcpStream::connect_timeout(&address, timeout)
-    .context("failed to connect access_log.otlp.endpoint")?;
+  let mut stream = connect_otlp_endpoint(endpoint, timeout)?;
   stream.set_read_timeout(Some(timeout)).ok();
   stream.set_write_timeout(Some(timeout)).ok();
+  match endpoint.scheme {
+    OtlpEndpointScheme::Http => post_otlp_over_stream(endpoint, payload, &mut stream),
+    OtlpEndpointScheme::Https => {
+      let tls_config = tls_config
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("access_log.otlp.endpoint requires TLS client config"))?;
+      let server_name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
+        .map_err(|error| anyhow::anyhow!("invalid access_log.otlp TLS server name: {error}"))?;
+      let mut tls = rustls::StreamOwned::new(
+        rustls::ClientConnection::new(tls_config, server_name)
+          .context("failed to create OTLP access-log TLS client connection")?,
+        stream,
+      );
+      post_otlp_over_stream(endpoint, payload, &mut tls)
+    }
+  }
+}
+
+fn connect_otlp_endpoint(
+  endpoint: &OtlpHttpEndpoint,
+  timeout: Duration,
+) -> anyhow::Result<TcpStream> {
+  let addresses = (endpoint.host.as_str(), endpoint.port)
+    .to_socket_addrs()
+    .context("failed to resolve access_log.otlp.endpoint")?
+    .collect::<Vec<_>>();
+  if addresses.is_empty() {
+    bail!("access_log.otlp.endpoint resolved no addresses");
+  }
+  let mut last_error = None;
+  for address in addresses {
+    match TcpStream::connect_timeout(&address, timeout) {
+      Ok(stream) => return Ok(stream),
+      Err(error) => last_error = Some((address, error)),
+    }
+  }
+  if let Some((address, error)) = last_error {
+    Err(error)
+      .with_context(|| format!("failed to connect access_log.otlp.endpoint at {address}"))?;
+  }
+  bail!("failed to connect access_log.otlp.endpoint")
+}
+
+fn post_otlp_over_stream(
+  endpoint: &OtlpHttpEndpoint,
+  payload: &[u8],
+  stream: &mut (impl Read + Write),
+) -> anyhow::Result<()> {
   let request = format!(
     "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nUser-Agent: oxibelt\r\nConnection: close\r\n\r\n",
     endpoint.path_and_query,
-    endpoint.host,
+    endpoint.authority,
     payload.len()
   );
   stream
@@ -420,108 +553,5 @@ fn write_varint(out: &mut Vec<u8>, mut value: u64) {
 }
 
 #[cfg(test)]
-mod tests {
-  use serde_json::json;
-
-  use super::*;
-  use crate::access_log::projection::{project_ecs, project_ocsf};
-
-  #[test]
-  fn otlp_logs_export_request_contains_ecs_payload_and_attributes() {
-    let original = json!({
-      "event": "oxibelt.access",
-      "scope": "system",
-      "method": "GET",
-      "status": 200,
-      "user_agent": {
-        "values": ["first-agent", "second-agent"],
-        "is_truncated": false
-      }
-    });
-    let record = OtlpLogRecord::from_projected(
-      AccessLogSource::System,
-      42,
-      AccessLogSchema::Ecs,
-      &original,
-      project_ecs(AccessLogSource::System, 42, &original),
-    );
-
-    let bytes = encode_logs_export_request("oxibelt", &[record]);
-
-    assert_payload_contains(&bytes, b"service.name");
-    assert_payload_contains(&bytes, b"ecs.version");
-    assert_payload_contains(&bytes, b"oxibelt.access_log.schema");
-    assert_payload_contains(&bytes, b"oxibelt.access.system");
-    assert_payload_contains(&bytes, b"\"oxibelt\"");
-    assert_payload_contains(&bytes, b"\"original\"");
-    assert_payload_contains(&bytes, b"first-agent");
-    assert_payload_contains(&bytes, b"second-agent");
-  }
-
-  #[test]
-  fn otlp_logs_export_request_contains_ocsf_payload_and_attributes() {
-    let original = json!({
-      "event": "oxibelt.admin.access",
-      "scope": "admin",
-      "request_id": "req-1",
-      "actor": "alice",
-      "principal": "admin",
-      "subject": "sub-1",
-      "groups": ["ops"],
-      "tls": true,
-      "method": "POST",
-      "path": "/admin/v1/tokens",
-      "service": "tokens",
-      "operation": "post.tokens.create",
-      "action": "admin:CreateToken",
-      "resource": "token/*",
-      "target_kind": "token",
-      "target_id": "tok-1",
-      "status": 201,
-      "outcome": "applied"
-    });
-    let record = OtlpLogRecord::from_projected(
-      AccessLogSource::Admin,
-      42,
-      AccessLogSchema::Ocsf,
-      &original,
-      project_ocsf(AccessLogSource::Admin, 42, &original),
-    );
-
-    let bytes = encode_logs_export_request("oxibelt", &[record]);
-
-    assert_payload_contains(&bytes, b"ocsf.version");
-    assert_payload_contains(&bytes, b"API Activity");
-    assert_payload_contains(&bytes, b"oxibelt.admin.access");
-    assert_payload_contains(&bytes, b"admin:CreateToken");
-    assert_payload_contains(&bytes, b"tok-1");
-  }
-
-  #[test]
-  fn failed_status_uses_error_severity() {
-    let original = json!({
-      "event": "oxibelt.access",
-      "scope": "waf",
-      "method": "POST",
-      "status": 403
-    });
-    let record = OtlpLogRecord::from_projected(
-      AccessLogSource::Waf,
-      42,
-      AccessLogSchema::Ecs,
-      &original,
-      project_ecs(AccessLogSource::Waf, 42, &original),
-    );
-
-    assert_eq!(record.severity_number, 17);
-    assert_eq!(record.severity_text, "ERROR");
-  }
-
-  fn assert_payload_contains(payload: &[u8], needle: &[u8]) {
-    assert!(
-      payload.windows(needle.len()).any(|window| window == needle),
-      "payload did not contain {:?}",
-      String::from_utf8_lossy(needle)
-    );
-  }
-}
+#[path = "otlp_tests.rs"]
+mod tests;

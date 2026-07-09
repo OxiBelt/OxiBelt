@@ -1,9 +1,11 @@
 //! Access-log schema and sink configuration.
 //! PostgreSQL access-log sinks are intentionally not part of this surface.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, bail};
 use serde::{Deserialize, Deserializer};
-use url::Url;
+use url::{Host, Url};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AccessLogConfig {
@@ -74,6 +76,8 @@ pub struct AccessLogOtlpConfig {
   #[serde(default = "default_otlp_logs_endpoint")]
   pub endpoint: String,
   #[serde(default)]
+  pub trusted_ca_certs: Vec<PathBuf>,
+  #[serde(default)]
   pub schema: AccessLogSchema,
   #[serde(default = "default_otlp_queue_capacity")]
   pub queue_capacity: usize,
@@ -90,6 +94,7 @@ impl Default for AccessLogOtlpConfig {
     Self {
       enabled: false,
       endpoint: default_otlp_logs_endpoint(),
+      trusted_ca_certs: Vec::new(),
       schema: AccessLogSchema::default(),
       queue_capacity: default_otlp_queue_capacity(),
       batch_size: default_otlp_batch_size(),
@@ -115,14 +120,34 @@ impl AccessLogOtlpConfig {
     }
     if self.enabled {
       let endpoint = Url::parse(&self.endpoint).context("invalid access_log.otlp.endpoint")?;
-      if endpoint.scheme() != "http" {
-        bail!("access_log.otlp.endpoint currently supports only http:// OTLP endpoints");
-      }
-      if endpoint.host_str().is_none() {
-        bail!("access_log.otlp.endpoint must include a host");
-      }
+      validate_access_log_otlp_endpoint_url(&endpoint)?;
     }
     Ok(())
+  }
+}
+
+pub(crate) fn validate_access_log_otlp_endpoint_url(endpoint: &Url) -> anyhow::Result<()> {
+  if endpoint.host_str().is_none() {
+    bail!("access_log.otlp.endpoint must include a host");
+  }
+  match endpoint.scheme() {
+    "https" => Ok(()),
+    "http" if access_log_otlp_endpoint_allows_plaintext(endpoint) => Ok(()),
+    "http" => bail!(
+      "access_log.otlp.endpoint http:// is only supported for loopback OTLP collectors; use https:// for remote collectors"
+    ),
+    _ => {
+      bail!("access_log.otlp.endpoint must use https://, or http:// for loopback OTLP collectors")
+    }
+  }
+}
+
+pub(crate) fn access_log_otlp_endpoint_allows_plaintext(endpoint: &Url) -> bool {
+  match endpoint.host() {
+    Some(Host::Ipv4(address)) => address.is_loopback(),
+    Some(Host::Ipv6(address)) => address.is_loopback(),
+    Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+    None => false,
   }
 }
 

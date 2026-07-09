@@ -28,6 +28,7 @@ schema = "ocsf" # ocsf | ecs
 [access_log.otlp]
 enabled = false
 endpoint = "http://127.0.0.1:4318/v1/logs"
+trusted_ca_certs = []
 schema = "ocsf" # ocsf | ecs
 queue_capacity = 1024
 batch_size = 64
