@@ -278,7 +278,7 @@ impl<'de> Deserialize<'de> for Config {
     let diagnostics =
       lb_policy_compat::normalize_toml_from_config(&mut value).map_err(serde::de::Error::custom)?;
     lb_policy_compat::ensure_supported(&diagnostics).map_err(serde::de::Error::custom)?;
-    reject_legacy_access_log_postgres(&value).map_err(serde::de::Error::custom)?;
+    reject_removed_access_log_config(&value).map_err(serde::de::Error::custom)?;
     RawConfig::deserialize(value)
       .map_err(serde::de::Error::custom)?
       .try_into()
@@ -2530,7 +2530,7 @@ fn normalize_merged_lb_policy_compat(value: &mut toml::Value) -> anyhow::Result<
 }
 
 fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
-  reject_legacy_access_log_postgres(value)?;
+  reject_removed_access_log_config(value)?;
   let strict = value
     .get("config")
     .and_then(|config| config.get("strict_unknown_fields"))
@@ -2551,15 +2551,14 @@ fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
   }
   Ok(())
 }
-
-fn reject_legacy_access_log_postgres(value: &toml::Value) -> anyhow::Result<()> {
+fn reject_removed_access_log_config(value: &toml::Value) -> anyhow::Result<()> {
   if value
     .get("database")
     .and_then(|database| database.get("access_log"))
     .is_some()
   {
     bail!(
-      "database.access_log PostgreSQL access-log sink has been removed; use access_log.stdout or access_log.otlp"
+      "database.access_log PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\""
     );
   }
   if value
@@ -2569,7 +2568,16 @@ fn reject_legacy_access_log_postgres(value: &toml::Value) -> anyhow::Result<()> 
     .is_some()
   {
     bail!(
-      "logging.access_log.database PostgreSQL access-log sink has been removed; use access_log.stdout or access_log.otlp"
+      "logging.access_log.database PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\""
+    );
+  }
+  if value
+    .get("access_log")
+    .and_then(|access_log| access_log.get("otlp"))
+    .is_some()
+  {
+    bail!(
+      "access_log.otlp is not implemented for access logs yet; use access_log.stdout with schema = \"ocsf\""
     );
   }
   Ok(())
@@ -2612,16 +2620,8 @@ fn join_key_path(parent: &str, key: &str) -> String {
 fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   let keys = match path {
     "" => allowed_keys::ROOT_CONFIG_KEYS,
-    "access_log" => &["admin", "otlp", "stdout", "system", "waf"][..],
+    "access_log" => &["admin", "stdout", "system", "waf"][..],
     "access_log.admin" => &["enabled"][..],
-    "access_log.otlp" => &[
-      "batch_size",
-      "enabled",
-      "endpoint",
-      "export_timeout_ms",
-      "queue_capacity",
-      "service_name",
-    ][..],
     "access_log.stdout" => &["enabled", "schema"][..],
     "access_log.system" => &["enabled"][..],
     "access_log.waf" => &["enabled"][..],

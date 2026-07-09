@@ -7189,8 +7189,7 @@ fn system_access_log_defaults_to_disabled_stdout() {
   assert!(config.access_log.waf.enabled);
   assert!(!config.access_log.admin.enabled);
   assert!(config.access_log.stdout.enabled);
-  assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ecs);
-  assert!(!config.access_log.otlp.enabled);
+  assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ocsf);
   assert_eq!(
     config
       .logging
@@ -7223,14 +7222,6 @@ enabled = true
 enabled = true
 schema = "ocsf"
 
-[access_log.otlp]
-enabled = true
-endpoint = "http://127.0.0.1:4318/v1/logs"
-queue_capacity = 32
-batch_size = 8
-export_timeout_ms = 500
-service_name = "oxibelt-test"
-
 [[logging.access_log.fields]]
 name = "method"
 value = "Request.Http.Method"
@@ -7248,9 +7239,31 @@ expression = "Response.Http.Status"
   assert!(config.logging.access_log.enabled);
   assert!(config.access_log.system.enabled);
   assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ocsf);
-  assert!(config.access_log.otlp.enabled);
-  assert_eq!(config.access_log.otlp.queue_capacity, 32);
   assert_eq!(config.logging.access_log.fields.len(), 2);
+}
+
+#[test]
+fn access_log_stdout_rejects_future_ecs_schema() {
+  let temp_dir = common::TempDir::new("access-log-ecs-schema");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "access-log-ecs-schema");
+  let raw = format!(
+    r#"
+{}
+
+[access_log.stdout]
+schema = "ecs"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("ECS schema should fail for now");
+  assert!(
+    error
+      .to_string()
+      .contains("access_log.stdout.schema = \"ecs\" is not implemented yet"),
+    "unexpected error: {error}"
+  );
 }
 
 #[test]
@@ -9404,10 +9417,10 @@ ca_cert = "postgres-ca.pem"
 }
 
 #[test]
-fn access_log_rejects_invalid_otlp_endpoint_and_empty_service_name() {
-  let temp_dir = common::TempDir::new("access-log-otlp-invalid");
+fn access_log_rejects_unimplemented_otlp_section() {
+  let temp_dir = common::TempDir::new("access-log-otlp-unimplemented");
   let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-invalid");
+    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-unimplemented");
   let raw = format!(
     r#"
 {}
@@ -9418,32 +9431,11 @@ endpoint = "https://collector.example/v1/logs"
 "#,
     common::minimal_config_toml(&cert_path, &key_path)
   );
-  let config: Config = toml::from_str(&raw).expect("config should parse");
-  let error = config.validate().expect_err("https endpoint should fail");
+  let error = toml::from_str::<Config>(&raw).expect_err("access-log OTLP should not parse yet");
   assert!(
     error
       .to_string()
-      .contains("access_log.otlp.endpoint currently supports only http://"),
-    "unexpected error: {error}"
-  );
-
-  let raw = format!(
-    r#"
-{}
-
-[access_log.otlp]
-service_name = " "
-"#,
-    common::minimal_config_toml(&cert_path, &key_path)
-  );
-  let config: Config = toml::from_str(&raw).expect("config should parse");
-  let error = config
-    .validate()
-    .expect_err("empty OTLP service name should fail");
-  assert!(
-    error
-      .to_string()
-      .contains("access_log.otlp.service_name must not be empty"),
+      .contains("access_log.otlp is not implemented for access logs yet"),
     "unexpected error: {error}"
   );
 }

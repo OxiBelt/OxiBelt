@@ -7,17 +7,15 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::admin_audit::AdminAuditEvent;
-use crate::config::{AccessLogConfig, AccessLogSchema, LoggingAccessLogConfig};
+use crate::config::{AccessLogConfig, LoggingAccessLogConfig};
 use crate::waf::{
   AccessLogRecord, CompiledAccessLogFields, WafEngine, WafResponseInput, compile_access_log_fields,
   current_unix_ms,
 };
 
-mod otlp;
 mod projection;
 
-use otlp::{OtlpAccessLogSink, OtlpLogRecord};
-use projection::{admin_event_value, emit_stdout, project_ecs, project_ocsf};
+use projection::{admin_event_value, emit_stdout, project_ocsf};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AccessLogSource {
@@ -33,7 +31,6 @@ pub struct AccessLogRuntime {
 
 struct AccessLogRuntimeInner {
   config: AccessLogConfig,
-  otlp: Option<OtlpAccessLogSink>,
 }
 
 #[derive(Clone)]
@@ -49,22 +46,15 @@ impl AccessLogRuntime {
     config.waf.enabled = false;
     config.admin.enabled = false;
     config.stdout.enabled = false;
-    config.otlp.enabled = false;
     Self {
-      inner: Arc::new(AccessLogRuntimeInner { config, otlp: None }),
+      inner: Arc::new(AccessLogRuntimeInner { config }),
     }
   }
 
   pub async fn new(config: &AccessLogConfig) -> anyhow::Result<Self> {
-    let otlp = if config.otlp.enabled {
-      Some(OtlpAccessLogSink::start(&config.otlp)?)
-    } else {
-      None
-    };
     Ok(Self {
       inner: Arc::new(AccessLogRuntimeInner {
         config: config.clone(),
-        otlp,
       }),
     })
   }
@@ -94,17 +84,9 @@ impl AccessLogRuntime {
       return;
     }
 
-    let ecs = project_ecs(source, timestamp_unix_ms, &value);
     if self.inner.config.stdout.enabled {
-      let stdout_record = match self.inner.config.stdout.schema {
-        AccessLogSchema::Ecs => ecs.clone(),
-        AccessLogSchema::Ocsf => project_ocsf(source, timestamp_unix_ms, &value),
-      };
+      let stdout_record = project_ocsf(source, timestamp_unix_ms, &value);
       emit_stdout(source, &stdout_record);
-    }
-
-    if let Some(otlp) = &self.inner.otlp {
-      otlp.enqueue(OtlpLogRecord::from_ecs(source, timestamp_unix_ms, ecs));
     }
   }
 }

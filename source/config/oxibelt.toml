@@ -23,15 +23,7 @@ enabled = false
 
 [access_log.stdout]
 enabled = true
-schema = "ecs" # ecs | ocsf
-
-[access_log.otlp]
-enabled = false
-endpoint = "http://127.0.0.1:4318/v1/logs"
-queue_capacity = 1024
-batch_size = 64
-export_timeout_ms = 3000
-service_name = "oxibelt"
+schema = "ocsf"
 
 [runtime]
 linux_only = true

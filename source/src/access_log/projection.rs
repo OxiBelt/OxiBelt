@@ -7,129 +7,17 @@ use crate::admin_audit::AdminAuditEvent;
 
 use super::AccessLogSource;
 
-pub(super) const ECS_VERSION: &str = "9.4.0";
-const OCSF_VERSION: &str = "1.5.0";
+pub(super) const OCSF_VERSION: &str = "1.8.0";
+const HTTP_ACTIVITY_CLASS_UID: u64 = 4002;
+const API_ACTIVITY_CLASS_UID: u64 = 6003;
 
-pub(super) fn project_ecs(source: AccessLogSource, timestamp_unix_ms: u64, value: &Value) -> Value {
-  let mut root = Map::new();
-  root.insert(
-    "@timestamp".to_string(),
-    Value::Number(Number::from(timestamp_unix_ms)),
-  );
-  root.insert("ecs".to_string(), json!({ "version": ECS_VERSION }));
-  root.insert(
-    "event".to_string(),
-    json!({
-      "kind": "event",
-      "category": event_categories(source),
-      "type": ["access"],
-      "dataset": event_dataset(source),
-      "provider": "oxibelt",
-      "action": event_action(source, value),
-      "outcome": event_outcome(value),
-    }),
-  );
-  root.insert(
-    "observer".to_string(),
-    json!({
-      "vendor": "OxiBelt",
-      "product": "OxiBelt",
-      "type": "proxy",
-    }),
-  );
-  insert_nested(
-    &mut root,
-    &["labels", "scope"],
-    string_value(source_scope(source)),
-  );
-
-  if let Some(value) = value_string(value, &["method"]) {
-    insert_nested(
-      &mut root,
-      &["http", "request", "method"],
-      string_value(value),
-    );
-  }
-  if let Some(value) = value_u64(value, &["status"]) {
-    insert_nested(
-      &mut root,
-      &["http", "response", "status_code"],
-      Value::Number(Number::from(value)),
-    );
-  }
-  if let Some(value) = value_u64(value, &["response_body_bytes"]) {
-    insert_nested(
-      &mut root,
-      &["http", "response", "body", "bytes"],
-      Value::Number(Number::from(value)),
-    );
-  }
-  if let Some(path) = value_string(value, &["path"]) {
-    insert_nested(&mut root, &["url", "path"], string_value(path));
-  }
-  if let Some(query) = value_string(value, &["query"]) {
-    insert_nested(&mut root, &["url", "query"], string_value(query));
-  }
-  if let Some(uri) = value_string(value, &["uri"]) {
-    insert_nested(&mut root, &["url", "original"], string_value(uri));
-  } else if let Some(path) = value_string(value, &["path"]) {
-    insert_nested(&mut root, &["url", "original"], string_value(path));
-  }
-  if let Some(user_agent) = user_agent_value(value) {
-    insert_nested(
-      &mut root,
-      &["user_agent", "original"],
-      string_value(user_agent),
-    );
-  }
-  if let Some(ip) =
-    value_string(value, &["client_ip"]).or_else(|| value_string(value, &["source_ip"]))
-  {
-    insert_nested(&mut root, &["source", "ip"], string_value(ip.clone()));
-    insert_nested(&mut root, &["client", "ip"], string_value(ip));
-  }
-  if let Some(port) = value_u64(value, &["client_port"]) {
-    insert_nested(
-      &mut root,
-      &["source", "port"],
-      Value::Number(Number::from(port)),
-    );
-  }
-  if let Some(value) = value_string(value, &["host"]) {
-    insert_nested(&mut root, &["url", "domain"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["protocol"]) {
-    insert_nested(&mut root, &["network", "protocol"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["transport"]) {
-    insert_nested(&mut root, &["network", "transport"], string_value(value));
-  }
-  if let Some(value) = value_bool(value, &["tls"]) {
-    insert_nested(&mut root, &["tls", "established"], Value::Bool(value));
-  }
-  if let Some(value) = value_string(value, &["route"]) {
-    insert_nested(&mut root, &["labels", "route"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["request_id"]) {
-    insert_nested(&mut root, &["http", "request", "id"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["operation"]) {
-    insert_nested(&mut root, &["labels", "operation"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["service"]) {
-    insert_nested(&mut root, &["labels", "service"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["actor"]) {
-    insert_nested(&mut root, &["user", "name"], string_value(value));
-  }
-  if let Some(value) = value_string(value, &["subject"]) {
-    insert_nested(&mut root, &["user", "id"], string_value(value));
-  }
-  if let Some(value) = value.get("groups").and_then(Value::as_array) {
-    insert_nested(&mut root, &["user", "roles"], Value::Array(value.clone()));
-  }
-  root.insert("oxibelt".to_string(), value.clone());
-  Value::Object(root)
+struct OcsfClass {
+  category_uid: u64,
+  category_name: &'static str,
+  class_uid: u64,
+  class_name: &'static str,
+  activity_id: u64,
+  activity_name: &'static str,
 }
 
 pub(super) fn project_ocsf(
@@ -137,7 +25,125 @@ pub(super) fn project_ocsf(
   timestamp_unix_ms: u64,
   value: &Value,
 ) -> Value {
-  let status = value_u64(value, &["status"]);
+  match source {
+    AccessLogSource::Admin => project_admin_api_activity(timestamp_unix_ms, value),
+    AccessLogSource::System | AccessLogSource::Waf => {
+      project_http_activity(source, timestamp_unix_ms, value)
+    }
+  }
+}
+
+fn project_http_activity(source: AccessLogSource, timestamp_unix_ms: u64, value: &Value) -> Value {
+  let method = value_string(value, &["method"]);
+  let (activity_id, activity_name) = http_activity(method.as_deref());
+  let status_code = value_u64(value, &["status"]);
+  let status_id = event_status_id(value, status_code);
+  let severity_id = severity_id(status_code, status_id);
+  let mut root = base_event(
+    timestamp_unix_ms,
+    OcsfClass {
+      category_uid: 4,
+      category_name: "Network Activity",
+      class_uid: HTTP_ACTIVITY_CLASS_UID,
+      class_name: "HTTP Activity",
+      activity_id,
+      activity_name,
+    },
+    status_id,
+    severity_id,
+  );
+  insert_string(
+    &mut root,
+    "message",
+    Some(format!("OxiBelt {} access", source_scope(source))),
+  );
+
+  if let Some(http_request) = http_request_value(value, method) {
+    root.insert("http_request".to_string(), http_request);
+  }
+  if let Some(http_response) = http_response_value(status_code) {
+    root.insert("http_response".to_string(), http_response);
+  }
+  if let Some(src_endpoint) = src_endpoint_value(value) {
+    root.insert("src_endpoint".to_string(), src_endpoint);
+  }
+  if let Some(dst_endpoint) = dst_endpoint_value(value) {
+    root.insert("dst_endpoint".to_string(), dst_endpoint);
+  }
+  if let Some(tls) = tls_value(value) {
+    root.insert("tls".to_string(), tls);
+  }
+  insert_string(
+    &mut root,
+    "app_protocol_name",
+    value_string(value, &["protocol"]),
+  );
+  if source == AccessLogSource::Waf {
+    root.insert(
+      "security_result".to_string(),
+      json!([{
+        "category_name": "WAF",
+        "action": "Logged",
+      }]),
+    );
+  }
+  root.insert("unmapped".to_string(), json!({ "oxibelt": value }));
+  Value::Object(root)
+}
+
+fn project_admin_api_activity(timestamp_unix_ms: u64, value: &Value) -> Value {
+  let method = value_string(value, &["method"]);
+  let (activity_id, activity_name) = api_activity(method.as_deref());
+  let status_code = value_u64(value, &["status"]);
+  let status_id = event_status_id(value, status_code);
+  let severity_id = severity_id(status_code, status_id);
+  let mut root = base_event(
+    timestamp_unix_ms,
+    OcsfClass {
+      category_uid: 6,
+      category_name: "Application Activity",
+      class_uid: API_ACTIVITY_CLASS_UID,
+      class_name: "API Activity",
+      activity_id,
+      activity_name,
+    },
+    status_id,
+    severity_id,
+  );
+  insert_string(
+    &mut root,
+    "message",
+    value_string(value, &["operation"]).map(|operation| format!("OxiBelt Admin API {operation}")),
+  );
+  root.insert("actor".to_string(), admin_actor_value(value));
+  root.insert("api".to_string(), admin_api_value(value));
+
+  if let Some(http_request) = http_request_value(value, method) {
+    root.insert("http_request".to_string(), http_request);
+  }
+  if let Some(http_response) = http_response_value(status_code) {
+    root.insert("http_response".to_string(), http_response);
+  }
+  if let Some(src_endpoint) = src_endpoint_value(value) {
+    root.insert("src_endpoint".to_string(), src_endpoint);
+  }
+  if let Some(tls) = tls_value(value) {
+    root.insert("tls".to_string(), tls);
+  }
+  if let Some(resources) = admin_resources_value(value) {
+    root.insert("resources".to_string(), resources);
+  }
+  insert_string(&mut root, "status_detail", value_string(value, &["error"]));
+  root.insert("unmapped".to_string(), json!({ "oxibelt": value }));
+  Value::Object(root)
+}
+
+fn base_event(
+  timestamp_unix_ms: u64,
+  class: OcsfClass,
+  status_id: u64,
+  severity_id: u64,
+) -> Map<String, Value> {
   let mut root = Map::new();
   root.insert(
     "time".to_string(),
@@ -155,107 +161,53 @@ pub(super) fn project_ocsf(
   );
   root.insert(
     "category_uid".to_string(),
-    Value::Number(Number::from(4_u64)),
+    Value::Number(Number::from(class.category_uid)),
   );
   root.insert(
     "category_name".to_string(),
-    Value::String("Network Activity".to_string()),
+    Value::String(class.category_name.to_string()),
   );
   root.insert(
     "class_uid".to_string(),
-    Value::Number(Number::from(4002_u64)),
+    Value::Number(Number::from(class.class_uid)),
   );
   root.insert(
     "class_name".to_string(),
-    Value::String("HTTP Activity".to_string()),
+    Value::String(class.class_name.to_string()),
   );
   root.insert(
     "activity_id".to_string(),
-    Value::Number(Number::from(1_u64)),
+    Value::Number(Number::from(class.activity_id)),
   );
   root.insert(
     "activity_name".to_string(),
-    Value::String("Access".to_string()),
+    Value::String(class.activity_name.to_string()),
   );
   root.insert(
     "type_uid".to_string(),
-    Value::Number(Number::from(400201_u64)),
+    Value::Number(Number::from(type_uid(class.class_uid, class.activity_id))),
   );
   root.insert(
     "type_name".to_string(),
-    Value::String(format!("HTTP Activity: {}", source_scope(source))),
+    Value::String(format!("{}: {}", class.class_name, class.activity_name)),
   );
   root.insert(
     "severity_id".to_string(),
-    Value::Number(Number::from(
-      if status.is_some_and(|status| status >= 500) {
-        3_u64
-      } else {
-        1_u64
-      },
-    )),
+    Value::Number(Number::from(severity_id)),
+  );
+  root.insert(
+    "severity".to_string(),
+    Value::String(severity_name(severity_id).to_string()),
+  );
+  root.insert(
+    "status_id".to_string(),
+    Value::Number(Number::from(status_id)),
   );
   root.insert(
     "status".to_string(),
-    Value::String(event_outcome(value).to_string()),
+    Value::String(status_name(status_id).to_string()),
   );
-  root.insert(
-    "http_request".to_string(),
-    json!({
-      "http_method": value_string(value, &["method"]),
-      "url": {
-        "path": value_string(value, &["path"]),
-        "query_string": value_string(value, &["query"]),
-        "url_string": value_string(value, &["uri"]).or_else(|| value_string(value, &["path"])),
-      },
-      "user_agent": user_agent_value(value),
-    }),
-  );
-  root.insert(
-    "http_response".to_string(),
-    json!({
-      "code": status,
-    }),
-  );
-  root.insert(
-    "src_endpoint".to_string(),
-    json!({
-      "ip": value_string(value, &["client_ip"]).or_else(|| value_string(value, &["source_ip"])),
-      "port": value_u64(value, &["client_port"]),
-    }),
-  );
-  root.insert(
-    "tls".to_string(),
-    json!({
-      "enabled": value_bool(value, &["tls"]),
-    }),
-  );
-  if source == AccessLogSource::Admin {
-    root.insert(
-      "actor".to_string(),
-      json!({
-        "user": {
-          "name": value_string(value, &["actor"]),
-          "uid": value_string(value, &["subject"]),
-          "groups": value.get("groups").cloned(),
-        },
-        "process": {
-          "name": "oxibelt-admin-api",
-        },
-      }),
-    );
-  }
-  if source == AccessLogSource::Waf {
-    root.insert(
-      "security_result".to_string(),
-      json!([{
-        "category_name": "WAF",
-        "action": "Logged",
-      }]),
-    );
-  }
-  root.insert("unmapped".to_string(), json!({ "oxibelt": value }));
-  Value::Object(root)
+  root
 }
 
 pub(super) fn admin_event_value(event: &AdminAuditEvent) -> Value {
@@ -306,22 +258,6 @@ pub(super) fn emit_stdout(source: AccessLogSource, value: &Value) {
   }
 }
 
-pub(super) fn event_name(source: AccessLogSource) -> &'static str {
-  match source {
-    AccessLogSource::System => "oxibelt.access",
-    AccessLogSource::Waf => "oxibelt.waf.access",
-    AccessLogSource::Admin => "oxibelt.admin.access",
-  }
-}
-
-pub(super) fn event_dataset(source: AccessLogSource) -> &'static str {
-  match source {
-    AccessLogSource::System => "oxibelt.access",
-    AccessLogSource::Waf => "oxibelt.waf.access",
-    AccessLogSource::Admin => "oxibelt.admin.access",
-  }
-}
-
 pub(super) fn source_scope(source: AccessLogSource) -> &'static str {
   match source {
     AccessLogSource::System => "system",
@@ -330,34 +266,185 @@ pub(super) fn source_scope(source: AccessLogSource) -> &'static str {
   }
 }
 
-fn event_categories(source: AccessLogSource) -> Vec<&'static str> {
-  match source {
-    AccessLogSource::System => vec!["web"],
-    AccessLogSource::Waf => vec!["web", "intrusion_detection"],
-    AccessLogSource::Admin => vec!["web", "configuration"],
+fn http_activity(method: Option<&str>) -> (u64, &'static str) {
+  match method.map(str::to_ascii_uppercase).as_deref() {
+    Some("CONNECT") => (1, "Connect"),
+    Some("DELETE") => (2, "Delete"),
+    Some("GET") => (3, "Get"),
+    Some("HEAD") => (4, "Head"),
+    Some("OPTIONS") => (5, "Options"),
+    Some("POST") => (6, "Post"),
+    Some("PUT") => (7, "Put"),
+    Some("TRACE") => (8, "Trace"),
+    Some("PATCH") => (9, "Patch"),
+    Some(_) => (99, "Other"),
+    None => (0, "Unknown"),
   }
 }
 
-fn event_action(source: AccessLogSource, value: &Value) -> String {
-  match source {
-    AccessLogSource::Admin => value_string(value, &["operation"]).unwrap_or_else(|| "admin".into()),
-    _ => value_string(value, &["method"]).unwrap_or_else(|| "access".into()),
+fn api_activity(method: Option<&str>) -> (u64, &'static str) {
+  match method.map(str::to_ascii_uppercase).as_deref() {
+    Some("POST") => (1, "Create"),
+    Some("GET") | Some("HEAD") | Some("OPTIONS") => (2, "Read"),
+    Some("PUT") | Some("PATCH") => (3, "Update"),
+    Some("DELETE") => (4, "Delete"),
+    Some(_) => (99, "Other"),
+    None => (0, "Unknown"),
   }
 }
 
-fn event_outcome(value: &Value) -> &'static str {
+fn type_uid(class_uid: u64, activity_id: u64) -> u64 {
+  class_uid.saturating_mul(100).saturating_add(activity_id)
+}
+
+fn http_request_value(value: &Value, method: Option<String>) -> Option<Value> {
+  let mut request = Map::new();
+  insert_string(&mut request, "http_method", method);
+  insert_string(&mut request, "user_agent", user_agent_value(value));
+  let mut url = Map::new();
+  insert_string(&mut url, "path", value_string(value, &["path"]));
+  insert_string(&mut url, "query_string", value_string(value, &["query"]));
+  insert_string(
+    &mut url,
+    "url_string",
+    value_string(value, &["uri"]).or_else(|| value_string(value, &["path"])),
+  );
+  if !url.is_empty() {
+    request.insert("url".to_string(), Value::Object(url));
+  }
+  object_value(request)
+}
+
+fn http_response_value(status_code: Option<u64>) -> Option<Value> {
+  let mut response = Map::new();
+  insert_u64(&mut response, "code", status_code);
+  object_value(response)
+}
+
+fn src_endpoint_value(value: &Value) -> Option<Value> {
+  let mut endpoint = Map::new();
+  insert_string(
+    &mut endpoint,
+    "ip",
+    value_string(value, &["client_ip"]).or_else(|| value_string(value, &["source_ip"])),
+  );
+  insert_u64(&mut endpoint, "port", value_u64(value, &["client_port"]));
+  object_value(endpoint)
+}
+
+fn dst_endpoint_value(value: &Value) -> Option<Value> {
+  let mut endpoint = Map::new();
+  insert_string(&mut endpoint, "hostname", value_string(value, &["host"]));
+  object_value(endpoint)
+}
+
+fn tls_value(value: &Value) -> Option<Value> {
+  value_bool(value, &["tls"]).map(|enabled| json!({ "enabled": enabled }))
+}
+
+fn admin_actor_value(value: &Value) -> Value {
+  let mut actor = Map::new();
+  let mut user = Map::new();
+  insert_string(&mut user, "name", value_string(value, &["actor"]));
+  insert_string(&mut user, "uid", value_string(value, &["subject"]));
+  if let Some(groups) = value.get("groups").and_then(Value::as_array)
+    && !groups.is_empty()
+  {
+    user.insert("groups".to_string(), Value::Array(groups.clone()));
+  }
+  if let Some(principal) = value_string(value, &["principal"]) {
+    user.insert("account".to_string(), json!({ "name": principal }));
+  }
+  if !user.is_empty() {
+    actor.insert("user".to_string(), Value::Object(user));
+  }
+  actor.insert(
+    "process".to_string(),
+    json!({
+      "name": "oxibelt-admin-api",
+    }),
+  );
+  Value::Object(actor)
+}
+
+fn admin_api_value(value: &Value) -> Value {
+  let mut api = Map::new();
+  api.insert(
+    "name".to_string(),
+    Value::String("OxiBelt Admin API".to_string()),
+  );
+  insert_string(&mut api, "operation", value_string(value, &["operation"]));
+  if let Some(service) = value_string(value, &["service"]) {
+    api.insert("service".to_string(), json!({ "name": service }));
+  }
+  if let Some(request_id) = value_string(value, &["request_id"]) {
+    api.insert("request".to_string(), json!({ "uid": request_id }));
+  }
+  Value::Object(api)
+}
+
+fn admin_resources_value(value: &Value) -> Option<Value> {
+  let action = value_string(value, &["action"]);
+  let resource = value_string(value, &["resource"]);
+  let target_kind = value_string(value, &["target_kind"]);
+  let target_id = value_string(value, &["target_id"]);
+  if action.is_none() && resource.is_none() && target_kind.is_none() && target_id.is_none() {
+    return None;
+  }
+  let mut item = Map::new();
+  insert_string(&mut item, "name", resource);
+  insert_string(&mut item, "type", target_kind);
+  insert_string(&mut item, "uid", target_id);
+  insert_string(&mut item, "action", action);
+  Some(Value::Array(vec![Value::Object(item)]))
+}
+
+fn event_status_id(value: &Value, status_code: Option<u64>) -> u64 {
   if let Some(outcome) = value_string(value, &["outcome"]) {
-    if outcome.eq_ignore_ascii_case("success") || outcome.eq_ignore_ascii_case("allowed") {
-      return "success";
+    let normalized = outcome.to_ascii_lowercase();
+    if matches!(normalized.as_str(), "success" | "allowed" | "applied") {
+      return 1;
     }
-    if outcome.eq_ignore_ascii_case("failure") || outcome.eq_ignore_ascii_case("denied") {
-      return "failure";
+    if matches!(normalized.as_str(), "failure" | "denied" | "rejected") {
+      return 2;
     }
   }
-  match value_u64(value, &["status"]) {
-    Some(status) if status >= 400 => "failure",
-    Some(_) => "success",
-    None => "unknown",
+  match status_code {
+    Some(status) if status >= 400 => 2,
+    Some(_) => 1,
+    None => 0,
+  }
+}
+
+fn status_name(status_id: u64) -> &'static str {
+  match status_id {
+    1 => "Success",
+    2 => "Failure",
+    99 => "Other",
+    _ => "Unknown",
+  }
+}
+
+fn severity_id(status_code: Option<u64>, status_id: u64) -> u64 {
+  match status_code {
+    Some(status) if status >= 500 => 3,
+    Some(status) if status >= 400 => 2,
+    Some(_) => 1,
+    None if status_id == 2 => 2,
+    None => 1,
+  }
+}
+
+fn severity_name(severity_id: u64) -> &'static str {
+  match severity_id {
+    1 => "Informational",
+    2 => "Low",
+    3 => "Medium",
+    4 => "High",
+    5 => "Critical",
+    6 => "Fatal",
+    99 => "Other",
+    _ => "Unknown",
   }
 }
 
@@ -390,7 +477,7 @@ fn value_bool(value: &Value, path: &[&str]) -> Option<bool> {
   value_at(value, path)?.as_bool()
 }
 
-pub(super) fn value_u64(value: &Value, path: &[&str]) -> Option<u64> {
+fn value_u64(value: &Value, path: &[&str]) -> Option<u64> {
   let value = value_at(value, path)?;
   value
     .as_u64()
@@ -404,26 +491,23 @@ fn value_at<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
   Some(value)
 }
 
-fn string_value(value: impl Into<String>) -> Value {
-  Value::String(value.into())
+fn insert_string(object: &mut Map<String, Value>, key: &str, value: Option<String>) {
+  if let Some(value) = value {
+    object.insert(key.to_string(), Value::String(value));
+  }
 }
 
-fn insert_nested(object: &mut Map<String, Value>, path: &[&str], value: Value) {
-  let Some((head, tail)) = path.split_first() else {
-    return;
-  };
-  if tail.is_empty() {
-    object.insert((*head).to_string(), value);
-    return;
+fn insert_u64(object: &mut Map<String, Value>, key: &str, value: Option<u64>) {
+  if let Some(value) = value {
+    object.insert(key.to_string(), Value::Number(Number::from(value)));
   }
-  let child = object
-    .entry((*head).to_string())
-    .or_insert_with(|| Value::Object(Map::new()));
-  if !child.is_object() {
-    *child = Value::Object(Map::new());
-  }
-  if let Value::Object(child) = child {
-    insert_nested(child, tail, value);
+}
+
+fn object_value(object: Map<String, Value>) -> Option<Value> {
+  if object.is_empty() {
+    None
+  } else {
+    Some(Value::Object(object))
   }
 }
 
@@ -432,7 +516,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn ecs_projection_maps_http_and_source_fields() {
+  fn ocsf_http_projection_maps_system_access_fields() {
     let record = json!({
       "event": "oxibelt.access",
       "scope": "system",
@@ -444,37 +528,101 @@ mod tests {
       "client_port": 32123,
       "status": 200,
       "tls": true,
-      "user_agent": { "values": ["curl/8.0"] }
+      "user_agent": { "values": ["curl/8.0", "duplicate"] }
     });
 
-    let projected = project_ecs(AccessLogSource::System, 42, &record);
+    let projected = project_ocsf(AccessLogSource::System, 42, &record);
 
-    assert_eq!(projected["@timestamp"], json!(42));
-    assert_eq!(projected["ecs"]["version"], json!(ECS_VERSION));
-    assert_eq!(projected["http"]["request"]["method"], json!("GET"));
-    assert_eq!(projected["http"]["response"]["status_code"], json!(200));
-    assert_eq!(projected["source"]["ip"], json!("203.0.113.10"));
-    assert_eq!(projected["tls"]["established"], json!(true));
-    assert_eq!(projected["user_agent"]["original"], json!("curl/8.0"));
+    assert_eq!(projected["metadata"]["version"], json!(OCSF_VERSION));
+    assert_eq!(projected["category_uid"], json!(4));
+    assert_eq!(projected["class_uid"], json!(4002));
+    assert_eq!(projected["activity_id"], json!(3));
+    assert_eq!(projected["type_uid"], json!(400203));
+    assert_eq!(projected["http_request"]["http_method"], json!("GET"));
+    assert_eq!(projected["http_response"]["code"], json!(200));
+    assert_eq!(projected["src_endpoint"]["ip"], json!("203.0.113.10"));
+    assert_eq!(projected["tls"]["enabled"], json!(true));
+    assert_eq!(projected["http_request"]["user_agent"], json!("curl/8.0"));
+    assert_eq!(
+      projected["unmapped"]["oxibelt"]["user_agent"]["values"],
+      json!(["curl/8.0", "duplicate"])
+    );
   }
 
   #[test]
-  fn ocsf_projection_preserves_unmapped_record() {
+  fn ocsf_waf_projection_adds_security_result() {
+    let record = json!({
+      "event": "oxibelt.access",
+      "scope": "waf",
+      "method": "POST",
+      "path": "/login",
+      "status": 403
+    });
+
+    let projected = project_ocsf(AccessLogSource::Waf, 99, &record);
+
+    assert_eq!(projected["class_uid"], json!(4002));
+    assert_eq!(projected["activity_id"], json!(6));
+    assert_eq!(projected["status_id"], json!(2));
+    assert_eq!(
+      projected["security_result"][0]["category_name"],
+      json!("WAF")
+    );
+    assert_eq!(projected["unmapped"]["oxibelt"]["scope"], json!("waf"));
+  }
+
+  #[test]
+  fn ocsf_admin_projection_maps_tls_token_and_ipm_fields() {
     let record = json!({
       "event": "oxibelt.admin.access",
       "scope": "admin",
+      "request_id": "req-1",
+      "actor": "alice",
+      "principal": "admin",
+      "subject": "sub-1",
+      "groups": ["ops"],
+      "source_ip": "127.0.0.1",
+      "tls": true,
       "method": "POST",
-      "path": "/admin/tokens",
-      "status": 403,
-      "actor": "alice"
+      "path": "/admin/v1/tokens",
+      "service": "ipm",
+      "operation": "post.ipm.credentials",
+      "action": "ipm:CreateCredential",
+      "resource": "oxibelt:oxibelt:ipm:credential/*",
+      "target_kind": "credential",
+      "target_id": "cred-1",
+      "status": 201,
+      "outcome": "applied"
     });
 
     let projected = project_ocsf(AccessLogSource::Admin, 42, &record);
 
-    assert_eq!(projected["class_uid"], json!(4002));
-    assert_eq!(projected["http_response"]["code"], json!(403));
+    assert_eq!(projected["category_uid"], json!(6));
+    assert_eq!(projected["class_uid"], json!(6003));
+    assert_eq!(projected["activity_id"], json!(1));
+    assert_eq!(projected["type_uid"], json!(600301));
     assert_eq!(projected["actor"]["user"]["name"], json!("alice"));
-    assert_eq!(projected["unmapped"]["oxibelt"]["scope"], json!("admin"));
+    assert_eq!(projected["actor"]["user"]["uid"], json!("sub-1"));
+    assert_eq!(
+      projected["actor"]["user"]["account"]["name"],
+      json!("admin")
+    );
+    assert_eq!(projected["actor"]["user"]["groups"], json!(["ops"]));
+    assert_eq!(projected["api"]["operation"], json!("post.ipm.credentials"));
+    assert_eq!(projected["api"]["request"]["uid"], json!("req-1"));
+    assert_eq!(
+      projected["resources"][0]["name"],
+      json!("oxibelt:oxibelt:ipm:credential/*")
+    );
+    assert_eq!(
+      projected["resources"][0]["action"],
+      json!("ipm:CreateCredential")
+    );
+    assert_eq!(projected["tls"]["enabled"], json!(true));
+    assert_eq!(
+      projected["unmapped"]["oxibelt"]["target_id"],
+      json!("cred-1")
+    );
   }
 
   #[test]

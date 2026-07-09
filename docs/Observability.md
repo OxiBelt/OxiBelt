@@ -47,13 +47,7 @@ enabled = true
 
 [access_log.stdout]
 enabled = true
-schema = "ecs"
-
-[access_log.otlp]
-enabled = true
-endpoint = "http://127.0.0.1:4318/v1/logs"
-service_name = "oxibelt"
-export_timeout_ms = 3000
+schema = "ocsf"
 
 [telemetry.tracing]
 enabled = true
@@ -72,6 +66,9 @@ tenant boundary, set `propagate_trace_context = false`.
 Do not add credential-bearing request headers, session cookies, or response
 cookies to access-log fields. Keep custom access-log expressions focused on
 request IDs, route names, status, client network metadata, and upstream timing.
+Access logs currently export OCSF JSON on stdout only; OpenTelemetry access-log
+export is reserved for a later implementation. Trace OTLP export remains
+configured under `[telemetry.tracing]`.
 
 ## Bundle Assets
 

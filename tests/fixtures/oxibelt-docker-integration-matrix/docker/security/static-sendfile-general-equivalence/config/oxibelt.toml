@@ -10,7 +10,7 @@ enabled = true
 
 [access_log.stdout]
 enabled = true
-schema = "ecs"
+schema = "ocsf"
 
 [runtime]
 linux_only = true

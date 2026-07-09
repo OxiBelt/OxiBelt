@@ -28,7 +28,7 @@ run_case_checks() {
   logged="$(plain_client_request_with_headers_on_port 8080 "static-equivalence.example.test" "/static/ok.txt?case=system-log" 200 "GET" "" "User-Agent: first-agent" "User-Agent: second-agent")"
   assert_response_jq "${logged}" '.body == "static ok\n"'
   logs="$(docker logs "${proxy_container}" 2>&1 || true)"
-  matching="$(grep -F '"scope":"system"' <<<"${logs}" | grep -F '"path":"/static/ok.txt"' | grep -F '"status":200' | grep -F '"route":"static-equivalence"' || true)"
+  matching="$(grep -F '"class_uid":4002' <<<"${logs}" | grep -F '"scope":"system"' | grep -F '"path":"/static/ok.txt"' | grep -F '"status":200' | grep -F '"route":"static-equivalence"' || true)"
   if [[ -z "${matching}" ]]; then
     echo "${logs}" >&2
     fail_with_diagnostics "expected static sendfile system access log JSON on stdout"

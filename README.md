@@ -15,7 +15,7 @@ The current implementation is a production-oriented foundation: configuration is
 - Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, TCP upstream/stream-target PROXY protocol egress, rate limits, connection limits, request limits, and bounded response cache support.
 - Opt-in TCP/UDP stream listeners for raw L4 forwarding to fixed targets or stream pools, with visible TLS/QUIC SNI-aware passthrough routing.
 - OxiRule request, response, and stream WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded HTTP body scanning, WebSocket/WebTransport payload inspection, and optional CRS-compatible anomaly scoring.
-- Request-wide structured system access logs with stdout and PostgreSQL sinks.
+- Request-wide structured system access logs with OCSF JSON stdout delivery.
 - Prometheus metrics with aggregate or detailed route/upstream/protocol labels, plus optional W3C tracecontext propagation and OTLP trace export.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
 - Kubernetes Gateway API controller binary that can translate `HTTPRoute` and
