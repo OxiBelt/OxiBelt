@@ -102,6 +102,22 @@ impl AccessLogRecord {
     out
   }
 
+  pub fn to_json_value(&self) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+      "event".to_string(),
+      serde_json::Value::String(Self::EVENT.to_string()),
+    );
+    object.insert(
+      "timestamp_unix_ms".to_string(),
+      serde_json::Value::Number(serde_json::Number::from(self.timestamp_unix_ms)),
+    );
+    for field in &self.fields {
+      object.insert(field.name.clone(), field.value.to_json_value());
+    }
+    serde_json::Value::Object(object)
+  }
+
   pub fn emit_stdout(&self) {
     let mut stdout = std::io::stdout().lock();
     if let Err(error) = writeln!(stdout, "{}", self.to_json_line()) {
@@ -111,6 +127,24 @@ impl AccessLogRecord {
 }
 
 impl AccessLogJsonValue {
+  fn to_json_value(&self) -> serde_json::Value {
+    match self {
+      Self::Bool(value) => serde_json::Value::Bool(*value),
+      Self::Int(value) => serde_json::Value::Number(serde_json::Number::from(*value)),
+      Self::String(value) => serde_json::Value::String(value.clone()),
+      Self::Array(values) => {
+        serde_json::Value::Array(values.iter().map(Self::to_json_value).collect())
+      }
+      Self::Object(fields) => serde_json::Value::Object(
+        fields
+          .iter()
+          .map(|(name, value)| (name.clone(), value.to_json_value()))
+          .collect(),
+      ),
+      Self::Null => serde_json::Value::Null,
+    }
+  }
+
   pub(super) fn from_value(value: Value, ctx: &EvalContext<'_>) -> anyhow::Result<Self> {
     match value {
       Value::Bool(value) => Ok(Self::Bool(value)),

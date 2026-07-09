@@ -5,6 +5,13 @@ level = "info"
 enabled = true
 stdout = true
 
+[access_log.system]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ecs"
+
 [runtime]
 linux_only = true
 read_only_rootfs_compatible = true

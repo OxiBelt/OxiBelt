@@ -3,31 +3,6 @@ use crate::{DockerCase, ExpectStart, Needs, docker_case};
 pub(super) fn docker_cases() -> Vec<DockerCase> {
   vec![
     docker_case(
-      "database-access-log",
-      "postgres-mtls",
-      "OxiRule access logs are written to PostgreSQL over verified mTLS",
-      ExpectStart::Success,
-      Needs {
-        http_upstream: true,
-        postgres: true,
-        postgres_mtls: true,
-        ..Needs::default()
-      },
-      None,
-    ),
-    docker_case(
-      "database-access-log",
-      "system-postgres",
-      "system-wide access logs use a separate PostgreSQL sink",
-      ExpectStart::Success,
-      Needs {
-        http_upstream: true,
-        postgres: true,
-        ..Needs::default()
-      },
-      None,
-    ),
-    docker_case(
       "database-mitigation",
       "managed-postgres",
       "OxiRule mitigation events aggregate into a managed PostgreSQL table",

@@ -17,3 +17,8 @@ service:
         - otlp
       exporters:
         - debug
+    logs:
+      receivers:
+        - otlp
+      exporters:
+        - debug

@@ -83,12 +83,7 @@ const DOCKER_INTEGRATION_GROUPS: &[DockerIntegrationGroup] = &[
   },
   DockerIntegrationGroup {
     name: "state-data",
-    categories: &[
-      "database-access-log",
-      "database-mitigation",
-      "dynamic-policy",
-      "shared-state",
-    ],
+    categories: &["database-mitigation", "dynamic-policy", "shared-state"],
   },
   DockerIntegrationGroup {
     name: "ops",

@@ -1,14 +1,6 @@
 //! Immutable runtime snapshots and shared client pools used by request handlers.
 //! Reloads swap snapshots so in-flight work can finish against a consistent view.
-
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use anyhow::Context;
-use http::{HeaderValue, StatusCode};
-
-use crate::access_log::{AccessLogSinks, SystemAccessLog};
+use crate::access_log::{AccessLogRuntime, AccessLogSinks, AccessLogSource, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::cache::{ExternalCacheRuntime, ResponseCache};
 use crate::client_identity::ClientIdentityRuntime;
@@ -46,6 +38,11 @@ use crate::tls;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
 use crate::webtransport_admin::WebTransportAdminRegistry;
+use anyhow::Context;
+use http::{HeaderValue, StatusCode};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 pub(crate) mod handle;
 mod http1_upgrade;
@@ -314,9 +311,15 @@ impl AppSnapshot {
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
-    let admin_audit = AdminAuditRuntime::new(&config)
+    let access_log_runtime = AccessLogRuntime::new(&config.access_log)
       .await
-      .context("failed to build admin audit runtime")?;
+      .context("failed to build access log runtime")?;
+    let admin_audit = AdminAuditRuntime::new(
+      &config,
+      AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Admin),
+    )
+    .await
+    .context("failed to build admin audit runtime")?;
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
@@ -397,12 +400,14 @@ impl AppSnapshot {
     let route_table = RouteTable::new_with_waf(&config, &waf);
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
-    let access_logs = AccessLogSinks::new(&config.database.access_log)
-      .await
-      .context("failed to build access log sinks")?;
-    let system_access_log = SystemAccessLog::new(&config.logging.access_log)
-      .await
-      .context("failed to build system access log")?;
+    let access_logs = AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Waf);
+    let system_access_log = SystemAccessLog::new(
+      &config.logging.access_log,
+      access_log_runtime,
+      config.access_log.system.enabled || config.logging.access_log.enabled,
+    )
+    .await
+    .context("failed to build system access log")?;
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       cache.enabled(),

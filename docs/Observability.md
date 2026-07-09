@@ -6,7 +6,7 @@ Target project: OxiBelt Rust-based reverse proxy
 This runbook turns OxiBelt's existing operational surfaces into a small,
 operator-facing bundle. It does not introduce a new configuration section.
 Use `[metrics]`, `[health]`, `[telemetry.tracing]`, and
-`[logging.access_log]` directly.
+`[access_log]` directly.
 
 The supporting Prometheus, OpenTelemetry Collector, and Grafana assets live in:
 
@@ -35,6 +35,25 @@ live_path = "/live"
 [logging.access_log]
 enabled = true
 stdout = true
+
+[access_log.system]
+enabled = true
+
+[access_log.waf]
+enabled = true
+
+[access_log.admin]
+enabled = true
+
+[access_log.stdout]
+enabled = true
+schema = "ecs"
+
+[access_log.otlp]
+enabled = true
+endpoint = "http://127.0.0.1:4318/v1/logs"
+service_name = "oxibelt"
+export_timeout_ms = 3000
 
 [telemetry.tracing]
 enabled = true

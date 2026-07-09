@@ -7,23 +7,20 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  default_database_access_log_connect_timeout_ms, default_database_access_log_max_connections,
-  default_database_access_log_queue_capacity, default_shared_state_namespace,
-  quote_postgres_identifier_path, resolve_existing_local_config_file_path_with_logical,
-  validate_optional_non_empty, validate_postgres_identifier_path,
+  default_database_postgres_connect_timeout_ms, default_database_postgres_max_connections,
+  default_shared_state_namespace, quote_postgres_identifier_path,
+  resolve_existing_local_config_file_path_with_logical, validate_optional_non_empty,
+  validate_postgres_identifier_path,
 };
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct DatabaseConfig {
-  #[serde(default)]
-  pub access_log: DatabaseAccessLogConfig,
   #[serde(default)]
   pub mitigation: DatabaseMitigationConfig,
 }
 
 impl DatabaseConfig {
   pub(super) fn validate(&self) -> anyhow::Result<()> {
-    self.access_log.validate()?;
     self.mitigation.validate()
   }
 }
@@ -45,110 +42,6 @@ pub enum MitigationFailurePolicy {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct DatabaseAccessLogConfig {
-  #[serde(default)]
-  pub enabled: bool,
-  #[serde(default)]
-  pub connection_url: Option<String>,
-  #[serde(default)]
-  pub connection_url_env: Option<String>,
-  #[serde(default)]
-  pub table: Option<String>,
-  #[serde(default = "default_database_access_log_max_connections")]
-  pub max_connections: u32,
-  #[serde(default = "default_database_access_log_connect_timeout_ms")]
-  pub connect_timeout_ms: u64,
-  #[serde(default = "default_database_access_log_queue_capacity")]
-  pub queue_capacity: usize,
-  #[serde(default)]
-  pub tls: DatabaseTlsConfig,
-}
-
-impl Default for DatabaseAccessLogConfig {
-  fn default() -> Self {
-    Self {
-      enabled: false,
-      connection_url: None,
-      connection_url_env: None,
-      table: None,
-      max_connections: default_database_access_log_max_connections(),
-      connect_timeout_ms: default_database_access_log_connect_timeout_ms(),
-      queue_capacity: default_database_access_log_queue_capacity(),
-      tls: DatabaseTlsConfig::default(),
-    }
-  }
-}
-
-impl DatabaseAccessLogConfig {
-  fn validate(&self) -> anyhow::Result<()> {
-    self.validate_with_prefix("database.access_log")
-  }
-
-  pub(crate) fn validate_with_prefix(&self, prefix: &str) -> anyhow::Result<()> {
-    validate_optional_non_empty(
-      &format!("{prefix}.connection_url"),
-      self.connection_url.as_deref(),
-    )?;
-    validate_optional_non_empty(
-      &format!("{prefix}.connection_url_env"),
-      self.connection_url_env.as_deref(),
-    )?;
-    if let Some(table) = &self.table {
-      validate_postgres_identifier_path(&format!("{prefix}.table"), table)?;
-    }
-    if self.max_connections == 0 {
-      bail!("{prefix}.max_connections must be greater than 0");
-    }
-    if self.connect_timeout_ms == 0 {
-      bail!("{prefix}.connect_timeout_ms must be greater than 0");
-    }
-    if self.queue_capacity == 0 {
-      bail!("{prefix}.queue_capacity must be greater than 0");
-    }
-    self.tls.validate_with_prefix(&format!("{prefix}.tls"))?;
-
-    if !self.enabled {
-      return Ok(());
-    }
-
-    match (&self.connection_url, &self.connection_url_env) {
-      (Some(_), Some(_)) => {
-        bail!("{prefix} must set only one of connection_url or connection_url_env")
-      }
-      (None, None) => {
-        bail!("{prefix} requires connection_url or connection_url_env when enabled=true")
-      }
-      _ => {}
-    }
-    if self.table.is_none() {
-      bail!("{prefix}.table is required when enabled=true");
-    }
-
-    Ok(())
-  }
-
-  pub(crate) fn connection_url_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
-    if let Some(env_name) = &self.connection_url_env {
-      let value = std::env::var(env_name)
-        .with_context(|| format!("failed to read {prefix}.connection_url_env {env_name}"))?;
-      if value.trim().is_empty() {
-        bail!("{prefix}.connection_url_env {env_name} resolved to an empty value");
-      }
-      return Ok(Some(value));
-    }
-    Ok(self.connection_url.clone())
-  }
-
-  pub(crate) fn table_name_with_prefix(&self, prefix: &str) -> anyhow::Result<Option<String>> {
-    self
-      .table
-      .as_deref()
-      .map(|table| quote_postgres_identifier_path(&format!("{prefix}.table"), table))
-      .transpose()
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DatabaseMitigationConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -164,9 +57,9 @@ pub struct DatabaseMitigationConfig {
   pub connection_url: Option<String>,
   #[serde(default)]
   pub connection_url_env: Option<String>,
-  #[serde(default = "default_database_access_log_max_connections")]
+  #[serde(default = "default_database_postgres_max_connections")]
   pub max_connections: u32,
-  #[serde(default = "default_database_access_log_connect_timeout_ms")]
+  #[serde(default = "default_database_postgres_connect_timeout_ms")]
   pub connect_timeout_ms: u64,
   #[serde(default = "default_database_mitigation_queue_capacity")]
   pub queue_capacity: usize,
@@ -190,8 +83,8 @@ impl Default for DatabaseMitigationConfig {
       backend: None,
       connection_url: None,
       connection_url_env: None,
-      max_connections: default_database_access_log_max_connections(),
-      connect_timeout_ms: default_database_access_log_connect_timeout_ms(),
+      max_connections: default_database_postgres_max_connections(),
+      connect_timeout_ms: default_database_postgres_connect_timeout_ms(),
       queue_capacity: default_database_mitigation_queue_capacity(),
       dedupe_window_ms: default_database_mitigation_dedupe_window_ms(),
       ttl_seconds: default_database_mitigation_ttl_seconds(),
@@ -295,14 +188,18 @@ impl Default for DatabaseTlsConfig {
 }
 
 impl DatabaseTlsConfig {
-  pub(super) fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+  pub(super) fn resolve_relative_paths(
+    &mut self,
+    prefix: &str,
+    base_dir: &Path,
+  ) -> anyhow::Result<Vec<PathBuf>> {
     let mut source_paths = Vec::new();
     self.ca_cert = self
       .ca_cert
       .take()
       .map(|path| {
         let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.ca_cert",
+          &format!("{prefix}.ca_cert"),
           base_dir,
           &path,
         )?;
@@ -315,7 +212,7 @@ impl DatabaseTlsConfig {
       .take()
       .map(|path| {
         let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.client_cert",
+          &format!("{prefix}.client_cert"),
           base_dir,
           &path,
         )?;
@@ -328,7 +225,7 @@ impl DatabaseTlsConfig {
       .take()
       .map(|path| {
         let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "database.access_log.tls.client_key",
+          &format!("{prefix}.client_key"),
           base_dir,
           &path,
         )?;

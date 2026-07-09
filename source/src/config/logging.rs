@@ -4,7 +4,7 @@
 use anyhow::bail;
 use serde::Deserialize;
 
-use super::{DatabaseAccessLogConfig, default_true};
+use super::default_true;
 use crate::waf::AccessLogFieldConfig;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -30,10 +30,6 @@ impl LoggingConfig {
       bail!("logging.level must not be empty");
     }
     crate::waf::validate_access_log_field_configs("logging.access_log", &self.access_log.fields)?;
-    self
-      .access_log
-      .database
-      .validate_with_prefix("logging.access_log.database")?;
     Ok(())
   }
 }
@@ -46,8 +42,6 @@ pub struct LoggingAccessLogConfig {
   pub stdout: bool,
   #[serde(default = "default_system_access_log_field_configs")]
   pub fields: Vec<AccessLogFieldConfig>,
-  #[serde(default)]
-  pub database: DatabaseAccessLogConfig,
 }
 
 impl Default for LoggingAccessLogConfig {
@@ -56,7 +50,6 @@ impl Default for LoggingAccessLogConfig {
       enabled: false,
       stdout: true,
       fields: default_system_access_log_field_configs(),
-      database: DatabaseAccessLogConfig::default(),
     }
   }
 }

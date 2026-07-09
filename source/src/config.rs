@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::waf::WafConfig;
 
+mod access_log;
 mod admin_legacy;
 mod admin_runtime;
 mod allowed_keys;
@@ -54,6 +55,7 @@ mod turn;
 mod turn_queue;
 mod upstream_pool;
 mod workers;
+pub use access_log::*;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use cache_external::{
   ExternalCacheHandlerConfig, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
@@ -107,6 +109,7 @@ pub use workers::*;
 /// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+  pub access_log: AccessLogConfig,
   pub config: ConfigBehaviorConfig,
   pub logging: LoggingConfig,
   pub runtime: RuntimeConfig,
@@ -145,6 +148,8 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+  #[serde(default)]
+  access_log: AccessLogConfig,
   #[serde(default)]
   config: ConfigBehaviorConfig,
   #[serde(default)]
@@ -225,6 +230,7 @@ impl TryFrom<RawConfig> for Config {
       .collect::<anyhow::Result<Vec<_>>>()?;
     let listeners = raw.listeners.resolve()?;
     Ok(Self {
+      access_log: raw.access_log,
       config: raw.config,
       logging: raw.logging,
       runtime,
@@ -272,6 +278,7 @@ impl<'de> Deserialize<'de> for Config {
     let diagnostics =
       lb_policy_compat::normalize_toml_from_config(&mut value).map_err(serde::de::Error::custom)?;
     lb_policy_compat::ensure_supported(&diagnostics).map_err(serde::de::Error::custom)?;
+    reject_legacy_access_log_postgres(&value).map_err(serde::de::Error::custom)?;
     RawConfig::deserialize(value)
       .map_err(serde::de::Error::custom)?
       .try_into()
@@ -737,31 +744,17 @@ impl Config {
     }
     for path in self
       .database
-      .access_log
-      .tls
-      .resolve_relative_paths(&path_roots.cert_dir)?
-    {
-      self.source_paths.remember_runtime_file(path);
-    }
-    for path in self
-      .database
       .mitigation
       .tls
-      .resolve_relative_paths(&path_roots.cert_dir)?
-    {
-      self.source_paths.remember_runtime_file(path);
-    }
-    for path in self
-      .logging
-      .access_log
-      .database
-      .tls
-      .resolve_relative_paths(&path_roots.cert_dir)?
+      .resolve_relative_paths("database.mitigation.tls", &path_roots.cert_dir)?
     {
       self.source_paths.remember_runtime_file(path);
     }
     for backend in &mut self.shared_state.backends {
-      for path in backend.tls.resolve_relative_paths(&path_roots.cert_dir)? {
+      for path in backend.tls.resolve_relative_paths(
+        &format!("shared_state.backends.{}.tls", backend.name),
+        &path_roots.cert_dir,
+      )? {
         self.source_paths.remember_runtime_file(path);
       }
     }
@@ -872,6 +865,7 @@ impl Config {
     self.quic.validate(self.listeners.http3)?;
     self.validate_http3_alt_svc_binds()?;
     self.validate_sni_forward()?;
+    self.access_log.validate()?;
     self.logging.validate()?;
 
     if self.runtime.linux_only && !cfg!(target_os = "linux") {
@@ -2536,6 +2530,7 @@ fn normalize_merged_lb_policy_compat(value: &mut toml::Value) -> anyhow::Result<
 }
 
 fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
+  reject_legacy_access_log_postgres(value)?;
   let strict = value
     .get("config")
     .and_then(|config| config.get("strict_unknown_fields"))
@@ -2557,6 +2552,28 @@ fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn reject_legacy_access_log_postgres(value: &toml::Value) -> anyhow::Result<()> {
+  if value
+    .get("database")
+    .and_then(|database| database.get("access_log"))
+    .is_some()
+  {
+    bail!(
+      "database.access_log PostgreSQL access-log sink has been removed; use access_log.stdout or access_log.otlp"
+    );
+  }
+  if value
+    .get("logging")
+    .and_then(|logging| logging.get("access_log"))
+    .and_then(|access_log| access_log.get("database"))
+    .is_some()
+  {
+    bail!(
+      "logging.access_log.database PostgreSQL access-log sink has been removed; use access_log.stdout or access_log.otlp"
+    );
+  }
+  Ok(())
+}
 fn collect_unknown_keys(value: &toml::Value, path: &str, unknown: &mut Vec<String>) {
   if path == "waf" || path.ends_with(".waf") || path.contains(".waf.") {
     return;
@@ -2595,25 +2612,27 @@ fn join_key_path(parent: &str, key: &str) -> String {
 fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
   let keys = match path {
     "" => allowed_keys::ROOT_CONFIG_KEYS,
+    "access_log" => &["admin", "otlp", "stdout", "system", "waf"][..],
+    "access_log.admin" => &["enabled"][..],
+    "access_log.otlp" => &[
+      "batch_size",
+      "enabled",
+      "endpoint",
+      "export_timeout_ms",
+      "queue_capacity",
+      "service_name",
+    ][..],
+    "access_log.stdout" => &["enabled", "schema"][..],
+    "access_log.system" => &["enabled"][..],
+    "access_log.waf" => &["enabled"][..],
     "config" => &[
       "lb_policy_compat_profile",
       "strict_unknown_fields",
       "warn_on_deprecated_fields",
     ][..],
     "logging" => &["access_log", "level"][..],
-    "logging.access_log" => &["database", "enabled", "fields", "stdout"][..],
+    "logging.access_log" => &["enabled", "fields", "stdout"][..],
     "logging.access_log.fields" => &["expression", "name", "value"][..],
-    "logging.access_log.database" => &[
-      "connect_timeout_ms",
-      "connection_url",
-      "connection_url_env",
-      "enabled",
-      "max_connections",
-      "queue_capacity",
-      "table",
-      "tls",
-    ][..],
-    "logging.access_log.database.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "runtime" => &[
       "accept",
       "direct_h1_io",
@@ -3155,18 +3174,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "referrer_policy",
       "x_content_type_options",
     ][..],
-    "database" => &["access_log", "mitigation"][..],
-    "database.access_log" => &[
-      "connect_timeout_ms",
-      "connection_url",
-      "connection_url_env",
-      "enabled",
-      "max_connections",
-      "queue_capacity",
-      "table",
-      "tls",
-    ][..],
-    "database.access_log.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
+    "database" => &["mitigation"][..],
     "database.mitigation" => &[
       "backend",
       "connect_timeout_ms",
@@ -5070,7 +5078,7 @@ pub struct SharedStateBackendConfig {
   pub connection_url_env: Option<String>,
   #[serde(default = "default_shared_state_max_connections")]
   pub max_connections: u32,
-  #[serde(default = "default_database_access_log_connect_timeout_ms")]
+  #[serde(default = "default_database_postgres_connect_timeout_ms")]
   pub connect_timeout_ms: u64,
   #[serde(default)]
   pub tls: DatabaseTlsConfig,
@@ -5733,16 +5741,12 @@ fn default_discovery_min_ttl_ms() -> u64 {
   1_000
 }
 
-fn default_database_access_log_max_connections() -> u32 {
+fn default_database_postgres_max_connections() -> u32 {
   4
 }
 
-fn default_database_access_log_connect_timeout_ms() -> u64 {
+fn default_database_postgres_connect_timeout_ms() -> u64 {
   3_000
-}
-
-fn default_database_access_log_queue_capacity() -> usize {
-  1024
 }
 
 fn default_admin_audit_queue_capacity() -> usize {

@@ -149,8 +149,6 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("cache", "shared-background-refresh-disabled"),
   ("cache", "admission-stale-errors"),
   ("cache", "collapsed-forwarding-metrics"),
-  ("database-access-log", "postgres-mtls"),
-  ("database-access-log", "system-postgres"),
   ("database-mitigation", "managed-postgres"),
   ("database-mitigation", "existing-postgres"),
   ("shared-state", "redis-valkey-cluster-state"),

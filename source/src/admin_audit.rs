@@ -14,6 +14,7 @@ use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::access_log::AccessLogSinks;
 use crate::config::Config;
 
 mod request;
@@ -22,6 +23,7 @@ mod store;
 #[derive(Clone)]
 pub struct AdminAuditRuntime {
   inner: Option<AdminAuditSink>,
+  access_logs: Option<AccessLogSinks>,
 }
 
 #[derive(Clone)]
@@ -102,11 +104,15 @@ pub struct AdminAuditHandle {
 
 pub(crate) struct AdminAuditReservation {
   permit: Option<mpsc::OwnedPermit<AdminAuditEvent>>,
+  access_logs: Option<AccessLogSinks>,
 }
 
 impl AdminAuditRuntime {
   pub fn disabled() -> Self {
-    Self { inner: None }
+    Self {
+      inner: None,
+      access_logs: None,
+    }
   }
 
   #[cfg(test)]
@@ -121,12 +127,16 @@ impl AdminAuditRuntime {
         pool,
         sender,
       }),
+      access_logs: None,
     }
   }
 
-  pub async fn new(config: &Config) -> anyhow::Result<Self> {
+  pub async fn new(config: &Config, access_logs: AccessLogSinks) -> anyhow::Result<Self> {
     if !config.admin.enabled || !config.admin.audit.enabled {
-      return Ok(Self::disabled());
+      return Ok(Self {
+        inner: None,
+        access_logs: Some(access_logs),
+      });
     }
     let backend_name = config
       .admin
@@ -160,16 +170,21 @@ impl AdminAuditRuntime {
         pool,
         sender,
       }),
+      access_logs: Some(access_logs),
     })
   }
 
   pub(crate) fn reserve(&self) -> anyhow::Result<AdminAuditReservation> {
     let Some(inner) = &self.inner else {
-      return Ok(AdminAuditReservation { permit: None });
+      return Ok(AdminAuditReservation {
+        permit: None,
+        access_logs: self.access_logs.clone(),
+      });
     };
     match inner.sender.clone().try_reserve_owned() {
       Ok(permit) => Ok(AdminAuditReservation {
         permit: Some(permit),
+        access_logs: self.access_logs.clone(),
       }),
       Err(mpsc::error::TrySendError::Full(_)) => {
         bail!("admin audit queue is full");
@@ -182,6 +197,9 @@ impl AdminAuditRuntime {
 
   pub(crate) fn emit_unstored(&self, event: AdminAuditEvent, error: &anyhow::Error) {
     emit_tracing(&event);
+    if let Some(access_logs) = &self.access_logs {
+      access_logs.emit_admin_event(&event);
+    }
     warn!(error = %error, "admin audit unavailable; rejected admin request without durable audit row");
   }
 
@@ -196,6 +214,9 @@ impl AdminAuditRuntime {
 impl AdminAuditReservation {
   pub(crate) fn commit(self, event: AdminAuditEvent) {
     emit_tracing(&event);
+    if let Some(access_logs) = &self.access_logs {
+      access_logs.emit_admin_event(&event);
+    }
     if let Some(permit) = self.permit {
       drop(permit.send(event));
     }
