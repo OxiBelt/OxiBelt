@@ -7243,7 +7243,7 @@ expression = "Response.Http.Status"
 }
 
 #[test]
-fn access_log_stdout_rejects_future_ecs_schema() {
+fn access_log_stdout_accepts_ecs_schema() {
   let temp_dir = common::TempDir::new("access-log-ecs-schema");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "access-log-ecs-schema");
@@ -7257,11 +7257,31 @@ schema = "ecs"
     common::minimal_config_toml(&cert_path, &key_path)
   );
 
-  let error = toml::from_str::<Config>(&raw).expect_err("ECS schema should fail for now");
+  let config: Config = toml::from_str(&raw).expect("ECS schema should parse");
+  config.validate().expect("ECS schema should validate");
+  assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ecs);
+}
+
+#[test]
+fn access_log_stdout_rejects_unknown_schema() {
+  let temp_dir = common::TempDir::new("access-log-unknown-schema");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "access-log-unknown-schema");
+  let raw = format!(
+    r#"
+{}
+
+[access_log.stdout]
+schema = "cef"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("unknown schema should fail");
   assert!(
     error
       .to_string()
-      .contains("access_log.stdout.schema = \"ecs\" is not implemented yet"),
+      .contains("unsupported access_log.stdout.schema \"cef\"; use \"ocsf\" or \"ecs\""),
     "unexpected error: {error}"
   );
 }

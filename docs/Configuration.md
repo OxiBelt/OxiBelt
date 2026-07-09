@@ -268,7 +268,7 @@ schema = "ocsf"
 
 `strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `lb_policy_compat_profile` defaults to `strict`, which accepts only canonical OxiBelt load-balancing policy names. Set it to `nginx` or `caddy` only while migrating legacy pool-policy names; the profile converts exact safe aliases and rejects names that do not have an exact OxiBelt equivalent. `level` is passed to the tracing filter and defaults to `info`.
 
-`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited Open Cybersecurity Schema Framework JSON and defaults to `schema = "ocsf"`. Elastic Common Schema and OpenTelemetry access-log export are reserved for later implementation and fail configuration loading if selected now.
+`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited JSON and defaults to `schema = "ocsf"`. Set `schema = "ecs"` to emit Elastic Common Schema JSON instead. OpenTelemetry access-log export is reserved for later implementation and fails configuration loading if selected now.
 
 `logging.access_log` keeps the request-wide field-expression list and legacy `enabled` compatibility flag. When enabled through either `[access_log.system]` or `logging.access_log.enabled`, OxiBelt emits one access-log record for each finalized HTTP response with `event = "oxibelt.access"` and `scope = "system"` before schema projection. The default fields include request/response IDs, transaction ID, method, URI, client IP, route, status, upstream name, upstream timing fields, and a duplicate-safe `user_agent` collection from `Request.Headers.getAll('User-Agent')`.
 
@@ -288,7 +288,7 @@ name = "status"
 expression = "Response.Http.Status"
 ```
 
-PostgreSQL access-log sinks are removed. `database.access_log` and `logging.access_log.database` fail configuration loading; use `[access_log.stdout]` with `schema = "ocsf"`.
+PostgreSQL access-log sinks are removed. `database.access_log` and `logging.access_log.database` fail configuration loading; use `[access_log.stdout]` with `schema = "ocsf"` or `schema = "ecs"`.
 
 ```toml
 [runtime]
@@ -1935,7 +1935,9 @@ schema = "ocsf"
 
 `[access_log.stdout].schema = "ocsf"` writes Open Cybersecurity Schema Framework JSON and preserves the original OxiBelt record under `unmapped.oxibelt`. System and WAF records use OCSF HTTP Activity; Admin API records use OCSF API Activity so fine-grained token identity, authorization checks, TLS scheme state, and redacted request summaries stay in the access-log stream.
 
-`schema = "ecs"` and `[access_log.otlp]` are not implemented for access logs yet and fail configuration loading. OpenTelemetry trace export under `[telemetry.tracing]` is unaffected.
+`[access_log.stdout].schema = "ecs"` writes Elastic Common Schema JSON with `ecs.version = "9.4.0"` and preserves the original OxiBelt record under `oxibelt.access.original`. System and WAF records map HTTP, URL, client, user-agent, TLS, and WAF rule fields where present; Admin API records map API categorization, source IP, TLS scheme state, safe token identity, authorization resource metadata, and redacted request summaries.
+
+`[access_log.otlp]` is not implemented for access logs yet and fails configuration loading. OpenTelemetry trace export under `[telemetry.tracing]` is unaffected.
 
 PostgreSQL access-log support has been removed. Configurations containing `[database.access_log]` or `[logging.access_log.database]` fail during loading so stale credentials and tables cannot silently remain configured.
 

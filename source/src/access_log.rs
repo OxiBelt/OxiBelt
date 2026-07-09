@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::admin_audit::AdminAuditEvent;
-use crate::config::{AccessLogConfig, LoggingAccessLogConfig};
+use crate::config::{AccessLogConfig, AccessLogSchema, LoggingAccessLogConfig};
 use crate::waf::{
   AccessLogRecord, CompiledAccessLogFields, WafEngine, WafResponseInput, compile_access_log_fields,
   current_unix_ms,
@@ -15,7 +15,7 @@ use crate::waf::{
 
 mod projection;
 
-use projection::{admin_event_value, emit_stdout, project_ocsf};
+use projection::{admin_event_value, emit_stdout, project_ecs, project_ocsf};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AccessLogSource {
@@ -85,7 +85,10 @@ impl AccessLogRuntime {
     }
 
     if self.inner.config.stdout.enabled {
-      let stdout_record = project_ocsf(source, timestamp_unix_ms, &value);
+      let stdout_record = match self.inner.config.stdout.schema {
+        AccessLogSchema::Ocsf => project_ocsf(source, timestamp_unix_ms, &value),
+        AccessLogSchema::Ecs => project_ecs(source, timestamp_unix_ms, &value),
+      };
       emit_stdout(source, &stdout_record);
     }
   }

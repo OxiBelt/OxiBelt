@@ -7,6 +7,10 @@ use crate::admin_audit::AdminAuditEvent;
 
 use super::AccessLogSource;
 
+mod ecs;
+
+pub(super) use ecs::project_ecs;
+
 pub(super) const OCSF_VERSION: &str = "1.8.0";
 const HTTP_ACTIVITY_CLASS_UID: u64 = 4002;
 const API_ACTIVITY_CLASS_UID: u64 = 6003;

@@ -69,5 +69,16 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     ),
+    docker_case(
+      "ops",
+      "system-access-log-stdout-ecs",
+      "system-wide access log emits ECS stdout records without WAF rules",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
   ]
 }

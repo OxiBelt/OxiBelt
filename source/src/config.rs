@@ -2558,7 +2558,7 @@ fn reject_removed_access_log_config(value: &toml::Value) -> anyhow::Result<()> {
     .is_some()
   {
     bail!(
-      "database.access_log PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\""
+      "database.access_log PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\" or \"ecs\""
     );
   }
   if value
@@ -2568,7 +2568,7 @@ fn reject_removed_access_log_config(value: &toml::Value) -> anyhow::Result<()> {
     .is_some()
   {
     bail!(
-      "logging.access_log.database PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\""
+      "logging.access_log.database PostgreSQL access-log sink has been removed; use access_log.stdout with schema = \"ocsf\" or \"ecs\""
     );
   }
   if value
@@ -2577,7 +2577,7 @@ fn reject_removed_access_log_config(value: &toml::Value) -> anyhow::Result<()> {
     .is_some()
   {
     bail!(
-      "access_log.otlp is not implemented for access logs yet; use access_log.stdout with schema = \"ocsf\""
+      "access_log.otlp is not implemented for access logs yet; use access_log.stdout with schema = \"ocsf\" or \"ecs\""
     );
   }
   Ok(())

@@ -79,6 +79,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("ops", "admin-operation-webtransport"),
   ("ops", "kernel-extension-installer"),
   ("ops", "system-access-log-stdout"),
+  ("ops", "system-access-log-stdout-ecs"),
   ("limits", "request-body-limit"),
   ("limits", "route-request-body-limit"),
   ("limits", "http3-content-length-zero-body-limit"),

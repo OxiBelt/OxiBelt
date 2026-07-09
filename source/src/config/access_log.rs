@@ -65,6 +65,7 @@ impl AccessLogStdoutConfig {
 pub enum AccessLogSchema {
   #[default]
   Ocsf,
+  Ecs,
 }
 
 impl<'de> Deserialize<'de> for AccessLogSchema {
@@ -75,11 +76,9 @@ impl<'de> Deserialize<'de> for AccessLogSchema {
     let value = String::deserialize(deserializer)?;
     match value.as_str() {
       "ocsf" => Ok(Self::Ocsf),
-      "ecs" => Err(serde::de::Error::custom(
-        "access_log.stdout.schema = \"ecs\" is not implemented yet; use \"ocsf\"",
-      )),
+      "ecs" => Ok(Self::Ecs),
       other => Err(serde::de::Error::custom(format!(
-        "unsupported access_log.stdout.schema {other:?}; only \"ocsf\" is implemented"
+        "unsupported access_log.stdout.schema {other:?}; use \"ocsf\" or \"ecs\""
       ))),
     }
   }

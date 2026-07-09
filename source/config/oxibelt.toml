@@ -23,7 +23,7 @@ enabled = false
 
 [access_log.stdout]
 enabled = true
-schema = "ocsf"
+schema = "ocsf" # ocsf | ecs
 
 [runtime]
 linux_only = true

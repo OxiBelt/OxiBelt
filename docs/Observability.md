@@ -66,9 +66,9 @@ tenant boundary, set `propagate_trace_context = false`.
 Do not add credential-bearing request headers, session cookies, or response
 cookies to access-log fields. Keep custom access-log expressions focused on
 request IDs, route names, status, client network metadata, and upstream timing.
-Access logs currently export OCSF JSON on stdout only; OpenTelemetry access-log
-export is reserved for a later implementation. Trace OTLP export remains
-configured under `[telemetry.tracing]`.
+Access logs currently export OCSF or ECS JSON on stdout; OpenTelemetry
+access-log export is reserved for a later implementation. Trace OTLP export
+remains configured under `[telemetry.tracing]`.
 
 ## Bundle Assets
 
