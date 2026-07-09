@@ -75,7 +75,7 @@ url = { version = "2.5.8", features = ["serde"] }
 webpki-roots = "1.0.8"
 web-transport-quinn = { version = "0.11.9", default-features = false, features = ["aws-lc-rs"] }
 quic-parser = { version = "0.1.5", default-features = false, features = ["aws-lc-rs"] }
-x509-cert = "0.2.5"
+x509-cert = "0.3.0"
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"
 compio = { version = "0.19.1", default-features = false, features = ["io-uring", "polling", "runtime"] }
