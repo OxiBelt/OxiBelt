@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import re
 import ssl
@@ -16,6 +17,7 @@ TLS_ENABLED = bool(TLS_CERT_FILE and TLS_KEY_FILE)
 UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
+CAPTURE_REQUESTS = os.environ.get("CAPTURE_REQUESTS", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 REQUEST_COUNTS = {}
 REQUEST_COUNTS_LOCK = threading.Lock()
@@ -47,10 +49,32 @@ class EchoHandler(BaseHTTPRequestHandler):
     self._handle()
 
   def do_POST(self):
+    if CAPTURE_REQUESTS:
+      self._capture_request()
+      return
     self._handle()
 
   def log_message(self, format, *args):
     return
+
+  def _capture_request(self):
+    body_length = int(self.headers.get("content-length", "0"))
+    body = self.rfile.read(body_length) if body_length else b""
+    record = {
+      "method": self.command,
+      "path": self.path,
+      "headers": {key.lower(): value for key, value in self.headers.items()},
+      "body_base64": base64.b64encode(body).decode("ascii"),
+      "body_text": body.decode("utf-8", "replace"),
+      "body_len": len(body),
+    }
+    print(json.dumps(record, sort_keys=True), flush=True)
+    encoded = b"ok"
+    self.send_response(200)
+    self.send_header("content-type", "text/plain")
+    self.send_header("content-length", str(len(encoded)))
+    self.end_headers()
+    self.wfile.write(encoded)
 
   def _handle(self):
     body_length = int(self.headers.get("content-length", "0"))

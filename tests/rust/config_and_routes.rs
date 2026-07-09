@@ -7190,6 +7190,12 @@ fn system_access_log_defaults_to_disabled_stdout() {
   assert!(!config.access_log.admin.enabled);
   assert!(config.access_log.stdout.enabled);
   assert_eq!(config.access_log.stdout.schema, AccessLogSchema::Ocsf);
+  assert!(!config.access_log.otlp.enabled);
+  assert_eq!(config.access_log.otlp.schema, AccessLogSchema::Ocsf);
+  assert_eq!(
+    config.access_log.otlp.endpoint,
+    "http://127.0.0.1:4318/v1/logs"
+  );
   assert_eq!(
     config
       .logging
@@ -7281,7 +7287,7 @@ schema = "cef"
   assert!(
     error
       .to_string()
-      .contains("unsupported access_log.stdout.schema \"cef\"; use \"ocsf\" or \"ecs\""),
+      .contains("unsupported access log schema \"cef\"; use \"ocsf\" or \"ecs\""),
     "unexpected error: {error}"
   );
 }
@@ -9437,10 +9443,45 @@ ca_cert = "postgres-ca.pem"
 }
 
 #[test]
-fn access_log_rejects_unimplemented_otlp_section() {
-  let temp_dir = common::TempDir::new("access-log-otlp-unimplemented");
+fn access_log_otlp_accepts_ecs_schema_and_endpoint() {
+  let temp_dir = common::TempDir::new("access-log-otlp-ecs");
   let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-unimplemented");
+    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-ecs");
+  let raw = format!(
+    r#"
+{}
+
+[access_log.otlp]
+enabled = true
+endpoint = "http://collector.example:4318/v1/logs"
+schema = "ecs"
+queue_capacity = 8
+batch_size = 4
+export_timeout_ms = 250
+service_name = "edge-proxy"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+  config.validate().expect("access-log OTLP should validate");
+
+  assert!(config.access_log.otlp.enabled);
+  assert_eq!(config.access_log.otlp.schema, AccessLogSchema::Ecs);
+  assert_eq!(
+    config.access_log.otlp.endpoint,
+    "http://collector.example:4318/v1/logs"
+  );
+  assert_eq!(config.access_log.otlp.queue_capacity, 8);
+  assert_eq!(config.access_log.otlp.batch_size, 4);
+  assert_eq!(config.access_log.otlp.export_timeout_ms, 250);
+  assert_eq!(config.access_log.otlp.service_name, "edge-proxy");
+}
+
+#[test]
+fn access_log_otlp_rejects_non_http_endpoint_when_enabled() {
+  let temp_dir = common::TempDir::new("access-log-otlp-https");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-https");
   let raw = format!(
     r#"
 {}
@@ -9451,13 +9492,85 @@ endpoint = "https://collector.example/v1/logs"
 "#,
     common::minimal_config_toml(&cert_path, &key_path)
   );
-  let error = toml::from_str::<Config>(&raw).expect_err("access-log OTLP should not parse yet");
+  let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+  let error = config
+    .validate()
+    .expect_err("HTTPS access-log OTLP endpoint should fail validation");
   assert!(
     error
       .to_string()
-      .contains("access_log.otlp is not implemented for access logs yet"),
+      .contains("access_log.otlp.endpoint currently supports only http:// OTLP endpoints"),
     "unexpected error: {error}"
   );
+}
+
+#[test]
+fn access_log_otlp_rejects_zero_queue_capacity() {
+  let temp_dir = common::TempDir::new("access-log-otlp-zero-queue");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "access-log-otlp-zero-queue");
+  let raw = format!(
+    r#"
+{}
+
+[access_log.otlp]
+queue_capacity = 0
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+  let error = config
+    .validate()
+    .expect_err("zero access-log OTLP queue capacity should fail validation");
+  assert!(
+    error
+      .to_string()
+      .contains("access_log.otlp.queue_capacity must be greater than 0"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn access_log_otlp_rejects_invalid_batch_timeout_and_service_name() {
+  for (name, setting, expected) in [
+    (
+      "zero-batch",
+      "batch_size = 0",
+      "access_log.otlp.batch_size must be greater than 0",
+    ),
+    (
+      "zero-timeout",
+      "export_timeout_ms = 0",
+      "access_log.otlp.export_timeout_ms must be greater than 0",
+    ),
+    (
+      "blank-service",
+      r#"service_name = "   ""#,
+      "access_log.otlp.service_name must not be empty",
+    ),
+  ] {
+    let temp_dir = common::TempDir::new(&format!("access-log-otlp-{name}"));
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), &format!("access-log-otlp-{name}"));
+    let raw = format!(
+      r#"
+{}
+
+[access_log.otlp]
+{}
+"#,
+      common::minimal_config_toml(&cert_path, &key_path),
+      setting
+    );
+    let config: Config = toml::from_str(&raw).expect("access-log OTLP should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid access-log OTLP setting should fail validation");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected error for {name}: {error}"
+    );
+  }
 }
 
 #[test]

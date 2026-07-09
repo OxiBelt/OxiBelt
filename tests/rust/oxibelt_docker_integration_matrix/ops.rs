@@ -80,5 +80,16 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     ),
+    docker_case(
+      "ops",
+      "system-access-log-otlp-ecs",
+      "system-wide access log emits ECS OTLP log records without WAF rules",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
   ]
 }

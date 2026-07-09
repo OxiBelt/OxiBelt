@@ -13,8 +13,10 @@ use crate::waf::{
   current_unix_ms,
 };
 
+mod otlp;
 mod projection;
 
+use otlp::{OtlpAccessLogSink, OtlpLogRecord};
 use projection::{admin_event_value, emit_stdout, project_ecs, project_ocsf};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -31,6 +33,7 @@ pub struct AccessLogRuntime {
 
 struct AccessLogRuntimeInner {
   config: AccessLogConfig,
+  otlp: Option<OtlpAccessLogSink>,
 }
 
 #[derive(Clone)]
@@ -46,15 +49,22 @@ impl AccessLogRuntime {
     config.waf.enabled = false;
     config.admin.enabled = false;
     config.stdout.enabled = false;
+    config.otlp.enabled = false;
     Self {
-      inner: Arc::new(AccessLogRuntimeInner { config }),
+      inner: Arc::new(AccessLogRuntimeInner { config, otlp: None }),
     }
   }
 
   pub async fn new(config: &AccessLogConfig) -> anyhow::Result<Self> {
+    let otlp = if config.otlp.enabled {
+      Some(OtlpAccessLogSink::start(&config.otlp)?)
+    } else {
+      None
+    };
     Ok(Self {
       inner: Arc::new(AccessLogRuntimeInner {
         config: config.clone(),
+        otlp,
       }),
     })
   }
@@ -85,12 +95,38 @@ impl AccessLogRuntime {
     }
 
     if self.inner.config.stdout.enabled {
-      let stdout_record = match self.inner.config.stdout.schema {
-        AccessLogSchema::Ocsf => project_ocsf(source, timestamp_unix_ms, &value),
-        AccessLogSchema::Ecs => project_ecs(source, timestamp_unix_ms, &value),
-      };
+      let stdout_record = project_schema(
+        self.inner.config.stdout.schema,
+        source,
+        timestamp_unix_ms,
+        &value,
+      );
       emit_stdout(source, &stdout_record);
     }
+
+    if let Some(otlp) = &self.inner.otlp {
+      let schema = self.inner.config.otlp.schema;
+      let projected = project_schema(schema, source, timestamp_unix_ms, &value);
+      otlp.enqueue(OtlpLogRecord::from_projected(
+        source,
+        timestamp_unix_ms,
+        schema,
+        &value,
+        projected,
+      ));
+    }
+  }
+}
+
+fn project_schema(
+  schema: AccessLogSchema,
+  source: AccessLogSource,
+  timestamp_unix_ms: u64,
+  value: &Value,
+) -> Value {
+  match schema {
+    AccessLogSchema::Ocsf => project_ocsf(source, timestamp_unix_ms, value),
+    AccessLogSchema::Ecs => project_ecs(source, timestamp_unix_ms, value),
   }
 }
 

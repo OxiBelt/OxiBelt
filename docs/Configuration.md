@@ -92,6 +92,7 @@ include = ["conf.d/*.toml"]
 [access_log.waf]
 [access_log.admin]
 [access_log.stdout]
+[access_log.otlp]
 [logging]
 [logging.access_log]
 [[logging.access_log.fields]]
@@ -264,11 +265,20 @@ enabled = false
 [access_log.stdout]
 enabled = true
 schema = "ocsf"
+
+[access_log.otlp]
+enabled = false
+endpoint = "http://127.0.0.1:4318/v1/logs"
+schema = "ocsf"
+queue_capacity = 1024
+batch_size = 64
+export_timeout_ms = 3000
+service_name = "oxibelt"
 ```
 
 `strict_unknown_fields` defaults to `true`; unknown keys fail startup after includes are merged. `lb_policy_compat_profile` defaults to `strict`, which accepts only canonical OxiBelt load-balancing policy names. Set it to `nginx` or `caddy` only while migrating legacy pool-policy names; the profile converts exact safe aliases and rejects names that do not have an exact OxiBelt equivalent. `level` is passed to the tracing filter and defaults to `info`.
 
-`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited JSON and defaults to `schema = "ocsf"`. Set `schema = "ecs"` to emit Elastic Common Schema JSON instead. OpenTelemetry access-log export is reserved for later implementation and fails configuration loading if selected now.
+`access_log` controls the supported access-log sources and sinks. `system`, `waf`, and `admin` independently enable request-wide, OxiRule, and Admin API records. `[access_log.stdout]` writes newline-delimited JSON and defaults to `schema = "ocsf"`. Set `schema = "ecs"` to emit Elastic Common Schema JSON instead. `[access_log.otlp]` exports OpenTelemetry Logs over OTLP HTTP/protobuf to `/v1/logs` style collector endpoints and has an independent `schema = "ocsf"` or `schema = "ecs"` projection choice.
 
 `logging.access_log` keeps the request-wide field-expression list and legacy `enabled` compatibility flag. When enabled through either `[access_log.system]` or `logging.access_log.enabled`, OxiBelt emits one access-log record for each finalized HTTP response with `event = "oxibelt.access"` and `scope = "system"` before schema projection. The default fields include request/response IDs, transaction ID, method, URI, client IP, route, status, upstream name, upstream timing fields, and a duplicate-safe `user_agent` collection from `Request.Headers.getAll('User-Agent')`.
 
@@ -288,7 +298,7 @@ name = "status"
 expression = "Response.Http.Status"
 ```
 
-PostgreSQL access-log sinks are removed. `database.access_log` and `logging.access_log.database` fail configuration loading; use `[access_log.stdout]` with `schema = "ocsf"` or `schema = "ecs"`.
+PostgreSQL access-log sinks are removed. `database.access_log` and `logging.access_log.database` fail configuration loading; use `[access_log.stdout]` or `[access_log.otlp]` with `schema = "ocsf"` or `schema = "ecs"`.
 
 ```toml
 [runtime]
@@ -1929,6 +1939,15 @@ enabled = false
 [access_log.stdout]
 enabled = true
 schema = "ocsf"
+
+[access_log.otlp]
+enabled = false
+endpoint = "http://127.0.0.1:4318/v1/logs"
+schema = "ocsf"
+queue_capacity = 1024
+batch_size = 64
+export_timeout_ms = 3000
+service_name = "oxibelt"
 ```
 
 `[access_log.system]` emits request-wide records built from `[logging.access_log].fields`. `[access_log.waf]` emits OxiRule `emit_access_log` records. `[access_log.admin]` emits Admin API records derived from the TLS/IPM-aware audit gate, including safe actor, principal, subject, group, source IP, method, path, operation, status, outcome, and request-summary metadata.
@@ -1937,7 +1956,7 @@ schema = "ocsf"
 
 `[access_log.stdout].schema = "ecs"` writes Elastic Common Schema JSON with `ecs.version = "9.4.0"` and preserves the original OxiBelt record under `oxibelt.access.original`. System and WAF records map HTTP, URL, client, user-agent, TLS, and WAF rule fields where present; Admin API records map API categorization, source IP, TLS scheme state, safe token identity, authorization resource metadata, and redacted request summaries.
 
-`[access_log.otlp]` is not implemented for access logs yet and fails configuration loading. OpenTelemetry trace export under `[telemetry.tracing]` is unaffected.
+`[access_log.otlp]` exports the selected OCSF or ECS projection as the OpenTelemetry log body over OTLP HTTP/protobuf. It is disabled by default, supports only `http://` endpoints in this release, uses a bounded queue with best-effort drops on exporter backpressure or delivery failure, and does not block data-plane or Admin API enforcement decisions. OpenTelemetry trace export under `[telemetry.tracing]` is configured separately and is unaffected.
 
 PostgreSQL access-log support has been removed. Configurations containing `[database.access_log]` or `[logging.access_log.database]` fail during loading so stale credentials and tables cannot silently remain configured.
 
