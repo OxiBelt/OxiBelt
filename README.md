@@ -283,4 +283,4 @@ matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-
 for the design rationale behind reserved work.
 
 ## Disclaimer
-This project is created with some LLM Agents or LLM assistance. This can introduce security issues, unintended behavior, or inaccuracies. However, all code changes are reviewed or approved by people to mitigate potential risks and many GitHub Action workflows are in place to enforce code quality and security checks.
+This project is developed with some LLM Agents or LLM assistances like ChatGPT Codex. This can introduce security issues, unintended behavior, or inaccuracies. However, all code changes are reviewed or approved by people to mitigate potential risks and many GitHub Action workflows are in place to enforce code quality and security checks.
