@@ -692,6 +692,8 @@ async fn shared_state_coordinates_pool_active_counts_and_health() {
   drop(first);
 
   first_state.report_failure_async(&first_upstream).await;
+  let snapshot = second_state.snapshot_async("app-pool").await.unwrap();
+  assert!(!snapshot_server(&snapshot, &first_upstream).healthy);
   let after_failure = second_state
     .select_with_cookie_header_async("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
     .await

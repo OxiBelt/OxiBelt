@@ -97,6 +97,19 @@ impl PoolState {
     Ok(selection)
   }
 
+  pub(crate) async fn snapshots_async(&self) -> Vec<super::PoolRuntimeSnapshot> {
+    for pool in self.pools.values() {
+      self.refresh_shared_pool_view(pool).await;
+    }
+    self.snapshots()
+  }
+
+  pub(crate) async fn snapshot_async(&self, pool_name: &str) -> Option<super::PoolRuntimeSnapshot> {
+    let pool = self.pools.get(pool_name)?;
+    self.refresh_shared_pool_view(pool).await;
+    Some(super::pool_snapshot(pool))
+  }
+
   async fn refresh_shared_pool_view(&self, pool: &Arc<PoolRuntime>) {
     let Some(shared) = self.shared_state.clone() else {
       return;
@@ -114,14 +127,26 @@ impl PoolState {
       });
     }
     while let Some(result) = tasks.join_next().await {
-      let Ok((server, health, active)) = result else {
-        continue;
+      let (server, health, active) = match result {
+        Ok(result) => result,
+        Err(error) => {
+          tracing::warn!(error = %error, "shared upstream pool refresh task failed");
+          continue;
+        }
       };
-      if let Ok(Some(healthy)) = health {
-        set_server_health(&server, healthy, now_millis());
+      match health {
+        Ok(Some(healthy)) => set_server_health(&server, healthy, now_millis()),
+        Ok(None) => {}
+        Err(error) => {
+          tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to refresh shared upstream health");
+        }
       }
-      if let Ok(Some(active)) = active {
-        server.active.store(active, Ordering::Relaxed);
+      match active {
+        Ok(Some(active)) => server.active.store(active, Ordering::Relaxed),
+        Ok(None) => {}
+        Err(error) => {
+          tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to refresh shared upstream active count");
+        }
       }
     }
   }

@@ -317,7 +317,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(deployment.contains("--status-service={{ .Values.statusService }}"));
   assert!(deployment.contains("strategy:\n    type: Recreate"));
   assert!(deployment.contains("validateManagedConfigPath"));
-  for needle in [
+  let rollout_arguments = [
     "--rollout-target-namespace=",
     "--rollout-target-kind=",
     "--rollout-target-name=",
@@ -325,10 +325,23 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
     "--rollout-volume-name=",
     "--rollout-timeout-seconds=",
     "--rollout-config-map-prefix=",
-  ] {
+  ];
+  for needle in rollout_arguments {
     assert!(
       deployment.contains(needle),
       "controller deployment should contain {needle}"
+    );
+  }
+  let run_position = deployment
+    .find("- \"run\"")
+    .expect("controller deployment should invoke the run subcommand");
+  for needle in rollout_arguments {
+    let argument_position = deployment
+      .find(needle)
+      .expect("controller deployment should contain every rollout argument");
+    assert!(
+      run_position < argument_position,
+      "controller subcommand `run` must precede {needle}"
     );
   }
   assert!(!deployment.contains("--admin-"));

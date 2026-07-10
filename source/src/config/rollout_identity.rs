@@ -227,10 +227,7 @@ impl EnvironmentValues {
   }
 
   fn has_immutable_metadata(&self) -> bool {
-    self.revision.is_some()
-      || self.digest.is_some()
-      || self.revision_file.is_some()
-      || self.instance_id.is_some()
+    self.revision.is_some() || self.digest.is_some() || self.revision_file.is_some()
   }
 }
 
@@ -375,6 +372,59 @@ mod tests {
     assert_eq!(identity.mode(), ConfigRolloutMode::Mutable);
     assert!(identity.is_ready());
     assert_eq!(identity.status_fields()["apply_state"], "not_configured");
+  }
+
+  #[test]
+  fn mutable_mode_accepts_shared_state_instance_id_without_rollout_mode() {
+    let identity = ConfigRolloutIdentity::from_environment_values(
+      EnvironmentValues {
+        instance_id: Some("proxy-a".to_string()),
+        ..EnvironmentValues::default()
+      },
+      &ConfigSourcePaths::default(),
+    )
+    .expect("standalone shared-state identity should preserve mutable behavior");
+
+    assert_eq!(identity.mode(), ConfigRolloutMode::Mutable);
+    assert!(identity.is_ready());
+    assert!(identity.status_fields()["instance_id"].is_null());
+  }
+
+  #[test]
+  fn mutable_mode_rejects_rollout_metadata_without_rollout_mode() {
+    let source_paths = ConfigSourcePaths::default();
+    for values in [
+      EnvironmentValues {
+        revision: Some("gateway-config-test".to_string()),
+        ..EnvironmentValues::default()
+      },
+      EnvironmentValues {
+        digest: Some("0".repeat(SHA256_HEX_LEN)),
+        ..EnvironmentValues::default()
+      },
+      EnvironmentValues {
+        revision_file: Some("conf.d/gateway-api.generated.toml".to_string()),
+        ..EnvironmentValues::default()
+      },
+    ] {
+      let error = ConfigRolloutIdentity::from_environment_values(values, &source_paths)
+        .expect_err("rollout metadata without a mode should fail closed");
+      assert!(format!("{error:#}").contains(CONFIG_ROLLOUT_MODE_ENV));
+    }
+  }
+
+  #[test]
+  fn immutable_mode_still_requires_instance_id() {
+    let error = ConfigRolloutIdentity::from_environment_values(
+      EnvironmentValues {
+        mode: Some(KUBERNETES_IMMUTABLE_MODE.to_string()),
+        ..EnvironmentValues::default()
+      },
+      &ConfigSourcePaths::default(),
+    )
+    .expect_err("immutable rollout mode should require an instance ID");
+
+    assert!(format!("{error:#}").contains(INSTANCE_ID_ENV));
   }
 
   #[test]

@@ -39,7 +39,10 @@ pub(super) async fn admin_upstream_pools_response(
         "method not allowed",
       ));
     }
-    return Some(json_response(StatusCode::OK, &snapshot.pools.snapshots()));
+    return Some(json_response(
+      StatusCode::OK,
+      &snapshot.pools.snapshots_async().await,
+    ));
   }
 
   if path == "/admin/v1/upstream-pools/status" {
@@ -79,7 +82,7 @@ pub(super) async fn admin_upstream_pools_response(
           "method not allowed",
         ));
       }
-      let Some(pool) = snapshot.pools.snapshot(pool_name) else {
+      let Some(pool) = snapshot.pools.snapshot_async(pool_name).await else {
         return Some(text_response(StatusCode::NOT_FOUND, "not found"));
       };
       return Some(json_response(StatusCode::OK, &pool));

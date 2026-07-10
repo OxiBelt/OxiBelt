@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+#![recursion_limit = "256"]
 
 //! Application entrypoints and module wiring for the OxiBelt proxy runtime.
 //! Keep this crate root declarative so ownership stays in focused modules.

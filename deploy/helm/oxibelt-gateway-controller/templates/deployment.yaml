@@ -28,6 +28,7 @@ spec:
         args:
         - "--controller-name={{ .Values.controllerName }}"
         - "--managed-config-path={{ .Values.managedConfigPath }}"
+        - "run"
         - "--rollout-target-namespace={{ default .Release.Namespace .Values.rollout.target.namespace }}"
         - "--rollout-target-kind={{ .Values.rollout.target.kind }}"
         - "--rollout-target-name={{ required "rollout.target.name is required" .Values.rollout.target.name }}"
@@ -46,7 +47,6 @@ spec:
         {{- if .Values.dryRun }}
         - "--dry-run"
         {{- end }}
-        - "run"
         ports:
         - name: health
           containerPort: 9090
