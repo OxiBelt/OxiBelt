@@ -10,8 +10,8 @@
     "lint": "eslint source/**/*.ts"
   },
   "devDependencies": {
-    "@types/node": "26.1.0",
-    "tsx": "4.22.5",
+    "@types/node": "24.13.3",
+    "tsx": "4.23.0",
     "typescript": "6.0.3"
   },
   "overrides": {
@@ -19,7 +19,7 @@
       "esbuild": "0.28.1"
     },
     "@types/node": {
-      "undici-types": "8.3.0"
+      "undici-types": "7.18.0"
     }
   }
 }

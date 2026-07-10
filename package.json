@@ -17,12 +17,12 @@
     "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
+    "@types/node": "^24.13.3",
     "@types/semver": "^7.7.1",
-    "@typescript-eslint/eslint-plugin": "^8.62.1",
-    "@typescript-eslint/parser": "^8.62.1",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
     "eslint": "^10.6.0",
-    "tsx": "^4.22.5",
+    "tsx": "^4.23.0",
     "typescript": "^6.0.3"
   },
   "dependencies": {

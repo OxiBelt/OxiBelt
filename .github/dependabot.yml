@@ -21,3 +21,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Keep runtime typings on the active Node.js LTS line. Remove this guard
+    # after Node.js 26 reaches Active LTS.
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">=25"]

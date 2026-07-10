@@ -13,7 +13,6 @@
     "strict": true,
     "types": ["node"],
     "ignoreDeprecations": "6.0",
-    "baseUrl": ".",
     "paths": {
       "@builder/*": ["./builder/source/*"],
       "@userscript/*": ["./userscript/source/*"],

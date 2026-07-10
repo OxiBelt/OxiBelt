@@ -49,7 +49,7 @@ pub(crate) fn client_certificate_metadata(
 
 pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCertificateMetadata> {
   let cert = Certificate::from_der(der)?;
-  let validity = cert.tbs_certificate.validity;
+  let validity = cert.tbs_certificate().validity();
   let mut metadata = ParsedCertificateMetadata {
     not_before_unix_seconds: unix_seconds(validity.not_before),
     not_after_unix_seconds: unix_seconds(validity.not_after),
@@ -57,7 +57,7 @@ pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCer
     san_dns_names: Vec::new(),
     san_ip_addresses: Vec::new(),
   };
-  if let Some(extensions) = &cert.tbs_certificate.extensions {
+  if let Some(extensions) = cert.tbs_certificate().extensions() {
     for extension in extensions {
       if extension.extn_id.to_string() == "2.5.29.17" {
         collect_subject_alt_names(extension.extn_value.as_bytes(), &mut metadata)?;
@@ -74,11 +74,9 @@ fn unix_seconds(time: x509_cert::time::Time) -> i64 {
 
 fn subject_common_names(cert: &Certificate) -> Vec<String> {
   cert
-    .tbs_certificate
-    .subject
-    .0
+    .tbs_certificate()
+    .subject()
     .iter()
-    .flat_map(|relative_distinguished_name| relative_distinguished_name.0.iter())
     .filter_map(|attribute| {
       (attribute.oid.to_string() == "2.5.4.3")
         .then(|| directory_string_to_string(&attribute.value))

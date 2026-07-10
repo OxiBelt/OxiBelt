@@ -1,10 +1,10 @@
 use sha1::Digest;
-use x509_cert::Certificate;
-use x509_cert::der::{
+use x509_cert_v2::Certificate;
+use x509_cert_v2::der::{
   Encode,
   asn1::{Any, AnyRef, Null, ObjectIdentifier, OctetString},
 };
-use x509_cert::spki::AlgorithmIdentifierOwned;
+use x509_cert_v2::spki::AlgorithmIdentifierOwned;
 use x509_ocsp::CertId;
 
 const ID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
@@ -68,7 +68,7 @@ fn sha1_parameters_match(parameters: &Option<Any>) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use x509_cert::der::Decode;
+  use x509_cert_v2::der::Decode;
 
   const CERT_ID_WITH_SHA1_NULL_PARAMETERS_DER: &[u8] = &[
     0x30, 0x3a, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14, 0x11,

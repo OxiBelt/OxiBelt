@@ -242,13 +242,13 @@ pub(super) fn crlite_query_material_from_der(
   let leaf = Certificate::from_der(leaf_der).context("crlite_leaf_parse")?;
   let issuer = Certificate::from_der(issuer_der).context("crlite_issuer_parse")?;
   let issuer_spki_der = issuer
-    .tbs_certificate
-    .subject_public_key_info
+    .tbs_certificate()
+    .subject_public_key_info()
     .to_der()
     .context("crlite_issuer_spki_encode")?;
   let mut issuer_spki_hash = [0_u8; 32];
   issuer_spki_hash.copy_from_slice(&crate::crypto::sha256(&issuer_spki_der));
-  let serial = leaf.tbs_certificate.serial_number.as_bytes().to_vec();
+  let serial = leaf.tbs_certificate().serial_number().as_bytes().to_vec();
   let scts = embedded_scts(&leaf)?;
   Ok(CrliteQueryMaterial {
     issuer_spki_hash: IssuerSpkiHash(issuer_spki_hash),
@@ -258,7 +258,7 @@ pub(super) fn crlite_query_material_from_der(
 }
 
 fn embedded_scts(leaf: &Certificate) -> anyhow::Result<SctEntries> {
-  let Some(extensions) = leaf.tbs_certificate.extensions.as_deref() else {
+  let Some(extensions) = leaf.tbs_certificate().extensions() else {
     return Ok(Vec::new());
   };
   let Some(extension) = extensions

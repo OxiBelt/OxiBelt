@@ -8,10 +8,10 @@ use rustls::pki_types::{CertificateDer, SignatureVerificationAlgorithm, UnixTime
 use sha1::Digest;
 use url::Url;
 use webpki::{EndEntityCert, KeyUsage, anchor_from_trusted_cert};
-use x509_cert::Certificate;
-use x509_cert::der::{Decode, Encode};
-use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
-use x509_cert::ext::pkix::name::GeneralName;
+use x509_cert_v2::Certificate;
+use x509_cert_v2::der::{Decode, Encode};
+use x509_cert_v2::ext::pkix::AuthorityInfoAccessSyntax;
+use x509_cert_v2::ext::pkix::name::GeneralName;
 use x509_ocsp::builder::OcspRequestBuilder;
 use x509_ocsp::{
   BasicOcspResponse, CertId, CertStatus, OcspResponse, OcspResponseStatus, Request, ResponderId,
