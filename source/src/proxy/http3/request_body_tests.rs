@@ -290,15 +290,13 @@ async fn get_without_framing_headers_immediate_data_uses_spawn_path() {
 
 #[tokio::test]
 async fn request_body_streams_data_then_trailers_then_eof() {
-  let mut expected_trailers = http::HeaderMap::new();
-  expected_trailers.insert("x-request-checksum", "ok".parse().unwrap());
   let request = request(Method::POST);
   let stream = FakeRequestStream::with_trailers(
     [
       FakeStreamEvent::Data(Bytes::from_static(b"body")),
       FakeStreamEvent::End,
     ],
-    [FakeTrailerEvent::Trailers(expected_trailers)],
+    [FakeTrailerEvent::Trailers(trailer_map())],
   );
 
   let prepared = prepare_h3_request_body_inner(request, stream).await;
@@ -320,7 +318,7 @@ async fn request_body_streams_data_then_trailers_then_eof() {
     .expect("trailers frame should be valid")
     .into_trailers()
     .expect("second frame should be trailers");
-  assert_eq!(trailers["x-request-checksum"], "ok");
+  assert_sanitized_request_trailers(&trailers);
   assert!(body.frame().await.is_none());
 }
 
@@ -355,7 +353,7 @@ async fn immediate_or_delayed_trailers_never_mark_safe_request_verified_empty() 
       .expect("trailers frame should be valid")
       .into_trailers()
       .expect("first frame should be trailers");
-    assert_eq!(trailers["x-request-checksum"], "ok");
+    assert_sanitized_request_trailers(&trailers);
     assert!(body.frame().await.is_none());
   }
 }
@@ -492,7 +490,42 @@ fn request_with_content_length(method: Method, values: &[&'static str]) -> Reque
 fn trailer_map() -> http::HeaderMap {
   let mut trailers = http::HeaderMap::new();
   trailers.insert("x-request-checksum", "ok".parse().unwrap());
+  trailers.insert("x-forwarded-for", "203.0.113.66".parse().unwrap());
+  trailers.insert("x-forwarded-proto", "http".parse().unwrap());
+  trailers.insert("x-forwarded-host", "admin.internal".parse().unwrap());
+  trailers.insert("x-forwarded-port", "80".parse().unwrap());
+  trailers.insert("x-real-ip", "203.0.113.66".parse().unwrap());
+  trailers.insert("forwarded", "for=203.0.113.66;proto=http".parse().unwrap());
+  trailers.insert("authorization", "Bearer attacker".parse().unwrap());
+  trailers.insert("cookie", "session=attacker".parse().unwrap());
+  trailers.insert("host", "admin.internal".parse().unwrap());
+  trailers.insert("connection", "x-trailer-control".parse().unwrap());
+  trailers.insert("x-trailer-control", "remove-me".parse().unwrap());
+  trailers.insert("te", "gzip".parse().unwrap());
   trailers
+}
+
+fn assert_sanitized_request_trailers(trailers: &http::HeaderMap) {
+  assert_eq!(trailers["x-request-checksum"], "ok");
+  for stripped in [
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-real-ip",
+    "forwarded",
+    "authorization",
+    "cookie",
+    "host",
+    "connection",
+    "x-trailer-control",
+    "te",
+  ] {
+    assert!(
+      !trailers.contains_key(stripped),
+      "request trailers should strip {stripped}"
+    );
+  }
 }
 
 enum FakeStreamEvent {

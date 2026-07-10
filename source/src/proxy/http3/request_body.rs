@@ -10,6 +10,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body, Frame, SizeHint};
 
 use crate::proxy::http::body::{BoxError, ProxyBody, boxed_error};
+use crate::proxy::http::headers::sanitize_request_trailers_for_upstream;
 use crate::proxy::http::request_framing::{
   VerifiedEmptyRequestBody, h2_or_h3_safe_method_empty_probe_allowed,
 };
@@ -108,7 +109,7 @@ where
           Some(Ok(Some(trailers))) => direct_h3_request_body_with_initial(
             request,
             stream,
-            Some(Ok(Frame::trailers(trailers))),
+            Some(Ok(sanitized_h3_request_trailers_frame(trailers))),
             H3DirectRequestBodyState::End,
             PreparedH3RequestBodyReadiness::Spawn,
           ),
@@ -267,7 +268,7 @@ where
         H3DirectRequestBodyState::Trailers => match stream.poll_recv_trailers(cx) {
           Poll::Ready(Ok(Some(trailers))) => {
             this.state = H3DirectRequestBodyState::End;
-            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+            return Poll::Ready(Some(Ok(sanitized_h3_request_trailers_frame(trailers))));
           }
           Poll::Ready(Ok(None)) => {
             this.state = H3DirectRequestBodyState::End;
@@ -291,6 +292,11 @@ where
   fn size_hint(&self) -> SizeHint {
     SizeHint::new()
   }
+}
+
+fn sanitized_h3_request_trailers_frame(mut trailers: http::HeaderMap) -> Frame<Bytes> {
+  sanitize_request_trailers_for_upstream(&mut trailers);
+  Frame::trailers(trailers)
 }
 
 fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {

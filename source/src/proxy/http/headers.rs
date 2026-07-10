@@ -6,8 +6,8 @@ use std::str::FromStr;
 
 use http::Request;
 use http::header::{
-  CONNECTION, FORWARDED, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE,
-  PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+  AUTHORIZATION, CONNECTION, COOKIE, FORWARDED, HOST, HeaderMap, HeaderName, HeaderValue,
+  PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::uri::Authority;
 
@@ -25,6 +25,7 @@ const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const X_FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
 
 #[derive(Clone, Debug)]
 pub(crate) struct ForwardedHeaderCache {
@@ -238,6 +239,19 @@ fn default_port_for_optional_scheme(scheme: &str) -> Option<u16> {
 
 fn remove_inbound_forwarded_headers(headers: &mut HeaderMap) {
   headers.remove(FORWARDED);
+}
+
+pub(crate) fn sanitize_request_trailers_for_upstream(trailers: &mut HeaderMap) {
+  strip_hop_by_hop_headers(trailers);
+  remove_inbound_forwarded_headers(trailers);
+  trailers.remove(HOST);
+  trailers.remove(AUTHORIZATION);
+  trailers.remove(COOKIE);
+  trailers.remove(X_FORWARDED_FOR);
+  trailers.remove(X_FORWARDED_HOST);
+  trailers.remove(X_FORWARDED_PORT);
+  trailers.remove(X_FORWARDED_PROTO);
+  trailers.remove(X_REAL_IP);
 }
 
 fn effective_host_header_value(host: &str) -> Option<HeaderValue> {

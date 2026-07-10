@@ -313,3 +313,49 @@ fn hop_by_hop_stripping_removes_te_when_connection_lists_te() {
   assert!(!headers.contains_key(CONNECTION));
   assert!(!headers.contains_key(TE));
 }
+
+#[test]
+fn request_trailer_sanitization_removes_sensitive_and_hop_by_hop_fields() {
+  let mut trailers = HeaderMap::new();
+  trailers.insert("x-request-checksum", HeaderValue::from_static("ok"));
+  trailers.insert(TE, HeaderValue::from_static("trailers"));
+  trailers.insert(FORWARDED, HeaderValue::from_static("for=203.0.113.66"));
+  trailers.insert(HOST, HeaderValue::from_static("admin.internal"));
+  trailers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer attacker"));
+  trailers.insert(COOKIE, HeaderValue::from_static("session=attacker"));
+  trailers.insert(X_FORWARDED_FOR, HeaderValue::from_static("203.0.113.66"));
+  trailers.insert(X_FORWARDED_HOST, HeaderValue::from_static("admin.internal"));
+  trailers.insert(X_FORWARDED_PORT, HeaderValue::from_static("80"));
+  trailers.insert(X_FORWARDED_PROTO, HeaderValue::from_static("http"));
+  trailers.insert(X_REAL_IP, HeaderValue::from_static("203.0.113.66"));
+  trailers.insert(CONNECTION, HeaderValue::from_static("x-trailer-control"));
+  trailers.insert("x-trailer-control", HeaderValue::from_static("remove-me"));
+  trailers.insert(
+    PROXY_AUTHORIZATION,
+    HeaderValue::from_static("Basic attacker"),
+  );
+
+  sanitize_request_trailers_for_upstream(&mut trailers);
+
+  assert_eq!(trailers["x-request-checksum"], "ok");
+  assert_eq!(trailers[TE], "trailers");
+  for stripped in [
+    "forwarded",
+    "host",
+    "authorization",
+    "cookie",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "connection",
+    "x-trailer-control",
+    "proxy-authorization",
+  ] {
+    assert!(
+      !trailers.contains_key(stripped),
+      "request trailers should strip {stripped}"
+    );
+  }
+}
