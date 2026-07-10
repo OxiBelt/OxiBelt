@@ -1,23 +1,21 @@
 //! HTTP/3 downstream and upstream handling.
 //! QUIC session state stays explicit because stream lifetimes differ from TCP request lifetimes.
 
-use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::Bytes;
 use h3::ext::Protocol;
 use http_body_util::BodyExt;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, ConnectionLimitIdentityMode, HttpVersion, UpstreamConfig};
+use crate::config::{ConnectionLimitIdentityMode, UpstreamConfig};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
@@ -40,6 +38,8 @@ type H3RequestRecvStream =
   h3::server::RequestStream<<H3BidiStream as h3::quic::BidiStream<Bytes>>::RecvStream, Bytes>;
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
+const H3_POOL_SELECTION_RETRIES: usize = 4;
+const H3_MAX_FIELD_SECTION_SIZE: u64 = (1_u64 << 62) - 1;
 
 mod fast_response;
 mod request_body;
@@ -47,7 +47,10 @@ mod request_tasks;
 mod response_body;
 #[cfg(test)]
 mod tests;
+mod upstream_pool;
 mod webtransport_bridge;
+
+pub(crate) use upstream_pool::UpstreamH3Pools;
 
 #[cfg(test)]
 use crate::proxy::http::body::{InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES};
@@ -65,224 +68,6 @@ pub(super) struct H3DownstreamRequestContext {
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
   drain: ConnectionDrain,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct UpstreamH3Pools {
-  by_upstream: HashMap<String, Arc<UpstreamH3Pool>>,
-}
-
-impl UpstreamH3Pools {
-  pub(crate) fn new(
-    upstreams: &[UpstreamConfig],
-    config: &Config,
-    tls_resumption: &tls::TlsResumptionState,
-    outbound_revocation: &tls::OutboundRevocationRuntime,
-  ) -> anyhow::Result<Self> {
-    if !config.quic.upstream_pool.enabled {
-      return Ok(Self::default());
-    }
-
-    let mut by_upstream = HashMap::new();
-    for upstream in upstreams {
-      if upstream.max_http_version != HttpVersion::H3 {
-        continue;
-      }
-      let quic_config =
-        tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
-          &config.crypto,
-          &config.proxy.trusted_ca_certs,
-          &upstream.tls.ech,
-          &config.quic,
-          &upstream.tls.resumption,
-          Some(tls_resumption),
-          &upstream.name,
-          Some((
-            outbound_revocation,
-            outbound_revocation.policy_for_upstream(upstream),
-          )),
-        )
-        .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
-      by_upstream.insert(
-        upstream.name.clone(),
-        Arc::new(UpstreamH3Pool {
-          client_config: quic_config,
-          quic_config: config.quic.clone(),
-          quic_host_key_base_dir: config.source_paths.cert_dir.clone(),
-          entries: Mutex::new(HashMap::new()),
-        }),
-      );
-    }
-
-    Ok(Self { by_upstream })
-  }
-
-  pub(crate) fn for_upstream(&self, upstream_name: &str) -> Option<Arc<UpstreamH3Pool>> {
-    self.by_upstream.get(upstream_name).cloned()
-  }
-}
-
-pub(crate) struct UpstreamH3Pool {
-  client_config: h3_quinn::quinn::ClientConfig,
-  quic_config: crate::config::QuicConfig,
-  quic_host_key_base_dir: Option<PathBuf>,
-  entries: Mutex<HashMap<H3PoolKey, Arc<H3PoolSlot>>>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct H3PoolKey {
-  remote_addr: SocketAddr,
-  server_name: String,
-}
-
-struct PooledH3Connection {
-  _endpoint: h3_quinn::quinn::Endpoint,
-  connection: h3_quinn::quinn::Connection,
-  send_request: H3SendRequest,
-  created_at: Instant,
-  last_used: std::sync::Mutex<Instant>,
-  driver_task: JoinHandle<()>,
-}
-
-struct H3PoolSlot {
-  connection: Mutex<Option<Arc<PooledH3Connection>>>,
-}
-
-impl PooledH3Connection {
-  fn usable(&self, upstream: &UpstreamConfig, quic_config: &crate::config::QuicConfig) -> bool {
-    self.connection.close_reason().is_none()
-      && self.created_at.elapsed()
-        < Duration::from_millis(quic_config.upstream_pool.max_lifetime_ms)
-      && self
-        .last_used
-        .lock()
-        .expect("pooled H3 connection last_used lock poisoned")
-        .elapsed()
-        < Duration::from_millis(upstream.idle_timeout_ms)
-  }
-
-  fn mark_used(&self) {
-    *self
-      .last_used
-      .lock()
-      .expect("pooled H3 connection last_used lock poisoned") = Instant::now();
-  }
-}
-
-impl Drop for PooledH3Connection {
-  fn drop(&mut self) {
-    self.connection.close(0u32.into(), b"pool entry dropped");
-    self.driver_task.abort();
-  }
-}
-
-impl UpstreamH3Pool {
-  async fn forward_request(
-    self: Arc<Self>,
-    request: Request<ProxyBody>,
-    upstream: &UpstreamConfig,
-    timeouts: EffectiveTimeouts,
-    metrics: &Arc<crate::metrics::Metrics>,
-  ) -> anyhow::Result<Response<ProxyBody>> {
-    let uri = request.uri().clone();
-    metrics.record_http_upstream_client_request("h3", "https", "primary");
-    let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
-    let key = H3PoolKey {
-      remote_addr,
-      server_name,
-    };
-    let send_request = self
-      .send_request_for(key.clone(), upstream, timeouts, metrics)
-      .await?;
-    match send_h3_request(send_request, request, &uri, timeouts).await {
-      Ok(response) => Ok(response),
-      Err(error) => {
-        self.remove_entry(&key).await;
-        Err(error)
-      }
-    }
-  }
-
-  async fn send_request_for(
-    &self,
-    key: H3PoolKey,
-    upstream: &UpstreamConfig,
-    timeouts: EffectiveTimeouts,
-    metrics: &Arc<crate::metrics::Metrics>,
-  ) -> anyhow::Result<H3SendRequest> {
-    let slot = self.slot_for_key(key.clone()).await;
-    let mut connection = slot.connection.lock().await;
-    if let Some(entry) = connection.as_ref() {
-      if entry.usable(upstream, &self.quic_config) {
-        entry.mark_used();
-        return Ok(entry.send_request.clone());
-      }
-      *connection = None;
-    }
-
-    metrics.record_http_upstream_client_pool_miss("h3", "https", "primary");
-    let connected = connect_h3_upstream(
-      key.server_name.clone(),
-      key.remote_addr,
-      self.client_config.clone(),
-      &self.quic_config,
-      self.quic_host_key_base_dir.as_deref(),
-      timeouts.upstream_connect,
-    )
-    .await?;
-    metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
-    let entry = Arc::new(PooledH3Connection {
-      _endpoint: connected.endpoint,
-      connection: connected.connection,
-      send_request: connected.send_request,
-      created_at: Instant::now(),
-      last_used: std::sync::Mutex::new(Instant::now()),
-      driver_task: connected.driver_task,
-    });
-    let send_request = entry.send_request.clone();
-    *connection = Some(entry);
-    Ok(send_request)
-  }
-
-  async fn slot_for_key(&self, key: H3PoolKey) -> Arc<H3PoolSlot> {
-    let mut entries = self.entries.lock().await;
-    if let Some(slot) = entries.get(&key) {
-      return slot.clone();
-    }
-
-    if entries.len() >= self.quic_config.upstream_pool.max_connections_per_upstream {
-      let oldest_key = entries
-        .iter()
-        .filter_map(|(candidate_key, slot)| {
-          let connection = slot.connection.try_lock().ok()?;
-          let entry = connection.as_ref()?;
-          let last_used = *entry
-            .last_used
-            .lock()
-            .expect("pooled H3 connection last_used lock poisoned");
-          Some((candidate_key.clone(), last_used))
-        })
-        .min_by_key(|(_, last_used)| *last_used)
-        .map(|(candidate_key, _)| candidate_key)
-        .or_else(|| entries.keys().next().cloned());
-      if let Some(oldest_key) = oldest_key {
-        entries.remove(&oldest_key);
-      }
-    }
-
-    let slot = Arc::new(H3PoolSlot {
-      connection: Mutex::new(None),
-    });
-    entries.insert(key, slot.clone());
-    slot
-  }
-
-  async fn remove_entry(&self, key: &H3PoolKey) {
-    let slot = self.entries.lock().await.remove(key);
-    if let Some(slot) = slot {
-      *slot.connection.lock().await = None;
-    }
-  }
 }
 
 struct ConnectedH3Upstream {
@@ -367,6 +152,7 @@ pub(crate) async fn handle_downstream_connection(
     .config
     .limits
     .max_webtransport_sessions_per_connection;
+  let max_field_section_size = h3_field_section_size(snapshot.config.limits.max_total_header_bytes);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
@@ -384,6 +170,9 @@ pub(crate) async fn handle_downstream_connection(
     drain: drain.clone(),
   };
   let mut h3_connection = h3::server::builder()
+    // This applies to every H3 field section, including trailers decoded after
+    // request admission. Keep it aligned with the configured HTTP header cap.
+    .max_field_section_size(max_field_section_size)
     .enable_extended_connect(true)
     .enable_datagram(true)
     .enable_webtransport(true)
@@ -558,14 +347,15 @@ pub(crate) async fn handle_downstream_connection(
         timing::OUTCOME_OK,
         ingress_started,
       );
-      if prepared.verified_empty {
-        debug_assert_eq!(
-          prepared.inline_readiness,
-          request_body::PreparedH3RequestBodyReadiness::InlineReady
-        );
-      }
+      let inline_ready = prepared.verified_empty
+        && prepared.inline_readiness == request_body::PreparedH3RequestBodyReadiness::InlineReady;
+      debug_assert!(
+        prepared.inline_readiness != request_body::PreparedH3RequestBodyReadiness::InlineReady
+          || prepared.verified_empty,
+        "the HTTP/3 inline path requires a fully verified empty request body"
+      );
       let inline_spawn_started = timing::start(timing_enabled);
-      if prepared.inline_readiness == request_body::PreparedH3RequestBodyReadiness::Spawn {
+      if !inline_ready {
         request_tasks.spawn_prepared(
           prepared.request,
           send_stream,
@@ -689,6 +479,10 @@ where
       false
     }
   }
+}
+
+fn h3_field_section_size(max_total_header_bytes: usize) -> u64 {
+  (max_total_header_bytes as u64).min(H3_MAX_FIELD_SECTION_SIZE)
 }
 
 fn h3_inline_fast_path_candidate(

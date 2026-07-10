@@ -894,6 +894,7 @@ fn write_feature_gate_rows(
     vec![
       load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, monitor_p99),
       load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+      load_row("nginx-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
       load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
       load_row(
         "oxibelt-h3-inline-fast-path-experiment",
@@ -999,6 +1000,7 @@ fn write_required_quorum_evidence_with_h2_p99(
         vec![
           load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
           load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+          load_row("nginx-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
           load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
           load_row(
             "oxibelt-h3-inline-fast-path-experiment",
@@ -1077,6 +1079,7 @@ fn write_required_quorum_h1_evidence_with_p99_distribution(
       vec![
         load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 4.0),
         load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+        load_row("nginx-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
         load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
         load_row(
           "oxibelt-h3-inline-fast-path-experiment",
@@ -1442,7 +1445,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 29);
+  assert_eq!(report["schema_version"], 30);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1921,7 +1924,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 29);
+  assert_eq!(report["schema_version"], 30);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);
@@ -2830,6 +2833,7 @@ fn regression_gates_pass_when_median_recovers_from_low_samples() {
     vec![
       load_row("oxibelt-waf-monitor", "h2", 13000.0, 1.0, 10.0),
       load_row("oxibelt-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
+      load_row("nginx-post-1k-json-h2", "h2", 6000.0, 1.0, 8.0),
       load_row("oxibelt-waf-header-only-bodyful", "h2", 6000.0, 1.0, 8.0),
       load_row(
         "oxibelt-h3-inline-fast-path-experiment",
@@ -4136,6 +4140,7 @@ fn bodyful_and_h3_inline_min_rps_gates_fail_below_floor() {
       load_row("oxibelt-crs-monitor", "h2", 10000.0, 1.0, 10.0),
       load_row("oxibelt-crs-enforcing", "h2", 9200.0, 1.0, 11.0),
       load_row("oxibelt-post-1k-json-h2", "h2", 391.0, 1.0, 42.0),
+      load_row("nginx-post-1k-json-h2", "h2", 391.0, 1.0, 42.0),
       load_row("oxibelt-waf-header-only-bodyful", "h2", 391.0, 1.0, 42.0),
       load_row(
         "oxibelt-h3-inline-fast-path-experiment",
@@ -4187,6 +4192,115 @@ fn bodyful_and_h3_inline_min_rps_gates_fail_below_floor() {
       .as_f64()
       .expect("H3 inline RPS should exist"),
     8000.0,
+  );
+}
+
+#[test]
+fn bodyful_comparator_ratio_gate_blocks_a_slow_complete_pair() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 4.0);
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+    vec![
+      load_row("oxibelt-post-1k-json-h2", "h2", 70.0, 1.0, 8.0),
+      load_row("nginx-post-1k-json-h2", "h2", 100.0, 1.0, 8.0),
+    ],
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let violation =
+    find_regression_violation(&report, "bodyful_h2_min_nginx_ratio", "post-1k-json-h2");
+  assert_eq!(violation["metric"], "median_rps_ratio");
+  assert_eq!(violation["comparator"], "nginx");
+  assert_close(
+    violation["observed"]
+      .as_f64()
+      .expect("bodyful ratio should be present"),
+    0.70,
+  );
+  assert_close(
+    violation["threshold"]
+      .as_f64()
+      .expect("bodyful threshold should be present"),
+    0.80,
+  );
+}
+
+#[test]
+fn bodyful_comparator_missing_counterpart_fails_closed() {
+  for (label, missing_comparator) in [
+    ("oxibelt-post-1k-json-h2", "nginx"),
+    ("nginx-post-1k-json-h2", "oxibelt"),
+  ] {
+    let temp_dir = TempDir::new();
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 4.0);
+    write_results_array(
+      &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+      vec![load_row(label, "h2", 100.0, 1.0, 8.0)],
+    );
+
+    let report = run_aggregate(&input_dir, &output_dir);
+    let paired_rows = report["quorum"]["rows"]
+      .as_array()
+      .expect("quorum rows should be an array")
+      .iter()
+      .filter(|row| row["scenario"] == "post-1k-json-h2")
+      .collect::<Vec<_>>();
+    assert_eq!(
+      paired_rows.len(),
+      2,
+      "both sides must be required for {label}"
+    );
+    assert!(
+      paired_rows.iter().any(|row| {
+        row["comparator"] == missing_comparator && row["status"] == "insufficient_evidence"
+      }),
+      "missing {missing_comparator} bodyful counterpart must fail quorum: {paired_rows:?}"
+    );
+
+    let violation =
+      find_regression_violation(&report, "bodyful_h2_min_nginx_ratio", "post-1k-json-h2");
+    assert_eq!(violation["comparator"], missing_comparator);
+    assert!(
+      violation["message"]
+        .as_str()
+        .expect("missing comparator message should be present")
+        .contains("cannot evaluate"),
+      "missing bodyful evidence must remain a blocking ratio-gate failure"
+    );
+  }
+}
+
+#[test]
+fn bodyful_comparator_gate_stays_inactive_without_any_bodyful_evidence() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  write_reverse_proxy_h2(&input_dir, 100.0, 100.0, 4.0);
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  assert!(
+    !report["quorum"]["rows"]
+      .as_array()
+      .expect("quorum rows should be an array")
+      .iter()
+      .any(|row| row["scenario"] == "post-1k-json-h2"),
+    "bodyful quorum rows should appear only after at least one comparator emits evidence"
+  );
+  assert!(
+    !report["regression_gates"]["violations"]
+      .as_array()
+      .expect("regression violations should be an array")
+      .iter()
+      .any(|violation| violation["gate"] == "bodyful_h2_min_nginx_ratio"),
+    "no bodyful evidence should not fabricate a comparator ratio violation"
   );
 }
 

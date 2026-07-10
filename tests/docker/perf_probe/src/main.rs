@@ -31,6 +31,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 const MAX_ERROR_SAMPLES: usize = 8;
 const REMOTE_ADDR_RESOLVE_ATTEMPTS: usize = 10;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_TCP_NODELAY: bool = true;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Protocol {
@@ -126,6 +127,8 @@ struct LoadArgs {
   warmup: Duration,
   concurrency: usize,
   h2_streams_per_connection: usize,
+  h3_streams_per_connection: usize,
+  tcp_nodelay: bool,
   method: Method,
   request_body: Bytes,
   request_content_type: Option<String>,
@@ -397,7 +400,7 @@ fn usage() {
   eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
-  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>] [--method <method>] [--request-body-bytes <n>] [--request-body-kind bytes|json] [--chunked-request-body 0|1]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>] [--h3-streams-per-connection <n>] [--tcp-nodelay 0|1] [--method <method>] [--request-body-bytes <n>] [--request-body-kind bytes|json] [--chunked-request-body 0|1]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close|slow-post|slow-response|h2-rapid-stream-churn|h2-cl0-data|h3-cl0-data> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>] [--protocol <h1c|h1|h2|h3>] [--server-name <name>] [--ca-cert <pem>] [--path <path>] [--expect-status <status>] [--chunk-bytes <n>] [--chunk-delay-ms <n>] [--streams-per-connection <n>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
@@ -452,6 +455,26 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
   if h2_streams_per_connection != 1 && protocol != Protocol::H2 {
     bail!("--h2-streams-per-connection is only supported for protocol h2");
   }
+  let h3_streams_per_connection = values
+    .get("--h3-streams-per-connection")
+    .map(|value| {
+      value
+        .parse()
+        .context("invalid --h3-streams-per-connection value")
+    })
+    .transpose()?
+    .unwrap_or(1usize);
+  if h3_streams_per_connection == 0 {
+    bail!("--h3-streams-per-connection must be greater than zero");
+  }
+  if values.contains_key("--h3-streams-per-connection") && protocol != Protocol::H3 {
+    bail!("--h3-streams-per-connection is only supported for protocol h3");
+  }
+  let tcp_nodelay = values
+    .get("--tcp-nodelay")
+    .map(|value| parse_bool_flag(value, "--tcp-nodelay"))
+    .transpose()?
+    .unwrap_or(DEFAULT_TCP_NODELAY);
   let method = values
     .get("--method")
     .map(|value| value.parse().context("invalid --method value"))
@@ -506,6 +529,8 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     warmup: Duration::from_secs(parse_u64(&values, "--warmup-seconds")?),
     concurrency: parse_usize(&values, "--concurrency")?,
     h2_streams_per_connection,
+    h3_streams_per_connection,
+    tcp_nodelay,
     method,
     request_body,
     request_content_type,
@@ -1046,6 +1071,8 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "warmup_seconds": args.warmup.as_secs(),
         "concurrency": args.concurrency,
         "h2_streams_per_connection": args.h2_streams_per_connection,
+        "h3_streams_per_connection": args.h3_streams_per_connection,
+        "tcp_nodelay": args.tcp_nodelay,
         "method": args.method.as_str(),
         "request_body_bytes": args.request_body.len(),
         "chunked_request_body": args.chunked_request_body,
@@ -1191,6 +1218,7 @@ async fn h1c_connection_loop(
     &args.host,
     args.port,
     "connecting cleartext HTTP/1.1 socket",
+    args.tcp_nodelay,
   )
   .await?;
   let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
@@ -1236,6 +1264,7 @@ async fn h1_connection_loop(
     &args.server_name,
     &args.ca_cert,
     args.protocol.alpn(),
+    args.tcp_nodelay,
   )
   .await?;
   let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls_stream))
@@ -1300,6 +1329,7 @@ async fn h2_connection_loop(
     &args.server_name,
     &args.ca_cert,
     args.protocol.alpn(),
+    args.tcp_nodelay,
   )
   .await?;
   let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
@@ -1346,6 +1376,7 @@ async fn h2_multiplexed_connection_loop(
     &args.server_name,
     &args.ca_cert,
     args.protocol.alpn(),
+    args.tcp_nodelay,
   )
   .await?;
   let (mut sender, connection) = h2::client::handshake(tls_stream)
@@ -1425,6 +1456,9 @@ async fn h3_connection_loop(
   stats: &SharedStats,
   record: bool,
 ) -> anyhow::Result<()> {
+  if args.h3_streams_per_connection > 1 {
+    return h3_multiplexed_connection_loop(args, deadline, stats, record).await;
+  }
   let h3_client = h3_connect(
     &args.host,
     args.port,
@@ -1473,6 +1507,10 @@ async fn h3_connection_loop(
       let len = chunk.remaining();
       let _ = chunk.copy_to_bytes(len);
     }
+    let _ = stream
+      .recv_trailers()
+      .await
+      .context("failed to read HTTP/3 response trailers")?;
     if record {
       stats.record_response(
         response.status().as_u16(),
@@ -1485,6 +1523,93 @@ async fn h3_connection_loop(
   close_connection.close(0u32.into(), b"perf-probe complete");
   let _ = driver_task.await;
   Ok(())
+}
+
+async fn h3_multiplexed_connection_loop(
+  args: &LoadArgs,
+  deadline: Instant,
+  stats: &SharedStats,
+  record: bool,
+) -> anyhow::Result<()> {
+  let h3_client = h3_connect(
+    &args.host,
+    args.port,
+    &args.server_name,
+    &args.ca_cert,
+    args.protocol.alpn(),
+  )
+  .await?;
+  let close_connection = h3_client.connection.clone();
+  let h3_connection = h3_quinn::Connection::new(h3_client.connection);
+  let mut builder = h3::client::builder();
+  builder.send_grease(false);
+  let (mut driver, mut send_request) = builder
+    .build::<_, _, Bytes>(h3_connection)
+    .await
+    .context("failed to establish multiplexed HTTP/3 client")?;
+  let driver_task = tokio::spawn(async move {
+    let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+  });
+
+  let result = async {
+    let mut responses = FuturesUnordered::new();
+    loop {
+      while Instant::now() < deadline && responses.len() < args.h3_streams_per_connection {
+        let started = Instant::now();
+        let mut stream = send_request
+          .send_request(request(args, Version::HTTP_3, ())?)
+          .await
+          .context("failed to send multiplexed HTTP/3 request")?;
+        if !args.request_body.is_empty() {
+          stream
+            .send_data(args.request_body.clone())
+            .await
+            .context("failed to send multiplexed HTTP/3 request body")?;
+        }
+        stream
+          .finish()
+          .await
+          .context("failed to finish multiplexed HTTP/3 request")?;
+        responses.push(async move {
+          let response = stream
+            .recv_response()
+            .await
+            .context("failed to receive multiplexed HTTP/3 response")?;
+          while let Some(mut chunk) = stream
+            .recv_data()
+            .await
+            .context("failed to read multiplexed HTTP/3 response body")?
+          {
+            let len = chunk.remaining();
+            let _ = chunk.copy_to_bytes(len);
+          }
+          let _ = stream
+            .recv_trailers()
+            .await
+            .context("failed to read multiplexed HTTP/3 response trailers")?;
+          Ok::<_, anyhow::Error>((response.status().as_u16(), started.elapsed()))
+        });
+      }
+
+      if responses.is_empty() {
+        break;
+      }
+
+      let Some(result) = futures_util::StreamExt::next(&mut responses).await else {
+        break;
+      };
+      let (status, elapsed) = result?;
+      if record {
+        stats.record_response(status, elapsed, args.expect_status);
+      }
+    }
+    Ok(())
+  }
+  .await;
+
+  close_connection.close(0u32.into(), b"perf-probe complete");
+  let _ = driver_task.await;
+  result
 }
 
 fn request<B>(args: &LoadArgs, version: Version, body: B) -> anyhow::Result<Request<B>> {
@@ -1634,6 +1759,7 @@ async fn run_single_handshake(
         &args.host,
         args.port,
         "connecting cleartext HTTP/1.1 socket",
+        DEFAULT_TCP_NODELAY,
       )
       .await?;
       Ok(HandshakeObservation::default())
@@ -1672,6 +1798,7 @@ async fn tcp_handshake(
     args.port,
     &args.server_name,
     config,
+    DEFAULT_TCP_NODELAY,
   )
   .await?;
   observe_post_handshake(&mut stream, args.post_handshake_observe).await;
@@ -2551,6 +2678,7 @@ async fn h2_sender(
     &server_name,
     &ca_cert,
     args.protocol.alpn(),
+    DEFAULT_TCP_NODELAY,
   )
   .await?;
   let (sender, connection) = h2::client::handshake(tls_stream)
@@ -2647,9 +2775,19 @@ async fn tls_connect(
   server_name: &str,
   ca_cert: &str,
   alpn: &[u8],
+  tcp_nodelay: bool,
 ) -> anyhow::Result<TlsStream<TcpStream>> {
   let remote_addr = resolve_remote_addr(host, port).await?;
-  tls_connect_to_addr(remote_addr, host, port, server_name, ca_cert, alpn).await
+  tls_connect_to_addr(
+    remote_addr,
+    host,
+    port,
+    server_name,
+    ca_cert,
+    alpn,
+    tcp_nodelay,
+  )
+  .await
 }
 
 async fn tls_connect_to_addr(
@@ -2659,9 +2797,10 @@ async fn tls_connect_to_addr(
   server_name: &str,
   ca_cert: &str,
   alpn: &[u8],
+  tcp_nodelay: bool,
 ) -> anyhow::Result<TlsStream<TcpStream>> {
   let config = tcp_tls_config(ca_cert, alpn)?;
-  tls_connect_with_config_to_addr(remote_addr, host, port, server_name, config).await
+  tls_connect_with_config_to_addr(remote_addr, host, port, server_name, config, tcp_nodelay).await
 }
 
 fn tcp_tls_config(ca_cert: &str, alpn: &[u8]) -> anyhow::Result<Arc<ClientConfig>> {
@@ -2676,9 +2815,17 @@ async fn tls_connect_with_config_to_addr(
   port: u16,
   server_name: &str,
   config: Arc<ClientConfig>,
+  tcp_nodelay: bool,
 ) -> anyhow::Result<TlsStream<TcpStream>> {
   let connector = TlsConnector::from(config);
-  let stream = connect_tcp_addr(remote_addr, host, port, "connecting TLS socket").await?;
+  let stream = connect_tcp_addr(
+    remote_addr,
+    host,
+    port,
+    "connecting TLS socket",
+    tcp_nodelay,
+  )
+  .await?;
   let server_name = ServerName::try_from(server_name.to_owned())
     .map_err(|_| anyhow!("invalid server name: {server_name}"))?;
   connector
@@ -2758,8 +2905,9 @@ async fn connect_tcp_addr(
   host: &str,
   port: u16,
   context: &str,
+  tcp_nodelay: bool,
 ) -> anyhow::Result<TcpStream> {
-  tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(remote_addr))
+  let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(remote_addr))
     .await
     .with_context(|| {
       format!(
@@ -2767,7 +2915,13 @@ async fn connect_tcp_addr(
         TCP_CONNECT_TIMEOUT.as_millis()
       )
     })?
-    .with_context(|| format!("{context} to {host}:{port} ({remote_addr})"))
+    .with_context(|| format!("{context} to {host}:{port} ({remote_addr})"))?;
+  stream.set_nodelay(tcp_nodelay).with_context(|| {
+    format!(
+      "failed to set TCP_NODELAY={tcp_nodelay} after {context} to {host}:{port} ({remote_addr})"
+    )
+  })?;
+  Ok(stream)
 }
 
 fn client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
@@ -3017,6 +3171,8 @@ mod tests {
 
     assert_eq!(args.unique_query_param.as_deref(), Some("fill_id"));
     assert_eq!(args.h2_streams_per_connection, 1);
+    assert_eq!(args.h3_streams_per_connection, 1);
+    assert!(args.tcp_nodelay);
     let first =
       request(&args, Version::HTTP_2, Full::new(Bytes::new())).expect("first request should build");
     let second = request(&args, Version::HTTP_2, Full::new(Bytes::new()))
@@ -3101,6 +3257,117 @@ mod tests {
     assert!(error
       .to_string()
       .contains("--h2-streams-per-connection is only supported for protocol h2"));
+  }
+
+  #[test]
+  fn load_args_accept_h3_streams_per_connection_for_h3_only() {
+    let args = parse_load_args(
+      [
+        "--label",
+        "h3-multiplexed",
+        "--protocol",
+        "h3",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/h3?body=ok",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--h3-streams-per-connection",
+        "16",
+        "--tcp-nodelay",
+        "0",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    )
+    .expect("H3 streams-per-connection should parse");
+
+    assert_eq!(args.h3_streams_per_connection, 16);
+    assert_eq!(args.h2_streams_per_connection, 1);
+    assert!(!args.tcp_nodelay);
+
+    let error = match parse_load_args(
+      [
+        "--protocol",
+        "h2",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/h2?body=ok",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--h3-streams-per-connection",
+        "1",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    ) {
+      Ok(_) => panic!("non-H3 loads should reject H3 multiplexing"),
+      Err(error) => error,
+    };
+    assert!(error
+      .to_string()
+      .contains("--h3-streams-per-connection is only supported for protocol h3"));
+
+    let error = match parse_load_args(
+      [
+        "--protocol",
+        "h3",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/h3?body=ok",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+        "--h3-streams-per-connection",
+        "0",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    ) {
+      Ok(_) => panic!("H3 streams-per-connection must be positive"),
+      Err(error) => error,
+    };
+    assert!(error
+      .to_string()
+      .contains("--h3-streams-per-connection must be greater than zero"));
   }
 
   #[test]

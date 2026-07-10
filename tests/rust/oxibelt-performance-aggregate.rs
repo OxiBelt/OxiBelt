@@ -33,7 +33,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 29;
+const COMPARISON_SCHEMA_VERSION: u32 = 30;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -44,6 +44,16 @@ const EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC: &str = "benchmark_infrastructure
 const PROFILE_CLASSIFICATION_VALIDATION: &str = "diagnostic_profile_validation";
 const PROFILE_CLASSIFICATION_ENV_UNAVAILABLE: &str = "profiling_environment_unavailable";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
+const BODYFUL_COMPARATOR_SCENARIOS: [&str; 8] = [
+  "post-1k-json-h2",
+  "post-16k-json-h2",
+  "upload-1m-post-h2",
+  "stream-1m-h2",
+  "h2-multiplexed-bodyful",
+  "post-1k-json-h3",
+  "post-16k-json-h3",
+  "h3-multiplexed-bodyful",
+];
 const SERVING_TYPES: [&str; 8] = [
   "reverse-proxy",
   "static-files",
@@ -2675,7 +2685,7 @@ fn build_quorum_report(
   };
   let required_shards =
     expected_shards.map(|shards| ((shards as f64) * QUORUM_SHARD_PERCENT).ceil() as usize);
-  let required_rows = required_quorum_rows();
+  let required_rows = required_quorum_rows(aggregates);
   let mut rows = Vec::new();
   let mut warnings = Vec::new();
   let mut violations = Vec::new();
@@ -2762,8 +2772,8 @@ fn build_quorum_report(
   }
 }
 
-fn required_quorum_rows() -> Vec<RequiredQuorumRow> {
-  vec![
+fn required_quorum_rows(aggregates: &PrimaryAggregateMap) -> Vec<RequiredQuorumRow> {
+  let mut rows = vec![
     RequiredQuorumRow {
       group: ScenarioGroup::ReverseProxy,
       scenario: "h1-keepalive",
@@ -2854,7 +2864,26 @@ fn required_quorum_rows() -> Vec<RequiredQuorumRow> {
       comparator: Comparator::Oxibelt,
       matching_comparator_rows: 1,
     },
-  ]
+  ];
+
+  for scenario in BODYFUL_COMPARATOR_SCENARIOS {
+    if bodyful_comparator_evidence_is_present(aggregates, scenario) {
+      rows.push(RequiredQuorumRow {
+        group: ScenarioGroup::ReverseProxy,
+        scenario,
+        comparator: Comparator::Oxibelt,
+        matching_comparator_rows: 1,
+      });
+      rows.push(RequiredQuorumRow {
+        group: ScenarioGroup::ReverseProxy,
+        scenario,
+        comparator: Comparator::Nginx,
+        matching_comparator_rows: 1,
+      });
+    }
+  }
+
+  rows
 }
 
 fn aggregate_shard_count(aggregate: &AggregateStats) -> usize {
@@ -4012,6 +4041,7 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
   } else if remote_signer_base_scenario(scenario).is_some() {
     ScenarioGroup::RemoteSigner
   } else if matches!(scenario, "h1-keepalive" | "h2" | "h3" | "tls-handshake-h2")
+    || bodyful_comparator_scenario(scenario)
     || metrics_mode_reverse_proxy_scenario(scenario)
   {
     ScenarioGroup::ReverseProxy
@@ -4020,6 +4050,18 @@ fn classify_scenario(comparator: Comparator, scenario: &str) -> ScenarioGroup {
   } else {
     ScenarioGroup::Unclassified
   }
+}
+
+fn bodyful_comparator_scenario(scenario: &str) -> bool {
+  BODYFUL_COMPARATOR_SCENARIOS.contains(&scenario)
+}
+
+fn bodyful_comparator_evidence_is_present(
+  aggregates: &PrimaryAggregateMap,
+  scenario: &str,
+) -> bool {
+  aggregates.contains_key(&(Comparator::Oxibelt, scenario.to_owned()))
+    || aggregates.contains_key(&(Comparator::Nginx, scenario.to_owned()))
 }
 
 fn metrics_mode_reverse_proxy_scenario(scenario: &str) -> bool {
@@ -5346,6 +5388,13 @@ fn build_regression_gate_report(
     thresholds.h1_fast_path_min_hit_rate,
     &mut findings,
   );
+  collect_bodyful_comparator_ratio_regression_gates(
+    aggregates,
+    baseline,
+    primary_target_cpu,
+    thresholds,
+    &mut findings,
+  );
   collect_static_regression_gate(
     aggregates,
     baseline,
@@ -5505,6 +5554,40 @@ fn apply_accepted_regression(
 
 fn accepted_regression_eligible(violation: &RegressionGateViolation) -> bool {
   violation.observed.is_some() && violation.evaluation_mode != "evidence"
+}
+
+fn collect_bodyful_comparator_ratio_regression_gates(
+  aggregates: &PrimaryAggregateMap,
+  baseline: Option<&BaselineGateContext>,
+  primary_target_cpu: &str,
+  thresholds: RegressionGateThresholds,
+  findings: &mut RegressionGateFindings,
+) {
+  for scenario in BODYFUL_COMPARATOR_SCENARIOS {
+    if !bodyful_comparator_evidence_is_present(aggregates, scenario) {
+      continue;
+    }
+    let (gate, threshold) = if scenario.ends_with("-h3") {
+      ("bodyful_h3_min_nginx_ratio", thresholds.h3_min_nginx_ratio)
+    } else {
+      ("bodyful_h2_min_nginx_ratio", thresholds.h2_min_nginx_ratio)
+    };
+    collect_comparator_ratio_regression_gate(
+      aggregates,
+      baseline,
+      primary_target_cpu,
+      ComparatorRatioGate {
+        gate,
+        group: ScenarioGroup::ReverseProxy,
+        scenario,
+        comparator: Comparator::Nginx,
+        threshold,
+        allow_baseline_advisory: false,
+        baseline_stable_advisory_policy: None,
+      },
+      findings,
+    );
+  }
 }
 
 fn collect_static_regression_gate(

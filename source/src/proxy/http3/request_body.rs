@@ -28,8 +28,6 @@ pub(super) enum PreparedH3RequestBodyReadiness {
   Spawn,
 }
 
-const INLINE_REQUEST_BODY_MAX_BYTES: usize = 16 * 1024;
-
 pub(super) async fn prepare_h3_request_body(
   request: Request<()>,
   stream: H3RequestRecvStream,
@@ -47,14 +45,15 @@ pub(super) async fn prepare_h3_request_body_with_verification(
 trait H3RequestBodyStream: Send + Unpin + 'static {
   type Error: fmt::Display + Send + Sync + 'static;
 
-  fn is_end_stream(&self) -> bool {
-    false
-  }
-
   fn poll_recv_data_bytes(
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<Result<Option<Bytes>, Self::Error>>;
+
+  fn poll_recv_trailers(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<Option<http::HeaderMap>, Self::Error>>;
 }
 
 impl H3RequestBodyStream for H3RequestRecvStream {
@@ -73,6 +72,13 @@ impl H3RequestBodyStream for H3RequestRecvStream {
       })
     })
   }
+
+  fn poll_recv_trailers(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<Option<http::HeaderMap>, Self::Error>> {
+    self.poll_recv_trailers(cx)
+  }
 }
 
 async fn prepare_h3_request_body_inner<S>(
@@ -82,57 +88,55 @@ async fn prepare_h3_request_body_inner<S>(
 where
   S: H3RequestBodyStream,
 {
-  if h2_or_h3_safe_method_empty_probe_allowed(
+  let empty_probe_allowed = h2_or_h3_safe_method_empty_probe_allowed(
     request.method(),
     http::Version::HTTP_3,
     request.headers(),
-  ) && stream.is_end_stream()
-  {
-    let (parts, _) = request.into_parts();
-    drop(stream);
-    return verified_empty_request(parts);
-  }
+  );
 
-  let first = match poll_h3_request_body_once(&mut stream).await {
-    None
-      if h2_or_h3_safe_method_empty_probe_allowed(
-        request.method(),
-        http::Version::HTTP_3,
-        request.headers(),
-      ) =>
-    {
-      if stream.is_end_stream() {
-        Some(Ok(None))
-      } else {
-        None
-      }
-    }
-    first => first,
-  };
+  let first = poll_h3_request_body_once(&mut stream).await;
 
   match first {
     Some(Ok(None)) => {
-      let (parts, _) = request.into_parts();
-      drop(stream);
-      verified_empty_request(parts)
-    }
-    Some(Ok(Some(chunk))) => {
-      let inline_readiness = if chunk.len() <= INLINE_REQUEST_BODY_MAX_BYTES {
-        PreparedH3RequestBodyReadiness::InlineReady
+      if empty_probe_allowed {
+        match poll_h3_request_trailers_once(&mut stream).await {
+          Some(Ok(None)) => {
+            let (parts, _) = request.into_parts();
+            drop(stream);
+            verified_empty_request(parts)
+          }
+          Some(Ok(Some(trailers))) => direct_h3_request_body_with_initial(
+            request,
+            stream,
+            Some(Ok(Frame::trailers(trailers))),
+            H3DirectRequestBodyState::End,
+            PreparedH3RequestBodyReadiness::Spawn,
+          ),
+          Some(Err(error)) => direct_h3_request_body_with_initial(
+            request,
+            stream,
+            Some(Err(downstream_h3_request_trailers_error(error))),
+            H3DirectRequestBodyState::End,
+            PreparedH3RequestBodyReadiness::Spawn,
+          ),
+          None => direct_h3_request_body_after_data_eof(request, stream),
+        }
       } else {
-        PreparedH3RequestBodyReadiness::Spawn
-      };
-      direct_h3_request_body_with_initial(
-        request,
-        stream,
-        Some(Ok(Frame::data(chunk))),
-        inline_readiness,
-      )
+        direct_h3_request_body_after_data_eof(request, stream)
+      }
     }
+    Some(Ok(Some(chunk))) => direct_h3_request_body_with_initial(
+      request,
+      stream,
+      Some(Ok(Frame::data(chunk))),
+      H3DirectRequestBodyState::Data,
+      PreparedH3RequestBodyReadiness::Spawn,
+    ),
     Some(Err(error)) => direct_h3_request_body_with_initial(
       request,
       stream,
       Some(Err(downstream_h3_request_body_error(error))),
+      H3DirectRequestBodyState::End,
       PreparedH3RequestBodyReadiness::Spawn,
     ),
     None => direct_h3_request_body(request, stream),
@@ -150,17 +154,53 @@ where
   .await
 }
 
+async fn poll_h3_request_trailers_once<S>(
+  stream: &mut S,
+) -> Option<Result<Option<http::HeaderMap>, S::Error>>
+where
+  S: H3RequestBodyStream,
+{
+  poll_fn(|cx| match stream.poll_recv_trailers(cx) {
+    Poll::Ready(result) => Poll::Ready(Some(result)),
+    Poll::Pending => Poll::Ready(None),
+  })
+  .await
+}
+
 fn direct_h3_request_body<S>(request: Request<()>, stream: S) -> PreparedH3RequestBody
 where
   S: H3RequestBodyStream,
 {
-  direct_h3_request_body_with_initial(request, stream, None, PreparedH3RequestBodyReadiness::Spawn)
+  direct_h3_request_body_with_initial(
+    request,
+    stream,
+    None,
+    H3DirectRequestBodyState::Data,
+    PreparedH3RequestBodyReadiness::Spawn,
+  )
+}
+
+fn direct_h3_request_body_after_data_eof<S>(
+  request: Request<()>,
+  stream: S,
+) -> PreparedH3RequestBody
+where
+  S: H3RequestBodyStream,
+{
+  direct_h3_request_body_with_initial(
+    request,
+    stream,
+    None,
+    H3DirectRequestBodyState::Trailers,
+    PreparedH3RequestBodyReadiness::Spawn,
+  )
 }
 
 fn direct_h3_request_body_with_initial<S>(
   request: Request<()>,
   stream: S,
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
+  state: H3DirectRequestBodyState,
   inline_readiness: PreparedH3RequestBodyReadiness,
 ) -> PreparedH3RequestBody
 where
@@ -170,7 +210,7 @@ where
   let body = H3DirectRequestBody {
     initial_frame,
     stream: Mutex::new(stream),
-    ended: false,
+    state,
   }
   .boxed();
   PreparedH3RequestBody {
@@ -180,10 +220,17 @@ where
   }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H3DirectRequestBodyState {
+  Data,
+  Trailers,
+  End,
+}
+
 struct H3DirectRequestBody<S> {
   initial_frame: Option<Result<Frame<Bytes>, BoxError>>,
   stream: Mutex<S>,
-  ended: bool,
+  state: H3DirectRequestBodyState,
 }
 
 impl<S> Body for H3DirectRequestBody<S>
@@ -199,45 +246,46 @@ where
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
     let this = self.get_mut();
     if let Some(frame) = this.initial_frame.take() {
-      if frame.is_err() {
-        this.ended = true;
-      }
       return Poll::Ready(Some(frame));
-    }
-    if this.ended {
-      return Poll::Ready(None);
     }
 
     let stream = match this.stream.get_mut() {
       Ok(stream) => stream,
       Err(poisoned) => poisoned.into_inner(),
     };
-    match stream.poll_recv_data_bytes(cx) {
-      Poll::Ready(Ok(Some(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
-      Poll::Ready(Ok(None)) => {
-        this.ended = true;
-        Poll::Ready(None)
+    loop {
+      match this.state {
+        H3DirectRequestBodyState::Data => match stream.poll_recv_data_bytes(cx) {
+          Poll::Ready(Ok(Some(chunk))) => return Poll::Ready(Some(Ok(Frame::data(chunk)))),
+          Poll::Ready(Ok(None)) => this.state = H3DirectRequestBodyState::Trailers,
+          Poll::Ready(Err(error)) => {
+            this.state = H3DirectRequestBodyState::End;
+            return Poll::Ready(Some(Err(downstream_h3_request_body_error(error))));
+          }
+          Poll::Pending => return Poll::Pending,
+        },
+        H3DirectRequestBodyState::Trailers => match stream.poll_recv_trailers(cx) {
+          Poll::Ready(Ok(Some(trailers))) => {
+            this.state = H3DirectRequestBodyState::End;
+            return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+          }
+          Poll::Ready(Ok(None)) => {
+            this.state = H3DirectRequestBodyState::End;
+            return Poll::Ready(None);
+          }
+          Poll::Ready(Err(error)) => {
+            this.state = H3DirectRequestBodyState::End;
+            return Poll::Ready(Some(Err(downstream_h3_request_trailers_error(error))));
+          }
+          Poll::Pending => return Poll::Pending,
+        },
+        H3DirectRequestBodyState::End => return Poll::Ready(None),
       }
-      Poll::Ready(Err(error)) => {
-        this.ended = true;
-        Poll::Ready(Some(Err(downstream_h3_request_body_error(error))))
-      }
-      Poll::Pending => Poll::Pending,
     }
   }
 
   fn is_end_stream(&self) -> bool {
-    if self.ended {
-      return true;
-    }
-    if self.initial_frame.is_some() {
-      return false;
-    }
-    self
-      .stream
-      .lock()
-      .map(|stream| stream.is_end_stream())
-      .unwrap_or(false)
+    self.initial_frame.is_none() && self.state == H3DirectRequestBodyState::End
   }
 
   fn size_hint(&self) -> SizeHint {
@@ -248,6 +296,12 @@ where
 fn downstream_h3_request_body_error(error: impl fmt::Display) -> BoxError {
   boxed_error(std::io::Error::other(format!(
     "failed to receive downstream HTTP/3 request data: {error}"
+  )))
+}
+
+fn downstream_h3_request_trailers_error(error: impl fmt::Display) -> BoxError {
+  boxed_error(std::io::Error::other(format!(
+    "failed to receive downstream HTTP/3 request trailers: {error}"
   )))
 }
 
@@ -268,462 +322,5 @@ fn verified_empty_request(parts: http::request::Parts) -> PreparedH3RequestBody 
 }
 
 #[cfg(test)]
-mod tests {
-  use std::collections::VecDeque;
-  use std::fmt;
-  use std::sync::Arc;
-  use std::sync::atomic::{AtomicUsize, Ordering};
-  use std::task::{Context, Poll};
-  use std::time::Duration;
-
-  use ::http::header::CONTENT_LENGTH;
-  use ::http::{HeaderValue, Method, Request};
-  use bytes::Bytes;
-  use http_body_util::BodyExt;
-
-  use super::*;
-
-  fn assert_inline_ready(prepared: &PreparedH3RequestBody) {
-    assert_eq!(
-      prepared.inline_readiness,
-      PreparedH3RequestBodyReadiness::InlineReady
-    );
-  }
-
-  fn assert_spawn(prepared: &PreparedH3RequestBody) {
-    assert_eq!(
-      prepared.inline_readiness,
-      PreparedH3RequestBodyReadiness::Spawn
-    );
-  }
-
-  #[tokio::test]
-  async fn get_content_length_zero_data_is_streamed_into_proxy_body() {
-    assert_content_length_zero_data_is_streamed(Method::GET).await;
-  }
-
-  #[tokio::test]
-  async fn head_content_length_zero_data_is_streamed_into_proxy_body() {
-    assert_content_length_zero_data_is_streamed(Method::HEAD).await;
-  }
-
-  #[tokio::test]
-  async fn post_body_uses_streaming_path() {
-    let request = request(Method::POST);
-    let stream = FakeRequestStream::new([
-      FakeStreamEvent::Data(Bytes::from_static(b"abc")),
-      FakeStreamEvent::End,
-    ]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_inline_ready(&prepared);
-    let request = prepared.request;
-
-    let body = request
-      .into_body()
-      .collect()
-      .await
-      .expect("POST body should collect")
-      .to_bytes();
-    assert_eq!(body, Bytes::from_static(b"abc"));
-  }
-
-  #[tokio::test]
-  async fn large_initial_body_uses_spawn_path() {
-    let request = request(Method::POST);
-    let large = Bytes::from(vec![b'x'; INLINE_REQUEST_BODY_MAX_BYTES + 1]);
-    let stream =
-      FakeRequestStream::new([FakeStreamEvent::Data(large.clone()), FakeStreamEvent::End]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-    assert_spawn(&prepared);
-    let body = prepared
-      .request
-      .into_body()
-      .collect()
-      .await
-      .expect("large body should collect")
-      .to_bytes();
-    assert_eq!(body, large);
-  }
-
-  #[tokio::test]
-  async fn content_length_zero_end_stream_returns_empty_body_after_polling_stream() {
-    let request = request_with_content_length(Method::GET, &["0"]);
-    let stream = FakeRequestStream::new([FakeStreamEvent::End]);
-    let poll_count = stream.poll_count();
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert_inline_ready(&prepared);
-    let request = prepared.request;
-    let body = request
-      .into_body()
-      .collect()
-      .await
-      .expect("ended H3 stream should collect")
-      .to_bytes();
-    assert!(body.is_empty());
-  }
-
-  #[tokio::test]
-  async fn get_content_length_zero_uses_streaming_path_when_body_might_arrive() {
-    let request = request_with_content_length(Method::GET, &["0"]);
-    let stream = FakeRequestStream::pending();
-    let poll_count = stream.poll_count();
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert_spawn(&prepared);
-  }
-
-  #[tokio::test]
-  async fn get_without_content_length_uses_streaming_path_when_body_might_arrive() {
-    let request = request(Method::GET);
-    let stream = FakeRequestStream::pending();
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_spawn(&prepared);
-  }
-
-  #[tokio::test]
-  async fn get_and_head_without_framing_headers_end_stream_mark_verified_empty_without_polling() {
-    for method in [Method::GET, Method::HEAD] {
-      let request = request(method);
-      let stream = FakeRequestStream::new([FakeStreamEvent::End]);
-      let poll_count = stream.poll_count();
-
-      let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-      assert_eq!(poll_count.load(Ordering::SeqCst), 0);
-      assert!(prepared.verified_empty);
-      assert_inline_ready(&prepared);
-      let request = prepared.request;
-      assert!(
-        request
-          .extensions()
-          .get::<VerifiedEmptyRequestBody>()
-          .is_some()
-      );
-      let body = request
-        .into_body()
-        .collect()
-        .await
-        .expect("ended H3 stream should collect")
-        .to_bytes();
-      assert!(body.is_empty());
-    }
-  }
-
-  #[tokio::test]
-  async fn get_and_head_without_framing_headers_shortcut_pending_marked_end() {
-    for method in [Method::GET, Method::HEAD] {
-      let request = request(method);
-      let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
-      let poll_count = stream.poll_count();
-
-      let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-      assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-      assert_inline_ready(&prepared);
-      let request = prepared.request;
-      assert!(
-        request
-          .extensions()
-          .get::<VerifiedEmptyRequestBody>()
-          .is_some()
-      );
-      let body = request
-        .into_body()
-        .collect()
-        .await
-        .expect("pending then EOF request body should collect")
-        .to_bytes();
-      assert!(body.is_empty());
-    }
-  }
-
-  #[tokio::test]
-  async fn post_without_framing_headers_does_not_use_empty_probe() {
-    let request = request(Method::POST);
-    let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_spawn(&prepared);
-    let request = prepared.request;
-
-    let body = request
-      .into_body()
-      .collect()
-      .await
-      .expect("POST body should still use the streaming path")
-      .to_bytes();
-    assert!(body.is_empty());
-  }
-
-  #[tokio::test]
-  async fn get_content_length_positive_does_not_use_empty_probe() {
-    let request = request_with_content_length(Method::GET, &["5"]);
-    let stream = FakeRequestStream::new([FakeStreamEvent::Pending, FakeStreamEvent::End]);
-    let poll_count = stream.poll_count();
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    assert_spawn(&prepared);
-    let request = prepared.request;
-    assert!(
-      request
-        .extensions()
-        .get::<VerifiedEmptyRequestBody>()
-        .is_none()
-    );
-    let body = request
-      .into_body()
-      .collect()
-      .await
-      .expect("framed GET body should still use the streaming path")
-      .to_bytes();
-    assert!(body.is_empty());
-  }
-
-  #[tokio::test]
-  async fn get_without_framing_headers_preserves_late_data_and_errors() {
-    let request = request(Method::GET);
-    let stream = FakeRequestStream::new([
-      FakeStreamEvent::Pending,
-      FakeStreamEvent::Data(Bytes::from_static(b"body")),
-      FakeStreamEvent::End,
-    ]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-
-    assert!(!prepared.verified_empty);
-    assert_spawn(&prepared);
-    let body = prepared
-      .request
-      .into_body()
-      .collect()
-      .await
-      .expect("late DATA should collect through the streaming path")
-      .to_bytes();
-    assert_eq!(body, Bytes::from_static(b"body"));
-
-    let request = self::request(Method::GET);
-    let stream = FakeRequestStream::new([
-      FakeStreamEvent::Pending,
-      FakeStreamEvent::Error("stream reset"),
-    ]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_spawn(&prepared);
-    let request = prepared.request;
-
-    let error = request
-      .into_body()
-      .collect()
-      .await
-      .expect_err("late stream error should be exposed as a body error");
-    assert!(
-      error
-        .to_string()
-        .contains("failed to receive downstream HTTP/3 request data: stream reset")
-    );
-  }
-
-  #[tokio::test]
-  async fn h3_stream_error_propagates_through_streaming_body() {
-    let request = request(Method::POST);
-    let stream = FakeRequestStream::new([FakeStreamEvent::Error("stream reset")]);
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_spawn(&prepared);
-    let request = prepared.request;
-
-    let error = request
-      .into_body()
-      .collect()
-      .await
-      .expect_err("stream error should be exposed as a body error");
-    assert!(
-      error
-        .to_string()
-        .contains("failed to receive downstream HTTP/3 request data: stream reset")
-    );
-  }
-
-  #[tokio::test]
-  async fn dropping_proxy_body_drops_direct_recv_stream() {
-    let request = request(Method::POST);
-    let stream = FakeRequestStream::new([
-      FakeStreamEvent::Data(Bytes::from_static(b"first")),
-      FakeStreamEvent::Data(Bytes::from_static(b"second")),
-      FakeStreamEvent::End,
-    ]);
-    let drop_count = stream.drop_count();
-
-    let prepared = prepare_h3_request_body_inner(request, stream).await;
-    assert_inline_ready(&prepared);
-    let request = prepared.request;
-
-    drop(request);
-    tokio::time::timeout(Duration::from_secs(1), async {
-      loop {
-        if drop_count.load(Ordering::SeqCst) > 0 {
-          break;
-        }
-        tokio::task::yield_now().await;
-      }
-    })
-    .await
-    .expect("direct recv stream should drop with downstream body");
-  }
-
-  #[tokio::test]
-  async fn dropping_pending_proxy_body_drops_direct_recv_stream() {
-    let request = request(Method::POST);
-    let stream = FakeRequestStream::pending();
-    let drop_count = stream.drop_count();
-
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
-
-    drop(request);
-    tokio::time::timeout(Duration::from_secs(1), async {
-      loop {
-        if drop_count.load(Ordering::SeqCst) > 0 {
-          break;
-        }
-        tokio::task::yield_now().await;
-      }
-    })
-    .await
-    .expect("pending direct recv stream should drop with downstream body");
-  }
-
-  async fn assert_content_length_zero_data_is_streamed(method: Method) {
-    let request = request_with_content_length(method, &["0"]);
-    let stream = FakeRequestStream::new([
-      FakeStreamEvent::Data(Bytes::from_static(b"malicious-body")),
-      FakeStreamEvent::End,
-    ]);
-    let poll_count = stream.poll_count();
-
-    let request = prepare_h3_request_body_inner(request, stream).await.request;
-
-    assert_eq!(poll_count.load(Ordering::SeqCst), 1);
-    let body = request
-      .into_body()
-      .collect()
-      .await
-      .expect("Content-Length: 0 DATA should collect through ProxyBody")
-      .to_bytes();
-    assert_eq!(body, Bytes::from_static(b"malicious-body"));
-  }
-
-  fn request(method: Method) -> Request<()> {
-    Request::builder()
-      .method(method)
-      .uri("https://example.com/resource")
-      .body(())
-      .expect("request should build")
-  }
-
-  fn request_with_content_length(method: Method, values: &[&'static str]) -> Request<()> {
-    let mut request = request(method);
-    for value in values {
-      request
-        .headers_mut()
-        .append(CONTENT_LENGTH, HeaderValue::from_static(value));
-    }
-    request
-  }
-
-  enum FakeStreamEvent {
-    Pending,
-    Data(Bytes),
-    End,
-    Error(&'static str),
-  }
-
-  struct FakeRequestStream {
-    events: VecDeque<FakeStreamEvent>,
-    pending: bool,
-    poll_count: Arc<AtomicUsize>,
-    drop_count: Arc<AtomicUsize>,
-  }
-
-  impl FakeRequestStream {
-    fn new(events: impl IntoIterator<Item = FakeStreamEvent>) -> Self {
-      Self {
-        events: events.into_iter().collect(),
-        pending: false,
-        poll_count: Arc::new(AtomicUsize::new(0)),
-        drop_count: Arc::new(AtomicUsize::new(0)),
-      }
-    }
-
-    fn pending() -> Self {
-      Self {
-        events: VecDeque::new(),
-        pending: true,
-        poll_count: Arc::new(AtomicUsize::new(0)),
-        drop_count: Arc::new(AtomicUsize::new(0)),
-      }
-    }
-
-    fn poll_count(&self) -> Arc<AtomicUsize> {
-      Arc::clone(&self.poll_count)
-    }
-
-    fn drop_count(&self) -> Arc<AtomicUsize> {
-      Arc::clone(&self.drop_count)
-    }
-  }
-
-  impl Drop for FakeRequestStream {
-    fn drop(&mut self) {
-      self.drop_count.fetch_add(1, Ordering::SeqCst);
-    }
-  }
-
-  impl H3RequestBodyStream for FakeRequestStream {
-    type Error = FakeStreamError;
-
-    fn is_end_stream(&self) -> bool {
-      !self.pending
-        && (self.events.is_empty() || matches!(self.events.front(), Some(FakeStreamEvent::End)))
-    }
-
-    fn poll_recv_data_bytes(
-      &mut self,
-      cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>> {
-      self.poll_count.fetch_add(1, Ordering::SeqCst);
-      if self.pending {
-        return Poll::Pending;
-      }
-
-      match self.events.pop_front().unwrap_or(FakeStreamEvent::End) {
-        FakeStreamEvent::Pending => {
-          cx.waker().wake_by_ref();
-          Poll::Pending
-        }
-        FakeStreamEvent::Data(bytes) => Poll::Ready(Ok(Some(bytes))),
-        FakeStreamEvent::End => Poll::Ready(Ok(None)),
-        FakeStreamEvent::Error(message) => Poll::Ready(Err(FakeStreamError(message))),
-      }
-    }
-  }
-
-  #[derive(Debug)]
-  struct FakeStreamError(&'static str);
-
-  impl fmt::Display for FakeStreamError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-      formatter.write_str(self.0)
-    }
-  }
-}
+#[path = "request_body_tests.rs"]
+mod tests;

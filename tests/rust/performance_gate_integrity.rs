@@ -1089,6 +1089,7 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
   let script = performance_script_text();
   let bodyful_function = extract_bash_function(&script, "run_oxibelt_bodyful_performance_gates");
   let waf_function = extract_bash_function(&script, "run_oxibelt_waf_body_mode_gates");
+  let reverse_proxy_function = extract_bash_function(&script, "run_reverse_proxy_group");
 
   for expected in [
     "run_load \"oxibelt-post-1k-json-h2\" h2",
@@ -1100,17 +1101,38 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
     "run_load \"oxibelt-chunked-post-16k-h1\" h1",
     "run_load \"oxibelt-h2-multiplexed-bodyful\" h2",
     "run_load \"oxibelt-post-1k-json-h3\" h3",
+    "run_load \"oxibelt-post-16k-json-h3\" h3",
+    "run_load \"oxibelt-h3-multiplexed-bodyful\" h3",
     "run_load \"oxibelt-h3-concurrent-bodyful\" h3",
     "--request-body-kind json",
     "--request-body-bytes 1048576",
     "--chunked-request-body 1",
     "--h2-streams-per-connection 16",
+    "--h3-streams-per-connection 16",
     "--expect-status 204",
     "assert_min_rps_regression_gate \"oxibelt-post-1k-json-h2\"",
   ] {
     assert!(
       bodyful_function.contains(expected),
       "bodyful performance gates should contain {expected:?}"
+    );
+  }
+
+  let nginx_bodyful_function = extract_bash_function(&script, "run_nginx_bodyful_comparator_loads");
+  for expected in [
+    "run_load \"nginx-post-1k-json-h2\" h2",
+    "run_load \"nginx-post-16k-json-h2\" h2",
+    "run_load \"nginx-upload-1m-post-h2\" h2",
+    "run_load \"nginx-stream-1m-h2\" h2",
+    "run_load \"nginx-h2-multiplexed-bodyful\" h2",
+    "run_load \"nginx-post-1k-json-h3\" h3",
+    "run_load \"nginx-post-16k-json-h3\" h3",
+    "run_load \"nginx-h3-multiplexed-bodyful\" h3",
+    "--h3-streams-per-connection 16",
+  ] {
+    assert!(
+      nginx_bodyful_function.contains(expected),
+      "nginx bodyful comparator rows should contain {expected:?}"
     );
   }
 
@@ -1135,10 +1157,14 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
     "run_oxibelt_waf_body_mode_gates",
   ] {
     assert!(
-      script.contains(expected),
+      reverse_proxy_function.contains(expected),
       "performance script should call {expected}"
     );
   }
+  assert!(
+    reverse_proxy_function.contains("run_nginx_bodyful_comparator_loads \"${nginx_h3_mode}\""),
+    "reverse-proxy runs must emit paired nginx bodyful rows before aggregate gates evaluate them"
+  );
 }
 
 #[test]
@@ -3306,7 +3332,7 @@ fn perf_probe_h3_client_disables_grease_for_comparator_interop() {
   let source = perf_probe_source_text();
   assert_eq!(
     source.matches("builder.send_grease(false);").count(),
-    2,
-    "perf-probe should disable HTTP/3 GREASE in load and stress clients so nginx comparator required H3 smoke measures proxy behavior instead of GREASE interop"
+    3,
+    "perf-probe should disable HTTP/3 GREASE in sequential, multiplexed, and stress clients so nginx comparator required H3 smoke measures proxy behavior instead of GREASE interop"
   );
 }

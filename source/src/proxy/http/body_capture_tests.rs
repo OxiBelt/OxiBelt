@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use pretty_assertions::assert_eq;
 
-use super::body::CapturedBody;
+use super::body::{CapturedBody, capture_proxy_body_prefix};
 use super::waf_body_capture::{
   WafBodyCaptureError, capture_request_body_for_waf, capture_response_body_for_waf,
   request_body_is_definitely_empty, response_body_is_definitely_empty,
@@ -20,6 +21,38 @@ use super::waf_body_capture::{
 use super::*;
 
 struct PanicBody;
+
+struct FramesBody {
+  frames: VecDeque<Frame<bytes::Bytes>>,
+}
+
+impl FramesBody {
+  fn new(frames: impl IntoIterator<Item = Frame<bytes::Bytes>>) -> Self {
+    Self {
+      frames: frames.into_iter().collect(),
+    }
+  }
+}
+
+impl Body for FramesBody {
+  type Data = bytes::Bytes;
+  type Error = body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Poll::Ready(self.frames.pop_front().map(Ok))
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.frames.is_empty()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    SizeHint::new()
+  }
+}
 
 impl Body for PanicBody {
   type Data = bytes::Bytes;
@@ -237,6 +270,76 @@ async fn prefix_request_body_capture_reads_body() {
     captured.expect("body should be captured").bytes.as_ref(),
     b"abc"
   );
+}
+
+#[tokio::test]
+async fn complete_single_frame_prefix_capture_does_not_retain_frame_owner() {
+  let drops = Arc::new(AtomicUsize::new(0));
+  let owner = DropTrackedBytes::new(vec![b's'; 1024 * 1024], Arc::clone(&drops));
+  let source = bytes::Bytes::from_owner(owner).slice(..1024);
+  let (body, captured) = capture_proxy_body_prefix(full_body(source), 2048, None)
+    .await
+    .expect("single-frame prefix capture should succeed");
+
+  assert!(!captured.is_truncated);
+  drop(body);
+  assert_eq!(
+    drops.load(Ordering::SeqCst),
+    1,
+    "captured complete prefix must not retain the oversized frame owner"
+  );
+  assert_eq!(captured.bytes.as_ref(), &[b's'; 1024]);
+}
+
+#[tokio::test]
+async fn multi_frame_prefix_capture_preserves_bounded_replay_and_trailers() {
+  let mut trailers = HeaderMap::new();
+  trailers.insert("x-trailer", "kept".parse().unwrap());
+  let body = FramesBody::new([
+    Frame::data(bytes::Bytes::from_static(b"ab")),
+    Frame::data(bytes::Bytes::from_static(b"cdef")),
+    Frame::trailers(trailers),
+  ])
+  .boxed();
+
+  let (body, captured) = capture_proxy_body_prefix(body, 5, None)
+    .await
+    .expect("multi-frame prefix capture should succeed");
+  assert_eq!(captured.bytes.as_ref(), b"abcde");
+  assert!(captured.is_truncated);
+
+  let replayed = body
+    .collect()
+    .await
+    .expect("multi-frame captured body should replay");
+  assert_eq!(replayed.trailers().unwrap()["x-trailer"], "kept");
+  assert_eq!(replayed.to_bytes().as_ref(), b"abcdef");
+}
+
+#[tokio::test]
+async fn multi_frame_partial_prefix_does_not_retain_oversized_frame_owner() {
+  let drops = Arc::new(AtomicUsize::new(0));
+  let owner = DropTrackedBytes::new(vec![b'x'; 1024 * 1024], Arc::clone(&drops));
+  let body = FramesBody::new([
+    Frame::data(bytes::Bytes::from_static(b"ab")),
+    Frame::data(bytes::Bytes::from_owner(owner)),
+  ])
+  .boxed();
+
+  let (body, captured) = capture_proxy_body_prefix(body, 8, None)
+    .await
+    .expect("multi-frame partial prefix capture should succeed");
+  assert_eq!(captured.bytes.as_ref(), b"abxxxxxx");
+  assert!(captured.is_truncated);
+  assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+  drop(body);
+  assert_eq!(
+    drops.load(Ordering::SeqCst),
+    1,
+    "captured multi-frame prefix must not retain the oversized frame owner"
+  );
+  assert_eq!(captured.bytes.as_ref(), b"abxxxxxx");
 }
 
 #[tokio::test]

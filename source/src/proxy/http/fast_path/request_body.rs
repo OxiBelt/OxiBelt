@@ -328,6 +328,10 @@ where
       BodyTimeoutKind::DownstreamRequestRead,
     );
     let expected = options.content_length();
+    // Copy into a bounded allocation. A small `Bytes` can be a slice of a
+    // much larger downstream read buffer and this body can wait on upstream
+    // I/O, so retaining it would turn a small declared request into pinned
+    // attacker-controlled memory.
     let mut bytes = BytesMut::with_capacity(expected);
     let mut trailers = None;
     while let Some(frame) = body.frame().await {

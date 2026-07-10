@@ -207,6 +207,19 @@ fn plain_connect_is_not_webtransport() {
 }
 
 #[test]
+fn h3_field_section_size_uses_the_configured_header_budget() {
+  assert_eq!(h3_field_section_size(65_536), 65_536);
+}
+
+#[test]
+fn h3_field_section_size_stays_within_the_http3_setting_range() {
+  assert_eq!(
+    h3_field_section_size(usize::MAX),
+    (usize::MAX as u64).min(H3_MAX_FIELD_SECTION_SIZE)
+  );
+}
+
+#[test]
 fn zero_rtt_policy_rejects_non_safe_early_data_methods() {
   let request = Request::builder()
     .method(Method::POST)
