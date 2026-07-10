@@ -1,8 +1,8 @@
 # Kubernetes Gateway API Controller
 
 `oxibelt-gateway-controller` translates selected Kubernetes Gateway API
-resources into an OxiBelt TOML include file and applies that file through the
-authenticated Admin API.
+resources into an OxiBelt TOML include file, publishes it as an immutable
+Kubernetes ConfigMap, and rolls a selected OxiBelt workload to that revision.
 
 The controller is intentionally narrow in v1. It is useful for running
 OxiBelt in Kubernetes without making OxiBelt itself own certificate issuance,
@@ -167,48 +167,74 @@ resources owned by its configured `--controller-name`.
 - `TCPRoute`: when attached to an in-scope parent, sets
   `Accepted=False, reason=UnsupportedKind` and emits no TOML.
 
-`--dry-run` skips both Admin file sync and Kubernetes status mutations.
+`--dry-run` skips immutable artifact/workload mutations and Kubernetes status
+mutations.
 
-## Apply Model
+## Immutable Rollout Model
 
 The base OxiBelt config must include the controller-owned path, usually with a
-glob:
+glob, and set `runtime.hot_reload.mode = "off"`:
 
 ```toml
 include = ["conf.d/*.toml"]
 ```
 
-The default managed path is:
-
-```text
-conf.d/gateway-api.generated.toml
-```
+The default managed path is `conf.d/gateway-api.generated.toml`. It must remain
+a safe nested relative `.toml` path, not a root-level filename, so the
+controller can prove its pre-existing parent beneath the config root. The
+controller derives the selected container's config root from its `--config`
+argument and mounts this one file from an immutable ConfigMap. In
+`kubernetes_immutable` mode, the data-plane chart projects
+`gateway-config-directory` to `conf.d/.keep` so the parent directory already
+exists beneath the read-only config root. Existing ConfigMaps used only for
+ordinary `helm_immutable` rollouts do not need this sentinel.
 
 At reconcile time the controller:
 
 1. Polls Gateway API resources and Services from the Kubernetes API.
-2. Renders one deterministic TOML file with ownership/source comments.
-3. Refuses to apply if translation produced blocking diagnostics.
-4. Fetches `/admin/v1/config/status` for the active config ETag.
-5. Calls `/admin/v1/files/sync` with `apply = "full"` and `If-Match`.
+2. Renders and validates one deterministic TOML file with ownership/source
+   comments; blocking diagnostics stop before publication.
+3. Computes the raw SHA-256 of the exact TOML bytes and a tagged artifact
+   digest, then creates or reuses an immutable ConfigMap named
+   `<prefix>-<deployment-or-daemonset>-<target-name>-<full-64-hex-artifact-digest>`.
+4. Requires `oxibelt.dev/immutable-config-rollout: "true"` on the selected
+   Deployment or DaemonSet before patching it.
+5. Applies a resource-version-guarded patch for the generated volume/mount and
+   `oxibelt.dev/config-revision` plus `oxibelt.dev/config-digest` pod-template
+   annotations.
+6. Waits for observed generation, availability, and every Ready Pod proven to
+   be owned by the selected workload before checking its revision/digest proof
+   and reporting `Programmed=True` and committing.
 
-The controller never reconstructs a full candidate from redacted
-`/admin/v1/config/effective` output. It only writes its own include file.
+The rollout phases are `Generated`, `Validated`, `CanaryApplying`,
+`CanaryHealthy`, `Expanding`, `FullyApplied`, and `Committed`. Any rejection,
+unreachable Pod, conflict, or timeout requests the last committed immutable
+revision and verifies rollback before reporting failure. The controller resumes
+persisted rollout state after restart. Generated immutable revisions are
+preserved for named rollback; operators control their retention rather than the
+controller garbage collecting ConfigMaps.
 
-Required Admin/IPM actions are:
+Ownership verification follows controller-owner UIDs: a DaemonSet Pod must be
+directly controlled by the selected DaemonSet, while a Deployment Pod must be
+directly controlled by a ReplicaSet directly controlled by the selected
+Deployment. This excludes selector-colliding Pods as defense in depth. It does
+not replace target-namespace RBAC and admission policy: less-trusted principals
+must not be able to create or alter a colliding ownership chain.
 
-- `config:GetStatus`
-- `config:SyncFiles`
-- `config:Load`
+A successful translation alone does not mean `Programmed=True`: Gateway,
+listener, and route `Programmed` conditions become true only after the desired
+digest is committed across all Ready selected replicas. During convergence they
+remain `False` with a bounded rollout reason. Route attachment and reference
+conditions continue to reflect translation independently.
 
-If generated config would affect protected `[admin]` or `[ipm]` sections,
-OxiBelt's existing Admin file-sync precheck still requires the corresponding
-`admin:UpdateConfig` or `ipm:UpdateConfig` actions. The controller-generated
-file does not intentionally emit those sections.
+The controller does not read, write, or authenticate to an OxiBelt Admin
+Service. In `kubernetes_immutable` mode, the data plane rejects local mutable
+config load, rollback, file-sync, and downstream TLS reload operations rather
+than allowing a Pod to diverge from the assigned Kubernetes revision.
 
 ## CLI
 
-Render local manifests without contacting Kubernetes or Admin:
+Render local manifests without contacting Kubernetes:
 
 ```sh
 cargo run --manifest-path source/Cargo.toml \
@@ -220,9 +246,14 @@ Run in-cluster:
 
 ```sh
 oxibelt-gateway-controller \
-  --admin-url http://oxibelt-admin.oxibelt.svc.cluster.local:9092 \
-  --admin-token-file /var/run/oxibelt-admin-token/token \
   --managed-config-path conf.d/gateway-api.generated.toml \
+  --rollout-target-namespace default \
+  --rollout-target-kind deployment \
+  --rollout-target-name oxibelt \
+  --rollout-target-container-name oxibelt \
+  --rollout-volume-name gateway-config \
+  --rollout-timeout-seconds 300 \
+  --rollout-config-map-prefix oxibelt-gateway-config \
   --health-bind 0.0.0.0:9090 \
   run
 ```
@@ -239,7 +270,12 @@ A minimal chart lives under:
 deploy/helm/oxibelt-gateway-controller
 ```
 
-It installs a controller `Deployment`, `ServiceAccount`, RBAC, Admin token
-secret reference, health probes, and an example Gateway API manifest. The
-controller image is the normal OxiBelt image; the Docker image includes
+It installs a single-replica `Recreate` controller `Deployment`,
+`ServiceAccount`, read-only Gateway API RBAC, a target-namespace rollout Role,
+health probes, and an example Gateway API manifest. The target Role grants no
+Secret access; it gets and creates ConfigMaps, lists Pods and, for a Deployment
+target, ReplicaSets, and may get and patch only the named Deployment or
+DaemonSet. It has no target
+namespace `watch` or `delete` permission. The controller image is the normal
+OxiBelt image; the Docker image includes
 `/usr/local/bin/oxibelt-gateway-controller`.

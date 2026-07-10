@@ -1,8 +1,6 @@
 use anyhow::{Context, bail};
 use clap::Parser;
 
-#[path = "oxibelt_gateway_controller/admin_sync.rs"]
-mod admin_sync;
 #[path = "oxibelt_gateway_controller/cli.rs"]
 mod cli;
 #[path = "oxibelt_gateway_controller/gateway_policy.rs"]
@@ -13,6 +11,14 @@ mod health;
 mod model;
 #[path = "oxibelt_gateway_controller/render.rs"]
 mod render;
+#[path = "oxibelt_gateway_controller/rollout.rs"]
+mod rollout;
+#[path = "oxibelt_gateway_controller/rollout_client.rs"]
+mod rollout_client;
+#[path = "oxibelt_gateway_controller/rollout_patch.rs"]
+mod rollout_patch;
+#[path = "oxibelt_gateway_controller/rollout_status.rs"]
+mod rollout_status;
 #[path = "oxibelt_gateway_controller/status.rs"]
 mod status;
 #[path = "oxibelt_gateway_controller/translate.rs"]
@@ -54,12 +60,12 @@ async fn run() -> anyhow::Result<()> {
       }
     }
     Command::Run(args) => {
-      let _health = health::spawn_if_configured(cli.shared.health_bind).await?;
-      let admin = admin_sync::AdminSync::from_args(&cli.shared)
-        .context("failed to build Admin sync client")?;
+      let controller_health = health::ControllerHealth::default();
+      let _health =
+        health::spawn_if_configured(cli.shared.health_bind, controller_health.clone()).await?;
       let kubernetes = watch::KubernetesPoller::from_environment(&cli.shared)
         .context("failed to build Kubernetes API poller")?;
-      watch::run_poll_loop(kubernetes, admin, &cli.shared, args).await?;
+      watch::run_poll_loop(kubernetes, &cli.shared, args, controller_health).await?;
     }
   }
   Ok(())

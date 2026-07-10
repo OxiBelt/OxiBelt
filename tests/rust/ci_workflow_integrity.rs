@@ -394,6 +394,11 @@ fn docker_integration_matrix_script_text() -> String {
     .expect("Docker integration matrix script should be readable")
 }
 
+fn kubernetes_immutable_rollout_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-immutable-rollout.sh"))
+    .expect("Kubernetes immutable rollout script should be readable")
+}
+
 fn oxibelt_main_text() -> String {
   fs::read_to_string(repo_root().join("source/src/main.rs"))
     .expect("OxiBelt binary main should be readable")
@@ -705,6 +710,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "docker-performance-probe-image",
     "docker-external-benchmark-image",
     "docker-integration-helper-images",
+    "kubernetes-immutable-rollout",
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
     "docker-image-trivy-scan",
@@ -936,6 +942,88 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
       job.needs,
       expected_needs(PRIMARY_RUST_GATE_NEEDS),
       "{job_id} should wait for all primary Rust and advisory gates"
+    );
+  }
+}
+
+#[test]
+fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-immutable-rollout")
+    .expect("workflow should define the Kubernetes immutable rollout job");
+  let job_text = workflow_job_text(&workflow, "kubernetes-immutable-rollout");
+  let script = kubernetes_immutable_rollout_script_text();
+
+  assert_eq!(
+    job.needs,
+    vec!["docker-alpine-musl-image-amd64".to_owned()],
+    "the Kubernetes rollout job should consume the already-scanned AMD64 OxiBelt image artifact"
+  );
+  for expected in [
+    "name: Kubernetes immutable Gateway rollout",
+    "runs-on: ubuntu-26.04",
+    "actions: read",
+    "contents: read",
+    "timeout-minutes: 25",
+    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "version: v3.16.4",
+    "helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0",
+    "version: v0.26.0",
+    "kubectl_version: v1.31.4",
+    "install_only: true",
+    "tests/scripts/select-amd64-docker-image-artifact.sh auto",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
+    "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
+    "tests/scripts/run-kubernetes-immutable-rollout.sh",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Kubernetes immutable rollout CI job should include {expected}"
+    );
+  }
+
+  for expected in [
+    "gateway_api_version=\"v1.3.0\"",
+    "gateway_api_sha256=\"3e7a27e4456ff3d68606a6a8516306aaff354d6f0950b32bb31930669b7bf8b8\"",
+    "kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30",
+    "sha256sum --check --status",
+    "CI event values are untrusted input",
+    "OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS must be a decimal value from 60 through 900",
+    "image-values.yaml",
+    "kind create cluster",
+    "kind load docker-image",
+    "kind delete cluster --name \"${cluster_name}\"",
+    "docker version --format '{{.Server.Version}}'",
+    "docker image inspect \"${image}\"",
+    "--set \"replicaCount=3\"",
+    "configRollout.mode=kubernetes_immutable",
+    "rollout.target.name=${workload_name}",
+    "Gateway Programmed=True after full rollout convergence",
+    "all three Ready Pods must carry the exact assigned revision and digest",
+    "x-oxibelt-config-revision",
+    "x-oxibelt-config-digest",
+    "ConfigMap raw bytes do not match the Pod-assigned digest",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Kubernetes immutable rollout script should preserve {expected}"
+    );
+  }
+
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "kubectl delete --all",
+    "kubectl delete namespace --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
     );
   }
 }

@@ -12,6 +12,8 @@ impl Config {
     validate_merged_toml_shape(&value)?;
     let mut config: Self = value.try_into().context("failed to decode inline TOML")?;
     config.source_paths.config_entry = active.source_paths.config_entry.clone();
+    config.source_paths.config_files = active.source_paths.config_files.clone();
+    config.rollout = active.rollout.clone();
     let path_roots = active_config_path_roots(active)?;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;

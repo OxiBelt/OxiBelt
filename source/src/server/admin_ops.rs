@@ -12,7 +12,9 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, AdminAuthorization};
-use super::{admin, admin_body::collect_admin_json, admin_control, file_sync_path};
+use super::{
+  admin, admin_body::collect_admin_json, admin_control, file_sync_path, rollout_identity,
+};
 
 mod oxirule_devtools;
 pub(in crate::server) use oxirule_devtools::{
@@ -142,7 +144,9 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:GetStatus", "*") {
         return permission_denied(authorization.actor, "config:GetStatus");
       }
-      admin::json_response(StatusCode::OK, &admin_control.status().await)
+      let mut status = admin_control.status().await;
+      append_rollout_status(&mut status, &state.snapshot().config.rollout);
+      admin::json_response(StatusCode::OK, &status)
     }
     (&::http::Method::GET, "/admin/v1/config/effective") => {
       if !authorization.is_allowed("config:GetEffective", "*") {
@@ -229,6 +233,9 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:Load", "*") {
         return permission_denied(authorization.actor, "config:Load");
       }
+      if state.snapshot().config.rollout.blocks_per_pod_mutation() {
+        return rollout_identity::immutable_mutation_rejected();
+      }
       let if_match = if_match_header(&request);
       let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
         Ok(payload) => payload,
@@ -251,6 +258,9 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:Rollback", "*") {
         return permission_denied(authorization.actor, "config:Rollback");
       }
+      if state.snapshot().config.rollout.blocks_per_pod_mutation() {
+        return rollout_identity::immutable_mutation_rejected();
+      }
       admin_control
         .rollback_config(
           authorization.actor.name.clone(),
@@ -261,6 +271,15 @@ pub(super) async fn admin_config_response(
         .into_http()
     }
     (_, _) => text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+  }
+}
+
+fn append_rollout_status(
+  status: &mut serde_json::Value,
+  rollout: &crate::config::ConfigRolloutIdentity,
+) {
+  if let Some(status) = status.as_object_mut() {
+    status.insert("rollout".to_string(), rollout.status_fields());
   }
 }
 
@@ -325,6 +344,9 @@ pub(super) async fn admin_tls_response(
           "config:ReloadDownstreamTls",
         ));
       }
+      if snapshot.config.rollout.blocks_per_pod_mutation() {
+        return Some(rollout_identity::immutable_mutation_rejected());
+      }
       Some(
         admin_control
           .reload_downstream_tls(authorization.actor.name.clone(), if_match_header(request))
@@ -376,6 +398,7 @@ pub(super) async fn admin_tls_response(
 pub(super) async fn admin_files_response(
   request: hyper::Request<Incoming>,
   admin_control: admin_control::AdminControlHandle,
+  immutable_rollout: bool,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
@@ -385,6 +408,9 @@ pub(super) async fn admin_files_response(
   }
   if *method != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+  }
+  if immutable_rollout {
+    return rollout_identity::immutable_mutation_rejected();
   }
   let if_match = if_match_header(&request);
   let payload = match collect_admin_json::<admin_control::AdminFilesSyncRequest>(request).await {

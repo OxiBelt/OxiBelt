@@ -11,18 +11,32 @@
       }
     },
     "controllerName": { "type": "string", "minLength": 1 },
-    "managedConfigPath": { "type": "string", "minLength": 1 },
+    "managedConfigPath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+\\.toml$"
+    },
     "watchNamespace": { "type": "string" },
     "statusService": { "type": "string" },
     "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
     "dryRun": { "type": "boolean" },
-    "admin": {
+    "rollout": {
       "type": "object",
       "properties": {
-        "url": { "type": "string", "minLength": 1 },
-        "tokenSecretName": { "type": "string", "minLength": 1 },
-        "tokenSecretKey": { "type": "string", "minLength": 1 }
-      }
+        "target": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string" },
+            "kind": { "type": "string", "enum": ["deployment", "daemonset"] },
+            "name": { "type": "string", "minLength": 1 },
+            "containerName": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "name", "containerName"]
+        },
+        "volumeName": { "type": "string", "minLength": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "configMapPrefix": { "type": "string", "minLength": 1 }
+      },
+      "required": ["target", "volumeName", "timeoutSeconds", "configMapPrefix"]
     }
   }
 }

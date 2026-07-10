@@ -81,7 +81,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 }
 
 /// Runs OxiBelt with explicit runtime metadata for reload and admin surfaces.
-pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
+pub async fn run_with_options(mut config: Config, options: RunOptions) -> anyhow::Result<()> {
+  config.resolve_rollout_identity_from_environment()?;
   let observability = runtime::init_observability(&config)?;
   config.validate()?;
   hardening::apply_runtime_hardening(&config.runtime.hardening)?;

@@ -39,6 +39,7 @@ mod outbound_revocation;
 mod quic;
 mod rate_limit;
 mod retry;
+mod rollout_identity;
 mod route;
 mod route_actions;
 mod route_header_policy;
@@ -91,6 +92,7 @@ pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use rate_limit::*;
 pub use retry::*;
+pub use rollout_identity::{ConfigRolloutApplyState, ConfigRolloutIdentity, ConfigRolloutMode};
 pub use route::*;
 pub use route_actions::*;
 pub use route_header_policy::*;
@@ -146,6 +148,7 @@ pub struct Config {
   pub routes: Vec<RouteConfig>,
   pub waf: WafConfig,
   pub source_paths: ConfigSourcePaths,
+  pub rollout: ConfigRolloutIdentity,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +270,7 @@ impl TryFrom<RawConfig> for Config {
       routes: raw.routes,
       waf: raw.waf,
       source_paths: ConfigSourcePaths::default(),
+      rollout: ConfigRolloutIdentity::default(),
     })
   }
 }
@@ -330,6 +334,7 @@ impl Config {
     config.load_external_waf_rules()?;
     config.normalize_loaded_waf_lb_policy_compat()?;
     config.collect_loaded_waf_rule_paths();
+    config.resolve_rollout_identity_from_environment()?;
     Ok(config)
   }
 
@@ -351,6 +356,7 @@ impl Config {
     config.load_external_waf_rules()?;
     config.normalize_loaded_waf_lb_policy_compat()?;
     config.collect_loaded_waf_rule_paths();
+    config.resolve_rollout_identity_from_environment()?;
     Ok(config)
   }
 
@@ -494,6 +500,7 @@ impl Config {
     self.logging == other.logging
       && self.config == other.config
       && self.runtime == other.runtime
+      && self.rollout == other.rollout
       && self.crypto == other.crypto
       && self.listeners == other.listeners
       && self.tls == other.tls
@@ -868,6 +875,9 @@ impl Config {
     }
 
     self.runtime.validate()?;
+    self
+      .rollout
+      .validate(&self.source_paths, self.runtime.hot_reload.mode)?;
     self.validate_limits()?;
     self.validate_proxy()?;
     self.validate_compression()?;

@@ -24,12 +24,6 @@ fn args() -> SharedArgs {
   SharedArgs {
     controller_name: "oxibelt.dev/gateway-controller".to_string(),
     managed_config_path: "conf.d/gateway-api.generated.toml".to_string(),
-    admin_url: "http://127.0.0.1:9092".parse().expect("url"),
-    admin_token_env: "OXIBELT_ADMIN_TOKEN".to_string(),
-    admin_token_file: None,
-    ca_certs: Vec::new(),
-    client_cert: None,
-    client_key: None,
     watch_namespace: None,
     status_address: Vec::new(),
     status_service: None,
@@ -457,6 +451,25 @@ fn endpoint_slice_backend_resolution_rejects_named_target_port_without_service_p
   );
   assert!(!rendered.toml.contains("[[upstream_pools.discovery]]"));
   assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
+fn equivalent_kubernetes_input_order_keeps_the_generated_content_digest_stable() {
+  let objects = objects(HTTP_FIXTURE);
+  let mut reordered = objects.clone();
+  reordered.reverse();
+
+  let first = translate_objects(&crate::rollout::canonicalize_objects(&objects), &args())
+    .expect("canonical translation should succeed");
+  let second = translate_objects(&crate::rollout::canonicalize_objects(&reordered), &args())
+    .expect("reordered canonical translation should succeed");
+
+  assert_eq!(first.toml, second.toml);
+  assert_eq!(
+    crate::rollout::digest_content(first.toml.as_bytes()),
+    crate::rollout::digest_content(second.toml.as_bytes()),
+    "the immutable artifact content digest must not depend on Kubernetes list order"
+  );
 }
 
 fn generated_toml_validates(rendered_toml: &str) {

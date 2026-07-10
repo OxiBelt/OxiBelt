@@ -9,6 +9,7 @@ use super::gateway_policy::{self, ListenerPolicy, RoutePolicyDecision};
 use super::model::{
   Diagnostic, DiagnosticSeverity, KubernetesObject, ObjectKey, object_ref as model_object_ref,
 };
+use super::rollout_status::RolloutStatus;
 
 const CONDITION_TRUE: &str = "True";
 const CONDITION_FALSE: &str = "False";
@@ -55,6 +56,7 @@ pub fn build_status_patches(
   objects: &[KubernetesObject],
   args: &SharedArgs,
   diagnostics: &[Diagnostic],
+  rollout_status: &RolloutStatus,
 ) -> Vec<StatusPatch> {
   let now = rfc3339_now();
   let accepted_classes = accepted_gateway_classes(objects, args);
@@ -76,6 +78,7 @@ pub fn build_status_patches(
           object,
           gateways.get(&object.key()).expect("checked gateway key"),
           &status_addresses,
+          rollout_status,
           &now,
         ));
       }
@@ -86,6 +89,7 @@ pub fn build_status_patches(
           &gateways,
           &namespace_labels,
           &diagnostics_by_object,
+          rollout_status,
           &now,
         ) {
           patches.push(patch);
@@ -123,6 +127,7 @@ fn gateway_patch(
   object: &KubernetesObject,
   gateway: &GatewaySummary,
   status_addresses: &[Value],
+  rollout_status: &RolloutStatus,
   now: &str,
 ) -> StatusPatch {
   let listener_conflicts = listener_conflicts(&gateway.listeners);
@@ -133,6 +138,7 @@ fn gateway_patch(
       listener_status(
         listener,
         &listener_conflicts,
+        rollout_status,
         object.metadata.generation,
         now,
       )
@@ -141,7 +147,7 @@ fn gateway_patch(
   let accepted = listeners
     .iter()
     .all(|listener| listener_condition_status(listener, "Accepted") == Some(CONDITION_TRUE));
-  let programmed = accepted;
+  let programmed = rollout_status.programmed(accepted);
   let mut status = json!({
     "conditions": [
       condition(
@@ -158,13 +164,9 @@ fn gateway_patch(
       ),
       condition(
         "Programmed",
-        bool_status(programmed),
-        if programmed { "Programmed" } else { "Pending" },
-        if programmed {
-          "Gateway has been translated into generated OxiBelt configuration"
-        } else {
-          "Gateway is waiting for all listeners to become accepted"
-        },
+        bool_status(programmed.programmed),
+        programmed.reason,
+        programmed.message,
         object.metadata.generation,
         now,
       )
@@ -231,6 +233,7 @@ fn parse_service_ref(value: &str) -> Option<(&str, &str)> {
 fn listener_status(
   listener: &ListenerSummary,
   conflicts: &HashSet<(Option<u16>, String, Option<String>)>,
+  rollout_status: &RolloutStatus,
   generation: Option<i64>,
   now: &str,
 ) -> Value {
@@ -242,6 +245,7 @@ fn listener_status(
   );
   let conflicted = conflicts.contains(&conflict_key);
   let accepted = !supported_kinds.is_empty() && !conflicted;
+  let programmed = rollout_status.programmed(accepted);
   let supported_kinds = supported_kinds
     .iter()
     .map(|kind| {
@@ -272,13 +276,9 @@ fn listener_status(
       ),
       condition(
         "Programmed",
-        bool_status(accepted),
-        if accepted { "Programmed" } else { "Pending" },
-        if accepted {
-          "Listener has been translated into generated OxiBelt configuration"
-        } else {
-          "Listener is not programmed because it is not accepted"
-        },
+        bool_status(programmed.programmed),
+        programmed.reason,
+        programmed.message,
         generation,
         now,
       ),
@@ -312,6 +312,7 @@ fn route_patch(
   gateways: &HashMap<ObjectKey, GatewaySummary>,
   namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   diagnostics: &HashMap<String, Vec<&Diagnostic>>,
+  rollout_status: &RolloutStatus,
   now: &str,
 ) -> Option<StatusPatch> {
   let mut parents = preserved_parent_statuses(object, &args.controller_name);
@@ -337,7 +338,7 @@ fn route_patch(
       gateway,
       namespace_labels,
       &args.controller_name,
-      diagnostics,
+      (diagnostics, rollout_status),
       now,
     );
     parents.push(parent_status);
@@ -361,7 +362,7 @@ fn route_parent_status(
   gateway: &GatewaySummary,
   namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   controller_name: &str,
-  diagnostics: &HashMap<String, Vec<&Diagnostic>>,
+  status: (&HashMap<String, Vec<&Diagnostic>>, &RolloutStatus),
   now: &str,
 ) -> Value {
   if object.kind == "TCPRoute" {
@@ -376,6 +377,7 @@ fn route_parent_status(
     });
   }
 
+  let (diagnostics, rollout_status) = status;
   let object_ref = model_object_ref(object);
   let object_errors = diagnostics.get(&object_ref).cloned().unwrap_or_default();
   let listener_matches = route_has_matching_listener(object, parent, gateway, namespace_labels);
@@ -390,6 +392,7 @@ fn route_parent_status(
       || diagnostic.message.contains("references")
   });
   let accepted = listener_matches && !has_error;
+  let programmed = rollout_status.programmed(accepted);
   json!({
     "parentRef": normalized_parent_ref(parent),
     "controllerName": controller_name,
@@ -428,13 +431,9 @@ fn route_parent_status(
       ),
       condition(
         "Programmed",
-        bool_status(accepted),
-        if accepted { "Programmed" } else { "Pending" },
-        if accepted {
-          "Route has been translated into generated OxiBelt configuration"
-        } else {
-          "Route is not programmed because it is not accepted"
-        },
+        bool_status(programmed.programmed),
+        programmed.reason,
+        programmed.message,
         object.metadata.generation,
         now,
       )

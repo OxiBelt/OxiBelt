@@ -1,3 +1,9 @@
+{{- $targetNamespace := default .Release.Namespace .Values.rollout.target.namespace -}}
+{{- $targetName := required "rollout.target.name is required" .Values.rollout.target.name -}}
+{{- $targetKind := .Values.rollout.target.kind -}}
+{{- if not (has $targetKind (list "deployment" "daemonset")) -}}
+{{- fail "rollout.target.kind must be deployment or daemonset" -}}
+{{- end -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -30,6 +36,43 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "oxibelt-gateway-controller.name" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-rollout
+  namespace: {{ $targetNamespace | quote }}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+{{- if eq $targetKind "deployment" }}
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["list"]
+{{- end }}
+- apiGroups: ["apps"]
+  resources: [{{ ternary "deployments" "daemonsets" (eq $targetKind "deployment") | quote }}]
+  resourceNames:
+  - {{ $targetName | quote }}
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-rollout
+  namespace: {{ $targetNamespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "oxibelt-gateway-controller.name" . }}-rollout
 subjects:
 - kind: ServiceAccount
   name: {{ include "oxibelt-gateway-controller.name" . }}

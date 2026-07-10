@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::{Config, IpmPolicyConfig, IpmPolicyEffect, IpmPolicyStatementConfig};
 use crate::ipm::{IpmActor, IpmRequestContext, IpmRuntime};
+use serde_json::json;
 
 mod common {
   include!(concat!(
@@ -40,6 +41,26 @@ fn admin_actor(name: &str, groups: Vec<String>) -> AdminActor {
     subject: name.to_string(),
     groups,
   }
+}
+
+#[test]
+fn config_status_keeps_runtime_fields_under_a_nested_rollout_object() {
+  let mut status = json!({
+    "revision": 1,
+    "etag": "\"oxibelt-config-1\"",
+    "runtime_only": true,
+  });
+
+  append_rollout_status(
+    &mut status,
+    &crate::config::ConfigRolloutIdentity::default(),
+  );
+
+  assert_eq!(status["revision"], 1);
+  assert_eq!(status["etag"], "\"oxibelt-config-1\"");
+  assert_eq!(status["rollout"]["rollout_mode"], "mutable");
+  assert_eq!(status["rollout"]["apply_state"], "not_configured");
+  assert!(status["desired_revision"].is_null());
 }
 
 fn sync_request(

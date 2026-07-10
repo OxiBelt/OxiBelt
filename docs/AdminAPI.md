@@ -150,11 +150,14 @@ The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
 `/admin/v1/*` OpenAPI contract.
 
-`oxibelt-gateway-controller` uses the existing `GET /admin/v1/config/status`
-and `POST /admin/v1/files/sync` endpoints. It fetches the active config ETag,
-writes only its managed config-root include file, and sends `apply = "full"` so
-OxiBelt validates and loads the replacement runtime view. The controller does
-not build candidates from redacted effective config output.
+`oxibelt-gateway-controller` does not use the Admin API as a cluster rollout
+transport. It publishes a Kubernetes immutable ConfigMap, updates the selected
+workload, and relies on per-Pod revision/digest proof. In
+`kubernetes_immutable` deployment mode, `POST /admin/v1/config/load`,
+`POST /admin/v1/config/rollback`, `POST /admin/v1/files/sync`, and
+`POST /admin/v1/tls/downstream/reload` return `409` so one Pod cannot diverge
+from its assigned revision. Read-only status, effective-config, validation, and
+diff endpoints remain available to operators.
 
 ## Person Proof Administration
 

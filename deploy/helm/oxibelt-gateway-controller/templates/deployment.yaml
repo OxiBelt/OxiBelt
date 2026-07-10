@@ -1,3 +1,4 @@
+{{- include "oxibelt-gateway-controller.validateManagedConfigPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +7,8 @@ metadata:
     app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
@@ -25,16 +28,14 @@ spec:
         args:
         - "--controller-name={{ .Values.controllerName }}"
         - "--managed-config-path={{ .Values.managedConfigPath }}"
-        - "--admin-url={{ .Values.admin.url }}"
-        - "--admin-token-file=/var/run/oxibelt-admin-token/token"
+        - "--rollout-target-namespace={{ default .Release.Namespace .Values.rollout.target.namespace }}"
+        - "--rollout-target-kind={{ .Values.rollout.target.kind }}"
+        - "--rollout-target-name={{ required "rollout.target.name is required" .Values.rollout.target.name }}"
+        - "--rollout-target-container-name={{ .Values.rollout.target.containerName }}"
+        - "--rollout-volume-name={{ .Values.rollout.volumeName }}"
+        - "--rollout-timeout-seconds={{ .Values.rollout.timeoutSeconds }}"
+        - "--rollout-config-map-prefix={{ .Values.rollout.configMapPrefix }}"
         - "--health-bind={{ .Values.healthBind }}"
-        {{- if .Values.admin.caSecretName }}
-        - "--ca-cert=/var/run/oxibelt-admin-ca/ca.crt"
-        {{- end }}
-        {{- if .Values.admin.clientTlsSecretName }}
-        - "--client-cert=/var/run/oxibelt-admin-client-tls/tls.crt"
-        - "--client-key=/var/run/oxibelt-admin-client-tls/tls.key"
-        {{- end }}
         {{- if .Values.watchNamespace }}
         - "--watch-namespace={{ .Values.watchNamespace }}"
         {{- end }}
@@ -61,49 +62,10 @@ spec:
           httpGet:
             path: /healthz
             port: health
-        volumeMounts:
-        - name: admin-token
-          mountPath: /var/run/oxibelt-admin-token
-          readOnly: true
-        {{- if .Values.admin.caSecretName }}
-        - name: admin-ca
-          mountPath: /var/run/oxibelt-admin-ca
-          readOnly: true
-        {{- end }}
-        {{- if .Values.admin.clientTlsSecretName }}
-        - name: admin-client-tls
-          mountPath: /var/run/oxibelt-admin-client-tls
-          readOnly: true
-        {{- end }}
         securityContext:
 {{ toYaml .Values.securityContext | indent 10 }}
         resources:
 {{ toYaml .Values.resources | indent 10 }}
-      volumes:
-      - name: admin-token
-        secret:
-          secretName: {{ .Values.admin.tokenSecretName }}
-          items:
-          - key: {{ .Values.admin.tokenSecretKey }}
-            path: token
-      {{- if .Values.admin.caSecretName }}
-      - name: admin-ca
-        secret:
-          secretName: {{ .Values.admin.caSecretName }}
-          items:
-          - key: {{ .Values.admin.caSecretKey }}
-            path: ca.crt
-      {{- end }}
-      {{- if .Values.admin.clientTlsSecretName }}
-      - name: admin-client-tls
-        secret:
-          secretName: {{ .Values.admin.clientTlsSecretName }}
-          items:
-          - key: {{ .Values.admin.clientCertKey }}
-            path: tls.crt
-          - key: {{ .Values.admin.clientKeyKey }}
-            path: tls.key
-      {{- end }}
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}
       tolerations:

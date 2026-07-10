@@ -81,6 +81,7 @@ mod plain_http;
 mod prefixed_io;
 #[cfg(test)]
 mod reload_tests;
+mod rollout_identity;
 use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
@@ -326,17 +327,8 @@ fn ops_response(
     OpsKind::Health => {
       let snapshot = state.snapshot();
       let path = request.uri().path();
-      if path == snapshot.config.health.ready_path {
-        if snapshot.lifecycle.is_draining() {
-          text_response(StatusCode::SERVICE_UNAVAILABLE, "draining")
-        } else {
-          text_response(StatusCode::OK, "ready")
-        }
-      } else if path == snapshot.config.health.live_path {
-        text_response(StatusCode::OK, "live")
-      } else {
-        text_response(StatusCode::NOT_FOUND, "not found")
-      }
+      rollout_identity::health_response(snapshot.as_ref(), path)
+        .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"))
     }
   }
 }
@@ -766,6 +758,7 @@ async fn admin_response_inner(
     return admin_ops::admin_files_response(
       request,
       admin_control.clone(),
+      snapshot.config.rollout.blocks_per_pod_mutation(),
       &authorization,
       &method,
       &path,

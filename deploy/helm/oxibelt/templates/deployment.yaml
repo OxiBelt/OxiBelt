@@ -1,3 +1,6 @@
+{{- include "oxibelt.validateConfigRollout" . -}}
+{{- include "oxibelt.validateBaseConfigKey" . -}}
+{{- include "oxibelt.validateWorkloadRollout" . -}}
 {{- if eq .Values.workload.kind "Deployment" }}
 apiVersion: apps/v1
 kind: Deployment
@@ -5,10 +8,22 @@ metadata:
   name: {{ include "oxibelt.name" . }}
   labels:
 {{ include "oxibelt.labels" . | indent 4 }}
+{{ if eq .Values.configRollout.mode "kubernetes_immutable" }}
+  annotations:
+    oxibelt.dev/immutable-config-rollout: "true"
+{{ end }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  minReadySeconds: {{ .Values.workload.deployment.minReadySeconds }}
+  progressDeadlineSeconds: {{ .Values.workload.deployment.progressDeadlineSeconds }}
+  revisionHistoryLimit: {{ .Values.workload.deployment.revisionHistoryLimit }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.workload.deployment.maxUnavailable }}
+      maxSurge: {{ .Values.workload.deployment.maxSurge }}
   selector:
     matchLabels:
 {{ include "oxibelt.selectorLabels" . | indent 6 }}
@@ -19,10 +34,17 @@ spec:
 {{- with .Values.podLabels }}
 {{ toYaml . | indent 8 }}
 {{- end }}
-{{- with .Values.podAnnotations }}
       annotations:
+{{ with .Values.podAnnotations }}
 {{ toYaml . | indent 8 }}
-{{- end }}
+{{ end }}
+        checksum/oxibelt-config: {{ include "oxibelt.configDigest" . | quote }}
+        {{- if .Values.oxirule.enabled }}
+        checksum/oxibelt-oxirule: {{ include "oxibelt.oxiruleConfigMapDigest" . | quote }}
+        {{- end }}
+        {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
+        oxibelt.dev/immutable-config-rollout: "true"
+        {{- end }}
     spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
       securityContext:
@@ -34,7 +56,7 @@ spec:
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
-        {{- if or .Values.admin.enabled .Values.extraEnv }}
+        {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") }}
         env:
         {{- if .Values.admin.enabled }}
         - name: OXIBELT_ADMIN_TOKEN
@@ -42,6 +64,24 @@ spec:
             secretKeyRef:
               name: {{ required "admin.tokenSecretName is required when admin.enabled=true" .Values.admin.tokenSecretName }}
               key: {{ .Values.admin.tokenSecretKey }}
+        {{- end }}
+        {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
+        - name: OXIBELT_CONFIG_ROLLOUT_MODE
+          value: kubernetes_immutable
+        - name: OXIBELT_CONFIG_REVISION
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/config-revision']"
+        - name: OXIBELT_CONFIG_DIGEST
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/config-digest']"
+        - name: OXIBELT_CONFIG_REVISION_FILE
+          value: {{ printf "%s/%s" (trimSuffix "/" .Values.config.mountPath) .Values.configRollout.managedConfigPath | quote }}
+        - name: OXIBELT_INSTANCE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
         {{- end }}
         {{- with .Values.extraEnv }}
 {{ toYaml . | indent 8 }}
@@ -118,6 +158,10 @@ spec:
           items:
           - key: {{ .Values.config.key }}
             path: {{ .Values.config.key }}
+{{ if eq .Values.configRollout.mode "kubernetes_immutable" }}
+          - key: gateway-config-directory
+            path: {{ printf "%s/.keep" (dir .Values.configRollout.managedConfigPath) | quote }}
+{{ end }}
       {{- if .Values.tls.enabled }}
       - name: tls
         secret:

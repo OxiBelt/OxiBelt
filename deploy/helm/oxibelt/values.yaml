@@ -8,6 +8,16 @@ replicaCount: 2
 
 workload:
   kind: Deployment # Deployment | DaemonSet
+  deployment:
+    maxUnavailable: 0
+    maxSurge: 1
+    minReadySeconds: 5
+    progressDeadlineSeconds: 300
+    revisionHistoryLimit: 3
+  daemonSet:
+    maxUnavailable: 1
+    minReadySeconds: 5
+    revisionHistoryLimit: 3
 
 serviceAccount:
   create: true
@@ -62,6 +72,12 @@ health:
 config:
   create: true
   existingConfigMap: ""
+  # Required for an operator-managed ConfigMap. The referenced ConfigMap must
+  # be immutable, uniquely named per content revision, and carry these exact
+  # lower-case SHA-256 bytes.
+  existingConfigMapDigest: ""
+  # A single safe ConfigMap key / filename. It cannot be a path or the
+  # controller's reserved `gateway-config-directory` sentinel key.
   key: oxibelt.toml
   mountPath: /etc/oxibelt/config
   inline: |
@@ -79,6 +95,9 @@ config:
     read_only_rootfs_compatible = true
     memory_only_state = true
     unprivileged_mode = true
+
+    [runtime.hot_reload]
+    mode = "off"
 
     [listeners]
     http_binds = ["0.0.0.0:8080"]
@@ -112,6 +131,16 @@ config:
     bearer_token_env = "OXIBELT_ADMIN_TOKEN"
     allow_insecure_plaintext = false
 
+# `helm_immutable` is the ordinary Helm-managed content-addressed ConfigMap
+# rollout. `kubernetes_immutable` opts the workload into controller-owned
+# Gateway API revisions; Helm deliberately does not own the generated volume,
+# file mount, or revision annotations in that mode.
+configRollout:
+  mode: helm_immutable # helm_immutable | kubernetes_immutable
+  # A safe nested path under the mounted config root; root-level paths are
+  # rejected because the controller needs a pre-existing parent directory.
+  managedConfigPath: conf.d/gateway-api.generated.toml
+
 tls:
   enabled: true
   secretName: oxibelt-tls
@@ -120,6 +149,9 @@ tls:
 oxirule:
   enabled: false
   existingConfigMap: ""
+  # Required when `oxirule.enabled` is true. The ConfigMap must be immutable
+  # and uniquely named for the referenced content revision.
+  existingConfigMapDigest: ""
   mountPath: /etc/oxibelt/oxirule
 
 extraEnv: []

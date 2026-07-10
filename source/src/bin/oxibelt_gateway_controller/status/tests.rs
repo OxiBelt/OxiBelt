@@ -4,12 +4,6 @@ fn args() -> SharedArgs {
   SharedArgs {
     controller_name: "oxibelt.dev/gateway-controller".to_string(),
     managed_config_path: "conf.d/gateway-api.generated.toml".to_string(),
-    admin_url: "http://127.0.0.1:9092".parse().expect("url"),
-    admin_token_env: "OXIBELT_ADMIN_TOKEN".to_string(),
-    admin_token_file: None,
-    ca_certs: Vec::new(),
-    client_cert: None,
-    client_key: None,
     watch_namespace: None,
     status_address: vec!["203.0.113.10".to_string()],
     status_service: None,
@@ -26,6 +20,15 @@ fn object(raw: &str) -> KubernetesObject {
     .into_iter()
     .next()
     .expect("one object")
+}
+
+fn committed_rollout() -> RolloutStatus {
+  RolloutStatus {
+    phase: crate::rollout::RolloutPhase::Committed,
+    desired_revision: Some("revision".to_string()),
+    desired_content_digest: Some("digest".to_string()),
+    reason: None,
+  }
 }
 
 #[test]
@@ -57,7 +60,7 @@ spec:
 "#,
     ),
   ];
-  let patches = build_status_patches(&objects, &args(), &[]);
+  let patches = build_status_patches(&objects, &args(), &[], &committed_rollout());
 
   let gateway = patches
     .iter()
@@ -119,7 +122,7 @@ status:
 "#,
     ),
   ];
-  let patches = build_status_patches(&objects, &args, &[]);
+  let patches = build_status_patches(&objects, &args, &[], &committed_rollout());
 
   let gateway = patches
     .iter()
@@ -170,7 +173,7 @@ spec:
 "#,
     ),
   ];
-  let patches = build_status_patches(&objects, &args(), &[]);
+  let patches = build_status_patches(&objects, &args(), &[], &committed_rollout());
 
   let route = patches
     .iter()
@@ -229,7 +232,7 @@ spec:
 "#,
     ),
   ];
-  let patches = build_status_patches(&objects, &args(), &[]);
+  let patches = build_status_patches(&objects, &args(), &[], &committed_rollout());
 
   let route = patches
     .iter()
@@ -290,7 +293,7 @@ spec:
     "HTTPRoute/frontend/secret",
     "cross-namespace backendRef to backend/secret requires ReferenceGrant",
   )];
-  let patches = build_status_patches(&objects, &args(), &diagnostics);
+  let patches = build_status_patches(&objects, &args(), &diagnostics, &committed_rollout());
 
   let route = patches
     .iter()

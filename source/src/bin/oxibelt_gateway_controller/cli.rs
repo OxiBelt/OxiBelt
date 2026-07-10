@@ -2,8 +2,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use oxibelt::admin_client::{DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
-use url::Url;
 
 pub const DEFAULT_CONTROLLER_NAME: &str = "oxibelt.dev/gateway-controller";
 pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml";
@@ -24,18 +22,6 @@ pub struct SharedArgs {
   pub controller_name: String,
   #[arg(long, global = true, default_value = DEFAULT_MANAGED_CONFIG_PATH)]
   pub managed_config_path: String,
-  #[arg(long, global = true, default_value = DEFAULT_ADMIN_URL)]
-  pub admin_url: Url,
-  #[arg(long, global = true, default_value = DEFAULT_ADMIN_TOKEN_ENV)]
-  pub admin_token_env: String,
-  #[arg(long, global = true, value_name = "FILE")]
-  pub admin_token_file: Option<PathBuf>,
-  #[arg(long = "ca-cert", global = true, value_name = "FILE")]
-  pub ca_certs: Vec<PathBuf>,
-  #[arg(long, global = true, value_name = "FILE", requires = "client_key")]
-  pub client_cert: Option<PathBuf>,
-  #[arg(long, global = true, value_name = "FILE", requires = "client_cert")]
-  pub client_key: Option<PathBuf>,
   #[arg(long, global = true)]
   pub watch_namespace: Option<String>,
   #[arg(long, global = true)]
@@ -58,6 +44,15 @@ pub enum BackendResolution {
   EndpointSliceWatch,
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum RolloutTargetKind {
+  #[default]
+  Deployment,
+  #[value(name = "daemonset")]
+  DaemonSet,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
   Run(RunArgs),
@@ -68,6 +63,23 @@ pub enum Command {
 pub struct RunArgs {
   #[arg(long, default_value_t = 5000)]
   pub poll_interval_ms: u64,
+  #[arg(long = "rollout-target-namespace")]
+  pub rollout_target_namespace: String,
+  #[arg(long = "rollout-target-kind", value_enum, default_value = "deployment")]
+  pub rollout_target_kind: RolloutTargetKind,
+  #[arg(long = "rollout-target-name")]
+  pub rollout_target_name: String,
+  #[arg(long = "rollout-target-container-name", default_value = "oxibelt")]
+  pub rollout_target_container_name: String,
+  #[arg(long = "rollout-volume-name", default_value = "gateway-config")]
+  pub rollout_volume_name: String,
+  #[arg(long = "rollout-timeout-seconds", default_value_t = 300)]
+  pub rollout_timeout_seconds: u64,
+  #[arg(
+    long = "rollout-config-map-prefix",
+    default_value = "oxibelt-gateway-config"
+  )]
+  pub rollout_config_map_prefix: String,
 }
 
 #[derive(Debug, Args)]

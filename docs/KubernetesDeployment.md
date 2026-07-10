@@ -5,7 +5,7 @@ Status: Draft
 OxiBelt provides two Helm charts:
 
 - `deploy/helm/oxibelt`: data-plane chart for the `oxibelt` reverse proxy and WAF.
-- `deploy/helm/oxibelt-gateway-controller`: Gateway API controller chart for rendering controller-owned TOML includes through the Admin API.
+- `deploy/helm/oxibelt-gateway-controller`: Gateway API controller chart for publishing immutable generated configuration and rolling the selected data-plane workload.
 
 The Gateway controller remains a Gateway API controller. It is not an Ingress controller.
 
@@ -28,7 +28,67 @@ cert_chain = "/etc/oxibelt/cert/tls.crt"
 private_key = "/etc/oxibelt/cert/tls.key"
 ```
 
-Set `config.existingConfigMap` to use an operator-managed config file instead of the chart-generated ConfigMap. The config path is mounted read-only and passed to OxiBelt with `--config`.
+The chart-generated base configuration is content addressed: it creates an
+`immutable: true` ConfigMap named from a SHA-256 digest of the rendered key and
+content. The Pod template records that digest, so a Helm change creates a new
+ConfigMap and a normal Kubernetes rollout rather than modifying a mounted file.
+Old chart-created ConfigMaps are kept for rollback safety; prune only revisions
+that no live Pod references.
+
+Set `config.existingConfigMap` to use an operator-managed base configuration.
+The referenced ConfigMap must be immutable, uniquely named for its content
+revision, and paired with its lowercase SHA-256 value in
+`config.existingConfigMapDigest`. When `oxirule.enabled = true`, the same
+contract applies to `oxirule.existingConfigMap` and
+`oxirule.existingConfigMapDigest`. Helm rejects a missing or non-lowercase
+64-character digest.
+
+For `kubernetes_immutable` controller pairing, every base configuration
+ConfigMap must contain the `gateway-config-directory` key. Only in that mode,
+the chart projects it as `conf.d/.keep`, creating the parent directory for the
+controller's read-only single-file mount. Ordinary `helm_immutable` releases
+do not project or require this sentinel from an existing ConfigMap. `config.key`
+must be a single safe ConfigMap key/base filename
+(`[A-Za-z0-9][A-Za-z0-9._-]{0,252}`), not a path and not the reserved
+`gateway-config-directory` key. The config path remains mounted read-only and
+passed to OxiBelt with `--config`.
+
+## Configuration Rollout Modes
+
+`configRollout.mode` selects one unambiguous configuration owner:
+
+- `helm_immutable` is the default. Helm owns immutable base ConfigMaps and a
+  standard Deployment or DaemonSet rollout. It does not enable the Gateway
+  controller.
+- `kubernetes_immutable` is required when pairing the data-plane chart with
+  `oxibelt-gateway-controller`. The chart adds only the immutable-rollout opt-in
+  and Downward API environment declarations. The controller owns generated
+  ConfigMaps, their `gateway-config` volume and file mount, and assigned
+  revision/digest annotations.
+
+For controller pairing, keep the generated include inside the base config root
+at a nested relative `.toml` path (not a root-level filename) and disable
+in-process hot reload:
+
+```yaml
+configRollout:
+  mode: kubernetes_immutable
+  managedConfigPath: conf.d/gateway-api.generated.toml
+```
+
+```toml
+include = ["conf.d/*.toml"]
+
+[runtime.hot_reload]
+mode = "off"
+```
+
+In this mode the chart declares `OXIBELT_CONFIG_ROLLOUT_MODE`, assigned
+revision and digest Downward API fields, the generated-file path, and the Pod
+UID. It deliberately does not declare a `gateway-config` volume or mount and
+does not set `oxibelt.dev/config-revision` or `oxibelt.dev/config-digest`; those
+are controller-owned values. Do not add an overlapping mount through
+`extraVolumes` or `extraVolumeMounts`.
 
 ## Security Defaults
 
@@ -52,12 +112,64 @@ The chart enables OxiBelt health and basic Prometheus metrics in the generated c
 
 Horizontal scaling is chart-owned only through the optional `autoscaling` block, which renders an `autoscaling/v2` HPA for Deployment workloads. The metrics Service remains available whether or not HPA rendering is enabled.
 
+Deployment defaults are deliberately conservative for immutable configuration:
+`maxUnavailable: 0`, `maxSurge: 1`, `minReadySeconds: 5`,
+`progressDeadlineSeconds: 300`, and `revisionHistoryLimit: 3`. DaemonSets use a
+one-at-a-time rolling update (`maxUnavailable: 1`) with the same ready and
+history defaults. Override these values only with an availability analysis for
+the target topology.
+
 ## Gateway Controller Pairing
 
-When using the Gateway controller chart with the data-plane chart, mount a config that includes the controller-owned path:
+The Gateway controller never calls a load-balanced OxiBelt Admin Service to
+claim cluster-wide configuration success. It validates a deterministic Gateway
+API translation, creates an immutable ConfigMap, patches only its selected
+workload, and waits until every Ready Pod verified as owned by that workload
+reports the assigned raw content digest. On failure it restores the last
+committed revision.
+
+Install the controller/RBAC first, then enable `kubernetes_immutable` on the
+data-plane chart. The data-plane workload must opt in through the chart-created
+`oxibelt.dev/immutable-config-rollout: "true"` annotation. A controller paired
+with an older data chart remains non-mutating rather than falling back to Admin
+file sync.
+
+The data-plane base config must include the controller-owned path:
 
 ```toml
 include = ["conf.d/*.toml"]
 ```
 
-The controller chart expects an Admin token Secret and uses the authenticated Admin API to sync only its managed include file.
+Configure the controller target explicitly; an empty target namespace means the
+controller release namespace:
+
+```yaml
+rollout:
+  target:
+    namespace: ""
+    kind: deployment # or daemonset
+    name: oxibelt
+    containerName: oxibelt
+  volumeName: gateway-config
+  timeoutSeconds: 300
+  configMapPrefix: oxibelt-gateway-config
+```
+
+The controller chart has no Admin URL, token, CA, client certificate, or Secret
+permission. Its target-namespace Role gets and creates ConfigMaps, lists Pods
+and, for a Deployment target, ReplicaSets, and gets and patches only the named
+Deployment or DaemonSet.
+It neither watches nor deletes target-namespace resources. Generated immutable
+revisions are preserved for named rollback; their retention is operator
+controlled rather than controller garbage collected. ConfigMap access is still
+namespace scoped because content-addressed artifact names are known only at
+runtime.
+
+Pod proof follows exact controller-owner UIDs: a DaemonSet Pod must be directly
+controlled by the selected DaemonSet, while a Deployment Pod must be directly
+controlled by a ReplicaSet directly controlled by the selected Deployment. This
+defense in depth excludes label-colliding Pods, but target-namespace RBAC and
+admission policy must also prevent less-trusted principals from creating or
+altering a colliding ownership chain. The target workload still needs the
+controller opt-in annotation; the Role alone is not authority to mutate
+arbitrary workloads.

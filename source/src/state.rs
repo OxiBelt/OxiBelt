@@ -51,6 +51,7 @@ mod upstream_clients;
 
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
+use stream_pool_update::next_stream_pool_generation;
 pub use upstream_clients::UpstreamBody;
 use upstream_clients::build_clients;
 pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
@@ -187,10 +188,15 @@ impl AppSnapshot {
   }
 
   async fn new_with_previous_and_telemetry(
-    config: Config,
+    mut config: Config,
     previous: Option<&AppSnapshot>,
     initial_telemetry: Option<TelemetryRuntime>,
   ) -> anyhow::Result<Self> {
+    if config.rollout.is_immutable() {
+      config
+        .validate()
+        .context("failed to validate immutable rollout configuration")?;
+    }
     crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
@@ -430,6 +436,8 @@ impl AppSnapshot {
       &upstream_uri_parts_by_index,
     );
 
+    config.rollout.mark_applied();
+
     Ok(Self {
       config,
       effective_direct_h1_io,
@@ -651,17 +659,6 @@ fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>
     previous.upstream_pool_generation
   } else {
     previous.upstream_pool_generation.saturating_add(1)
-  }
-}
-
-fn next_stream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
-  let Some(previous) = previous else {
-    return 0;
-  };
-  if config.stream_upstream_pools == previous.config.stream_upstream_pools {
-    previous.stream_pool_generation
-  } else {
-    previous.stream_pool_generation.saturating_add(1)
   }
 }
 

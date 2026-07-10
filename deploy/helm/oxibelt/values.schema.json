@@ -13,7 +13,25 @@
     "workload": {
       "type": "object",
       "properties": {
-        "kind": { "type": "string", "enum": ["Deployment", "DaemonSet"] }
+        "kind": { "type": "string", "enum": ["Deployment", "DaemonSet"] },
+        "deployment": {
+          "type": "object",
+          "properties": {
+            "maxUnavailable": { "type": "integer", "minimum": 0 },
+            "maxSurge": { "type": "integer", "minimum": 1 },
+            "minReadySeconds": { "type": "integer", "minimum": 0 },
+            "progressDeadlineSeconds": { "type": "integer", "minimum": 1 },
+            "revisionHistoryLimit": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "daemonSet": {
+          "type": "object",
+          "properties": {
+            "maxUnavailable": { "type": "integer", "minimum": 1 },
+            "minReadySeconds": { "type": "integer", "minimum": 0 },
+            "revisionHistoryLimit": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     },
     "replicaCount": { "type": "integer", "minimum": 1 },
@@ -55,6 +73,40 @@
         "mountPath": { "type": "string", "minLength": 1 }
       }
     },
+    "config": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "existingConfigMap": { "type": "string" },
+        "existingConfigMapDigest": { "type": "string" },
+        "key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$",
+          "not": { "const": "gateway-config-directory" }
+        },
+        "mountPath": { "type": "string", "minLength": 1 },
+        "inline": { "type": "string" }
+      }
+    },
+    "configRollout": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["helm_immutable", "kubernetes_immutable"] },
+        "managedConfigPath": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+\\.toml$"
+        }
+      }
+    },
+    "oxirule": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingConfigMap": { "type": "string" },
+        "existingConfigMapDigest": { "type": "string" },
+        "mountPath": { "type": "string", "minLength": 1 }
+      }
+    },
     "autoscaling": {
       "type": "object",
       "properties": {
@@ -71,5 +123,54 @@
         "minAvailable": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string" }] }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["config"],
+        "properties": {
+          "config": {
+            "required": ["existingConfigMap"],
+            "properties": {
+              "existingConfigMap": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "required": ["existingConfigMapDigest"],
+            "properties": {
+              "existingConfigMapDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["oxirule"],
+        "properties": {
+          "oxirule": {
+            "required": ["enabled"],
+            "properties": {
+              "enabled": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "oxirule": {
+            "required": ["existingConfigMap", "existingConfigMapDigest"],
+            "properties": {
+              "existingConfigMap": { "type": "string", "minLength": 1 },
+              "existingConfigMapDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

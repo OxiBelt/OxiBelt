@@ -58,6 +58,7 @@ fn admin_error_responses_use_json_envelope_and_headers() {
     "Unauthorized",
     "Forbidden",
     "Conflict",
+    "ImmutableRolloutConflict",
     "NotFound",
     "PreconditionFailed",
     "PreconditionRequired",
@@ -79,6 +80,51 @@ fn admin_error_responses_use_json_envelope_and_headers() {
     assert!(
       response["headers"].get("X-OxiBelt-API-Version").is_some(),
       "{name} must declare X-OxiBelt-API-Version"
+    );
+  }
+}
+
+#[test]
+fn immutable_rollout_status_and_mutation_boundaries_are_documented() {
+  let spec = openapi();
+  let status = &spec["paths"]["/admin/v1/config/status"]["get"];
+  let rollout =
+    &status["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["rollout"];
+  assert_eq!(
+    rollout["$ref"], "#/components/schemas/ConfigRolloutStatus",
+    "config status must expose additive immutable rollout identity"
+  );
+
+  let rollout_schema = &spec["components"]["schemas"]["ConfigRolloutStatus"];
+  assert_eq!(
+    rollout_schema["properties"]["rollout_mode"]["enum"][1],
+    "kubernetes_immutable"
+  );
+  assert_eq!(
+    rollout_schema["properties"]["apply_state"]["enum"][2],
+    "applied"
+  );
+  assert_eq!(
+    rollout_schema["properties"]["digest"]["pattern"],
+    "^[a-f0-9]{64}$"
+  );
+
+  for path in [
+    "/admin/v1/config/load",
+    "/admin/v1/config/rollback",
+    "/admin/v1/files/sync",
+    "/admin/v1/tls/downstream/reload",
+  ] {
+    let operation = &spec["paths"][path]["post"];
+    assert!(
+      operation["summary"]
+        .as_str()
+        .is_some_and(|summary| summary.contains("Kubernetes immutable rollout mode")),
+      "{path} must explain the immutable rollout mutation boundary"
+    );
+    assert_eq!(
+      operation["responses"]["409"]["$ref"], "#/components/responses/ImmutableRolloutConflict",
+      "{path} must document immutable rollout conflict"
     );
   }
 }

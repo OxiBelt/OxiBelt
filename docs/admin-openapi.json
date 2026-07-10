@@ -513,10 +513,34 @@
           "config"
         ],
         "operationId": "getConfigStatus",
-        "summary": "Fetch active config revision, ETag, rollback state, and last operation.",
+        "summary": "Fetch active config revision, ETag, rollback state, last operation, and immutable rollout identity.",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Active configuration status with additive immutable rollout identity.",
+            "headers": {
+              "X-OxiBelt-Request-Id": {
+                "$ref": "#/components/headers/AdminRequestId"
+              },
+              "X-OxiBelt-API-Version": {
+                "$ref": "#/components/headers/AdminApiVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "rollout"
+                  ],
+                  "properties": {
+                    "rollout": {
+                      "$ref": "#/components/schemas/ConfigRolloutStatus"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -611,7 +635,7 @@
           "config"
         ],
         "operationId": "loadConfig",
-        "summary": "Install a validated runtime-only config snapshot.",
+        "summary": "Install a validated runtime-only config snapshot; unavailable in Kubernetes immutable rollout mode.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -633,6 +657,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "409": {
+            "$ref": "#/components/responses/ImmutableRolloutConflict"
+          },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
           },
@@ -648,7 +675,7 @@
           "config"
         ],
         "operationId": "rollbackConfig",
-        "summary": "Restore the last-good runtime snapshot.",
+        "summary": "Restore the last-good runtime snapshot; unavailable in Kubernetes immutable rollout mode.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -669,6 +696,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/ImmutableRolloutConflict"
           },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
@@ -1002,7 +1032,7 @@
           "config"
         ],
         "operationId": "reloadDownstreamTls",
-        "summary": "Reload downstream TLS certificate, key, CRLite, and OCSP runtime.",
+        "summary": "Reload downstream TLS certificate, key, CRLite, and OCSP runtime; unavailable in Kubernetes immutable rollout mode.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -1023,6 +1053,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/ImmutableRolloutConflict"
           },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
@@ -1152,7 +1185,7 @@
           "files"
         ],
         "operationId": "syncAdminFiles",
-        "summary": "Synchronize explicit config or OxiRule files and optionally apply changes.",
+        "summary": "Synchronize explicit config or OxiRule files and optionally apply changes; unavailable in Kubernetes immutable rollout mode.",
         "requestBody": {
           "$ref": "#/components/requestBodies/FileSyncRequest"
         },
@@ -1168,6 +1201,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/ImmutableRolloutConflict"
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
@@ -5113,6 +5149,24 @@
           }
         }
       },
+      "ImmutableRolloutConflict": {
+        "description": "The Pod is assigned to a Kubernetes immutable configuration rollout, so local configuration mutation is disabled.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
+            }
+          }
+        }
+      },
       "NotFound": {
         "description": "Resource not found.",
         "headers": {
@@ -5483,6 +5537,65 @@
           },
           "draining": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigRolloutStatus": {
+        "description": "Process-local proof of the Pod-assigned configuration rollout revision. This object is additive to the existing config status response.",
+        "type": "object",
+        "required": [
+          "instance_id",
+          "rollout_mode",
+          "desired_revision",
+          "applied_revision",
+          "digest",
+          "apply_state"
+        ],
+        "properties": {
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kubernetes Pod UID in immutable mode; null for mutable deployments."
+          },
+          "rollout_mode": {
+            "type": "string",
+            "enum": [
+              "mutable",
+              "kubernetes_immutable"
+            ]
+          },
+          "desired_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Assigned immutable ConfigMap name, if any."
+          },
+          "applied_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Assigned revision after full configuration validation and snapshot construction."
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Raw SHA-256 of the exact mounted generated TOML bytes, if assigned."
+          },
+          "apply_state": {
+            "type": "string",
+            "enum": [
+              "not_configured",
+              "pending",
+              "applied"
+            ]
           }
         },
         "additionalProperties": false

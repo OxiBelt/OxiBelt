@@ -1,3 +1,5 @@
+{{- include "oxibelt.validateConfigRollout" . -}}
+{{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap
@@ -5,7 +7,16 @@ metadata:
   name: {{ include "oxibelt.configMapName" . }}
   labels:
 {{ include "oxibelt.labels" . | indent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    oxibelt.dev/config-digest: {{ include "oxibelt.generatedConfigDigest" . | quote }}
+immutable: true
 data:
   {{ .Values.config.key }}: |-
-{{ tpl .Values.config.inline . | indent 4 }}
+{{ include "oxibelt.generatedConfigContent" . | indent 4 }}
+{{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
+  # This projects as `conf.d/.keep` so a controller can safely bind-mount an
+  # immutable generated include below the read-only config root.
+  gateway-config-directory: ""
+{{- end }}
 {{- end }}

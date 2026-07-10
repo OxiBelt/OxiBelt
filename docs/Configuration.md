@@ -178,11 +178,17 @@ The default example config also allows controller-owned modules with:
 include = ["conf.d/*.toml"]
 ```
 
-This is the expected apply target for `oxibelt-gateway-controller`, which writes
-`conf.d/gateway-api.generated.toml` through Admin `POST /admin/v1/files/sync`.
-The controller-generated file contains only route, upstream-pool, and SNI
-forwarding rule arrays; operator-owned listener, TLS, Admin/IPM, and scalar
-`[sni_forward]` settings stay in the base config.
+This is the expected immutable rollout target for
+`oxibelt-gateway-controller`. The controller publishes
+`conf.d/gateway-api.generated.toml` as a single-file mount from an immutable
+Kubernetes ConfigMap; it does not write the config root through Admin
+`POST /admin/v1/files/sync`. The controller-generated file contains only route,
+upstream-pool, and SNI forwarding rule arrays; operator-owned listener, TLS,
+Admin/IPM, and scalar `[sni_forward]` settings stay in the base config.
+The managed file path must be a safe nested relative `.toml` path so its parent
+is present beneath the read-only config root; a root-level generated filename,
+path traversal, or an unsafe path segment is rejected by the paired Helm
+charts and controller.
 
 `include` may be a single string or an array of strings. Include entries support exact file paths and glob patterns using `*`, `?`, and `[...]`.
 
@@ -1790,6 +1796,24 @@ legacy array; paginated responses add a `pagination` object with an opaque
 `next_cursor` when more rows are available.
 
 Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, downstream TLS, and upstream TLS revocation operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime, and preserves the active TLS state if validation fails. Upstream TLS status reads require `config:ReadUpstreamTls`; `POST /admin/v1/tls/upstream/refresh` requires `config:RefreshUpstreamTls` and refreshes known upstream OCSP cache contexts without exposing certificate identifiers or responder URLs.
+
+Kubernetes-native immutable rollout mode is enabled by setting
+`OXIBELT_CONFIG_ROLLOUT_MODE=kubernetes_immutable` in a Pod. It requires
+`runtime.hot_reload.mode = "off"`, an assigned
+`OXIBELT_CONFIG_REVISION`, a lowercase raw SHA-256
+`OXIBELT_CONFIG_DIGEST`, `OXIBELT_CONFIG_REVISION_FILE`, and
+`OXIBELT_INSTANCE_ID`. The revision file must be a regular file beneath the
+configured config root, appear in the loaded `ConfigSourcePaths.config_files`,
+and hash to the assigned digest. Missing metadata, path escape, an excluded
+file, unreadable/non-regular input, or a digest mismatch fails startup closed.
+The revision becomes applied only after full configuration validation and the
+runtime snapshot are built. Readiness returns `200` only when the assigned and
+applied revision match; successful responses include revision and digest
+headers. Config status adds rollout mode, instance ID, desired/applied
+revision, digest, and apply state without replacing its existing process-local
+revision or ETag fields. In this mode, the per-Pod config load, rollback,
+file-sync, and downstream TLS reload mutations return `409`; read-only
+validate, diff, effective-config, and status operations remain available.
 
 Admin diagnostics endpoints return the same production preflight report shape as
 `oxibeltctl doctor`: `ok`, `profile`, severity `summary`, `findings`, and

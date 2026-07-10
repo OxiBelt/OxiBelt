@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::stream::pools::StreamPoolState;
 
-use super::{AppSnapshot, next_stream_pool_generation};
+use super::AppSnapshot;
 
 impl AppSnapshot {
   pub async fn new_with_updated_stream_pools(
@@ -63,5 +63,16 @@ impl AppSnapshot {
       alt_svc_header_values: previous.alt_svc_header_values.clone(),
       http1_upgrades_possible: previous.http1_upgrades_possible,
     })
+  }
+}
+
+pub(super) fn next_stream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
+  let Some(previous) = previous else {
+    return 0;
+  };
+  if config.stream_upstream_pools == previous.config.stream_upstream_pools {
+    previous.stream_pool_generation
+  } else {
+    previous.stream_pool_generation.saturating_add(1)
   }
 }

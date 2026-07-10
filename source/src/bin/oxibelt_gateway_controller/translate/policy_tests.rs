@@ -8,12 +8,6 @@ fn args() -> SharedArgs {
   SharedArgs {
     controller_name: "oxibelt.dev/gateway-controller".to_string(),
     managed_config_path: "conf.d/gateway-api.generated.toml".to_string(),
-    admin_url: "http://127.0.0.1:9092".parse().expect("url"),
-    admin_token_env: "OXIBELT_ADMIN_TOKEN".to_string(),
-    admin_token_file: None,
-    ca_certs: Vec::new(),
-    client_cert: None,
-    client_key: None,
     watch_namespace: None,
     status_address: Vec::new(),
     status_service: None,
