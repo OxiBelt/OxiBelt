@@ -107,21 +107,24 @@ pub(in crate::proxy::http) async fn finalize_response(
       tags,
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let response_waf = state.waf.evaluate_response(WafResponseInput {
-      request: request_input,
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: parts.version,
-      status: parts.status,
-      headers: &parts.headers,
-      body: response_body,
-      upstream_name: "static",
-      upstream_pool: None,
-      upstream_scheme: "file",
-      upstream_connect_time_ms: None,
-      upstream_first_byte_time_ms: None,
-      upstream_error: None,
-    });
+    let response_waf = state
+      .waf
+      .evaluate_response_async(WafResponseInput {
+        request: request_input,
+        response_id: access_log.response_id(),
+        received_at_unix_ms: access_log.response_received_at_unix_ms,
+        version: parts.version,
+        status: parts.status,
+        headers: &parts.headers,
+        body: response_body,
+        upstream_name: "static",
+        upstream_pool: None,
+        upstream_scheme: "file",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: None,
+        upstream_error: None,
+      })
+      .await;
     for access_log in &response_waf.access_logs {
       state.access_logs.emit(access_log);
     }

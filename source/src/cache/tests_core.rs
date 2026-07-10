@@ -597,51 +597,6 @@ fn stale_if_error_status_policy_matches_configured_status() {
 }
 
 #[test]
-fn stale_shared_hits_respect_named_policy_disabled_background_refresh() {
-  let config = cache_config_with_disabled_named_background_refresh();
-  let local = ResponseCache::new(&config, None).unwrap();
-  let shared = crate::shared_state::SharedState::test_memory("cache-bg-refresh-disabled");
-  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
-  let second = ResponseCache::new(&config, Some(shared)).unwrap();
-  let request_headers = HeaderMap::new();
-  let mut no_cache_headers = HeaderMap::new();
-  no_cache_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-  let local_uri = "/asset/local.css".parse::<Uri>().unwrap();
-  let shared_validator_uri = "/asset/shared-validator.css".parse::<Uri>().unwrap();
-  let shared_no_validator_uri = "/asset/shared-no-validator.css".parse::<Uri>().unwrap();
-
-  insert_stale_revalidate_entry(
-    &local,
-    &local_uri,
-    &request_headers,
-    Bytes::from_static(b"local"),
-    true,
-  );
-  insert_stale_revalidate_entry(
-    &first,
-    &shared_validator_uri,
-    &request_headers,
-    Bytes::from_static(b"shared-validator"),
-    true,
-  );
-  insert_stale_revalidate_entry(
-    &first,
-    &shared_no_validator_uri,
-    &request_headers,
-    Bytes::from_static(b"shared-no-validator"),
-    false,
-  );
-
-  std::thread::sleep(Duration::from_millis(1200));
-
-  assert_stale_background_refresh_disabled(&local, &local_uri, &request_headers);
-  assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
-  // A repeated lookup catches stale L2 entries being promoted as newly fresh L1 entries.
-  assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers);
-  assert_stale_background_refresh_disabled(&second, &shared_no_validator_uri, &no_cache_headers);
-}
-
-#[test]
 fn background_refresh_permit_respects_disabled_named_policy() {
   let config = cache_config_with_disabled_named_background_refresh();
   let cache = ResponseCache::new(&config, None).unwrap();

@@ -658,8 +658,8 @@ fn sticky_cookie_falls_back_when_cookie_target_is_excluded() {
   assert!(second.sticky_cookie().is_some());
 }
 
-#[test]
-fn shared_state_coordinates_pool_active_counts_and_health() {
+#[tokio::test]
+async fn shared_state_coordinates_pool_active_counts_and_health() {
   let shared = SharedState::test_memory("pool-test");
   let mut pool = test_pool(LoadBalancingAlgorithm::WeightedLeastConn);
   pool.servers[0].max_conns = 1;
@@ -667,24 +667,34 @@ fn shared_state_coordinates_pool_active_counts_and_health() {
   pool.health_check.enabled = true;
   pool.health_check.healthy_threshold = 1;
   pool.health_check.unhealthy_threshold = 1;
-  let first_state = PoolState::new(&[pool.clone()], Some(shared.clone()));
-  let second_state = PoolState::new(&[pool], Some(shared));
+  let first_state = PoolState::new_with_previous_and_metrics_async(
+    &[pool.clone()],
+    Some(shared.clone()),
+    None,
+    None,
+  )
+  .await;
+  let second_state =
+    PoolState::new_with_previous_and_metrics_async(&[pool], Some(shared), None, None).await;
 
   let first = first_state
-    .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+    .select_with_cookie_header_async("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
+    .await
     .unwrap();
   let first_upstream = first.upstream_name.clone();
 
   let second = second_state
-    .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+    .select_with_cookie_header_async("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
+    .await
     .unwrap();
   assert_ne!(second.upstream_name, first_upstream);
   drop(second);
   drop(first);
 
-  first_state.report_failure(&first_upstream);
+  first_state.report_failure_async(&first_upstream).await;
   let after_failure = second_state
-    .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+    .select_with_cookie_header_async("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
+    .await
     .unwrap();
   assert_ne!(after_failure.upstream_name, first_upstream);
 }

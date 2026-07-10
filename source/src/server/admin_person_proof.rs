@@ -43,7 +43,7 @@ pub(super) async fn admin_person_proof_response(
       ) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
-      Some(match snapshot.waf.person_proof_admin_status() {
+      Some(match snapshot.waf.person_proof_admin_status_async().await {
         Ok(status) => json_response(StatusCode::OK, &status),
         Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
       })
@@ -62,7 +62,8 @@ pub(super) async fn admin_person_proof_response(
       Some(
         match snapshot
           .waf
-          .person_proof_admin_clearances(query.limit, query.cursor.as_deref())
+          .person_proof_admin_clearances_async(query.limit, query.cursor.as_deref())
+          .await
         {
           Ok(page) => json_response(
             StatusCode::OK,
@@ -93,7 +94,8 @@ pub(super) async fn admin_person_proof_response(
       Some(
         match snapshot
           .waf
-          .person_proof_admin_revoke_clearance(&hash, body.ttl_seconds)
+          .person_proof_admin_revoke_clearance_async(&hash, body.ttl_seconds)
+          .await
         {
           Ok(result) => json_response(StatusCode::OK, &result),
           Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),

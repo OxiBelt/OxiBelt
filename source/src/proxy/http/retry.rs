@@ -362,7 +362,9 @@ pub(super) async fn send_pool_with_retry(
         } else {
           &[]
         },
-      ) {
+      )
+      .await
+      {
         Ok(selected) => selected,
         Err(error) => {
           if last_error.is_none() {
@@ -394,7 +396,8 @@ pub(super) async fn send_pool_with_retry(
         &mut current_selection,
         &mut failed_upstreams,
         policy,
-      );
+      )
+      .await;
       continue;
     };
     let target_uri = route_actions::build_upstream_uri(
@@ -420,7 +423,8 @@ pub(super) async fn send_pool_with_retry(
         &mut current_selection,
         &mut failed_upstreams,
         policy,
-      );
+      )
+      .await;
       continue;
     };
 
@@ -439,7 +443,8 @@ pub(super) async fn send_pool_with_retry(
             &mut current_selection,
             &mut failed_upstreams,
             policy,
-          );
+          )
+          .await;
           if !has_remaining_attempt(policy, attempt) {
             break;
           }
@@ -467,7 +472,8 @@ pub(super) async fn send_pool_with_retry(
             &mut current_selection,
             &mut failed_upstreams,
             policy,
-          );
+          )
+          .await;
         }
         if !retryable || !has_remaining_attempt(policy, attempt) {
           break;
@@ -484,7 +490,8 @@ pub(super) async fn send_pool_with_retry(
             &mut current_selection,
             &mut failed_upstreams,
             policy,
-          );
+          )
+          .await;
         }
         if !retryable || !has_remaining_attempt(policy, attempt) {
           break;
@@ -497,14 +504,14 @@ pub(super) async fn send_pool_with_retry(
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
 }
 
-fn report_pool_attempt_failure(
+async fn report_pool_attempt_failure(
   state: &AppSnapshot,
   upstream: &UpstreamConfig,
   current_selection: &mut Option<PoolSelection>,
   failed_upstreams: &mut Vec<String>,
   policy: &EffectiveRetryPolicy,
 ) {
-  report_pool_passive_failure(state, upstream, policy);
+  report_pool_passive_failure(state, upstream, policy).await;
   if policy.reselect_pool_on_retry
     && !failed_upstreams
       .iter()
@@ -517,13 +524,13 @@ fn report_pool_attempt_failure(
   }
 }
 
-fn report_pool_passive_failure(
+async fn report_pool_passive_failure(
   state: &AppSnapshot,
   upstream: &UpstreamConfig,
   policy: &EffectiveRetryPolicy,
 ) {
   if should_report_pool_passive_failure(policy) {
-    state.pools.report_failure(&upstream.name);
+    state.pools.report_failure_async(&upstream.name).await;
   }
 }
 

@@ -74,7 +74,7 @@ fn test_cache_policy_with_negative_status() -> crate::config::CachePolicyConfig 
   }
 }
 
-fn insert_stale_revalidate_entry(
+async fn insert_stale_revalidate_entry(
   cache: &ResponseCache,
   uri: &Uri,
   request_headers: &HeaderMap,
@@ -91,34 +91,39 @@ fn insert_stale_revalidate_entry(
   }
 
   assert_eq!(
-    cache.insert(
-      CacheInsertContext {
-        policy_name: Some("no-background-refresh"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri,
-        request_headers,
-      },
-      CacheEntry::memory(StatusCode::OK, headers, body),
-    ),
+    cache
+      .insert_async(
+        CacheInsertContext {
+          policy_name: Some("no-background-refresh"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri,
+          request_headers,
+        },
+        CacheEntry::memory(StatusCode::OK, headers, body),
+      )
+      .await,
     CacheInsertOutcome::Stored
   );
 }
 
-fn assert_stale_background_refresh_disabled(
+async fn assert_stale_background_refresh_disabled(
   cache: &ResponseCache,
   uri: &Uri,
   request_headers: &HeaderMap,
 ) {
-  match cache.lookup(CacheLookupContext {
-    policy_name: Some("no-background-refresh"),
-    scheme: "https",
-    host: "example.test",
-    method: &Method::GET,
-    uri,
-    request_headers,
-  }) {
+  match cache
+    .lookup_async(CacheLookupContext {
+      policy_name: Some("no-background-refresh"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri,
+      request_headers,
+    })
+    .await
+  {
     Some(CacheLookup::Stale(stale)) => assert!(
       !stale.background_refresh,
       "stale hit ignored disabled background_refresh policy"

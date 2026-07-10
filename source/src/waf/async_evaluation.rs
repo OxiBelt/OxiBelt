@@ -1,0 +1,84 @@
+//! Async wrappers for WAF phases that consult shared Person proof state.
+
+use tracing::warn;
+
+use super::{
+  AccessLogRecord, CompiledAccessLogFields, ResponseWafDecision, WafEngine, WafFailPolicy,
+  WafHttpTerminal, WafResponseInput, WafStreamClose, WafStreamDecision, WafStreamInput,
+};
+
+impl WafEngine {
+  pub async fn evaluate_response_async(&self, input: WafResponseInput<'_>) -> ResponseWafDecision {
+    if !self.enabled
+      || !self
+        .route_plan(input.request.route_name)
+        .response()
+        .enabled()
+    {
+      return ResponseWafDecision::default();
+    }
+
+    let person_proof = self
+      .person_proof
+      .evaluate_request_async(input.request)
+      .await;
+    match self.evaluate_response_inner_with_person_proof(input, &person_proof) {
+      Ok(decision) => decision,
+      Err(error) => match self.fail_policy {
+        WafFailPolicy::Open => {
+          warn!(error = %error, "WAF response evaluation failed open");
+          ResponseWafDecision::default()
+        }
+        WafFailPolicy::Closed => {
+          warn!(error = %error, "WAF response evaluation failed closed");
+          ResponseWafDecision {
+            terminal: Some(WafHttpTerminal::response(
+              http::StatusCode::FORBIDDEN,
+              "WAF evaluation failed".to_string(),
+            )),
+            ..ResponseWafDecision::default()
+          }
+        }
+      },
+    }
+  }
+
+  pub async fn evaluate_stream_async(&self, input: WafStreamInput<'_>) -> WafStreamDecision {
+    if !self.enabled || !self.route_plan(input.request.route_name).stream().enabled() {
+      return WafStreamDecision::default();
+    }
+
+    let person_proof = self
+      .person_proof
+      .evaluate_request_async(input.request)
+      .await;
+    match self.evaluate_stream_inner_with_person_proof(input, &person_proof) {
+      Ok(decision) => decision,
+      Err(error) => match self.fail_policy {
+        WafFailPolicy::Open => {
+          warn!(error = %error, "WAF stream evaluation failed open");
+          WafStreamDecision::default()
+        }
+        WafFailPolicy::Closed => {
+          warn!(error = %error, "WAF stream evaluation failed closed");
+          WafStreamDecision {
+            close: Some(WafStreamClose::default()),
+            ..WafStreamDecision::default()
+          }
+        }
+      },
+    }
+  }
+
+  pub async fn build_system_access_log_async(
+    &self,
+    fields: &CompiledAccessLogFields,
+    input: WafResponseInput<'_>,
+  ) -> anyhow::Result<AccessLogRecord> {
+    let person_proof = self
+      .person_proof
+      .evaluate_request_async(input.request)
+      .await;
+    self.build_system_access_log_with_person_proof(fields, input, &person_proof)
+  }
+}

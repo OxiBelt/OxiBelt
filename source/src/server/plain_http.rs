@@ -87,7 +87,7 @@ pub(super) async fn handle_connection(
   mut data_plane_drain: watch::Receiver<bool>,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let _global_permit = super::acquire_global_connection_permit(&snapshot)?;
+  let _global_permit = super::acquire_global_connection_permit(&snapshot).await?;
   let _plain_connection_guard =
     snapshot.runtime_introspection_guard(RuntimeCounter::PlainHttpConnection);
   let _http1_connection_guard =
@@ -96,7 +96,7 @@ pub(super) async fn handle_connection(
   let proxy_mode = snapshot.config.listeners.http_mode == HttpListenerMode::Proxy;
   let _ip_permit =
     if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol || !proxy_mode {
-      Some(super::acquire_ip_connection_permit(&snapshot, peer_addr)?)
+      Some(super::acquire_ip_connection_permit(&snapshot, peer_addr).await?)
     } else {
       None
     };

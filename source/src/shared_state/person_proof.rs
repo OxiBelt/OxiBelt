@@ -6,7 +6,7 @@ use super::MemoryBackend;
 #[cfg(test)]
 use super::purge_expired_values;
 use super::{Backend, PostgresBackend, RedisBackend, SharedState};
-use super::{block_on_timeout, now_unix_ms, ttl_from_expires_ms};
+use super::{now_unix_ms, ttl_from_expires_ms};
 
 const PERSON_PROOF_REUSE_CLEARANCE_PREFIX: &str = "person-proof:reuse:clearance:";
 const PERSON_PROOF_REUSE_CHALLENGE_PREFIX: &str = "person-proof:reuse:challenge:";
@@ -34,12 +34,12 @@ pub struct PersonProofSharedClearancePage {
 }
 
 impl SharedState {
-  pub fn person_proof_secret(&self) -> anyhow::Result<Option<[u8; 32]>> {
+  pub async fn person_proof_secret(&self) -> anyhow::Result<Option<[u8; 32]>> {
     let Some(backend) = &self.person_proof else {
       return Ok(None);
     };
     let key = self.key("person-proof:secret:v1");
-    let secret = backend.get_or_init_bytes(&key, 32, None)?;
+    let secret = backend.get_or_init_bytes(&key, 32, None).await?;
     let bytes: [u8; 32] = secret
       .as_slice()
       .try_into()
@@ -51,22 +51,26 @@ impl SharedState {
     self.person_proof.is_some()
   }
 
-  pub fn person_proof_remember(&self, key: &str, expires_at_ms: i64) -> anyhow::Result<bool> {
+  pub async fn person_proof_remember(&self, key: &str, expires_at_ms: i64) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(true);
     };
     let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend.put_if_absent(&self.key(&format!("person-proof:reuse:{key}")), b"1", ttl)
+    backend
+      .put_if_absent(&self.key(&format!("person-proof:reuse:{key}")), b"1", ttl)
+      .await
   }
 
-  pub fn person_proof_consume(&self, key: &str) -> anyhow::Result<bool> {
+  pub async fn person_proof_consume(&self, key: &str) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(false);
     };
-    backend.take_key(&self.key(&format!("person-proof:reuse:{key}")))
+    backend
+      .take_key(&self.key(&format!("person-proof:reuse:{key}")))
+      .await
   }
 
-  pub fn person_proof_mark_challenge_used(
+  pub async fn person_proof_mark_challenge_used(
     &self,
     token: &str,
     hash: &str,
@@ -76,39 +80,46 @@ impl SharedState {
       return Ok(true);
     };
     let legacy_key = self.key(&format!("{PERSON_PROOF_REUSE_CHALLENGE_PREFIX}{token}"));
-    if backend.get(&legacy_key)?.is_some() {
+    if backend.get(&legacy_key).await?.is_some() {
       return Ok(false);
     }
     let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend.put_if_absent(
-      &self.key(&format!("{PERSON_PROOF_REUSE_CHALLENGE_PREFIX}{hash}")),
-      b"1",
-      ttl,
-    )
+    backend
+      .put_if_absent(
+        &self.key(&format!("{PERSON_PROOF_REUSE_CHALLENGE_PREFIX}{hash}")),
+        b"1",
+        ttl,
+      )
+      .await
   }
 
-  pub fn person_proof_consume_clearance(&self, token: &str, hash: &str) -> anyhow::Result<bool> {
+  pub async fn person_proof_consume_clearance(
+    &self,
+    token: &str,
+    hash: &str,
+  ) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(false);
     };
     let key = self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{hash}"));
-    if backend.take_key(&key)? {
+    if backend.take_key(&key).await? {
       return Ok(true);
     }
     let legacy_key = self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{token}"));
-    backend.take_key(&legacy_key)
+    backend.take_key(&legacy_key).await
   }
 
-  pub fn person_proof_clearance_revoked(&self, hash: &str) -> anyhow::Result<bool> {
+  pub async fn person_proof_clearance_revoked(&self, hash: &str) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(false);
     };
     backend
       .get(&self.key(&format!("{PERSON_PROOF_REVOKED_CLEARANCE_PREFIX}{hash}")))
+      .await
       .map(|value| value.is_some())
   }
 
-  pub fn person_proof_revoke_clearance_hash(
+  pub async fn person_proof_revoke_clearance_hash(
     &self,
     hash: &str,
     expires_at_ms: i64,
@@ -117,22 +128,28 @@ impl SharedState {
       return Ok(false);
     };
     let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend.put(
-      &self.key(&format!("{PERSON_PROOF_REVOKED_CLEARANCE_PREFIX}{hash}")),
-      b"1",
-      ttl,
-    )?;
-    backend.take_key(&self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{hash}")))
+    backend
+      .put(
+        &self.key(&format!("{PERSON_PROOF_REVOKED_CLEARANCE_PREFIX}{hash}")),
+        b"1",
+        ttl,
+      )
+      .await?;
+    backend
+      .take_key(&self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{hash}")))
+      .await
   }
 
-  pub fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofSharedStatus> {
+  pub async fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofSharedStatus> {
     let Some(backend) = &self.person_proof else {
       return Ok(PersonProofSharedStatus::default());
     };
-    backend.person_proof_status(&self.key("person-proof:"))
+    backend
+      .person_proof_status(&self.key("person-proof:"))
+      .await
   }
 
-  pub fn person_proof_list_clearances(
+  pub async fn person_proof_list_clearances(
     &self,
     limit: usize,
     cursor: Option<&str>,
@@ -143,33 +160,57 @@ impl SharedState {
         next_cursor: None,
       });
     };
-    backend.person_proof_clearances(
-      &self.key(PERSON_PROOF_REUSE_CLEARANCE_PREFIX),
-      limit,
-      cursor,
-    )
+    backend
+      .person_proof_clearances(
+        &self.key(PERSON_PROOF_REUSE_CLEARANCE_PREFIX),
+        limit,
+        cursor,
+      )
+      .await
   }
 }
 
 impl Backend {
-  fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
+  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
     match self {
-      Self::Redis(redis) => redis.person_proof_status(prefix),
-      Self::Postgres(pg) => pg.person_proof_status(prefix),
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("person_proof", || redis.person_proof_status(prefix))
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("person_proof", || pg.person_proof_status(prefix))
+          .await
+      }
       #[cfg(test)]
       Self::Memory(memory) => memory.person_proof_status(prefix),
     }
   }
 
-  fn person_proof_clearances(
+  async fn person_proof_clearances(
     &self,
     prefix: &str,
     limit: usize,
     cursor: Option<&str>,
   ) -> anyhow::Result<PersonProofSharedClearancePage> {
     match self {
-      Self::Redis(redis) => redis.person_proof_clearances(prefix, limit, cursor),
-      Self::Postgres(pg) => pg.person_proof_clearances(prefix, limit, cursor),
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("person_proof", || {
+            redis.person_proof_clearances(prefix, limit, cursor)
+          })
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("person_proof", || {
+            pg.person_proof_clearances(prefix, limit, cursor)
+          })
+          .await
+      }
       #[cfg(test)]
       Self::Memory(memory) => memory.person_proof_clearances(prefix, limit, cursor),
     }
@@ -223,15 +264,17 @@ impl MemoryBackend {
 }
 
 impl RedisBackend {
-  fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
+  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
     let mut cursor = "0".to_string();
     let mut keys = Vec::new();
     loop {
-      let (batch, next_cursor) = self.scan_keys(
-        &format!("{prefix}*"),
-        &cursor,
-        PERSON_PROOF_ADMIN_SCAN_COUNT,
-      )?;
+      let (batch, next_cursor) = self
+        .scan_keys(
+          &format!("{prefix}*"),
+          &cursor,
+          PERSON_PROOF_ADMIN_SCAN_COUNT,
+        )
+        .await?;
       keys.extend(batch);
       let Some(next_cursor) = next_cursor else {
         break;
@@ -241,7 +284,7 @@ impl RedisBackend {
     Ok(person_proof_status_from_keys(keys.iter(), prefix))
   }
 
-  fn person_proof_clearances(
+  async fn person_proof_clearances(
     &self,
     prefix: &str,
     limit: usize,
@@ -250,13 +293,15 @@ impl RedisBackend {
     let mut cursor = cursor.unwrap_or("0").to_string();
     let mut entries = Vec::new();
     let next_cursor = loop {
-      let (keys, next_cursor) = self.scan_keys(
-        &format!("{prefix}*"),
-        &cursor,
-        PERSON_PROOF_ADMIN_SCAN_COUNT,
-      )?;
+      let (keys, next_cursor) = self
+        .scan_keys(
+          &format!("{prefix}*"),
+          &cursor,
+          PERSON_PROOF_ADMIN_SCAN_COUNT,
+        )
+        .await?;
       for key in keys {
-        let expires_at_ms = self.expires_at_ms(&key)?;
+        let expires_at_ms = self.expires_at_ms(&key).await?;
         if expires_at_ms == Some(0) {
           continue;
         }
@@ -280,21 +325,19 @@ impl RedisBackend {
 }
 
 impl PostgresBackend {
-  fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
+  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
     let pattern = format!("{prefix}%");
-    block_on_timeout(self.timeout, async {
-      let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
-      )
-      .bind(pattern)
-      .bind(now_unix_ms())
-      .fetch_all(&self.pool)
-      .await?;
-      Ok(person_proof_status_from_keys(keys.iter(), prefix))
-    })
+    let keys: Vec<String> = sqlx::query_scalar(
+      "SELECT key FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
+    )
+    .bind(pattern)
+    .bind(now_unix_ms())
+    .fetch_all(&self.pool)
+    .await?;
+    Ok(person_proof_status_from_keys(keys.iter(), prefix))
   }
 
-  fn person_proof_clearances(
+  async fn person_proof_clearances(
     &self,
     prefix: &str,
     limit: usize,
@@ -304,32 +347,30 @@ impl PostgresBackend {
     let pattern = format!("{prefix}%");
     let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
     let offset = i64::try_from(offset).unwrap_or(i64::MAX);
-    block_on_timeout(self.timeout, async {
-      let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT key, expires_at_ms FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) ORDER BY key LIMIT $3 OFFSET $4",
-      )
-      .bind(pattern)
-      .bind(now_unix_ms())
-      .bind(fetch_limit)
-      .bind(offset)
-      .fetch_all(&self.pool)
-      .await?;
-      let mut entries = rows
-        .into_iter()
-        .filter_map(|(key, expires_at_ms)| {
-          person_proof_clearance_from_key(&key, prefix, expires_at_ms)
-        })
-        .collect::<Vec<_>>();
-      let next_cursor = (entries.len() > limit).then(|| {
-        offset
-          .saturating_add(i64::try_from(limit).unwrap_or(i64::MAX))
-          .to_string()
-      });
-      entries.truncate(limit);
-      Ok(PersonProofSharedClearancePage {
-        clearances: entries,
-        next_cursor,
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
+      "SELECT key, expires_at_ms FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) ORDER BY key LIMIT $3 OFFSET $4",
+    )
+    .bind(pattern)
+    .bind(now_unix_ms())
+    .bind(fetch_limit)
+    .bind(offset)
+    .fetch_all(&self.pool)
+    .await?;
+    let mut entries = rows
+      .into_iter()
+      .filter_map(|(key, expires_at_ms)| {
+        person_proof_clearance_from_key(&key, prefix, expires_at_ms)
       })
+      .collect::<Vec<_>>();
+    let next_cursor = (entries.len() > limit).then(|| {
+      offset
+        .saturating_add(i64::try_from(limit).unwrap_or(i64::MAX))
+        .to_string()
+    });
+    entries.truncate(limit);
+    Ok(PersonProofSharedClearancePage {
+      clearances: entries,
+      next_cursor,
     })
   }
 }
@@ -399,28 +440,32 @@ mod tests {
   const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-  #[test]
-  fn person_proof_admin_projection_lists_only_hash_keyed_clearances() {
+  #[tokio::test]
+  async fn person_proof_admin_projection_lists_only_hash_keyed_clearances() {
     let state = SharedState::test_memory("test");
     let expires = now_unix_ms() + 60_000;
     assert!(
       state
         .person_proof_remember(&format!("clearance:{HASH_A}"), expires)
+        .await
         .expect("hash clearance should store")
     );
     assert!(
       state
         .person_proof_mark_challenge_used("session.v1.raw", HASH_B, expires)
+        .await
         .expect("hash challenge should store")
     );
     assert!(
       state
         .person_proof_remember("clearance:clearance.v2.raw", expires)
+        .await
         .expect("legacy clearance should store")
     );
 
     let status = state
       .person_proof_admin_status()
+      .await
       .expect("status should load");
     assert_eq!(status.active_clearance_count, 1);
     assert_eq!(status.challenge_replay_marker_count, 1);
@@ -428,6 +473,7 @@ mod tests {
 
     let page = state
       .person_proof_list_clearances(10, None)
+      .await
       .expect("clearance list should load");
     assert_eq!(page.clearances.len(), 1);
     assert_eq!(
@@ -436,49 +482,56 @@ mod tests {
     );
   }
 
-  #[test]
-  fn person_proof_revocation_tombstone_blocks_and_removes_hash_key() {
+  #[tokio::test]
+  async fn person_proof_revocation_tombstone_blocks_and_removes_hash_key() {
     let state = SharedState::test_memory("test");
     let expires = now_unix_ms() + 60_000;
     assert!(
       state
         .person_proof_remember(&format!("clearance:{HASH_A}"), expires)
+        .await
         .expect("hash clearance should store")
     );
     assert!(
       state
         .person_proof_revoke_clearance_hash(HASH_A, expires)
+        .await
         .expect("revocation should store tombstone")
     );
     assert!(
       state
         .person_proof_clearance_revoked(HASH_A)
+        .await
         .expect("revocation should be readable")
     );
     let status = state
       .person_proof_admin_status()
+      .await
       .expect("status should load");
     assert_eq!(status.active_clearance_count, 0);
     assert_eq!(status.revoked_clearance_count, 1);
   }
 
-  #[test]
-  fn person_proof_consume_clearance_honors_legacy_raw_key() {
+  #[tokio::test]
+  async fn person_proof_consume_clearance_honors_legacy_raw_key() {
     let state = SharedState::test_memory("test");
     let expires = now_unix_ms() + 60_000;
     assert!(
       state
         .person_proof_remember("clearance:clearance.v2.raw", expires)
+        .await
         .expect("legacy clearance should store")
     );
     assert!(
       state
         .person_proof_consume_clearance("clearance.v2.raw", HASH_A)
+        .await
         .expect("legacy clearance should consume")
     );
     assert!(
       !state
         .person_proof_consume_clearance("clearance.v2.raw", HASH_A)
+        .await
         .expect("legacy clearance should be gone")
     );
   }

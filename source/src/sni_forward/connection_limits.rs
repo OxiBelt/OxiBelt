@@ -9,33 +9,38 @@ use crate::config::ConnectionLimitIdentityMode;
 use crate::limits::ConnectionPermit;
 use crate::state::AppSnapshot;
 
-pub(crate) fn acquire_tcp_forward_connection_permit(
+pub(crate) async fn acquire_tcp_forward_connection_permit(
   snapshot: &AppSnapshot,
   peer_addr: SocketAddr,
 ) -> Result<Option<ConnectionPermit>, StatusCode> {
   match snapshot.config.limits.connection_limit_identity {
     ConnectionLimitIdentityMode::ProxyProtocol => Ok(None),
     ConnectionLimitIdentityMode::FirstRequestRealIp
-    | ConnectionLimitIdentityMode::PerRequestRealIp => snapshot
-      .limits
-      .acquire_ip_connection(
-        peer_addr.ip(),
-        &snapshot.config.limits,
-        &snapshot.config.connection_limits,
-      )
-      .map(Some),
+    | ConnectionLimitIdentityMode::PerRequestRealIp => Ok(Some(
+      snapshot
+        .limits
+        .acquire_ip_connection_async(
+          peer_addr.ip(),
+          &snapshot.config.limits,
+          &snapshot.config.connection_limits,
+        )
+        .await?,
+    )),
   }
 }
 
-pub(crate) fn acquire_quic_forward_connection_permit(
+pub(crate) async fn acquire_quic_forward_connection_permit(
   snapshot: &AppSnapshot,
   peer_addr: SocketAddr,
 ) -> Result<ConnectionPermit, StatusCode> {
-  snapshot.limits.acquire_connection(
-    peer_addr.ip(),
-    &snapshot.config.limits,
-    &snapshot.config.connection_limits,
-  )
+  snapshot
+    .limits
+    .acquire_connection_async(
+      peer_addr.ip(),
+      &snapshot.config.limits,
+      &snapshot.config.connection_limits,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -65,16 +70,21 @@ mod tests {
     let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
     let permit = acquire_tcp_forward_connection_permit(&snapshot, peer)
+      .await
       .expect("first forwarded TCP lease should succeed")
       .expect("real-ip mode should acquire an IP permit");
 
     assert_eq!(
-      tcp_forward_error_status(&snapshot, peer),
+      tcp_forward_error_status(&snapshot, peer).await,
       StatusCode::TOO_MANY_REQUESTS
     );
 
     drop(permit);
-    assert!(acquire_tcp_forward_connection_permit(&snapshot, peer).is_ok());
+    assert!(
+      acquire_tcp_forward_connection_permit(&snapshot, peer)
+        .await
+        .is_ok()
+    );
   }
 
   #[tokio::test]
@@ -90,6 +100,7 @@ mod tests {
 
     assert!(
       acquire_tcp_forward_connection_permit(&snapshot, peer)
+        .await
         .expect("proxy-protocol mode should not add an inner TCP permit")
         .is_none()
     );
@@ -107,22 +118,25 @@ mod tests {
     let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
     let permit = acquire_quic_forward_connection_permit(&snapshot, peer)
+      .await
       .expect("first forwarded QUIC lease should succeed");
 
     assert_eq!(
-      quic_forward_error_status(&snapshot, peer),
+      quic_forward_error_status(&snapshot, peer).await,
       StatusCode::TOO_MANY_REQUESTS
     );
 
     drop(permit);
     let first = acquire_quic_forward_connection_permit(&snapshot, peer)
+      .await
       .expect("released QUIC lease should become available again");
     let other_peer: SocketAddr = "127.0.0.2:12345".parse().unwrap();
     let second = acquire_quic_forward_connection_permit(&snapshot, other_peer)
+      .await
       .expect("second IP should fit under total limit");
 
     assert_eq!(
-      quic_forward_error_status(&snapshot, "127.0.0.3:12345".parse().unwrap()),
+      quic_forward_error_status(&snapshot, "127.0.0.3:12345".parse().unwrap()).await,
       StatusCode::SERVICE_UNAVAILABLE
     );
 
@@ -153,15 +167,15 @@ mod tests {
     config
   }
 
-  fn tcp_forward_error_status(snapshot: &AppSnapshot, peer: SocketAddr) -> StatusCode {
-    match acquire_tcp_forward_connection_permit(snapshot, peer) {
+  async fn tcp_forward_error_status(snapshot: &AppSnapshot, peer: SocketAddr) -> StatusCode {
+    match acquire_tcp_forward_connection_permit(snapshot, peer).await {
       Ok(_) => panic!("forwarded TCP connection permit should be rejected"),
       Err(status) => status,
     }
   }
 
-  fn quic_forward_error_status(snapshot: &AppSnapshot, peer: SocketAddr) -> StatusCode {
-    match acquire_quic_forward_connection_permit(snapshot, peer) {
+  async fn quic_forward_error_status(snapshot: &AppSnapshot, peer: SocketAddr) -> StatusCode {
+    match acquire_quic_forward_connection_permit(snapshot, peer).await {
       Ok(_) => panic!("forwarded QUIC connection permit should be rejected"),
       Err(status) => status,
     }

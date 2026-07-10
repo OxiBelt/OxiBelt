@@ -287,8 +287,8 @@ fn asn_keys_bucket_by_asn_and_fallback_to_ip() {
   assert_eq!(fallback, "asn_route:fallback_ip:203.0.113.10:app");
 }
 
-#[test]
-fn shared_state_keeps_new_bucket_keys_stable_across_instances() {
+#[tokio::test]
+async fn shared_state_keeps_new_bucket_keys_stable_across_instances() {
   let shared = SharedState::test_memory("limit-prefix-test");
   let first = LimitState::new(Some(shared.clone()));
   let second = LimitState::new(Some(shared));
@@ -309,17 +309,21 @@ fn shared_state_keeps_new_bucket_keys_stable_across_instances() {
   }];
 
   assert_eq!(
-    first.check_route_rate_limits(
-      RateLimitContext::route(first_ip, "app", "/same", &headers),
-      &limit,
-    ),
+    first
+      .check_route_rate_limits_async(
+        RateLimitContext::route(first_ip, "app", "/same", &headers),
+        &limit,
+      )
+      .await,
     None
   );
   assert_eq!(
-    second.check_route_rate_limits(
-      RateLimitContext::route(second_ip, "app", "/same", &headers),
-      &limit,
-    ),
+    second
+      .check_route_rate_limits_async(
+        RateLimitContext::route(second_ip, "app", "/same", &headers),
+        &limit,
+      )
+      .await,
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }

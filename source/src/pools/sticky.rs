@@ -61,17 +61,7 @@ pub(super) fn sticky_secret_for_pool(
       }
     }
   }
-  if let Some(shared) = shared_state
-    && shared.has_sticky_sessions()
-  {
-    match shared.sticky_session_secret(&config.name) {
-      Ok(Some(secret)) => return secret,
-      Ok(None) => {}
-      Err(error) => {
-        tracing::warn!(pool = %config.name, error = %error, "failed to load shared sticky session secret");
-      }
-    }
-  }
+  let _ = shared_state;
   let mut secret = [0u8; 32];
   if crate::crypto::random_fill(&mut secret).is_err() {
     tracing::warn!(
@@ -127,7 +117,11 @@ fn verify_sticky_cookie(pool: &Arc<PoolRuntime>, value: &str) -> Option<String> 
   let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
     .decode(signature)
     .ok()?;
-  if !crate::crypto::verify_hmac_sha256(&pool.sticky_secret, signed.as_bytes(), &signature) {
+  let secret = *pool
+    .sticky_secret
+    .read()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  if !crate::crypto::verify_hmac_sha256(&secret, signed.as_bytes(), &signature) {
     return None;
   }
   let server_id = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -141,7 +135,11 @@ fn build_sticky_cookie(pool: &Arc<PoolRuntime>, server_id: &str) -> Option<Heade
   let expires = now_unix_seconds().saturating_add(cookie.ttl_seconds);
   let encoded_server_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(server_id);
   let signed = format!("v1.{encoded_server_id}.{expires}");
-  let signature = crate::crypto::hmac_sha256(&pool.sticky_secret, signed.as_bytes());
+  let secret = *pool
+    .sticky_secret
+    .read()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let signature = crate::crypto::hmac_sha256(&secret, signed.as_bytes());
   let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
   let mut value = format!(
     "{}={signed}.{signature}; Max-Age={}; Path={}; SameSite={}",

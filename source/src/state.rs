@@ -256,7 +256,7 @@ impl AppSnapshot {
     let bootstrap_control_http =
       ControlHttpClient::new_with_crypto(&config.proxy.trusted_ca_certs, &config.crypto)
         .context("failed to build revocation bootstrap HTTP client")?;
-    let shared_state = SharedState::new(&config)
+    let shared_state = SharedState::new(&config, metrics.clone())
       .await
       .context("failed to build shared state")?;
     if previous.is_none()
@@ -265,12 +265,13 @@ impl AppSnapshot {
       buffering::cleanup_stale_temp_files(temp_dir);
     }
     let limits = LimitState::new(shared_state.clone());
-    let pools = PoolState::new_with_previous_and_metrics(
+    let pools = PoolState::new_with_previous_and_metrics_async(
       &config.upstream_pools,
       shared_state.clone(),
       previous.map(|snapshot| snapshot.pools.as_ref()),
       Some(metrics.clone()),
-    );
+    )
+    .await;
     publish_upstream_pool_server_metrics(&pools);
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
@@ -395,13 +396,14 @@ impl AppSnapshot {
     } else {
       None
     };
-    let waf = WafEngine::new_with_previous_limits_and_mitigation(
+    let waf = WafEngine::new_with_previous_limits_and_mitigation_async(
       &config,
       previous.map(|snapshot| &snapshot.waf),
       shared_state.clone(),
       Some(limits.clone()),
       mitigation.clone(),
     )
+    .await
     .context("failed to build WAF engine")?;
     let route_table = RouteTable::new_with_waf(&config, &waf);
     let sni_forward =
@@ -554,12 +556,13 @@ impl AppSnapshot {
     previous
       .runtime_introspection
       .set_enabled(config.admin.enabled);
-    let pools = PoolState::new_with_previous_and_metrics(
+    let pools = PoolState::new_with_previous_and_metrics_async(
       &config.upstream_pools,
       previous.shared_state.clone(),
       Some(previous.pools.as_ref()),
       Some(metrics.clone()),
-    );
+    )
+    .await;
     publish_upstream_pool_server_metrics(&pools);
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);

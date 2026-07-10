@@ -104,8 +104,8 @@ fn split_connection_permits_enforce_named_limits_per_ip() {
   assert!(state.acquire_ip_connection(ip, &limits, &named).is_ok());
 }
 
-#[test]
-fn shared_state_enforces_rate_and_connection_limits_across_instances() {
+#[tokio::test]
+async fn shared_state_enforces_rate_and_connection_limits_across_instances() {
   let shared = SharedState::test_memory("limit-test");
   let first = LimitState::new(Some(shared.clone()));
   let second = LimitState::new(Some(shared));
@@ -123,9 +123,9 @@ fn shared_state_enforces_rate_and_connection_limits_across_instances() {
     ..rate_limit_config("per-ip", RateLimitKey::ClientIp)
   }];
 
-  assert_eq!(first.check_rate_limits(ip, &rate_limits), None);
+  assert_eq!(first.check_rate_limits_async(ip, &rate_limits).await, None);
   assert_eq!(
-    second.check_rate_limits(ip, &rate_limits),
+    second.check_rate_limits_async(ip, &rate_limits).await,
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 
@@ -134,20 +134,68 @@ fn shared_state_enforces_rate_and_connection_limits_across_instances() {
     max_connections_per_ip: 1,
     ..LimitsConfig::default()
   };
-  let total = first.acquire_global_connection(&limits).unwrap();
+  let mut total = first
+    .acquire_global_connection_async(&limits)
+    .await
+    .unwrap();
   assert_eq!(
-    second.acquire_global_connection(&limits).err(),
+    second.acquire_global_connection_async(&limits).await.err(),
     Some(StatusCode::SERVICE_UNAVAILABLE)
   );
-  assert!(second.acquire_ip_connection(ip, &limits, &[]).is_ok());
-  drop(total);
-  let ip_permit = first.acquire_ip_connection(ip, &limits, &[]).unwrap();
+  let mut second_ip_permit = second
+    .acquire_ip_connection_async(ip, &limits, &[])
+    .await
+    .unwrap();
+  second_ip_permit.release().await;
+  total.release().await;
+  let mut ip_permit = first
+    .acquire_ip_connection_async(ip, &limits, &[])
+    .await
+    .unwrap();
   assert_eq!(
-    second.acquire_ip_connection(ip, &limits, &[]).err(),
+    second
+      .acquire_ip_connection_async(ip, &limits, &[])
+      .await
+      .err(),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
-  drop(ip_permit);
-  assert!(second.acquire_global_connection(&limits).is_ok());
+  ip_permit.release().await;
+  assert!(
+    second
+      .acquire_global_connection_async(&limits)
+      .await
+      .is_ok()
+  );
+}
+
+#[tokio::test]
+async fn dropped_shared_connection_permit_uses_bounded_deferred_cleanup() {
+  let shared = SharedState::test_memory("limit-deferred-release");
+  let first = LimitState::new(Some(shared.clone()));
+  let second = LimitState::new(Some(shared));
+  let limits = LimitsConfig {
+    max_connections: 1,
+    ..LimitsConfig::default()
+  };
+
+  drop(
+    first
+      .acquire_global_connection_async(&limits)
+      .await
+      .unwrap(),
+  );
+
+  tokio::time::timeout(Duration::from_millis(100), async {
+    loop {
+      if let Ok(mut permit) = second.acquire_global_connection_async(&limits).await {
+        permit.release().await;
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .expect("deferred shared connection cleanup should release the lease");
 }
 
 #[test]
@@ -484,8 +532,8 @@ fn local_rate_limit_monitor_mode_does_not_grow_after_bucket_cap() {
   assert_eq!(state.rates.lock().unwrap().len(), 1);
 }
 
-#[test]
-fn shared_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
+#[tokio::test]
+async fn shared_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
   let shared = SharedState::test_memory("shared-rate-bucket-cap");
   let first = LimitState::new(Some(shared.clone()));
   let second = LimitState::new(Some(shared));
@@ -511,26 +559,32 @@ fn shared_rate_limit_rejects_new_bucket_when_max_buckets_exhausted() {
   token_c.insert(AUTHORIZATION, "Bearer token-c".parse().unwrap());
 
   assert_eq!(
-    first.check_route_rate_limits(
-      RateLimitContext::route(ip, "app", "/tokens", &token_a),
-      &limit
-    ),
+    first
+      .check_route_rate_limits_async(
+        RateLimitContext::route(ip, "app", "/tokens", &token_a),
+        &limit
+      )
+      .await,
     None
   );
   assert_eq!(
-    second.check_route_rate_limits(
-      RateLimitContext::route(ip, "app", "/tokens", &token_b),
-      &limit
-    ),
+    second
+      .check_route_rate_limits_async(
+        RateLimitContext::route(ip, "app", "/tokens", &token_b),
+        &limit
+      )
+      .await,
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 
   std::thread::sleep(Duration::from_millis(650));
   assert_eq!(
-    second.check_route_rate_limits(
-      RateLimitContext::route(ip, "app", "/tokens", &token_c),
-      &limit
-    ),
+    second
+      .check_route_rate_limits_async(
+        RateLimitContext::route(ip, "app", "/tokens", &token_c),
+        &limit
+      )
+      .await,
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 }

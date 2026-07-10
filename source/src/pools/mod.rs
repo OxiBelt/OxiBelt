@@ -3,8 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use anyhow::bail;
 use http::HeaderValue;
@@ -20,6 +20,7 @@ use crate::shared_state::SharedState;
 
 mod health;
 mod selection;
+mod shared_runtime;
 mod sticky;
 
 const EWMA_FAILURE_PENALTY_MS: u64 = 30_000;
@@ -48,8 +49,7 @@ struct PoolRuntime {
   config: UpstreamPoolConfig,
   servers: Vec<Arc<PoolServerRuntime>>,
   chooser: AtomicUsize,
-  sticky_secret: [u8; 32],
-  shared_state: Option<Arc<SharedState>>,
+  sticky_secret: RwLock<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -174,10 +174,8 @@ pub struct PoolServerRuntimeSnapshot {
 impl Drop for PoolSelection {
   fn drop(&mut self) {
     self.server.active.fetch_sub(1, Ordering::Relaxed);
-    if let Some(shared) = &self.shared_state
-      && let Err(error) = shared.pool_active_add(&self.upstream_name, -1)
-    {
-      tracing::warn!(error = %error, upstream = %self.upstream_name, "failed to release shared upstream active count");
+    if let Some(shared) = &self.shared_state {
+      shared.defer_pool_active_add(&self.upstream_name, -1);
     }
   }
 }
@@ -245,8 +243,10 @@ impl PoolState {
             config: config.clone(),
             servers,
             chooser: AtomicUsize::new(0x9e37_79b9),
-            sticky_secret: sticky::sticky_secret_for_pool(config, shared_state.as_ref()),
-            shared_state: shared_state.clone(),
+            sticky_secret: RwLock::new(sticky::sticky_secret_for_pool(
+              config,
+              shared_state.as_ref(),
+            )),
           }),
         )
       })
@@ -449,8 +449,18 @@ impl PoolState {
     self.report_success_with_reason(upstream_name, HEALTH_REASON_PASSIVE_SUCCESS);
   }
 
+  pub async fn report_success_async(&self, upstream_name: &str) {
+    self.report_success(upstream_name);
+    self.report_shared_health_async(upstream_name, true).await;
+  }
+
   pub fn report_active_success(&self, upstream_name: &str) {
     self.report_success_with_reason(upstream_name, HEALTH_REASON_ACTIVE_SUCCESS);
+  }
+
+  pub async fn report_active_success_async(&self, upstream_name: &str) {
+    self.report_active_success(upstream_name);
+    self.report_shared_health_async(upstream_name, true).await;
   }
 
   fn report_success_with_reason(&self, upstream_name: &str, reason: u8) {
@@ -460,19 +470,6 @@ impl PoolState {
     if let Some((pool, server)) = self.find_pool_server(upstream_name) {
       let now_ms = mark_health_report(&server, reason);
       self.record_health_report(&pool, &server, true, reason);
-      if let Some(shared) = &self.shared_state
-        && let Ok(Some(healthy)) = shared.pool_report(
-          upstream_name,
-          true,
-          pool.config.health_check.enabled,
-          pool.config.health_check.healthy_threshold,
-          pool.config.health_check.unhealthy_threshold,
-        )
-      {
-        set_server_health(&server, healthy, now_ms);
-        self.publish_server_count_metrics();
-        return;
-      }
       server.consecutive_failures.store(0, Ordering::Relaxed);
       let successes = server.consecutive_successes.fetch_add(1, Ordering::Relaxed) + 1;
       if !pool.config.health_check.enabled
@@ -491,12 +488,27 @@ impl PoolState {
     self.report_success_with_reason(upstream_name, HEALTH_REASON_PASSIVE_SUCCESS);
   }
 
+  pub async fn report_success_latency_async(&self, upstream_name: &str, latency_ms: u64) {
+    self.report_success_latency(upstream_name, latency_ms);
+    self.report_shared_health_async(upstream_name, true).await;
+  }
+
   pub fn report_failure(&self, upstream_name: &str) {
     self.report_failure_with_reason(upstream_name, HEALTH_REASON_PASSIVE_FAILURE);
   }
 
+  pub async fn report_failure_async(&self, upstream_name: &str) {
+    self.report_failure(upstream_name);
+    self.report_shared_health_async(upstream_name, false).await;
+  }
+
   pub fn report_active_failure(&self, upstream_name: &str) {
     self.report_failure_with_reason(upstream_name, HEALTH_REASON_ACTIVE_FAILURE);
+  }
+
+  pub async fn report_active_failure_async(&self, upstream_name: &str) {
+    self.report_active_failure(upstream_name);
+    self.report_shared_health_async(upstream_name, false).await;
   }
 
   fn report_failure_with_reason(&self, upstream_name: &str, reason: u8) {
@@ -507,18 +519,7 @@ impl PoolState {
       let now_ms = mark_health_report(&server, reason);
       observe_ewma_latency(&server, EWMA_FAILURE_PENALTY_MS);
       self.record_health_report(&pool, &server, false, reason);
-      let shared_health = if let Some(shared) = &self.shared_state
-        && let Ok(Some(healthy)) = shared.pool_report(
-          upstream_name,
-          false,
-          pool.config.health_check.enabled,
-          pool.config.health_check.healthy_threshold,
-          pool.config.health_check.unhealthy_threshold,
-        ) {
-        Some(healthy)
-      } else {
-        None
-      };
+      let shared_health = None;
       server.consecutive_successes.store(0, Ordering::Relaxed);
       let failures = server.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
       if let Some(healthy) = shared_health {
@@ -533,6 +534,34 @@ impl PoolState {
         set_server_health(&server, false, now_ms);
       }
       self.publish_server_count_metrics();
+    }
+  }
+
+  async fn report_shared_health_async(&self, upstream_name: &str, success: bool) {
+    let Some(shared) = &self.shared_state else {
+      return;
+    };
+    let Some((pool, server)) = self.find_pool_server(upstream_name) else {
+      return;
+    };
+    match shared
+      .pool_report(
+        upstream_name,
+        success,
+        pool.config.health_check.enabled,
+        pool.config.health_check.healthy_threshold,
+        pool.config.health_check.unhealthy_threshold,
+      )
+      .await
+    {
+      Ok(Some(healthy)) => {
+        set_server_health(&server, healthy, now_millis());
+        self.publish_server_count_metrics();
+      }
+      Ok(None) => {}
+      Err(error) => {
+        tracing::warn!(error = %error, upstream = %upstream_name, "failed to report shared upstream health");
+      }
     }
   }
 
@@ -557,11 +586,6 @@ impl PoolState {
     sticky_cookie: Option<HeaderValue>,
   ) -> PoolSelection {
     server.active.fetch_add(1, Ordering::Relaxed);
-    if let Some(shared) = &self.shared_state
-      && let Err(error) = shared.pool_active_add(&server.upstream_name, 1)
-    {
-      tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to update shared upstream active count");
-    }
     PoolSelection {
       pool_name: pool_name.to_string(),
       upstream_name: server.upstream_name.clone(),
@@ -637,11 +661,7 @@ fn server_capacity_available(
 }
 
 fn active_count(pool: &PoolRuntime, server: &PoolServerRuntime) -> usize {
-  if let Some(shared) = &pool.shared_state
-    && let Ok(Some(active)) = shared.pool_active(&server.upstream_name)
-  {
-    return active;
-  }
+  let _ = pool;
   server.active.load(Ordering::Relaxed)
 }
 

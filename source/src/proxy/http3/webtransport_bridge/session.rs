@@ -132,7 +132,9 @@ pub(super) async fn accept_webtransport_session(
     prepared.client_addr.ip(),
     connection_limit_context.as_ref(),
     snapshot.as_ref(),
-  ) {
+  )
+  .await
+  {
     Ok(permits) => permits,
     Err(status) => {
       respond_to_h3_request(stream, text_response(status, "connection limit exceeded")).await?;

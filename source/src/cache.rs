@@ -34,6 +34,7 @@ mod metadata;
 mod range;
 mod revalidation;
 mod shared;
+mod shared_async;
 pub mod signing;
 mod streaming;
 
@@ -577,35 +578,38 @@ impl ResponseCache {
     base_key: &str,
     ctx: CacheLookupContext<'_>,
   ) -> Option<CacheLookup> {
-    let shared = self.shared_state.as_ref()?;
-    if !shared.has_cache() {
+    // Synchronous cache APIs are deliberately L1-only. Request paths use
+    // `lookup_async` whenever a shared backend is configured.
+    let _ = (policy, background_refresh, partition, base_key, ctx);
+    None
+  }
+
+  pub async fn lookup_async(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
+    if let Some(lookup) = self.lookup(ctx.clone()) {
+      return Some(lookup);
+    }
+    if !self.policy_enabled(ctx.policy_name, ctx.method)
+      || request_no_store(ctx.request_headers, &self.bypass_request_headers)
+    {
       return None;
     }
-    let uri = ctx.uri.to_string();
-    match shared.cache_lookup(
-      policy,
+    let operation = self.operation_context(
+      ctx.policy_name,
       ctx.scheme,
       ctx.host,
-      partition,
-      base_key,
-      &uri,
       ctx.method,
+      ctx.uri,
       ctx.request_headers,
-      request_no_cache(ctx.request_headers),
-      background_refresh,
-    ) {
-      Ok(Some(lookup)) => {
-        if matches!(lookup, CacheLookup::Fresh(_)) {
-          self.promote_shared_lookup(ctx, &lookup);
-        }
-        Some(lookup)
-      }
-      Ok(None) => None,
-      Err(error) => {
-        warn!(error = %error, "shared cache lookup failed; falling back to local miss");
-        None
-      }
-    }
+    )?;
+    self
+      .lookup_shared_async(
+        &operation.policy.name,
+        operation.policy.background_refresh,
+        &operation.partition,
+        &operation.base_key,
+        ctx,
+      )
+      .await
   }
 
   fn promote_shared_lookup(&self, ctx: CacheLookupContext<'_>, lookup: &CacheLookup) {
@@ -642,6 +646,21 @@ impl ResponseCache {
       })
   }
 
+  pub async fn begin_fill_async(
+    self: &Arc<Self>,
+    ctx: CacheLookupContext<'_>,
+  ) -> Option<CacheFillPermit> {
+    self
+      .begin_fill_decision_async(ctx)
+      .await
+      .and_then(|decision| match decision {
+        CacheFillDecision::Leader(guard) => Some(CacheFillPermit::Leader(guard)),
+        CacheFillDecision::Follower(waiter) => Some(CacheFillPermit::Follower(waiter)),
+        CacheFillDecision::SharedConflict => Some(CacheFillPermit::SharedConflict),
+        CacheFillDecision::Suppressed(_) => None,
+      })
+  }
+
   pub(crate) fn begin_fill_decision(
     self: &Arc<Self>,
     ctx: CacheLookupContext<'_>,
@@ -666,28 +685,51 @@ impl ResponseCache {
       )?
       .fill_key;
     match self.fills.begin(key.clone()) {
-      CacheFillDecision::Leader(mut guard) => {
-        if let Some(shared) = self
-          .shared_state
-          .as_ref()
-          .filter(|shared| shared.has_cache())
-        {
-          match shared.cache_try_lock_result(&key) {
-            Ok(Some(shared_lock)) => guard.set_shared_lock(shared_lock),
-            Ok(None) => {
-              drop(guard);
-              return Some(CacheFillDecision::SharedConflict);
-            }
-            Err(error) => {
-              warn!(error = %error, "shared cache fill lock failed; using local fill lock");
-            }
-          }
-        }
-        Some(CacheFillDecision::Leader(guard))
-      }
+      CacheFillDecision::Leader(guard) => Some(CacheFillDecision::Leader(guard)),
       CacheFillDecision::Follower(waiter) => Some(CacheFillDecision::Follower(waiter)),
       CacheFillDecision::SharedConflict => Some(CacheFillDecision::SharedConflict),
       CacheFillDecision::Suppressed(reason) => Some(CacheFillDecision::Suppressed(reason)),
+    }
+  }
+
+  pub(crate) async fn begin_fill_decision_async(
+    self: &Arc<Self>,
+    ctx: CacheLookupContext<'_>,
+  ) -> Option<CacheFillDecision> {
+    let key = self
+      .operation_context(
+        ctx.policy_name,
+        ctx.scheme,
+        ctx.host,
+        ctx.method,
+        ctx.uri,
+        ctx.request_headers,
+      )?
+      .fill_key;
+    let decision = self.begin_fill_decision(ctx)?;
+    let CacheFillDecision::Leader(mut guard) = decision else {
+      return Some(decision);
+    };
+    let Some(shared) = self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    else {
+      return Some(CacheFillDecision::Leader(guard));
+    };
+    match shared.cache_try_lock_result(&key).await {
+      Ok(Some(shared_lock)) => {
+        guard.set_shared_lock(shared_lock);
+        Some(CacheFillDecision::Leader(guard))
+      }
+      Ok(None) => {
+        drop(guard);
+        Some(CacheFillDecision::SharedConflict)
+      }
+      Err(error) => {
+        warn!(error = %error, "shared cache fill lock failed; using local fill lock");
+        Some(CacheFillDecision::Leader(guard))
+      }
     }
   }
 
@@ -729,6 +771,24 @@ impl ResponseCache {
     self.insert_with_external(ctx, entry, true)
   }
 
+  pub async fn insert_async(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    entry: CacheEntry,
+  ) -> CacheInsertOutcome {
+    let shared_context = ctx.clone();
+    let status = entry.status;
+    let headers = entry.headers.clone();
+    let body_len = entry.body.len();
+    let outcome = self.insert(ctx, entry);
+    if outcome == CacheInsertOutcome::Stored {
+      self
+        .write_shared_entry_for_insert(shared_context, status, &headers, body_len)
+        .await;
+    }
+    outcome
+  }
+
   fn insert_with_external(
     &self,
     ctx: CacheInsertContext<'_>,
@@ -752,6 +812,19 @@ impl ResponseCache {
     self.insert_prepared_with_external(prepared, entry, true)
   }
 
+  pub(crate) async fn insert_prepared_async(
+    &self,
+    prepared: CachePreparedInsert,
+    entry: CacheEntry,
+  ) -> CacheInsertOutcome {
+    let variant_key = prepared.variant_key.clone();
+    let outcome = self.insert_prepared(prepared, entry);
+    if outcome == CacheInsertOutcome::Stored {
+      self.write_shared_entry_for_variant(&variant_key).await;
+    }
+    outcome
+  }
+
   fn insert_prepared_with_external(
     &self,
     prepared: CachePreparedInsert,
@@ -763,7 +836,7 @@ impl ResponseCache {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
     };
-    let (shared_entry, external_entry) = {
+    let external_entry = {
       let mut inner = self.inner.lock().expect("cache lock poisoned");
       if variant_count_exceeded(
         &inner,
@@ -840,28 +913,54 @@ impl ResponseCache {
       add_size(&mut inner, &stored);
       inner.order.push_back(prepared.variant_key.clone());
       index_entry(&mut inner, &stored);
-      let shared_entry = self
-        .shared_state
-        .as_ref()
-        .filter(|shared| shared.has_cache())
-        .and_then(|_| shared_cache_entry(&stored));
       let external_entry = publish_external
         .then(|| self.external_entry_for_stored(&stored))
         .flatten();
       inner.entries.insert(prepared.variant_key, stored);
       self.evict_if_needed(&mut inner, &prepared.policy);
-      (shared_entry, external_entry)
+      external_entry
     };
-    if let Some(shared) = &self.shared_state
-      && shared.has_cache()
-      && let Some(shared_entry) = shared_entry
-    {
-      shared.cache_put(&shared_entry);
-    }
     if let Some((handler, metadata, body)) = external_entry {
       self.spawn_external_fill(handler, metadata, body);
     }
     CacheInsertOutcome::Stored
+  }
+
+  async fn write_shared_entry_for_insert(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body_len: usize,
+  ) {
+    let Some(prepared) = (match self.prepare_insert(ctx, status, headers, Some(body_len)) {
+      CachePreparedInsertDecision::Cacheable(prepared) => Some(prepared),
+      CachePreparedInsertDecision::NotCacheable(_) | CachePreparedInsertDecision::Rejected(_) => {
+        None
+      }
+    }) else {
+      return;
+    };
+    self
+      .write_shared_entry_for_variant(&prepared.variant_key)
+      .await;
+  }
+
+  async fn write_shared_entry_for_variant(&self, variant_key: &str) {
+    let Some(shared) = self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    else {
+      return;
+    };
+    let shared_entry = {
+      let inner = self.inner.lock().expect("cache lock poisoned");
+      inner.entries.get(variant_key).and_then(shared_cache_entry)
+    };
+    if let Some(shared_entry) = shared_entry {
+      shared.cache_put(&shared_entry).await;
+    }
   }
 
   pub fn update_from_not_modified(
@@ -871,6 +970,27 @@ impl ResponseCache {
     not_modified_headers: &HeaderMap,
   ) {
     revalidation::update_from_not_modified(self, ctx, cached_entry, not_modified_headers);
+  }
+
+  pub async fn update_from_not_modified_async(
+    &self,
+    ctx: CacheInsertContext<'_>,
+    cached_entry: &CacheEntry,
+    not_modified_headers: &HeaderMap,
+  ) {
+    self.update_from_not_modified(ctx.clone(), cached_entry, not_modified_headers);
+    let mut headers = cached_entry.headers.clone();
+    for (name, value) in not_modified_headers {
+      if matches!(
+        name.as_str(),
+        "cache-control" | "expires" | "etag" | "last-modified" | "vary"
+      ) {
+        headers.insert(name.clone(), value.clone());
+      }
+    }
+    self
+      .write_shared_entry_for_insert(ctx, cached_entry.status, &headers, cached_entry.body_len())
+      .await;
   }
 
   pub fn response_head_decision(
@@ -981,12 +1101,30 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
     }
     count
-      + self
-        .shared_state
-        .as_ref()
-        .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_exact(policy, scheme, host, uri, partition))
-        .unwrap_or(0)
+  }
+
+  pub async fn purge_exact_partition_async(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> usize {
+    let count = self.purge_exact_partition(policy, scheme, host, uri, partition);
+    let shared_count = match self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      Some(shared) => {
+        shared
+          .cache_purge_exact(policy, scheme, host, uri, partition)
+          .await
+      }
+      None => 0,
+    };
+    count.saturating_add(shared_count)
   }
 
   pub fn purge_prefix(&self, policy: &str, scheme: &str, host: &str, path_prefix: &str) -> usize {
@@ -1023,12 +1161,30 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
     }
     count
-      + self
-        .shared_state
-        .as_ref()
-        .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_prefix(policy, scheme, host, path_prefix, partition))
-        .unwrap_or(0)
+  }
+
+  pub async fn purge_prefix_partition_async(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    path_prefix: &str,
+    partition: Option<&str>,
+  ) -> usize {
+    let count = self.purge_prefix_partition(policy, scheme, host, path_prefix, partition);
+    let shared_count = match self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      Some(shared) => {
+        shared
+          .cache_purge_prefix(policy, scheme, host, path_prefix, partition)
+          .await
+      }
+      None => 0,
+    };
+    count.saturating_add(shared_count)
   }
 
   pub fn purge_tag(
@@ -1067,12 +1223,30 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
     }
     count
-      + self
-        .shared_state
-        .as_ref()
-        .filter(|shared| shared.has_cache())
-        .map(|shared| shared.cache_purge_tag(policy, tag, scheme, host, partition))
-        .unwrap_or(0)
+  }
+
+  pub async fn purge_tag_partition_async(
+    &self,
+    policy: &str,
+    tag: &str,
+    scheme: Option<&str>,
+    host: Option<&str>,
+    partition: Option<&str>,
+  ) -> usize {
+    let count = self.purge_tag_partition(policy, tag, scheme, host, partition);
+    let shared_count = match self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      Some(shared) => {
+        shared
+          .cache_purge_tag(policy, tag, scheme, host, partition)
+          .await
+      }
+      None => 0,
+    };
+    count.saturating_add(shared_count)
   }
 
   pub fn stats(&self) -> CacheStats {

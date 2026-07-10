@@ -155,7 +155,7 @@ async fn proxy_udp_datagram(
     else {
       return Ok(());
     };
-    let permit = acquire_udp_flow_permit(state, peer_addr)?;
+    let permit = acquire_udp_flow_permit(state, peer_addr).await?;
     let upstream = Arc::new(UdpSocket::bind(client_bind_addr(resolved.addr)).await?);
     upstream.connect(resolved.addr).await?;
     let upstream_reader = upstream.clone();
@@ -292,18 +292,19 @@ async fn classify_udp_flow(
   Ok(Some((route.name.to_string(), resolved)))
 }
 
-fn acquire_udp_flow_permit(
+async fn acquire_udp_flow_permit(
   state: &AppHandle,
   peer_addr: SocketAddr,
 ) -> anyhow::Result<ConnectionPermit> {
   let snapshot = state.snapshot();
   snapshot
     .limits
-    .acquire_connection(
+    .acquire_connection_async(
       peer_addr.ip(),
       &snapshot.config.limits,
       &snapshot.config.connection_limits,
     )
+    .await
     .map_err(|status| anyhow::anyhow!("UDP stream flow rejected with status {status}"))
 }
 
@@ -454,7 +455,7 @@ mod tests {
       last_activity: Instant::now(),
       rate: None,
       _selection: None,
-      _connection_permit: acquire_udp_flow_permit(state, "127.0.0.1:49152".parse()?)?,
+      _connection_permit: acquire_udp_flow_permit(state, "127.0.0.1:49152".parse()?).await?,
       _introspection_guard: state
         .snapshot()
         .runtime_introspection

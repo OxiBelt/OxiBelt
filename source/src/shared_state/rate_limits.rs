@@ -4,8 +4,7 @@ use anyhow::bail;
 use sqlx::Postgres;
 
 use super::{
-  PostgresBackend, RedisBackend, SharedRateLimitOutcome, block_on_timeout, now_unix_ms,
-  parse_rate_bucket,
+  PostgresBackend, RedisBackend, SharedRateLimitOutcome, now_unix_ms, parse_rate_bucket,
 };
 
 #[cfg(test)]
@@ -79,7 +78,7 @@ impl MemoryBackend {
 }
 
 impl RedisBackend {
-  pub(super) fn rate_take(
+  pub(super) async fn rate_take(
     &self,
     limit_name: &str,
     key: &str,
@@ -125,23 +124,25 @@ redis.call('PEXPIRE', KEYS[2], ttl)
 return 1
 "#;
     let ttl = ttl_ms(bucket_ttl);
-    let resp = self.command(&[
-      b"EVAL".to_vec(),
-      script.as_bytes().to_vec(),
-      b"2".to_vec(),
-      key.as_bytes().to_vec(),
-      limit_name.as_bytes().to_vec(),
-      now_unix_ms().to_string().into_bytes(),
-      rate.to_string().into_bytes(),
-      burst.to_string().into_bytes(),
-      ttl.to_string().into_bytes(),
-      max_buckets.max(1).to_string().into_bytes(),
-      key.as_bytes().to_vec(),
-    ])?;
+    let resp = self
+      .command(&[
+        b"EVAL".to_vec(),
+        script.as_bytes().to_vec(),
+        b"2".to_vec(),
+        key.as_bytes().to_vec(),
+        limit_name.as_bytes().to_vec(),
+        now_unix_ms().to_string().into_bytes(),
+        rate.to_string().into_bytes(),
+        burst.to_string().into_bytes(),
+        ttl.to_string().into_bytes(),
+        max_buckets.max(1).to_string().into_bytes(),
+        key.as_bytes().to_vec(),
+      ])
+      .await?;
     shared_rate_limit_outcome(resp.into_i64()?)
   }
 
-  pub(super) fn rate_take_bucket(
+  pub(super) async fn rate_take_bucket(
     &self,
     key: &str,
     rate: f64,
@@ -174,22 +175,24 @@ redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
 return 1
 "#;
     let ttl = ttl_ms(bucket_ttl);
-    let resp = self.command(&[
-      b"EVAL".to_vec(),
-      script.as_bytes().to_vec(),
-      b"1".to_vec(),
-      key.as_bytes().to_vec(),
-      now_unix_ms().to_string().into_bytes(),
-      rate.to_string().into_bytes(),
-      burst.to_string().into_bytes(),
-      ttl.to_string().into_bytes(),
-    ])?;
+    let resp = self
+      .command(&[
+        b"EVAL".to_vec(),
+        script.as_bytes().to_vec(),
+        b"1".to_vec(),
+        key.as_bytes().to_vec(),
+        now_unix_ms().to_string().into_bytes(),
+        rate.to_string().into_bytes(),
+        burst.to_string().into_bytes(),
+        ttl.to_string().into_bytes(),
+      ])
+      .await?;
     shared_rate_limit_outcome(resp.into_i64()?)
   }
 }
 
 impl PostgresBackend {
-  pub(super) fn rate_take(
+  pub(super) async fn rate_take(
     &self,
     limit_name: &str,
     key: &str,
@@ -198,80 +201,76 @@ impl PostgresBackend {
     max_buckets: usize,
     bucket_ttl: Duration,
   ) -> anyhow::Result<SharedRateLimitOutcome> {
-    block_on_timeout(self.timeout, async {
-      let mut tx = self.pool.begin().await?;
-      let now = now_unix_ms();
-      let expires_at_ms = expires_at_ms(now, bucket_ttl);
-      let max_buckets = i64::try_from(max_buckets.max(1)).unwrap_or(i64::MAX);
-      postgres_lock_rate_limit(&mut tx, limit_name).await?;
-      sqlx::query(
-        "DELETE FROM oxibelt_shared_rate_buckets WHERE limit_name = $1 AND expires_at_ms <= $2",
+    let mut tx = self.pool.begin().await?;
+    let now = now_unix_ms();
+    let expires_at_ms = expires_at_ms(now, bucket_ttl);
+    let max_buckets = i64::try_from(max_buckets.max(1)).unwrap_or(i64::MAX);
+    postgres_lock_rate_limit(&mut tx, limit_name).await?;
+    sqlx::query(
+      "DELETE FROM oxibelt_shared_rate_buckets WHERE limit_name = $1 AND expires_at_ms <= $2",
+    )
+    .bind(limit_name)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    let existing: Option<i64> = sqlx::query_scalar(
+      "SELECT expires_at_ms FROM oxibelt_shared_rate_buckets
+       WHERE limit_name = $1 AND bucket_key = $2 AND expires_at_ms > $3",
+    )
+    .bind(limit_name)
+    .bind(key)
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing.is_none() {
+      let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oxibelt_shared_rate_buckets WHERE limit_name = $1",
       )
       .bind(limit_name)
-      .bind(now)
-      .execute(&mut *tx)
+      .fetch_one(&mut *tx)
       .await?;
-      let existing: Option<i64> = sqlx::query_scalar(
-        "SELECT expires_at_ms FROM oxibelt_shared_rate_buckets
-         WHERE limit_name = $1 AND bucket_key = $2 AND expires_at_ms > $3",
-      )
-      .bind(limit_name)
-      .bind(key)
-      .bind(now)
-      .fetch_optional(&mut *tx)
-      .await?;
-      if existing.is_none() {
-        let active: i64 = sqlx::query_scalar(
-          "SELECT count(*) FROM oxibelt_shared_rate_buckets WHERE limit_name = $1",
-        )
-        .bind(limit_name)
-        .fetch_one(&mut *tx)
-        .await?;
-        if active >= max_buckets {
-          tx.rollback().await?;
-          return Ok(SharedRateLimitOutcome::BucketCapExceeded);
-        }
+      if active >= max_buckets {
+        tx.rollback().await?;
+        return Ok(SharedRateLimitOutcome::BucketCapExceeded);
       }
-      let outcome = postgres_rate_take_in_tx(&mut tx, key, rate, burst, now, expires_at_ms).await?;
-      sqlx::query(
-        "INSERT INTO oxibelt_shared_rate_buckets (limit_name, bucket_key, expires_at_ms)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (limit_name, bucket_key)
-         DO UPDATE SET expires_at_ms = EXCLUDED.expires_at_ms",
-      )
-      .bind(limit_name)
-      .bind(key)
-      .bind(expires_at_ms)
-      .execute(&mut *tx)
-      .await?;
-      tx.commit().await?;
-      Ok(outcome)
-    })
+    }
+    let outcome = postgres_rate_take_in_tx(&mut tx, key, rate, burst, now, expires_at_ms).await?;
+    sqlx::query(
+      "INSERT INTO oxibelt_shared_rate_buckets (limit_name, bucket_key, expires_at_ms)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (limit_name, bucket_key)
+       DO UPDATE SET expires_at_ms = EXCLUDED.expires_at_ms",
+    )
+    .bind(limit_name)
+    .bind(key)
+    .bind(expires_at_ms)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
   }
 
-  pub(super) fn rate_take_bucket(
+  pub(super) async fn rate_take_bucket(
     &self,
     key: &str,
     rate: f64,
     burst: u32,
     bucket_ttl: Duration,
   ) -> anyhow::Result<SharedRateLimitOutcome> {
-    block_on_timeout(self.timeout, async {
-      let mut tx = self.pool.begin().await?;
-      let now = now_unix_ms();
-      postgres_lock_rate_limit(&mut tx, key).await?;
-      let outcome = postgres_rate_take_in_tx(
-        &mut tx,
-        key,
-        rate,
-        burst,
-        now,
-        expires_at_ms(now, bucket_ttl),
-      )
-      .await?;
-      tx.commit().await?;
-      Ok(outcome)
-    })
+    let mut tx = self.pool.begin().await?;
+    let now = now_unix_ms();
+    postgres_lock_rate_limit(&mut tx, key).await?;
+    let outcome = postgres_rate_take_in_tx(
+      &mut tx,
+      key,
+      rate,
+      burst,
+      now,
+      expires_at_ms(now, bucket_ttl),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
   }
 }
 

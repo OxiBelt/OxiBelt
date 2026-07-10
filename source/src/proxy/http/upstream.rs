@@ -43,7 +43,7 @@ pub(crate) enum UpstreamSelectionError {
   MissingSyntheticUpstream(String),
 }
 
-pub(crate) fn select_request_upstream<'a>(
+pub(crate) async fn select_request_upstream<'a>(
   state: &'a AppSnapshot,
   resolved: &ResolvedRoute<'a>,
   client_addr: std::net::SocketAddr,
@@ -74,7 +74,8 @@ pub(crate) fn select_request_upstream<'a>(
       &format!("{downstream_host}{uri}"),
       request_waf.load_balancing_policy.as_deref(),
       cookie_header,
-    );
+    )
+    .await;
   }
 
   let upstream = resolved
@@ -91,7 +92,7 @@ pub(crate) fn select_request_upstream<'a>(
   })
 }
 
-pub(crate) fn select_pool_upstream<'a>(
+pub(crate) async fn select_pool_upstream<'a>(
   state: &'a AppSnapshot,
   pool_name: &str,
   client_addr: std::net::SocketAddr,
@@ -108,9 +109,10 @@ pub(crate) fn select_pool_upstream<'a>(
     cookie_header,
     &[],
   )
+  .await
 }
 
-pub(crate) fn select_pool_upstream_excluding<'a>(
+pub(crate) async fn select_pool_upstream_excluding<'a>(
   state: &'a AppSnapshot,
   pool_name: &str,
   client_addr: std::net::SocketAddr,
@@ -121,7 +123,7 @@ pub(crate) fn select_pool_upstream_excluding<'a>(
 ) -> Result<SelectedUpstream<'a>, UpstreamSelectionError> {
   let selection = state
     .pools
-    .select_with_cookie_header_excluding(
+    .select_with_cookie_header_excluding_async(
       pool_name,
       client_addr.ip(),
       hash_key,
@@ -129,6 +131,7 @@ pub(crate) fn select_pool_upstream_excluding<'a>(
       cookie_header,
       excluded_upstreams,
     )
+    .await
     .map_err(|error| UpstreamSelectionError::PoolUnavailable {
       pool_name: pool_name.to_string(),
       message: error.to_string(),

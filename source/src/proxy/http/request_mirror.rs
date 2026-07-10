@@ -36,72 +36,68 @@ pub(super) fn spawn_request_mirrors(
       state.metrics.record_request_mirror_skip();
       continue;
     }
-    let selected = match select_pool_upstream(
-      state.as_ref(),
-      &mirror.upstream_pool,
-      client_addr,
-      &format!("{host}{request_uri}"),
-      None,
-      None,
-    ) {
-      Ok(selected) => selected,
-      Err(error) => {
-        state.metrics.record_request_mirror_error();
-        warn!(
-          route = %route.name,
-          pool = %mirror.upstream_pool,
-          error = ?error,
-          "failed to select request mirror upstream"
-        );
-        continue;
-      }
-    };
-    let upstream = selected.upstream.clone();
-    let upstream_version = mirror_upstream_version(&state, route, &upstream);
-    if upstream_version == HttpVersion::H3
-      || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
-    {
-      state.metrics.record_request_mirror_skip();
-      continue;
-    }
-    let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
-      state.metrics.record_request_mirror_error();
-      warn!(
-        route = %route.name,
-        upstream = %upstream.name,
-        "missing request mirror upstream URI parts"
-      );
-      continue;
-    };
-    let target_uri = match route_actions::build_upstream_uri(
-      upstream_uri,
-      route,
-      RouteActionRenderContext {
-        route_prefix: route.effective_path_prefix(),
-        path_captures: &[],
-        downstream_scheme,
-        downstream_host: host,
-        downstream_uri: request_uri,
-      },
-    ) {
-      Ok(uri) => uri,
-      Err(error) => {
-        state.metrics.record_request_mirror_error();
-        warn!(
-          route = %route.name,
-          upstream = %upstream.name,
-          error = %error,
-          "failed to build request mirror URI"
-        );
-        continue;
-      }
-    };
-    let mut mirror_request = empty_request_from(outbound);
-    *mirror_request.uri_mut() = target_uri;
-    *mirror_request.version_mut() = upstream_request_version(upstream_version);
-    let timeouts = EffectiveTimeouts::new(&state.config, route, &upstream);
     let mirror_state = state.clone();
+    let route = route.clone();
+    let pool_name = mirror.upstream_pool.clone();
+    let route_name = route.name.clone();
+    let hash_key = format!("{host}{request_uri}");
+    let downstream_scheme = downstream_scheme.to_string();
+    let downstream_host = host.to_string();
+    let downstream_uri = request_uri.clone();
+    let mut mirror_request = empty_request_from(outbound);
     tokio::spawn(async move {
+      let selected = match select_pool_upstream(
+        mirror_state.as_ref(),
+        &pool_name,
+        client_addr,
+        &hash_key,
+        None,
+        None,
+      )
+      .await
+      {
+        Ok(selected) => selected,
+        Err(error) => {
+          mirror_state.metrics.record_request_mirror_error();
+          warn!(route = %route_name, pool = %pool_name, error = ?error, "failed to select request mirror upstream");
+          return;
+        }
+      };
+      let upstream = selected.upstream.clone();
+      let _selection = selected.into_pool_selection();
+      let upstream_version = mirror_upstream_version(&mirror_state, &route, &upstream);
+      if upstream_version == HttpVersion::H3
+        || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
+      {
+        mirror_state.metrics.record_request_mirror_skip();
+        return;
+      }
+      let Some(upstream_uri) = mirror_state.upstream_uri_parts.get(&upstream.name) else {
+        mirror_state.metrics.record_request_mirror_error();
+        warn!(route = %route_name, upstream = %upstream.name, "missing request mirror upstream URI parts");
+        return;
+      };
+      let target_uri = match route_actions::build_upstream_uri(
+        upstream_uri,
+        &route,
+        RouteActionRenderContext {
+          route_prefix: route.effective_path_prefix(),
+          path_captures: &[],
+          downstream_scheme: &downstream_scheme,
+          downstream_host: &downstream_host,
+          downstream_uri: &downstream_uri,
+        },
+      ) {
+        Ok(uri) => uri,
+        Err(error) => {
+          mirror_state.metrics.record_request_mirror_error();
+          warn!(route = %route_name, upstream = %upstream.name, error = %error, "failed to build request mirror URI");
+          return;
+        }
+      };
+      *mirror_request.uri_mut() = target_uri;
+      *mirror_request.version_mut() = upstream_request_version(upstream_version);
+      let timeouts = EffectiveTimeouts::new(&mirror_state.config, &route, &upstream);
       let Some(client) = mirror_state.clients.for_upstream_version(
         &upstream.name,
         upstream.origin.scheme(),

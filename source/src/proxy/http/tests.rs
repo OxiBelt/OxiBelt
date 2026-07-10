@@ -165,8 +165,8 @@ fn tunnel_connection_limit_hold_keeps_request_permit_until_drop() {
   assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
 }
 
-#[test]
-fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
+#[tokio::test]
+async fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
   let limits = crate::config::LimitsConfig {
     max_connections: 10,
     max_connections_per_ip: 1,
@@ -176,7 +176,10 @@ fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
   let ip = "203.0.113.11".parse().unwrap();
   let context = ConnectionLimitContext::default();
   context
-    .bind_first_request(ip, |ip| limit_state.acquire_ip_connection(ip, &limits, &[]))
+    .bind_first_request(ip, |ip| {
+      limit_state.acquire_ip_connection_async(ip, &limits, &[])
+    })
+    .await
     .expect("first request context should bind");
   let mut request_permit = None;
 

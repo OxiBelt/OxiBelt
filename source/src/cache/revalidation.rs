@@ -86,12 +86,9 @@ fn update_prepared_not_modified(
     cache.evict_if_needed(&mut inner, &prepared.policy);
     (shared_entry, external_metadata)
   };
-  if let Some(shared) = &cache.shared_state
-    && shared.has_cache()
-    && let Some(shared_entry) = shared_entry
-  {
-    shared.cache_put(&shared_entry);
-  }
+  // Synchronous revalidation updates are L1-only. Request paths use the
+  // asynchronous cache insertion path before publishing to shared state.
+  let _ = shared_entry;
   if let Some((handler, metadata)) = external_metadata {
     cache.spawn_external_revalidate(handler, metadata);
   }

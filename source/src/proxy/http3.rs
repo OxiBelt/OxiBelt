@@ -126,7 +126,8 @@ pub(crate) async fn handle_downstream_connection(
   let udp_connection_id: Arc<str> = format!("quinn-stable:{}", connection.stable_id()).into();
   let _global_permit = snapshot
     .limits
-    .acquire_global_connection(&snapshot.config.limits)
+    .acquire_global_connection_async(&snapshot.config.limits)
+    .await
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))?;
   let _http3_connection_guard =
     snapshot.runtime_introspection_guard(RuntimeCounter::Http3Connection);
@@ -135,11 +136,12 @@ pub(crate) async fn handle_downstream_connection(
     Some(
       snapshot
         .limits
-        .acquire_ip_connection(
+        .acquire_ip_connection_async(
           peer_addr.ip(),
           &snapshot.config.limits,
           &snapshot.config.connection_limits,
         )
+        .await
         .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))?,
     )
   } else {

@@ -1981,7 +1981,7 @@ async fn handle_connection(
   mut data_plane_drain: watch::Receiver<bool>,
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
-  let _global_permit = acquire_global_connection_permit(&handshake_state)?;
+  let _global_permit = acquire_global_connection_permit(&handshake_state).await?;
   let _https_connection_guard =
     handshake_state.runtime_introspection_guard(RuntimeCounter::DownstreamHttpsTcpConnection);
   let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
@@ -1992,7 +1992,7 @@ async fn handle_connection(
   .await?;
   let connection_limit_identity = handshake_state.config.limits.connection_limit_identity;
   let _ip_permit = if connection_limit_identity == ConnectionLimitIdentityMode::ProxyProtocol {
-    Some(acquire_ip_connection_permit(&handshake_state, peer_addr)?)
+    Some(acquire_ip_connection_permit(&handshake_state, peer_addr).await?)
   } else {
     None
   };
@@ -2246,24 +2246,28 @@ fn redirect_to_https(request: &hyper::Request<Incoming>) -> Response<ProxyBody> 
   response
 }
 
-fn acquire_global_connection_permit(snapshot: &AppSnapshot) -> anyhow::Result<ConnectionPermit> {
+async fn acquire_global_connection_permit(
+  snapshot: &AppSnapshot,
+) -> anyhow::Result<ConnectionPermit> {
   snapshot
     .limits
-    .acquire_global_connection(&snapshot.config.limits)
+    .acquire_global_connection_async(&snapshot.config.limits)
+    .await
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
 }
 
-fn acquire_ip_connection_permit(
+async fn acquire_ip_connection_permit(
   snapshot: &AppSnapshot,
   peer_addr: SocketAddr,
 ) -> anyhow::Result<ConnectionPermit> {
   snapshot
     .limits
-    .acquire_ip_connection(
+    .acquire_ip_connection_async(
       peer_addr.ip(),
       &snapshot.config.limits,
       &snapshot.config.connection_limits,
     )
+    .await
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
 }
 

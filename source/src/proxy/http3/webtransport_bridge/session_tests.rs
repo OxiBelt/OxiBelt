@@ -110,15 +110,22 @@ async fn webtransport_session_permits_enforce_proxy_protocol_per_ip_limit() {
   let ip = "203.0.113.10".parse().unwrap();
 
   let first = acquire_webtransport_session_permits(ip, None, &state)
+    .await
     .expect("first WebTransport session should acquire a permit");
 
   assert_eq!(
-    acquire_webtransport_session_permits(ip, None, &state).err(),
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .err(),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 
   drop(first);
-  assert!(acquire_webtransport_session_permits(ip, None, &state).is_ok());
+  assert!(
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .is_ok()
+  );
 }
 
 #[tokio::test]
@@ -129,16 +136,21 @@ async fn webtransport_first_request_identity_uses_bound_ip_for_later_sessions() 
   let spoofed_later_ip = "203.0.113.21".parse().unwrap();
 
   let first = acquire_webtransport_session_permits(first_ip, Some(&context), &state)
+    .await
     .expect("first WebTransport session should bind and acquire a permit");
 
   assert_eq!(
-    acquire_webtransport_session_permits(spoofed_later_ip, Some(&context), &state).err(),
+    acquire_webtransport_session_permits(spoofed_later_ip, Some(&context), &state)
+      .await
+      .err(),
     Some(StatusCode::TOO_MANY_REQUESTS)
   );
 
   drop(first);
   assert!(
-    acquire_webtransport_session_permits(spoofed_later_ip, Some(&context), &state).is_ok(),
+    acquire_webtransport_session_permits(spoofed_later_ip, Some(&context), &state)
+      .await
+      .is_ok(),
     "after release, the same first-request identity should be reusable"
   );
 }
@@ -153,14 +165,18 @@ async fn webtransport_per_request_identity_rejects_when_normal_ip_limit_is_exhau
     .expect("ordinary request should acquire the only normal per-IP permit");
 
   assert_eq!(
-    acquire_webtransport_session_permits(ip, None, &state).err(),
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .err(),
     Some(StatusCode::TOO_MANY_REQUESTS),
     "WebTransport must honor the existing normal per-IP connection counter"
   );
 
   drop(normal_connection);
   assert!(
-    acquire_webtransport_session_permits(ip, None, &state).is_ok(),
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .is_ok(),
     "WebTransport should proceed once the normal per-IP permit is released"
   );
 }
@@ -171,6 +187,7 @@ async fn webtransport_per_request_identity_holds_normal_ip_permit_for_session_li
   let ip = "203.0.113.31".parse().unwrap();
 
   let webtransport = acquire_webtransport_session_permits(ip, None, &state)
+    .await
     .expect("WebTransport session should acquire normal and session permits");
 
   assert_eq!(
@@ -199,6 +216,7 @@ async fn webtransport_first_request_identity_binds_normal_ip_permit_to_connectio
   let ip = "203.0.113.32".parse().unwrap();
 
   let webtransport = acquire_webtransport_session_permits(ip, Some(&context), &state)
+    .await
     .expect("WebTransport session should bind the first request Real-IP permit");
 
   assert_eq!(
@@ -251,11 +269,17 @@ status = 425
     .expect("ordinary request should acquire the only named connection permit");
 
   assert_eq!(
-    acquire_webtransport_session_permits(ip, None, &state).err(),
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .err(),
     Some(StatusCode::TOO_EARLY),
     "WebTransport must honor named normal connection counters and their configured status"
   );
 
   drop(normal_connection);
-  assert!(acquire_webtransport_session_permits(ip, None, &state).is_ok());
+  assert!(
+    acquire_webtransport_session_permits(ip, None, &state)
+      .await
+      .is_ok()
+  );
 }

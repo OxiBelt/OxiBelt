@@ -107,21 +107,24 @@ pub(super) async fn apply_static_waf(
       tags: access_log.tags(),
       dynamic_policy: &dynamic_policy,
     };
-    let response_waf = snapshot.waf.evaluate_response(WafResponseInput {
-      request: request_input,
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: Version::HTTP_11,
-      status: plan.status,
-      headers: &plan.headers,
-      body: None,
-      upstream_name: "static",
-      upstream_pool: None,
-      upstream_scheme: "file",
-      upstream_connect_time_ms: None,
-      upstream_first_byte_time_ms: None,
-      upstream_error: None,
-    });
+    let response_waf = snapshot
+      .waf
+      .evaluate_response_async(WafResponseInput {
+        request: request_input,
+        response_id: access_log.response_id(),
+        received_at_unix_ms: access_log.response_received_at_unix_ms,
+        version: Version::HTTP_11,
+        status: plan.status,
+        headers: &plan.headers,
+        body: None,
+        upstream_name: "static",
+        upstream_pool: None,
+        upstream_scheme: "file",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: None,
+        upstream_error: None,
+      })
+      .await;
     for access_log in &response_waf.access_logs {
       snapshot.access_logs.emit(access_log);
     }

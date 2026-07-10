@@ -11,7 +11,7 @@ use crate::config::{ConnectionLimitConfig, LimitsConfig};
 use super::{ConnectionAcquireKind, ConnectionAcquireSpec, ConnectionPermit, LimitState};
 
 impl LimitState {
-  pub fn acquire_webtransport_session(
+  pub async fn acquire_webtransport_session(
     self: &Arc<Self>,
     ip: IpAddr,
     limits: &LimitsConfig,
@@ -40,6 +40,6 @@ impl LimitState {
         status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
       }
     }));
-    self.acquire_scopes(specs)
+    self.acquire_scopes_async(specs).await
   }
 }

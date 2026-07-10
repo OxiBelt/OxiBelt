@@ -41,7 +41,7 @@ pub(crate) fn plain_fast_path_waf_required(resolved: &ResolvedRoute<'_>) -> bool
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_plain_fast_path_waf<B>(
+pub(crate) async fn prepare_plain_fast_path_waf<B>(
   request: &Request<B>,
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
@@ -64,28 +64,31 @@ pub(crate) fn prepare_plain_fast_path_waf<B>(
   let mut tags = None;
   let mut request_waf = if resolved.execution_plan.waf.request.enabled() {
     access_log.ensure_request_ids();
-    state.waf.evaluate_request(WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: request.method(),
-      uri: request.uri(),
-      version: request.version(),
-      headers: request.headers(),
-      body: None,
-      peer_addr: client_addr,
-      client_asn: state.client_identity.asn.lookup(client_addr.ip()),
-      downstream_host: host,
-      downstream_scheme,
-      route_name: &resolved.route.name,
-      tcp_max_hop,
-      tls,
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags: tags_ref(&tags),
-      dynamic_policy: &access_log.dynamic_policy,
-    })
+    state
+      .waf
+      .evaluate_request_async(WafRequestInput {
+        request_id: access_log.request_id(),
+        transaction_id: access_log.transaction_id(),
+        received_at_unix_ms: access_log.request_received_at_unix_ms,
+        method: request.method(),
+        uri: request.uri(),
+        version: request.version(),
+        headers: request.headers(),
+        body: None,
+        peer_addr: client_addr,
+        client_asn: state.client_identity.asn.lookup(client_addr.ip()),
+        downstream_host: host,
+        downstream_scheme,
+        route_name: &resolved.route.name,
+        tcp_max_hop,
+        tls,
+        protocol,
+        transport_network,
+        transport_metadata,
+        tags: tags_ref(&tags),
+        dynamic_policy: &access_log.dynamic_policy,
+      })
+      .await
   } else {
     RequestWafDecision::default()
   };
@@ -205,6 +208,7 @@ value = "yes"
       "https",
       &mut access_log,
     )
+    .await
     .expect("response WAF should prepare without evaluating request WAF");
 
     assert!(
@@ -292,6 +296,7 @@ value = "yes"
       "https",
       &mut access_log,
     )
+    .await
     .expect_err("terminal WAF decision should return a response");
     assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
 
@@ -325,6 +330,7 @@ value = "yes"
       "https",
       &mut access_log,
     )
+    .await
     .expect("header mutation should stay on the fast path");
     assert!(
       prepared.request_headers.is_none(),

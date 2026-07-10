@@ -12,38 +12,45 @@ pub(super) struct WebTransportSessionPermits {
   _webtransport_session_permit: ConnectionPermit,
 }
 
-pub(super) fn acquire_webtransport_session_permits(
+pub(super) async fn acquire_webtransport_session_permits(
   client_ip: std::net::IpAddr,
   connection_limit_context: Option<&ConnectionLimitContext>,
   state: &AppSnapshot,
 ) -> Result<WebTransportSessionPermits, StatusCode> {
   let acquire_request_connection = |ip| {
-    state
-      .limits
-      .acquire_ip_connection(ip, &state.config.limits, &state.config.connection_limits)
+    state.limits.acquire_ip_connection_async(
+      ip,
+      &state.config.limits,
+      &state.config.connection_limits,
+    )
   };
   let mut request_connection_permit = None;
   let limit_ip = match state.config.limits.connection_limit_identity {
     ConnectionLimitIdentityMode::ProxyProtocol => client_ip,
     ConnectionLimitIdentityMode::PerRequestRealIp => {
-      request_connection_permit = Some(acquire_request_connection(client_ip)?);
+      request_connection_permit = Some(acquire_request_connection(client_ip).await?);
       client_ip
     }
     ConnectionLimitIdentityMode::FirstRequestRealIp => {
       if let Some(context) = connection_limit_context {
-        context.bind_first_request(client_ip, acquire_request_connection)?;
-        context.bind_or_get_first_request_ip(client_ip)
+        context
+          .bind_first_request(client_ip, acquire_request_connection)
+          .await?;
+        context.bind_or_get_first_request_ip(client_ip).await
       } else {
-        request_connection_permit = Some(acquire_request_connection(client_ip)?);
+        request_connection_permit = Some(acquire_request_connection(client_ip).await?);
         client_ip
       }
     }
   };
-  let webtransport_session_permit = state.limits.acquire_webtransport_session(
-    limit_ip,
-    &state.config.limits,
-    &state.config.connection_limits,
-  )?;
+  let webtransport_session_permit = state
+    .limits
+    .acquire_webtransport_session(
+      limit_ip,
+      &state.config.limits,
+      &state.config.connection_limits,
+    )
+    .await?;
   Ok(WebTransportSessionPermits {
     _request_connection_permit: request_connection_permit,
     _webtransport_session_permit: webtransport_session_permit,

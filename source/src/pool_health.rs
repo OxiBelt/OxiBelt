@@ -50,9 +50,15 @@ pub(crate) async fn run_pool_health_checks(state: AppHandle, mut shutdown: watch
 
         *due = now + next_check_delay(&pool.health_check, &upstream_name);
         if check_pool_server(snapshot.clone(), pool, index, &upstream_name).await {
-          snapshot.pools.report_active_success(&upstream_name);
+          snapshot
+            .pools
+            .report_active_success_async(&upstream_name)
+            .await;
         } else {
-          snapshot.pools.report_active_failure(&upstream_name);
+          snapshot
+            .pools
+            .report_active_failure_async(&upstream_name)
+            .await;
         }
       }
     }

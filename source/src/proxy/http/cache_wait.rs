@@ -54,14 +54,18 @@ pub(super) async fn wait_for_shared_fill(
       return None;
     }
     tokio::time::sleep(SHARED_FILL_POLL_INTERVAL.min(timeout - elapsed)).await;
-    let Some(lookup) = state.cache.lookup(CacheLookupContext {
-      policy_name: resolved.route.cache.as_deref(),
-      scheme: downstream_scheme,
-      host,
-      method: request_method,
-      uri: request_uri,
-      request_headers,
-    }) else {
+    let Some(lookup) = state
+      .cache
+      .lookup_async(CacheLookupContext {
+        policy_name: resolved.route.cache.as_deref(),
+        scheme: downstream_scheme,
+        host,
+        method: request_method,
+        uri: request_uri,
+        request_headers,
+      })
+      .await
+    else {
       continue;
     };
     record_route_cache_fill_stage(state, resolved.route, "lock_wait", "shared_lookup", started);

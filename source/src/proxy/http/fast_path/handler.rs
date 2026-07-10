@@ -3,7 +3,6 @@
 use http_body_util::BodyExt;
 
 use super::*;
-
 pub(crate) struct PlainProxyFastPath;
 
 impl PlainProxyFastPath {
@@ -133,7 +132,9 @@ impl PlainProxyFastPath {
         request.uri(),
         pool_cookie_header,
         &request_waf,
-      ) {
+      )
+      .await
+      {
         Ok(selected) => selected,
         Err(error) => {
           return with_route_security_headers(

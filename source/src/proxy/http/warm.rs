@@ -80,23 +80,23 @@ pub(crate) async fn warm_cache_request(
   .await;
   let status = response.status();
   let _ = response.into_body().collect().await;
-  let result = snapshot
-    .route_table
-    .resolve_normalized_host_with_context(
-      &crate::routes::normalize_host(host),
-      RouteMatchContext {
-        path: uri.path(),
-        method: Some(&method),
-        headers: Some(&headers),
-        query: uri.query(),
-        source_ip: Some(peer_addr.ip()),
-        protocol: Some(RouteRequestProtocol::Http1),
-        tls: Some(tls.as_ref()),
-      },
-      &snapshot.upstreams,
-    )
-    .and_then(|resolved| {
-      snapshot.cache.lookup(crate::cache::CacheLookupContext {
+  let resolved = snapshot.route_table.resolve_normalized_host_with_context(
+    &crate::routes::normalize_host(host),
+    RouteMatchContext {
+      path: uri.path(),
+      method: Some(&method),
+      headers: Some(&headers),
+      query: uri.query(),
+      source_ip: Some(peer_addr.ip()),
+      protocol: Some(RouteRequestProtocol::Http1),
+      tls: Some(tls.as_ref()),
+    },
+    &snapshot.upstreams,
+  );
+  let stored = if let Some(resolved) = resolved {
+    snapshot
+      .cache
+      .lookup_async(crate::cache::CacheLookupContext {
         policy_name: resolved.route.cache.as_deref(),
         scheme,
         host,
@@ -104,15 +104,18 @@ pub(crate) async fn warm_cache_request(
         uri: &uri,
         request_headers: &headers,
       })
-    })
-    .map(|_| "stored")
-    .unwrap_or_else(|| {
-      if status.is_server_error() || status.is_client_error() {
-        "upstream_error"
-      } else {
-        "not_cacheable"
-      }
-    });
+      .await
+      .is_some()
+  } else {
+    false
+  };
+  let result = if stored {
+    "stored"
+  } else if status.is_server_error() || status.is_client_error() {
+    "upstream_error"
+  } else {
+    "not_cacheable"
+  };
   Ok(CacheWarmResult {
     status: status.as_u16(),
     result,

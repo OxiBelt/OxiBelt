@@ -104,7 +104,7 @@ the provisioning directories under `/etc/grafana/provisioning/`.
 
 ## Operator Questions
 
-The dashboard and existing endpoints are organized around six first-response
+The dashboard and existing endpoints are organized around seven first-response
 questions.
 
 | Question | Primary signal | Notes |
@@ -113,6 +113,7 @@ questions.
 | Are certificates healthy? | `GET /admin/v1/tls/downstream`, `GET /admin/v1/tls/upstream`, `oxibelt_tls_ocsp_*`, `oxibelt_tls_crlite_*`, `oxibelt_tls_upstream_*`, TLS session storage metrics | Certificate inventory, including bounded SNI-selected downstream certificate entries, downstream OCSP/CRLite state, and upstream revocation state stay on the authenticated Admin API. Public TLS revocation metrics use fixed series only and omit responder URLs, SNI, issuers, certificate fingerprints, serial numbers, and filter identifiers. |
 | Are upstreams healthy? | `oxibelt_upstream_requests_total`, `oxibelt_upstream_errors_total`, `oxibelt_upstream_pool_servers`, `oxibelt_upstream_pool_health_reports_total`, `oxibelt_upstream_pool_outlier_ejections_total`, upstream latency histograms | Public pool metrics use pool/source/state/outcome/reason labels and omit origins, discovery endpoints, tokens, raw errors, and response bodies. Use Admin upstream-pool APIs for per-server health reason, slow-start, ejection, active control, and Admin upstream TLS status for outbound revocation health. |
 | Are stream listeners healthy? | `oxibelt_stream_tcp_sessions_total`, `oxibelt_stream_udp_sessions_total`, `oxibelt_stream_session_errors_total`, `oxibelt_stream_tcp_bytes_total`, `oxibelt_stream_udp_bytes_total`, `oxibelt_stream_udp_rate_limited_total`, Admin stream-pool snapshots | Public stream metrics are aggregate by transport and omit listener names, SNI values, targets, and origins. Use authenticated stream-pool APIs and runtime introspection for per-pool state and active TCP/UDP flow counts. |
+| Is shared state saturated? | `oxibelt_shared_state_queue_duration_ms`, `oxibelt_shared_state_operation_duration_ms`, `oxibelt_shared_state_queued_operations`, `oxibelt_shared_state_in_flight_operations`, `oxibelt_shared_state_operations_total` | Alert on sustained queue growth or rising queue latency before operation timeouts. Labels are bounded to backend, kind, operation, and outcome; they never contain backend keys, request identity, tokens, URLs, or raw errors. |
 | Is security automation active? | dynamic-policy, external-auth, and mitigation counters | Public metrics expose aggregate behavior, not sensitive WAF metadata. |
 | Is HTTP/3 working? | detailed HTTP protocol labels and `oxibelt_quic_retries_total` | Detailed metrics must be enabled for per-protocol request panels. |
 | Are reloads and drains safe? | `/ready`, Admin lifecycle state, runtime snapshot endpoints | Use `redact=true` on runtime and support-bundle endpoints. |

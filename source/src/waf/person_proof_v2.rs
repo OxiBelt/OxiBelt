@@ -248,6 +248,18 @@ pub(super) fn complete_provider_challenge(
   issue_clearance(engine, input, &challenge.state, now)
 }
 
+pub(super) async fn complete_provider_challenge_async(
+  engine: &PersonProofEngine,
+  input: WafRequestInput<'_>,
+  challenge: PersonProofProviderChallenge,
+) -> anyhow::Result<PersonProofIssuedClearance> {
+  let now = now_unix_ms()?;
+  if now > challenge.state.expires {
+    bail!("person proof challenge token expired");
+  }
+  issue_clearance_async(engine, input, &challenge.state, now).await
+}
+
 pub(super) fn consume_provider_challenge_attempt(
   engine: &PersonProofEngine,
   challenge: &PersonProofProviderChallenge,
@@ -264,12 +276,37 @@ pub(super) fn consume_provider_challenge_attempt(
   Ok(())
 }
 
+pub(super) async fn consume_provider_challenge_attempt_async(
+  engine: &PersonProofEngine,
+  challenge: &PersonProofProviderChallenge,
+) -> anyhow::Result<()> {
+  let now = now_unix_ms()?;
+  if now > challenge.state.expires {
+    bail!("person proof challenge token expired");
+  }
+  if challenge.state.policy.single_use
+    && !engine
+      .mark_challenge_token_used_async(&challenge.state.token, challenge.state.expires, now)
+      .await?
+  {
+    bail!("person proof challenge token was already used");
+  }
+  Ok(())
+}
+
 impl super::WafEngine {
   pub fn consume_person_proof_provider_challenge_attempt(
     &self,
     challenge: &PersonProofProviderChallenge,
   ) -> anyhow::Result<()> {
     consume_provider_challenge_attempt(&self.person_proof, challenge)
+  }
+
+  pub async fn consume_person_proof_provider_challenge_attempt_async(
+    &self,
+    challenge: &PersonProofProviderChallenge,
+  ) -> anyhow::Result<()> {
+    consume_provider_challenge_attempt_async(&self.person_proof, challenge).await
   }
 }
 
@@ -348,6 +385,83 @@ pub(super) fn verify_clearance(
   Ok(status)
 }
 
+pub(super) async fn verify_clearance_async(
+  engine: &PersonProofEngine,
+  input: WafRequestInput<'_>,
+  policy: &PersonProofPolicy,
+  proof: &str,
+) -> anyhow::Result<PersonProofRequestStatus> {
+  let fields = parse_clearance_token(proof)?;
+  if fields.mode != policy.mode.as_str() {
+    bail!("person proof clearance mode does not match policy");
+  }
+  if fields.provider != provider_identity(policy) {
+    bail!("person proof clearance provider does not match policy");
+  }
+  if fields.method != input.method.as_str() || fields.route != input.route_name {
+    bail!("person proof clearance request context does not match");
+  }
+  let current_binding_hash = token_binding_hash(input, policy, input.route_name);
+  if current_binding_hash != fields.binding_hash {
+    bail!("person proof clearance token bindings do not match request");
+  }
+  verify_clearance_mac(engine, input, policy, &fields)?;
+
+  let now = now_unix_ms()?;
+  let mut status = PersonProofRequestStatus {
+    state: if now > fields.expires {
+      PersonProofState::Expired
+    } else {
+      PersonProofState::Valid
+    },
+    mode: Some(policy.mode.as_str()),
+    difficulty: None,
+    issued_at_unix_ms: Some(fields.issued),
+    expires_at_unix_ms: Some(fields.expires),
+    policy_key: Some(policy.key.clone()),
+    rate_limited: false,
+    weight: 0,
+    allowed: false,
+    clearance_hash: None,
+    clearance: None,
+  };
+  if status.state != PersonProofState::Valid {
+    return Ok(status);
+  }
+  let hash = clearance_hash(proof);
+  status.clearance_hash = Some(hash.clone());
+  if engine.clearance_revoked_async(&hash, now).await? {
+    bail!("person proof clearance token was revoked");
+  }
+  if policy.single_use {
+    if !engine.consume_clearance_token_async(proof, now).await? {
+      bail!("person proof clearance token was already used");
+    }
+    let state = ProviderChallengeState {
+      policy: policy.clone(),
+      token: proof.to_string(),
+      issued: now,
+      expires: fields.expires,
+      mode: fields.mode,
+      provider: fields.provider,
+      method: fields.method,
+      route_name: fields.route,
+      binding_hash: fields.binding_hash,
+      random: random_hex(16)?,
+    };
+    let value = sign_clearance_token(engine, input, &state);
+    engine
+      .remember_reuse_token_async(&clearance_reuse_key(&value), fields.expires, now)
+      .await?;
+    status.clearance = Some(policy.clearance.issue(
+      value,
+      fields.expires,
+      remaining_seconds(now, fields.expires),
+    )?);
+  }
+  Ok(status)
+}
+
 fn issue_clearance(
   engine: &PersonProofEngine,
   input: WafRequestInput<'_>,
@@ -357,6 +471,24 @@ fn issue_clearance(
   let value = sign_clearance_token(engine, input, state);
   if state.policy.single_use {
     engine.remember_reuse_token(&clearance_reuse_key(&value), state.expires, now)?;
+  }
+  state
+    .policy
+    .clearance
+    .issue(value, state.expires, remaining_seconds(now, state.expires))
+}
+
+async fn issue_clearance_async(
+  engine: &PersonProofEngine,
+  input: WafRequestInput<'_>,
+  state: &ProviderChallengeState,
+  now: i64,
+) -> anyhow::Result<PersonProofIssuedClearance> {
+  let value = sign_clearance_token(engine, input, state);
+  if state.policy.single_use {
+    engine
+      .remember_reuse_token_async(&clearance_reuse_key(&value), state.expires, now)
+      .await?;
   }
   state
     .policy

@@ -244,7 +244,7 @@ async fn serve_stream_listener(
           }
         };
         let connection_config = config.clone();
-        let permit = match acquire_connection_permit(&state, peer_addr) {
+        let permit = match acquire_connection_permit(&state, peer_addr).await {
           Ok(permit) => permit,
           Err(error) => {
             warn!(name = %config.name, peer = %peer_addr, error = %error, "stream connection rejected");
@@ -359,18 +359,19 @@ async fn peek_optional_tls_sni(
   result
 }
 
-fn acquire_connection_permit(
+async fn acquire_connection_permit(
   state: &AppHandle,
   peer_addr: SocketAddr,
 ) -> anyhow::Result<ConnectionPermit> {
   let snapshot = state.snapshot();
   snapshot
     .limits
-    .acquire_connection(
+    .acquire_connection_async(
       peer_addr.ip(),
       &snapshot.config.limits,
       &snapshot.config.connection_limits,
     )
+    .await
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
 }
 

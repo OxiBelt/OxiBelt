@@ -21,6 +21,8 @@ mod http_io;
 mod ocsp;
 mod outbound_revocation;
 mod pool;
+mod shared_state;
+mod shared_state_api;
 mod sni_forward;
 mod stream;
 mod upstream_client;
@@ -71,6 +73,7 @@ pub struct Metrics {
   upstream_client: upstream_client::UpstreamClientMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
   stream: stream::StreamMetrics,
+  shared_state: shared_state::SharedStateMetrics,
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
@@ -623,6 +626,7 @@ impl Metrics {
     self.append_sni_forward_prometheus(&mut output);
     self.append_stream_prometheus(&mut output);
     self.append_upstream_pool_prometheus(&mut output);
+    self.append_shared_state_prometheus(&mut output);
     append_metric(
       &mut output,
       "oxibelt_cache_disk_recovered_entries_total",

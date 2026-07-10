@@ -81,7 +81,9 @@ where
       transport_metadata,
       downstream_scheme,
       access_log,
-    ) {
+    )
+    .await
+    {
       Ok(waf) => waf,
       Err(response) => return Ok(*response),
     }

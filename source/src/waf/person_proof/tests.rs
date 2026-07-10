@@ -71,29 +71,34 @@ fn json_visible_clearance_targets_include_token() {
   }
 }
 
-#[test]
-fn shared_state_shares_secret_and_single_use_replay_state() {
+#[tokio::test]
+async fn shared_state_shares_secret_and_single_use_replay_state() {
   let shared = SharedState::test_memory("person-proof-test");
-  let first =
+  let mut first =
     PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared.clone()))
       .unwrap();
-  let second =
+  let mut second =
     PersonProofEngine::from_policies_with_previous(Vec::new(), 16, None, Some(shared)).unwrap();
+  first.load_shared_secret().await.unwrap();
+  second.load_shared_secret().await.unwrap();
 
   assert_eq!(first.secret, second.secret);
 
   let now = now_unix_ms().unwrap();
   first
-    .remember_reuse_token("challenge:test-token", now + 60_000, now)
+    .remember_reuse_token_async("challenge:test-token", now + 60_000, now)
+    .await
     .unwrap();
   assert!(
     second
-      .consume_reuse_token("challenge:test-token", now)
+      .consume_reuse_token_async("challenge:test-token", now)
+      .await
       .unwrap()
   );
   assert!(
     !first
-      .consume_reuse_token("challenge:test-token", now)
+      .consume_reuse_token_async("challenge:test-token", now)
+      .await
       .unwrap()
   );
 }

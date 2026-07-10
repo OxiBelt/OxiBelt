@@ -385,12 +385,6 @@ impl PersonProofEngine {
         Arc::new(Mutex::new(HashMap::new())),
       )
     };
-    if let Some(shared) = &shared_state
-      && let Some(shared_secret) = shared.person_proof_secret()?
-    {
-      secret = shared_secret;
-    }
-
     Ok(Self {
       secret,
       policies,
@@ -399,6 +393,15 @@ impl PersonProofEngine {
       max_reuse_tokens,
       shared_state,
     })
+  }
+
+  pub(super) async fn load_shared_secret(&mut self) -> anyhow::Result<()> {
+    if let Some(shared) = &self.shared_state
+      && let Some(shared_secret) = shared.person_proof_secret().await?
+    {
+      self.secret = shared_secret;
+    }
+    Ok(())
   }
 
   pub(super) fn tcp_max_hop(&self) -> Option<u8> {
@@ -430,6 +433,42 @@ impl PersonProofEngine {
             expires_at_unix_ms: None,
             policy_key: Some(policy.key.clone()),
             rate_limited: is_reuse_capacity_error(&error),
+            weight: 0,
+            allowed: false,
+            clearance_hash: None,
+            clearance: None,
+          });
+        }
+      }
+    }
+
+    failed.or(expired).unwrap_or_default()
+  }
+
+  pub(super) async fn evaluate_request_async(
+    &self,
+    input: WafRequestInput<'_>,
+  ) -> PersonProofRequestStatus {
+    let mut failed = None;
+    let mut expired = None;
+
+    for policy in &self.policies {
+      let Some(proof) = policy.clearance.extract_token(input.headers) else {
+        continue;
+      };
+      match self.verify_proof_async(input, policy, proof).await {
+        Ok(status) if status.state == PersonProofState::Valid => return status,
+        Ok(status) if status.state == PersonProofState::Expired => expired = Some(status),
+        Ok(status) => failed = Some(status),
+        Err(error) => {
+          failed = Some(PersonProofRequestStatus {
+            state: PersonProofState::Failed,
+            mode: Some(policy.mode.as_str()),
+            difficulty: Some(policy.difficulty),
+            issued_at_unix_ms: None,
+            expires_at_unix_ms: None,
+            policy_key: Some(policy.key.clone()),
+            rate_limited: super::person_proof_reuse::is_reuse_capacity_error(&error),
             weight: 0,
             allowed: false,
             clearance_hash: None,
@@ -532,6 +571,21 @@ impl PersonProofEngine {
   ) -> anyhow::Result<PersonProofRequestStatus> {
     if proof.starts_with("clearance.v2.") {
       return super::person_proof_v2::verify_clearance(self, input, policy, proof);
+    }
+    if proof.starts_with("clearance.") {
+      bail!("person proof clearance token has unsupported version");
+    }
+    bail!("person proof credential must contain an API-issued clearance token")
+  }
+
+  async fn verify_proof_async(
+    &self,
+    input: WafRequestInput<'_>,
+    policy: &PersonProofPolicy,
+    proof: &str,
+  ) -> anyhow::Result<PersonProofRequestStatus> {
+    if proof.starts_with("clearance.v2.") {
+      return super::person_proof_v2::verify_clearance_async(self, input, policy, proof).await;
     }
     if proof.starts_with("clearance.") {
       bail!("person proof clearance token has unsupported version");

@@ -2,19 +2,21 @@
 //! Serialized cache entries keep HTTP metadata separate from backend storage details.
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
-use std::fs::File;
-use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
 
 use crate::cache::{CacheEntry, CacheLookup, Revalidation, StaleEntry};
 
-use super::{Backend, SharedCacheEntry, SharedState, SharedVaryMatcher, now_unix_ms, random_hex};
+use super::{
+  Backend, CleanupDispatcher, SharedCacheEntry, SharedState, SharedVaryMatcher, now_unix_ms,
+  random_hex,
+};
 
 impl SharedState {
   #[allow(clippy::too_many_arguments)]
-  pub fn cache_lookup(
+  pub async fn cache_lookup(
     &self,
     policy: &str,
     scheme: &str,
@@ -33,39 +35,41 @@ impl SharedState {
     let now = now_unix_ms();
     let direct_variant_key = shared_no_vary_variant_key(partition, base_key);
     let direct_key = self.shared_cache_entry_key(&direct_variant_key);
-    if let Some(bytes) = backend.get(&direct_key)?
+    if let Some(bytes) = backend.get(&direct_key).await?
       && let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes)
       && entry.vary.is_empty()
       && shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
-      && let Some(lookup) = self.cache_lookup_entry(
-        backend,
-        Some(&direct_key),
-        None,
-        entry,
-        method,
-        request_headers,
-        request_no_cache,
-        background_refresh,
-        now,
-      )?
+      && let Some(lookup) = self
+        .cache_lookup_entry(
+          backend,
+          Some(&direct_key),
+          None,
+          entry,
+          method,
+          request_headers,
+          request_no_cache,
+          background_refresh,
+          now,
+        )
+        .await?
     {
       return Ok(Some(lookup));
     }
 
     let index_prefix =
       self.shared_cache_index_prefix(policy, scheme, host, partition, base_key, uri);
-    for (index_key, value) in backend.raw_entries(&index_prefix)? {
+    for (index_key, value) in backend.raw_entries(&index_prefix).await? {
       let Ok(variant_key) = String::from_utf8(value) else {
-        let _ = backend.delete(&index_key);
+        let _ = backend.delete(&index_key).await;
         continue;
       };
       let entry_key = self.shared_cache_entry_key(&variant_key);
-      let Some(bytes) = backend.get(&entry_key)? else {
-        let _ = backend.delete(&index_key);
+      let Some(bytes) = backend.get(&entry_key).await? else {
+        let _ = backend.delete(&index_key).await;
         continue;
       };
       let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes) else {
-        let _ = backend.delete(&index_key);
+        let _ = backend.delete(&index_key).await;
         continue;
       };
       if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
@@ -73,48 +77,53 @@ impl SharedState {
       {
         continue;
       }
-      if let Some(lookup) = self.cache_lookup_entry(
-        backend,
-        Some(&entry_key),
-        Some(&index_key),
-        entry,
-        method,
-        request_headers,
-        request_no_cache,
-        background_refresh,
-        now,
-      )? {
+      if let Some(lookup) = self
+        .cache_lookup_entry(
+          backend,
+          Some(&entry_key),
+          Some(&index_key),
+          entry,
+          method,
+          request_headers,
+          request_no_cache,
+          background_refresh,
+          now,
+        )
+        .await?
+      {
         return Ok(Some(lookup));
       }
     }
 
-    let entries = backend.cache_entries(&self.key("cache:entry:"))?;
+    let entries = backend.cache_entries(&self.key("cache:entry:")).await?;
     for entry in entries {
       if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
         || !shared_vary_matches(&entry.vary, request_headers)
       {
         continue;
       }
-      self.cache_put_index(&entry);
+      self.cache_put_index(&entry).await;
       let entry_key = self.shared_cache_entry_key(&entry.variant_key);
       let index_key = self.shared_cache_index_key(&entry);
-      return self.cache_lookup_entry(
-        backend,
-        Some(&entry_key),
-        Some(&index_key),
-        entry,
-        method,
-        request_headers,
-        request_no_cache,
-        background_refresh,
-        now,
-      );
+      return self
+        .cache_lookup_entry(
+          backend,
+          Some(&entry_key),
+          Some(&index_key),
+          entry,
+          method,
+          request_headers,
+          request_no_cache,
+          background_refresh,
+          now,
+        )
+        .await;
     }
     Ok(None)
   }
 
   #[allow(clippy::too_many_arguments)]
-  fn cache_lookup_entry(
+  async fn cache_lookup_entry(
     &self,
     backend: &Backend,
     entry_key: Option<&str>,
@@ -128,22 +137,22 @@ impl SharedState {
   ) -> anyhow::Result<Option<CacheLookup>> {
     if entry.stale_if_error_until_ms.unwrap_or(entry.expires_at_ms) <= now {
       if let Some(entry_key) = entry_key {
-        let _ = backend.delete(entry_key);
+        let _ = backend.delete(entry_key).await;
       }
       if let Some(index_key) = index_key {
-        let _ = backend.delete(index_key);
+        let _ = backend.delete(index_key).await;
       }
       for chunk_key in &entry.body_chunks {
-        let _ = backend.delete(chunk_key);
+        let _ = backend.delete(chunk_key).await;
       }
       return Ok(None);
     }
-    let Some(cache_entry) = self.shared_cache_entry_to_cache_entry(&entry) else {
+    let Some(cache_entry) = self.shared_cache_entry_to_cache_entry(&entry).await else {
       if let Some(entry_key) = entry_key {
-        let _ = backend.delete(entry_key);
+        let _ = backend.delete(entry_key).await;
       }
       if let Some(index_key) = index_key {
-        let _ = backend.delete(index_key);
+        let _ = backend.delete(index_key).await;
       }
       return Ok(None);
     };
@@ -206,10 +215,31 @@ impl SharedState {
     Ok(Some(CacheLookup::Fresh(cache_entry)))
   }
 
-  pub fn cache_put(&self, entry: &SharedCacheEntry) {
+  pub async fn cache_put(&self, entry: &SharedCacheEntry) {
     let Some(backend) = &self.cache else {
       return;
     };
+    let result = match backend.operation_timeout() {
+      Some(timeout) => {
+        match tokio::time::timeout(timeout, self.cache_put_inner(backend, entry)).await {
+          Ok(result) => result,
+          Err(_) => Err(anyhow::anyhow!(
+            "shared cache write exceeded its operation deadline"
+          )),
+        }
+      }
+      None => self.cache_put_inner(backend, entry).await,
+    };
+    if let Err(error) = result {
+      warn!(error = %error, "failed to write shared cache entry");
+    }
+  }
+
+  async fn cache_put_inner(
+    &self,
+    backend: &Backend,
+    entry: &SharedCacheEntry,
+  ) -> anyhow::Result<()> {
     let ttl = super::ttl_from_expires_ms(
       entry
         .stale_if_error_until_ms
@@ -225,25 +255,19 @@ impl SharedState {
       let mut chunks = Vec::new();
       for (index, chunk) in entry.body.chunks(self.cache_chunk_bytes).enumerate() {
         let chunk_key = self.key(&format!("cache:chunk:{stem}:{index}"));
-        if let Err(error) = backend.put(&chunk_key, chunk, chunk_ttl) {
-          warn!(error = %error, "failed to write shared cache body chunk");
-          return;
-        }
+        backend.put(&chunk_key, chunk, chunk_ttl).await?;
         chunks.push(chunk_key);
       }
       entry.body.clear();
       entry.body_chunks = chunks;
     }
-    match serde_json::to_vec(&entry)
-      .map_err(Into::into)
-      .and_then(|value| backend.put(&key, &value, ttl))
-    {
-      Ok(()) => self.cache_put_index(&entry),
-      Err(error) => warn!(error = %error, "failed to write shared cache entry"),
-    }
+    let value = serde_json::to_vec(&entry)?;
+    backend.put(&key, &value, ttl).await?;
+    self.cache_put_index(&entry).await;
+    Ok(())
   }
 
-  pub fn cache_put_file(
+  pub async fn cache_put_file(
     &self,
     entry: &SharedCacheEntry,
     body_path: &Path,
@@ -258,13 +282,13 @@ impl SharedState {
         .unwrap_or(entry.expires_at_ms)
         .max(entry.expires_at_ms),
     );
-    let mut file = File::open(body_path)?;
+    let mut file = tokio::fs::File::open(body_path).await?;
     let stem = shared_cache_chunk_stem(&entry.variant_key);
     let mut chunks = Vec::new();
     let mut buffer = vec![0_u8; self.cache_chunk_bytes.max(1)];
     let mut copied = 0_usize;
     loop {
-      let read = file.read(&mut buffer)?;
+      let read = file.read(&mut buffer).await?;
       if read == 0 {
         break;
       }
@@ -272,14 +296,14 @@ impl SharedState {
         .checked_add(read)
         .ok_or_else(|| anyhow::anyhow!("shared cache file body length overflow"))?;
       let chunk_key = self.key(&format!("cache:chunk:{stem}:{}", chunks.len()));
-      if let Err(error) = backend.put(&chunk_key, &buffer[..read], ttl) {
-        delete_shared_chunks(backend, &chunks);
+      if let Err(error) = backend.put(&chunk_key, &buffer[..read], ttl).await {
+        delete_shared_chunks(backend, &chunks).await;
         return Err(error);
       }
       chunks.push(chunk_key);
     }
     if copied != body_len {
-      delete_shared_chunks(backend, &chunks);
+      delete_shared_chunks(backend, &chunks).await;
       anyhow::bail!("shared cache file body length mismatch: expected {body_len}, copied {copied}");
     }
     let key = self.shared_cache_entry_key(&entry.variant_key);
@@ -287,20 +311,16 @@ impl SharedState {
     entry.body.clear();
     entry.body_len = body_len;
     entry.body_chunks = chunks;
-    match serde_json::to_vec(&entry)
-      .map_err(Into::into)
-      .and_then(|value| backend.put(&key, &value, ttl))
-    {
-      Ok(()) => self.cache_put_index(&entry),
-      Err(error) => {
-        delete_shared_chunks(backend, &entry.body_chunks);
-        return Err(error);
-      }
+    let value = serde_json::to_vec(&entry)?;
+    if let Err(error) = backend.put(&key, &value, ttl).await {
+      delete_shared_chunks(backend, &entry.body_chunks).await;
+      return Err(error);
     }
+    self.cache_put_index(&entry).await;
     Ok(())
   }
 
-  fn cache_put_index(&self, entry: &SharedCacheEntry) {
+  async fn cache_put_index(&self, entry: &SharedCacheEntry) {
     let Some(backend) = &self.cache else {
       return;
     };
@@ -311,7 +331,7 @@ impl SharedState {
         .max(entry.expires_at_ms),
     );
     let key = self.shared_cache_index_key(entry);
-    if let Err(error) = backend.put(&key, entry.variant_key.as_bytes(), ttl) {
+    if let Err(error) = backend.put(&key, entry.variant_key.as_bytes(), ttl).await {
       warn!(error = %error, "failed to write shared cache index");
     }
   }
@@ -346,29 +366,37 @@ impl SharedState {
     self.key(&format!("cache:index:{digest}"))
   }
 
-  pub fn cache_try_lock(&self, fill_key: &str) -> Option<SharedCacheLock> {
-    self.cache_try_lock_result(fill_key).ok().flatten()
+  pub async fn cache_try_lock(&self, fill_key: &str) -> Option<SharedCacheLock> {
+    self.cache_try_lock_result(fill_key).await.ok().flatten()
   }
 
-  pub fn cache_try_lock_result(&self, fill_key: &str) -> anyhow::Result<Option<SharedCacheLock>> {
+  pub async fn cache_try_lock_result(
+    &self,
+    fill_key: &str,
+  ) -> anyhow::Result<Option<SharedCacheLock>> {
     let Some(backend) = &self.cache else {
       return Ok(None);
     };
     let backend = backend.clone();
     let key = self.key(&format!("cache:lock:{fill_key}"));
     let token = random_hex(16)?;
-    match backend.put_if_absent(&key, token.as_bytes(), Some(self.cache_lock)) {
+    match backend
+      .put_if_absent(&key, token.as_bytes(), Some(self.cache_lock))
+      .await
+    {
       Ok(true) => Ok(Some(SharedCacheLock {
         backend,
         key,
         token,
+        cleanup: self.cleanup.clone(),
+        released: false,
       })),
       Ok(false) => Ok(None),
       Err(error) => Err(error.context("failed to acquire shared cache fill lock")),
     }
   }
 
-  pub fn cache_purge_exact(
+  pub async fn cache_purge_exact(
     &self,
     policy: &str,
     scheme: &str,
@@ -376,16 +404,18 @@ impl SharedState {
     uri: &str,
     partition: Option<&str>,
   ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && entry.scheme == scheme
-        && entry.host == host
-        && entry.uri == uri
-        && partition.is_none_or(|partition| entry.partition == partition)
-    })
+    self
+      .cache_purge(|entry| {
+        entry.policy == policy
+          && entry.scheme == scheme
+          && entry.host == host
+          && entry.uri == uri
+          && partition.is_none_or(|partition| entry.partition == partition)
+      })
+      .await
   }
 
-  pub fn cache_purge_prefix(
+  pub async fn cache_purge_prefix(
     &self,
     policy: &str,
     scheme: &str,
@@ -393,20 +423,22 @@ impl SharedState {
     path_prefix: &str,
     partition: Option<&str>,
   ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && entry.scheme == scheme
-        && entry.host == host
-        && partition.is_none_or(|partition| entry.partition == partition)
-        && entry
-          .uri
-          .parse::<Uri>()
-          .ok()
-          .is_some_and(|uri| uri.path().starts_with(path_prefix))
-    })
+    self
+      .cache_purge(|entry| {
+        entry.policy == policy
+          && entry.scheme == scheme
+          && entry.host == host
+          && partition.is_none_or(|partition| entry.partition == partition)
+          && entry
+            .uri
+            .parse::<Uri>()
+            .ok()
+            .is_some_and(|uri| uri.path().starts_with(path_prefix))
+      })
+      .await
   }
 
-  pub fn cache_purge_tag(
+  pub async fn cache_purge_tag(
     &self,
     policy: &str,
     tag: &str,
@@ -414,28 +446,33 @@ impl SharedState {
     host: Option<&str>,
     partition: Option<&str>,
   ) -> usize {
-    self.cache_purge(|entry| {
-      entry.policy == policy
-        && partition.is_none_or(|partition| entry.partition == partition)
-        && scheme.is_none_or(|scheme| entry.scheme == scheme)
-        && host.is_none_or(|host| entry.host == host)
-        && entry.tags.iter().any(|candidate| candidate == tag)
-    })
+    self
+      .cache_purge(|entry| {
+        entry.policy == policy
+          && partition.is_none_or(|partition| entry.partition == partition)
+          && scheme.is_none_or(|scheme| entry.scheme == scheme)
+          && host.is_none_or(|host| entry.host == host)
+          && entry.tags.iter().any(|candidate| candidate == tag)
+      })
+      .await
   }
 
-  fn cache_purge(&self, matches: impl Fn(&SharedCacheEntry) -> bool) -> usize {
+  async fn cache_purge(&self, matches: impl Fn(&SharedCacheEntry) -> bool) -> usize {
     let Some(backend) = &self.cache else {
       return 0;
     };
-    let Ok(entries) = backend.cache_entries_with_keys(&self.key("cache:entry:")) else {
+    let Ok(entries) = backend
+      .cache_entries_with_keys(&self.key("cache:entry:"))
+      .await
+    else {
       return 0;
     };
     let mut purged = 0;
     for (key, entry) in entries {
-      if matches(&entry) && backend.delete(&key).is_ok() {
-        let _ = backend.delete(&self.shared_cache_index_key(&entry));
+      if matches(&entry) && backend.delete(&key).await.is_ok() {
+        let _ = backend.delete(&self.shared_cache_index_key(&entry)).await;
         for chunk_key in &entry.body_chunks {
-          let _ = backend.delete(chunk_key);
+          let _ = backend.delete(chunk_key).await;
         }
         purged += 1;
       }
@@ -443,7 +480,10 @@ impl SharedState {
     purged
   }
 
-  fn shared_cache_entry_to_cache_entry(&self, entry: &SharedCacheEntry) -> Option<CacheEntry> {
+  async fn shared_cache_entry_to_cache_entry(
+    &self,
+    entry: &SharedCacheEntry,
+  ) -> Option<CacheEntry> {
     if !entry.security_headers_neutral {
       return None;
     }
@@ -453,22 +493,24 @@ impl SharedState {
     let backend = self.cache.as_ref()?;
     let headers = shared_entry_headers(entry)?;
     let stored_at = shared_entry_stored_at(entry);
-    let mut file = tempfile::Builder::new()
+    let file = tempfile::Builder::new()
       .prefix("oxibelt-shared-cache-")
       .tempfile()
       .ok()?;
+    let mut writer = tokio::fs::File::from_std(file.reopen().ok()?);
     let mut copied = 0_usize;
     for chunk_key in &entry.body_chunks {
-      let chunk = backend.get(chunk_key).ok().flatten()?;
+      let chunk = backend.get(chunk_key).await.ok().flatten()?;
       copied = copied.checked_add(chunk.len())?;
       if copied > entry.body_len {
         return None;
       }
-      file.write_all(&chunk).ok()?;
+      writer.write_all(&chunk).await.ok()?;
     }
-    if copied != entry.body_len || file.flush().is_err() {
+    if copied != entry.body_len || writer.flush().await.is_err() {
       return None;
     }
+    drop(writer);
     Some(CacheEntry::temporary_file(
       http::StatusCode::from_u16(entry.status).ok()?,
       headers,
@@ -479,9 +521,9 @@ impl SharedState {
   }
 }
 
-fn delete_shared_chunks(backend: &Backend, chunks: &[String]) {
+async fn delete_shared_chunks(backend: &Backend, chunks: &[String]) {
   for chunk_key in chunks {
-    let _ = backend.delete(chunk_key);
+    let _ = backend.delete(chunk_key).await;
   }
 }
 
@@ -490,12 +532,27 @@ pub struct SharedCacheLock {
   backend: Arc<Backend>,
   key: String,
   token: String,
+  cleanup: Arc<CleanupDispatcher>,
+  released: bool,
+}
+
+impl SharedCacheLock {
+  pub async fn unlock(&mut self) -> anyhow::Result<()> {
+    if self.released {
+      return Ok(());
+    }
+    self.backend.unlock(&self.key, &self.token).await?;
+    self.released = true;
+    Ok(())
+  }
 }
 
 impl Drop for SharedCacheLock {
   fn drop(&mut self) {
-    if let Err(error) = self.backend.unlock(&self.key, &self.token) {
-      warn!(error = %error, "failed to release shared cache fill lock");
+    if !self.released {
+      self
+        .cleanup
+        .defer_unlock(self.backend.clone(), self.key.clone(), self.token.clone());
     }
   }
 }

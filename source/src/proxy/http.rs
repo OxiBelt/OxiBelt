@@ -466,29 +466,37 @@ where
     ConnectionLimitIdentityMode::ProxyProtocol => {}
     ConnectionLimitIdentityMode::FirstRequestRealIp => {
       let acquire = |ip| {
-        state.limits.acquire_ip_connection(
+        state.limits.acquire_ip_connection_async(
           ip,
           &state.config.limits,
           &state.config.connection_limits,
         )
       };
       let result = if let Some(context) = connection_limit_context.as_ref() {
-        context.bind_first_request(client_addr.ip(), acquire)
+        context.bind_first_request(client_addr.ip(), acquire).await
       } else {
-        acquire(client_addr.ip()).map(|permit| {
-          *request_connection_permit = Some(permit);
-        })
+        match acquire(client_addr.ip()).await {
+          Ok(permit) => {
+            *request_connection_permit = Some(permit);
+            Ok(())
+          }
+          Err(status) => Err(status),
+        }
       };
       if let Err(status) = result {
         return text_response(status, "connection limit exceeded");
       }
     }
     ConnectionLimitIdentityMode::PerRequestRealIp => {
-      match state.limits.acquire_ip_connection(
-        client_addr.ip(),
-        &state.config.limits,
-        &state.config.connection_limits,
-      ) {
+      match state
+        .limits
+        .acquire_ip_connection_async(
+          client_addr.ip(),
+          &state.config.limits,
+          &state.config.connection_limits,
+        )
+        .await
+      {
         Ok(permit) => *request_connection_permit = Some(permit),
         Err(status) => return text_response(status, "connection limit exceeded"),
       }
@@ -498,7 +506,8 @@ where
   if state.request_path_features.rate_limits
     && let Some(status) = state
       .limits
-      .check_pre_route_rate_limits(client_addr.ip(), &state.config.rate_limits)
+      .check_pre_route_rate_limits_async(client_addr.ip(), &state.config.rate_limits)
+      .await
   {
     return text_response(status, "rate limit exceeded");
   }
@@ -674,69 +683,79 @@ where
     .with_tcp_max_hop(tcp_max_hop);
     if let Some(status) = state
       .limits
-      .check_route_rate_limits(rate_limit_context, &state.config.rate_limits)
+      .check_route_rate_limits_async(rate_limit_context, &state.config.rate_limits)
+      .await
     {
       return route_security.text(status, "rate limit exceeded");
     }
   }
   let mut evaluated_person_proof = None;
-  if state.request_path_features.dynamic_policy
-    && state
-      .dynamic_policy
-      .needs_person_proof_clearance_for_request(DynamicPolicyRequest {
-        client_ip: client_addr.ip(),
-        route_name: &resolved.route.name,
-        method: &request_method,
-        path: request_uri.path(),
-        headers: Some(request.headers()),
-        tls_fingerprint: tls.fingerprint.as_deref(),
-        client_asn,
-        tcp_max_hop,
-        person_proof_clearance_hash: None,
-      })
+  if request_waf_enabled
+    || (state.request_path_features.dynamic_policy
+      && state
+        .dynamic_policy
+        .needs_person_proof_clearance_for_request(DynamicPolicyRequest {
+          client_ip: client_addr.ip(),
+          route_name: &resolved.route.name,
+          method: &request_method,
+          path: request_uri.path(),
+          headers: Some(request.headers()),
+          tls_fingerprint: tls.fingerprint.as_deref(),
+          client_asn,
+          tcp_max_hop,
+          person_proof_clearance_hash: None,
+        }))
   {
     access_log.ensure_request_ids();
-    evaluated_person_proof = Some(state.waf.evaluate_person_proof_request(WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: &request_method,
-      uri: &request_uri,
-      version: request_version,
-      headers: request.headers(),
-      body: None,
-      peer_addr: client_addr,
-      client_asn,
-      downstream_host: host,
-      downstream_scheme,
-      route_name: &resolved.route.name,
-      tcp_max_hop,
-      tls: tls.as_ref(),
-      protocol,
-      transport_network,
-      transport_metadata,
-      tags: tags_ref(&tags),
-      dynamic_policy: &access_log.dynamic_policy,
-    }));
+    evaluated_person_proof = Some(
+      state
+        .waf
+        .evaluate_person_proof_request_async(WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: &request_method,
+          uri: &request_uri,
+          version: request_version,
+          headers: request.headers(),
+          body: None,
+          peer_addr: client_addr,
+          client_asn,
+          downstream_host: host,
+          downstream_scheme,
+          route_name: &resolved.route.name,
+          tcp_max_hop,
+          tls: tls.as_ref(),
+          protocol,
+          transport_network,
+          transport_metadata,
+          tags: tags_ref(&tags),
+          dynamic_policy: &access_log.dynamic_policy,
+        })
+        .await,
+    );
   }
   let person_proof_clearance_hash = evaluated_person_proof
     .as_ref()
     .and_then(|status| status.clearance_hash());
   let dynamic_policy = if state.request_path_features.dynamic_policy {
-    state.dynamic_policy.evaluate(
-      DynamicPolicyRequest {
-        client_ip: client_addr.ip(),
-        route_name: &resolved.route.name,
-        method: &request_method,
-        path: request_uri.path(),
-        headers: Some(request.headers()),
-        tls_fingerprint: tls.fingerprint.as_deref(),
-        client_asn,
-        tcp_max_hop,
-        person_proof_clearance_hash,
-      },
-      &state.limits,
-    )
+    state
+      .dynamic_policy
+      .evaluate_async(
+        DynamicPolicyRequest {
+          client_ip: client_addr.ip(),
+          route_name: &resolved.route.name,
+          method: &request_method,
+          path: request_uri.path(),
+          headers: Some(request.headers()),
+          tls_fingerprint: tls.fingerprint.as_deref(),
+          client_asn,
+          tcp_max_hop,
+          person_proof_clearance_hash,
+        },
+        &state.limits,
+      )
+      .await
   } else {
     Default::default()
   };
@@ -941,32 +960,35 @@ where
 
   let mut request_waf = if request_waf_enabled {
     access_log.ensure_request_ids();
-    state.waf.evaluate_request_with_person_proof(
-      WafRequestInput {
-        request_id: access_log.request_id(),
-        transaction_id: access_log.transaction_id(),
-        received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: &request_method,
-        uri: &request_uri,
-        version: request_version,
-        headers: request.headers(),
-        body: request_body,
-        peer_addr: client_addr,
-        client_asn,
-        downstream_host: host,
-        downstream_scheme,
-        route_name: &resolved.route.name,
-        tcp_max_hop,
-        tls: tls.as_ref(),
-        protocol,
-        transport_network,
-        transport_metadata,
-        tags: tags_ref(&tags),
-        dynamic_policy: &access_log.dynamic_policy,
-      },
-      evaluated_person_proof.as_ref(),
-      dynamic_person_proof_mutation_added,
-    )
+    state
+      .waf
+      .evaluate_request_with_person_proof_async(
+        WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: &request_method,
+          uri: &request_uri,
+          version: request_version,
+          headers: request.headers(),
+          body: request_body,
+          peer_addr: client_addr,
+          client_asn,
+          downstream_host: host,
+          downstream_scheme,
+          route_name: &resolved.route.name,
+          tcp_max_hop,
+          tls: tls.as_ref(),
+          protocol,
+          transport_network,
+          transport_metadata,
+          tags: tags_ref(&tags),
+          dynamic_policy: &access_log.dynamic_policy,
+        },
+        evaluated_person_proof.as_ref(),
+        dynamic_person_proof_mutation_added,
+      )
+      .await
   } else {
     if !dynamic_person_proof_mutation_added
       && let Some(evaluated) = evaluated_person_proof.as_ref()
@@ -1135,7 +1157,9 @@ where
     request.uri(),
     pool_cookie_header,
     &request_waf,
-  ) {
+  )
+  .await
+  {
     Ok(selected) => selected,
     Err(error) => {
       return route_security.apply(upstream_selection_error_response(error));
@@ -1335,7 +1359,7 @@ where
     uri: &request_uri,
     request_headers: &request_headers,
   };
-  let lookup = match state.cache.lookup(initial_cache_lookup.clone()) {
+  let lookup = match state.cache.lookup_async(initial_cache_lookup.clone()).await {
     Some(lookup) => Some(lookup),
     None => {
       state
@@ -1379,7 +1403,7 @@ where
     loop {
       let Some(permit) = state
         .cache
-        .begin_fill_decision(crate::cache::CacheLookupContext {
+        .begin_fill_decision_async(crate::cache::CacheLookupContext {
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
           host,
@@ -1387,6 +1411,7 @@ where
           uri: &request_uri,
           request_headers: &request_headers,
         })
+        .await
       else {
         break;
       };
@@ -1394,9 +1419,9 @@ where
         crate::cache::CacheFillDecision::Leader(guard) => {
           _cache_fill_guard = Some(guard);
           cache_store_allowed = true;
-          if let Some(response) = state
+          if let Some(lookup) = state
             .cache
-            .lookup(crate::cache::CacheLookupContext {
+            .lookup_async(crate::cache::CacheLookupContext {
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
               host,
@@ -1404,28 +1429,27 @@ where
               uri: &request_uri,
               request_headers: &request_headers,
             })
-            .and_then(|lookup| {
-              handle_cache_lookup_result(
-                state,
-                &resolved,
-                lookup,
-                &mut outbound,
-                upstream,
-                upstream_version,
-                timeouts,
-                downstream_scheme,
-                host,
-                &request_method,
-                &request_uri,
-                &request_headers,
-                request_version,
-                listener_bind,
-                transport_network,
-                &mut stale_on_error,
-                &mut revalidation_entry,
-                false,
-              )
-            })
+            .await
+            && let Some(response) = handle_cache_lookup_result(
+              state,
+              &resolved,
+              lookup,
+              &mut outbound,
+              upstream,
+              upstream_version,
+              timeouts,
+              downstream_scheme,
+              host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+              request_version,
+              listener_bind,
+              transport_network,
+              &mut stale_on_error,
+              &mut revalidation_entry,
+              false,
+            )
           {
             return response;
           }
@@ -1460,14 +1484,18 @@ where
             "notified",
             lock_wait_started,
           );
-          if let Some(lookup) = state.cache.lookup(crate::cache::CacheLookupContext {
-            policy_name: resolved.route.cache.as_deref(),
-            scheme: downstream_scheme,
-            host,
-            method: &request_method,
-            uri: &request_uri,
-            request_headers: &request_headers,
-          }) {
+          if let Some(lookup) = state
+            .cache
+            .lookup_async(crate::cache::CacheLookupContext {
+              policy_name: resolved.route.cache.as_deref(),
+              scheme: downstream_scheme,
+              host,
+              method: &request_method,
+              uri: &request_uri,
+              request_headers: &request_headers,
+            })
+            .await
+          {
             if let Some(response) = handle_cache_lookup_result(
               state,
               &resolved,
@@ -1548,7 +1576,7 @@ where
     {
       Err(_) => {
         if should_report_upstream_request_failure(true, grpc_timeout_caps) {
-          state.pools.report_failure(&upstream.name);
+          state.pools.report_failure_async(&upstream.name).await;
         }
         warn!(upstream = %upstream.name, "upstream HTTP/3 request timed out");
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
@@ -1592,7 +1620,7 @@ where
         response
       }
       Ok(Err(error)) => {
-        state.pools.report_failure(&upstream.name);
+        state.pools.report_failure_async(&upstream.name).await;
         warn!(
             error = %error,
             upstream = %upstream.name,
@@ -1735,7 +1763,7 @@ where
         if !pool_failures_reported
           && should_report_upstream_request_failure(upstream_first_byte_timeout, grpc_timeout_caps)
         {
-          state.pools.report_failure(&upstream.name);
+          state.pools.report_failure_async(&upstream.name).await;
         }
         warn!(
             error = %error,
@@ -1797,9 +1825,10 @@ where
     if let Some(latency_ms) = access_log.upstream_first_byte_time_ms {
       state
         .pools
-        .report_success_latency(&upstream.name, latency_ms);
+        .report_success_latency_async(&upstream.name, latency_ms)
+        .await;
     } else {
-      state.pools.report_success(&upstream.name);
+      state.pools.report_success_async(&upstream.name).await;
     }
   }
   drop(pool_selection);
@@ -1934,21 +1963,24 @@ where
       tags: tags_ref(&tags),
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let response_waf = state.waf.evaluate_response(WafResponseInput {
-      request: request_input,
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: parts.version,
-      status: parts.status,
-      headers: &parts.headers,
-      body: response_body,
-      upstream_name: &upstream.name,
-      upstream_pool: access_log.upstream_pool.as_deref(),
-      upstream_scheme: upstream.origin.scheme(),
-      upstream_connect_time_ms: access_log.upstream_connect_time_ms,
-      upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
-      upstream_error: None,
-    });
+    let response_waf = state
+      .waf
+      .evaluate_response_async(WafResponseInput {
+        request: request_input,
+        response_id: access_log.response_id(),
+        received_at_unix_ms: access_log.response_received_at_unix_ms,
+        version: parts.version,
+        status: parts.status,
+        headers: &parts.headers,
+        body: response_body,
+        upstream_name: &upstream.name,
+        upstream_pool: access_log.upstream_pool.as_deref(),
+        upstream_scheme: upstream.origin.scheme(),
+        upstream_connect_time_ms: access_log.upstream_connect_time_ms,
+        upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
+        upstream_error: None,
+      })
+      .await;
     for access_log in &response_waf.access_logs {
       state.access_logs.emit(access_log);
     }
@@ -2101,7 +2133,9 @@ async fn handle_connect_request(
     request.uri(),
     request.headers().get(http::header::COOKIE),
     request_waf,
-  ) {
+  )
+  .await
+  {
     Ok(selected) => selected,
     Err(error) => {
       return route_security.apply(upstream_selection_error_response(error));
@@ -2409,7 +2443,9 @@ async fn handle_upgrade_request(
     request.uri(),
     request.headers().get(http::header::COOKIE),
     request_waf,
-  ) {
+  )
+  .await
+  {
     Ok(selected) => selected,
     Err(error) => {
       return Some(route_security.apply(upstream_selection_error_response(error)));
@@ -2493,7 +2529,7 @@ async fn handle_upgrade_request(
         response
       }
       Ok(Err(error)) => {
-        state.pools.report_failure(&upstream.name);
+        state.pools.report_failure_async(&upstream.name).await;
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("connect_error", &error.to_string());
         return Some(route_security.text(
@@ -2502,7 +2538,7 @@ async fn handle_upgrade_request(
         ));
       }
       Err(_) => {
-        state.pools.report_failure(&upstream.name);
+        state.pools.report_failure_async(&upstream.name).await;
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("read_timeout", "upstream upgrade request timed out");
         return Some(route_security.text(
@@ -3306,10 +3342,14 @@ async fn maybe_cache_response_with_store_permission(
         cache_headers.remove("surrogate-control");
       }
       let store_started = Instant::now();
-      let reason = match state.cache.insert_prepared(
-        *prepared,
-        crate::cache::CacheEntry::memory(parts.status, cache_headers.clone(), bytes.clone()),
-      ) {
+      let reason = match state
+        .cache
+        .insert_prepared_async(
+          *prepared,
+          crate::cache::CacheEntry::memory(parts.status, cache_headers.clone(), bytes.clone()),
+        )
+        .await
+      {
         crate::cache::CacheInsertOutcome::Rejected => {
           record_fill_stage("local_store", "rejected", store_started);
           state.metrics.record_cache_admission_rejection();

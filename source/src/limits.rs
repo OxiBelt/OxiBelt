@@ -232,76 +232,38 @@ impl LimitState {
       shared_state,
     })
   }
-
-  pub fn acquire_global_connection(
+  pub async fn acquire_global_connection_async(
     self: &Arc<Self>,
     limits: &LimitsConfig,
   ) -> Result<ConnectionPermit, StatusCode> {
-    self.acquire_scopes(vec![ConnectionAcquireSpec {
-      key: "total".to_string(),
-      kind: ConnectionAcquireKind::Total,
-      limit: limits.max_connections,
-      status: StatusCode::SERVICE_UNAVAILABLE,
-    }])
+    self
+      .acquire_scopes_async(Self::global_connection_specs(limits))
+      .await
   }
 
-  pub fn acquire_ip_connection(
+  pub async fn acquire_ip_connection_async(
     self: &Arc<Self>,
     ip: IpAddr,
     limits: &LimitsConfig,
     connection_limits: &[ConnectionLimitConfig],
   ) -> Result<ConnectionPermit, StatusCode> {
-    let mut specs = vec![ConnectionAcquireSpec {
-      key: format!("ip:{ip}"),
-      kind: ConnectionAcquireKind::Ip(ip),
-      limit: limits.max_connections_per_ip,
-      status: StatusCode::TOO_MANY_REQUESTS,
-    }];
-    specs.extend(connection_limits.iter().map(|limit| ConnectionAcquireSpec {
-      key: format!("named:{}:{ip}", limit.name),
-      kind: ConnectionAcquireKind::Named {
-        name: limit.name.clone(),
-        ip,
-      },
-      limit: limit.limit,
-      status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-    }));
-    self.acquire_scopes(specs)
+    self
+      .acquire_scopes_async(Self::ip_connection_specs(ip, limits, connection_limits))
+      .await
   }
 
-  pub fn acquire_connection(
+  pub async fn acquire_connection_async(
     self: &Arc<Self>,
     ip: IpAddr,
     limits: &LimitsConfig,
     connection_limits: &[ConnectionLimitConfig],
   ) -> Result<ConnectionPermit, StatusCode> {
-    let mut specs = vec![
-      ConnectionAcquireSpec {
-        key: "total".to_string(),
-        kind: ConnectionAcquireKind::Total,
-        limit: limits.max_connections,
-        status: StatusCode::SERVICE_UNAVAILABLE,
-      },
-      ConnectionAcquireSpec {
-        key: format!("ip:{ip}"),
-        kind: ConnectionAcquireKind::Ip(ip),
-        limit: limits.max_connections_per_ip,
-        status: StatusCode::TOO_MANY_REQUESTS,
-      },
-    ];
-    specs.extend(connection_limits.iter().map(|limit| ConnectionAcquireSpec {
-      key: format!("named:{}:{ip}", limit.name),
-      kind: ConnectionAcquireKind::Named {
-        name: limit.name.clone(),
-        ip,
-      },
-      limit: limit.limit,
-      status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-    }));
-    self.acquire_scopes(specs)
+    self
+      .acquire_scopes_async(Self::connection_specs(ip, limits, connection_limits))
+      .await
   }
 
-  fn acquire_scopes(
+  async fn acquire_scopes_async(
     self: &Arc<Self>,
     specs: Vec<ConnectionAcquireSpec>,
   ) -> Result<ConnectionPermit, StatusCode> {
@@ -321,7 +283,7 @@ impl LimitState {
           status: spec.status,
         })
         .collect::<Vec<_>>();
-      let acquired = shared.acquire_connections(&scopes);
+      let acquired = shared.acquire_connections(&scopes).await;
       drop(scopes);
       return match acquired {
         Ok(None) => Ok(ConnectionPermit {
@@ -336,6 +298,13 @@ impl LimitState {
         }
       };
     }
+    self.acquire_scopes_local(specs)
+  }
+
+  fn acquire_scopes_local(
+    self: &Arc<Self>,
+    specs: Vec<ConnectionAcquireSpec>,
+  ) -> Result<ConnectionPermit, StatusCode> {
     let mut counts = self
       .connections
       .lock()
@@ -393,6 +362,185 @@ impl LimitState {
     })
   }
 
+  pub fn acquire_global_connection(
+    self: &Arc<Self>,
+    limits: &LimitsConfig,
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self.acquire_scopes_local_or_fail_closed(Self::global_connection_specs(limits))
+  }
+
+  pub fn acquire_ip_connection(
+    self: &Arc<Self>,
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self.acquire_scopes_local_or_fail_closed(Self::ip_connection_specs(
+      ip,
+      limits,
+      connection_limits,
+    ))
+  }
+
+  pub fn acquire_connection(
+    self: &Arc<Self>,
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self.acquire_scopes_local_or_fail_closed(Self::connection_specs(ip, limits, connection_limits))
+  }
+
+  fn acquire_scopes_local_or_fail_closed(
+    self: &Arc<Self>,
+    specs: Vec<ConnectionAcquireSpec>,
+  ) -> Result<ConnectionPermit, StatusCode> {
+    if self
+      .shared_state
+      .as_ref()
+      .is_some_and(|shared| shared.has_connection_limits())
+    {
+      return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    self.acquire_scopes_local(specs)
+  }
+
+  fn global_connection_specs(limits: &LimitsConfig) -> Vec<ConnectionAcquireSpec> {
+    vec![ConnectionAcquireSpec {
+      key: "total".to_string(),
+      kind: ConnectionAcquireKind::Total,
+      limit: limits.max_connections,
+      status: StatusCode::SERVICE_UNAVAILABLE,
+    }]
+  }
+
+  fn ip_connection_specs(
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+  ) -> Vec<ConnectionAcquireSpec> {
+    let mut specs = vec![ConnectionAcquireSpec {
+      key: format!("ip:{ip}"),
+      kind: ConnectionAcquireKind::Ip(ip),
+      limit: limits.max_connections_per_ip,
+      status: StatusCode::TOO_MANY_REQUESTS,
+    }];
+    specs.extend(connection_limits.iter().map(|limit| ConnectionAcquireSpec {
+      key: format!("named:{}:{ip}", limit.name),
+      kind: ConnectionAcquireKind::Named {
+        name: limit.name.clone(),
+        ip,
+      },
+      limit: limit.limit,
+      status: StatusCode::from_u16(limit.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
+    }));
+    specs
+  }
+
+  fn connection_specs(
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+  ) -> Vec<ConnectionAcquireSpec> {
+    let mut specs = Self::global_connection_specs(limits);
+    specs.extend(Self::ip_connection_specs(ip, limits, connection_limits));
+    specs
+  }
+
+  pub async fn check_rate_limits_async(
+    &self,
+    ip: IpAddr,
+    rate_limits: &[RateLimitConfig],
+  ) -> Option<StatusCode> {
+    self
+      .check_pre_route_rate_limits_async(ip, rate_limits)
+      .await
+  }
+
+  pub async fn check_pre_route_rate_limits_async(
+    &self,
+    ip: IpAddr,
+    rate_limits: &[RateLimitConfig],
+  ) -> Option<StatusCode> {
+    let context = RateLimitContext::pre_route(ip);
+    for limit in rate_limits
+      .iter()
+      .filter(|limit| rate_limit_applies_before_route(limit))
+    {
+      if let Some(status) = self
+        .check_rate_limit_async(context, RateLimitCheck::from(limit))
+        .await
+      {
+        return Some(status);
+      }
+    }
+    None
+  }
+
+  pub async fn check_route_rate_limits_async(
+    &self,
+    context: RateLimitContext<'_>,
+    rate_limits: &[RateLimitConfig],
+  ) -> Option<StatusCode> {
+    for limit in rate_limits
+      .iter()
+      .filter(|limit| rate_limit_applies_after_route(limit, context.route_name.unwrap_or_default()))
+    {
+      if let Some(status) = self
+        .check_rate_limit_async(context, RateLimitCheck::from(limit))
+        .await
+      {
+        return Some(status);
+      }
+    }
+    None
+  }
+
+  pub async fn check_rate_limit_async(
+    &self,
+    context: RateLimitContext<'_>,
+    limit: RateLimitCheck<'_>,
+  ) -> Option<StatusCode> {
+    let Ok(rate) = parse_rate(limit.rate) else {
+      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let key = rate_limit_key(context, &limit);
+    self
+      .check_rate_limit_bucket(RateLimitBucketSpec {
+        name: limit.name,
+        key: &key,
+        rate,
+        burst: limit.burst,
+        max_buckets: limit.max_buckets,
+        mode: limit.mode,
+        status: limit.status,
+      })
+      .await
+  }
+
+  pub async fn check_direct_rate_limit_async(
+    &self,
+    bucket: &str,
+    rate: &str,
+    burst: u32,
+    status: u16,
+  ) -> Option<StatusCode> {
+    let Ok(rate) = parse_rate(rate) else {
+      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    self
+      .check_rate_limit_bucket(RateLimitBucketSpec {
+        name: bucket,
+        key: "",
+        rate,
+        burst,
+        max_buckets: 1,
+        mode: LimitMode::Enforcing,
+        status,
+      })
+      .await
+  }
+
   pub fn check_rate_limits(
     &self,
     ip: IpAddr,
@@ -439,19 +587,7 @@ impl LimitState {
     context: RateLimitContext<'_>,
     limit: RateLimitCheck<'_>,
   ) -> Option<StatusCode> {
-    let Ok(rate) = parse_rate(limit.rate) else {
-      return Some(StatusCode::INTERNAL_SERVER_ERROR);
-    };
-    let key = rate_limit_key(context, &limit);
-    self.check_rate_limit_bucket(RateLimitBucketSpec {
-      name: limit.name,
-      key: &key,
-      rate,
-      burst: limit.burst,
-      max_buckets: limit.max_buckets,
-      mode: limit.mode,
-      status: limit.status,
-    })
+    self.check_rate_limit_local(context, limit)
   }
 
   pub fn check_direct_rate_limit(
@@ -461,10 +597,27 @@ impl LimitState {
     burst: u32,
     status: u16,
   ) -> Option<StatusCode> {
+    self.check_direct_rate_limit_local(bucket, rate, burst, status)
+  }
+
+  pub(crate) fn check_direct_rate_limit_local(
+    &self,
+    bucket: &str,
+    rate: &str,
+    burst: u32,
+    status: u16,
+  ) -> Option<StatusCode> {
     let Ok(rate) = parse_rate(rate) else {
       return Some(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    self.check_rate_limit_bucket(RateLimitBucketSpec {
+    if self
+      .shared_state
+      .as_ref()
+      .is_some_and(|shared| shared.has_rate_limits())
+    {
+      return Some(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    self.check_rate_limit_bucket_local(RateLimitBucketSpec {
       name: bucket,
       key: "",
       rate,
@@ -475,14 +628,45 @@ impl LimitState {
     })
   }
 
-  fn check_rate_limit_bucket(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
+  pub(crate) fn check_rate_limit_local(
+    &self,
+    context: RateLimitContext<'_>,
+    limit: RateLimitCheck<'_>,
+  ) -> Option<StatusCode> {
+    let Ok(rate) = parse_rate(limit.rate) else {
+      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    if self
+      .shared_state
+      .as_ref()
+      .is_some_and(|shared| shared.has_rate_limits())
+    {
+      return Some(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let key = rate_limit_key(context, &limit);
+    self.check_rate_limit_bucket_local(RateLimitBucketSpec {
+      name: limit.name,
+      key: &key,
+      rate,
+      burst: limit.burst,
+      max_buckets: limit.max_buckets,
+      mode: limit.mode,
+      status: limit.status,
+    })
+  }
+
+  async fn check_rate_limit_bucket(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
     if let Some(shared) = &self.shared_state
       && shared.has_rate_limits()
     {
       let result = if spec.key.is_empty() {
-        shared.take_rate_token_bucket(spec.name, spec.rate, spec.burst)
+        shared
+          .take_rate_token_bucket(spec.name, spec.rate, spec.burst)
+          .await
       } else {
-        shared.take_rate_token(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
+        shared
+          .take_rate_token(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
+          .await
       };
       match result {
         Ok(SharedRateLimitOutcome::Allowed) => {}
@@ -500,6 +684,10 @@ impl LimitState {
       }
       return None;
     }
+    self.check_rate_limit_bucket_local(spec)
+  }
+
+  fn check_rate_limit_bucket_local(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
     let burst = f64::from(spec.burst.max(1));
     let now = Instant::now();
     let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
@@ -542,9 +730,15 @@ impl LimitState {
     }
   }
 
-  fn release_shared_connection(&self, scopes: &[String]) {
+  async fn release_shared_connection(&self, scopes: &[String]) {
     if let Some(shared) = &self.shared_state {
-      shared.release_connections(scopes);
+      shared.release_connections(scopes).await;
+    }
+  }
+
+  fn defer_shared_connection_release(&self, scopes: &[String]) {
+    if let Some(shared) = &self.shared_state {
+      shared.defer_connection_release(scopes);
     }
   }
 }
@@ -555,12 +749,29 @@ pub struct ConnectionPermit {
   shared_scopes: Vec<String>,
 }
 
+impl ConnectionPermit {
+  pub async fn release(&mut self) {
+    if self.shared_scopes.is_empty() {
+      self.state.release_connection(&self.local_release);
+    } else {
+      self
+        .state
+        .release_shared_connection(&self.shared_scopes)
+        .await;
+    }
+    self.local_release = LocalConnectionRelease::default();
+    self.shared_scopes.clear();
+  }
+}
+
 impl Drop for ConnectionPermit {
   fn drop(&mut self) {
     if self.shared_scopes.is_empty() {
       self.state.release_connection(&self.local_release);
     } else {
-      self.state.release_shared_connection(&self.shared_scopes);
+      self
+        .state
+        .defer_shared_connection_release(&self.shared_scopes);
     }
   }
 }

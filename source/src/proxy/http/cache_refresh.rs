@@ -48,29 +48,6 @@ pub(super) fn spawn_background_refresh(
     state.metrics.record_cache_background_refresh_skip();
     return false;
   };
-  let Some(fill_permit) = state.cache.begin_fill(crate::cache::CacheLookupContext {
-    policy_name: route_cache,
-    scheme,
-    host: &host,
-    method: &method,
-    uri: &uri,
-    request_headers: &request_headers,
-  }) else {
-    state.metrics.record_cache_background_refresh_skip();
-    return false;
-  };
-  let guard = match fill_permit {
-    crate::cache::CacheFillPermit::Leader(guard) => guard,
-    crate::cache::CacheFillPermit::Follower(_) => {
-      state.metrics.record_cache_background_refresh_skip();
-      return false;
-    }
-    crate::cache::CacheFillPermit::SharedConflict => {
-      state.metrics.record_cache_fill_lock_conflict();
-      state.metrics.record_cache_background_refresh_skip();
-      return false;
-    }
-  };
   let route_cache = route_cache.map(str::to_string);
   let route_security_headers = route_security_headers.map(str::to_string);
   let upstream = upstream.clone();
@@ -79,6 +56,33 @@ pub(super) fn spawn_background_refresh(
     outbound.headers_mut().insert(name.clone(), value.clone());
   }
   tokio::spawn(async move {
+    let Some(fill_permit) = state
+      .cache
+      .begin_fill_async(crate::cache::CacheLookupContext {
+        policy_name: route_cache.as_deref(),
+        scheme,
+        host: &host,
+        method: &method,
+        uri: &uri,
+        request_headers: &request_headers,
+      })
+      .await
+    else {
+      state.metrics.record_cache_background_refresh_skip();
+      return;
+    };
+    let guard = match fill_permit {
+      crate::cache::CacheFillPermit::Leader(guard) => guard,
+      crate::cache::CacheFillPermit::Follower(_) => {
+        state.metrics.record_cache_background_refresh_skip();
+        return;
+      }
+      crate::cache::CacheFillPermit::SharedConflict => {
+        state.metrics.record_cache_fill_lock_conflict();
+        state.metrics.record_cache_background_refresh_skip();
+        return;
+      }
+    };
     let _guard = guard;
     let _permit = permit;
     if let Err(error) = background_refresh(
@@ -133,18 +137,21 @@ async fn background_refresh(
   let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy).await?;
   let (mut parts, body) = response.into_parts();
   if parts.status == StatusCode::NOT_MODIFIED {
-    state.cache.update_from_not_modified(
-      crate::cache::CacheInsertContext {
-        policy_name: route_cache.as_deref(),
-        scheme,
-        host: &host,
-        method: &method,
-        uri: &uri,
-        request_headers: &request_headers,
-      },
-      &cached_entry,
-      &parts.headers,
-    );
+    state
+      .cache
+      .update_from_not_modified_async(
+        crate::cache::CacheInsertContext {
+          policy_name: route_cache.as_deref(),
+          scheme,
+          host: &host,
+          method: &method,
+          uri: &uri,
+          request_headers: &request_headers,
+        },
+        &cached_entry,
+        &parts.headers,
+      )
+      .await;
     state.metrics.record_cache_background_refresh_success();
     return Ok(());
   }
@@ -175,17 +182,21 @@ async fn background_refresh(
     .to_bytes();
   let mut cache_headers = parts.headers.clone();
   neutralize_applied_route_security_headers(&mut cache_headers, &applied_route_security_headers);
-  match state.cache.insert(
-    crate::cache::CacheInsertContext {
-      policy_name: route_cache.as_deref(),
-      scheme,
-      host: &host,
-      method: &method,
-      uri: &uri,
-      request_headers: &request_headers,
-    },
-    crate::cache::CacheEntry::memory(parts.status, cache_headers, bytes),
-  ) {
+  match state
+    .cache
+    .insert_async(
+      crate::cache::CacheInsertContext {
+        policy_name: route_cache.as_deref(),
+        scheme,
+        host: &host,
+        method: &method,
+        uri: &uri,
+        request_headers: &request_headers,
+      },
+      crate::cache::CacheEntry::memory(parts.status, cache_headers, bytes),
+    )
+    .await
+  {
     crate::cache::CacheInsertOutcome::Stored => {
       state.metrics.record_cache_background_refresh_success();
     }

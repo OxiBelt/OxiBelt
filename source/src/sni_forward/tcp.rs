@@ -83,7 +83,7 @@ pub(crate) async fn classify_and_maybe_forward(
     }
     SniForwardDecision::Forward(rule) => {
       let _connection_permit =
-        match acquire_tcp_forward_connection_permit(snapshot.as_ref(), peer_addr) {
+        match acquire_tcp_forward_connection_permit(snapshot.as_ref(), peer_addr).await {
           Ok(permit) => permit,
           Err(status) => {
             snapshot.metrics.record_sni_forward_decision(

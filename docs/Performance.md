@@ -10,6 +10,8 @@ Build or provide an OxiBelt image, then run:
 tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy,openresty
 ```
 
+Shared-state delay isolation is a functional state-data integration check, not a comparative benchmark. Run its Redis/Valkey and PostgreSQL cases with the normal rootless `docker` path; inject backend delay while probing `/live` or `/metrics`, then verify bounded shared-state timeout outcomes, recovery after the delay is removed, and queue/operation metrics. It must show that unrelated Tokio work continues to make progress, not establish a throughput target.
+
 OpenResty rows are retained as strict comparator evidence for HTTP/1.1,
 HTTP/2, HTTP/3, static-file, and cold TLS handshake scenarios. The pinned
 OpenResty image is new enough to expose downstream HTTP/3 in this harness, so

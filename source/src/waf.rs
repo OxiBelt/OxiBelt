@@ -27,6 +27,7 @@ use crate::mitigation::MitigationSink;
 use crate::shared_state::SharedState;
 
 mod access_log_record;
+mod async_evaluation;
 mod binary_format;
 mod body_cache;
 mod body_eval;
@@ -1660,12 +1661,34 @@ impl WafEngine {
     })
   }
 
+  pub async fn new_with_previous_limits_and_mitigation_async(
+    config: &Config,
+    previous: Option<&Self>,
+    shared_state: Option<std::sync::Arc<SharedState>>,
+    rate_limits: Option<Arc<LimitState>>,
+    mitigation: MitigationSink,
+  ) -> anyhow::Result<Self> {
+    let mut engine = Self::new_with_previous_limits_and_mitigation(
+      config,
+      previous,
+      shared_state,
+      rate_limits,
+      mitigation,
+    )?;
+    engine.person_proof.load_shared_secret().await?;
+    Ok(engine)
+  }
+
   pub fn person_proof_tcp_max_hop(&self) -> Option<u8> {
     self.person_proof_tcp_max_hop
   }
 
   pub fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
     self.person_proof.admin_status()
+  }
+
+  pub async fn person_proof_admin_status_async(&self) -> anyhow::Result<PersonProofAdminStatus> {
+    self.person_proof.admin_status_async().await
   }
 
   pub fn person_proof_admin_clearances(
@@ -1676,12 +1699,34 @@ impl WafEngine {
     self.person_proof.admin_list_clearances(limit, cursor)
   }
 
+  pub async fn person_proof_admin_clearances_async(
+    &self,
+    limit: usize,
+    cursor: Option<&str>,
+  ) -> anyhow::Result<PersonProofAdminClearancePage> {
+    self
+      .person_proof
+      .admin_list_clearances_async(limit, cursor)
+      .await
+  }
+
   pub fn person_proof_admin_revoke_clearance(
     &self,
     hash: &str,
     ttl_seconds: Option<u64>,
   ) -> anyhow::Result<PersonProofAdminRevokeResult> {
     self.person_proof.admin_revoke_clearance(hash, ttl_seconds)
+  }
+
+  pub async fn person_proof_admin_revoke_clearance_async(
+    &self,
+    hash: &str,
+    ttl_seconds: Option<u64>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    self
+      .person_proof
+      .admin_revoke_clearance_async(hash, ttl_seconds)
+      .await
   }
 
   pub fn normalize_person_proof_admin_clearance_hash(hash: &str) -> anyhow::Result<String> {
@@ -1801,6 +1846,14 @@ impl WafEngine {
     person_proof_v2::complete_provider_challenge(&self.person_proof, input, challenge)
   }
 
+  pub async fn complete_person_proof_provider_challenge_async(
+    &self,
+    input: WafRequestInput<'_>,
+    challenge: PersonProofProviderChallenge,
+  ) -> anyhow::Result<PersonProofIssuedClearance> {
+    person_proof_v2::complete_provider_challenge_async(&self.person_proof, input, challenge).await
+  }
+
   pub fn requires_request_body_inspection(&self, route_name: &str) -> bool {
     self
       .route_plan(route_name)
@@ -1895,8 +1948,17 @@ impl WafEngine {
     fields: &CompiledAccessLogFields,
     input: WafResponseInput<'_>,
   ) -> anyhow::Result<AccessLogRecord> {
-    let mut tx = TransactionBudget::new(&self.limits);
     let person_proof = self.person_proof.evaluate_request(input.request);
+    self.build_system_access_log_with_person_proof(fields, input, &person_proof)
+  }
+
+  fn build_system_access_log_with_person_proof(
+    &self,
+    fields: &CompiledAccessLogFields,
+    input: WafResponseInput<'_>,
+    person_proof: &PersonProofRequestStatus,
+  ) -> anyhow::Result<AccessLogRecord> {
+    let mut tx = TransactionBudget::new(&self.limits);
     let body_text_caches = BodyTextCaches::default();
     let ctx = EvalContext {
       phase: WafPhase::Response,
@@ -1907,7 +1969,7 @@ impl WafEngine {
       request: input.request,
       response: Some(input),
       stream: None,
-      person_proof: &person_proof,
+      person_proof,
       pattern_sets: &self.pattern_sets,
       regex_cache: None,
       locals: &[],
@@ -2054,8 +2116,16 @@ impl WafEngine {
     &self,
     input: WafResponseInput<'_>,
   ) -> anyhow::Result<ResponseWafDecision> {
-    let mut decision = ResponseWafDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
+    self.evaluate_response_inner_with_person_proof(input, &person_proof)
+  }
+
+  fn evaluate_response_inner_with_person_proof(
+    &self,
+    input: WafResponseInput<'_>,
+    person_proof: &PersonProofRequestStatus,
+  ) -> anyhow::Result<ResponseWafDecision> {
+    let mut decision = ResponseWafDecision::default();
     let mut tx = TransactionBudget::new(&self.limits);
     let body_text_caches = BodyTextCaches::default();
 
@@ -2070,7 +2140,7 @@ impl WafEngine {
         request: input.request,
         response: Some(input),
         stream: None,
-        person_proof: &person_proof,
+        person_proof,
         pattern_sets: &self.pattern_sets,
         regex_cache: None,
         locals: &[],
@@ -2109,8 +2179,16 @@ impl WafEngine {
   }
 
   fn evaluate_stream_inner(&self, input: WafStreamInput<'_>) -> anyhow::Result<WafStreamDecision> {
-    let mut decision = WafStreamDecision::default();
     let person_proof = self.person_proof.evaluate_request(input.request);
+    self.evaluate_stream_inner_with_person_proof(input, &person_proof)
+  }
+
+  fn evaluate_stream_inner_with_person_proof(
+    &self,
+    input: WafStreamInput<'_>,
+    person_proof: &PersonProofRequestStatus,
+  ) -> anyhow::Result<WafStreamDecision> {
+    let mut decision = WafStreamDecision::default();
     let mut tx = TransactionBudget::new(&self.limits);
     let body_text_caches = BodyTextCaches::default();
 
@@ -2125,7 +2203,7 @@ impl WafEngine {
         request: input.request,
         response: None,
         stream: Some(input),
-        person_proof: &person_proof,
+        person_proof,
         pattern_sets: &self.pattern_sets,
         regex_cache: None,
         locals: &[],
@@ -3064,7 +3142,7 @@ fn apply_request_actions(
           mode: LimitMode::Enforcing,
           status: *status,
         };
-        if let Some(status) = rate_limits.check_rate_limit(context, check) {
+        if let Some(status) = rate_limits.check_rate_limit_local(context, check) {
           decision.terminal = Some(WafHttpTerminal::response(
             status,
             body

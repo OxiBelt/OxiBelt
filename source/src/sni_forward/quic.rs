@@ -332,7 +332,7 @@ impl QuicDemuxSocket {
       }
       SniForwardDecision::Forward(rule) => {
         let connection_permit =
-          match acquire_quic_forward_connection_permit(snapshot.as_ref(), peer) {
+          match acquire_quic_forward_connection_permit(snapshot.as_ref(), peer).await {
             Ok(permit) => permit,
             Err(status) => {
               snapshot.metrics.record_sni_forward_decision(

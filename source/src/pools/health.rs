@@ -83,11 +83,7 @@ pub(super) fn server_healthy(pool: &PoolRuntime, server: &PoolServerRuntime) -> 
   if ejection_active(server, now_millis()) {
     return false;
   }
-  if let Some(shared) = &pool.shared_state
-    && let Ok(Some(healthy)) = shared.pool_health(&server.upstream_name)
-  {
-    return healthy;
-  }
+  let _ = pool;
   server.healthy.load(Ordering::Relaxed)
 }
 

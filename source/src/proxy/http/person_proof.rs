@@ -204,7 +204,8 @@ where
     };
   if let Err(error) = state
     .waf
-    .consume_person_proof_provider_challenge_attempt(&challenge)
+    .consume_person_proof_provider_challenge_attempt_async(&challenge)
+    .await
   {
     if error.to_string().contains("expired") {
       return text_response(StatusCode::GONE, "person proof session expired");
@@ -217,11 +218,11 @@ where
   }
 
   match verify_person_proof_response(state, &challenge, &payload.response, client_ip).await {
-    Ok(true) => complete_person_proof_verify(state, input, challenge),
+    Ok(true) => complete_person_proof_verify(state, input, challenge).await,
     Ok(false) => text_response(StatusCode::FORBIDDEN, "person proof verification failed"),
     Err(error) if challenge.provider_fail_policy == PersonProofProviderFailPolicy::Open => {
       warn!(error = %error, "person proof provider failed open");
-      complete_person_proof_verify(state, input, challenge)
+      complete_person_proof_verify(state, input, challenge).await
     }
     Err(error) => {
       warn!(error = %error, "person proof provider failed closed");
@@ -479,7 +480,7 @@ fn parse_provider_success(body: &[u8]) -> anyhow::Result<bool> {
     .context("person proof provider response is missing success")
 }
 
-fn complete_person_proof_verify(
+async fn complete_person_proof_verify(
   state: &AppSnapshot,
   input: WafRequestInput<'_>,
   challenge: PersonProofProviderChallenge,
@@ -487,7 +488,8 @@ fn complete_person_proof_verify(
   let return_path = challenge.return_path.clone();
   let clearance = match state
     .waf
-    .complete_person_proof_provider_challenge(input, challenge)
+    .complete_person_proof_provider_challenge_async(input, challenge)
+    .await
   {
     Ok(clearance) => clearance,
     Err(error) => {

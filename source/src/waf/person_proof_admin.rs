@@ -47,6 +47,104 @@ pub struct PersonProofAdminRevokeResult {
 }
 
 impl PersonProofEngine {
+  pub(super) async fn admin_status_async(&self) -> anyhow::Result<PersonProofAdminStatus> {
+    if let Some(shared) = &self.shared_state
+      && shared.person_proof_enabled()
+    {
+      let policies = PersonProofAdminPolicyStatus {
+        total: self.policies.len(),
+        single_use: self
+          .policies
+          .iter()
+          .filter(|policy| policy.single_use)
+          .count(),
+        multi_use: self
+          .policies
+          .iter()
+          .filter(|policy| !policy.single_use)
+          .count(),
+      };
+      let status = shared.person_proof_admin_status().await?;
+      return Ok(PersonProofAdminStatus {
+        enabled: !self.policies.is_empty(),
+        store_scope: "shared",
+        policies,
+        max_reuse_tokens: self.max_reuse_tokens,
+        active_clearance_count: status.active_clearance_count,
+        challenge_replay_marker_count: status.challenge_replay_marker_count,
+        revoked_clearance_count: status.revoked_clearance_count,
+        legacy_raw_key_count: status.legacy_raw_key_count,
+      });
+    }
+    self.admin_status()
+  }
+
+  pub(super) async fn admin_list_clearances_async(
+    &self,
+    limit: usize,
+    cursor: Option<&str>,
+  ) -> anyhow::Result<PersonProofAdminClearancePage> {
+    if let Some(shared) = &self.shared_state
+      && shared.person_proof_enabled()
+    {
+      let page = shared.person_proof_list_clearances(limit, cursor).await?;
+      return Ok(PersonProofAdminClearancePage {
+        clearances: page
+          .clearances
+          .into_iter()
+          .map(|entry| PersonProofAdminClearance {
+            clearance_hash: entry.clearance_hash,
+            expires_at_unix_ms: entry.expires_at_unix_ms,
+            store_scope: "shared",
+          })
+          .collect(),
+        next_cursor: page.next_cursor,
+      });
+    }
+    self.admin_list_clearances(limit, cursor)
+  }
+
+  pub(super) async fn admin_revoke_clearance_async(
+    &self,
+    hash: &str,
+    ttl_seconds: Option<u64>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    if let Some(shared) = &self.shared_state
+      && shared.person_proof_enabled()
+    {
+      let hash = normalize_clearance_hash(hash)?;
+      let ttl_seconds = ttl_seconds.unwrap_or_else(|| self.max_policy_ttl_seconds());
+      if ttl_seconds == 0 {
+        bail!("person proof clearance revocation ttl_seconds must be greater than 0");
+      }
+      if ttl_seconds > MAX_ADMIN_REVOKE_TTL_SECONDS {
+        bail!(
+          "person proof clearance revocation ttl_seconds must be at most {}",
+          MAX_ADMIN_REVOKE_TTL_SECONDS
+        );
+      }
+      let now = now_unix_ms()?;
+      let expires_at = now
+        .checked_add(
+          i64::try_from(ttl_seconds)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000),
+        )
+        .unwrap_or(i64::MAX);
+      let removed_active = shared
+        .person_proof_revoke_clearance_hash(&hash, expires_at)
+        .await?;
+      return Ok(PersonProofAdminRevokeResult {
+        clearance_hash: format!("clearance:{hash}"),
+        revoked: true,
+        removed_active,
+        store_scope: "shared",
+        expires_at_unix_ms: expires_at,
+      });
+    }
+    self.admin_revoke_clearance(hash, ttl_seconds)
+  }
+
   pub(super) fn admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
     let policies = PersonProofAdminPolicyStatus {
       total: self.policies.len(),
@@ -64,17 +162,8 @@ impl PersonProofEngine {
     if let Some(shared) = &self.shared_state
       && shared.person_proof_enabled()
     {
-      let status = shared.person_proof_admin_status()?;
-      return Ok(PersonProofAdminStatus {
-        enabled: !self.policies.is_empty(),
-        store_scope: "shared",
-        policies,
-        max_reuse_tokens: self.max_reuse_tokens,
-        active_clearance_count: status.active_clearance_count,
-        challenge_replay_marker_count: status.challenge_replay_marker_count,
-        revoked_clearance_count: status.revoked_clearance_count,
-        legacy_raw_key_count: status.legacy_raw_key_count,
-      });
+      let _ = shared;
+      bail!("person proof shared administration requires asynchronous evaluation");
     }
 
     let now = now_unix_ms()?;
@@ -122,19 +211,8 @@ impl PersonProofEngine {
     if let Some(shared) = &self.shared_state
       && shared.person_proof_enabled()
     {
-      let page = shared.person_proof_list_clearances(limit, cursor)?;
-      return Ok(PersonProofAdminClearancePage {
-        clearances: page
-          .clearances
-          .into_iter()
-          .map(|entry| PersonProofAdminClearance {
-            clearance_hash: entry.clearance_hash,
-            expires_at_unix_ms: entry.expires_at_unix_ms,
-            store_scope: "shared",
-          })
-          .collect(),
-        next_cursor: page.next_cursor,
-      });
+      let _ = shared;
+      bail!("person proof shared administration requires asynchronous evaluation");
     }
 
     let now = now_unix_ms()?;
@@ -196,14 +274,8 @@ impl PersonProofEngine {
     if let Some(shared) = &self.shared_state
       && shared.person_proof_enabled()
     {
-      let removed_active = shared.person_proof_revoke_clearance_hash(&hash, expires_at)?;
-      return Ok(PersonProofAdminRevokeResult {
-        clearance_hash: format!("clearance:{hash}"),
-        revoked: true,
-        removed_active,
-        store_scope: "shared",
-        expires_at_unix_ms: expires_at,
-      });
+      let _ = shared;
+      bail!("person proof shared administration requires asynchronous evaluation");
     }
 
     let key = format!("clearance:{hash}");

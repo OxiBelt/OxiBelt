@@ -301,14 +301,16 @@ impl ResponseCache {
       return;
     }
     if !matches!(
-      self.insert_streamed_disk_file(prepared, body_path.clone(), body_len, reservation),
+      self
+        .insert_streamed_disk_file(prepared, body_path.clone(), body_len, reservation)
+        .await,
       CacheInsertOutcome::Stored
     ) {
       remove_streaming_body(&body_path);
     }
   }
 
-  fn insert_streamed_disk_file(
+  async fn insert_streamed_disk_file(
     &self,
     prepared: CachePreparedInsert,
     body_path: PathBuf,
@@ -391,7 +393,9 @@ impl ResponseCache {
     if let Some(shared) = &self.shared_state
       && shared.has_cache()
       && let Some(shared_entry) = shared_entry
-      && let Err(error) = shared.cache_put_file(&shared_entry, &body_path, body_len)
+      && let Err(error) = shared
+        .cache_put_file(&shared_entry, &body_path, body_len)
+        .await
     {
       warn!(error = %error, "failed to write streaming cache entry to shared cache");
     }

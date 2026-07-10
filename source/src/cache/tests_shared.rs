@@ -1,7 +1,56 @@
 use super::*;
 
-#[test]
-fn shared_cache_tag_purge_removes_l2_entry() {
+#[tokio::test]
+async fn stale_shared_hits_respect_named_policy_disabled_background_refresh() {
+  let config = cache_config_with_disabled_named_background_refresh();
+  let local = ResponseCache::new(&config, None).unwrap();
+  let shared = crate::shared_state::SharedState::test_memory("cache-bg-refresh-disabled");
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared)).unwrap();
+  let request_headers = HeaderMap::new();
+  let mut no_cache_headers = HeaderMap::new();
+  no_cache_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+  let local_uri = "/asset/local.css".parse::<Uri>().unwrap();
+  let shared_validator_uri = "/asset/shared-validator.css".parse::<Uri>().unwrap();
+  let shared_no_validator_uri = "/asset/shared-no-validator.css".parse::<Uri>().unwrap();
+
+  for (cache, uri, body, include_validator) in [
+    (&local, &local_uri, b"local".as_slice(), true),
+    (
+      &first,
+      &shared_validator_uri,
+      b"shared-validator".as_slice(),
+      true,
+    ),
+    (
+      &first,
+      &shared_no_validator_uri,
+      b"shared-no-validator".as_slice(),
+      false,
+    ),
+  ] {
+    insert_stale_revalidate_entry(
+      cache,
+      uri,
+      &request_headers,
+      Bytes::from_static(body),
+      include_validator,
+    )
+    .await;
+  }
+
+  tokio::time::sleep(Duration::from_millis(1200)).await;
+
+  assert_stale_background_refresh_disabled(&local, &local_uri, &request_headers).await;
+  assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers).await;
+  // A repeated lookup catches stale L2 entries being promoted as newly fresh L1 entries.
+  assert_stale_background_refresh_disabled(&second, &shared_validator_uri, &request_headers).await;
+  assert_stale_background_refresh_disabled(&second, &shared_no_validator_uri, &no_cache_headers)
+    .await;
+}
+
+#[tokio::test]
+async fn shared_cache_tag_purge_removes_l2_entry() {
   let shared = crate::shared_state::SharedState::test_memory("cache-tag-test");
   let config = CacheConfig {
     enabled: true,
@@ -13,36 +62,26 @@ fn shared_cache_tag_purge_removes_l2_entry() {
   let request_headers = HeaderMap::new();
   let mut response_headers = HeaderMap::new();
   response_headers.insert("cache-tag", HeaderValue::from_static("release-1"));
-  first.insert(
-    CacheInsertContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &request_headers,
-    },
-    CacheEntry::memory(
-      StatusCode::OK,
-      response_headers,
-      Bytes::from_static(b"tagged"),
-    ),
-  );
+  first
+    .insert_async(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &request_headers,
+      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"tagged"),
+      ),
+    )
+    .await;
   assert!(matches!(
-    second.lookup(CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &request_headers,
-    }),
-    Some(CacheLookup::Fresh(_))
-  ));
-  assert_eq!(second.purge_tag("default", "release-1", None, None), 2);
-  assert!(
     second
-      .lookup(CacheLookupContext {
+      .lookup_async(CacheLookupContext {
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -50,12 +89,32 @@ fn shared_cache_tag_purge_removes_l2_entry() {
         uri: &uri,
         request_headers: &request_headers,
       })
+      .await,
+    Some(CacheLookup::Fresh(_))
+  ));
+  assert_eq!(
+    second
+      .purge_tag_partition_async("default", "release-1", None, None, None)
+      .await,
+    2
+  );
+  assert!(
+    second
+      .lookup_async(CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &request_headers,
+      })
+      .await
       .is_none()
   );
 }
 
-#[test]
-fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
+#[tokio::test]
+async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
   let shared = crate::shared_state::SharedState::test_memory("cache-test");
   let config = CacheConfig {
     enabled: true,
@@ -74,21 +133,23 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     request_headers: &headers,
   };
 
-  first.insert(
-    CacheInsertContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    },
-    CacheEntry::memory(
-      StatusCode::OK,
-      HeaderMap::new(),
-      Bytes::from_static(b"shared-cache"),
-    ),
-  );
+  first
+    .insert_async(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        HeaderMap::new(),
+        Bytes::from_static(b"shared-cache"),
+      ),
+    )
+    .await;
   assert_eq!(first.stats().memory_entries, 1);
   let index_keys = shared.test_cache_raw_keys("cache:index:");
   assert!(
@@ -96,7 +157,7 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     "shared cache writes should maintain lookup index pointers"
   );
 
-  match second.lookup(ctx.clone()) {
+  match second.lookup_async(ctx.clone()).await {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, Bytes::from_static(b"shared-cache"))
     }
@@ -104,19 +165,22 @@ fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
   }
 
   assert_eq!(
-    second.purge_exact(
-      "default",
-      "https",
-      "example.test",
-      "/asset/app.css?body=shared"
-    ),
+    second
+      .purge_exact_partition_async(
+        "default",
+        "https",
+        "example.test",
+        "/asset/app.css?body=shared",
+        None,
+      )
+      .await,
     2
   );
-  assert!(second.lookup(ctx).is_none());
+  assert!(second.lookup_async(ctx).await.is_none());
 }
 
-#[test]
-fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
+#[tokio::test]
+async fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
   let shared = crate::shared_state::SharedState::test_memory("cache-index-backfill");
   let config = CacheConfig {
     enabled: true,
@@ -134,21 +198,23 @@ fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
   );
 
   assert_eq!(
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &headers,
-      },
-      CacheEntry::memory(
-        StatusCode::OK,
-        response_headers,
-        Bytes::from_static(b"legacy-cache")
-      ),
-    ),
+    first
+      .insert_async(
+        CacheInsertContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &headers,
+        },
+        CacheEntry::memory(
+          StatusCode::OK,
+          response_headers,
+          Bytes::from_static(b"legacy-cache")
+        ),
+      )
+      .await,
     CacheInsertOutcome::Stored
   );
 
@@ -157,14 +223,17 @@ fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
   }
   assert!(shared.test_cache_raw_keys("cache:index:").is_empty());
 
-  match second.lookup(CacheLookupContext {
-    policy_name: Some("default"),
-    scheme: "https",
-    host: "example.test",
-    method: &Method::GET,
-    uri: &uri,
-    request_headers: &headers,
-  }) {
+  match second
+    .lookup_async(CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    })
+    .await
+  {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"legacy-cache")),
     other => panic!("expected legacy shared cache hit, got {other:?}"),
   }
@@ -174,8 +243,8 @@ fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
   );
 }
 
-#[test]
-fn shared_cache_vary_lookup_uses_indexed_variant() {
+#[tokio::test]
+async fn shared_cache_vary_lookup_uses_indexed_variant() {
   let shared = crate::shared_state::SharedState::test_memory("cache-vary-index");
   let config = CacheConfig {
     enabled: true,
@@ -193,21 +262,23 @@ fn shared_cache_vary_lookup_uses_indexed_variant() {
   );
 
   assert_eq!(
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &request_headers,
-      },
-      CacheEntry::memory(
-        StatusCode::OK,
-        response_headers,
-        Bytes::from_static(b"vary-en")
-      ),
-    ),
+    first
+      .insert_async(
+        CacheInsertContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &request_headers,
+        },
+        CacheEntry::memory(
+          StatusCode::OK,
+          response_headers,
+          Bytes::from_static(b"vary-en")
+        ),
+      )
+      .await,
     CacheInsertOutcome::Stored
   );
   assert!(
@@ -215,21 +286,24 @@ fn shared_cache_vary_lookup_uses_indexed_variant() {
     "vary shared cache entries should write lookup index pointers"
   );
 
-  match second.lookup(CacheLookupContext {
-    policy_name: Some("default"),
-    scheme: "https",
-    host: "example.test",
-    method: &Method::GET,
-    uri: &uri,
-    request_headers: &request_headers,
-  }) {
+  match second
+    .lookup_async(CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &request_headers,
+    })
+    .await
+  {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"vary-en")),
     other => panic!("expected indexed vary shared cache hit, got {other:?}"),
   }
 }
 
-#[test]
-fn shared_cache_large_body_uses_retrievable_chunks() {
+#[tokio::test]
+async fn shared_cache_large_body_uses_retrievable_chunks() {
   let shared = crate::shared_state::SharedState::test_memory("cache-large-chunks");
   let config = CacheConfig {
     enabled: true,
@@ -242,28 +316,33 @@ fn shared_cache_large_body_uses_retrievable_chunks() {
   let body = Bytes::from(vec![b'x'; 1_048_577]);
 
   assert_eq!(
-    first.insert(
-      CacheInsertContext {
-        policy_name: Some("default"),
-        scheme: "https",
-        host: "example.test",
-        method: &Method::GET,
-        uri: &uri,
-        request_headers: &headers,
-      },
-      CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body.clone()),
-    ),
+    first
+      .insert_async(
+        CacheInsertContext {
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &headers,
+        },
+        CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body.clone()),
+      )
+      .await,
     CacheInsertOutcome::Stored
   );
 
-  match second.lookup(CacheLookupContext {
-    policy_name: Some("default"),
-    scheme: "https",
-    host: "example.test",
-    method: &Method::GET,
-    uri: &uri,
-    request_headers: &headers,
-  }) {
+  match second
+    .lookup_async(CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    })
+    .await
+  {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body_len(), body.len());
       assert_eq!(read_cache_entry_body(&entry), body);
@@ -272,7 +351,9 @@ fn shared_cache_large_body_uses_retrievable_chunks() {
     other => panic!("expected chunked shared cache hit, got {other:?}"),
   }
   assert_eq!(
-    second.purge_exact("default", "https", "example.test", "/asset/large.bin"),
+    second
+      .purge_exact_partition_async("default", "https", "example.test", "/asset/large.bin", None)
+      .await,
     1
   );
 }
@@ -290,19 +371,22 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
 
   stream_disk_fill(&first, &uri, &headers, body.clone()).await;
 
-  let chunk_keys = shared.test_cache_raw_keys("cache:chunk:");
+  let chunk_keys = wait_for_shared_chunks(&shared).await;
   assert!(
     chunk_keys.len() >= 2,
     "streaming disk shared fill should write chunked L2 body"
   );
-  match second.lookup(CacheLookupContext {
-    policy_name: Some("default"),
-    scheme: "https",
-    host: "example.test",
-    method: &Method::GET,
-    uri: &uri,
-    request_headers: &headers,
-  }) {
+  match second
+    .lookup_async(CacheLookupContext {
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+    })
+    .await
+  {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body_len(), body.len());
       assert_eq!(read_cache_entry_body(&entry), body);
@@ -326,7 +410,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
   let body = Bytes::from(vec![b'm'; 1_048_577]);
 
   stream_disk_fill(&first, &uri, &headers, body.clone()).await;
-  let chunk_keys = shared.test_cache_raw_keys("cache:chunk:");
+  let chunk_keys = wait_for_shared_chunks(&shared).await;
   assert!(!chunk_keys.is_empty(), "expected shared body chunks");
   shared.test_delete_raw_key(&chunk_keys[0]);
 
@@ -346,7 +430,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
   }
   assert!(
     second
-      .lookup(CacheLookupContext {
+      .lookup_async(CacheLookupContext {
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -354,13 +438,14 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
         uri: &uri,
         request_headers: &headers,
       })
+      .await
       .is_none(),
     "missing shared chunks should produce a safe shared miss"
   );
 }
 
-#[test]
-fn shared_cache_requires_exact_uri_when_cache_key_collides() {
+#[tokio::test]
+async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
   let shared = crate::shared_state::SharedState::test_memory("cache-uri-isolation");
   let config = CacheConfig {
     enabled: true,
@@ -373,21 +458,23 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
   let other_uri = "/profile?token=other".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
 
-  first.insert(
-    CacheInsertContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &secret_uri,
-      request_headers: &headers,
-    },
-    CacheEntry::memory(
-      StatusCode::OK,
-      HeaderMap::new(),
-      Bytes::from_static(b"secret-token-response"),
-    ),
-  );
+  first
+    .insert_async(
+      CacheInsertContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &secret_uri,
+        request_headers: &headers,
+      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        HeaderMap::new(),
+        Bytes::from_static(b"secret-token-response"),
+      ),
+    )
+    .await;
 
   let other_ctx = CacheLookupContext {
     policy_name: Some("default"),
@@ -397,7 +484,7 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     uri: &other_uri,
     request_headers: &headers,
   };
-  assert!(second.lookup(other_ctx).is_none());
+  assert!(second.lookup_async(other_ctx).await.is_none());
 
   let secret_ctx = CacheLookupContext {
     policy_name: Some("default"),
@@ -407,7 +494,7 @@ fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     uri: &secret_uri,
     request_headers: &headers,
   };
-  match second.lookup(secret_ctx) {
+  match second.lookup_async(secret_ctx).await {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, Bytes::from_static(b"secret-token-response"))
     }
@@ -506,4 +593,15 @@ async fn wait_for_fresh(
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
   }
   panic!("expected fresh local cache entry");
+}
+
+async fn wait_for_shared_chunks(shared: &crate::shared_state::SharedState) -> Vec<String> {
+  for _ in 0..100 {
+    let chunks = shared.test_cache_raw_keys("cache:chunk:");
+    if !chunks.is_empty() {
+      return chunks;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+  panic!("expected shared cache body chunks");
 }
