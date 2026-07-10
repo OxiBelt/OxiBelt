@@ -29,6 +29,8 @@ selector="app.kubernetes.io/name=oxibelt,app.kubernetes.io/instance=${data_relea
 managed_config_path="conf.d/gateway-api.generated.toml"
 port_forward_pid=""
 cluster_created=0
+admin_server_name=""
+admin_service_name="${workload_name}-admin"
 
 die() {
   echo "kubernetes immutable rollout test: $*" >&2
@@ -116,6 +118,46 @@ health_endpoint_is_ready() {
   curl --fail --silent --show-error --max-time 2 "${url}/ready" >/dev/null 2>&1
 }
 
+admin_endpoint_accepts_client() {
+  local port="$1"
+  curl --fail --silent --show-error --max-time 5 --tlsv1.3 \
+    --resolve "${admin_server_name}:${port}:127.0.0.1" \
+    --cacert "${work_dir}/admin-server-ca.crt" \
+    --cert "${work_dir}/admin-client.crt" \
+    --key "${work_dir}/admin-client.key" \
+    --header "@${work_dir}/admin-headers.txt" \
+    "https://${admin_server_name}:${port}/admin/v1/openapi.json" \
+    >/dev/null
+}
+
+verify_admin_mtls() {
+  local port="$1"
+  local url="https://${admin_server_name}:${port}/admin/v1/openapi.json"
+
+  kubectl --context "kind-${cluster_name}" -n "${namespace}" port-forward \
+    --address 127.0.0.1 "service/${admin_service_name}" "${port}:9092" \
+    >"${work_dir}/admin-port-forward.log" 2>&1 &
+  port_forward_pid="$!"
+
+  wait_for "mTLS Admin response" 60 admin_endpoint_accepts_client "${port}"
+
+  if curl --fail --silent --show-error --max-time 5 --tlsv1.3 \
+    --resolve "${admin_server_name}:${port}:127.0.0.1" \
+    --cacert "${work_dir}/admin-server-ca.crt" \
+    --header "@${work_dir}/admin-headers.txt" \
+    "${url}" \
+    >/dev/null 2>&1; then
+    die "Admin listener accepted a bearer-authenticated client without a certificate"
+  fi
+
+  admin_endpoint_accepts_client "${port}" \
+    || die "Admin listener rejected the configured mTLS client and bearer token"
+
+  kill "${port_forward_pid}" >/dev/null 2>&1 || true
+  wait "${port_forward_pid}" >/dev/null 2>&1 || true
+  port_forward_pid=""
+}
+
 check_pod_runtime_proof() {
   local pod="$1"
   local port="$2"
@@ -142,7 +184,7 @@ check_pod_runtime_proof() {
   port_forward_pid=""
 }
 
-for command in docker kind kubectl helm curl jq openssl sha256sum; do
+for command in docker kind kubectl helm curl jq openssl sha256sum tr; do
   require_command "${command}"
 done
 
@@ -162,6 +204,7 @@ run_id="${run_id:0:24}"
 cluster_name="oxibelt-rollout-${run_id}"
 namespace="oxibelt-rollout-${run_id}"
 work_dir="${repo_root}/tests/.tmp/kubernetes-immutable-rollout-${run_id}"
+admin_server_name="${admin_service_name}.${namespace}.svc"
 
 [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]] \
   || die "OXIBELT_DOCKER_IMAGE must name the locally loaded OxiBelt image"
@@ -222,6 +265,72 @@ kube -n "${namespace}" create secret tls oxibelt-tls \
   --key "${work_dir}/tls.key" \
   >/dev/null
 
+# Keep all credentials inside this invocation's guarded temporary directory.
+# The data-plane image receives only the corresponding Kubernetes Secrets; the
+# test never reads Secret data back from the API.
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+  -subj '/CN=OxiBelt test Admin server CA' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -keyout "${work_dir}/admin-server-ca.key" \
+  -out "${work_dir}/admin-server-ca.crt" \
+  >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes \
+  -subj "/CN=${admin_server_name}" \
+  -keyout "${work_dir}/admin-server.key" \
+  -out "${work_dir}/admin-server.csr" \
+  >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s\n' \
+  "${admin_server_name}" >"${work_dir}/admin-server.ext"
+openssl x509 -req -sha256 -days 1 \
+  -in "${work_dir}/admin-server.csr" \
+  -CA "${work_dir}/admin-server-ca.crt" \
+  -CAkey "${work_dir}/admin-server-ca.key" \
+  -CAcreateserial \
+  -extfile "${work_dir}/admin-server.ext" \
+  -out "${work_dir}/admin-server.crt" \
+  >/dev/null 2>&1
+
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+  -subj '/CN=OxiBelt test Admin client CA' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -keyout "${work_dir}/admin-client-ca.key" \
+  -out "${work_dir}/admin-client-ca.crt" \
+  >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes \
+  -subj '/CN=OxiBelt test Admin client' \
+  -keyout "${work_dir}/admin-client.key" \
+  -out "${work_dir}/admin-client.csr" \
+  >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' \
+  >"${work_dir}/admin-client.ext"
+openssl x509 -req -sha256 -days 1 \
+  -in "${work_dir}/admin-client.csr" \
+  -CA "${work_dir}/admin-client-ca.crt" \
+  -CAkey "${work_dir}/admin-client-ca.key" \
+  -CAcreateserial \
+  -extfile "${work_dir}/admin-client.ext" \
+  -out "${work_dir}/admin-client.crt" \
+  >/dev/null 2>&1
+openssl rand -hex 32 >"${work_dir}/admin-token"
+{
+  printf 'Authorization: Bearer '
+  tr -d '\r\n' <"${work_dir}/admin-token"
+  printf '\n'
+} >"${work_dir}/admin-headers.txt"
+
+kube -n "${namespace}" create secret generic oxibelt-admin-server \
+  --from-file=tls.crt="${work_dir}/admin-server.crt" \
+  --from-file=tls.key="${work_dir}/admin-server.key" \
+  >/dev/null
+kube -n "${namespace}" create secret generic oxibelt-admin-client-ca \
+  --from-file=ca.crt="${work_dir}/admin-client-ca.crt" \
+  >/dev/null
+kube -n "${namespace}" create secret generic oxibelt-admin-token \
+  --from-file=token="${work_dir}/admin-token" \
+  >/dev/null
+
 kube -n "${namespace}" apply -f - >/dev/null <<'EOF'
 apiVersion: v1
 kind: Service
@@ -274,8 +383,10 @@ EOF
 helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --namespace "${namespace}" \
   -f "${image_values}" \
+  -f "${repo_root}/deploy/helm/oxibelt/examples/admin-mtls-values.yaml" \
   --set "replicaCount=3" \
   --set "service.type=ClusterIP" \
+  --set-string "admin.tls.serverNames[0]=${admin_server_name}" \
   --set-string "configRollout.mode=kubernetes_immutable" \
   --set-string "configRollout.managedConfigPath=${managed_config_path}"
 
@@ -306,6 +417,38 @@ digest="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-digest"
   || die "workload did not receive a deterministic immutable ConfigMap revision"
 [[ "${digest}" =~ ^[a-f0-9]{64}$ ]] \
   || die "workload did not receive a lower-case raw SHA-256 config digest"
+
+admin_service_json="$(kube -n "${namespace}" get service "${admin_service_name}" -o json)"
+jq -e '
+  .spec.type == "ClusterIP"
+    and (.spec.ports | length) == 1
+    and .spec.ports[0].name == "admin"
+    and .spec.ports[0].targetPort == "admin"
+' >/dev/null <<<"${admin_service_json}" \
+  || die "Admin Service must stay ClusterIP and target only the Admin container port"
+
+jq -e '
+  any(.spec.template.spec.containers[]?;
+    .name == "oxibelt"
+      and any(.volumeMounts[]?;
+        .name == "tls"
+          and .mountPath == "/etc/oxibelt/cert"
+          and .readOnly == true))
+  and any(.spec.template.spec.volumes[]?;
+    .name == "tls"
+      and .projected.defaultMode == 288
+      and any(.projected.sources[]?;
+        .secret.name == "oxibelt-admin-server"
+          and any(.secret.items[]?;
+            .key == "tls.crt" and .path == "admin-server/tls.crt")
+          and any(.secret.items[]?;
+            .key == "tls.key" and .path == "admin-server/tls.key"))
+      and any(.projected.sources[]?;
+        .secret.name == "oxibelt-admin-client-ca"
+          and any(.secret.items[]?;
+            .key == "ca.crt" and .path == "admin-client-ca/ca.crt")))
+' >/dev/null <<<"${deployment_json}" \
+  || die "Admin identity and client-CA Secrets must be read-only projected certificate files"
 
 jq -e --arg revision "${revision}" --arg managed_path "${managed_config_path}" '
   any(.spec.template.spec.volumes[]?;
@@ -358,5 +501,6 @@ mapfile -t pods < <(jq -r '
 for index in "${!pods[@]}"; do
   check_pod_runtime_proof "${pods[${index}]}" "$((21000 + RANDOM % 10000 + index))" "${revision}" "${digest}"
 done
+verify_admin_mtls "$((25000 + RANDOM % 10000))"
 
 echo "Kubernetes immutable three-replica rollout passed"

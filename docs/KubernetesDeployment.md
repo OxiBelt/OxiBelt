@@ -24,8 +24,8 @@ TLS private keys are operator-owned Kubernetes Secrets. By default the chart mou
 
 ```toml
 [tls]
-cert_chain = "/etc/oxibelt/cert/tls.crt"
-private_key = "/etc/oxibelt/cert/tls.key"
+cert_chain = "tls.crt"
+private_key = "tls.key"
 ```
 
 The chart-generated base configuration is content addressed: it creates an
@@ -102,7 +102,45 @@ The chart defaults are compatible with the release image's non-root runtime:
 - config, TLS, and OxiRule mounts read-only
 - `/var/cache/oxibelt` backed by an `emptyDir`
 
-Admin API exposure is disabled by default. When `admin.enabled = true`, set `admin.tokenSecretName`; the chart injects the token as `OXIBELT_ADMIN_TOKEN` and can expose a separate Admin Service when `admin.service.enabled = true`.
+### Admin Listener
+
+Admin API exposure is disabled by default. Its generated listener is loopback
+only, has no Service, and accepts plaintext only through OxiBelt's loopback
+allowlist. When `admin.enabled = true`, `admin.tokenSecretName` remains
+required and is injected as `OXIBELT_ADMIN_TOKEN`; bearer authentication is
+still required when mTLS is enabled.
+
+For a non-loopback Admin listener, enable `admin.tls`, supply an identity
+Secret and at least one DNS name, and use the generated TLS 1.3-only Admin
+configuration. The chart projects the server certificate/key as
+`admin-server/tls.crt` and `admin-server/tls.key` below the same read-only
+certificate root used by OxiBelt runtime configuration. Enable `admin.mtls` to
+project a client CA as `admin-client-ca/ca.crt` and require a client
+certificate.
+
+Use [the production mTLS values example](../deploy/helm/oxibelt/examples/admin-mtls-values.yaml)
+as the starting point. It intentionally contains only Secret names and keys.
+The Admin Service defaults to disabled and `ClusterIP`; `NodePort` and
+`LoadBalancer` exposure require mTLS under the default policy.
+
+`admin.mtls.enforcement` controls deliberate TLS-plus-bearer-only operation:
+
+- `required_non_loopback` is the default and requires mTLS on every
+  non-loopback bind.
+- `required_external` allows TLS-plus-bearer access through a disabled or
+  `ClusterIP` Admin Service, but requires mTLS for `NodePort` or
+  `LoadBalancer`.
+- `optional` permits TLS-plus-bearer access at any exposure level and emits a
+  prominent Helm warning for externally exposed Admin without mTLS.
+
+`admin.insecureDevelopmentMode.enabled = true` is the only plaintext
+non-loopback escape hatch. It cannot be combined with TLS, mTLS, `NodePort`,
+or `LoadBalancer` exposure. It is intended only for isolated development
+clusters.
+
+The chart validates its generated default Admin TOML. If an operator replaces
+`config.inline` or uses `config.existingConfigMap`, that TOML remains
+operator-owned and must be checked with `oxibelt --config <file> --check`.
 
 Runtime Kubernetes upstream discovery uses the mounted service-account token when generated config sets `token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"`. Enable `kubernetesDiscovery.rbac.create` only when the data plane must read Kubernetes Endpoints or EndpointSlices.
 

@@ -38,6 +38,16 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["service"]["type"], "LoadBalancer");
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
   assert_eq!(values["tls"]["secretName"], "oxibelt-tls");
+  assert!(values["config"]["inline"].as_str().is_some_and(|inline| {
+    inline.contains("[runtime.accept]\nreuse_port = true")
+      && inline.contains("[quic.socket]\nreuse_port = true")
+  }));
+  assert_eq!(values["admin"]["bindAddress"], "127.0.0.1");
+  assert_eq!(values["admin"]["service"]["type"], "ClusterIP");
+  assert_eq!(
+    values["admin"]["mtls"]["enforcement"],
+    "required_non_loopback"
+  );
   assert_eq!(values["configRollout"]["mode"], "helm_immutable");
   assert_eq!(
     values["configRollout"]["managedConfigPath"],
@@ -76,12 +86,34 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     schema["allOf"][0]["then"]["properties"]["config"]["properties"]["existingConfigMapDigest"]["pattern"],
     "^[a-f0-9]{64}$"
   );
+  assert_eq!(
+    schema["properties"]["admin"]["properties"]["bindAddress"]["enum"][3],
+    "::"
+  );
+  assert_eq!(
+    schema["properties"]["admin"]["properties"]["mtls"]["properties"]["enforcement"]["enum"][1],
+    "required_external"
+  );
+  assert_eq!(
+    schema["properties"]["admin"]["properties"]["mtls"]["properties"]["verifyDepth"]["maximum"],
+    255
+  );
+
+  let admin_mtls_example = read_yaml("deploy/helm/oxibelt/examples/admin-mtls-values.yaml");
+  assert_eq!(admin_mtls_example["admin"]["service"]["type"], "ClusterIP");
+  assert_eq!(admin_mtls_example["admin"]["tls"]["enabled"], true);
+  assert_eq!(admin_mtls_example["admin"]["mtls"]["enabled"], true);
+  assert_eq!(
+    admin_mtls_example["admin"]["tls"]["serverNames"][0],
+    "oxibelt-admin.oxibelt.svc.cluster.local"
+  );
 }
 
 #[test]
 fn data_plane_chart_templates_cover_production_runtime_contracts() {
   let expected = [
     "templates/_helpers.tpl",
+    "templates/NOTES.txt",
     "templates/serviceaccount.yaml",
     "templates/rbac.yaml",
     "templates/configmap.yaml",
@@ -107,7 +139,11 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "readinessProbe",
     "livenessProbe",
     "startupProbe",
-    "secretName: {{ required \"tls.secretName is required when tls.enabled=true\"",
+    "name: {{ required \"tls.secretName is required when tls.enabled=true\"",
+    "projected:",
+    "defaultMode: 288",
+    "admin-server/tls.crt",
+    "admin-client-ca/ca.crt",
     "emptyDir: {}",
     "OXIBELT_ADMIN_TOKEN",
     "maxUnavailable: {{ .Values.workload.deployment.maxUnavailable }}",
@@ -120,6 +156,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "OXIBELT_INSTANCE_ID",
     "oxibelt.dev/immutable-config-rollout",
     "gateway-config-directory",
+    "oxibelt.validateAdmin",
   ] {
     assert!(
       deployment.contains(needle),
@@ -148,6 +185,11 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "checksum/oxibelt-config",
     "OXIBELT_CONFIG_ROLLOUT_MODE",
     "gateway-config-directory",
+    "oxibelt.validateAdmin",
+    "projected:",
+    "defaultMode: 288",
+    "admin-server/tls.crt",
+    "admin-client-ca/ca.crt",
   ] {
     assert!(
       daemonset.contains(needle),
@@ -171,6 +213,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "helm.sh/resource-policy: keep",
     "oxibelt.dev/config-digest",
     "gateway-config-directory",
+    "oxibelt.validateAdmin",
   ] {
     assert!(
       configmap.contains(needle),
@@ -189,12 +232,21 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "nested relative TOML path",
     "validateWorkloadRollout",
     "progressDeadlineSeconds must be greater than",
+    "oxibelt.validateAdmin",
+    "required_non_loopback",
+    "admin.insecureDevelopmentMode.enabled",
+    "oxibelt.adminConfig",
+    "admin-server/tls.crt",
   ] {
     assert!(
       helpers.contains(needle),
       "data chart helper should contain {needle}"
     );
   }
+
+  let notes = read_repo("deploy/helm/oxibelt/templates/NOTES.txt");
+  assert!(notes.contains("WARNING: the Admin Service is externally exposed without mTLS."));
+  assert!(notes.contains("admin.mtls.enforcement"));
 
   let service = read_repo("deploy/helm/oxibelt/templates/service.yaml");
   assert!(service.contains("protocol: TCP"));

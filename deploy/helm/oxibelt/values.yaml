@@ -48,6 +48,14 @@ service:
 
 admin:
   enabled: false
+  # Kubernetes-relevant listener addresses only. The chart combines this with
+  # `admin.service.port` so the Pod and Service cannot drift to different
+  # Admin ports.
+  bindAddress: 127.0.0.1 # 127.0.0.1 | 0.0.0.0 | ::1 | ::
+  insecureDevelopmentMode:
+    # An intentionally named plaintext escape hatch for local development.
+    # It cannot be combined with TLS, mTLS, NodePort, or LoadBalancer exposure.
+    enabled: false
   service:
     enabled: false
     type: ClusterIP
@@ -55,6 +63,24 @@ admin:
     annotations: {}
   tokenSecretName: ""
   tokenSecretKey: token
+  tls:
+    # Non-loopback Admin binds require this unless insecureDevelopmentMode is
+    # explicitly enabled. The server identity is mounted below the runtime
+    # certificate root as `admin-server/tls.crt` and `admin-server/tls.key`.
+    enabled: false
+    secretName: ""
+    certKey: tls.crt
+    privateKeyKey: tls.key
+    serverNames: []
+  mtls:
+    # When enabled, require a client certificate rooted in the mounted CA
+    # Secret. `enforcement` controls where a TLS-plus-bearer deployment may
+    # intentionally omit mTLS.
+    enabled: false
+    enforcement: required_non_loopback # required_non_loopback | required_external | optional
+    clientCaSecretName: ""
+    clientCaSecretKey: ca.crt
+    verifyDepth: 4
 
 metrics:
   enabled: true
@@ -99,6 +125,17 @@ config:
     [runtime.hot_reload]
     mode = "off"
 
+    # The default accept-worker count scales with available CPU. Multiple
+    # accept workers require SO_REUSEPORT so generated chart configuration is
+    # accepted on multi-core Kubernetes nodes.
+    [runtime.accept]
+    reuse_port = true
+
+    # HTTP/3 uses automatic QUIC socket workers by default. Keep the listener
+    # socket policy aligned with the multi-worker runtime invariant.
+    [quic.socket]
+    reuse_port = true
+
     [listeners]
     http_binds = ["0.0.0.0:8080"]
     https_binds = ["0.0.0.0:8443"]
@@ -108,8 +145,8 @@ config:
     http3 = true
 
     [tls]
-    cert_chain = "/etc/oxibelt/cert/tls.crt"
-    private_key = "/etc/oxibelt/cert/tls.key"
+    cert_chain = "tls.crt"
+    private_key = "tls.key"
     min_version = "tls1.3"
     max_version = "tls1.3"
 
@@ -125,11 +162,7 @@ config:
     format = "prometheus"
     detail = "basic"
 
-    [admin]
-    enabled = {{ .Values.admin.enabled }}
-    bind = "0.0.0.0:9092"
-    bearer_token_env = "OXIBELT_ADMIN_TOKEN"
-    allow_insecure_plaintext = false
+    {{ include "oxibelt.adminConfig" . }}
 
 # `helm_immutable` is the ordinary Helm-managed content-addressed ConfigMap
 # rollout. `kubernetes_immutable` opts the workload into controller-owned

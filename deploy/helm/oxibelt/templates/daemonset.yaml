@@ -1,6 +1,7 @@
 {{- include "oxibelt.validateConfigRollout" . -}}
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateWorkloadRollout" . -}}
+{{- include "oxibelt.validateAdmin" . -}}
 {{- if eq .Values.workload.kind "DaemonSet" }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -129,9 +130,9 @@ spec:
         - name: config
           mountPath: {{ .Values.config.mountPath }}
           readOnly: true
-        {{- if .Values.tls.enabled }}
+        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) }}
         - name: tls
-          mountPath: {{ .Values.tls.mountPath }}
+          mountPath: {{ include "oxibelt.certMountPath" . }}
           readOnly: true
         {{- end }}
         {{- if .Values.oxirule.enabled }}
@@ -157,10 +158,33 @@ spec:
           - key: gateway-config-directory
             path: {{ printf "%s/.keep" (dir .Values.configRollout.managedConfigPath) | quote }}
 {{ end }}
-      {{- if .Values.tls.enabled }}
+      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) }}
       - name: tls
-        secret:
-          secretName: {{ required "tls.secretName is required when tls.enabled=true" .Values.tls.secretName }}
+        projected:
+          # Decimal 288 is POSIX mode 0440. Kubernetes applies the Pod fsGroup
+          # so the non-root OxiBelt process can read certificate material.
+          defaultMode: 288
+          sources:
+          {{- if .Values.tls.enabled }}
+          - secret:
+              name: {{ required "tls.secretName is required when tls.enabled=true" .Values.tls.secretName }}
+          {{- end }}
+          {{- if and .Values.admin.enabled .Values.admin.tls.enabled }}
+          - secret:
+              name: {{ required "admin.tls.secretName is required when admin TLS is enabled" .Values.admin.tls.secretName }}
+              items:
+              - key: {{ .Values.admin.tls.certKey }}
+                path: admin-server/tls.crt
+              - key: {{ .Values.admin.tls.privateKeyKey }}
+                path: admin-server/tls.key
+          {{- if .Values.admin.mtls.enabled }}
+          - secret:
+              name: {{ required "admin.mtls.clientCaSecretName is required when admin mTLS is enabled" .Values.admin.mtls.clientCaSecretName }}
+              items:
+              - key: {{ .Values.admin.mtls.clientCaSecretKey }}
+                path: admin-client-ca/ca.crt
+          {{- end }}
+          {{- end }}
       {{- end }}
       {{- if .Values.oxirule.enabled }}
       - name: oxirule

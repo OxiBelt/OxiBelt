@@ -1,0 +1,6 @@
+{{- if and .Values.admin.enabled .Values.admin.service.enabled (has .Values.admin.service.type (list "LoadBalancer" "NodePort")) (not .Values.admin.mtls.enabled) (eq .Values.admin.mtls.enforcement "optional") }}
+WARNING: the Admin Service is externally exposed without mTLS. TLS 1.3 and the
+bearer token remain required, but every client that can obtain the token can
+reach the Admin API. Set `admin.mtls.enabled=true` or use a stricter
+`admin.mtls.enforcement` policy for production workloads.
+{{- end }}

@@ -915,6 +915,9 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Validate Helm Admin configuration
+        run: tests/scripts/check-helm-admin-config.sh
+
       - name: Install Kind and kubectl
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:

@@ -1,5 +1,6 @@
 {{- include "oxibelt.validateConfigRollout" . -}}
 {{- include "oxibelt.validateBaseConfigKey" . -}}
+{{- include "oxibelt.validateAdmin" . -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap

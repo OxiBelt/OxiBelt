@@ -56,7 +56,51 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "tokenSecretName": { "type": "string" }
+        "bindAddress": { "type": "string", "enum": ["127.0.0.1", "0.0.0.0", "::1", "::"] },
+        "insecureDevelopmentMode": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" }
+          }
+        },
+        "tokenSecretName": { "type": "string" },
+        "tokenSecretKey": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" },
+            "certKey": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+            "privateKeyKey": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+            "serverNames": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "mtls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "enforcement": {
+              "type": "string",
+              "enum": ["required_non_loopback", "required_external", "optional"]
+            },
+            "clientCaSecretName": { "type": "string" },
+            "clientCaSecretKey": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+            "verifyDepth": { "type": "integer", "minimum": 1, "maximum": 255 }
+          }
+        }
       }
     },
     "metrics": {
@@ -167,6 +211,96 @@
             "properties": {
               "existingConfigMap": { "type": "string", "minLength": 1 },
               "existingConfigMapDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["admin"],
+        "properties": {
+          "admin": {
+            "required": ["enabled"],
+            "properties": {
+              "enabled": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "admin": {
+            "required": ["tokenSecretName"],
+            "properties": {
+              "tokenSecretName": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["admin"],
+        "properties": {
+          "admin": {
+            "required": ["enabled", "tls"],
+            "properties": {
+              "enabled": { "const": true },
+              "tls": {
+                "required": ["enabled"],
+                "properties": {
+                  "enabled": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "admin": {
+            "properties": {
+              "tls": {
+                "required": ["secretName", "serverNames"],
+                "properties": {
+                  "secretName": { "type": "string", "minLength": 1 },
+                  "serverNames": { "type": "array", "minItems": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["admin"],
+        "properties": {
+          "admin": {
+            "required": ["enabled", "mtls"],
+            "properties": {
+              "enabled": { "const": true },
+              "mtls": {
+                "required": ["enabled"],
+                "properties": {
+                  "enabled": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "admin": {
+            "properties": {
+              "mtls": {
+                "required": ["clientCaSecretName"],
+                "properties": {
+                  "clientCaSecretName": { "type": "string", "minLength": 1 }
+                }
+              }
             }
           }
         }

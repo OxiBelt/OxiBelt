@@ -1,0 +1,25 @@
+# Production Admin listener example. Create the referenced Secrets separately;
+# this file intentionally contains names and keys only, never credentials or
+# certificate material.
+admin:
+  enabled: true
+  bindAddress: 0.0.0.0
+  service:
+    enabled: true
+    type: ClusterIP
+    port: 9092
+  tokenSecretName: oxibelt-admin-token
+  tokenSecretKey: token
+  tls:
+    enabled: true
+    secretName: oxibelt-admin-server
+    certKey: tls.crt
+    privateKeyKey: tls.key
+    serverNames:
+    - oxibelt-admin.oxibelt.svc.cluster.local
+  mtls:
+    enabled: true
+    enforcement: required_non_loopback
+    clientCaSecretName: oxibelt-admin-client-ca
+    clientCaSecretKey: ca.crt
+    verifyDepth: 4
