@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::rollout_patch::WorkloadPatch;
 
 fn target() -> RolloutTarget {
   RolloutTarget {
@@ -33,9 +34,32 @@ fn workload() -> Value {
           "containers": [{
             "name": "oxibelt",
             "args": ["--config", "/etc/oxibelt/config/oxibelt.toml"],
-            "volumeMounts": [],
+            "volumeMounts": [{
+              "name": "config",
+              "mountPath": "/etc/oxibelt/config",
+              "readOnly": true,
+            }],
           }],
-          "volumes": [],
+          "volumes": [{
+            "name": "config",
+            "configMap": {
+              "name": "base-config",
+              "items": [
+                {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+                {
+                  "key": "gateway-config-directory",
+                  "path": "conf.d/.keep",
+                  "mode": 288,
+                },
+                {
+                  "key": "gateway-config-directory",
+                  "path": "conf.d/gateway-api.generated.toml",
+                },
+              ],
+              "defaultMode": 416,
+              "optional": false,
+            },
+          }],
         },
       },
     },
@@ -46,6 +70,85 @@ fn workload() -> Value {
       "availableReplicas": 3,
     },
   })
+}
+
+fn projected_workload(artifact: &ConfigArtifact) -> Value {
+  let mut workload = workload();
+  workload["metadata"]["annotations"][DESIRED_REVISION_ANNOTATION] = json!(artifact.name);
+  workload["metadata"]["annotations"][ARTIFACT_DIGEST_ANNOTATION] = json!(artifact.artifact_digest);
+  workload["metadata"]["annotations"][CONFIG_DIGEST_ANNOTATION] = json!(artifact.content_digest);
+  workload["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["name"] =
+    json!("gateway-config");
+  workload["spec"]["template"]["spec"]["volumes"]
+    .as_array_mut()
+    .expect("volumes")
+    .push(json!({
+      "name": "gateway-config",
+      "projected": {
+        "defaultMode": 416,
+        "sources": [
+          {"configMap": {
+            "name": "base-config",
+            "items": [
+              {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+              {
+                "key": "gateway-config-directory",
+                "path": "conf.d/.keep",
+                "mode": 288,
+              },
+            ],
+            "optional": false,
+          }},
+          {"configMap": {
+            "name": artifact.name,
+            "items": [{
+              "key": artifact.data_key,
+              "path": artifact.managed_path,
+            }],
+          }},
+        ],
+      },
+    }));
+  workload
+}
+
+fn legacy_workload(artifact: &ConfigArtifact) -> Value {
+  let mut workload = workload();
+  workload["metadata"]["annotations"][DESIRED_REVISION_ANNOTATION] = json!(artifact.name);
+  workload["metadata"]["annotations"][ARTIFACT_DIGEST_ANNOTATION] = json!(artifact.artifact_digest);
+  workload["metadata"]["annotations"][CONFIG_DIGEST_ANNOTATION] = json!(artifact.content_digest);
+  workload["spec"]["template"]["spec"]["volumes"]
+    .as_array_mut()
+    .expect("volumes")
+    .push(json!({
+      "name": "gateway-config",
+      "configMap": {
+        "name": artifact.name,
+        "items": [{"key": artifact.data_key, "path": artifact.data_key}],
+        "defaultMode": 420,
+      },
+    }));
+  workload["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    .as_array_mut()
+    .expect("volume mounts")
+    .push(json!({
+      "name": "gateway-config",
+      "mountPath": "/etc/oxibelt/config/conf.d/gateway-api.generated.toml",
+      "subPath": artifact.data_key,
+      "readOnly": true,
+    }));
+  workload
+}
+
+fn generated_source_replacement(patch: &WorkloadPatch) -> &Value {
+  patch
+    .operations
+    .iter()
+    .find(|operation| {
+      operation["path"] == "/spec/template/spec/volumes/1/projected/sources/1/configMap"
+    })
+    .map(|operation| &operation["value"])
+    .expect("generated projected source replacement")
 }
 
 #[test]
@@ -112,7 +215,7 @@ fn artifact_rejects_unsafe_path_and_unowned_toml_sections() {
 }
 
 #[test]
-fn patch_is_resource_version_guarded_and_keeps_mount_read_only() {
+fn initial_patch_builds_a_projected_root_without_a_nested_subpath_mount() {
   let target = target();
   let artifact = ConfigArtifact::new(
     &target,
@@ -124,11 +227,194 @@ fn patch_is_resource_version_guarded_and_keeps_mount_read_only() {
   let patch = build_workload_patch(&workload(), &target, &artifact, &state).expect("patch");
   assert_eq!(patch.operations[0]["op"], "test");
   assert_eq!(patch.operations[0]["path"], "/metadata/resourceVersion");
+  let volume = patch
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/volumes/-")
+    .map(|operation| &operation["value"])
+    .expect("projected rollout volume should be added");
+  assert_eq!(volume["name"], "gateway-config");
+  assert_eq!(volume["projected"]["defaultMode"], 416);
+  assert_eq!(
+    volume["projected"]["sources"][0]["configMap"],
+    json!({
+      "name": "base-config",
+      "items": [
+        {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+        {"key": "gateway-config-directory", "path": "conf.d/.keep", "mode": 288},
+      ],
+      "optional": false,
+    })
+  );
+  assert_eq!(
+    volume["projected"]["sources"][1]["configMap"],
+    json!({
+      "name": artifact.name,
+      "items": [{
+        "key": "gateway-api.generated.toml",
+        "path": "conf.d/gateway-api.generated.toml",
+      }],
+    })
+  );
   assert!(patch.operations.iter().any(|operation| {
-    operation["path"] == "/spec/template/spec/containers/0/volumeMounts/-"
-      && operation["value"]["readOnly"] == true
-      && operation["value"]["mountPath"] == "/etc/oxibelt/config/conf.d/gateway-api.generated.toml"
+    operation["op"] == "replace"
+      && operation["path"] == "/spec/template/spec/containers/0/volumeMounts/0/name"
+      && operation["value"] == "gateway-config"
   }));
+  assert!(!patch.json().to_string().contains("subPath"));
+}
+
+#[test]
+fn projected_updates_and_rollbacks_replace_only_the_generated_source() {
+  let target = target();
+  let first = ConfigArtifact::new(
+    &target,
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\nid = \"first\"\n".to_string(),
+  )
+  .expect("first artifact");
+  let second = ConfigArtifact::new(
+    &target,
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\nid = \"second\"\n".to_string(),
+  )
+  .expect("second artifact");
+
+  let current = projected_workload(&first);
+  let update_state = RolloutState::new_attempt(&second, &RolloutState::from_workload(&current), 20);
+  let update = build_workload_patch(&current, &target, &second, &update_state).expect("update");
+  assert_eq!(
+    generated_source_replacement(&update),
+    &json!({
+      "name": second.name,
+      "items": [{
+        "key": second.data_key,
+        "path": second.managed_path,
+      }],
+    })
+  );
+  assert_eq!(
+    update
+      .operations
+      .iter()
+      .filter(|operation| operation["path"]
+        .as_str()
+        .is_some_and(|path| { path.starts_with("/spec/template/spec/volumes/") }))
+      .count(),
+    1
+  );
+  assert!(!update.operations.iter().any(|operation| {
+    operation["path"]
+      .as_str()
+      .is_some_and(|path| path.contains("/volumeMounts"))
+  }));
+
+  let failed = projected_workload(&second);
+  let rollback_state = RolloutState::new_attempt(&first, &RolloutState::from_workload(&failed), 30);
+  let rollback = build_workload_patch(&failed, &target, &first, &rollback_state).expect("rollback");
+  assert_eq!(generated_source_replacement(&rollback)["name"], first.name);
+  assert_eq!(
+    rollback
+      .operations
+      .iter()
+      .filter(|operation| operation["path"]
+        .as_str()
+        .is_some_and(|path| { path.starts_with("/spec/template/spec/volumes/") }))
+      .count(),
+    1
+  );
+}
+
+#[test]
+fn exact_legacy_subpath_rollout_is_migrated_to_the_projected_root() {
+  let target = target();
+  let artifact = ConfigArtifact::new(
+    &target,
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+  )
+  .expect("artifact");
+  let legacy = legacy_workload(&artifact);
+  let state = RolloutState::from_workload(&legacy);
+  let patch = build_workload_patch(&legacy, &target, &artifact, &state).expect("migration");
+
+  let volume = patch
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/volumes/1")
+    .map(|operation| &operation["value"])
+    .expect("legacy volume replacement");
+  assert!(volume.get("configMap").is_none());
+  assert_eq!(
+    volume["projected"]["sources"][1]["configMap"]["name"],
+    artifact.name
+  );
+  assert!(patch.operations.iter().any(|operation| {
+    operation["path"] == "/spec/template/spec/containers/0/volumeMounts/0/name"
+      && operation["value"] == "gateway-config"
+  }));
+  assert!(patch.operations.iter().any(|operation| {
+    operation["op"] == "remove"
+      && operation["path"] == "/spec/template/spec/containers/0/volumeMounts/1"
+  }));
+  assert!(!volume.to_string().contains("subPath"));
+
+  let mut nondefault_legacy = legacy_workload(&artifact);
+  nondefault_legacy["spec"]["template"]["spec"]["volumes"][1]["configMap"]["defaultMode"] =
+    json!(384);
+  assert!(
+    build_workload_patch(&nondefault_legacy, &target, &artifact, &state).is_err(),
+    "legacy migration must accept only the API server's default ConfigMap mode"
+  );
+}
+
+#[test]
+fn projected_rollout_rejects_unknown_sources_revision_drift_and_overlapping_mounts() {
+  let target = target();
+  let artifact = ConfigArtifact::new(
+    &target,
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+  )
+  .expect("artifact");
+  let state = RolloutState::from_workload(&projected_workload(&artifact));
+
+  let mut extra_source = projected_workload(&artifact);
+  extra_source["spec"]["template"]["spec"]["volumes"][1]["projected"]["sources"]
+    .as_array_mut()
+    .expect("sources")
+    .push(json!({"secret": {"name": "operator-secret"}}));
+  assert!(build_workload_patch(&extra_source, &target, &artifact, &state).is_err());
+
+  let mut revision_drift = projected_workload(&artifact);
+  revision_drift["spec"]["template"]["spec"]["volumes"][1]["projected"]["sources"][1]["configMap"]
+    ["name"] = json!("operator-revision");
+  assert!(build_workload_patch(&revision_drift, &target, &artifact, &state).is_err());
+
+  let mut overlap = projected_workload(&artifact);
+  overlap["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    .as_array_mut()
+    .expect("volume mounts")
+    .push(json!({
+      "name": "operator-config",
+      "mountPath": "/etc/oxibelt/config/conf.d/operator.toml",
+      "readOnly": true,
+    }));
+  assert!(build_workload_patch(&overlap, &target, &artifact, &state).is_err());
+
+  let mut sidecar_collision = projected_workload(&artifact);
+  sidecar_collision["spec"]["template"]["spec"]["containers"]
+    .as_array_mut()
+    .expect("containers")
+    .push(json!({
+      "name": "sidecar",
+      "volumeMounts": [{
+        "name": "gateway-config",
+        "mountPath": "/sidecar/config",
+        "readOnly": true,
+      }],
+    }));
+  assert!(build_workload_patch(&sidecar_collision, &target, &artifact, &state).is_err());
 }
 
 #[test]
@@ -141,16 +427,13 @@ fn initial_rollout_refuses_to_adopt_an_operator_volume_name_collision() {
   )
   .expect("artifact");
   let mut conflicting = workload();
-  conflicting["spec"]["template"]["spec"]["volumes"] = json!([{
-    "name": "gateway-config",
-    "configMap": { "name": "operator-config" },
-  }]);
-  conflicting["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] = json!([{
-    "name": "gateway-config",
-    "mountPath": "/etc/oxibelt/config/conf.d/gateway-api.generated.toml",
-    "subPath": "gateway-api.generated.toml",
-    "readOnly": true,
-  }]);
+  conflicting["spec"]["template"]["spec"]["volumes"]
+    .as_array_mut()
+    .expect("volumes")
+    .push(json!({
+      "name": "gateway-config",
+      "configMap": { "name": "operator-config" },
+    }));
   let state = RolloutState::new_attempt(&artifact, &RolloutState::from_workload(&conflicting), 10);
   assert!(build_workload_patch(&conflicting, &target, &artifact, &state).is_err());
 }

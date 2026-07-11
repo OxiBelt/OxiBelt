@@ -46,11 +46,11 @@ contract applies to `oxirule.existingConfigMap` and
 For `kubernetes_immutable` controller pairing, every base configuration
 ConfigMap must contain an empty `gateway-config-directory` key. Only in that
 mode, the chart projects it as both `conf.d/.keep` and the exact managed
-configuration path. The exact empty placeholder creates the target for the
-controller's read-only single-file mount; `.keep` preserves a safe
-data-plane-first upgrade path. Ordinary `helm_immutable` releases do not
-project or require this sentinel from an existing ConfigMap. `config.key` must
-be a single safe ConfigMap key/base filename
+configuration path. The exact empty placeholder gives the bootstrap Pods a
+valid revision file while `.keep` preserves a safe data-plane-first upgrade
+path. Ordinary `helm_immutable` releases do not project or require this
+sentinel from an existing ConfigMap. `config.key` must be a single safe
+ConfigMap key/base filename
 (`[A-Za-z0-9][A-Za-z0-9._-]{0,252}`), not a path and not the reserved
 `gateway-config-directory` key. The config path remains mounted read-only and
 passed to OxiBelt with `--config`.
@@ -63,10 +63,11 @@ passed to OxiBelt with `--config`.
   standard Deployment or DaemonSet rollout. It does not enable the Gateway
   controller.
 - `kubernetes_immutable` is required when pairing the data-plane chart with
-  `oxibelt-gateway-controller`. The chart adds only the immutable-rollout opt-in
-  and Downward API environment declarations. The controller owns generated
-  ConfigMaps, their `gateway-config` volume and file mount, and assigned
-  revision/digest annotations.
+  `oxibelt-gateway-controller`. The chart adds the immutable-rollout opt-in,
+  Downward API environment declarations, and, for chart-created bases, a
+  bootstrap revision/digest identity. The controller owns generated ConfigMaps,
+  the composed `gateway-config` projected config root, and assigned
+  revision/digest annotations after reconciliation.
 
 For controller pairing, keep the generated include inside the base config root
 at a nested relative `.toml` path (not a root-level filename) and disable
@@ -87,10 +88,19 @@ mode = "off"
 
 In this mode the chart declares `OXIBELT_CONFIG_ROLLOUT_MODE`, assigned
 revision and digest Downward API fields, the generated-file path, and the Pod
-UID. It deliberately does not declare a `gateway-config` volume or mount and
-does not set `oxibelt.dev/config-revision` or `oxibelt.dev/config-digest`; those
-are controller-owned values. Do not add an overlapping mount through
-`extraVolumes` or `extraVolumeMounts`.
+UID. For a chart-created, content-addressed base, the Pod template initially
+sets `oxibelt.dev/config-revision` to the immutable base ConfigMap name and
+`oxibelt.dev/config-digest` to the SHA-256 of the empty managed placeholder.
+This bootstrap identity does not weaken configuration validation; a base
+configuration without routes remains unready until the controller assigns its
+generated revision. For `config.existingConfigMap`, the chart cannot verify the
+external object's bytes and therefore leaves both annotations unassigned;
+OxiBelt fails closed until controller reconciliation assigns them.
+The chart deliberately does not declare a `gateway-config` volume or mount.
+The controller replaces the selected container's direct base-config mount with
+one projected config root that combines the base key mappings and generated
+ConfigMap; it leaves the original base volume available to sidecars. Do not add
+an overlapping mount through `extraVolumes` or `extraVolumeMounts`.
 
 ## Security Defaults
 

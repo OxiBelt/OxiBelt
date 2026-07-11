@@ -182,13 +182,27 @@ include = ["conf.d/*.toml"]
 The default managed path is `conf.d/gateway-api.generated.toml`. It must remain
 a safe nested relative `.toml` path, not a root-level filename, so the
 controller can prove its target remains beneath the config root. The controller
-derives the selected container's config root from its `--config` argument and
-mounts this one file from an immutable ConfigMap. In `kubernetes_immutable`
-mode, the data-plane chart projects the empty `gateway-config-directory` key
-to both `conf.d/.keep` and the exact managed path. The exact empty placeholder
-gives the read-only single-file mount a target; `.keep` remains for a safe
-data-plane-first upgrade. Existing ConfigMaps used only for ordinary
-`helm_immutable` rollouts do not need this sentinel.
+derives the selected container's config root from its `--config` argument. In
+`kubernetes_immutable` mode, the data-plane chart initially mounts its
+immutable base ConfigMap directly and projects the empty
+`gateway-config-directory` key to both `conf.d/.keep` and the exact managed
+path. For a chart-generated, content-addressed base, the Pod template identifies
+this bootstrap state with the base ConfigMap name and the SHA-256 of the empty
+managed placeholder, so every Pod has a nonempty, verifiable identity while it
+waits for controller assignment. This does not relax base-config validation:
+when the base has no routes, Pods remain unready until generated configuration
+is assigned. For `config.existingConfigMap`, Helm cannot verify the external
+object's bytes, so it leaves the revision/digest unassigned and OxiBelt fails
+closed until the controller assigns the generated revision. Existing
+ConfigMaps used only for ordinary `helm_immutable` rollouts do not need this
+sentinel.
+
+During reconciliation, the controller replaces only the selected container's
+config-root mount with a projected volume composed from the immutable base and
+generated ConfigMaps. It preserves the base key mappings except for the exact
+managed placeholder, then maps the generated key to the full managed path. The
+original base volume remains in the Pod template for any sidecar mounts; the
+controller does not nest one volume mount inside another.
 
 At reconcile time the controller:
 
@@ -200,7 +214,8 @@ At reconcile time the controller:
    `<prefix>-<deployment-or-daemonset>-<target-name>-<full-64-hex-artifact-digest>`.
 4. Requires `oxibelt.dev/immutable-config-rollout: "true"` on the selected
    Deployment or DaemonSet before patching it.
-5. Applies a resource-version-guarded patch for the generated volume/mount and
+5. Applies a resource-version-guarded patch for the composed projected
+   config-root volume, the selected container mount, and
    `oxibelt.dev/config-revision` plus `oxibelt.dev/config-digest` pod-template
    annotations.
 6. Waits for observed generation, availability, and every Ready Pod proven to

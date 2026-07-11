@@ -65,7 +65,7 @@ shared_state_delay_launch_requests() {
           --body "" \
           --header "X-Forwarded-For: 198.51.100.${i}" \
           --header "X-Delay-Sentinel: delay-secret-do-not-export" \
-          --timeout 3 \
+          --timeout 6 \
           --dump-response-json \
           --expect-status 503 2>&1)"; then
           printf "%s\\n" "${output}"
@@ -180,6 +180,7 @@ shared_state_delay_assert_recovery() {
 
 run_shared_state_delay_isolation() {
   local backend_kind="$1"
+  local resume_callback="${2:-}"
   local delayed_requests_log="${logs_dir}/shared-state-delay-${backend_kind}.jsonl"
   local live_response metrics_response
   local attempt
@@ -197,5 +198,13 @@ run_shared_state_delay_isolation() {
   shared_state_delay_assert_metrics_during_delay "${metrics_response}" "${backend_kind}"
   shared_state_delay_wait_for_requests "${delayed_requests_log}"
   shared_state_delay_assert_post_delay_metrics "${backend_kind}"
+  if [[ -n "${resume_callback}" ]]; then
+    if ! declare -F "${resume_callback}" >/dev/null; then
+      fail_with_diagnostics "shared-state backend resume callback is not defined: ${resume_callback}"
+    fi
+    if ! "${resume_callback}"; then
+      fail_with_diagnostics "failed to resume shared-state backend after delayed work"
+    fi
+  fi
   shared_state_delay_assert_recovery
 }

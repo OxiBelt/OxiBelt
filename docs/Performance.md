@@ -17,7 +17,7 @@ tests/scripts/run-proxy-integration-matrix.sh shared-state redis-delay-isolation
 tests/scripts/run-proxy-integration-matrix.sh shared-state postgres-delay-isolation
 ```
 
-Each case uses one Tokio worker and one shared backend permit, delays the backend for three seconds while issuing sixteen rate-limit requests, and probes `/live` plus `/metrics` with a one-second client timeout. It verifies bounded shared-state timeout outcomes, positive in-flight/queued gauges during the delay, zero gauges after cancellation, labels without request secrets, and fresh-request recovery after the delay is removed. It must show that unrelated Tokio work continues to make progress, not establish a throughput target.
+Each case uses one Tokio worker and one shared backend permit, applies a controlled bounded backend delay while issuing sixteen rate-limit requests, and probes `/live` plus `/metrics` with a one-second client timeout. It verifies bounded shared-state timeout outcomes, positive in-flight/queued gauges during the delay, zero gauges after cancellation, labels without request secrets, and fresh-request recovery after the delay is removed. It must show that unrelated Tokio work continues to make progress, not establish a throughput target.
 
 OpenResty rows are retained as strict comparator evidence for HTTP/1.1,
 HTTP/2, HTTP/3, static-file, and cold TLS handshake scenarios. The pinned

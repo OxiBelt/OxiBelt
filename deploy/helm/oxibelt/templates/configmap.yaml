@@ -17,7 +17,7 @@ data:
 {{ include "oxibelt.generatedConfigContent" . | indent 4 }}
 {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
   # This empty sentinel projects as both `conf.d/.keep` and the exact managed
-  # path so a controller can safely bind-mount an immutable generated include.
+  # path until the controller composes the base and generated ConfigMaps.
   gateway-config-directory: ""
 {{- end }}
 {{- end }}

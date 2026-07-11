@@ -27,6 +27,7 @@ controller_release="oxibelt-gateway-controller"
 workload_name="oxibelt"
 selector="app.kubernetes.io/name=oxibelt,app.kubernetes.io/instance=${data_release}"
 managed_config_path="conf.d/gateway-api.generated.toml"
+empty_config_digest="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 port_forward_pid=""
 cluster_created=0
 admin_server_name=""
@@ -119,6 +120,41 @@ gateway_is_programmed() {
   jq -e \
     'any(.status.conditions[]?; .type == "Programmed" and .status == "True")' \
     >/dev/null <<<"${gateway}"
+}
+
+bootstrap_pods_have_identity() {
+  local revision="$1"
+  local digest="$2"
+  local pods
+  pods="$(kube -n "${namespace}" get pods -l "${selector}" -o json 2>/dev/null)" || return 1
+  jq -e --arg revision "${revision}" --arg digest "${digest}" '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | ($pods | length) == 3
+    and all($pods[];
+      .metadata.annotations["oxibelt.dev/config-revision"] == $revision
+      and .metadata.annotations["oxibelt.dev/config-digest"] == $digest)
+  ' >/dev/null <<<"${pods}"
+}
+
+external_base_bootstrap_is_unassigned() {
+  local workload_kind="$1"
+  local template="$2"
+  local rendered
+  rendered="$(helm template external-base-bootstrap "${repo_root}/deploy/helm/oxibelt" \
+    --show-only "${template}" \
+    --set-string "workload.kind=${workload_kind}" \
+    --set-string "configRollout.mode=kubernetes_immutable" \
+    --set "config.create=false" \
+    --set-string "config.existingConfigMap=operator-managed-base" \
+    --set-string "config.existingConfigMapDigest=1111111111111111111111111111111111111111111111111111111111111111")" \
+    || return 1
+
+  grep -F 'oxibelt.dev/immutable-config-rollout: "true"' <<<"${rendered}" >/dev/null \
+    || return 1
+  if grep -F 'oxibelt.dev/config-revision:' <<<"${rendered}" >/dev/null \
+    || grep -F 'oxibelt.dev/config-digest:' <<<"${rendered}" >/dev/null; then
+    return 1
+  fi
 }
 
 health_endpoint_is_ready() {
@@ -238,6 +274,11 @@ gateway_api_manifest="${work_dir}/gateway-api-${gateway_api_version}.yaml"
 image_values="${work_dir}/image-values.yaml"
 printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
   "${image_repository}" "${image_tag}" >"${image_values}"
+
+external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
+  || die "external ConfigMap Deployment bootstrap must remain unassigned until controller reconciliation"
+external_base_bootstrap_is_unassigned DaemonSet templates/daemonset.yaml \
+  || die "external ConfigMap DaemonSet bootstrap must remain unassigned until controller reconciliation"
 
 cluster_created=1
 kind create cluster \
@@ -400,6 +441,55 @@ helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --set-string "configRollout.mode=kubernetes_immutable" \
   --set-string "configRollout.managedConfigPath=${managed_config_path}"
 
+# Prove the chart-owned bootstrap identity before the controller exists. The
+# default Gateway base config intentionally has no routes, so these Pods may
+# remain unready until the controller assigns generated configuration; that
+# fail-closed behavior must not be weakened by the rollout harness.
+bootstrap_deployment_json="$(kube -n "${namespace}" get deployment "${workload_name}" -o json)"
+bootstrap_revision="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-revision"] // empty' \
+  <<<"${bootstrap_deployment_json}")"
+bootstrap_digest="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-digest"] // empty' \
+  <<<"${bootstrap_deployment_json}")"
+[[ "${bootstrap_revision}" =~ ^oxibelt-config-[a-f0-9]{12}$ ]] \
+  || die "bootstrap workload did not identify the chart-owned immutable base ConfigMap"
+[[ "${bootstrap_digest}" == "${empty_config_digest}" ]] \
+  || die "bootstrap workload digest must prove the empty managed configuration placeholder"
+
+jq -e \
+  --arg revision "${bootstrap_revision}" \
+  --arg digest "${empty_config_digest}" \
+  --arg managed_path "${managed_config_path}" '
+  .spec.template.metadata.annotations["oxibelt.dev/config-revision"] == $revision
+  and .spec.template.metadata.annotations["oxibelt.dev/config-digest"] == $digest
+  and any(.spec.template.spec.volumes[]?;
+    .name == "config"
+      and .configMap.name == $revision
+      and .configMap.items == [
+        {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+        {"key": "gateway-config-directory", "path": "conf.d/.keep"},
+        {"key": "gateway-config-directory", "path": $managed_path}
+      ])
+  and any(.spec.template.spec.containers[]?;
+    .name == "oxibelt"
+      and any(.volumeMounts[]?;
+        .name == "config"
+          and .mountPath == "/etc/oxibelt/config"
+          and .readOnly == true
+          and (has("subPath") | not)))
+' >/dev/null <<<"${bootstrap_deployment_json}" \
+  || die "bootstrap workload must mount the direct immutable base ConfigMap and exact empty placeholder"
+
+bootstrap_config_map_json="$(kube -n "${namespace}" get configmap "${bootstrap_revision}" -o json)"
+jq -e --arg revision "${bootstrap_revision}" '
+  .metadata.name == $revision
+    and .immutable == true
+    and .data["gateway-config-directory"] == ""
+' >/dev/null <<<"${bootstrap_config_map_json}" \
+  || die "bootstrap ConfigMap must be immutable and contain the empty compatibility sentinel"
+
+wait_for "three bootstrap Pods with the base revision and empty digest" 60 \
+  bootstrap_pods_have_identity "${bootstrap_revision}" "${empty_config_digest}"
+
 helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   -f "${image_values}" \
@@ -460,19 +550,39 @@ jq -e '
 ' >/dev/null <<<"${deployment_json}" \
   || die "Admin identity and client-CA Secrets must be read-only projected certificate files"
 
-jq -e --arg revision "${revision}" --arg managed_path "${managed_config_path}" '
-  any(.spec.template.spec.volumes[]?;
-    .name == "gateway-config" and .configMap.name == $revision and .configMap.items == [
-      {"key": "gateway-api.generated.toml", "path": "gateway-api.generated.toml"}
-    ])
+jq -e \
+  --arg revision "${revision}" \
+  --arg bootstrap_revision "${bootstrap_revision}" \
+  --arg managed_path "${managed_config_path}" '
+  ([.spec.template.spec.volumes[]? | select(.name == "gateway-config")] | length) == 1
+  and any(.spec.template.spec.volumes[]?;
+    .name == "config"
+      and .configMap.name == $bootstrap_revision
+      and any(.configMap.items[]?;
+        .key == "gateway-config-directory" and .path == $managed_path))
+  and any(.spec.template.spec.volumes[]?;
+    .name == "gateway-config"
+      and (.projected.sources | length) == 2
+      and .projected.sources[0].configMap.name == $bootstrap_revision
+      and .projected.sources[0].configMap.items == [
+        {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+        {"key": "gateway-config-directory", "path": "conf.d/.keep"}
+      ]
+      and all(.projected.sources[0].configMap.items[]?; .path != $managed_path)
+      and .projected.sources[1].configMap.name == $revision
+      and .projected.sources[1].configMap.items == [
+        {"key": "gateway-api.generated.toml", "path": $managed_path}
+      ])
   and any(.spec.template.spec.containers[]?;
-    .name == "oxibelt" and any(.volumeMounts[]?;
-      .name == "gateway-config"
-        and .mountPath == ("/etc/oxibelt/config/" + $managed_path)
-        and .subPath == "gateway-api.generated.toml"
-        and .readOnly == true))
+    .name == "oxibelt"
+      and ([.volumeMounts[]? | select(.mountPath == "/etc/oxibelt/config")] | length) == 1
+      and any(.volumeMounts[]?;
+        .name == "gateway-config"
+          and .mountPath == "/etc/oxibelt/config"
+          and .readOnly == true
+          and (has("subPath") | not)))
 ' >/dev/null <<<"${deployment_json}" \
-  || die "workload does not mount exactly the controller-owned immutable config file"
+  || die "workload does not use the controller-owned projected immutable config root"
 
 config_map_json="$(kube -n "${namespace}" get configmap "${revision}" -o json)"
 jq -e --arg revision "${revision}" --arg digest "${digest}" --arg managed_path "${managed_config_path}" '

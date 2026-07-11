@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, bail};
@@ -7,6 +8,10 @@ use super::rollout::{
   ARTIFACT_DIGEST_ANNOTATION, CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact,
   IMMUTABLE_ROLLOUT_ANNOTATION, MANAGED_PATH_ANNOTATION, RolloutState, RolloutTarget, annotation,
 };
+
+#[path = "rollout_patch/volume.rs"]
+mod volume;
+use volume::patch_projected_volume;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WorkloadPatch {
@@ -20,11 +25,36 @@ pub struct BaseConfigReference {
   pub placeholder_key: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum BaseConfigLayoutKind {
+  Bootstrap,
+  Projected { volume_index: usize },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct BaseConfigLayout {
+  pub(super) reference: BaseConfigReference,
+  pub(super) kind: BaseConfigLayoutKind,
+  pub(super) container_index: usize,
+  pub(super) mount_index: usize,
+  pub(super) config_root: String,
+  pub(super) projected_source: Value,
+  pub(super) default_mode: Option<Value>,
+}
+
 pub fn base_config_reference(
   workload: &Value,
   target: &RolloutTarget,
   managed_path: &str,
 ) -> anyhow::Result<BaseConfigReference> {
+  Ok(base_config_layout(workload, target, managed_path)?.reference)
+}
+
+fn base_config_layout(
+  workload: &Value,
+  target: &RolloutTarget,
+  managed_path: &str,
+) -> anyhow::Result<BaseConfigLayout> {
   let container_index = target_container_index(workload, &target.container_name)?;
   let container = workload
     .pointer(&format!("/spec/template/spec/containers/{container_index}"))
@@ -45,65 +75,335 @@ pub fn base_config_reference(
     .and_then(Path::to_str)
     .filter(|path| path.starts_with('/'))
     .context("target --config path must have an absolute parent directory")?;
-  let mount = container
+  let mounts = container
     .get("volumeMounts")
     .and_then(Value::as_array)
-    .and_then(|mounts| {
-      mounts
-        .iter()
-        .find(|mount| mount.get("mountPath").and_then(Value::as_str) == Some(config_root))
-    })
+    .context("target --config root must be mounted from a read-only ConfigMap volume")?;
+  let root_mounts = mounts
+    .iter()
+    .enumerate()
+    .filter(|(_, mount)| mount.get("mountPath").and_then(Value::as_str) == Some(config_root))
+    .collect::<Vec<_>>();
+  if root_mounts.len() != 1 {
+    bail!("target --config root must have exactly one volume mount");
+  }
+  let (mount_index, mount) = root_mounts[0];
+  let mount = mount
+    .as_object()
     .context("target --config root must be mounted from a read-only ConfigMap volume")?;
   if mount.get("readOnly").and_then(Value::as_bool) != Some(true) {
     bail!("target base configuration mount must be read-only");
+  }
+  if mount.contains_key("subPath") || mount.contains_key("subPathExpr") {
+    bail!("target base configuration root mount must not use subPath or subPathExpr");
   }
   let volume_name = mount
     .get("name")
     .and_then(Value::as_str)
     .context("target base configuration mount has no volume name")?;
-  let config_map = workload
+  let volumes = workload
     .pointer("/spec/template/spec/volumes")
     .and_then(Value::as_array)
-    .and_then(|volumes| {
-      volumes
-        .iter()
-        .find(|volume| volume.get("name").and_then(Value::as_str) == Some(volume_name))
-    })
-    .and_then(|volume| volume.get("configMap"))
-    .context("target base configuration volume must be a ConfigMap")?;
+    .context("target workload spec.template.spec.volumes is required")?;
+  let matching_volumes = volumes
+    .iter()
+    .enumerate()
+    .filter(|(_, volume)| volume.get("name").and_then(Value::as_str) == Some(volume_name))
+    .collect::<Vec<_>>();
+  if matching_volumes.len() != 1 {
+    bail!("target base configuration mount must reference exactly one volume");
+  }
+  let (volume_index, volume) = matching_volumes[0];
+  if let Some(config_map) = volume.get("configMap") {
+    if volume_name == target.volume_name {
+      bail!(
+        "target workload volume `{}` collides with the reserved immutable rollout volume",
+        target.volume_name
+      );
+    }
+    validate_volume_shape(volume, &["name", "configMap"], "base ConfigMap volume")?;
+    let (reference, projected_source, default_mode) =
+      parse_base_config_map(config_map, config_file, managed_path, true, true)?;
+    return Ok(BaseConfigLayout {
+      reference,
+      kind: BaseConfigLayoutKind::Bootstrap,
+      container_index,
+      mount_index,
+      config_root: config_root.to_string(),
+      projected_source,
+      default_mode,
+    });
+  }
+
+  if volume_name != target.volume_name {
+    bail!("target base configuration volume must be a ConfigMap or controller-owned projection");
+  }
+  validate_volume_shape(
+    volume,
+    &["name", "projected"],
+    "immutable rollout projected volume",
+  )?;
+  let projected = volume
+    .get("projected")
+    .and_then(Value::as_object)
+    .context("immutable rollout projected volume definition must be an object")?;
+  validate_object_keys(
+    projected,
+    &["sources", "defaultMode"],
+    "immutable rollout projected volume",
+  )?;
+  let default_mode = projected
+    .get("defaultMode")
+    .map(|mode| validate_mode(mode, "immutable rollout projected defaultMode"))
+    .transpose()?
+    .cloned();
+  let sources = projected
+    .get("sources")
+    .and_then(Value::as_array)
+    .context("immutable rollout projected volume sources must be an array")?;
+  if sources.len() != 2 {
+    bail!("immutable rollout projected volume must contain exactly two ConfigMap sources");
+  }
+  let base_source = exact_config_map_source(&sources[0], "base")?;
+  let (reference, projected_source, source_default_mode) =
+    parse_base_config_map(base_source, config_file, managed_path, false, false)?;
+  if source_default_mode.is_some() {
+    bail!("projected base ConfigMap source must not define defaultMode");
+  }
+  validate_generated_source(
+    &sources[1],
+    managed_path,
+    RolloutState::from_workload(workload)
+      .desired_revision
+      .as_deref()
+      .context("projected immutable rollout volume has no recorded desired revision")?,
+  )?;
+  Ok(BaseConfigLayout {
+    reference,
+    kind: BaseConfigLayoutKind::Projected { volume_index },
+    container_index,
+    mount_index,
+    config_root: config_root.to_string(),
+    projected_source,
+    default_mode,
+  })
+}
+
+fn validate_volume_shape(
+  volume: &Value,
+  allowed: &[&str],
+  description: &str,
+) -> anyhow::Result<()> {
+  let object = volume
+    .as_object()
+    .with_context(|| format!("{description} must be an object"))?;
+  validate_object_keys(object, allowed, description)
+}
+
+fn validate_object_keys(
+  object: &Map<String, Value>,
+  allowed: &[&str],
+  description: &str,
+) -> anyhow::Result<()> {
+  if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+    bail!("{description} contains unsupported field `{key}`");
+  }
+  Ok(())
+}
+
+fn validate_mode<'a>(mode: &'a Value, description: &str) -> anyhow::Result<&'a Value> {
+  if mode.as_u64().is_none_or(|mode| mode > 0o777) {
+    bail!("{description} must be an integer between 0 and 0777");
+  }
+  Ok(mode)
+}
+
+fn exact_config_map_source<'a>(source: &'a Value, description: &str) -> anyhow::Result<&'a Value> {
+  let source = source
+    .as_object()
+    .with_context(|| format!("immutable rollout {description} source must be an object"))?;
+  validate_object_keys(
+    source,
+    &["configMap"],
+    &format!("immutable rollout {description} source"),
+  )?;
+  source
+    .get("configMap")
+    .with_context(|| format!("immutable rollout {description} source must be a ConfigMap"))
+}
+
+fn parse_base_config_map(
+  config_map: &Value,
+  config_file: &str,
+  managed_path: &str,
+  require_placeholder: bool,
+  allow_default_mode: bool,
+) -> anyhow::Result<(BaseConfigReference, Value, Option<Value>)> {
+  let config_map = config_map
+    .as_object()
+    .context("target base configuration ConfigMap reference must be an object")?;
+  let allowed = if allow_default_mode {
+    &["name", "items", "defaultMode", "optional"][..]
+  } else {
+    &["name", "items", "optional"][..]
+  };
+  validate_object_keys(
+    config_map,
+    allowed,
+    "target base configuration ConfigMap reference",
+  )?;
   let config_map_name = config_map
     .get("name")
     .and_then(Value::as_str)
+    .filter(|name| !name.is_empty())
     .context("target base configuration ConfigMap name is required")?;
-  let data_key = config_map
+  if config_map
+    .get("optional")
+    .is_some_and(|optional| !optional.is_boolean())
+  {
+    bail!("target base configuration ConfigMap optional field must be a boolean");
+  }
+  let default_mode = config_map
+    .get("defaultMode")
+    .map(|mode| validate_mode(mode, "target base configuration defaultMode"))
+    .transpose()?
+    .cloned();
+  let items = config_map
     .get("items")
     .and_then(Value::as_array)
-    .and_then(|items| {
-      items.iter().find_map(|item| {
-        (item.get("path").and_then(Value::as_str) == Some(config_file))
-          .then(|| item.get("key").and_then(Value::as_str))
-          .flatten()
-      })
-    })
-    .unwrap_or(config_file);
-  let placeholder_key = config_map
-    .get("items")
-    .and_then(Value::as_array)
-    .and_then(|items| {
-      items.iter().find_map(|item| {
-        (item.get("path").and_then(Value::as_str) == Some(managed_path))
-          .then(|| item.get("key").and_then(Value::as_str))
-          .flatten()
-      })
-    })
-    .context(
+    .context("target base configuration ConfigMap must use explicit item mappings")?;
+  let managed_directory = Path::new(managed_path)
+    .parent()
+    .and_then(Path::to_str)
+    .filter(|directory| !directory.is_empty() && *directory != ".")
+    .context("managed configuration must be below an existing configuration directory")?;
+  let directory_placeholder = format!("{managed_directory}/.keep");
+  let mut paths = HashSet::new();
+  let mut data_key = None;
+  let mut directory_key = None;
+  let mut placeholder_key = None;
+  let mut projected_items = Vec::with_capacity(items.len());
+
+  for item in items {
+    let object = item
+      .as_object()
+      .context("target base configuration ConfigMap item must be an object")?;
+    validate_object_keys(
+      object,
+      &["key", "path", "mode"],
+      "target base configuration ConfigMap item",
+    )?;
+    let key = object
+      .get("key")
+      .and_then(Value::as_str)
+      .filter(|key| !key.is_empty())
+      .context("target base configuration ConfigMap item key is required")?;
+    let path = object
+      .get("path")
+      .and_then(Value::as_str)
+      .filter(|path| !path.is_empty())
+      .context("target base configuration ConfigMap item path is required")?;
+    if !paths.insert(path.to_string()) {
+      bail!("target base configuration ConfigMap contains duplicate item path `{path}`");
+    }
+    if let Some(mode) = object.get("mode") {
+      validate_mode(mode, "target base configuration ConfigMap item mode")?;
+    }
+    if path == config_file {
+      data_key = Some(key.to_string());
+    }
+    if path == directory_placeholder {
+      directory_key = Some(key.to_string());
+    }
+    if path == managed_path {
+      placeholder_key = Some(key.to_string());
+      if require_placeholder {
+        continue;
+      }
+      bail!(
+        "projected base ConfigMap source must not override the controller-managed configuration path"
+      );
+    }
+    projected_items.push(item.clone());
+  }
+
+  let data_key = data_key.context(
+    "target base configuration ConfigMap must explicitly project the configured entry file",
+  )?;
+  let directory_key = directory_key.context(
+    "target base ConfigMap must project a .keep entry for the managed configuration directory",
+  )?;
+  let placeholder_key = if require_placeholder {
+    let placeholder_key = placeholder_key.context(
       "target base ConfigMap must project an empty placeholder at the managed configuration path",
     )?;
-  Ok(BaseConfigReference {
-    config_map_name: config_map_name.to_string(),
-    data_key: data_key.to_string(),
-    placeholder_key: placeholder_key.to_string(),
-  })
+    if placeholder_key != directory_key {
+      bail!(
+        "target base ConfigMap managed path and directory placeholders must use the same sentinel key"
+      );
+    }
+    placeholder_key
+  } else {
+    directory_key
+  };
+
+  let mut projected_source = config_map.clone();
+  projected_source.remove("defaultMode");
+  projected_source.insert("items".to_string(), Value::Array(projected_items));
+  Ok((
+    BaseConfigReference {
+      config_map_name: config_map_name.to_string(),
+      data_key,
+      placeholder_key,
+    },
+    Value::Object(projected_source),
+    default_mode,
+  ))
+}
+
+fn validate_generated_source(
+  source: &Value,
+  managed_path: &str,
+  expected_revision: &str,
+) -> anyhow::Result<()> {
+  let config_map = exact_config_map_source(source, "generated")?
+    .as_object()
+    .context("immutable rollout generated ConfigMap source must be an object")?;
+  validate_object_keys(
+    config_map,
+    &["name", "items"],
+    "immutable rollout generated ConfigMap source",
+  )?;
+  if config_map.get("name").and_then(Value::as_str) != Some(expected_revision) {
+    bail!(
+      "immutable rollout generated ConfigMap source is not owned by the recorded desired revision"
+    );
+  }
+  let data_key = Path::new(managed_path)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .context("managed configuration path must name a UTF-8 file")?;
+  let items = config_map
+    .get("items")
+    .and_then(Value::as_array)
+    .context("immutable rollout generated ConfigMap source items must be an array")?;
+  if items.len() != 1 {
+    bail!("immutable rollout generated ConfigMap source must contain exactly one item");
+  }
+  let item = items[0]
+    .as_object()
+    .context("immutable rollout generated ConfigMap source item must be an object")?;
+  validate_object_keys(
+    item,
+    &["key", "path"],
+    "immutable rollout generated ConfigMap source item",
+  )?;
+  if item.get("key").and_then(Value::as_str) != Some(data_key)
+    || item.get("path").and_then(Value::as_str) != Some(managed_path)
+  {
+    bail!("immutable rollout generated ConfigMap source item does not match the managed path");
+  }
+  Ok(())
 }
 
 pub fn validate_immutable_base_config(
@@ -165,8 +465,7 @@ pub fn build_workload_patch(
     .pointer("/metadata/resourceVersion")
     .and_then(Value::as_str)
     .context("target workload metadata.resourceVersion is required")?;
-  let container_index = target_container_index(workload, &target.container_name)?;
-  let mount_path = managed_mount_path(workload, container_index, &artifact.managed_path)?;
+  let layout = base_config_layout(workload, target, &artifact.managed_path)?;
   let prior_state = RolloutState::from_workload(workload);
   let mut operations = vec![json!({
     "op": "test",
@@ -197,14 +496,13 @@ pub fn build_workload_patch(
     "/spec/template/metadata",
     pod_annotations,
   )?;
-  patch_volume(&mut operations, workload, target, artifact, &prior_state)?;
-  patch_volume_mount(
+  patch_projected_volume(
     &mut operations,
     workload,
-    container_index,
     target,
     artifact,
-    &mount_path,
+    &prior_state,
+    &layout,
   )?;
   Ok(WorkloadPatch { operations })
 }
@@ -226,32 +524,6 @@ fn target_container_index(workload: &Value, name: &str) -> anyhow::Result<usize>
     .iter()
     .position(|container| container.get("name").and_then(Value::as_str) == Some(name))
     .with_context(|| format!("target container `{name}` was not found"))
-}
-
-fn managed_mount_path(
-  workload: &Value,
-  container_index: usize,
-  managed_path: &str,
-) -> anyhow::Result<String> {
-  let container = workload
-    .pointer(&format!("/spec/template/spec/containers/{container_index}"))
-    .context("target container disappeared while building rollout patch")?;
-  let empty_args = Vec::new();
-  let args = container
-    .get("args")
-    .and_then(Value::as_array)
-    .unwrap_or(&empty_args);
-  let config_path =
-    config_argument(args).context("target container must pass an absolute --config path")?;
-  let config_root = Path::new(config_path)
-    .parent()
-    .and_then(Path::to_str)
-    .filter(|path| path.starts_with('/'))
-    .context("target --config path must have an absolute parent directory")?;
-  Ok(format!(
-    "{}/{managed_path}",
-    config_root.trim_end_matches('/')
-  ))
 }
 
 fn config_argument(args: &[Value]) -> Option<&str> {
@@ -292,97 +564,6 @@ fn patch_annotations(
       "path": pointer,
       "value": Value::Object(annotations),
     })),
-  }
-  Ok(())
-}
-
-fn patch_volume(
-  operations: &mut Vec<Value>,
-  workload: &Value,
-  target: &RolloutTarget,
-  artifact: &ConfigArtifact,
-  prior_state: &RolloutState,
-) -> anyhow::Result<()> {
-  let path = "/spec/template/spec/volumes";
-  let desired = json!({
-    "name": target.volume_name,
-    "configMap": {
-      "name": artifact.name,
-      "items": [{ "key": artifact.data_key, "path": artifact.data_key }],
-    },
-  });
-  match workload.pointer(path) {
-    Some(Value::Array(volumes)) => {
-      if let Some(index) = volumes.iter().position(|volume| {
-        volume.get("name").and_then(Value::as_str) == Some(target.volume_name.as_str())
-      }) {
-        if volumes[index].get("configMap").is_none() {
-          bail!(
-            "target workload volume `{}` is not controller-owned ConfigMap volume",
-            target.volume_name
-          );
-        }
-        if volumes[index]
-          .pointer("/configMap/name")
-          .and_then(Value::as_str)
-          != prior_state.desired_revision.as_deref()
-        {
-          bail!(
-            "target workload volume `{}` is not owned by the recorded immutable rollout revision",
-            target.volume_name
-          );
-        }
-        operations.push(json!({
-          "op": "replace",
-          "path": format!("{path}/{index}/configMap"),
-          "value": desired["configMap"].clone(),
-        }));
-      } else {
-        operations.push(json!({ "op": "add", "path": format!("{path}/-"), "value": desired }));
-      }
-    }
-    Some(_) => bail!("target workload {path} must be an array when present"),
-    None => operations.push(json!({ "op": "add", "path": path, "value": [desired] })),
-  }
-  Ok(())
-}
-
-fn patch_volume_mount(
-  operations: &mut Vec<Value>,
-  workload: &Value,
-  container_index: usize,
-  target: &RolloutTarget,
-  artifact: &ConfigArtifact,
-  mount_path: &str,
-) -> anyhow::Result<()> {
-  let path = format!("/spec/template/spec/containers/{container_index}/volumeMounts");
-  let desired = json!({
-    "name": target.volume_name,
-    "mountPath": mount_path,
-    "subPath": artifact.data_key,
-    "readOnly": true,
-  });
-  match workload.pointer(&path) {
-    Some(Value::Array(mounts)) => {
-      if let Some(index) = mounts.iter().position(|mount| {
-        mount.get("name").and_then(Value::as_str) == Some(target.volume_name.as_str())
-      }) {
-        if mounts[index].get("mountPath").and_then(Value::as_str) != Some(mount_path)
-          || mounts[index].get("subPath").and_then(Value::as_str)
-            != Some(artifact.data_key.as_str())
-          || mounts[index].get("readOnly").and_then(Value::as_bool) != Some(true)
-        {
-          bail!(
-            "target workload volume mount `{}` conflicts with immutable rollout mount",
-            target.volume_name
-          );
-        }
-      } else {
-        operations.push(json!({ "op": "add", "path": format!("{path}/-"), "value": desired }));
-      }
-    }
-    Some(_) => bail!("target workload {path} must be an array when present"),
-    None => operations.push(json!({ "op": "add", "path": path, "value": [desired] })),
   }
   Ok(())
 }
