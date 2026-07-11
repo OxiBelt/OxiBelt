@@ -1,7 +1,8 @@
 //! Bounded execution and deferred cleanup for shared-state backends.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
@@ -12,6 +13,46 @@ use crate::config::SharedStateBackendConfig;
 use crate::metrics::Metrics;
 
 use super::Backend;
+
+const SHARED_POOL_WARNING_INTERVAL_MS: u64 = 60_000;
+
+#[derive(Debug, Default)]
+pub(super) struct SharedPoolWarningLimiter {
+  next_warning_ms: AtomicU64,
+}
+
+impl SharedPoolWarningLimiter {
+  pub(super) fn should_emit(&self) -> bool {
+    self.should_emit_at(monotonic_millis())
+  }
+
+  fn should_emit_at(&self, now_ms: u64) -> bool {
+    let mut next_warning_ms = self.next_warning_ms.load(Ordering::Relaxed);
+    loop {
+      if now_ms < next_warning_ms || next_warning_ms == u64::MAX {
+        return false;
+      }
+      match self.next_warning_ms.compare_exchange_weak(
+        next_warning_ms,
+        now_ms.saturating_add(SHARED_POOL_WARNING_INTERVAL_MS),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      ) {
+        Ok(_) => return true,
+        Err(current) => next_warning_ms = current,
+      }
+    }
+  }
+}
+
+fn monotonic_millis() -> u64 {
+  static START: OnceLock<Instant> = OnceLock::new();
+  START
+    .get_or_init(Instant::now)
+    .elapsed()
+    .as_millis()
+    .min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct BackendRuntime {
@@ -217,6 +258,7 @@ enum CleanupRequest {
     key: String,
     delta: i64,
     ttl: Option<Duration>,
+    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
   },
 }
 
@@ -257,12 +299,14 @@ impl CleanupDispatcher {
     key: String,
     delta: i64,
     ttl: Option<Duration>,
+    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
   ) {
     self.try_send(CleanupRequest::CounterAdd {
       backend,
       key,
       delta,
       ttl,
+      pool_warning_limiter,
     });
   }
 
@@ -284,23 +328,31 @@ impl CleanupDispatcher {
 
 async fn cleanup_worker(mut receiver: mpsc::Receiver<CleanupRequest>) {
   while let Some(request) = receiver.recv().await {
-    let result = match request {
+    let (result, pool_warning_limiter) = match request {
       CleanupRequest::ConnectionRelease { backend, keys } => {
-        backend.connection_release(&keys).await
+        (backend.connection_release(&keys).await, None)
       }
       CleanupRequest::Unlock {
         backend,
         key,
         token,
-      } => backend.unlock(&key, &token).await,
+      } => (backend.unlock(&key, &token).await, None),
       CleanupRequest::CounterAdd {
         backend,
         key,
         delta,
         ttl,
-      } => backend.counter_add(&key, delta, ttl).await.map(|_| ()),
+        pool_warning_limiter,
+      } => (
+        backend.counter_add(&key, delta, ttl).await.map(|_| ()),
+        Some(pool_warning_limiter),
+      ),
     };
-    if let Err(error) = result {
+    if let Err(error) = result
+      && pool_warning_limiter
+        .as_ref()
+        .is_none_or(|limiter| limiter.should_emit())
+    {
       warn!(error = %error, "failed to run deferred shared-state cleanup");
     }
   }
@@ -308,12 +360,12 @@ async fn cleanup_worker(mut receiver: mpsc::Receiver<CleanupRequest>) {
 
 #[cfg(test)]
 mod tests {
-  use std::sync::Arc;
+  use std::sync::{Arc, Barrier};
   use std::time::Duration;
 
   use tokio::sync::oneshot;
 
-  use super::BackendRuntime;
+  use super::{BackendRuntime, SHARED_POOL_WARNING_INTERVAL_MS, SharedPoolWarningLimiter};
   use crate::cache::CacheStats;
   use crate::config::MetricsConfig;
   use crate::metrics::Metrics;
@@ -328,6 +380,48 @@ mod tests {
       semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
       metrics,
     })
+  }
+
+  #[test]
+  fn shared_pool_warning_limiter_reopens_only_after_interval() {
+    let limiter = SharedPoolWarningLimiter::default();
+
+    assert!(limiter.should_emit_at(0));
+    assert!(!limiter.should_emit_at(0));
+    assert!(!limiter.should_emit_at(SHARED_POOL_WARNING_INTERVAL_MS - 1));
+    assert!(limiter.should_emit_at(SHARED_POOL_WARNING_INTERVAL_MS));
+    assert!(!limiter.should_emit_at(SHARED_POOL_WARNING_INTERVAL_MS - 1));
+    assert!(!limiter.should_emit_at(2 * SHARED_POOL_WARNING_INTERVAL_MS - 1));
+    assert!(limiter.should_emit_at(2 * SHARED_POOL_WARNING_INTERVAL_MS));
+  }
+
+  #[test]
+  fn shared_pool_warning_limiter_admits_one_concurrent_failure() {
+    const WORKERS: usize = 16;
+    let limiter = Arc::new(SharedPoolWarningLimiter::default());
+    let barrier = Arc::new(Barrier::new(WORKERS + 1));
+    let workers = (0..WORKERS)
+      .map(|_| {
+        let limiter = limiter.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+          barrier.wait();
+          limiter.should_emit_at(0)
+        })
+      })
+      .collect::<Vec<_>>();
+
+    barrier.wait();
+    let admitted = workers
+      .into_iter()
+      .map(|worker| {
+        worker
+          .join()
+          .expect("warning limiter worker should not panic")
+      })
+      .filter(|admitted| *admitted)
+      .count();
+    assert_eq!(admitted, 1);
   }
 
   #[tokio::test]

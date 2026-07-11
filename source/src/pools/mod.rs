@@ -539,34 +539,6 @@ impl PoolState {
     }
   }
 
-  async fn report_shared_health_async(&self, upstream_name: &str, success: bool) {
-    let Some(shared) = &self.shared_state else {
-      return;
-    };
-    let Some((pool, server)) = self.find_pool_server(upstream_name) else {
-      return;
-    };
-    match shared
-      .pool_report(
-        upstream_name,
-        success,
-        pool.config.health_check.enabled,
-        pool.config.health_check.healthy_threshold,
-        pool.config.health_check.unhealthy_threshold,
-      )
-      .await
-    {
-      Ok(Some(healthy)) => {
-        set_server_health(&server, healthy, now_millis());
-        self.publish_server_count_metrics();
-      }
-      Ok(None) => {}
-      Err(error) => {
-        tracing::warn!(error = %error, upstream = %upstream_name, "failed to report shared upstream health");
-      }
-    }
-  }
-
   fn find_pool_server(
     &self,
     upstream_name: &str,

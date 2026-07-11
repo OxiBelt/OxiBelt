@@ -9,7 +9,7 @@ use crate::config::{
   UpstreamPoolSlowStartConfig,
 };
 
-fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
+pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
   UpstreamPoolConfig {
     name: "app-pool".to_string(),
     algorithm,

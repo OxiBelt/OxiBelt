@@ -256,9 +256,13 @@ impl AppSnapshot {
     let bootstrap_control_http =
       ControlHttpClient::new_with_crypto(&config.proxy.trusted_ca_certs, &config.crypto)
         .context("failed to build revocation bootstrap HTTP client")?;
-    let shared_state = SharedState::new(&config, metrics.clone())
-      .await
-      .context("failed to build shared state")?;
+    let shared_state = SharedState::new_with_previous(
+      &config,
+      metrics.clone(),
+      previous.and_then(|snapshot| snapshot.shared_state.as_deref()),
+    )
+    .await
+    .context("failed to build shared state")?;
     if previous.is_none()
       && let Some(temp_dir) = config.proxy.buffering.temp_dir.as_deref()
     {
@@ -272,7 +276,7 @@ impl AppSnapshot {
       Some(metrics.clone()),
     )
     .await;
-    publish_upstream_pool_server_metrics(&pools);
+    pools.publish_server_count_metrics();
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let external_cache = ExternalCacheRuntime::new(&config, metrics.clone())
@@ -563,7 +567,7 @@ impl AppSnapshot {
       Some(metrics.clone()),
     )
     .await;
-    publish_upstream_pool_server_metrics(&pools);
+    pools.publish_server_count_metrics();
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_values = build_alt_svc_header_values(&config)
@@ -683,10 +687,6 @@ fn effective_direct_h1_io_for_backend(
     return RuntimeDirectH1IoMode::TokioHyper;
   }
   RuntimeDirectH1IoMode::Compio
-}
-
-fn publish_upstream_pool_server_metrics(pools: &Arc<PoolState>) {
-  pools.publish_server_count_metrics();
 }
 
 fn build_upstream_uri_parts(

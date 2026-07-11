@@ -1,0 +1,65 @@
+//! Test-only shared-state backends for focused runtime validation.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use url::Url;
+
+use super::runtime::{BackendRuntime, CleanupDispatcher};
+use super::{Backend, MemoryBackend, RedisBackend, SharedState};
+use crate::config::{SharedStateBackendConfig, SharedStateBackendKind};
+use crate::metrics::Metrics;
+
+impl SharedState {
+  pub fn test_memory(namespace: &str) -> Arc<Self> {
+    let backend = Arc::new(Backend::Memory(MemoryBackend::default()));
+    Arc::new(Self {
+      namespace: Arc::from(namespace),
+      instance_id: Arc::from("test-instance"),
+      connection_lease: Duration::from_secs(30),
+      cache_lock: Duration::from_secs(5),
+      cache_chunk_bytes: 1_048_576,
+      rate_limits: Some(backend.clone()),
+      connection_limits: Some(backend.clone()),
+      person_proof: Some(backend.clone()),
+      upstream_health: Some(backend.clone()),
+      pool_warning_limiter: Arc::default(),
+      sticky_sessions: Some(backend.clone()),
+      cache: Some(backend.clone()),
+      reload: Some(backend),
+      cleanup: CleanupDispatcher::new(),
+    })
+  }
+
+  pub(crate) fn test_redis(namespace: &str, url: &str, metrics: Arc<Metrics>) -> Arc<Self> {
+    let config = SharedStateBackendConfig {
+      name: "pool-warning-test".to_string(),
+      kind: SharedStateBackendKind::Redis,
+      connection_url: Some(url.to_string()),
+      connection_url_env: None,
+      max_connections: 64,
+      connect_timeout_ms: 100,
+      tls: Default::default(),
+    };
+    let backend = Arc::new(Backend::Redis(RedisBackend {
+      url: Url::parse(url).expect("test Redis URL should parse"),
+      runtime: BackendRuntime::new(&config, "redis", Duration::from_millis(250), metrics),
+    }));
+    Arc::new(Self {
+      namespace: Arc::from(namespace),
+      instance_id: Arc::from("test-instance"),
+      connection_lease: Duration::from_secs(30),
+      cache_lock: Duration::from_secs(5),
+      cache_chunk_bytes: 1_048_576,
+      rate_limits: None,
+      connection_limits: None,
+      person_proof: None,
+      upstream_health: Some(backend),
+      pool_warning_limiter: Arc::default(),
+      sticky_sessions: None,
+      cache: None,
+      reload: None,
+      cleanup: CleanupDispatcher::new(),
+    })
+  }
+}

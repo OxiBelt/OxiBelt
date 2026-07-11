@@ -29,9 +29,11 @@ mod rate_limits;
 mod redis_protocol;
 mod runtime;
 mod sticky_sessions;
+#[cfg(test)]
+mod test_support;
 
 use redis_protocol::{Resp, expect_ok, read_resp, write_resp_command};
-use runtime::{BackendRuntime, CleanupDispatcher};
+use runtime::{BackendRuntime, CleanupDispatcher, SharedPoolWarningLimiter};
 
 pub use cache_store::{SharedCacheLock, shared_header_values};
 pub use person_proof::{
@@ -49,6 +51,7 @@ pub struct SharedState {
   connection_limits: Option<Arc<Backend>>,
   person_proof: Option<Arc<Backend>>,
   upstream_health: Option<Arc<Backend>>,
+  pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
   sticky_sessions: Option<Arc<Backend>>,
   cache: Option<Arc<Backend>>,
   reload: Option<Arc<Backend>>,
@@ -174,6 +177,14 @@ impl Default for HealthRecord {
 
 impl SharedState {
   pub async fn new(config: &Config, metrics: Arc<Metrics>) -> anyhow::Result<Option<Arc<Self>>> {
+    Self::new_with_previous(config, metrics, None).await
+  }
+
+  pub(crate) async fn new_with_previous(
+    config: &Config,
+    metrics: Arc<Metrics>,
+    previous: Option<&SharedState>,
+  ) -> anyhow::Result<Option<Arc<Self>>> {
     let shared = &config.shared_state;
     if !shared.enabled {
       return Ok(None);
@@ -212,6 +223,7 @@ impl SharedState {
       connection_limits: pick(&shared.connection_limits_backend),
       person_proof: pick(&shared.person_proof_backend),
       upstream_health: pick(&shared.upstream_health_backend),
+      pool_warning_limiter: Self::inherited_pool_warning_limiter(previous),
       sticky_sessions: pick(&shared.sticky_sessions_backend),
       cache: pick(&shared.cache_backend),
       reload: pick(&shared.reload_backend),
@@ -221,24 +233,12 @@ impl SharedState {
     Ok(Some(state))
   }
 
-  #[cfg(test)]
-  pub fn test_memory(namespace: &str) -> Arc<Self> {
-    let backend = Arc::new(Backend::Memory(MemoryBackend::default()));
-    Arc::new(Self {
-      namespace: Arc::from(namespace),
-      instance_id: Arc::from("test-instance"),
-      connection_lease: Duration::from_secs(30),
-      cache_lock: Duration::from_secs(5),
-      cache_chunk_bytes: 1_048_576,
-      rate_limits: Some(backend.clone()),
-      connection_limits: Some(backend.clone()),
-      person_proof: Some(backend.clone()),
-      upstream_health: Some(backend.clone()),
-      sticky_sessions: Some(backend.clone()),
-      cache: Some(backend.clone()),
-      reload: Some(backend),
-      cleanup: CleanupDispatcher::new(),
-    })
+  fn inherited_pool_warning_limiter(
+    previous: Option<&SharedState>,
+  ) -> Arc<SharedPoolWarningLimiter> {
+    previous
+      .map(|state| state.pool_warning_limiter.clone())
+      .unwrap_or_default()
   }
 
   #[cfg(test)]
@@ -349,6 +349,10 @@ impl SharedState {
     Ok(backend.health_get(&key).await?.map(|record| record.healthy))
   }
 
+  pub(crate) fn should_log_pool_warning(&self) -> bool {
+    self.pool_warning_limiter.should_emit()
+  }
+
   pub async fn pool_report(
     &self,
     upstream_name: &str,
@@ -433,6 +437,7 @@ impl SharedState {
       self.key(&format!("pool:active:{upstream_name}")),
       delta,
       Some(self.connection_lease),
+      self.pool_warning_limiter.clone(),
     );
   }
 

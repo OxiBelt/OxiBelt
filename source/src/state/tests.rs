@@ -183,6 +183,42 @@ propagate_trace_context = false
   assert!(initial.telemetry.enabled());
 }
 
+#[tokio::test]
+async fn shared_state_reload_preserves_pool_warning_limiter() {
+  let temp_dir = common::TempDir::new("shared-pool-warning-reload");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-pool-warning-reload");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[shared_state]
+enabled = true
+namespace = "warning-reload-test"
+operation_timeout_ms = 50
+upstream_health_backend = "pool-warning-test"
+
+[[shared_state.backends]]
+name = "pool-warning-test"
+kind = "redis"
+connection_url = "redis://127.0.0.1:0/"
+max_connections = 4
+connect_timeout_ms = 50
+"#;
+
+  let config = parse_config(&raw);
+  let initial = SharedState::new(&config, Metrics::new())
+    .await
+    .expect("initial shared state should initialize")
+    .expect("shared state should be enabled");
+  assert!(initial.should_log_pool_warning());
+
+  let reloaded = SharedState::new_with_previous(&config, Metrics::new(), Some(initial.as_ref()))
+    .await
+    .expect("reloaded shared state should initialize")
+    .expect("reloaded shared state should stay enabled");
+  assert!(!reloaded.should_log_pool_warning());
+}
+
 #[test]
 fn upstream_client_pools_returns_precomputed_index_by_name() {
   let mut by_upstream = HashMap::new();
