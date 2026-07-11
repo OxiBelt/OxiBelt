@@ -54,6 +54,7 @@ spec:
       - name: oxibelt
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["/usr/local/bin/oxibelt"]
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"

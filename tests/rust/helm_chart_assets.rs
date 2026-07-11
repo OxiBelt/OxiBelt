@@ -156,6 +156,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "OXIBELT_INSTANCE_ID",
     "oxibelt.dev/immutable-config-rollout",
     "gateway-config-directory",
+    "command: [\"/usr/local/bin/oxibelt\"]",
     "oxibelt.validateAdmin",
   ] {
     assert!(
@@ -193,6 +194,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "checksum/oxibelt-config",
     "OXIBELT_CONFIG_ROLLOUT_MODE",
     "gateway-config-directory",
+    "command: [\"/usr/local/bin/oxibelt\"]",
     "oxibelt.validateAdmin",
     "projected:",
     "defaultMode: 288",

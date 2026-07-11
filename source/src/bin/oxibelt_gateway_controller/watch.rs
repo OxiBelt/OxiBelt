@@ -146,7 +146,9 @@ impl KubernetesPoller {
     if !response.status.is_success() {
       bail!("Kubernetes API {path} returned {}", response.status);
     }
-    parse_list(response.body)
+    parse_list(response.body).map_err(|error| {
+      anyhow::anyhow!("failed to parse Kubernetes API list from {path}: {error:#}")
+    })
   }
 
   pub async fn apply_status_patches(&self, patches: &[status::StatusPatch]) -> anyhow::Result<()> {
@@ -344,20 +346,38 @@ mod tests {
     assert_eq!(gateway_classes[0].kind, "GatewayClass");
     assert_eq!(gateway_classes[0].name(), "oxibelt");
 
+    let namespaces = parse_list(Bytes::from_static(
+      br#"{
+        "apiVersion": "v1",
+        "kind": "NamespaceList",
+        "metadata": {"resourceVersion": "2"},
+        "items": [{
+          "metadata": {"name": "default"},
+          "spec": {"finalizers": ["kubernetes"]},
+          "status": {"phase": "Active"}
+        }]
+      }"#,
+    ))
+    .expect("NamespaceList should supply omitted item TypeMeta");
+    assert_eq!(namespaces.len(), 1);
+    assert_eq!(namespaces[0].api_version, "v1");
+    assert_eq!(namespaces[0].kind, "Namespace");
+    assert_eq!(namespaces[0].name(), "default");
+
     let services = parse_list(Bytes::from_static(
       br#"{
         "apiVersion": "v1",
         "kind": "ServiceList",
-        "metadata": {"resourceVersion": "2"},
+        "metadata": {"resourceVersion": "3"},
         "items": [{
-          "apiVersion": "v1",
-          "kind": "Service",
-          "metadata": {"name": "backend", "namespace": "default"}
+          "metadata": {"name": "backend", "namespace": "default"},
+          "spec": {"ports": [{"port": 8080}]}
         }]
       }"#,
     ))
-    .expect("ServiceList should parse");
+    .expect("ServiceList should supply omitted item TypeMeta");
     assert_eq!(services.len(), 1);
+    assert_eq!(services[0].api_version, "v1");
     assert_eq!(services[0].kind, "Service");
     assert_eq!(services[0].name(), "backend");
 
@@ -378,6 +398,38 @@ mod tests {
   }
 
   #[test]
+  fn parse_list_rejects_conflicting_typed_item_metadata() {
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{
+          "apiVersion": "v1",
+          "kind": "ServiceList",
+          "items": [{
+            "apiVersion": "apps/v1",
+            "kind": "Service",
+            "metadata": {"name": "backend"}
+          }]
+        }"#,
+      ))
+      .is_err()
+    );
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{
+          "apiVersion": "v1",
+          "kind": "ServiceList",
+          "items": [{
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": "backend"}
+          }]
+        }"#,
+      ))
+      .is_err()
+    );
+  }
+
+  #[test]
   fn parse_list_rejects_malformed_list_envelopes() {
     assert!(
       parse_list(Bytes::from_static(
@@ -388,6 +440,18 @@ mod tests {
     assert!(
       parse_list(Bytes::from_static(
         br#"{"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":{}}"#
+      ))
+      .is_err()
+    );
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{"kind":"ServiceList","metadata":{},"items":[]}"#
+      ))
+      .is_err()
+    );
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{"apiVersion":"v1","kind":"List","items":[{"metadata":{"name":"missing-type-meta"}}]}"#
       ))
       .is_err()
     );

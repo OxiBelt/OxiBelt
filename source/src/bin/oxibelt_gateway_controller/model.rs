@@ -49,18 +49,33 @@ impl KubernetesObject {
     if value.is_null() {
       return Ok(Vec::new());
     }
-    let is_list = value
+    let list_kind = value
       .get("kind")
       .and_then(Value::as_str)
-      .is_some_and(|kind| {
-        kind == "List"
+      .filter(|kind| {
+        *kind == "List"
           || (kind.ends_with("List")
             && value
               .pointer("/metadata/name")
               .and_then(Value::as_str)
               .is_none_or(str::is_empty))
-      });
-    if is_list {
+      })
+      .map(str::to_owned);
+    if let Some(list_kind) = list_kind {
+      let typed_item = if list_kind == "List" {
+        None
+      } else {
+        let api_version = value
+          .get("apiVersion")
+          .and_then(Value::as_str)
+          .filter(|api_version| !api_version.is_empty())
+          .context("Kubernetes typed list object must set a non-empty apiVersion")?;
+        let item_kind = list_kind
+          .strip_suffix("List")
+          .filter(|item_kind| !item_kind.is_empty())
+          .context("Kubernetes typed list object must identify an item kind")?;
+        Some((api_version.to_owned(), item_kind.to_owned()))
+      };
       let items = match value {
         Value::Object(mut object) => match object.remove("items") {
           Some(Value::Array(items)) => items,
@@ -69,7 +84,14 @@ impl KubernetesObject {
         _ => bail!("Kubernetes list object must contain an items array"),
       };
       let mut objects = Vec::with_capacity(items.len());
-      for item in items {
+      for mut item in items {
+        if let Some((api_version, item_kind)) = &typed_item {
+          let Value::Object(item) = &mut item else {
+            bail!("Kubernetes typed list items must be objects");
+          };
+          inherit_typed_list_field(item, "apiVersion", api_version)?;
+          inherit_typed_list_field(item, "kind", item_kind)?;
+        }
         objects.extend(Self::from_value(item)?);
       }
       return Ok(objects);
@@ -81,6 +103,21 @@ impl KubernetesObject {
     }
     Ok(vec![object])
   }
+}
+
+fn inherit_typed_list_field(
+  item: &mut serde_json::Map<String, Value>,
+  field: &str,
+  expected: &str,
+) -> anyhow::Result<()> {
+  match item.get(field) {
+    None => {
+      item.insert(field.to_owned(), Value::String(expected.to_owned()));
+    }
+    Some(Value::String(value)) if value == expected => {}
+    Some(_) => bail!("Kubernetes typed list item {field} must match its list envelope"),
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
