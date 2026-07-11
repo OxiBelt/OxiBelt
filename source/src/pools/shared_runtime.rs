@@ -142,7 +142,7 @@ impl PoolState {
         }
       }
       match active {
-        Ok(Some(active)) => server.active.store(active, Ordering::Relaxed),
+        Ok(Some(active)) => server.shared_active.store(active, Ordering::Relaxed),
         Ok(None) => {}
         Err(error) => {
           tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to refresh shared upstream active count");

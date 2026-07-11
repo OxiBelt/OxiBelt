@@ -279,8 +279,8 @@ fn weighted_least_conn_normalizes_active_count_by_weight() {
   let state = PoolState::new(&[pool], None);
   let runtime = app_pool_runtime(&state);
 
-  runtime.servers[0].active.store(1, Ordering::Relaxed);
-  runtime.servers[1].active.store(1, Ordering::Relaxed);
+  runtime.servers[0].local_active.store(1, Ordering::Relaxed);
+  runtime.servers[1].local_active.store(1, Ordering::Relaxed);
 
   assert!(
     normalized_active_score(runtime, 0, &runtime.servers[0])
@@ -699,4 +699,45 @@ async fn shared_state_coordinates_pool_active_counts_and_health() {
     .await
     .unwrap();
   assert_ne!(after_failure.upstream_name, first_upstream);
+}
+
+#[tokio::test]
+async fn shared_pool_refresh_preserves_local_active_guard_count() {
+  let shared = SharedState::test_memory("pool-active-race");
+  let mut pool = test_pool(LoadBalancingAlgorithm::WeightedLeastConn);
+  pool.servers[0].max_conns = 1;
+  pool.servers[1].max_conns = 1;
+  let state =
+    PoolState::new_with_previous_and_metrics_async(&[pool], Some(shared.clone()), None, None).await;
+
+  let first = state
+    .select_with_cookie_header_async("app-pool", "203.0.113.10".parse().unwrap(), "/", None, None)
+    .await
+    .unwrap();
+  let first_upstream = first.upstream_name.clone();
+  shared.pool_active_add(&first_upstream, -1).await.unwrap();
+
+  let excluded = vec![first_upstream.clone()];
+  let second = state
+    .select_with_cookie_header_excluding_async(
+      "app-pool",
+      "203.0.113.10".parse().unwrap(),
+      "/",
+      None,
+      None,
+      &excluded,
+    )
+    .await
+    .unwrap();
+
+  assert_eq!(
+    snapshot_server(&state.snapshot("app-pool").unwrap(), &first_upstream).active,
+    1
+  );
+  drop(first);
+  assert_eq!(
+    snapshot_server(&state.snapshot("app-pool").unwrap(), &first_upstream).active,
+    0
+  );
+  drop(second);
 }

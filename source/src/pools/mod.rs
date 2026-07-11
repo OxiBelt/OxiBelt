@@ -56,7 +56,8 @@ struct PoolRuntime {
 struct PoolServerRuntime {
   server_id: String,
   upstream_name: String,
-  active: AtomicUsize,
+  local_active: AtomicUsize,
+  shared_active: AtomicUsize,
   healthy: AtomicBool,
   consecutive_successes: AtomicU32,
   consecutive_failures: AtomicU32,
@@ -90,7 +91,8 @@ impl PoolServerRuntime {
     Self {
       upstream_name: synthetic_upstream_name_for_id(pool_name, server_id),
       server_id: server_id.to_string(),
-      active: AtomicUsize::new(0),
+      local_active: AtomicUsize::new(0),
+      shared_active: AtomicUsize::new(0),
       healthy: AtomicBool::new(
         previous
           .map(|previous| previous.healthy.load(Ordering::Relaxed))
@@ -173,7 +175,7 @@ pub struct PoolServerRuntimeSnapshot {
 
 impl Drop for PoolSelection {
   fn drop(&mut self) {
-    self.server.active.fetch_sub(1, Ordering::Relaxed);
+    self.server.local_active.fetch_sub(1, Ordering::Relaxed);
     if let Some(shared) = &self.shared_state {
       shared.defer_pool_active_add(&self.upstream_name, -1);
     }
@@ -585,7 +587,7 @@ impl PoolState {
     server: Arc<PoolServerRuntime>,
     sticky_cookie: Option<HeaderValue>,
   ) -> PoolSelection {
-    server.active.fetch_add(1, Ordering::Relaxed);
+    server.local_active.fetch_add(1, Ordering::Relaxed);
     PoolSelection {
       pool_name: pool_name.to_string(),
       upstream_name: server.upstream_name.clone(),
@@ -659,10 +661,9 @@ fn server_capacity_available(
   let max_conns = pool.config.servers[index].max_conns;
   max_conns == 0 || active_count(pool, server) < max_conns
 }
-
-fn active_count(pool: &PoolRuntime, server: &PoolServerRuntime) -> usize {
-  let _ = pool;
-  server.active.load(Ordering::Relaxed)
+fn active_count(_pool: &PoolRuntime, server: &PoolServerRuntime) -> usize {
+  let local_active = server.local_active.load(Ordering::Relaxed);
+  local_active.max(server.shared_active.load(Ordering::Relaxed))
 }
 
 fn server_config(pool: &PoolRuntime, index: usize) -> &UpstreamPoolServerConfig {
