@@ -8,8 +8,8 @@ use http::{HeaderMap, Method, Request, Response, Uri, Version};
 
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::waf::{
-  WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata, WafTransportMetadataInput,
-  WafTransportNetwork, WafUpstreamError,
+  PersonProofRequestSnapshot, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, WafUpstreamError,
 };
 
 use super::body::ProxyBody;
@@ -43,6 +43,7 @@ pub(crate) struct SystemAccessLogContext<'a> {
   pub(super) transport_network: WafTransportNetwork,
   pub(super) transport_metadata: WafTransportMetadataInput<'a>,
   pub(super) tags: Option<HashMap<String, String>>,
+  person_proof: Option<PersonProofRequestSnapshot>,
   pub(super) dynamic_policy: DynamicPolicyContext,
   pub(super) upstream_name: String,
   pub(super) upstream_pool: Option<String>,
@@ -94,6 +95,7 @@ impl<'a> SystemAccessLogContext<'a> {
       transport_network,
       transport_metadata,
       tags: None,
+      person_proof: None,
       dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
       upstream_pool: None,
@@ -147,6 +149,17 @@ impl<'a> SystemAccessLogContext<'a> {
       return;
     }
     self.tags = tags.clone();
+  }
+
+  pub(super) fn set_person_proof_snapshot(
+    &mut self,
+    person_proof: Option<&PersonProofRequestSnapshot>,
+  ) {
+    self.person_proof = person_proof.cloned();
+  }
+
+  pub(super) fn person_proof_snapshot(&self) -> Option<&PersonProofRequestSnapshot> {
+    self.person_proof.as_ref()
   }
 
   pub(super) fn set_upstream(&mut self, upstream_name: &str, upstream_scheme: &str) {

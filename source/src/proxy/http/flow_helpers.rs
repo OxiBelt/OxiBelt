@@ -59,7 +59,7 @@ pub(super) fn record_route_cache_fill_stage(
   );
 }
 
-pub(super) fn emit_system_access_log(
+pub(super) async fn emit_system_access_log(
   state: &AppSnapshot,
   context: &mut SystemAccessLogContext<'_>,
   response: &Response<ProxyBody>,
@@ -67,7 +67,11 @@ pub(super) fn emit_system_access_log(
   if !state.request_path_features.system_access_log {
     return;
   }
+  let person_proof = context.person_proof_snapshot().cloned();
   if let Some(input) = context.response_input(response) {
-    state.system_access_log.emit(&state.waf, input);
+    state
+      .system_access_log
+      .emit_async(&state.waf, input, person_proof.as_ref())
+      .await;
   }
 }

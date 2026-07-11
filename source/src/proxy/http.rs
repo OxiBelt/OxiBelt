@@ -365,7 +365,7 @@ where
   } else {
     response
   };
-  emit_system_access_log(state.as_ref(), &mut access_log, &response);
+  emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
   record_request_observability(
     &state,
     &access_log,
@@ -691,6 +691,8 @@ where
   }
   let mut evaluated_person_proof = None;
   if request_waf_enabled
+    || response_waf_enabled
+    || resolved.execution_plan.waf.stream_enabled
     || (state.request_path_features.dynamic_policy
       && state
         .dynamic_policy
@@ -738,6 +740,10 @@ where
   let person_proof_clearance_hash = evaluated_person_proof
     .as_ref()
     .and_then(|status| status.clearance_hash());
+  let mut person_proof_snapshot = evaluated_person_proof
+    .as_ref()
+    .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
+  access_log.set_person_proof_snapshot(person_proof_snapshot.as_ref());
   let dynamic_policy = if state.request_path_features.dynamic_policy {
     state
       .dynamic_policy
@@ -783,7 +789,7 @@ where
           access_log.ensure_request_ids();
           let decision = match state
             .waf
-            .evaluate_dynamic_person_proof_challenge_with_status(
+            .evaluate_dynamic_person_proof_challenge_with_status_async(
               WafRequestInput {
                 request_id: access_log.request_id(),
                 transaction_id: access_log.transaction_id(),
@@ -808,7 +814,9 @@ where
               },
               status,
               &mut evaluated_person_proof,
-            ) {
+            )
+            .await
+          {
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
@@ -821,6 +829,10 @@ where
               ));
             }
           };
+          person_proof_snapshot = evaluated_person_proof
+            .as_ref()
+            .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
+          access_log.set_person_proof_snapshot(person_proof_snapshot.as_ref());
           if let Some(terminal) = decision.terminal {
             return route_security.waf_http_terminal(terminal, &decision.response_header_mutations);
           }
@@ -830,6 +842,10 @@ where
       }
     }
   }
+  person_proof_snapshot = evaluated_person_proof
+    .as_ref()
+    .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
+  access_log.set_person_proof_snapshot(person_proof_snapshot.as_ref());
   let person_proof_api_path = state.request_path_features.person_proof_api
     && state.waf.has_person_proof_api_path(request_uri.path());
   if person_proof_api_path {
@@ -1110,8 +1126,10 @@ where
           udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
           tags: tags.clone().unwrap_or_default(),
           dynamic_policy: access_log.dynamic_policy.clone(),
+          person_proof: access_log.person_proof_snapshot().cloned(),
         },
       )
+      .await
     } else {
       None
     };
@@ -1851,18 +1869,21 @@ where
     && let Some(entry) = revalidation_entry.clone()
   {
     if cache_store_allowed {
-      state.cache.update_from_not_modified(
-        crate::cache::CacheInsertContext {
-          policy_name: resolved.route.cache.as_deref(),
-          scheme: downstream_scheme,
-          host,
-          method: &request_method,
-          uri: &request_uri,
-          request_headers: &request_headers,
-        },
-        &entry,
-        &parts.headers,
-      );
+      state
+        .cache
+        .update_from_not_modified_async(
+          crate::cache::CacheInsertContext {
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host,
+            method: &request_method,
+            uri: &request_uri,
+            request_headers: &request_headers,
+          },
+          &entry,
+          &parts.headers,
+        )
+        .await;
     }
     let mut cached_entry = entry;
     let mut headers = cached_entry.headers.clone();
@@ -1963,9 +1984,11 @@ where
       tags: tags_ref(&tags),
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let response_waf = state
-      .waf
-      .evaluate_response_async(WafResponseInput {
+    let person_proof = access_log
+      .person_proof_snapshot()
+      .expect("response WAF evaluation should have a request-scoped Person proof snapshot");
+    let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
+      WafResponseInput {
         request: request_input,
         response_id: access_log.response_id(),
         received_at_unix_ms: access_log.response_received_at_unix_ms,
@@ -1979,8 +2002,9 @@ where
         upstream_connect_time_ms: access_log.upstream_connect_time_ms,
         upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
         upstream_error: None,
-      })
-      .await;
+      },
+      person_proof,
+    );
     for access_log in &response_waf.access_logs {
       state.access_logs.emit(access_log);
     }
@@ -2166,9 +2190,9 @@ async fn handle_connect_request(
       }
       .await;
       if result.is_ok() {
-        pool_report.report_success(&upstream.name);
+        pool_report.report_success_async(&upstream.name).await;
       } else {
-        pool_report.report_failure(&upstream.name);
+        pool_report.report_failure_async(&upstream.name).await;
       }
       drop(pool_selection);
     });
@@ -2192,7 +2216,7 @@ async fn handle_connect_request(
       response
     }
     Err(error) => {
-      pool_report.report_failure(&upstream.name);
+      pool_report.report_failure_async(&upstream.name).await;
       warn!(upstream = %upstream.name, error = %error, "failed to establish CONNECT tunnel");
       access_log.record_upstream_error("connect_error", &error.to_string());
       route_security.text(
@@ -2603,9 +2627,9 @@ async fn handle_upgrade_request(
     }
     .await;
     if result.is_ok() {
-      pool_report.report_success(&upstream_name);
+      pool_report.report_success_async(&upstream_name).await;
     } else {
-      pool_report.report_failure(&upstream_name);
+      pool_report.report_failure_async(&upstream_name).await;
     }
     if websocket_upgrade {
       record_websocket_session_end(

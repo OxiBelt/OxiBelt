@@ -1,0 +1,88 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["0.0.0.0/0", "::/0"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9090"
+
+[health]
+enabled = true
+bind = "0.0.0.0:9091"
+ready_path = "/ready"
+live_path = "/live"
+
+[shared_state]
+enabled = true
+namespace = "delay-isolation"
+default_backend = "cluster"
+operation_timeout_ms = 1500
+rate_limits_backend = "cluster"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+max_connections = 1
+connect_timeout_ms = 1000
+
+[[rate_limits]]
+name = "delay-rate"
+key = "client_ip"
+routes = ["delay-route"]
+rate = "100r/s"
+burst = 100
+max_buckets = 64
+status = 429
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+first_byte_timeout_ms = 2000
+preserve_host = false
+
+[[routes]]
+name = "delay-route"
+hosts = ["example.test"]
+path_prefix = "/app/delay"
+upstream = "http-upstream"

@@ -156,6 +156,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("database-mitigation", "existing-postgres"),
   ("shared-state", "redis-valkey-cluster-state"),
   ("shared-state", "postgres-cluster-state"),
+  ("shared-state", "redis-delay-isolation"),
+  ("shared-state", "postgres-delay-isolation"),
   ("dynamic-policy", "postgres-snapshot"),
   ("dynamic-policy", "automation-api"),
   ("hot-reload", "oxirule-config"),

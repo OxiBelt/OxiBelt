@@ -9,8 +9,8 @@ use tracing::warn;
 use crate::admin_audit::AdminAuditEvent;
 use crate::config::{AccessLogConfig, AccessLogSchema, CryptoConfig, LoggingAccessLogConfig};
 use crate::waf::{
-  AccessLogRecord, CompiledAccessLogFields, WafEngine, WafResponseInput, compile_access_log_fields,
-  current_unix_ms,
+  AccessLogRecord, CompiledAccessLogFields, PersonProofRequestSnapshot, WafEngine,
+  WafResponseInput, compile_access_log_fields, current_unix_ms,
 };
 
 mod otlp;
@@ -184,6 +184,32 @@ impl SystemAccessLog {
       return;
     }
     match waf.build_system_access_log(&self.fields, input) {
+      Ok(record) => self.sinks.emit(&record),
+      Err(error) => warn!(error = %error, "failed to build system access log record"),
+    }
+  }
+
+  /// Emit with a request-scoped Person proof snapshot when one is available.
+  ///
+  /// A missing snapshot is possible for paths that do not otherwise invoke a
+  /// WAF phase.  In that case, evaluate it asynchronously at the logging
+  /// boundary instead of using the legacy synchronous evaluation path.
+  pub async fn emit_async(
+    &self,
+    waf: &WafEngine,
+    input: WafResponseInput<'_>,
+    person_proof: Option<&PersonProofRequestSnapshot>,
+  ) {
+    if !self.enabled {
+      return;
+    }
+    let record = match person_proof {
+      Some(person_proof) => {
+        waf.build_system_access_log_with_person_proof_snapshot(&self.fields, input, person_proof)
+      }
+      None => waf.build_system_access_log_async(&self.fields, input).await,
+    };
+    match record {
       Ok(record) => self.sinks.emit(&record),
       Err(error) => warn!(error = %error, "failed to build system access log record"),
     }

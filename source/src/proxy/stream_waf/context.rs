@@ -7,9 +7,10 @@ use http::{HeaderMap, Method, Uri, Version};
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  WafBodyInput, WafProtocol, WafRequestInput, WafStreamDecision, WafStreamDirection,
-  WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput,
-  WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamMetadata,
+  PersonProofRequestSnapshot, WafBodyInput, WafProtocol, WafRequestInput, WafStreamDecision,
+  WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+  WafWebTransportStreamMetadata,
 };
 
 #[derive(Clone)]
@@ -35,6 +36,7 @@ pub(crate) struct StreamWafRequestContext {
   udp_connection_id: Option<String>,
   tags: HashMap<String, String>,
   dynamic_policy: DynamicPolicyContext,
+  person_proof: PersonProofRequestSnapshot,
   max_payload_bytes: usize,
 }
 
@@ -60,13 +62,52 @@ pub(crate) struct StreamWafRequestSeed {
   pub(crate) udp_connection_id: Option<String>,
   pub(crate) tags: HashMap<String, String>,
   pub(crate) dynamic_policy: DynamicPolicyContext,
+  pub(crate) person_proof: Option<PersonProofRequestSnapshot>,
 }
 
 impl StreamWafRequestContext {
-  pub(crate) fn from_seed(state: &AppSnapshot, seed: StreamWafRequestSeed) -> Option<Self> {
+  pub(crate) async fn from_seed(state: &AppSnapshot, seed: StreamWafRequestSeed) -> Option<Self> {
     if !state.waf.requires_stream_inspection(&seed.route_name) {
       return None;
     }
+
+    // Resolve any missing state before payload frames are retained by the
+    // WebSocket or WebTransport relay.  Normal HTTP paths supply a snapshot;
+    // this fallback covers isolated stream entry points.
+    let person_proof = match seed.person_proof.clone() {
+      Some(person_proof) => person_proof,
+      None => state
+        .waf
+        .evaluate_person_proof_request_async(WafRequestInput {
+          request_id: &seed.request_id,
+          transaction_id: &seed.transaction_id,
+          received_at_unix_ms: seed.received_at_unix_ms,
+          method: &seed.method,
+          uri: &seed.uri,
+          version: seed.version,
+          headers: &seed.headers,
+          body: None,
+          peer_addr: seed.peer_addr,
+          client_asn: None,
+          downstream_host: &seed.downstream_host,
+          downstream_scheme: seed.downstream_scheme,
+          route_name: &seed.route_name,
+          tcp_max_hop: seed.tcp_max_hop,
+          tls: seed.tls.as_ref(),
+          protocol: seed.protocol,
+          transport_network: seed.transport_network,
+          transport_metadata: WafTransportMetadataInput {
+            tcp_mss: seed.tcp_mss,
+            tcp_rtt_ms: seed.tcp_rtt_ms,
+            udp_datagram_size: seed.udp_datagram_size,
+            udp_connection_id: seed.udp_connection_id.as_deref(),
+          },
+          tags: &seed.tags,
+          dynamic_policy: &seed.dynamic_policy,
+        })
+        .await
+        .sanitized(),
+    };
 
     Some(Self {
       request_id: seed.request_id,
@@ -90,6 +131,7 @@ impl StreamWafRequestContext {
       udp_connection_id: seed.udp_connection_id,
       tags: seed.tags,
       dynamic_policy: seed.dynamic_policy,
+      person_proof,
       max_payload_bytes: state.config.waf.limits.max_body_inspection_bytes,
     })
   }
@@ -137,18 +179,21 @@ impl StreamWafRequestContext {
     is_truncated: bool,
     websocket: WafWebSocketStreamMetadata<'_>,
   ) -> WafStreamDecision {
-    state.waf.evaluate_stream(WafStreamInput {
-      request: self.request_input(),
-      protocol: WafStreamProtocol::Websocket,
-      direction,
-      unit,
-      payload: WafBodyInput {
-        bytes: payload,
-        is_truncated,
+    state.waf.evaluate_stream_with_person_proof_snapshot(
+      WafStreamInput {
+        request: self.request_input(),
+        protocol: WafStreamProtocol::Websocket,
+        direction,
+        unit,
+        payload: WafBodyInput {
+          bytes: payload,
+          is_truncated,
+        },
+        websocket: Some(websocket),
+        webtransport: None,
       },
-      websocket: Some(websocket),
-      webtransport: None,
-    })
+      &self.person_proof,
+    )
   }
 
   pub(crate) fn evaluate_webtransport(
@@ -159,21 +204,24 @@ impl StreamWafRequestContext {
     is_truncated: bool,
     metadata: WafWebTransportStreamMetadata,
   ) -> WafStreamDecision {
-    state.waf.evaluate_stream(WafStreamInput {
-      request: self.request_input(),
-      protocol: WafStreamProtocol::Webtransport,
-      direction,
-      unit: if metadata.datagram_size.is_some() {
-        WafStreamUnit::WebtransportDatagram
-      } else {
-        WafStreamUnit::WebtransportStreamChunk
+    state.waf.evaluate_stream_with_person_proof_snapshot(
+      WafStreamInput {
+        request: self.request_input(),
+        protocol: WafStreamProtocol::Webtransport,
+        direction,
+        unit: if metadata.datagram_size.is_some() {
+          WafStreamUnit::WebtransportDatagram
+        } else {
+          WafStreamUnit::WebtransportStreamChunk
+        },
+        payload: WafBodyInput {
+          bytes: payload,
+          is_truncated,
+        },
+        websocket: None,
+        webtransport: Some(metadata),
       },
-      payload: WafBodyInput {
-        bytes: payload,
-        is_truncated,
-      },
-      websocket: None,
-      webtransport: Some(metadata),
-    })
+      &self.person_proof,
+    )
   }
 }

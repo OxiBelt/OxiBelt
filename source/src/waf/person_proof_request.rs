@@ -22,6 +22,32 @@ impl EvaluatedPersonProofRequest {
   pub fn clearance_hash(&self) -> Option<&str> {
     self.status.clearance_hash.as_deref()
   }
+
+  /// Return the request-scoped decision data that later WAF phases may reuse.
+  ///
+  /// Issued clearances contain a bearer token and response metadata.  They are
+  /// intentionally retained only by the request phase that may emit the
+  /// mutation; response, stream, and logging phases must not keep them.
+  pub fn sanitized(&self) -> PersonProofRequestSnapshot {
+    let mut status = self.status.clone();
+    status.clearance = None;
+    PersonProofRequestSnapshot { status }
+  }
+}
+
+/// Sanitized request-scoped Person proof decision for later WAF phases.
+///
+/// This preserves decision fields and the irreversible clearance hash without
+/// retaining the raw clearance token, response header, or provider metadata.
+#[derive(Debug, Clone)]
+pub struct PersonProofRequestSnapshot {
+  pub(super) status: PersonProofRequestStatus,
+}
+
+impl PersonProofRequestSnapshot {
+  pub fn clearance_hash(&self) -> Option<&str> {
+    self.status.clearance_hash.as_deref()
+  }
 }
 
 impl WafEngine {
@@ -43,21 +69,52 @@ impl WafEngine {
     self.evaluate_dynamic_person_proof_challenge_with_status(input, status, &mut evaluated)
   }
 
+  /// Async dynamic-challenge evaluation for request paths backed by shared
+  /// Person proof state.
+  pub async fn evaluate_dynamic_person_proof_challenge_with_status_async(
+    &self,
+    input: WafRequestInput<'_>,
+    status: StatusCode,
+    evaluated: &mut Option<EvaluatedPersonProofRequest>,
+  ) -> anyhow::Result<RequestWafDecision> {
+    if evaluated.is_none() {
+      *evaluated = Some(self.evaluate_person_proof_request_async(input).await);
+    }
+    self.evaluate_dynamic_person_proof_challenge_with_evaluated(
+      input,
+      status,
+      evaluated
+        .as_ref()
+        .expect("person proof status was initialized"),
+    )
+  }
+
   pub fn evaluate_dynamic_person_proof_challenge_with_status(
     &self,
     input: WafRequestInput<'_>,
     status: StatusCode,
     evaluated: &mut Option<EvaluatedPersonProofRequest>,
   ) -> anyhow::Result<RequestWafDecision> {
-    let mut decision = RequestWafDecision::default();
     if evaluated.is_none() {
       *evaluated = Some(self.evaluate_person_proof_request(input));
     }
-    let person_proof = evaluated
-      .as_ref()
-      .expect("person proof status was initialized")
-      .status
-      .clone();
+    self.evaluate_dynamic_person_proof_challenge_with_evaluated(
+      input,
+      status,
+      evaluated
+        .as_ref()
+        .expect("person proof status was initialized"),
+    )
+  }
+
+  fn evaluate_dynamic_person_proof_challenge_with_evaluated(
+    &self,
+    input: WafRequestInput<'_>,
+    status: StatusCode,
+    evaluated: &EvaluatedPersonProofRequest,
+  ) -> anyhow::Result<RequestWafDecision> {
+    let person_proof = &evaluated.status;
+    let mut decision = RequestWafDecision::default();
     if person_proof.rate_limited {
       return Ok(person_proof_rate_limited_decision());
     }
@@ -67,7 +124,7 @@ impl WafEngine {
     {
       let mutation = self
         .person_proof
-        .clearance_response_mutation(&person_proof)?;
+        .clearance_response_mutation(person_proof)?;
       decision.response_header_mutations.extend(mutation);
       return Ok(decision);
     }
@@ -477,5 +534,48 @@ impl WafEngine {
       }
     }
     Ok(person_proof_policy)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn sanitized_snapshot_preserves_decision_without_clearance_secrets() {
+    let evaluated = EvaluatedPersonProofRequest {
+      status: PersonProofRequestStatus {
+        state: PersonProofState::Valid,
+        mode: Some("built-in"),
+        difficulty: Some(4),
+        issued_at_unix_ms: Some(1),
+        expires_at_unix_ms: Some(2),
+        policy_key: Some("default".to_string()),
+        rate_limited: false,
+        weight: 3,
+        allowed: true,
+        clearance_hash: Some("sha256:clearance".to_string()),
+        clearance: Some(crate::waf::PersonProofIssuedClearance {
+          token: "clearance.v2.secret".to_string(),
+          expires_unix_ms: 2,
+          max_age_seconds: 60,
+          response_header: None,
+          metadata: serde_json::json!({"provider_token": "secret"}),
+        }),
+      },
+    };
+
+    let snapshot = evaluated.sanitized();
+
+    assert_eq!(snapshot.clearance_hash(), Some("sha256:clearance"));
+    assert!(snapshot.status.clearance.is_none());
+    assert_eq!(
+      evaluated
+        .status
+        .clearance
+        .as_ref()
+        .map(|clearance| clearance.token.as_str()),
+      Some("clearance.v2.secret")
+    );
   }
 }

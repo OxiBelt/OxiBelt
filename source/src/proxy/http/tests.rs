@@ -10,7 +10,7 @@ use pretty_assertions::assert_eq;
 
 use super::*;
 use crate::config::Config;
-use crate::waf::HeaderMutation;
+use crate::waf::{HeaderMutation, WafResponseInput};
 
 fn parse_config(raw: &str) -> Config {
   let config: Config = toml::from_str(raw).expect("config should parse");
@@ -329,7 +329,6 @@ async fn pending_dynamic_person_proof_rotation_applies_to_early_text_response() 
   let evaluated = state
     .waf
     .evaluate_person_proof_request(request.input(&headers));
-
   let response = with_pending_dynamic_person_proof_response_mutations(
     text_response(StatusCode::TOO_MANY_REQUESTS, "blocked"),
     &state,
@@ -388,6 +387,53 @@ async fn pending_dynamic_person_proof_rotation_applies_to_redirect_without_dupli
     .collect();
   assert_eq!(cookies.len(), 1);
   assert_eq!(cookies[0], "__test_person_proof=already; Path=/");
+}
+
+#[tokio::test]
+async fn response_waf_reuses_single_use_person_proof_snapshot() {
+  let state = single_use_person_proof_state().await;
+  let request = PersonProofRequestFixture::new();
+  let clearance = issue_single_use_clearance(&state.waf, &request);
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::COOKIE,
+    format!("__test_person_proof={}", clearance_cookie_value(&clearance))
+      .parse()
+      .unwrap(),
+  );
+  let response_headers = HeaderMap::new();
+  let evaluated = state
+    .waf
+    .evaluate_person_proof_request_async(request.input(&headers))
+    .await;
+  let snapshot = evaluated.sanitized();
+  let response_input = WafResponseInput {
+    request: request.input(&headers),
+    response_id: "response-id",
+    received_at_unix_ms: crate::waf::current_unix_ms(),
+    version: http::Version::HTTP_11,
+    status: StatusCode::OK,
+    headers: &response_headers,
+    body: None,
+    upstream_name: "test",
+    upstream_pool: None,
+    upstream_scheme: "http",
+    upstream_connect_time_ms: None,
+    upstream_first_byte_time_ms: None,
+    upstream_error: None,
+  };
+  let reused = state
+    .waf
+    .evaluate_response_with_person_proof_snapshot(response_input, &snapshot);
+  assert!(reused.response_header_mutations.iter().any(|mutation| {
+    matches!(mutation, HeaderMutation::Set { name, value }
+      if name.as_str() == "x-person-proof-snapshot" && value == "valid")
+  }));
+  // This deliberately models the forbidden duplicate lookup: the single-use
+  // clearance has already been consumed, so an async re-evaluation loses the
+  // valid decision that later phases must instead reuse from the snapshot.
+  let duplicate = state.waf.evaluate_response_async(response_input).await;
+  assert!(duplicate.response_header_mutations.is_empty());
 }
 
 #[tokio::test]
@@ -596,6 +642,17 @@ difficulty = 4
 token_validity_seconds = 60
 clearance.cookie.key = "__test_person_proof"
 single_use = true
+
+[[waf.rules]]
+name = "response-observes-person-proof-snapshot"
+phase = "response"
+priority = 20
+when = "Request.Client.PersonProof.State == 'valid'"
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "X-Person-Proof-Snapshot"
+value = "valid"
 "#
   );
   AppSnapshot::new(parse_config(&raw))

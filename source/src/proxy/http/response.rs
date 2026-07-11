@@ -523,24 +523,30 @@ pub(super) fn upstream_error_response(
     tags,
     dynamic_policy: &access_log.dynamic_policy,
   };
-  let response_waf = state.waf.evaluate_response(WafResponseInput {
-    request,
-    response_id: access_log.response_id(),
-    received_at_unix_ms: crate::waf::current_unix_ms(),
-    version: http::Version::HTTP_11,
-    status,
-    headers: response.headers(),
-    body: None,
-    upstream_name,
-    upstream_pool: access_log.upstream_pool.as_deref(),
-    upstream_scheme,
-    upstream_connect_time_ms,
-    upstream_first_byte_time_ms,
-    upstream_error: Some(WafUpstreamError {
-      code: upstream_error_code,
-      message: error_message,
-    }),
-  });
+  let person_proof = access_log
+    .person_proof_snapshot()
+    .expect("upstream-error response WAF should have a request-scoped Person proof snapshot");
+  let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
+    WafResponseInput {
+      request,
+      response_id: access_log.response_id(),
+      received_at_unix_ms: crate::waf::current_unix_ms(),
+      version: http::Version::HTTP_11,
+      status,
+      headers: response.headers(),
+      body: None,
+      upstream_name,
+      upstream_pool: access_log.upstream_pool.as_deref(),
+      upstream_scheme,
+      upstream_connect_time_ms,
+      upstream_first_byte_time_ms,
+      upstream_error: Some(WafUpstreamError {
+        code: upstream_error_code,
+        message: error_message,
+      }),
+    },
+    person_proof,
+  );
   for access_log in &response_waf.access_logs {
     state.access_logs.emit(access_log);
   }

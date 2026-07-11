@@ -10,8 +10,8 @@ use super::{TimedStaticResponsePlan, parse::ParsedPlainRequest};
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata, WafTransportMetadataInput,
-  WafTransportNetwork,
+  PersonProofRequestSnapshot, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork,
 };
 
 static EMPTY_TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(HashMap::new);
@@ -27,6 +27,7 @@ pub(super) struct StaticFastPathContext {
   pub(super) downstream_host: String,
   pub(super) route_name: String,
   tags: Option<HashMap<String, String>>,
+  person_proof: Option<PersonProofRequestSnapshot>,
 }
 
 impl StaticFastPathContext {
@@ -47,6 +48,7 @@ impl StaticFastPathContext {
       downstream_host,
       route_name,
       tags: None,
+      person_proof: None,
     }
   }
 
@@ -86,6 +88,17 @@ impl StaticFastPathContext {
     }
   }
 
+  pub(super) fn set_person_proof_snapshot(
+    &mut self,
+    person_proof: Option<&PersonProofRequestSnapshot>,
+  ) {
+    self.person_proof = person_proof.cloned();
+  }
+
+  pub(super) fn person_proof_snapshot(&self) -> Option<&PersonProofRequestSnapshot> {
+    self.person_proof.as_ref()
+  }
+
   pub(super) fn request_id(&self) -> &str {
     self
       .request_id
@@ -112,7 +125,7 @@ impl StaticFastPathContext {
   }
 }
 
-pub(super) fn emit_system_access_log(
+pub(super) async fn emit_system_access_log(
   request: &ParsedPlainRequest,
   snapshot: &AppSnapshot,
   transport_metadata: WafTransportMetadataInput<'_>,
@@ -125,49 +138,54 @@ pub(super) fn emit_system_access_log(
     return;
   };
   access_log.ensure_response_ids();
+  let person_proof = access_log.person_proof_snapshot().cloned();
 
   let tls = WafTlsMetadata::default();
   let dynamic_policy = DynamicPolicyContext::default();
-  snapshot.system_access_log.emit(
-    &snapshot.waf,
-    WafResponseInput {
-      request: WafRequestInput {
-        request_id: access_log.request_id(),
-        transaction_id: access_log.transaction_id(),
-        received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: &request.method,
-        uri: &access_log.request_uri,
+  snapshot
+    .system_access_log
+    .emit_async(
+      &snapshot.waf,
+      WafResponseInput {
+        request: WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: &request.method,
+          uri: &access_log.request_uri,
+          version: Version::HTTP_11,
+          headers: &request.headers,
+          body: None,
+          peer_addr: access_log.client_addr,
+          client_asn: snapshot
+            .client_identity
+            .asn
+            .lookup(access_log.client_addr.ip()),
+          downstream_host: &access_log.downstream_host,
+          downstream_scheme: "http",
+          route_name: &access_log.route_name,
+          tcp_max_hop: None,
+          tls: &tls,
+          protocol: WafProtocol::Http,
+          transport_network: WafTransportNetwork::Tcp,
+          transport_metadata,
+          tags: access_log.tags(),
+          dynamic_policy: &dynamic_policy,
+        },
+        response_id: access_log.response_id(),
+        received_at_unix_ms: access_log.response_received_at_unix_ms,
         version: Version::HTTP_11,
-        headers: &request.headers,
+        status: plan.response.status,
+        headers: &plan.response.headers,
         body: None,
-        peer_addr: access_log.client_addr,
-        client_asn: snapshot
-          .client_identity
-          .asn
-          .lookup(access_log.client_addr.ip()),
-        downstream_host: &access_log.downstream_host,
-        downstream_scheme: "http",
-        route_name: &access_log.route_name,
-        tcp_max_hop: None,
-        tls: &tls,
-        protocol: WafProtocol::Http,
-        transport_network: WafTransportNetwork::Tcp,
-        transport_metadata,
-        tags: access_log.tags(),
-        dynamic_policy: &dynamic_policy,
+        upstream_name: "static",
+        upstream_pool: None,
+        upstream_scheme: "file",
+        upstream_connect_time_ms: None,
+        upstream_first_byte_time_ms: None,
+        upstream_error: None,
       },
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: Version::HTTP_11,
-      status: plan.response.status,
-      headers: &plan.response.headers,
-      body: None,
-      upstream_name: "static",
-      upstream_pool: None,
-      upstream_scheme: "file",
-      upstream_connect_time_ms: None,
-      upstream_first_byte_time_ms: None,
-      upstream_error: None,
-    },
-  );
+      person_proof.as_ref(),
+    )
+    .await;
 }

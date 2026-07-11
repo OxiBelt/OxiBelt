@@ -19,8 +19,8 @@ use crate::proxy::http::response::{
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::waf::{
-  RequestWafDecision, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
+  RequestWafDecision, WafProtocol, WafRequestInput, WafTlsMetadata, WafTransportMetadataInput,
+  WafTransportNetwork, apply_header_mutations,
 };
 
 use super::super::apply_alt_svc_header;
@@ -158,21 +158,14 @@ pub(super) fn finalize_response(
       tags: tags_ref(tags),
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let response_waf = state.waf.evaluate_response(WafResponseInput {
-      request: request_input,
-      response_id: access_log.response_id(),
-      received_at_unix_ms: access_log.response_received_at_unix_ms,
-      version: parts.version,
-      status: parts.status,
-      headers: &parts.headers,
-      body: None,
-      upstream_name: &upstream.name,
-      upstream_pool: pool_selection.map(|selection| selection.pool_name.as_str()),
-      upstream_scheme: upstream.origin.scheme(),
-      upstream_connect_time_ms: access_log.upstream_connect_time_ms,
-      upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
-      upstream_error: None,
-    });
+    let response_waf = super::response_waf::evaluate_response_waf(
+      state,
+      access_log,
+      request_input,
+      &parts,
+      upstream,
+      pool_selection,
+    );
     for access_log in &response_waf.access_logs {
       state.access_logs.emit(access_log);
     }

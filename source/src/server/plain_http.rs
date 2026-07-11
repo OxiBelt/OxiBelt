@@ -318,7 +318,7 @@ async fn try_sendfile_fast_path_inner(
       return Ok(SendfilePreflight::Done);
     }
     let close_after_response = header_has_token(&request.headers, CONNECTION, "close");
-    emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan);
+    emit_system_access_log(&request, snapshot.as_ref(), transport_metadata, &mut plan).await;
     buffer = request.remaining;
     let status = plan.response.status;
     if let Err(error) = write_static_plan(

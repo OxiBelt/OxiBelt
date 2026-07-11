@@ -34,30 +34,72 @@ pub(super) async fn apply_static_waf(
   let dynamic_policy = DynamicPolicyContext::default();
   let request_waf_enabled = route_waf.request.enabled();
   let response_waf_enabled = route_waf.response.enabled();
-  let mut request_waf = if request_waf_enabled {
+  let evaluated_person_proof = if request_waf_enabled || response_waf_enabled {
     access_log.ensure_request_ids();
-    snapshot.waf.evaluate_request(WafRequestInput {
-      request_id: access_log.request_id(),
-      transaction_id: access_log.transaction_id(),
-      received_at_unix_ms: access_log.request_received_at_unix_ms,
-      method: &request.method,
-      uri: &access_log.request_uri,
-      version: Version::HTTP_11,
-      headers: &request.headers,
-      body: None,
-      peer_addr: client_addr,
-      client_asn: snapshot.client_identity.asn.lookup(client_addr.ip()),
-      downstream_host: &access_log.downstream_host,
-      downstream_scheme: "http",
-      route_name: &access_log.route_name,
-      tcp_max_hop: None,
-      tls: &tls,
-      protocol: WafProtocol::Http,
-      transport_network: WafTransportNetwork::Tcp,
-      transport_metadata,
-      tags: access_log.tags(),
-      dynamic_policy: &dynamic_policy,
-    })
+    Some(
+      snapshot
+        .waf
+        .evaluate_person_proof_request_async(WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: &request.method,
+          uri: &access_log.request_uri,
+          version: Version::HTTP_11,
+          headers: &request.headers,
+          body: None,
+          peer_addr: client_addr,
+          client_asn: snapshot.client_identity.asn.lookup(client_addr.ip()),
+          downstream_host: &access_log.downstream_host,
+          downstream_scheme: "http",
+          route_name: &access_log.route_name,
+          tcp_max_hop: None,
+          tls: &tls,
+          protocol: WafProtocol::Http,
+          transport_network: WafTransportNetwork::Tcp,
+          transport_metadata,
+          tags: access_log.tags(),
+          dynamic_policy: &dynamic_policy,
+        })
+        .await,
+    )
+  } else {
+    None
+  };
+  let person_proof_snapshot = evaluated_person_proof
+    .as_ref()
+    .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
+  access_log.set_person_proof_snapshot(person_proof_snapshot.as_ref());
+  let mut request_waf = if request_waf_enabled {
+    snapshot
+      .waf
+      .evaluate_request_with_person_proof_async(
+        WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: &request.method,
+          uri: &access_log.request_uri,
+          version: Version::HTTP_11,
+          headers: &request.headers,
+          body: None,
+          peer_addr: client_addr,
+          client_asn: snapshot.client_identity.asn.lookup(client_addr.ip()),
+          downstream_host: &access_log.downstream_host,
+          downstream_scheme: "http",
+          route_name: &access_log.route_name,
+          tcp_max_hop: None,
+          tls: &tls,
+          protocol: WafProtocol::Http,
+          transport_network: WafTransportNetwork::Tcp,
+          transport_metadata,
+          tags: access_log.tags(),
+          dynamic_policy: &dynamic_policy,
+        },
+        evaluated_person_proof.as_ref(),
+        false,
+      )
+      .await
   } else {
     RequestWafDecision::default()
   };
@@ -107,9 +149,11 @@ pub(super) async fn apply_static_waf(
       tags: access_log.tags(),
       dynamic_policy: &dynamic_policy,
     };
-    let response_waf = snapshot
-      .waf
-      .evaluate_response_async(WafResponseInput {
+    let person_proof = access_log
+      .person_proof_snapshot()
+      .expect("static response WAF should have a request-scoped Person proof snapshot");
+    let response_waf = snapshot.waf.evaluate_response_with_person_proof_snapshot(
+      WafResponseInput {
         request: request_input,
         response_id: access_log.response_id(),
         received_at_unix_ms: access_log.response_received_at_unix_ms,
@@ -123,8 +167,9 @@ pub(super) async fn apply_static_waf(
         upstream_connect_time_ms: None,
         upstream_first_byte_time_ms: None,
         upstream_error: None,
-      })
-      .await;
+      },
+      person_proof,
+    );
     for access_log in &response_waf.access_logs {
       snapshot.access_logs.emit(access_log);
     }

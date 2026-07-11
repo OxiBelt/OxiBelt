@@ -132,6 +132,7 @@ pub(crate) async fn prepare_webtransport(
 
   let mut evaluated_person_proof = None;
   if resolved.execution_plan.waf.request.enabled()
+    || resolved.execution_plan.waf.stream_enabled
     || (state.request_path_features.dynamic_policy
       && state
         .dynamic_policy
@@ -230,7 +231,7 @@ pub(crate) async fn prepare_webtransport(
           let transaction_id = crate::waf::new_access_log_id();
           let decision = match state
             .waf
-            .evaluate_dynamic_person_proof_challenge_with_status(
+            .evaluate_dynamic_person_proof_challenge_with_status_async(
               WafRequestInput {
                 request_id: &request_id,
                 transaction_id: &transaction_id,
@@ -255,7 +256,9 @@ pub(crate) async fn prepare_webtransport(
               },
               status,
               &mut evaluated_person_proof,
-            ) {
+            )
+            .await
+          {
             Ok(decision) => decision,
             Err(error) => {
               warn!(error = %error, "failed to evaluate dynamic Person proof challenge");
@@ -286,6 +289,10 @@ pub(crate) async fn prepare_webtransport(
       }
     }
   }
+
+  let person_proof_snapshot = evaluated_person_proof
+    .as_ref()
+    .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
 
   match route_actions::redirect_response(
     resolved.route,
@@ -458,8 +465,10 @@ pub(crate) async fn prepare_webtransport(
         udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
         tags: tags.clone().unwrap_or_default(),
         dynamic_policy: dynamic_policy_context.clone(),
+        person_proof: person_proof_snapshot.clone(),
       },
     )
+    .await
   } else {
     None
   };

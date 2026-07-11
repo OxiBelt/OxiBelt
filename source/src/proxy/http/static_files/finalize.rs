@@ -107,9 +107,11 @@ pub(in crate::proxy::http) async fn finalize_response(
       tags,
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let response_waf = state
-      .waf
-      .evaluate_response_async(WafResponseInput {
+    let person_proof = access_log
+      .person_proof_snapshot()
+      .expect("static response WAF should have a request-scoped Person proof snapshot");
+    let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
+      WafResponseInput {
         request: request_input,
         response_id: access_log.response_id(),
         received_at_unix_ms: access_log.response_received_at_unix_ms,
@@ -123,8 +125,9 @@ pub(in crate::proxy::http) async fn finalize_response(
         upstream_connect_time_ms: None,
         upstream_first_byte_time_ms: None,
         upstream_error: None,
-      })
-      .await;
+      },
+      person_proof,
+    );
     for access_log in &response_waf.access_logs {
       state.access_logs.emit(access_log);
     }

@@ -643,9 +643,9 @@ impl PlainProxyFastPath {
     if report_pool_success && let Some(latency_ms) = upstream_started_at.map(elapsed_ms) {
       state
         .pools
-        .report_success_latency(&upstream.name, latency_ms);
+        .report_success_latency_async(&upstream.name, latency_ms)
+        .await;
     }
-
     let upstream_first_byte_time_ms = upstream_started_at.map(elapsed_ms);
     if let Some(upstream_first_byte_time_ms) = upstream_first_byte_time_ms {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);

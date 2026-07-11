@@ -371,7 +371,7 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
 
   stream_disk_fill(&first, &uri, &headers, body.clone()).await;
 
-  let chunk_keys = wait_for_shared_chunks(&shared).await;
+  let chunk_keys = wait_for_shared_chunks(&shared, 2).await;
   assert!(
     chunk_keys.len() >= 2,
     "streaming disk shared fill should write chunked L2 body"
@@ -410,7 +410,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
   let body = Bytes::from(vec![b'm'; 1_048_577]);
 
   stream_disk_fill(&first, &uri, &headers, body.clone()).await;
-  let chunk_keys = wait_for_shared_chunks(&shared).await;
+  let chunk_keys = wait_for_shared_chunks(&shared, 1).await;
   assert!(!chunk_keys.is_empty(), "expected shared body chunks");
   shared.test_delete_raw_key(&chunk_keys[0]);
 
@@ -595,13 +595,16 @@ async fn wait_for_fresh(
   panic!("expected fresh local cache entry");
 }
 
-async fn wait_for_shared_chunks(shared: &crate::shared_state::SharedState) -> Vec<String> {
+async fn wait_for_shared_chunks(
+  shared: &crate::shared_state::SharedState,
+  minimum_chunks: usize,
+) -> Vec<String> {
   for _ in 0..100 {
     let chunks = shared.test_cache_raw_keys("cache:chunk:");
-    if !chunks.is_empty() {
+    if chunks.len() >= minimum_chunks {
       return chunks;
     }
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
   }
-  panic!("expected shared cache body chunks");
+  panic!("expected at least {minimum_chunks} shared cache body chunks");
 }

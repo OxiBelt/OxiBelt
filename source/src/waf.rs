@@ -108,7 +108,7 @@ pub use person_proof_config::{
   WafPersonProofConfig,
 };
 use person_proof_policy::PersonProofPolicyState;
-pub use person_proof_request::EvaluatedPersonProofRequest;
+pub use person_proof_request::{EvaluatedPersonProofRequest, PersonProofRequestSnapshot};
 pub use person_proof_v2::PersonProofProviderChallenge;
 pub use plan::BodyNeed;
 use plan::{WafRoutePlan, phase_plan};

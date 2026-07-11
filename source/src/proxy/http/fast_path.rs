@@ -46,6 +46,7 @@ mod helpers;
 mod request_body;
 mod response_body;
 mod response_send_timing;
+mod response_waf;
 mod small_response;
 pub(crate) mod stage_timing;
 mod waf;

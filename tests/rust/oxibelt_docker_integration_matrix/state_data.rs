@@ -55,6 +55,30 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       None,
     ),
     docker_case(
+      "shared-state",
+      "redis-delay-isolation",
+      "Redis/Valkey backend delay times out bounded work without blocking health or metrics",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        redis: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "shared-state",
+      "postgres-delay-isolation",
+      "PostgreSQL backend delay times out bounded work without blocking health or metrics",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        postgres: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
       "dynamic-policy",
       "postgres-snapshot",
       "PostgreSQL dynamic policy snapshot rejects and rate-limits without hot-path DB reads",

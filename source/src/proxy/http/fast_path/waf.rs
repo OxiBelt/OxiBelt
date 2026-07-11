@@ -62,32 +62,72 @@ pub(crate) async fn prepare_plain_fast_path_waf<B>(
     None
   };
   let mut tags = None;
-  let mut request_waf = if resolved.execution_plan.waf.request.enabled() {
+  let request_waf_enabled = resolved.execution_plan.waf.request.enabled();
+  let evaluated_person_proof = if request_waf_enabled || response_waf_enabled {
     access_log.ensure_request_ids();
+    Some(
+      state
+        .waf
+        .evaluate_person_proof_request_async(WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: request.method(),
+          uri: request.uri(),
+          version: request.version(),
+          headers: request.headers(),
+          body: None,
+          peer_addr: client_addr,
+          client_asn: state.client_identity.asn.lookup(client_addr.ip()),
+          downstream_host: host,
+          downstream_scheme,
+          route_name: &resolved.route.name,
+          tcp_max_hop,
+          tls,
+          protocol,
+          transport_network,
+          transport_metadata,
+          tags: tags_ref(&tags),
+          dynamic_policy: &access_log.dynamic_policy,
+        })
+        .await,
+    )
+  } else {
+    None
+  };
+  let person_proof_snapshot = evaluated_person_proof
+    .as_ref()
+    .map(crate::waf::EvaluatedPersonProofRequest::sanitized);
+  access_log.set_person_proof_snapshot(person_proof_snapshot.as_ref());
+  let mut request_waf = if request_waf_enabled {
     state
       .waf
-      .evaluate_request_async(WafRequestInput {
-        request_id: access_log.request_id(),
-        transaction_id: access_log.transaction_id(),
-        received_at_unix_ms: access_log.request_received_at_unix_ms,
-        method: request.method(),
-        uri: request.uri(),
-        version: request.version(),
-        headers: request.headers(),
-        body: None,
-        peer_addr: client_addr,
-        client_asn: state.client_identity.asn.lookup(client_addr.ip()),
-        downstream_host: host,
-        downstream_scheme,
-        route_name: &resolved.route.name,
-        tcp_max_hop,
-        tls,
-        protocol,
-        transport_network,
-        transport_metadata,
-        tags: tags_ref(&tags),
-        dynamic_policy: &access_log.dynamic_policy,
-      })
+      .evaluate_request_with_person_proof_async(
+        WafRequestInput {
+          request_id: access_log.request_id(),
+          transaction_id: access_log.transaction_id(),
+          received_at_unix_ms: access_log.request_received_at_unix_ms,
+          method: request.method(),
+          uri: request.uri(),
+          version: request.version(),
+          headers: request.headers(),
+          body: None,
+          peer_addr: client_addr,
+          client_asn: state.client_identity.asn.lookup(client_addr.ip()),
+          downstream_host: host,
+          downstream_scheme,
+          route_name: &resolved.route.name,
+          tcp_max_hop,
+          tls,
+          protocol,
+          transport_network,
+          transport_metadata,
+          tags: tags_ref(&tags),
+          dynamic_policy: &access_log.dynamic_policy,
+        },
+        evaluated_person_proof.as_ref(),
+        false,
+      )
       .await
   } else {
     RequestWafDecision::default()
