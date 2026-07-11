@@ -52,6 +52,7 @@ md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "zerocopy"] }
 regex = "1.12.4"
 rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
 rustix = { version = "1.1.4", features = ["net", "std"] }
 sequoia-openpgp = { version = "=2.3.0", default-features = false, features = ["crypto-openssl"] }
 webpki = { package = "rustls-webpki", version = "0.103.13" }
@@ -82,6 +83,7 @@ x509-cert = "0.3.0"
 x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"
+zeroize = "1.9.0"
 compio = { version = "0.19.1", default-features = false, features = ["io-uring", "polling", "runtime"] }
 compio-driver = { version = "0.12.3", default-features = false, features = ["io-uring", "polling"] }
 online-dsl-forge = "0.2.0"

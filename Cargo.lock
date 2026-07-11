@@ -2703,6 +2703,7 @@ dependencies = [
  "regex",
  "rustix",
  "rustls",
+ "rustls-native-certs",
  "rustls-webpki",
  "sequoia-openpgp",
  "serde",
@@ -2728,6 +2729,7 @@ dependencies = [
  "x509-cert 0.2.5",
  "x509-cert 0.3.0",
  "x509-ocsp",
+ "zeroize",
  "zstd",
 ]
 

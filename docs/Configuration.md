@@ -53,7 +53,9 @@ for `error` or `critical` findings. Use `--format json` for automation,
 explicit dependency probes. Without `--external-probe`, doctor only
 loads and validates configuration plus local files, directories, and Unix
 socket permissions; it does not connect to upstreams, databases, Redis, or the
-remote signer.
+remote signer. Local `oxibeltctl doctor` permits its explicit probes to read
+secret-backed endpoint inputs, including Redis ACL files; Admin candidate
+diagnostics keep those probes disabled unless an authorized workflow opts in.
 
 Print the merged, redacted effective configuration:
 
@@ -986,6 +988,7 @@ Limit values must be greater than zero. `limits.max_request_body_bytes` is the d
 [shared_state]
 enabled = false
 namespace = "oxibelt"
+redis_plaintext_policy = "allow" # allow | loopback_only | deny
 instance_id_env = "OXIBELT_INSTANCE_ID"
 default_backend = "cluster"
 operation_timeout_ms = 500
@@ -1027,9 +1030,43 @@ mode = "off" # off | verify_full, PostgreSQL only
 
 Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
 
-`operation_timeout_ms` remains the absolute deadline for each shared-state operation. PostgreSQL uses its existing operation concurrency permit. Redis uses one persistent FIFO pool per configured backend: `max_connections` is its physical socket cap, and `max_waiters` bounds active-plus-waiting Redis commands at `max_connections + max_waiters`; excess commands fail immediately. `pool_wait_timeout_ms`, connection creation, health recycling, and `command_timeout_ms` are independently bounded and still cannot outlive the outer operation deadline. Defaults preserve lazy startup with zero idle connections, four waiters per allowed Redis connection, and inherited wait/command timeouts. A positive `min_idle_connections` is a startup and reload requirement: the configured backend must prewarm that many sockets before the new snapshot activates. Unchanged full reloads retain an existing pool; changed endpoint credentials or pool settings create a draining replacement generation.
+`operation_timeout_ms` remains the absolute deadline for each shared-state operation. PostgreSQL uses its existing operation concurrency permit. Redis uses one persistent FIFO pool per configured backend: `max_connections` is its physical socket cap, and `max_waiters` bounds active-plus-waiting Redis commands at `max_connections + max_waiters`; excess commands fail immediately. `pool_wait_timeout_ms`, connection creation, health recycling, and `command_timeout_ms` are independently bounded and still cannot outlive the outer operation deadline. Defaults preserve lazy startup with zero idle connections, four waiters per allowed Redis connection, and inherited wait/command timeouts. A positive `min_idle_connections` is a startup and reload requirement: the configured backend must prewarm that many sockets before the new snapshot activates. Unchanged plaintext pools retain their existing sockets; changed endpoint credentials or pool settings create a draining replacement generation. Every `rediss://` pool is rebuilt on a full reload so changed trust roots or client-certificate material at the same path cannot be retained.
 
-Redis pools accept only `redis://` single-endpoint URLs in this release. `rediss://`, query/fragment URL forms, and Redis TLS settings are rejected rather than falling back to plaintext; verified Redis TLS is a later compatibility boundary. Authentication and database selection occur once when a physical connection is created. After an idle interval, a checkout performs a bounded `PING`; idle sockets above `min_idle_connections` are retired. Dial failures use bounded exponential backoff and a single half-open reconnect probe while healthy idle sockets remain usable. OxiBelt never retries a command after an ambiguous transport failure. A socket is returned only after exactly one complete RESP reply, including a Redis `-ERR` reply; cancellation, command timeout, EOF, partial I/O, or malformed RESP drops the socket.
+Redis pools support single-endpoint `redis://` and verified `rediss://` URLs. Queries and fragments are rejected. `redis_plaintext_policy = "allow"` is the compatibility default; secure profiles should use `"deny"`, while `"loopback_only"` permits only literal loopback IP addresses. `rediss://` always uses normal Rustls PKI validation and hostname verification. `[shared_state.backends.redis_tls]` optionally selects `trust_store = "webpki"`, `"native"`, or an explicit `"custom"` CA bundle; custom roots replace rather than augment the selected public/native store. `server_name` overrides the URL host only for TLS name verification. `server_spki_sha256` adds one or more `sha256/<base64>` SPKI pins after PKI validation, rather than replacing PKI validation. `client_cert` and `client_key` are an optional pair for mTLS.
+
+Redis credentials may stay outside TOML with `[shared_state.backends.redis_auth]`. `password_file` alone sends Redis `AUTH <password>` and is the normal non-mTLS token/password deployment. Supplying both `username_file` and `password_file` sends Redis ACL `AUTH <username> <password>`. File credentials are mutually exclusive with URL userinfo; URL userinfo remains supported only for compatibility and is redacted from effective config output. Secret files are bounded, require non-empty content, and may have one terminal LF or CRLF removed. TLS/auth secret files resolve beneath the certificate root and are watched as full-reload runtime inputs. A new `rediss://` or file-auth backend establishes a connection, completes TLS/authentication/database selection, and must pass that pre-activation check before the replacement snapshot publishes; failure leaves the previous snapshot active.
+
+For a remote Redis deployment, mount the CA, optional client certificate/key, and ACL files below the certificate root and use relative paths:
+
+```toml
+[shared_state]
+enabled = true
+namespace = "oxibelt:prod:edge-a"
+redis_plaintext_policy = "deny"
+default_backend = "redis-main"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "rediss://redis.edge.svc:6380/0"
+max_connections = 8
+
+[shared_state.backends.redis_tls]
+trust_store = "custom"
+server_name = "redis.edge.svc"
+ca_cert = "redis/redis-main/ca.pem"
+# client_cert = "redis/redis-main/client.pem"
+# client_key = "redis/redis-main/client-key.pem"
+# server_spki_sha256 = ["sha256/<base64-encoded-32-byte-SPKI-hash>"]
+
+[shared_state.backends.redis_auth]
+username_file = "redis/redis-main/username"
+password_file = "redis/redis-main/password"
+```
+
+The Helm chart can project these files with `sharedState.redisSecretProjections`; each item is mounted as `/etc/oxibelt/cert/redis/<projection-name>/<path>`. The chart rejects traversal-like paths and uses read-only projected Secrets with mode `0440`. Configure `runtime.hot_reload.mode = "full"` when Kubernetes Secret rotation should become a new verified Redis pool without restarting the Pod.
+
+Authentication and database selection occur once when a physical connection is created. After an idle interval, a checkout performs a bounded `PING`; idle sockets above `min_idle_connections` are retired. Dial failures use bounded exponential backoff and a single half-open reconnect probe while healthy idle sockets remain usable. OxiBelt never retries a command after an ambiguous transport failure. A socket is returned only after exactly one complete RESP reply, including a Redis `-ERR` reply; cancellation, command timeout, EOF, partial I/O, or malformed RESP drops the socket.
 
 Cancellation drops in-flight Redis I/O and its checkout rather than returning a potentially desynchronized socket; connection-lease release, pool active-count decrement, and cache-lock unlock use a bounded deferred-cleanup queue only as a cancellation fallback, with their existing TTLs as the final recovery boundary. This does not change documented fail-open/fail-closed behavior. Basic Prometheus output exposes bounded `oxibelt_shared_state_queue_duration_ms`, `oxibelt_shared_state_operation_duration_ms`, `oxibelt_shared_state_operations_total`, `oxibelt_shared_state_queued_operations`, `oxibelt_shared_state_in_flight_operations`, `oxibelt_shared_state_deferred_cleanup_dropped_total`, `oxibelt_shared_state_pool_connections`, `oxibelt_shared_state_pool_waiters`, `oxibelt_shared_state_pool_max_connections`, `oxibelt_shared_state_pool_circuit_state`, `oxibelt_shared_state_pool_acquisitions_total`, and `oxibelt_shared_state_pool_connection_events_total` series. Labels contain only the configured backend name, backend kind, fixed operation name/outcome/event, and fixed connection state; keys, identities, tokens, URLs, and error text are never labels. A nonzero deferred-cleanup drop counter means cancellation saturated its bounded fallback queue; investigate it alongside backend timeout and queue metrics.
 

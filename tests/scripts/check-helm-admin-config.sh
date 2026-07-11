@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Validate the semantic Admin combinations that cannot be proved by static
-# YAML/JSON parsing alone. This script never creates Kubernetes resources.
+# Validate the semantic Admin and Redis Secret projection combinations that
+# cannot be proved by static YAML/JSON parsing alone. This script never creates
+# Kubernetes resources.
 set -euo pipefail
 
 umask 077
@@ -110,6 +111,32 @@ render production_mtls_daemonset -f "${production_values}" \
 assert_contains "${work_dir}/production_mtls_daemonset.yaml" "kind: DaemonSet"
 assert_contains "${work_dir}/production_mtls_daemonset.yaml" "admin-server/tls.key"
 assert_contains "${work_dir}/production_mtls_daemonset.yaml" "readOnly: true"
+
+render redis_acl_projection \
+  --set tls.enabled=false \
+  --set-string sharedState.redisSecretProjections[0].name=redis-main \
+  --set-string sharedState.redisSecretProjections[0].secretName=redis-main-credentials \
+  --set-string sharedState.redisSecretProjections[0].items[0].key=ca.crt \
+  --set-string sharedState.redisSecretProjections[0].items[0].path=ca.pem \
+  --set-string sharedState.redisSecretProjections[0].items[1].key=username \
+  --set-string sharedState.redisSecretProjections[0].items[1].path=username \
+  --set-string sharedState.redisSecretProjections[0].items[2].key=password \
+  --set-string sharedState.redisSecretProjections[0].items[2].path=password
+assert_contains "${work_dir}/redis_acl_projection.yaml" "name: \"redis-main-credentials\""
+assert_contains "${work_dir}/redis_acl_projection.yaml" "path: \"redis/redis-main/ca.pem\""
+assert_contains "${work_dir}/redis_acl_projection.yaml" "path: \"redis/redis-main/username\""
+assert_contains "${work_dir}/redis_acl_projection.yaml" "path: \"redis/redis-main/password\""
+assert_contains "${work_dir}/redis_acl_projection.yaml" "mountPath: /etc/oxibelt/cert"
+
+render redis_acl_projection_daemonset \
+  --set tls.enabled=false \
+  --set-string workload.kind=DaemonSet \
+  --set-string sharedState.redisSecretProjections[0].name=redis-main \
+  --set-string sharedState.redisSecretProjections[0].secretName=redis-main-credentials \
+  --set-string sharedState.redisSecretProjections[0].items[0].key=password \
+  --set-string sharedState.redisSecretProjections[0].items[0].path=password
+assert_contains "${work_dir}/redis_acl_projection_daemonset.yaml" "kind: DaemonSet"
+assert_contains "${work_dir}/redis_acl_projection_daemonset.yaml" "path: \"redis/redis-main/password\""
 
 render private_tls_bearer \
   --set admin.enabled=true \
@@ -224,5 +251,13 @@ expect_failure unsupported_bind "bindAddress" \
 
 expect_failure invalid_certificate_mount "tls.mountPath must be the cert sibling" \
   --set-string tls.mountPath=/tmp/invalid-cert-root
+
+expect_failure redis_secret_path_escape "items[].path must be a safe relative path" \
+  --skip-schema-validation \
+  --set tls.enabled=false \
+  --set-string sharedState.redisSecretProjections[0].name=redis-main \
+  --set-string sharedState.redisSecretProjections[0].secretName=redis-main-credentials \
+  --set-string sharedState.redisSecretProjections[0].items[0].key=password \
+  --set-string sharedState.redisSecretProjections[0].items[0].path=../password
 
 echo "Helm Admin configuration check passed"

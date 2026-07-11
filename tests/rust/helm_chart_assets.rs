@@ -38,6 +38,7 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["service"]["type"], "LoadBalancer");
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
   assert_eq!(values["tls"]["secretName"], "oxibelt-tls");
+  assert!(values["sharedState"]["redisSecretProjections"].is_array());
   assert!(values["config"]["inline"].as_str().is_some_and(|inline| {
     inline.contains("[runtime.accept]\nreuse_port = true")
       && inline.contains("[quic.socket]\nreuse_port = true")
@@ -81,6 +82,11 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(
     schema["properties"]["config"]["properties"]["key"]["pattern"],
     "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+  );
+  assert_eq!(
+    schema["properties"]["sharedState"]["properties"]["redisSecretProjections"]["items"]["properties"]
+      ["items"]["items"]["properties"]["path"]["pattern"],
+    "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
   );
   assert_eq!(
     schema["allOf"][0]["then"]["properties"]["config"]["properties"]["existingConfigMapDigest"]["pattern"],
@@ -152,6 +158,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "defaultMode: 288",
     "admin-server/tls.crt",
     "admin-client-ca/ca.crt",
+    "sharedState.redisSecretProjections",
+    "redis/%s/%s",
     "emptyDir: {}",
     "OXIBELT_ADMIN_TOKEN",
     "maxUnavailable: {{ .Values.workload.deployment.maxUnavailable }}",
@@ -212,6 +220,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "defaultMode: 288",
     "admin-server/tls.crt",
     "admin-client-ca/ca.crt",
+    "sharedState.redisSecretProjections",
+    "redis/%s/%s",
   ] {
     assert!(
       daemonset.contains(needle),
@@ -267,6 +277,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "admin.insecureDevelopmentMode.enabled",
     "oxibelt.adminConfig",
     "admin-server/tls.crt",
+    "validateRedisSecretProjections",
+    "sharedState.redisSecretProjections[].items[].path",
   ] {
     assert!(
       helpers.contains(needle),

@@ -7,7 +7,9 @@ use std::time::Duration;
 use super::redis_pool::RedisPool;
 use super::runtime::{BackendRuntime, CleanupDispatcher};
 use super::{Backend, MemoryBackend, RedisBackend, SharedState};
-use crate::config::{SharedStateBackendConfig, SharedStateBackendKind};
+use crate::config::{
+  CryptoConfig, RedisPlaintextPolicy, SharedStateBackendConfig, SharedStateBackendKind,
+};
 use crate::metrics::Metrics;
 
 impl SharedState {
@@ -41,11 +43,19 @@ impl SharedState {
       max_connections: 64,
       connect_timeout_ms: 100,
       redis_pool: None,
+      redis_tls: Default::default(),
+      redis_auth: Default::default(),
       tls: Default::default(),
     };
     let backend = Arc::new(Backend::Redis(RedisBackend {
-      pool: RedisPool::new(&config, Duration::from_millis(250), metrics.clone())
-        .expect("test Redis pool should build"),
+      pool: RedisPool::new(
+        &config,
+        Duration::from_millis(250),
+        &CryptoConfig::default(),
+        RedisPlaintextPolicy::Allow,
+        metrics.clone(),
+      )
+      .expect("test Redis pool should build"),
       runtime: BackendRuntime::new(&config, "redis", Duration::from_millis(250), metrics),
     }));
     let mut backends = HashMap::new();

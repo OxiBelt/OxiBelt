@@ -1,7 +1,9 @@
 {{- include "oxibelt.validateConfigRollout" . -}}
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateWorkloadRollout" . -}}
+{{- include "oxibelt.validateRedisSecretProjections" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
+{{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- if eq .Values.workload.kind "DaemonSet" }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -135,7 +137,7 @@ spec:
         - name: config
           mountPath: {{ .Values.config.mountPath }}
           readOnly: true
-        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) }}
+        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections }}
         - name: tls
           mountPath: {{ include "oxibelt.certMountPath" . }}
           readOnly: true
@@ -165,7 +167,7 @@ spec:
           - key: gateway-config-directory
             path: {{ .Values.configRollout.managedConfigPath | quote }}
 {{ end }}
-      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) }}
+      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections }}
       - name: tls
         projected:
           # Decimal 288 is POSIX mode 0440. Kubernetes applies the Pod fsGroup
@@ -191,6 +193,15 @@ spec:
               - key: {{ .Values.admin.mtls.clientCaSecretKey }}
                 path: admin-client-ca/ca.crt
           {{- end }}
+          {{- end }}
+          {{- range $projection := .Values.sharedState.redisSecretProjections }}
+          - secret:
+              name: {{ required "sharedState.redisSecretProjections[].secretName is required" $projection.secretName | quote }}
+              items:
+              {{- range $item := $projection.items }}
+              - key: {{ $item.key | quote }}
+                path: {{ printf "redis/%s/%s" $projection.name $item.path | quote }}
+              {{- end }}
           {{- end }}
       {{- end }}
       {{- if .Values.oxirule.enabled }}

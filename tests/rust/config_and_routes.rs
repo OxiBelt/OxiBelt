@@ -4729,6 +4729,155 @@ max_connections = 2
 }
 
 #[test]
+fn shared_state_rediss_tls_and_acl_secret_files_resolve_under_cert_root() {
+  let temp_dir = common::TempDir::new("shared-state-rediss-acl");
+  let pin = format!(
+    "sha256/{}",
+    base64::engine::general_purpose::STANDARD.encode([7_u8; 32])
+  );
+  let config_path = write_loadable_config(&temp_dir, "shared-state-rediss-acl", |raw| {
+    raw.replace(
+      "[[upstreams]]",
+      &format!(
+        r#"[shared_state]
+enabled = true
+namespace = "oxibelt:prod:edge-a"
+redis_plaintext_policy = "deny"
+default_backend = "redis-main"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "rediss://redis.edge.svc:6380/2"
+
+[shared_state.backends.redis_tls]
+trust_store = "custom"
+server_name = "redis.edge.svc"
+ca_cert = "redis/redis-main/ca.pem"
+client_cert = "redis/redis-main/client.pem"
+client_key = "redis/redis-main/client-key.pem"
+server_spki_sha256 = ["{pin}"]
+
+[shared_state.backends.redis_auth]
+username_file = "redis/redis-main/username"
+password_file = "redis/redis-main/password"
+
+[[upstreams]]"#,
+      ),
+    )
+  });
+  let redis_dir = temp_dir.path().join("cert/redis/redis-main");
+  std::fs::create_dir_all(&redis_dir).expect("failed to create Redis secret directory");
+  for (name, contents) in [
+    ("ca.pem", "test CA"),
+    ("client.pem", "test client certificate"),
+    ("client-key.pem", "test client key"),
+    ("username", "edge-user\n"),
+    ("password", "edge-password\n"),
+  ] {
+    std::fs::write(redis_dir.join(name), contents).expect("failed to write Redis test secret");
+  }
+
+  let config = Config::load(&config_path).expect("rediss ACL configuration should load");
+  let backend = &config.shared_state.backends[0];
+  assert_eq!(config.shared_state.namespace, "oxibelt:prod:edge-a");
+  assert_eq!(
+    backend.redis_tls.server_name.as_deref(),
+    Some("redis.edge.svc")
+  );
+  assert_eq!(
+    backend.redis_auth.username_file.as_deref(),
+    Some(redis_dir.join("username").as_path())
+  );
+  assert_eq!(
+    backend.redis_auth.password_file.as_deref(),
+    Some(redis_dir.join("password").as_path())
+  );
+  assert!(
+    config
+      .source_paths
+      .runtime_files
+      .contains(&redis_dir.join("password"))
+  );
+}
+
+#[test]
+fn shared_state_redis_tls_and_acl_validation_rejects_unsafe_combinations() {
+  let temp_dir = common::TempDir::new("shared-state-rediss-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-rediss-invalid");
+  for (name, shared_state, backend, expected) in [
+    (
+      "plaintext-denied",
+      r#"enabled = true
+redis_plaintext_policy = "deny""#,
+      r#"kind = "redis"
+connection_url = "redis://redis.edge.svc:6379/0""#,
+      "plaintext redis:// is forbidden",
+    ),
+    (
+      "tls-on-plaintext",
+      r#"enabled = true"#,
+      r#"kind = "redis"
+connection_url = "redis://127.0.0.1:6379/0"
+
+[shared_state.backends.redis_tls]
+server_name = "redis.edge.svc""#,
+      "redis_tls settings require a rediss:// URL",
+    ),
+    (
+      "custom-without-ca",
+      r#"enabled = true"#,
+      r#"kind = "redis"
+connection_url = "rediss://redis.edge.svc:6379/0"
+
+[shared_state.backends.redis_tls]
+trust_store = "custom""#,
+      "ca_cert is required",
+    ),
+    (
+      "username-without-password",
+      r#"enabled = true"#,
+      r#"kind = "redis"
+connection_url = "rediss://redis.edge.svc:6379/0"
+
+[shared_state.backends.redis_auth]
+username_file = "redis/redis-main/username""#,
+      "password_file is required",
+    ),
+    (
+      "invalid-namespace",
+      r#"enabled = true
+namespace = "bad namespace""#,
+      r#"kind = "redis"
+connection_url = "redis://127.0.0.1:6379/0""#,
+      "shared_state.namespace must be",
+    ),
+  ] {
+    let raw = format!(
+      r#"{}
+
+[shared_state]
+{shared_state}
+
+[[shared_state.backends]]
+name = "{name}"
+{backend}
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("invalid Redis configuration should parse");
+    let error = config
+      .validate()
+      .expect_err("unsafe Redis configuration should fail validation");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected validation error for {name}: {error}"
+    );
+  }
+}
+
+#[test]
 fn shared_state_redis_pool_rejects_invalid_or_postgres_settings() {
   let temp_dir = common::TempDir::new("shared-state-redis-pool-invalid");
   let (cert_path, key_path) =
@@ -4748,13 +4897,6 @@ max_connections = 2"#,
 connection_url = "redis://mock-redis:6379/0""#,
       r#"command_timeout_ms = 501"#,
       "redis_pool timeouts must not exceed shared_state.operation_timeout_ms",
-    ),
-    (
-      "tls-url",
-      r#"kind = "redis"
-connection_url = "rediss://mock-redis:6379/0""#,
-      r#"max_waiters = 1"#,
-      "must use redis://",
     ),
     (
       "postgres",

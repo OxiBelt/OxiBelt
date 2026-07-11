@@ -70,6 +70,8 @@ impl FromStr for ExternalProbeKind {
 #[derive(Debug, Clone, Default)]
 pub struct DoctorOptions {
   pub external_probes: Vec<ExternalProbeKind>,
+  // Kept as a compatibility name. Redis ACL secret files are also treated as
+  // secret-backed probe inputs and require this opt-in.
   pub allow_secret_env_probes: bool,
 }
 
@@ -549,6 +551,45 @@ token_env = "PATH"
         .iter()
         .any(|resource| resource == "probe/upstream/tcp/token-probe.example:8500"),
       "active-config probes should still expose authorized token_env discovery targets: {active_resources:#?}"
+    );
+  }
+
+  #[test]
+  fn external_probe_target_resources_skip_redis_acl_file_candidate_targets() {
+    let temp_dir = common::TempDir::new("diagnostics-redis-acl-file-targets");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "diagnostics-redis-acl-file-targets");
+    let raw = format!(
+      r#"
+{}
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "redis-acl"
+kind = "redis"
+connection_url = "rediss://redis.example.test:6380/0"
+
+[shared_state.backends.redis_auth]
+password_file = "redis/redis-acl/password"
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let options = DoctorOptions {
+      external_probes: vec![ExternalProbeKind::SharedState],
+      allow_secret_env_probes: false,
+    };
+
+    assert!(
+      external_probe_target_resources(&config, &options).is_empty(),
+      "candidate diagnostics must not use Redis ACL files"
+    );
+    assert!(
+      external_probe_target_resources(&config, &options.with_secret_env_probes())
+        .iter()
+        .any(|resource| resource == "probe/shared_state/tcp/redis.example.test:6380")
     );
   }
 

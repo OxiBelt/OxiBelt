@@ -34,6 +34,7 @@ mod negotiation;
 mod ocsp;
 mod outbound_revocation;
 mod provider;
+mod redis_client;
 mod resumption;
 mod server_policy;
 mod upstream_client;
@@ -54,6 +55,9 @@ pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;
+pub(crate) use redis_client::{
+  RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config,
+};
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{
   TlsServerResumptionKey, certificate_identity, client_auth_identity, configure_server_resumption,

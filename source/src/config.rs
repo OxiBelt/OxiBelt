@@ -101,9 +101,12 @@ pub use route_static_files::*;
 pub use runtime_hardening::*;
 pub use security_headers::*;
 pub use shared_state::{
-  RedisPoolConfig, SharedStateBackendConfig, SharedStateBackendKind, SharedStateConfig,
+  RedisAuthConfig, RedisPlaintextPolicy, RedisPoolConfig, RedisTlsConfig, RedisTrustStore,
+  SharedStateBackendConfig, SharedStateBackendKind, SharedStateConfig,
 };
-pub(crate) use shared_state::{RedisPoolSettings, default_shared_state_namespace};
+pub(crate) use shared_state::{
+  RedisPoolSettings, default_shared_state_namespace, validate_redis_connection_url,
+};
 pub use sni_forward::*;
 pub use source_paths::{ConfigSourcePaths, DownstreamTlsCertificateSourcePaths};
 pub use static_files::*;
@@ -782,6 +785,18 @@ impl Config {
     for backend in &mut self.shared_state.backends {
       for path in backend.tls.resolve_relative_paths(
         &format!("shared_state.backends.{}.tls", backend.name),
+        &path_roots.cert_dir,
+      )? {
+        self.source_paths.remember_runtime_file(path);
+      }
+      for path in backend.redis_tls.resolve_relative_paths(
+        &format!("shared_state.backends.{}.redis_tls", backend.name),
+        &path_roots.cert_dir,
+      )? {
+        self.source_paths.remember_runtime_file(path);
+      }
+      for path in backend.redis_auth.resolve_relative_paths(
+        &format!("shared_state.backends.{}.redis_auth", backend.name),
         &path_roots.cert_dir,
       )? {
         self.source_paths.remember_runtime_file(path);
@@ -3275,6 +3290,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "operation_timeout_ms",
       "admin_tokens_backend",
       "person_proof_backend",
+      "redis_plaintext_policy",
       "rate_limits_backend",
       "reload_backend",
       "sticky_sessions_backend",
@@ -3287,7 +3303,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "kind",
       "max_connections",
       "name",
+      "redis_auth",
       "redis_pool",
+      "redis_tls",
       "tls",
     ][..],
     "shared_state.backends.redis_pool" => &[
@@ -3302,6 +3320,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "reconnect_max_backoff_ms",
       "reconnect_min_backoff_ms",
     ][..],
+    "shared_state.backends.redis_tls" => &[
+      "ca_cert",
+      "client_cert",
+      "client_key",
+      "server_name",
+      "server_spki_sha256",
+      "trust_store",
+    ][..],
+    "shared_state.backends.redis_auth" => &["password_file", "username_file"][..],
     "shared_state.backends.tls" => &["ca_cert", "client_cert", "client_key", "mode"][..],
     "upstreams" => &[
       "connect_timeout_ms",

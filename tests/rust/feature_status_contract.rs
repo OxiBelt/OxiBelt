@@ -66,6 +66,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
     ("client-identity-asn", "experimental"),
     ("sybil-rate-limit-identities", "experimental"),
     ("cache", "supported"),
+    ("redis-shared-state-tls", "supported"),
     ("admin-api-runtime-control", "supported"),
     ("observability", "supported"),
     ("gateway-controller", "experimental"),

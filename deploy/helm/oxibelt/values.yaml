@@ -180,6 +180,22 @@ tls:
   secretName: oxibelt-tls
   mountPath: /etc/oxibelt/cert
 
+# Project Redis TLS, ACL username, and ACL password keys into the same
+# certificate root that OxiBelt resolves for `shared_state.backends.redis_*`.
+# Each item becomes `/etc/oxibelt/cert/redis/<name>/<path>` and must be
+# referenced by that relative path in `config.inline` or an existing ConfigMap.
+sharedState:
+  redisSecretProjections: []
+  # - name: redis-main
+  #   secretName: redis-main-credentials
+  #   items:
+  #   - key: ca.crt
+  #     path: ca.pem
+  #   - key: username
+  #     path: username
+  #   - key: password
+  #     path: password
+
 oxirule:
   enabled: false
   existingConfigMap: ""

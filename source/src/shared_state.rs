@@ -15,7 +15,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Pool, Postgres};
 use tracing::warn;
 
-use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
+use crate::config::{
+  Config, CryptoConfig, DatabaseTlsMode, RedisPlaintextPolicy, SharedStateBackendConfig,
+  SharedStateBackendKind,
+};
 use crate::limits::ParsedRate;
 use crate::metrics::Metrics;
 
@@ -26,6 +29,9 @@ mod rate_limits;
 mod redis_connection;
 mod redis_pool;
 mod redis_protocol;
+#[cfg(test)]
+#[path = "shared_state/redis_tls_tests.rs"]
+mod redis_tls_tests;
 mod runtime;
 mod sticky_sessions;
 #[cfg(test)]
@@ -200,6 +206,8 @@ impl SharedState {
       let built = Backend::connect(
         backend,
         shared.operation_timeout_ms,
+        &config.crypto,
+        shared.redis_plaintext_policy,
         metrics.clone(),
         previous_backend,
       )
@@ -470,10 +478,31 @@ impl SharedState {
   }
 }
 
+/// Runs a one-shot Redis health probe through the same URL validation,
+/// authentication, TLS, and server-verification path used by the runtime.
+pub(crate) async fn probe_redis_backend(
+  config: &Config,
+  backend: &SharedStateBackendConfig,
+) -> anyhow::Result<()> {
+  let pool = RedisPool::new(
+    backend,
+    Duration::from_millis(config.shared_state.operation_timeout_ms),
+    &config.crypto,
+    config.shared_state.redis_plaintext_policy,
+    Metrics::new(),
+  )?;
+  match pool.command(&[b"PING".to_vec()]).await? {
+    Resp::Simple(value) if value == "PONG" => Ok(()),
+    _ => bail!("unexpected Redis PING response"),
+  }
+}
+
 impl Backend {
   async fn connect(
     config: &SharedStateBackendConfig,
     timeout_ms: u64,
+    crypto: &CryptoConfig,
+    plaintext_policy: RedisPlaintextPolicy,
     metrics: Arc<Metrics>,
     previous: Option<&Arc<Backend>>,
   ) -> anyhow::Result<Self> {
@@ -484,7 +513,7 @@ impl Backend {
         let reused = if let Some(Self::Redis(previous)) = previous.map(Arc::as_ref) {
           previous
             .pool
-            .matches_config(config, operation_timeout)?
+            .matches_config(config, operation_timeout, crypto, plaintext_policy)?
             .then(|| previous.pool.clone())
         } else {
           None
@@ -492,7 +521,7 @@ impl Backend {
         let pool = if let Some(pool) = reused {
           pool
         } else {
-          RedisPool::new(config, operation_timeout, metrics)?
+          RedisPool::new(config, operation_timeout, crypto, plaintext_policy, metrics)?
         };
         // A positive minimum-idle setting is an activation requirement even
         // when an unchanged pool is retained over reload.

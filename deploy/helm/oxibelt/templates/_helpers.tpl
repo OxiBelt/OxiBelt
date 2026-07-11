@@ -155,6 +155,48 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validateRedisSecretProjections" -}}
+{{- $projections := .Values.sharedState.redisSecretProjections | default (list) -}}
+{{- $projectionNames := dict -}}
+{{- range $projection := $projections -}}
+{{- if not $projection.name -}}
+{{- fail "sharedState.redisSecretProjections[].name is required" -}}
+{{- else if or (gt (len $projection.name) 63) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $projection.name)) -}}
+{{- fail "sharedState.redisSecretProjections[].name must be a safe lower-case DNS label up to 63 characters" -}}
+{{- end -}}
+{{- if hasKey $projectionNames $projection.name -}}
+{{- fail "sharedState.redisSecretProjections must not reuse a projection name" -}}
+{{- end -}}
+{{- $_ := set $projectionNames $projection.name true -}}
+{{- if not $projection.secretName -}}
+{{- fail "sharedState.redisSecretProjections[].secretName is required" -}}
+{{- else if or (gt (len $projection.secretName) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $projection.secretName)) -}}
+{{- fail "sharedState.redisSecretProjections[].secretName must be a safe Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not $projection.items -}}
+{{- fail "sharedState.redisSecretProjections[].items must contain at least one Secret key" -}}
+{{- else -}}
+{{- $paths := dict -}}
+{{- range $item := $projection.items -}}
+{{- if not $item.key -}}
+{{- fail "sharedState.redisSecretProjections[].items[].key is required" -}}
+{{- else if not (regexMatch "^[A-Za-z0-9._-]+$" $item.key) -}}
+{{- fail "sharedState.redisSecretProjections[].items[].key must be a safe Kubernetes Secret key" -}}
+{{- end -}}
+{{- if not $item.path -}}
+{{- fail "sharedState.redisSecretProjections[].items[].path is required" -}}
+{{- else if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $item.path) -}}
+{{- fail "sharedState.redisSecretProjections[].items[].path must be a safe relative path" -}}
+{{- end -}}
+{{- if hasKey $paths $item.path -}}
+{{- fail "sharedState.redisSecretProjections[].items must not reuse a projected path" -}}
+{{- end -}}
+{{- $_ := set $paths $item.path true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.validateAdmin" -}}
 {{- $admin := .Values.admin -}}
 {{- $address := $admin.bindAddress -}}
@@ -162,10 +204,11 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $externalService := and $admin.service.enabled (has $admin.service.type (list "LoadBalancer" "NodePort")) -}}
 {{- $configMountPath := trimSuffix "/" .Values.config.mountPath -}}
 {{- $expectedCertMountPath := include "oxibelt.certMountPath" . -}}
+{{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- if or (not (hasPrefix "/" $configMountPath)) (eq $configMountPath "/") -}}
 {{- fail "config.mountPath must be an absolute non-root directory" -}}
 {{- end -}}
-{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled)) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
+{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
 {{- fail "tls.mountPath must be the cert sibling of config.mountPath" -}}
 {{- end -}}
 {{- if and $admin.service.enabled (not $admin.enabled) -}}

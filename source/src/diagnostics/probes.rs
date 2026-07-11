@@ -2,15 +2,13 @@
 //! Probe output is structured so callers can distinguish configuration, network, and TLS failures.
 
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
@@ -160,7 +158,7 @@ fn shared_state_backend_resource(
   backend: &SharedStateBackendConfig,
   allow_secret_env: bool,
 ) -> Option<String> {
-  if backend.connection_url_env.is_some() && !allow_secret_env {
+  if backend_requires_secret_probe_permission(backend) && !allow_secret_env {
     return None;
   }
   let raw = backend
@@ -172,6 +170,10 @@ fn shared_state_backend_resource(
     SharedStateBackendKind::Postgres => 5432,
   };
   tcp_resource_from_url(kind, &url, Some(default_port))
+}
+
+fn backend_requires_secret_probe_permission(backend: &SharedStateBackendConfig) -> bool {
+  backend.connection_url_env.is_some() || backend.redis_auth.is_configured()
 }
 
 fn tcp_resource_from_url(kind: &str, url: &Url, default_port: Option<u16>) -> Option<String> {
@@ -203,11 +205,11 @@ async fn probe_shared_state(
     return;
   }
   for backend in &config.shared_state.backends {
-    if backend.connection_url_env.is_some() && !options.allow_secret_env_probes {
+    if backend_requires_secret_probe_permission(backend) && !options.allow_secret_env_probes {
       probe_secret_env_skipped(report, "shared_state", &backend.name);
       continue;
     }
-    probe_shared_state_backend(backend, report, "shared_state").await;
+    probe_shared_state_backend(config, backend, report, "shared_state").await;
   }
 }
 
@@ -242,23 +244,26 @@ async fn probe_ipm_store(config: &Config, options: &DoctorOptions, report: &mut 
     );
     return;
   };
-  if backend.connection_url_env.is_some() && !options.allow_secret_env_probes {
+  if backend_requires_secret_probe_permission(backend) && !options.allow_secret_env_probes {
     probe_secret_env_skipped(report, "ipm_store", name);
     return;
   }
-  probe_postgres_backend(backend, report, "ipm_store").await;
+  probe_shared_state_backend(config, backend, report, "ipm_store").await;
 }
 
 async fn probe_shared_state_backend(
+  config: &Config,
   backend: &SharedStateBackendConfig,
   report: &mut DiagnosticReport,
   kind: &str,
 ) {
   match backend.kind {
-    SharedStateBackendKind::Redis => match probe_redis_backend(backend).await {
-      Ok(()) => report.probe(kind, &backend.name, "ok", "Redis PING succeeded"),
-      Err(error) => push_probe_error(report, kind, &backend.name, error),
-    },
+    SharedStateBackendKind::Redis => {
+      match crate::shared_state::probe_redis_backend(config, backend).await {
+        Ok(()) => report.probe(kind, &backend.name, "ok", "Redis PING succeeded"),
+        Err(error) => push_probe_error(report, kind, &backend.name, error),
+      }
+    }
     SharedStateBackendKind::Postgres => probe_postgres_backend(backend, report, kind).await,
   }
 }
@@ -313,7 +318,7 @@ fn probe_secret_env_skipped(report: &mut DiagnosticReport, kind: &str, target: &
     kind,
     target,
     "skipped",
-    "probe requires a configured secret environment variable and is disabled for candidate diagnostics",
+    "probe requires configured secret-backed credentials and is disabled for candidate diagnostics",
   );
 }
 
@@ -328,92 +333,6 @@ fn push_probe_error(report: &mut DiagnosticReport, kind: &str, target: &str, err
     format!("{kind} probe failed: {message}"),
     "Fix the dependency endpoint, credentials, network policy, or disable this external probe for offline validation.",
   );
-}
-
-async fn probe_redis_backend(backend: &SharedStateBackendConfig) -> anyhow::Result<()> {
-  let raw =
-    backend.connection_url_with_prefix(&format!("shared_state.backends.{}", backend.name))?;
-  let url = Url::parse(&raw).context("failed to parse Redis URL")?;
-  let host = url
-    .host_str()
-    .ok_or_else(|| anyhow!("Redis URL is missing host"))?;
-  let port = url.port().unwrap_or(6379);
-  let timeout = Duration::from_millis(backend.connect_timeout_ms);
-  let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect((host, port)))
-    .await
-    .map_err(|_| anyhow!("Redis connect timed out"))??;
-
-  if let Some(password) = url.password().filter(|value| !value.is_empty()) {
-    let mut args = vec!["AUTH".to_string()];
-    if !url.username().is_empty() {
-      args.push(url.username().to_string());
-    }
-    args.push(password.to_string());
-    redis_round_trip(&mut stream, &args, timeout)
-      .await
-      .context("Redis AUTH failed")?;
-  }
-  if let Some(db) = url
-    .path()
-    .strip_prefix('/')
-    .filter(|value| !value.is_empty())
-  {
-    redis_round_trip(
-      &mut stream,
-      &["SELECT".to_string(), db.to_string()],
-      timeout,
-    )
-    .await
-    .context("Redis SELECT failed")?;
-  }
-  let line = redis_round_trip(&mut stream, &["PING".to_string()], timeout).await?;
-  if line != "+PONG" {
-    bail!("unexpected Redis PING response {line}");
-  }
-  Ok(())
-}
-
-async fn redis_round_trip(
-  stream: &mut tokio::net::TcpStream,
-  args: &[String],
-  timeout: Duration,
-) -> anyhow::Result<String> {
-  let mut encoded = Vec::new();
-  write!(&mut encoded, "*{}\r\n", args.len())?;
-  for arg in args {
-    write!(&mut encoded, "${}\r\n", arg.len())?;
-    encoded.extend_from_slice(arg.as_bytes());
-    encoded.extend_from_slice(b"\r\n");
-  }
-  tokio::time::timeout(timeout, stream.write_all(&encoded))
-    .await
-    .map_err(|_| anyhow!("Redis write timed out"))??;
-  let line = tokio::time::timeout(timeout, read_redis_line(stream))
-    .await
-    .map_err(|_| anyhow!("Redis read timed out"))??;
-  if let Some(error) = line.strip_prefix('-') {
-    bail!("Redis error: {error}");
-  }
-  Ok(line)
-}
-
-async fn read_redis_line(stream: &mut tokio::net::TcpStream) -> anyhow::Result<String> {
-  let mut bytes = Vec::new();
-  loop {
-    let mut byte = [0_u8; 1];
-    let read = stream.read(&mut byte).await?;
-    if read == 0 {
-      bail!("Redis closed the connection");
-    }
-    bytes.push(byte[0]);
-    if bytes.ends_with(b"\r\n") {
-      bytes.truncate(bytes.len().saturating_sub(2));
-      return String::from_utf8(bytes).context("Redis response line was not UTF-8");
-    }
-    if bytes.len() > 16 * 1024 {
-      bail!("Redis response line exceeded 16 KiB");
-    }
-  }
 }
 
 async fn postgres_select_one(backend: &SharedStateBackendConfig) -> anyhow::Result<()> {

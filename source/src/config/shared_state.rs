@@ -12,12 +12,18 @@ use super::{
   validate_optional_non_empty,
 };
 
+mod redis_security;
+
+pub use redis_security::{RedisAuthConfig, RedisPlaintextPolicy, RedisTlsConfig, RedisTrustStore};
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]
   pub enabled: bool,
   #[serde(default = "default_shared_state_namespace")]
   pub namespace: String,
+  #[serde(default)]
+  pub redis_plaintext_policy: RedisPlaintextPolicy,
   #[serde(default = "default_shared_state_instance_id_env")]
   pub instance_id_env: String,
   #[serde(default)]
@@ -55,6 +61,7 @@ impl Default for SharedStateConfig {
     Self {
       enabled: false,
       namespace: default_shared_state_namespace(),
+      redis_plaintext_policy: RedisPlaintextPolicy::default(),
       instance_id_env: default_shared_state_instance_id_env(),
       default_backend: None,
       operation_timeout_ms: default_shared_state_operation_timeout_ms(),
@@ -80,6 +87,7 @@ impl SharedStateConfig {
       return Ok(());
     }
     validate_optional_non_empty("shared_state.namespace", Some(&self.namespace))?;
+    validate_shared_state_namespace(&self.namespace)?;
     validate_optional_non_empty("shared_state.instance_id_env", Some(&self.instance_id_env))?;
     if self.operation_timeout_ms == 0 || self.connection_lease_ms == 0 || self.cache_lock_ms == 0 {
       bail!("shared_state timeout and lease values must be greater than 0");
@@ -92,7 +100,7 @@ impl SharedStateConfig {
     }
     let mut names = HashSet::new();
     for backend in &self.backends {
-      backend.validate(self.operation_timeout_ms)?;
+      backend.validate(self.operation_timeout_ms, self.redis_plaintext_policy)?;
       if !names.insert(backend.name.as_str()) {
         bail!("duplicate shared_state backend name {}", backend.name);
       }
@@ -157,11 +165,19 @@ pub struct SharedStateBackendConfig {
   #[serde(default)]
   pub redis_pool: Option<RedisPoolConfig>,
   #[serde(default)]
+  pub redis_tls: RedisTlsConfig,
+  #[serde(default)]
+  pub redis_auth: RedisAuthConfig,
+  #[serde(default)]
   pub tls: DatabaseTlsConfig,
 }
 
 impl SharedStateBackendConfig {
-  fn validate(&self, operation_timeout_ms: u64) -> anyhow::Result<()> {
+  fn validate(
+    &self,
+    operation_timeout_ms: u64,
+    redis_plaintext_policy: RedisPlaintextPolicy,
+  ) -> anyhow::Result<()> {
     validate_optional_non_empty(
       &format!("shared_state.backends.{}.connection_url", self.name),
       self.connection_url.as_deref(),
@@ -212,14 +228,38 @@ impl SharedStateBackendConfig {
           self.name
         );
       }
+      self
+        .redis_tls
+        .validate(&format!("shared_state.backends.{}.redis_tls", self.name))?;
+      self
+        .redis_auth
+        .validate(&format!("shared_state.backends.{}.redis_auth", self.name))?;
       if let Some(connection_url) = self.connection_url.as_deref() {
-        validate_redis_connection_url(connection_url, &self.name)?;
+        validate_redis_connection_url(
+          connection_url,
+          &self.name,
+          redis_plaintext_policy,
+          &self.redis_tls,
+          &self.redis_auth,
+        )?;
       }
       let _ = self.redis_pool_settings(operation_timeout_ms)?;
     } else {
       if self.redis_pool.is_some() {
         bail!(
           "shared_state PostgreSQL backend {} does not support redis_pool settings",
+          self.name
+        );
+      }
+      if self.redis_tls.is_configured() {
+        bail!(
+          "shared_state PostgreSQL backend {} does not support redis_tls settings",
+          self.name
+        );
+      }
+      if self.redis_auth.is_configured() {
+        bail!(
+          "shared_state PostgreSQL backend {} does not support redis_auth settings",
           self.name
         );
       }
@@ -260,19 +300,45 @@ impl SharedStateBackendConfig {
   }
 }
 
-fn validate_redis_connection_url(connection_url: &str, backend_name: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_redis_connection_url(
+  connection_url: &str,
+  backend_name: &str,
+  plaintext_policy: RedisPlaintextPolicy,
+  redis_tls: &RedisTlsConfig,
+  redis_auth: &RedisAuthConfig,
+) -> anyhow::Result<()> {
   let url = Url::parse(connection_url)
     .with_context(|| format!("failed to parse shared_state Redis URL {backend_name}"))?;
-  if url.scheme() != "redis" {
-    bail!(
-      "shared_state Redis backend {backend_name} must use redis://; rediss:// requires the P0-5 TLS implementation"
-    );
+  if url.scheme() != "redis" && url.scheme() != "rediss" {
+    bail!("shared_state Redis backend {backend_name} must use redis:// or rediss://");
   }
   if url.query().is_some() || url.fragment().is_some() {
     bail!("shared_state Redis backend {backend_name} URL must not include a query or fragment");
   }
   if url.host_str().is_none_or(str::is_empty) {
     bail!("shared_state Redis backend {backend_name} URL is missing host");
+  }
+  let has_url_username = !url.username().is_empty();
+  let has_url_password = url.password().is_some_and(|password| !password.is_empty());
+  if has_url_username && !has_url_password {
+    bail!("shared_state Redis backend {backend_name} URL username requires a password");
+  }
+  if (has_url_username || has_url_password) && redis_auth.is_configured() {
+    bail!(
+      "shared_state Redis backend {backend_name} must not combine URL credentials with redis_auth files"
+    );
+  }
+  match url.scheme() {
+    "redis" => {
+      if redis_tls.is_configured() {
+        bail!(
+          "shared_state Redis backend {backend_name} redis_tls settings require a rediss:// URL"
+        );
+      }
+      plaintext_policy.validate_url_host(url.host_str().unwrap_or_default(), backend_name)?;
+    }
+    "rediss" => {}
+    _ => {}
   }
   match url.path() {
     "" | "/" => Ok(()),
@@ -287,6 +353,21 @@ fn validate_redis_connection_url(connection_url: &str, backend_name: &str) -> an
       bail!("shared_state Redis backend {backend_name} URL database must be an unsigned integer")
     }
   }
+}
+
+fn validate_shared_state_namespace(namespace: &str) -> anyhow::Result<()> {
+  if namespace.len() > 128
+    || namespace.starts_with(':')
+    || namespace.ends_with(':')
+    || !namespace
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+  {
+    bail!(
+      "shared_state.namespace must be 1-128 ASCII letters, digits, '.', '_', '-', or ':' and must not start or end with ':'"
+    );
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]

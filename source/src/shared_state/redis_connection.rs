@@ -2,25 +2,33 @@
 
 use std::fmt;
 use std::future::Future;
+use std::io::{self, Read};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use deadpool::managed::{Manager, Metrics as DeadpoolMetrics, RecycleError, RecycleResult};
-use tokio::io::BufReader;
+use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_rustls::TlsConnector;
 use url::Url;
+use zeroize::Zeroizing;
 
-use crate::config::{RedisPoolSettings, SharedStateBackendConfig};
+use crate::config::{
+  CryptoConfig, RedisAuthConfig, RedisPlaintextPolicy, RedisPoolSettings, SharedStateBackendConfig,
+  validate_redis_connection_url,
+};
 use crate::metrics::Metrics;
+use crate::tls::{RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config};
 
 use super::redis_protocol::{expect_ok, read_resp, write_resp_command};
 
 pub(super) struct RedisConnection {
-  pub(super) reader: BufReader<OwnedReadHalf>,
-  pub(super) writer: OwnedWriteHalf,
+  pub(super) reader: BufReader<ReadHalf<RedisTransport>>,
+  pub(super) writer: WriteHalf<RedisTransport>,
 }
 
 impl fmt::Debug for RedisConnection {
@@ -29,9 +37,56 @@ impl fmt::Debug for RedisConnection {
   }
 }
 
+pub(super) enum RedisTransport {
+  Plain(TcpStream),
+  Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for RedisTransport {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    context: &mut TaskContext<'_>,
+    buffer: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    match self.get_mut() {
+      Self::Plain(stream) => Pin::new(stream).poll_read(context, buffer),
+      Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(context, buffer),
+    }
+  }
+}
+
+impl AsyncWrite for RedisTransport {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    context: &mut TaskContext<'_>,
+    bytes: &[u8],
+  ) -> Poll<io::Result<usize>> {
+    match self.get_mut() {
+      Self::Plain(stream) => Pin::new(stream).poll_write(context, bytes),
+      Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(context, bytes),
+    }
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    match self.get_mut() {
+      Self::Plain(stream) => Pin::new(stream).poll_flush(context),
+      Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(context),
+    }
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+    match self.get_mut() {
+      Self::Plain(stream) => Pin::new(stream).poll_shutdown(context),
+      Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(context),
+    }
+  }
+}
+
 #[derive(Clone)]
 pub(super) struct RedisConnectionManager {
   pub(super) endpoint: RedisEndpoint,
+  pub(super) credentials: RedisCredentials,
+  pub(super) tls: Option<RedisTlsClientConfig>,
   pub(super) connect_timeout: Duration,
   pub(super) health_check_interval: Duration,
   pub(super) command_timeout: Duration,
@@ -113,14 +168,23 @@ impl RedisConnectionManager {
       stream
         .set_nodelay(true)
         .map_err(|_| RedisManagerError::Connection)?;
-      let (reader, mut writer) = stream.into_split();
+      let transport = match &self.tls {
+        Some(tls) => RedisTransport::Tls(Box::new(
+          TlsConnector::from(tls.config.clone())
+            .connect(tls.server_name.clone(), stream)
+            .await
+            .map_err(|_| RedisManagerError::TlsHandshake)?,
+        )),
+        None => RedisTransport::Plain(stream),
+      };
+      let (reader, mut writer) = tokio::io::split(transport);
       let mut reader = BufReader::new(reader);
-      if let Some(password) = &self.endpoint.password {
+      if let Some(password) = &self.credentials.password {
         let mut auth = vec![b"AUTH".to_vec()];
-        if let Some(username) = &self.endpoint.username {
-          auth.push(username.as_bytes().to_vec());
+        if let Some(username) = &self.credentials.username {
+          auth.push(username.as_ref().to_vec());
         }
-        auth.push(password.as_bytes().to_vec());
+        auth.push(password.as_ref().to_vec());
         write_resp_command(&mut writer, &auth)
           .await
           .map_err(|_| RedisManagerError::Authentication)?;
@@ -154,6 +218,7 @@ impl RedisConnectionManager {
 pub(super) enum RedisManagerError {
   CircuitOpen,
   Connection,
+  TlsHandshake,
   Authentication,
   DatabaseSelection,
   HealthCheck,
@@ -164,6 +229,7 @@ impl fmt::Display for RedisManagerError {
     let message = match self {
       Self::CircuitOpen => "Redis reconnect circuit is open",
       Self::Connection => "Redis connection failed",
+      Self::TlsHandshake => "Redis TLS handshake failed",
       Self::Authentication => "Redis authentication failed",
       Self::DatabaseSelection => "Redis database selection failed",
       Self::HealthCheck => "Redis health check failed",
@@ -177,59 +243,205 @@ impl std::error::Error for RedisManagerError {}
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct RedisPoolIdentity {
   pub(super) endpoint: RedisEndpoint,
+  pub(super) credentials: RedisCredentials,
+  pub(super) tls_identity: Option<RedisTlsIdentity>,
   pub(super) max_connections: usize,
   pub(super) connect_timeout: Duration,
   pub(super) settings: RedisPoolSettings,
 }
 
 impl RedisPoolIdentity {
-  pub(super) fn from_config(
+  pub(super) fn resolve(
     config: &SharedStateBackendConfig,
     operation_timeout: Duration,
-  ) -> anyhow::Result<Self> {
+    crypto: &CryptoConfig,
+    plaintext_policy: RedisPlaintextPolicy,
+  ) -> anyhow::Result<RedisPoolResolution> {
     let settings = config.redis_pool_settings(duration_ms(operation_timeout))?;
-    let connection_url =
-      config.connection_url_with_prefix(&format!("shared_state.backends.{}", config.name))?;
-    let endpoint = RedisEndpoint::parse(&connection_url, &config.name)?;
-    Ok(Self {
-      endpoint,
-      max_connections: usize::try_from(config.max_connections).map_err(|_| {
-        anyhow!(
-          "shared state Redis backend {} max_connections is too large",
-          config.name
-        )
-      })?,
-      connect_timeout: Duration::from_millis(config.connect_timeout_ms),
-      settings,
+    let prefix = format!("shared_state.backends.{}", config.name);
+    config.redis_tls.validate(&format!("{prefix}.redis_tls"))?;
+    config
+      .redis_auth
+      .validate(&format!("{prefix}.redis_auth"))?;
+    let connection_url = config.connection_url_with_prefix(&prefix)?;
+    let endpoint = RedisEndpoint::parse(
+      &connection_url,
+      &config.name,
+      plaintext_policy,
+      &config.redis_tls,
+      &config.redis_auth,
+    )?;
+    let credentials = RedisCredentials::from_config(&connection_url, &config.redis_auth)?;
+    let tls = endpoint
+      .uses_tls()
+      .then(|| build_redis_tls_client_config(crypto, &config.redis_tls, &endpoint.host))
+      .transpose()?;
+    Ok(RedisPoolResolution {
+      identity: Self {
+        endpoint,
+        credentials,
+        tls_identity: tls.as_ref().map(|tls| tls.identity.clone()),
+        max_connections: usize::try_from(config.max_connections).map_err(|_| {
+          anyhow!(
+            "shared state Redis backend {} max_connections is too large",
+            config.name
+          )
+        })?,
+        connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+        settings,
+      },
+      tls,
     })
   }
 
   pub(super) fn redacted_endpoint(&self) -> String {
     self.endpoint.redacted()
   }
+
+  pub(super) fn requires_activation_probe(&self) -> bool {
+    self.endpoint.uses_tls() || self.credentials.is_configured()
+  }
+}
+
+pub(super) struct RedisPoolResolution {
+  pub(super) identity: RedisPoolIdentity,
+  pub(super) tls: Option<RedisTlsClientConfig>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct RedisCredentials {
+  username: Option<RedisSecret>,
+  password: Option<RedisSecret>,
+}
+
+impl RedisCredentials {
+  fn from_config(connection_url: &str, auth: &RedisAuthConfig) -> anyhow::Result<Self> {
+    if auth.is_configured() {
+      return Ok(Self {
+        username: auth
+          .username_file
+          .as_ref()
+          .map(|path| read_redis_secret(path, "Redis ACL username"))
+          .transpose()?,
+        password: auth
+          .password_file
+          .as_ref()
+          .map(|path| read_redis_secret(path, "Redis ACL password"))
+          .transpose()?,
+      });
+    }
+    let url = Url::parse(connection_url).context("failed to parse Redis URL")?;
+    Ok(Self {
+      username: (!url.username().is_empty())
+        .then(|| RedisSecret::new(url.username().as_bytes().to_vec())),
+      password: url
+        .password()
+        .filter(|password| !password.is_empty())
+        .map(|password| RedisSecret::new(password.as_bytes().to_vec())),
+    })
+  }
+
+  pub(super) fn is_configured(&self) -> bool {
+    self.password.is_some()
+  }
+}
+
+impl fmt::Debug for RedisCredentials {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("RedisCredentials")
+      .field("username_configured", &self.username.is_some())
+      .field("password_configured", &self.password.is_some())
+      .finish()
+  }
+}
+
+#[derive(Clone)]
+struct RedisSecret(Arc<Zeroizing<Vec<u8>>>);
+
+impl RedisSecret {
+  fn new(value: Vec<u8>) -> Self {
+    Self(Arc::new(Zeroizing::new(value)))
+  }
+}
+
+impl AsRef<[u8]> for RedisSecret {
+  fn as_ref(&self) -> &[u8] {
+    self.0.as_slice()
+  }
+}
+
+impl PartialEq for RedisSecret {
+  fn eq(&self, other: &Self) -> bool {
+    self.as_ref() == other.as_ref()
+  }
+}
+
+impl Eq for RedisSecret {}
+
+impl fmt::Debug for RedisSecret {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("RedisSecret(..)")
+  }
+}
+
+fn read_redis_secret(path: &std::path::Path, label: &str) -> anyhow::Result<RedisSecret> {
+  const MAX_REDIS_SECRET_BYTES: usize = 16 * 1024;
+
+  // Read one extra byte rather than trusting metadata so a replacement or
+  // growing file cannot bypass the configured secret-size bound.
+  let file = std::fs::File::open(path)
+    .with_context(|| format!("failed to open {label} file {}", path.display()))?;
+  let mut bytes = Vec::with_capacity(MAX_REDIS_SECRET_BYTES);
+  file
+    .take((MAX_REDIS_SECRET_BYTES + 1) as u64)
+    .read_to_end(&mut bytes)
+    .with_context(|| format!("failed to read {label} file {}", path.display()))?;
+  if bytes.len() > MAX_REDIS_SECRET_BYTES {
+    bail!("{label} file exceeds {MAX_REDIS_SECRET_BYTES} bytes");
+  }
+  if bytes.ends_with(b"\r\n") {
+    bytes.truncate(bytes.len().saturating_sub(2));
+  } else if bytes.ends_with(b"\n") {
+    bytes.truncate(bytes.len().saturating_sub(1));
+  }
+  if bytes.is_empty() {
+    bail!("{label} file must not be empty");
+  }
+  Ok(RedisSecret::new(bytes))
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct RedisEndpoint {
   host: String,
   port: u16,
-  username: Option<String>,
-  password: Option<String>,
+  scheme: RedisScheme,
   database: Option<u32>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RedisScheme {
+  Plain,
+  Tls,
+}
+
 impl RedisEndpoint {
-  fn parse(connection_url: &str, backend_name: &str) -> anyhow::Result<Self> {
+  fn parse(
+    connection_url: &str,
+    backend_name: &str,
+    plaintext_policy: RedisPlaintextPolicy,
+    redis_tls: &crate::config::RedisTlsConfig,
+    redis_auth: &RedisAuthConfig,
+  ) -> anyhow::Result<Self> {
+    validate_redis_connection_url(
+      connection_url,
+      backend_name,
+      plaintext_policy,
+      redis_tls,
+      redis_auth,
+    )?;
     let url = Url::parse(connection_url)
       .with_context(|| format!("failed to parse shared_state Redis URL {backend_name}"))?;
-    if url.scheme() != "redis" {
-      bail!(
-        "shared_state Redis backend {backend_name} must use redis://; rediss:// requires the P0-5 TLS implementation"
-      );
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-      bail!("shared_state Redis backend {backend_name} URL must not include a query or fragment");
-    }
     let host = url
       .host_str()
       .filter(|host| !host.is_empty())
@@ -252,18 +464,20 @@ impl RedisEndpoint {
           })?,
       ),
     };
-    let username = (!url.username().is_empty()).then(|| url.username().to_string());
-    let password = url
-      .password()
-      .filter(|password| !password.is_empty())
-      .map(str::to_string);
     Ok(Self {
       host,
       port: url.port().unwrap_or(6379),
-      username,
-      password,
+      scheme: if url.scheme() == "rediss" {
+        RedisScheme::Tls
+      } else {
+        RedisScheme::Plain
+      },
       database,
     })
+  }
+
+  pub(super) fn uses_tls(&self) -> bool {
+    self.scheme == RedisScheme::Tls
   }
 
   fn redacted(&self) -> String {
@@ -271,7 +485,8 @@ impl RedisEndpoint {
       .database
       .map(|database| format!("/{database}"))
       .unwrap_or_default();
-    format!("redis://{}:{}{database}", self.host, self.port)
+    let scheme = if self.uses_tls() { "rediss" } else { "redis" };
+    format!("{scheme}://{}:{}{database}", self.host, self.port)
   }
 }
 
@@ -473,27 +688,5 @@ fn duration_ms(duration: Duration) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::RedisEndpoint;
-
-  #[test]
-  fn redis_endpoint_rejects_tls_and_ambiguous_url_forms() {
-    for url in [
-      "rediss://cache.example.test:6379/0",
-      "redis://cache.example.test:6379/0?insecure=true",
-      "redis://cache.example.test:6379/not-a-database",
-    ] {
-      assert!(
-        RedisEndpoint::parse(url, "test").is_err(),
-        "{url} must not be accepted by the plaintext Redis pool"
-      );
-    }
-  }
-
-  #[test]
-  fn redis_endpoint_debug_representation_redacts_credentials() {
-    let endpoint = RedisEndpoint::parse("redis://user:secret@cache.example.test:6380/2", "test")
-      .expect("Redis endpoint should parse");
-    assert_eq!(endpoint.redacted(), "redis://cache.example.test:6380/2");
-  }
-}
+#[path = "redis_connection_tests.rs"]
+mod tests;

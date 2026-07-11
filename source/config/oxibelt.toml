@@ -940,6 +940,8 @@ mode = "off"
 [shared_state]
 enabled = false
 namespace = "oxibelt"
+# allow preserves existing redis:// deployments; use deny for remote/secure profiles.
+redis_plaintext_policy = "allow" # allow | loopback_only | deny
 instance_id_env = "OXIBELT_INSTANCE_ID"
 # default_backend = "cluster"
 operation_timeout_ms = 500
@@ -958,6 +960,7 @@ cache_lock_ms = 10000
 # name = "cluster"
 # kind = "redis" # redis | postgres
 # connection_url_env = "OXIBELT_SHARED_STATE_URL"
+# For verified TLS use `rediss://redis.edge.svc:6380/0`; avoid URL userinfo.
 # max_connections = 4
 # connect_timeout_ms = 3000
 #
@@ -972,6 +975,18 @@ cache_lock_ms = 10000
 # reconnect_max_backoff_ms = 5000
 # circuit_breaker_failure_threshold = 5
 # circuit_breaker_open_timeout_ms = 1000
+#
+# [shared_state.backends.redis_tls]
+# trust_store = "custom" # webpki | native | custom
+# server_name = "redis.edge.svc" # defaults to the rediss:// host
+# ca_cert = "redis/cluster/ca.pem" # required only with trust_store = "custom"
+# # client_cert = "redis/cluster/client.pem" # optional mTLS
+# # client_key = "redis/cluster/client-key.pem"
+# # server_spki_sha256 = ["sha256/<base64-encoded-32-byte-SPKI-hash>"]
+#
+# [shared_state.backends.redis_auth]
+# # username_file = "redis/cluster/username" # optional Redis ACL username
+# password_file = "redis/cluster/password" # AUTH password; username + password sends ACL AUTH
 #
 # [shared_state.backends.tls]
 # mode = "off" # PostgreSQL only: off | verify_full
