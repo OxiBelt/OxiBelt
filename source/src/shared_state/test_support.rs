@@ -1,10 +1,10 @@
 //! Test-only shared-state backends for focused runtime validation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use url::Url;
-
+use super::redis_pool::RedisPool;
 use super::runtime::{BackendRuntime, CleanupDispatcher};
 use super::{Backend, MemoryBackend, RedisBackend, SharedState};
 use crate::config::{SharedStateBackendConfig, SharedStateBackendKind};
@@ -19,6 +19,7 @@ impl SharedState {
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
       cache_chunk_bytes: 1_048_576,
+      backends: HashMap::new(),
       rate_limits: Some(backend.clone()),
       connection_limits: Some(backend.clone()),
       person_proof: Some(backend.clone()),
@@ -39,18 +40,23 @@ impl SharedState {
       connection_url_env: None,
       max_connections: 64,
       connect_timeout_ms: 100,
+      redis_pool: None,
       tls: Default::default(),
     };
     let backend = Arc::new(Backend::Redis(RedisBackend {
-      url: Url::parse(url).expect("test Redis URL should parse"),
+      pool: RedisPool::new(&config, Duration::from_millis(250), metrics.clone())
+        .expect("test Redis pool should build"),
       runtime: BackendRuntime::new(&config, "redis", Duration::from_millis(250), metrics),
     }));
+    let mut backends = HashMap::new();
+    backends.insert(config.name.clone(), backend.clone());
     Arc::new(Self {
       namespace: Arc::from(namespace),
       instance_id: Arc::from("test-instance"),
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
       cache_chunk_bytes: 1_048_576,
+      backends,
       rate_limits: None,
       connection_limits: None,
       person_proof: None,

@@ -63,6 +63,18 @@ connection_url = "redis://mock-redis:6379/0"
 max_connections = 1
 connect_timeout_ms = 1000
 
+[shared_state.backends.redis_pool]
+min_idle_connections = 1
+max_waiters = 4
+pool_wait_timeout_ms = 1500
+command_timeout_ms = 1500
+idle_timeout_ms = 60000
+health_check_interval_ms = 15000
+reconnect_min_backoff_ms = 50
+reconnect_max_backoff_ms = 5000
+circuit_breaker_failure_threshold = 5
+circuit_breaker_open_timeout_ms = 1000
+
 [[rate_limits]]
 name = "delay-rate"
 key = "client_ip"

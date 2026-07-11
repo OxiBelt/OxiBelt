@@ -1,5 +1,6 @@
 //! Bounded execution and deferred cleanup for shared-state backends.
 
+use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -15,6 +16,25 @@ use crate::metrics::Metrics;
 use super::Backend;
 
 const SHARED_POOL_WARNING_INTERVAL_MS: u64 = 60_000;
+
+#[derive(Debug)]
+pub(super) struct SharedStateTimeout {
+  message: String,
+}
+
+impl SharedStateTimeout {
+  pub(super) fn new(message: String) -> Self {
+    Self { message }
+  }
+}
+
+impl fmt::Display for SharedStateTimeout {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(&self.message)
+  }
+}
+
+impl std::error::Error for SharedStateTimeout {}
 
 #[derive(Debug, Default)]
 pub(super) struct SharedPoolWarningLimiter {
@@ -60,7 +80,7 @@ pub(super) struct BackendRuntime {
   pub(super) kind: &'static str,
   pub(super) operation_timeout: Duration,
   pub(super) connect_timeout: Duration,
-  semaphore: Arc<Semaphore>,
+  semaphore: Option<Arc<Semaphore>>,
   pub(super) metrics: Arc<Metrics>,
 }
 
@@ -76,7 +96,12 @@ impl BackendRuntime {
       kind,
       operation_timeout,
       connect_timeout: Duration::from_millis(config.connect_timeout_ms),
-      semaphore: Arc::new(Semaphore::new(config.max_connections as usize)),
+      // Redis uses its persistent pool as the sole physical-connection and
+      // bounded-wait admission boundary. PostgreSQL retains this operation
+      // semaphore because its sqlx pool is not configured here with an
+      // equivalent queue cap.
+      semaphore: (kind != "redis")
+        .then(|| Arc::new(Semaphore::new(config.max_connections as usize))),
       metrics,
     }
   }
@@ -92,21 +117,20 @@ impl BackendRuntime {
   {
     let started = Instant::now();
     let mut queue_observation = QueueObservation::new(self, operation, started);
-    let permit = match tokio::time::timeout(
-      self.operation_timeout,
-      self.semaphore.clone().acquire_owned(),
-    )
-    .await
-    {
-      Ok(Ok(permit)) => permit,
-      Ok(Err(_)) => {
-        queue_observation.finish("closed");
-        bail!("shared state backend {} queue is closed", self.name);
+    let permit = if let Some(semaphore) = &self.semaphore {
+      match tokio::time::timeout(self.operation_timeout, semaphore.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Some(permit),
+        Ok(Err(_)) => {
+          queue_observation.finish("closed");
+          bail!("shared state backend {} queue is closed", self.name);
+        }
+        Err(_) => {
+          queue_observation.finish("timeout");
+          bail!("shared state backend {} queue timed out", self.name);
+        }
       }
-      Err(_) => {
-        queue_observation.finish("timeout");
-        bail!("shared state backend {} queue timed out", self.name);
-      }
+    } else {
+      None
     };
     queue_observation.finish("acquired");
     let elapsed = started.elapsed();
@@ -125,7 +149,12 @@ impl BackendRuntime {
         Ok(value)
       }
       Ok(Err(error)) => {
-        operation_observation.finish("error");
+        let outcome = if error.downcast_ref::<SharedStateTimeout>().is_some() {
+          "timeout"
+        } else {
+          "error"
+        };
+        operation_observation.finish(outcome);
         Err(error)
       }
       Err(_) => {
@@ -365,7 +394,9 @@ mod tests {
 
   use tokio::sync::oneshot;
 
-  use super::{BackendRuntime, SHARED_POOL_WARNING_INTERVAL_MS, SharedPoolWarningLimiter};
+  use super::{
+    BackendRuntime, SHARED_POOL_WARNING_INTERVAL_MS, SharedPoolWarningLimiter, SharedStateTimeout,
+  };
   use crate::cache::CacheStats;
   use crate::config::MetricsConfig;
   use crate::metrics::Metrics;
@@ -377,7 +408,7 @@ mod tests {
       kind: "redis",
       operation_timeout: timeout,
       connect_timeout: timeout,
-      semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+      semaphore: Some(Arc::new(tokio::sync::Semaphore::new(permits))),
       metrics,
     })
   }
@@ -516,5 +547,30 @@ mod tests {
       heartbeat.load(std::sync::atomic::Ordering::Relaxed) > 0,
       "an unrelated Tokio task should progress while backend I/O is delayed"
     );
+  }
+
+  #[tokio::test]
+  async fn pool_timeout_errors_preserve_the_operation_timeout_metric() {
+    let metrics = Metrics::new();
+    let runtime = test_runtime(metrics.clone(), 1, Duration::from_millis(100));
+    let error = runtime
+      .execute("rate_limit", || async {
+        Err::<(), _>(
+          SharedStateTimeout::new("shared state Redis backend test command timed out".to_string())
+            .into(),
+        )
+      })
+      .await
+      .expect_err("typed pool timeout should propagate");
+    assert!(error.to_string().contains("command timed out"));
+
+    let prometheus = metrics.prometheus(
+      &MetricsConfig::default(),
+      CacheStats::default(),
+      TlsServerSessionStorageStats::default(),
+    );
+    assert!(prometheus.contains(
+      "oxibelt_shared_state_operations_total{backend=\"shared-state-test\",kind=\"redis\",operation=\"rate_limit\",outcome=\"timeout\"} 1"
+    ));
   }
 }

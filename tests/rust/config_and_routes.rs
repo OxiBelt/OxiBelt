@@ -4675,6 +4675,19 @@ cache_lock_ms = 5000
 name = "redis-main"
 kind = "redis"
 connection_url = "redis://mock-redis:6379/0"
+max_connections = 8
+
+[shared_state.backends.redis_pool]
+min_idle_connections = 2
+max_waiters = 16
+pool_wait_timeout_ms = 25
+command_timeout_ms = 100
+idle_timeout_ms = 60000
+health_check_interval_ms = 15000
+reconnect_min_backoff_ms = 50
+reconnect_max_backoff_ms = 5000
+circuit_breaker_failure_threshold = 5
+circuit_breaker_open_timeout_ms = 1000
 
 [[shared_state.backends]]
 name = "postgres-main"
@@ -4704,6 +4717,110 @@ max_connections = 2
   assert_eq!(
     config.shared_state.dynamic_policy_backend.as_deref(),
     Some("postgres-main")
+  );
+  let redis_pool = config.shared_state.backends[0]
+    .redis_pool
+    .as_ref()
+    .expect("Redis pool configuration should parse");
+  assert_eq!(redis_pool.min_idle_connections, 2);
+  assert_eq!(redis_pool.max_waiters, Some(16));
+  assert_eq!(redis_pool.pool_wait_timeout_ms, Some(25));
+  assert_eq!(redis_pool.command_timeout_ms, Some(100));
+}
+
+#[test]
+fn shared_state_redis_pool_rejects_invalid_or_postgres_settings() {
+  let temp_dir = common::TempDir::new("shared-state-redis-pool-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-redis-pool-invalid");
+  for (name, backend, pool, expected) in [
+    (
+      "min-idle",
+      r#"kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+max_connections = 2"#,
+      r#"min_idle_connections = 3"#,
+      "min_idle_connections must not exceed max_connections",
+    ),
+    (
+      "timeout",
+      r#"kind = "redis"
+connection_url = "redis://mock-redis:6379/0""#,
+      r#"command_timeout_ms = 501"#,
+      "redis_pool timeouts must not exceed shared_state.operation_timeout_ms",
+    ),
+    (
+      "tls-url",
+      r#"kind = "redis"
+connection_url = "rediss://mock-redis:6379/0""#,
+      r#"max_waiters = 1"#,
+      "must use redis://",
+    ),
+    (
+      "postgres",
+      r#"kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt""#,
+      r#"min_idle_connections = 1"#,
+      "does not support redis_pool settings",
+    ),
+  ] {
+    let raw = format!(
+      r#"
+{}
+
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "{name}"
+{backend}
+
+[shared_state.backends.redis_pool]
+{pool}
+"#,
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).expect("invalid pool fixture should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid pool fixture should fail validation");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected validation error for {name}: {error}"
+    );
+  }
+}
+
+#[test]
+fn shared_state_redis_pool_unknown_fields_fail_strict_shape_validation() {
+  let temp_dir = common::TempDir::new("shared-state-redis-pool-unknown");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-redis-pool-unknown");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[[upstreams]]",
+    r#"[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+
+[shared_state.backends.redis_pool]
+max_waiters = 16
+unexpected = true
+
+[[upstreams]]"#,
+  );
+  let config_path = temp_dir.path().join("oxibelt.toml");
+  std::fs::write(&config_path, raw).expect("failed to write test config");
+
+  let error = Config::load(&config_path).expect_err("unknown Redis pool field should fail");
+  assert!(
+    error.to_string().contains(
+      "configuration contains unknown field(s): shared_state.backends.redis_pool.unexpected"
+    ),
+    "unexpected error: {error}"
   );
 }
 

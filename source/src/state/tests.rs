@@ -206,17 +206,67 @@ connect_timeout_ms = 50
 "#;
 
   let config = parse_config(&raw);
-  let initial = SharedState::new(&config, Metrics::new())
+  let metrics = Metrics::new();
+  let initial = SharedState::new(&config, metrics.clone())
     .await
     .expect("initial shared state should initialize")
     .expect("shared state should be enabled");
+  let pool_identity = initial
+    .test_redis_pool_identity("pool-warning-test")
+    .expect("initial Redis pool should exist");
   assert!(initial.should_log_pool_warning());
 
-  let reloaded = SharedState::new_with_previous(&config, Metrics::new(), Some(initial.as_ref()))
+  let reloaded = SharedState::new_with_previous(&config, metrics, Some(initial.as_ref()))
     .await
     .expect("reloaded shared state should initialize")
     .expect("reloaded shared state should stay enabled");
+  assert_eq!(
+    reloaded.test_redis_pool_identity("pool-warning-test"),
+    Some(pool_identity),
+    "unchanged Redis backends must retain their persistent pool over reload"
+  );
   assert!(!reloaded.should_log_pool_warning());
+}
+
+#[tokio::test]
+async fn shared_state_required_redis_idle_connections_fail_activation_when_unavailable() {
+  let temp_dir = common::TempDir::new("shared-state-required-redis-idle");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-required-redis-idle");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[shared_state]
+enabled = true
+upstream_health_backend = "required-idle-test"
+operation_timeout_ms = 50
+
+[[shared_state.backends]]
+name = "required-idle-test"
+kind = "redis"
+connection_url = "redis://127.0.0.1:0/"
+connect_timeout_ms = 10
+
+[shared_state.backends.redis_pool]
+min_idle_connections = 1
+pool_wait_timeout_ms = 10
+command_timeout_ms = 10
+idle_timeout_ms = 100
+health_check_interval_ms = 10
+reconnect_min_backoff_ms = 1
+reconnect_max_backoff_ms = 1
+circuit_breaker_failure_threshold = 1
+circuit_breaker_open_timeout_ms = 1
+"#;
+
+  let error = SharedState::new(&parse_config(&raw), Metrics::new())
+    .await
+    .expect_err("required Redis idle connections must fail activation when unavailable");
+  assert!(
+    error
+      .to_string()
+      .contains("shared state Redis backend required-idle-test")
+  );
 }
 
 #[test]

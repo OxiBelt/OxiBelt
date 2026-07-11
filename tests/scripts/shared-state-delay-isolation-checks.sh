@@ -25,8 +25,9 @@ shared_state_delay_metric_value() {
   local response="$1"
   local metric="$2"
   local backend_kind="$3"
-  jq -r '.body' <<<"${response}" | awk -v metric="${metric}" -v kind="${backend_kind}" '
-    index($1, metric "{") == 1 && index($0, "backend=\"cluster\"") && index($0, "kind=\"" kind "\"") {
+  local state="${4:-}"
+  jq -r '.body' <<<"${response}" | awk -v metric="${metric}" -v kind="${backend_kind}" -v state="${state}" '
+    index($1, metric "{") == 1 && index($0, "backend=\"cluster\"") && index($0, "kind=\"" kind "\"") && (state == "" || index($0, "state=\"" state "\"")) {
       value = $NF
     }
     END {
@@ -111,6 +112,19 @@ shared_state_delay_wait_for_requests() {
 shared_state_delay_assert_metrics_during_delay() {
   local response="$1"
   local backend_kind="$2"
+  if [[ "${backend_kind}" == "redis" ]]; then
+    local waiting active
+    waiting="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_pool_waiters "${backend_kind}")" || fail_with_diagnostics "missing Redis pool waiter gauge during backend delay"
+    active="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_pool_connections "${backend_kind}" active)" || fail_with_diagnostics "missing Redis pool active-connection gauge during backend delay"
+    if (( waiting <= 0 || active <= 0 )); then
+      jq -r '.body' <<<"${response}" >&2
+      fail_with_diagnostics "expected queued Redis pool work and an active Redis connection during backend delay"
+    fi
+    if jq -r '.body' <<<"${response}" | grep -F 'delay-secret-do-not-export' >/dev/null; then
+      fail_with_diagnostics "shared-state metric labels exposed request data"
+    fi
+    return
+  fi
   local queued in_flight
   queued="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_queued_operations "${backend_kind}")" || fail_with_diagnostics "missing shared-state queued gauge during backend delay"
   in_flight="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_in_flight_operations "${backend_kind}")" || fail_with_diagnostics "missing shared-state in-flight gauge during backend delay"
@@ -131,6 +145,13 @@ shared_state_delay_assert_metrics_during_delay() {
 shared_state_delay_metrics_are_positive() {
   local response="$1"
   local backend_kind="$2"
+  if [[ "${backend_kind}" == "redis" ]]; then
+    local waiting active
+    waiting="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_pool_waiters "${backend_kind}")" || return 1
+    active="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_pool_connections "${backend_kind}" active)" || return 1
+    (( waiting > 0 && active > 0 ))
+    return
+  fi
   local queued in_flight
   queued="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_queued_operations "${backend_kind}")" || return 1
   in_flight="$(shared_state_delay_metric_value "${response}" oxibelt_shared_state_in_flight_operations "${backend_kind}")" || return 1
@@ -145,6 +166,22 @@ shared_state_delay_assert_post_delay_metrics() {
   local attempt
   for attempt in $(seq 1 20); do
     metrics="$(shared_state_delay_probe 9090 ops.test /metrics)" || fail_with_diagnostics "metrics endpoint did not remain responsive after backend delay"
+    if [[ "${backend_kind}" == "redis" ]]; then
+      queued="$(shared_state_delay_metric_value "${metrics}" oxibelt_shared_state_pool_waiters "${backend_kind}")" || true
+      in_flight="$(shared_state_delay_metric_value "${metrics}" oxibelt_shared_state_pool_connections "${backend_kind}" active)" || true
+      if [[ "${queued}" == "0" && "${in_flight}" == "0" ]]; then
+        if ! shared_state_delay_timeout_metric_present "${metrics}" oxibelt_shared_state_operation_duration_ms_count "${backend_kind}"; then
+          jq -r '.body' <<<"${metrics}" >&2
+          fail_with_diagnostics "expected bounded shared-state timeout metric after Redis delay"
+        fi
+        if jq -r '.body' <<<"${metrics}" | grep -F 'delay-secret-do-not-export' >/dev/null; then
+          fail_with_diagnostics "shared-state metric labels exposed request data"
+        fi
+        return
+      fi
+      sleep 0.1
+      continue
+    fi
     queued="$(shared_state_delay_metric_value "${metrics}" oxibelt_shared_state_queued_operations "${backend_kind}")" || true
     in_flight="$(shared_state_delay_metric_value "${metrics}" oxibelt_shared_state_in_flight_operations "${backend_kind}")" || true
     if [[ "${queued}" == "0" && "${in_flight}" == "0" ]]; then

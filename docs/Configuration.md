@@ -130,6 +130,7 @@ include = ["conf.d/*.toml"]
 [limits]
 [shared_state]
 [[shared_state.backends]]
+[shared_state.backends.redis_pool]
 [shared_state.backends.tls]
 [compression]
 [[compression.policies]]
@@ -1005,6 +1006,18 @@ connection_url_env = "OXIBELT_SHARED_STATE_URL"
 max_connections = 4
 connect_timeout_ms = 3000
 
+[shared_state.backends.redis_pool]
+min_idle_connections = 0
+max_waiters = 16 # defaults to 4 * max_connections
+pool_wait_timeout_ms = 500 # defaults to operation_timeout_ms
+command_timeout_ms = 500 # defaults to operation_timeout_ms
+idle_timeout_ms = 60000
+health_check_interval_ms = 15000
+reconnect_min_backoff_ms = 50
+reconnect_max_backoff_ms = 5000
+circuit_breaker_failure_threshold = 5
+circuit_breaker_open_timeout_ms = 1000
+
 [shared_state.backends.tls]
 mode = "off" # off | verify_full, PostgreSQL only
 # ca_cert = "postgres-ca.pem"
@@ -1014,7 +1027,11 @@ mode = "off" # off | verify_full, PostgreSQL only
 
 Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
 
-`operation_timeout_ms` is one absolute deadline for each shared-state backend operation: it includes waiting for that backend's `max_connections` concurrency permit and the Redis or PostgreSQL operation itself. `max_connections` therefore limits in-flight Redis as well as PostgreSQL work. Cancellation drops the in-flight async I/O and releases its permit; connection-lease release, pool active-count decrement, and cache-lock unlock use a bounded deferred-cleanup queue only as a cancellation fallback, with their existing TTLs as the final recovery boundary. This does not change documented fail-open/fail-closed behavior. Basic Prometheus output exposes bounded `oxibelt_shared_state_queue_duration_ms`, `oxibelt_shared_state_operation_duration_ms`, `oxibelt_shared_state_operations_total`, `oxibelt_shared_state_queued_operations`, `oxibelt_shared_state_in_flight_operations`, and `oxibelt_shared_state_deferred_cleanup_dropped_total` series. Labels contain only the configured backend name, backend kind, fixed operation name, and fixed outcome; keys, identities, tokens, URLs, and error text are never labels. A nonzero deferred-cleanup drop counter means cancellation saturated its bounded fallback queue; investigate it alongside backend timeout and queue metrics.
+`operation_timeout_ms` remains the absolute deadline for each shared-state operation. PostgreSQL uses its existing operation concurrency permit. Redis uses one persistent FIFO pool per configured backend: `max_connections` is its physical socket cap, and `max_waiters` bounds active-plus-waiting Redis commands at `max_connections + max_waiters`; excess commands fail immediately. `pool_wait_timeout_ms`, connection creation, health recycling, and `command_timeout_ms` are independently bounded and still cannot outlive the outer operation deadline. Defaults preserve lazy startup with zero idle connections, four waiters per allowed Redis connection, and inherited wait/command timeouts. A positive `min_idle_connections` is a startup and reload requirement: the configured backend must prewarm that many sockets before the new snapshot activates. Unchanged full reloads retain an existing pool; changed endpoint credentials or pool settings create a draining replacement generation.
+
+Redis pools accept only `redis://` single-endpoint URLs in this release. `rediss://`, query/fragment URL forms, and Redis TLS settings are rejected rather than falling back to plaintext; verified Redis TLS is a later compatibility boundary. Authentication and database selection occur once when a physical connection is created. After an idle interval, a checkout performs a bounded `PING`; idle sockets above `min_idle_connections` are retired. Dial failures use bounded exponential backoff and a single half-open reconnect probe while healthy idle sockets remain usable. OxiBelt never retries a command after an ambiguous transport failure. A socket is returned only after exactly one complete RESP reply, including a Redis `-ERR` reply; cancellation, command timeout, EOF, partial I/O, or malformed RESP drops the socket.
+
+Cancellation drops in-flight Redis I/O and its checkout rather than returning a potentially desynchronized socket; connection-lease release, pool active-count decrement, and cache-lock unlock use a bounded deferred-cleanup queue only as a cancellation fallback, with their existing TTLs as the final recovery boundary. This does not change documented fail-open/fail-closed behavior. Basic Prometheus output exposes bounded `oxibelt_shared_state_queue_duration_ms`, `oxibelt_shared_state_operation_duration_ms`, `oxibelt_shared_state_operations_total`, `oxibelt_shared_state_queued_operations`, `oxibelt_shared_state_in_flight_operations`, `oxibelt_shared_state_deferred_cleanup_dropped_total`, `oxibelt_shared_state_pool_connections`, `oxibelt_shared_state_pool_waiters`, `oxibelt_shared_state_pool_max_connections`, `oxibelt_shared_state_pool_circuit_state`, `oxibelt_shared_state_pool_acquisitions_total`, and `oxibelt_shared_state_pool_connection_events_total` series. Labels contain only the configured backend name, backend kind, fixed operation name/outcome/event, and fixed connection state; keys, identities, tokens, URLs, and error text are never labels. A nonzero deferred-cleanup drop counter means cancellation saturated its bounded fallback queue; investigate it alongside backend timeout and queue metrics.
 
 Redis backends target Redis-protocol compatible Redis, Valkey, and KeyDB single-endpoint deployments. PostgreSQL backends create OxiBelt-managed shared-state tables at startup. Security-sensitive operations such as rate limits, connection leases, and Person proof fail closed when the configured shared backend errors. Shared cache operations fall back to the local/no-shared-cache path for the current request. Person proof shared state stores the cluster HMAC secret and replay/revocation markers under OxiBelt-managed keys. Operators should use the Admin Person proof endpoints for hash-only status and revocation; direct backend inspection can expose implementation keys and has a different trust boundary than the Admin API.
 

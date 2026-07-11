@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard};
 
+use super::SharedStatePoolStatus;
+
 const MAX_SERIES: usize = 4096;
 const MAX_LABEL_VALUE_BYTES: usize = 128;
 const DEFAULT_BUCKETS_MS: &[u64] = &[1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
@@ -23,6 +25,9 @@ struct SharedStateMetricsInner {
   queued: HashMap<BackendKey, i64>,
   in_flight: HashMap<BackendKey, i64>,
   deferred_cleanup_dropped: HashMap<BackendKey, u64>,
+  pool_status: HashMap<BackendKey, SharedStatePoolStatus>,
+  pool_acquisitions: HashMap<PoolMetricKey, u64>,
+  pool_connection_events: HashMap<PoolMetricKey, u64>,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -37,6 +42,13 @@ struct MetricKey {
   kind: &'static str,
   operation: &'static str,
   outcome: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct PoolMetricKey {
+  backend: String,
+  kind: &'static str,
+  value: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +70,9 @@ impl Default for SharedStateMetrics {
         queued: HashMap::new(),
         in_flight: HashMap::new(),
         deferred_cleanup_dropped: HashMap::new(),
+        pool_status: HashMap::new(),
+        pool_acquisitions: HashMap::new(),
+        pool_connection_events: HashMap::new(),
       }),
     }
   }
@@ -158,6 +173,34 @@ impl SharedStateMetrics {
     *inner.deferred_cleanup_dropped.entry(key).or_default() += 1;
   }
 
+  pub(super) fn pool_status(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    status: SharedStatePoolStatus,
+  ) {
+    let mut inner = self.lock();
+    let key = backend_key(&mut inner, backend, kind);
+    inner.pool_status.insert(key, status);
+  }
+
+  pub(super) fn pool_acquisition(&self, backend: &str, kind: &'static str, outcome: &'static str) {
+    let mut inner = self.lock();
+    let key = pool_metric_key(&mut inner, backend, kind, outcome);
+    *inner.pool_acquisitions.entry(key).or_default() += 1;
+  }
+
+  pub(super) fn pool_connection_event(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    event: &'static str,
+  ) {
+    let mut inner = self.lock();
+    let key = pool_metric_key(&mut inner, backend, kind, event);
+    *inner.pool_connection_events.entry(key).or_default() += 1;
+  }
+
   pub(super) fn append_prometheus(&self, output: &mut String) {
     let inner = self.lock();
     for (key, series) in &inner.queue {
@@ -212,6 +255,75 @@ impl SharedStateMetrics {
         *value,
       );
     }
+    for (key, status) in &inner.pool_status {
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_connections",
+        "gauge",
+        [
+          ("backend", key.backend.as_str()),
+          ("kind", key.kind),
+          ("state", "active"),
+        ],
+        status.active,
+      );
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_connections",
+        "gauge",
+        [
+          ("backend", key.backend.as_str()),
+          ("kind", key.kind),
+          ("state", "idle"),
+        ],
+        status.idle,
+      );
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_waiters",
+        "gauge",
+        backend_labels(key),
+        status.waiting,
+      );
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_max_connections",
+        "gauge",
+        backend_labels(key),
+        status.max_connections,
+      );
+      for state in ["closed", "open", "half_open"] {
+        append_metric(
+          output,
+          "oxibelt_shared_state_pool_circuit_state",
+          "gauge",
+          [
+            ("backend", key.backend.as_str()),
+            ("kind", key.kind),
+            ("state", state),
+          ],
+          if status.circuit_state == state { 1 } else { 0 },
+        );
+      }
+    }
+    for (key, value) in &inner.pool_acquisitions {
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_acquisitions_total",
+        "counter",
+        pool_metric_labels(key, "outcome"),
+        *value,
+      );
+    }
+    for (key, value) in &inner.pool_connection_events {
+      append_metric(
+        output,
+        "oxibelt_shared_state_pool_connection_events_total",
+        "counter",
+        pool_metric_labels(key, "event"),
+        *value,
+      );
+    }
   }
 
   fn lock(&self) -> MutexGuard<'_, SharedStateMetricsInner> {
@@ -247,6 +359,19 @@ fn metric_key(
   }
 }
 
+fn pool_metric_key(
+  inner: &mut SharedStateMetricsInner,
+  backend: &str,
+  kind: &'static str,
+  value: &'static str,
+) -> PoolMetricKey {
+  PoolMetricKey {
+    backend: bounded_backend_label(inner, backend, kind),
+    kind,
+    value,
+  }
+}
+
 fn bounded_backend_label(
   inner: &SharedStateMetricsInner,
   backend: &str,
@@ -258,12 +383,22 @@ fn bounded_backend_label(
     .keys()
     .chain(inner.in_flight.keys())
     .chain(inner.deferred_cleanup_dropped.keys())
+    .chain(inner.pool_status.keys())
     .any(|key| key.backend == backend && key.kind == kind)
     || inner
       .operations_total
       .keys()
+      .any(|key| key.backend == backend && key.kind == kind)
+    || inner
+      .pool_acquisitions
+      .keys()
+      .chain(inner.pool_connection_events.keys())
       .any(|key| key.backend == backend && key.kind == kind);
-  let series = inner.queue.len() + inner.operation.len() + inner.operations_total.len();
+  let series = inner.queue.len()
+    + inner.operation.len()
+    + inner.operations_total.len()
+    + inner.pool_acquisitions.len()
+    + inner.pool_connection_events.len();
   if exists || series < MAX_SERIES {
     backend
   } else {
@@ -303,6 +438,17 @@ fn metric_labels(key: &MetricKey) -> [(&'static str, &str); 4] {
     ("kind", key.kind),
     ("operation", key.operation),
     ("outcome", key.outcome),
+  ]
+}
+
+fn pool_metric_labels<'a>(
+  key: &'a PoolMetricKey,
+  label: &'static str,
+) -> [(&'static str, &'a str); 3] {
+  [
+    ("backend", key.backend.as_str()),
+    ("kind", key.kind),
+    (label, key.value),
   ]
 }
 

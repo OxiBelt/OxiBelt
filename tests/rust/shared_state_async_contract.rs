@@ -28,6 +28,8 @@ fn shared_state_backend_implementation_has_no_blocking_bridge() {
     "source/src/shared_state/feature_flags.rs",
     "source/src/shared_state/person_proof.rs",
     "source/src/shared_state/rate_limits.rs",
+    "source/src/shared_state/redis_connection.rs",
+    "source/src/shared_state/redis_pool.rs",
     "source/src/shared_state/redis_protocol.rs",
     "source/src/shared_state/runtime.rs",
     "source/src/shared_state/sticky_sessions.rs",

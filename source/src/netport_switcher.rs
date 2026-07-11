@@ -615,7 +615,7 @@ fn send_fd(stream: &UnixStream, fd: std::os::fd::BorrowedFd<'_>) -> anyhow::Resu
   if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
     bail!("failed to encode netport switcher SCM_RIGHTS response");
   }
-  let payload = [b'F'];
+  let payload = *b"F";
   let iov = [IoSlice::new(&payload)];
   let written = sendmsg(stream, &iov, &mut control, SendFlags::empty())?;
   if written != payload.len() {

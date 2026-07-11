@@ -961,6 +961,18 @@ cache_lock_ms = 10000
 # max_connections = 4
 # connect_timeout_ms = 3000
 #
+# [shared_state.backends.redis_pool]
+# min_idle_connections = 0
+# max_waiters = 16 # defaults to 4 * max_connections
+# pool_wait_timeout_ms = 500 # defaults to shared_state.operation_timeout_ms
+# command_timeout_ms = 500 # defaults to shared_state.operation_timeout_ms
+# idle_timeout_ms = 60000
+# health_check_interval_ms = 15000
+# reconnect_min_backoff_ms = 50
+# reconnect_max_backoff_ms = 5000
+# circuit_breaker_failure_threshold = 5
+# circuit_breaker_open_timeout_ms = 1000
+#
 # [shared_state.backends.tls]
 # mode = "off" # PostgreSQL only: off | verify_full
 # ca_cert = "postgres-ca.pem"

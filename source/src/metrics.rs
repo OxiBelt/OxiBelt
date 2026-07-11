@@ -1,6 +1,5 @@
 //! Prometheus metrics registration and update helpers.
 //! Label values are constrained at call sites so exported series remain low-cardinality.
-
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +22,7 @@ mod outbound_revocation;
 mod pool;
 mod shared_state;
 mod shared_state_api;
+pub(crate) use shared_state_api::SharedStatePoolStatus;
 mod sni_forward;
 mod stream;
 mod upstream_client;

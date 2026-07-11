@@ -13,10 +13,7 @@ use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Pool, Postgres};
-use tokio::io::BufReader;
-use tokio::net::TcpStream;
 use tracing::warn;
-use url::Url;
 
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
 use crate::limits::ParsedRate;
@@ -26,13 +23,16 @@ mod cache_store;
 mod feature_flags;
 mod person_proof;
 mod rate_limits;
+mod redis_connection;
+mod redis_pool;
 mod redis_protocol;
 mod runtime;
 mod sticky_sessions;
 #[cfg(test)]
 mod test_support;
 
-use redis_protocol::{Resp, expect_ok, read_resp, write_resp_command};
+use redis_pool::RedisPool;
+use redis_protocol::{Resp, expect_ok};
 use runtime::{BackendRuntime, CleanupDispatcher, SharedPoolWarningLimiter};
 
 pub use cache_store::{SharedCacheLock, shared_header_values};
@@ -47,6 +47,7 @@ pub struct SharedState {
   connection_lease: Duration,
   cache_lock: Duration,
   cache_chunk_bytes: usize,
+  backends: HashMap<String, Arc<Backend>>,
   rate_limits: Option<Arc<Backend>>,
   connection_limits: Option<Arc<Backend>>,
   person_proof: Option<Arc<Backend>>,
@@ -68,7 +69,7 @@ enum Backend {
 
 #[derive(Clone, Debug)]
 struct RedisBackend {
-  url: Url,
+  pool: RedisPool,
   runtime: BackendRuntime,
 }
 
@@ -195,7 +196,14 @@ impl SharedState {
     let mut backends = HashMap::new();
     for backend in &shared.backends {
       let name = backend.name.clone();
-      let built = Backend::connect(backend, shared.operation_timeout_ms, metrics.clone()).await?;
+      let previous_backend = previous.and_then(|state| state.backends.get(&name));
+      let built = Backend::connect(
+        backend,
+        shared.operation_timeout_ms,
+        metrics.clone(),
+        previous_backend,
+      )
+      .await?;
       backends.insert(name, Arc::new(built));
     }
 
@@ -213,20 +221,28 @@ impl SharedState {
       .ok()
       .filter(|value| !value.trim().is_empty())
       .unwrap_or_else(|| format!("{}-{}", std::process::id(), now_unix_ms()));
+    let rate_limits = pick(&shared.rate_limits_backend);
+    let connection_limits = pick(&shared.connection_limits_backend);
+    let person_proof = pick(&shared.person_proof_backend);
+    let upstream_health = pick(&shared.upstream_health_backend);
+    let sticky_sessions = pick(&shared.sticky_sessions_backend);
+    let cache = pick(&shared.cache_backend);
+    let reload = pick(&shared.reload_backend);
     let state = Arc::new(Self {
       namespace: Arc::from(shared.namespace.as_str()),
       instance_id: Arc::from(instance_id),
       connection_lease: Duration::from_millis(shared.connection_lease_ms),
       cache_lock: Duration::from_millis(shared.cache_lock_ms),
       cache_chunk_bytes: config.cache.stream_chunk_bytes,
-      rate_limits: pick(&shared.rate_limits_backend),
-      connection_limits: pick(&shared.connection_limits_backend),
-      person_proof: pick(&shared.person_proof_backend),
-      upstream_health: pick(&shared.upstream_health_backend),
+      backends,
+      rate_limits,
+      connection_limits,
+      person_proof,
+      upstream_health,
       pool_warning_limiter: Self::inherited_pool_warning_limiter(previous),
-      sticky_sessions: pick(&shared.sticky_sessions_backend),
-      cache: pick(&shared.cache_backend),
-      reload: pick(&shared.reload_backend),
+      sticky_sessions,
+      cache,
+      reload,
       cleanup: CleanupDispatcher::new(),
     });
     state.record_reload_generation(config).await;
@@ -258,6 +274,14 @@ impl SharedState {
   pub fn test_delete_raw_key(&self, key: &str) {
     if let Some(Backend::Memory(memory)) = self.cache.as_deref() {
       let _ = memory.delete(key);
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn test_redis_pool_identity(&self, name: &str) -> Option<usize> {
+    match self.backends.get(name).map(Arc::as_ref) {
+      Some(Backend::Redis(redis)) => Some(redis.pool.test_identity()),
+      _ => None,
     }
   }
 
@@ -451,18 +475,29 @@ impl Backend {
     config: &SharedStateBackendConfig,
     timeout_ms: u64,
     metrics: Arc<Metrics>,
+    previous: Option<&Arc<Backend>>,
   ) -> anyhow::Result<Self> {
     let operation_timeout = Duration::from_millis(timeout_ms);
     match config.kind {
       SharedStateBackendKind::Redis => {
-        let url = Url::parse(
-          &config.connection_url_with_prefix(&format!("shared_state.backends.{}", config.name))?,
-        )
-        .with_context(|| format!("failed to parse shared_state Redis URL {}", config.name))?;
-        Ok(Self::Redis(RedisBackend {
-          url,
-          runtime: BackendRuntime::new(config, "redis", operation_timeout, metrics),
-        }))
+        let runtime = BackendRuntime::new(config, "redis", operation_timeout, metrics.clone());
+        let reused = if let Some(Self::Redis(previous)) = previous.map(Arc::as_ref) {
+          previous
+            .pool
+            .matches_config(config, operation_timeout)?
+            .then(|| previous.pool.clone())
+        } else {
+          None
+        };
+        let pool = if let Some(pool) = reused {
+          pool
+        } else {
+          RedisPool::new(config, operation_timeout, metrics)?
+        };
+        // A positive minimum-idle setting is an activation requirement even
+        // when an unchanged pool is retained over reload.
+        pool.prewarm().await?;
+        Ok(Self::Redis(RedisBackend { pool, runtime }))
       }
       SharedStateBackendKind::Postgres => {
         let connection_url =
@@ -1188,53 +1223,7 @@ impl MemoryBackend {
 
 impl RedisBackend {
   async fn command(&self, args: &[Vec<u8>]) -> anyhow::Result<Resp> {
-    let host = self
-      .url
-      .host_str()
-      .ok_or_else(|| anyhow!("Redis URL is missing host"))?;
-    let port = self.url.port().unwrap_or(6379);
-    let stream = self
-      .runtime
-      .connect(|| async move {
-        TcpStream::connect((host, port))
-          .await
-          .with_context(|| format!("failed to connect Redis backend {host}:{port}"))
-      })
-      .await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-
-    if let Some(password) = self.url.password()
-      && !password.is_empty()
-    {
-      let username = self.url.username();
-      let auth = if username.is_empty() {
-        vec![b"AUTH".to_vec(), password.as_bytes().to_vec()]
-      } else {
-        vec![
-          b"AUTH".to_vec(),
-          username.as_bytes().to_vec(),
-          password.as_bytes().to_vec(),
-        ]
-      };
-      write_resp_command(&mut writer, &auth).await?;
-      expect_ok(read_resp(&mut reader).await?)?;
-    }
-    if let Some(db) = self
-      .url
-      .path()
-      .strip_prefix('/')
-      .filter(|value| !value.is_empty())
-    {
-      let select = vec![b"SELECT".to_vec(), db.as_bytes().to_vec()];
-      write_resp_command(&mut writer, &select).await?;
-      expect_ok(read_resp(&mut reader).await?)?;
-    }
-
-    write_resp_command(&mut writer, args).await?;
-    read_resp(&mut reader)
-      .await
-      .context("failed to read Redis response")
+    self.pool.command(args).await
   }
 
   async fn connection_acquire(
