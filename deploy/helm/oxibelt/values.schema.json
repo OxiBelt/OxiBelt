@@ -305,6 +305,29 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["config"],
+        "properties": {
+          "config": {
+            "required": ["create"],
+            "properties": {
+              "create": { "const": false }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "required": ["existingConfigMap"],
+            "properties": {
+              "existingConfigMap": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
     }
   ]
 }

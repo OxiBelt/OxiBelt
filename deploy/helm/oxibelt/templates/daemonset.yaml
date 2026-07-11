@@ -40,7 +40,7 @@ spec:
         {{- end }}
         {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
         oxibelt.dev/immutable-config-rollout: "true"
-        {{- if not .Values.config.existingConfigMap }}
+        {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
         oxibelt.dev/config-revision: {{ include "oxibelt.configMapName" . | quote }}
         oxibelt.dev/config-digest: {{ "" | sha256sum | quote }}
         {{- end }}

@@ -87,6 +87,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     "^[a-f0-9]{64}$"
   );
   assert_eq!(
+    schema["allOf"][5]["if"]["properties"]["config"]["properties"]["create"]["const"],
+    false
+  );
+  assert_eq!(
+    schema["allOf"][5]["then"]["properties"]["config"]["properties"]["existingConfigMap"]["minLength"],
+    1
+  );
+  assert_eq!(
     schema["properties"]["admin"]["properties"]["bindAddress"]["enum"][3],
     "::"
   );
@@ -155,7 +163,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "OXIBELT_CONFIG_REVISION_FILE",
     "OXIBELT_INSTANCE_ID",
     "oxibelt.dev/immutable-config-rollout",
-    "{{- if not .Values.config.existingConfigMap }}\n        oxibelt.dev/config-revision: {{ include \"oxibelt.configMapName\" . | quote }}",
+    "{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}\n        oxibelt.dev/config-revision: {{ include \"oxibelt.configMapName\" . | quote }}",
     "oxibelt.dev/config-digest: {{ \"\" | sha256sum | quote }}",
     "gateway-config-directory",
     "command: [\"/usr/local/bin/oxibelt\"]",
@@ -195,7 +203,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "maxUnavailable: {{ .Values.workload.daemonSet.maxUnavailable }}",
     "checksum/oxibelt-config",
     "OXIBELT_CONFIG_ROLLOUT_MODE",
-    "{{- if not .Values.config.existingConfigMap }}\n        oxibelt.dev/config-revision: {{ include \"oxibelt.configMapName\" . | quote }}",
+    "{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}\n        oxibelt.dev/config-revision: {{ include \"oxibelt.configMapName\" . | quote }}",
     "oxibelt.dev/config-digest: {{ \"\" | sha256sum | quote }}",
     "gateway-config-directory",
     "command: [\"/usr/local/bin/oxibelt\"]",
@@ -247,6 +255,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "oxibelt.generatedConfigDigest",
     "oxibelt-helm-config-v1",
     "sha256sum",
+    "config.existingConfigMap is required when config.create=false",
     "existingConfigMapDigest",
     "oxiruleConfigMapDigest",
     "validateBaseConfigKey",

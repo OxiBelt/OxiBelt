@@ -41,7 +41,9 @@ revision, and paired with its lowercase SHA-256 value in
 `config.existingConfigMapDigest`. When `oxirule.enabled = true`, the same
 contract applies to `oxirule.existingConfigMap` and
 `oxirule.existingConfigMapDigest`. Helm rejects a missing or non-lowercase
-64-character digest.
+64-character digest. When `config.create` is `false`,
+`config.existingConfigMap` is required; Helm rejects an unowned deterministic
+base ConfigMap name.
 
 For `kubernetes_immutable` controller pairing, every base configuration
 ConfigMap must contain an empty `gateway-config-directory` key. Only in that

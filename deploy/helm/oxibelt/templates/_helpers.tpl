@@ -23,6 +23,9 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 
 {{- define "oxibelt.configMapName" -}}
+{{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
+{{- fail "config.existingConfigMap is required when config.create=false" -}}
+{{- end -}}
 {{- if .Values.config.existingConfigMap -}}
 {{- .Values.config.existingConfigMap -}}
 {{- else -}}

@@ -96,6 +96,7 @@ health:
   livePath: /live
 
 config:
+  # Set false only with a nonempty operator-managed existingConfigMap and its digest.
   create: true
   existingConfigMap: ""
   # Required for an operator-managed ConfigMap. The referenced ConfigMap must
