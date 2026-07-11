@@ -17,7 +17,7 @@ pub struct WorkloadPatch {
 pub struct BaseConfigReference {
   pub config_map_name: String,
   pub data_key: String,
-  pub directory_key: String,
+  pub placeholder_key: String,
 }
 
 pub fn base_config_reference(
@@ -86,29 +86,23 @@ pub fn base_config_reference(
       })
     })
     .unwrap_or(config_file);
-  let managed_directory = Path::new(managed_path)
-    .parent()
-    .and_then(Path::to_str)
-    .filter(|directory| !directory.is_empty() && *directory != ".")
-    .context("managed configuration must be mounted below an existing configuration directory")?;
-  let directory_path = format!("{managed_directory}/.keep");
-  let directory_key = config_map
+  let placeholder_key = config_map
     .get("items")
     .and_then(Value::as_array)
     .and_then(|items| {
       items.iter().find_map(|item| {
-        (item.get("path").and_then(Value::as_str) == Some(directory_path.as_str()))
+        (item.get("path").and_then(Value::as_str) == Some(managed_path))
           .then(|| item.get("key").and_then(Value::as_str))
           .flatten()
       })
     })
     .context(
-      "target base ConfigMap must project a .keep entry for the managed configuration directory",
+      "target base ConfigMap must project an empty placeholder at the managed configuration path",
     )?;
   Ok(BaseConfigReference {
     config_map_name: config_map_name.to_string(),
     data_key: data_key.to_string(),
-    directory_key: directory_key.to_string(),
+    placeholder_key: placeholder_key.to_string(),
   })
 }
 
@@ -124,15 +118,18 @@ pub fn validate_immutable_base_config(
     .pointer(&format!("/data/{}", json_pointer_escape(&base.data_key)))
     .and_then(Value::as_str)
     .context("target base configuration ConfigMap does not contain the configured entry file")?;
-  config_map
+  let placeholder = config_map
     .pointer(&format!(
       "/data/{}",
-      json_pointer_escape(&base.directory_key)
+      json_pointer_escape(&base.placeholder_key)
     ))
     .and_then(Value::as_str)
     .context(
-      "target base configuration ConfigMap does not contain the managed directory .keep entry",
+      "target base configuration ConfigMap does not contain the managed configuration placeholder",
     )?;
+  if !placeholder.is_empty() {
+    bail!("target base configuration ConfigMap managed configuration placeholder must be empty");
+  }
   let parsed: toml::Value =
     toml::from_str(config).context("target base configuration entry file is not valid TOML")?;
   let includes = parsed
@@ -392,4 +389,88 @@ fn patch_volume_mount(
 
 pub fn json_pointer_escape(value: &str) -> String {
   value.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use serde_json::json;
+
+  use super::*;
+  use crate::rollout::WorkloadKind;
+
+  const MANAGED_PATH: &str = "conf.d/gateway-api.generated.toml";
+
+  fn target() -> RolloutTarget {
+    RolloutTarget {
+      namespace: "default".to_string(),
+      kind: WorkloadKind::Deployment,
+      name: "edge".to_string(),
+      container_name: "oxibelt".to_string(),
+      volume_name: "gateway-config".to_string(),
+      timeout: Duration::from_secs(300),
+      config_map_prefix: "oxibelt-gateway-config".to_string(),
+    }
+  }
+
+  fn workload(placeholder_path: &str) -> Value {
+    json!({
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [{
+              "name": "oxibelt",
+              "args": ["--config", "/etc/oxibelt/config/oxibelt.toml"],
+              "volumeMounts": [{
+                "name": "config",
+                "mountPath": "/etc/oxibelt/config",
+                "readOnly": true,
+              }],
+            }],
+            "volumes": [{
+              "name": "config",
+              "configMap": {
+                "name": "base-config",
+                "items": [
+                  {"key": "oxibelt.toml", "path": "oxibelt.toml"},
+                  {"key": "gateway-config-directory", "path": "conf.d/.keep"},
+                  {"key": "gateway-config-directory", "path": placeholder_path},
+                ],
+              },
+            }],
+          },
+        },
+      },
+    })
+  }
+
+  fn base_config() -> Value {
+    json!({
+      "immutable": true,
+      "data": {
+        "oxibelt.toml": "include = [\"conf.d/*.toml\"]\n",
+        "gateway-config-directory": "",
+      },
+    })
+  }
+
+  #[test]
+  fn immutable_base_config_requires_an_empty_exact_path_placeholder() {
+    let target = target();
+    let reference = base_config_reference(&workload(MANAGED_PATH), &target, MANAGED_PATH)
+      .expect("exact managed placeholder should be discovered");
+    assert_eq!(reference.placeholder_key, "gateway-config-directory");
+    validate_immutable_base_config(&base_config(), &reference, MANAGED_PATH)
+      .expect("empty exact managed placeholder should be accepted");
+
+    let mut nonempty_placeholder = base_config();
+    nonempty_placeholder["data"]["gateway-config-directory"] =
+      Value::String("[admin]\n".to_string());
+    assert!(
+      validate_immutable_base_config(&nonempty_placeholder, &reference, MANAGED_PATH).is_err()
+    );
+
+    assert!(base_config_reference(&workload("conf.d/.keep"), &target, MANAGED_PATH).is_err());
+  }
 }

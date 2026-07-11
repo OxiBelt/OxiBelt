@@ -162,6 +162,8 @@ spec:
 {{ if eq .Values.configRollout.mode "kubernetes_immutable" }}
           - key: gateway-config-directory
             path: {{ printf "%s/.keep" (dir .Values.configRollout.managedConfigPath) | quote }}
+          - key: gateway-config-directory
+            path: {{ .Values.configRollout.managedConfigPath | quote }}
 {{ end }}
       {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) }}
       - name: tls

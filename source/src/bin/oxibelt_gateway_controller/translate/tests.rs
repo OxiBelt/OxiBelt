@@ -464,6 +464,14 @@ fn equivalent_kubernetes_input_order_keeps_the_generated_content_digest_stable()
   let second = translate_objects(&crate::rollout::canonicalize_objects(&reordered), &args())
     .expect("reordered canonical translation should succeed");
 
+  assert!(
+    first.toml.contains("[[upstream_pools]]"),
+    "canonical input must retain the Gateway-backed upstream pools"
+  );
+  assert!(
+    first.toml.contains("[[routes]]"),
+    "canonical input must retain the Gateway-backed routes"
+  );
   assert_eq!(first.toml, second.toml);
   assert_eq!(
     crate::rollout::digest_content(first.toml.as_bytes()),

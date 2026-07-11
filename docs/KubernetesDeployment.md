@@ -44,11 +44,13 @@ contract applies to `oxirule.existingConfigMap` and
 64-character digest.
 
 For `kubernetes_immutable` controller pairing, every base configuration
-ConfigMap must contain the `gateway-config-directory` key. Only in that mode,
-the chart projects it as `conf.d/.keep`, creating the parent directory for the
-controller's read-only single-file mount. Ordinary `helm_immutable` releases
-do not project or require this sentinel from an existing ConfigMap. `config.key`
-must be a single safe ConfigMap key/base filename
+ConfigMap must contain an empty `gateway-config-directory` key. Only in that
+mode, the chart projects it as both `conf.d/.keep` and the exact managed
+configuration path. The exact empty placeholder creates the target for the
+controller's read-only single-file mount; `.keep` preserves a safe
+data-plane-first upgrade path. Ordinary `helm_immutable` releases do not
+project or require this sentinel from an existing ConfigMap. `config.key` must
+be a single safe ConfigMap key/base filename
 (`[A-Za-z0-9][A-Za-z0-9._-]{0,252}`), not a path and not the reserved
 `gateway-config-directory` key. The config path remains mounted read-only and
 passed to OxiBelt with `--config`.

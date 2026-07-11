@@ -251,17 +251,19 @@ impl TranslationState {
         {
           self.gateway_classes.insert(object.name().to_string());
         }
-        "Gateway" => {
-          if let Some(gateway) = parse_gateway(object, &self.gateway_classes) {
-            self.gateways.insert(object.key(), gateway);
-          }
-        }
         "ReferenceGrant" => {
           if let Some(grant) = gateway_policy::parse_reference_grant(object) {
             self.reference_grants.push(grant);
           }
         }
         _ => {}
+      }
+    }
+    for object in objects {
+      if object.kind == "Gateway"
+        && let Some(gateway) = parse_gateway(object, &self.gateway_classes)
+      {
+        self.gateways.insert(object.key(), gateway);
       }
     }
     Ok(())

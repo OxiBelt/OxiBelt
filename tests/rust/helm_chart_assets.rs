@@ -177,6 +177,14 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   assert!(deployment.contains(
     "{{ if eq .Values.configRollout.mode \"kubernetes_immutable\" }}\n          - key: gateway-config-directory"
   ));
+  assert_eq!(
+    deployment
+      .matches("- key: gateway-config-directory")
+      .count(),
+    2,
+    "Deployment must retain the compatibility sentinel and project the exact managed placeholder"
+  );
+  assert!(deployment.contains("path: {{ .Values.configRollout.managedConfigPath | quote }}"));
 
   let daemonset = read_repo("deploy/helm/oxibelt/templates/daemonset.yaml");
   for needle in [
@@ -206,6 +214,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   assert!(daemonset.contains(
     "{{ if eq .Values.configRollout.mode \"kubernetes_immutable\" }}\n          - key: gateway-config-directory"
   ));
+  assert_eq!(
+    daemonset.matches("- key: gateway-config-directory").count(),
+    2,
+    "DaemonSet must retain the compatibility sentinel and project the exact managed placeholder"
+  );
+  assert!(daemonset.contains("path: {{ .Values.configRollout.managedConfigPath | quote }}"));
 
   let configmap = read_repo("deploy/helm/oxibelt/templates/configmap.yaml");
   for needle in [
@@ -213,6 +227,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "helm.sh/resource-policy: keep",
     "oxibelt.dev/config-digest",
     "gateway-config-directory",
+    "gateway-config-directory: \"\"",
     "oxibelt.validateAdmin",
   ] {
     assert!(

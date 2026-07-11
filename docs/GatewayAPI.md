@@ -181,13 +181,14 @@ include = ["conf.d/*.toml"]
 
 The default managed path is `conf.d/gateway-api.generated.toml`. It must remain
 a safe nested relative `.toml` path, not a root-level filename, so the
-controller can prove its pre-existing parent beneath the config root. The
-controller derives the selected container's config root from its `--config`
-argument and mounts this one file from an immutable ConfigMap. In
-`kubernetes_immutable` mode, the data-plane chart projects
-`gateway-config-directory` to `conf.d/.keep` so the parent directory already
-exists beneath the read-only config root. Existing ConfigMaps used only for
-ordinary `helm_immutable` rollouts do not need this sentinel.
+controller can prove its target remains beneath the config root. The controller
+derives the selected container's config root from its `--config` argument and
+mounts this one file from an immutable ConfigMap. In `kubernetes_immutable`
+mode, the data-plane chart projects the empty `gateway-config-directory` key
+to both `conf.d/.keep` and the exact managed path. The exact empty placeholder
+gives the read-only single-file mount a target; `.keep` remains for a safe
+data-plane-first upgrade. Existing ConfigMaps used only for ordinary
+`helm_immutable` rollouts do not need this sentinel.
 
 At reconcile time the controller:
 

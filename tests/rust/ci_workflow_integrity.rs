@@ -1004,6 +1004,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "oxibelt-admin-server",
     "oxibelt-admin-client-ca",
     "--from-file=token=",
+    "openssl rand -hex 32 | tr -d '\\r\\n' >\"${work_dir}/admin-token\"",
+    "grep -Eq '^[a-f0-9]{64}$' \"${work_dir}/admin-token\"",
     "verify_admin_mtls",
     "Admin listener accepted a bearer-authenticated client without a certificate",
     ".projected.defaultMode == 288",
@@ -1014,6 +1016,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "x-oxibelt-config-revision",
     "x-oxibelt-config-digest",
     "ConfigMap raw bytes do not match the Pod-assigned digest",
+    "logs \"deployment/${controller_release}\"",
+    "--all-containers=true --prefix --previous --tail=200",
   ] {
     assert!(
       script.contains(expected),

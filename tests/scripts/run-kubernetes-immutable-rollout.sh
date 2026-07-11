@@ -59,6 +59,14 @@ cleanup() {
     echo "Kubernetes immutable rollout diagnostics for ${cluster_name}/${namespace}:" >&2
     kube -n "${namespace}" get deployments,replicasets,pods --ignore-not-found >&2 || true
     kube -n "${namespace}" get events --sort-by=.metadata.creationTimestamp >&2 || true
+    kube -n "${namespace}" logs "deployment/${controller_release}" \
+      --all-containers=true --prefix --tail=200 >&2 || true
+    kube -n "${namespace}" logs "deployment/${controller_release}" \
+      --all-containers=true --prefix --previous --tail=200 >&2 || true
+    kube -n "${namespace}" logs -l "${selector}" \
+      --all-containers=true --prefix --tail=200 >&2 || true
+    kube -n "${namespace}" logs -l "${selector}" \
+      --all-containers=true --prefix --previous --tail=200 >&2 || true
   fi
 
   if ((cluster_created == 1)); then
@@ -313,7 +321,9 @@ openssl x509 -req -sha256 -days 1 \
   -extfile "${work_dir}/admin-client.ext" \
   -out "${work_dir}/admin-client.crt" \
   >/dev/null 2>&1
-openssl rand -hex 32 >"${work_dir}/admin-token"
+openssl rand -hex 32 | tr -d '\r\n' >"${work_dir}/admin-token"
+grep -Eq '^[a-f0-9]{64}$' "${work_dir}/admin-token" \
+  || die "failed to generate a safe Admin token"
 {
   printf 'Authorization: Bearer '
   tr -d '\r\n' <"${work_dir}/admin-token"
@@ -453,11 +463,14 @@ jq -e '
 jq -e --arg revision "${revision}" --arg managed_path "${managed_config_path}" '
   any(.spec.template.spec.volumes[]?;
     .name == "gateway-config" and .configMap.name == $revision and .configMap.items == [
-      {"key": "gateway-api.generated.toml", "path": $managed_path}
+      {"key": "gateway-api.generated.toml", "path": "gateway-api.generated.toml"}
     ])
   and any(.spec.template.spec.containers[]?;
     .name == "oxibelt" and any(.volumeMounts[]?;
-      .name == "gateway-config" and .mountPath == ("/etc/oxibelt/config/" + $managed_path) and .readOnly == true))
+      .name == "gateway-config"
+        and .mountPath == ("/etc/oxibelt/config/" + $managed_path)
+        and .subPath == "gateway-api.generated.toml"
+        and .readOnly == true))
 ' >/dev/null <<<"${deployment_json}" \
   || die "workload does not mount exactly the controller-owned immutable config file"
 

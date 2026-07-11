@@ -49,13 +49,24 @@ impl KubernetesObject {
     if value.is_null() {
       return Ok(Vec::new());
     }
-    if value.get("kind").and_then(Value::as_str) == Some("List") {
+    let is_list = value
+      .get("kind")
+      .and_then(Value::as_str)
+      .is_some_and(|kind| {
+        kind == "List"
+          || (kind.ends_with("List")
+            && value
+              .pointer("/metadata/name")
+              .and_then(Value::as_str)
+              .is_none_or(str::is_empty))
+      });
+    if is_list {
       let items = match value {
         Value::Object(mut object) => match object.remove("items") {
           Some(Value::Array(items)) => items,
-          _ => bail!("List object must contain items array"),
+          _ => bail!("Kubernetes list object must contain an items array"),
         },
-        _ => bail!("List object must contain items array"),
+        _ => bail!("Kubernetes list object must contain an items array"),
       };
       let mut objects = Vec::with_capacity(items.len());
       for item in items {

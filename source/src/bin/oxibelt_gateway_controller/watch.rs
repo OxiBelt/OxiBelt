@@ -320,3 +320,91 @@ fn read_bearer_token(path: &Path) -> anyhow::Result<String> {
   }
   Ok(format!("Bearer {token}"))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parse_list_accepts_typed_kubernetes_list_envelopes() {
+    let gateway_classes = parse_list(Bytes::from_static(
+      br#"{
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "GatewayClassList",
+        "metadata": {"resourceVersion": "1"},
+        "items": [{
+          "apiVersion": "gateway.networking.k8s.io/v1",
+          "kind": "GatewayClass",
+          "metadata": {"name": "oxibelt"}
+        }]
+      }"#,
+    ))
+    .expect("GatewayClassList should parse");
+    assert_eq!(gateway_classes.len(), 1);
+    assert_eq!(gateway_classes[0].kind, "GatewayClass");
+    assert_eq!(gateway_classes[0].name(), "oxibelt");
+
+    let services = parse_list(Bytes::from_static(
+      br#"{
+        "apiVersion": "v1",
+        "kind": "ServiceList",
+        "metadata": {"resourceVersion": "2"},
+        "items": [{
+          "apiVersion": "v1",
+          "kind": "Service",
+          "metadata": {"name": "backend", "namespace": "default"}
+        }]
+      }"#,
+    ))
+    .expect("ServiceList should parse");
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].kind, "Service");
+    assert_eq!(services[0].name(), "backend");
+
+    let generic = parse_list(Bytes::from_static(
+      br#"{
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [{
+          "apiVersion": "v1",
+          "kind": "ConfigMap",
+          "metadata": {"name": "base-config"}
+        }]
+      }"#,
+    ))
+    .expect("generic List should parse");
+    assert_eq!(generic.len(), 1);
+    assert_eq!(generic[0].kind, "ConfigMap");
+  }
+
+  #[test]
+  fn parse_list_rejects_malformed_list_envelopes() {
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{"apiVersion":"v1","kind":"List","metadata":{}}"#
+      ))
+      .is_err()
+    );
+    assert!(
+      parse_list(Bytes::from_static(
+        br#"{"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":{}}"#
+      ))
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn parse_list_keeps_named_custom_kind_ending_in_list_as_an_object() {
+    let objects = parse_list(Bytes::from_static(
+      br#"{
+        "apiVersion": "example.test/v1",
+        "kind": "AllowList",
+        "metadata": {"name": "edge"}
+      }"#,
+    ))
+    .expect("named custom resource should parse");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].kind, "AllowList");
+    assert_eq!(objects[0].name(), "edge");
+  }
+}
