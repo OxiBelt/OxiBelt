@@ -75,11 +75,19 @@ shared_state_delay_launch_requests() {
           status=$?
         fi
         printf "%s\\n" "${output}"
-        # Shared connection admission runs before HTTP parsing.  Its configured
+        # Shared connection admission runs before HTTP parsing. Its configured
         # 503 therefore closes the downstream TCP connection instead of writing
-        # an HTTP response; accept only that controlled fail-closed outcome.
-        if [ "${status}" -ne 0 ] && printf "%s" "${output}" | grep -F "[Errno 104] Connection reset by peer" >/dev/null; then
-          exit 0
+        # an HTTP response. Depending on whether the close reaches the client
+        # while sending or receiving, Python reports an exact broken pipe,
+        # connection reset, or response EOF. Normalize only those controlled
+        # fail-closed outcomes so unrelated network failures remain rejected.
+        if [ "${status}" -ne 0 ]; then
+          case "${output}" in
+            "[Errno 32] Broken pipe"|"[Errno 104] Connection reset by peer"|"Remote end closed connection without response")
+              printf "%s\\n" "shared-state-delay-controlled-pre-response-close"
+              exit 0
+              ;;
+          esac
         fi
         exit 1
       ) &
@@ -102,7 +110,7 @@ shared_state_delay_wait_for_requests() {
     fail_with_diagnostics "delayed shared-state requests did not fail closed"
   fi
   local count
-  count="$(grep -Ec '"status": 503|\[Errno 104\] Connection reset by peer' "${output_path}" || true)"
+  count="$(grep -Ec '"status": 503|^shared-state-delay-controlled-pre-response-close$' "${output_path}" || true)"
   if [[ "${count}" != "16" ]]; then
     cat "${output_path}" >&2 || true
     fail_with_diagnostics "expected sixteen bounded shared-state timeout rejections, got ${count}"
@@ -215,12 +223,28 @@ shared_state_delay_assert_recovery() {
   fail_with_diagnostics "fresh request did not recover after shared-state backend delay"
 }
 
+shared_state_delay_resume_backend() {
+  local resume_callback="$1"
+  if ! declare -F "${resume_callback}" >/dev/null; then
+    fail_with_diagnostics "shared-state backend resume callback is not defined: ${resume_callback}"
+  fi
+  if ! "${resume_callback}"; then
+    fail_with_diagnostics "failed to resume shared-state backend after delayed work"
+  fi
+}
+
 run_shared_state_delay_isolation() {
   local backend_kind="$1"
   local resume_callback="${2:-}"
+  local resume_phase="${3:-after_post_delay_metrics}"
   local delayed_requests_log="${logs_dir}/shared-state-delay-${backend_kind}.jsonl"
   local live_response metrics_response
   local attempt
+
+  case "${resume_phase}" in
+    before_post_delay_metrics|after_post_delay_metrics) ;;
+    *) fail_with_diagnostics "unsupported shared-state backend resume phase: ${resume_phase}" ;;
+  esac
 
   shared_state_delay_launch_requests "${delayed_requests_log}"
   for attempt in $(seq 1 10); do
@@ -234,14 +258,12 @@ run_shared_state_delay_isolation() {
   done
   shared_state_delay_assert_metrics_during_delay "${metrics_response}" "${backend_kind}"
   shared_state_delay_wait_for_requests "${delayed_requests_log}"
+  if [[ -n "${resume_callback}" && "${resume_phase}" == "before_post_delay_metrics" ]]; then
+    shared_state_delay_resume_backend "${resume_callback}"
+  fi
   shared_state_delay_assert_post_delay_metrics "${backend_kind}"
-  if [[ -n "${resume_callback}" ]]; then
-    if ! declare -F "${resume_callback}" >/dev/null; then
-      fail_with_diagnostics "shared-state backend resume callback is not defined: ${resume_callback}"
-    fi
-    if ! "${resume_callback}"; then
-      fail_with_diagnostics "failed to resume shared-state backend after delayed work"
-    fi
+  if [[ -n "${resume_callback}" && "${resume_phase}" == "after_post_delay_metrics" ]]; then
+    shared_state_delay_resume_backend "${resume_callback}"
   fi
   shared_state_delay_assert_recovery
 }
