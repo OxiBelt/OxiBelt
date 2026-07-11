@@ -121,3 +121,27 @@ pub(super) fn expect_ok(resp: Resp) -> anyhow::Result<()> {
     other => bail!("unexpected Redis response: {other:?}"),
   }
 }
+
+pub(super) fn expect_pong(resp: Resp) -> anyhow::Result<()> {
+  match resp {
+    Resp::Simple(value) if value == "PONG" => Ok(()),
+    Resp::Error(error) => bail!("Redis error: {error}"),
+    other => bail!("unexpected Redis PING response: {other:?}"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Resp, expect_ok, expect_pong};
+
+  #[test]
+  fn redis_reply_validators_are_command_specific() {
+    assert!(expect_pong(Resp::Simple("PONG".to_string())).is_ok());
+    assert!(expect_pong(Resp::Simple("OK".to_string())).is_err());
+    assert!(expect_pong(Resp::Int(1)).is_err());
+
+    assert!(expect_ok(Resp::Simple("OK".to_string())).is_ok());
+    assert!(expect_ok(Resp::Simple("PONG".to_string())).is_err());
+    assert!(expect_ok(Resp::Int(1)).is_ok());
+  }
+}

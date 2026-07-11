@@ -1,8 +1,9 @@
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use deadpool::managed::{Manager, Metrics as DeadpoolMetrics};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedReadHalf;
@@ -154,6 +155,66 @@ async fn sequential_commands_reuse_one_initialized_connection() {
     "oxibelt_shared_state_pool_acquisitions_total{backend=\"redis-test\",kind=\"redis\",outcome=\"success\"} 2"
   ));
   assert!(!prometheus.contains("password"));
+}
+
+#[tokio::test]
+async fn health_check_accepts_standard_pong_reply() {
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("test listener should bind");
+  let address = listener
+    .local_addr()
+    .expect("test listener should have an address");
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.expect("client should connect");
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let command = read_command(&mut reader)
+      .await
+      .expect("health check should use RESP framing");
+    writer
+      .write_all(b"+PONG\r\n")
+      .await
+      .expect("server should reply to health check");
+    command
+  });
+
+  let config = pool_config(format!("redis://{address}"), 100);
+  let metrics = Metrics::new();
+  let pool = RedisPool::new(
+    &config,
+    Duration::from_millis(200),
+    &CryptoConfig::default(),
+    RedisPlaintextPolicy::Allow,
+    metrics.clone(),
+  )
+  .expect("pool should build");
+  let manager = pool.inner.pool.manager().clone();
+  let mut connection = manager
+    .create()
+    .await
+    .expect("health check connection should create");
+  let deadpool_metrics = DeadpoolMetrics {
+    created: Instant::now() - Duration::from_secs(61),
+    recycled: None,
+    recycle_count: 0,
+  };
+
+  manager
+    .recycle(&mut connection, &deadpool_metrics)
+    .await
+    .expect("standard Redis PONG should pass the health check");
+  assert_eq!(
+    server.await.expect("server should not panic"),
+    vec![b"PING".to_vec()]
+  );
+
+  let prometheus = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+  assert!(!prometheus.contains("event=\"health_failed\""));
 }
 
 #[tokio::test]

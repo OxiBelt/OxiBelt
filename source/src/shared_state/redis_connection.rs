@@ -24,7 +24,7 @@ use crate::config::{
 use crate::metrics::Metrics;
 use crate::tls::{RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config};
 
-use super::redis_protocol::{expect_ok, read_resp, write_resp_command};
+use super::redis_protocol::{expect_ok, expect_pong, read_resp, write_resp_command};
 
 pub(super) struct RedisConnection {
   pub(super) reader: BufReader<ReadHalf<RedisTransport>>,
@@ -141,7 +141,7 @@ impl Manager for RedisConnectionManager {
       }
       let ping = async {
         write_resp_command(&mut connection.writer, &[b"PING".to_vec()]).await?;
-        expect_ok(read_resp(&mut connection.reader).await?)
+        expect_pong(read_resp(&mut connection.reader).await?)
       };
       match tokio::time::timeout(manager.command_timeout, ping).await {
         Ok(Ok(())) => Ok(()),
