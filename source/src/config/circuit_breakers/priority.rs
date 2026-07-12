@@ -79,7 +79,7 @@ impl CircuitBreakerPriorityConfig {
         );
       }
       if let Some(share) = class.max_share
-        && (!share.is_finite() || !(0.0 < share && share <= 1.0))
+        && !(share.is_finite() && 0.0 < share && share <= 1.0)
       {
         bail!(
           "circuit_breakers.priority.classes {}.max_share must be finite and in (0, 1]",
@@ -301,6 +301,43 @@ mod tests {
         .to_string()
         .contains("admin may not reserve public request capacity")
     );
+  }
+
+  #[test]
+  fn validation_accepts_only_finite_max_shares_in_open_closed_unit_interval() {
+    let config_with_share = |max_share| {
+      let mut interactive = class(PriorityClass::Interactive);
+      interactive.max_share = Some(max_share);
+      CircuitBreakerPriorityConfig {
+        enabled: true,
+        classes: vec![interactive],
+      }
+    };
+
+    for share in [f64::MIN_POSITIVE, 0.5, 1.0] {
+      config_with_share(share)
+        .validate(Some(8))
+        .unwrap_or_else(|error| panic!("valid max_share {share} was rejected: {error}"));
+    }
+
+    for share in [
+      f64::NAN,
+      f64::NEG_INFINITY,
+      f64::INFINITY,
+      -1.0,
+      -0.0,
+      0.0,
+      1.000_000_1,
+    ] {
+      let error = config_with_share(share)
+        .validate(Some(8))
+        .expect_err("invalid max_share must fail validation");
+      assert!(
+        error
+          .to_string()
+          .contains("max_share must be finite and in (0, 1]")
+      );
+    }
   }
 
   #[test]
