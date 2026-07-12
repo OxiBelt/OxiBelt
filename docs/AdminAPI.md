@@ -164,9 +164,17 @@ diff endpoints remain available to operators.
 `GET /admin/v1/waf/person-proof/status` returns aggregate Person proof policy
 and replay-store state. `GET /admin/v1/waf/person-proof/clearances` lists only
 hash-keyed active clearance identifiers in canonical `clearance:<sha256>` form
-with expiry metadata. `POST /admin/v1/waf/person-proof/clearances/revoke`
-accepts only a bare SHA-256 value or canonical `clearance:<sha256>` value and
-creates an exact-match revocation tombstone.
+with expiry metadata. Shared-backend clearance pagination returns an opaque,
+versioned cursor bound to the shared-state namespace and scan position; invalid
+or cross-namespace cursors return `400`, and clients should discard cursors
+after a backend or deployment change. Authorization is checked before cursor
+parsing or shared-state enumeration. A shared status operation that cannot
+finish its complete scan inside its configured bound returns `503`, never a
+partial aggregate count. Clearance listing always returns only its bounded page
+plus a continuation cursor.
+`POST /admin/v1/waf/person-proof/clearances/revoke` accepts only a bare SHA-256
+value or canonical `clearance:<sha256>` value and creates an exact-match
+revocation tombstone.
 
 These endpoints never return raw session material, raw clearance credentials,
 provider responses, token-binding payloads, MACs, or the shared Person proof

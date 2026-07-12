@@ -25,6 +25,7 @@ fn shared_state_backend_implementation_has_no_blocking_bridge() {
   let files = [
     "source/src/shared_state.rs",
     "source/src/shared_state/cache_store.rs",
+    "source/src/shared_state/enumeration.rs",
     "source/src/shared_state/feature_flags.rs",
     "source/src/shared_state/person_proof.rs",
     "source/src/shared_state/rate_limits.rs",
@@ -46,6 +47,19 @@ fn shared_state_backend_implementation_has_no_blocking_bridge() {
     for marker in forbidden {
       assert_absent(path, &source, marker);
     }
+  }
+}
+
+#[test]
+fn shared_state_enumeration_never_issues_the_redis_keys_command() {
+  for path in [
+    "source/src/shared_state.rs",
+    "source/src/shared_state/cache_store.rs",
+    "source/src/shared_state/enumeration.rs",
+    "source/src/shared_state/person_proof.rs",
+  ] {
+    let source = read_repo_file(path);
+    assert_absent(path, &source, "b\"KEYS\"");
   }
 }
 

@@ -9,6 +9,7 @@ impl ResponseCache {
     &self,
     policy: &str,
     background_refresh: bool,
+    max_vary_variants: usize,
     partition: &str,
     base_key: &str,
     ctx: CacheLookupContext<'_>,
@@ -30,6 +31,7 @@ impl ResponseCache {
         ctx.request_headers,
         request_no_cache(ctx.request_headers),
         background_refresh,
+        max_vary_variants,
       )
       .await
     {

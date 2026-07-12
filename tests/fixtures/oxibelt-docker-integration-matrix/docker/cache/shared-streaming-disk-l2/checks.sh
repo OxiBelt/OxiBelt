@@ -10,7 +10,7 @@ run_case_checks() {
   assert_response_jq "${first}" '(.body | length) == 131072 and .headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored" and .headers["x-sequence-index"] == "0"'
 
   for _attempt in $(seq 1 50); do
-    chunk_keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli KEYS "matrix-shared-cache-streaming:cache:chunk:*"; else redis-cli KEYS "matrix-shared-cache-streaming:cache:chunk:*"; fi')"
+    chunk_keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli --scan --pattern "matrix-shared-cache-streaming:cache:chunk:*"; else redis-cli --scan --pattern "matrix-shared-cache-streaming:cache:chunk:*"; fi')"
     if [[ -n "${chunk_keys}" ]]; then
       break
     fi
@@ -27,4 +27,11 @@ run_case_checks() {
   docker rm -f "${http_container}" >/dev/null
   offline="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${path}" 200 "GET" "")"
   assert_response_jq "${offline}" '(.body | length) == 131072 and .headers["x-oxibelt-cache"] == "hit"'
+
+  local commandstats
+  commandstats="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli INFO commandstats; else redis-cli INFO commandstats; fi')"
+  if grep -Eq '^cmdstat_keys:calls=[1-9]' <<<"${commandstats}"; then
+    echo "${commandstats}" >&2
+    fail_with_diagnostics "OxiBelt shared cache fixture must not issue Redis KEYS"
+  fi
 }

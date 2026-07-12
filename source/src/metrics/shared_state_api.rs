@@ -87,6 +87,19 @@ impl Metrics {
       .pool_connection_event(backend, kind, event);
   }
 
+  pub(crate) fn record_shared_state_enumeration(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    scope: &'static str,
+    event: &'static str,
+    count: usize,
+  ) {
+    self
+      .shared_state
+      .enumeration(backend, kind, scope, event, count);
+  }
+
   pub(super) fn append_shared_state_prometheus(&self, output: &mut String) {
     self.shared_state.append_prometheus(output);
   }

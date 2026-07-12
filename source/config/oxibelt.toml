@@ -945,6 +945,9 @@ redis_plaintext_policy = "allow" # allow | loopback_only | deny
 instance_id_env = "OXIBELT_INSTANCE_ID"
 # default_backend = "cluster"
 operation_timeout_ms = 500
+# Shared-state enumeration is cursor-based and bounded by these limits.
+enumeration_page_size = 128
+enumeration_max_items_per_operation = 4096
 connection_lease_ms = 120000
 cache_lock_ms = 10000
 # rate_limits_backend = "cluster"

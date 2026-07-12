@@ -28,6 +28,7 @@ struct SharedStateMetricsInner {
   pool_status: HashMap<BackendKey, SharedStatePoolStatus>,
   pool_acquisitions: HashMap<PoolMetricKey, u64>,
   pool_connection_events: HashMap<PoolMetricKey, u64>,
+  enumeration: HashMap<EnumerationMetricKey, u64>,
 }
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -49,6 +50,14 @@ struct PoolMetricKey {
   backend: String,
   kind: &'static str,
   value: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct EnumerationMetricKey {
+  backend: String,
+  kind: &'static str,
+  scope: &'static str,
+  event: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +82,7 @@ impl Default for SharedStateMetrics {
         pool_status: HashMap::new(),
         pool_acquisitions: HashMap::new(),
         pool_connection_events: HashMap::new(),
+        enumeration: HashMap::new(),
       }),
     }
   }
@@ -201,6 +211,28 @@ impl SharedStateMetrics {
     *inner.pool_connection_events.entry(key).or_default() += 1;
   }
 
+  pub(super) fn enumeration(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    scope: &'static str,
+    event: &'static str,
+    count: usize,
+  ) {
+    if count == 0 {
+      return;
+    }
+    let mut inner = self.lock();
+    let key = EnumerationMetricKey {
+      backend: bounded_backend_label(&inner, backend, kind),
+      kind,
+      scope,
+      event,
+    };
+    let value = inner.enumeration.entry(key).or_default();
+    *value = value.saturating_add(count as u64);
+  }
+
   pub(super) fn append_prometheus(&self, output: &mut String) {
     let inner = self.lock();
     for (key, series) in &inner.queue {
@@ -324,6 +356,15 @@ impl SharedStateMetrics {
         *value,
       );
     }
+    for (key, value) in &inner.enumeration {
+      append_metric(
+        output,
+        "oxibelt_shared_state_enumeration_total",
+        "counter",
+        enumeration_metric_labels(key),
+        *value,
+      );
+    }
   }
 
   fn lock(&self) -> MutexGuard<'_, SharedStateMetricsInner> {
@@ -393,12 +434,17 @@ fn bounded_backend_label(
       .pool_acquisitions
       .keys()
       .chain(inner.pool_connection_events.keys())
+      .any(|key| key.backend == backend && key.kind == kind)
+    || inner
+      .enumeration
+      .keys()
       .any(|key| key.backend == backend && key.kind == kind);
   let series = inner.queue.len()
     + inner.operation.len()
     + inner.operations_total.len()
     + inner.pool_acquisitions.len()
-    + inner.pool_connection_events.len();
+    + inner.pool_connection_events.len()
+    + inner.enumeration.len();
   if exists || series < MAX_SERIES {
     backend
   } else {
@@ -449,6 +495,15 @@ fn pool_metric_labels<'a>(
     ("backend", key.backend.as_str()),
     ("kind", key.kind),
     (label, key.value),
+  ]
+}
+
+fn enumeration_metric_labels(key: &EnumerationMetricKey) -> [(&'static str, &str); 4] {
+  [
+    ("backend", key.backend.as_str()),
+    ("kind", key.kind),
+    ("scope", key.scope),
+    ("event", key.event),
   ]
 }
 
@@ -514,4 +569,25 @@ fn append_metric(
     output.push('}');
   }
   let _ = writeln!(output, " {value}");
+}
+
+#[cfg(test)]
+mod tests {
+  use super::SharedStateMetrics;
+
+  #[test]
+  fn enumeration_metrics_use_only_fixed_scope_and_event_labels() {
+    let metrics = SharedStateMetrics::default();
+    metrics.enumeration("redis-main", "redis", "cache_index", "pages", 2);
+    metrics.enumeration("redis-main", "redis", "cache_index", "scanned_keys", 3);
+
+    let mut prometheus = String::new();
+    metrics.append_prometheus(&mut prometheus);
+    assert!(prometheus.contains(
+      "oxibelt_shared_state_enumeration_total{backend=\"redis-main\",kind=\"redis\",scope=\"cache_index\",event=\"pages\"} 2"
+    ));
+    assert!(prometheus.contains(
+      "oxibelt_shared_state_enumeration_total{backend=\"redis-main\",kind=\"redis\",scope=\"cache_index\",event=\"scanned_keys\"} 3"
+    ));
+  }
 }

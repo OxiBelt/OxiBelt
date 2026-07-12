@@ -30,6 +30,27 @@ pub(super) async fn write_resp_command<W>(stream: &mut W, args: &[Vec<u8>]) -> a
 where
   W: AsyncWrite + Unpin,
 {
+  write_resp_commands(stream, &[args]).await
+}
+
+pub(super) async fn write_resp_commands<W>(
+  stream: &mut W,
+  commands: &[&[Vec<u8>]],
+) -> anyhow::Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  for args in commands {
+    write_resp_command_unflushed(stream, args).await?;
+  }
+  stream.flush().await?;
+  Ok(())
+}
+
+async fn write_resp_command_unflushed<W>(stream: &mut W, args: &[Vec<u8>]) -> anyhow::Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
   stream
     .write_all(format!("*{}\r\n", args.len()).as_bytes())
     .await?;
@@ -40,7 +61,6 @@ where
     stream.write_all(arg).await?;
     stream.write_all(b"\r\n").await?;
   }
-  stream.flush().await?;
   Ok(())
 }
 

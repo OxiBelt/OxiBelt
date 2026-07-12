@@ -5,6 +5,7 @@ use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::json;
+use tracing::warn;
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -45,7 +46,13 @@ pub(super) async fn admin_person_proof_response(
       }
       Some(match snapshot.waf.person_proof_admin_status_async().await {
         Ok(status) => json_response(StatusCode::OK, &status),
-        Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(error) => {
+          warn!(error = %error, "person proof shared status enumeration did not complete");
+          text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "person proof shared state unavailable",
+          )
+        }
       })
     }
     (&::http::Method::GET, "/admin/v1/waf/person-proof/clearances") => {
@@ -72,7 +79,22 @@ pub(super) async fn admin_person_proof_response(
               "pagination": { "next_cursor": page.next_cursor },
             }),
           ),
-          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          Err(error) => {
+            let message = error.to_string();
+            if matches!(
+              message.as_str(),
+              "person proof clearance cursor is invalid"
+                | "person proof clearances cursor must be an unsigned offset"
+            ) {
+              text_response(StatusCode::BAD_REQUEST, &message)
+            } else {
+              warn!(error = %message, "person proof shared clearance enumeration did not complete");
+              text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "person proof shared state unavailable",
+              )
+            }
+          }
         },
       )
     }

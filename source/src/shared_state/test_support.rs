@@ -21,6 +21,11 @@ impl SharedState {
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
       cache_chunk_bytes: 1_048_576,
+      operation_timeout: Duration::from_millis(500),
+      enumeration: super::enumeration::EnumerationLimits {
+        page_size: 128,
+        max_items: 4_096,
+      },
       backends: HashMap::new(),
       rate_limits: Some(backend.clone()),
       connection_limits: Some(backend.clone()),
@@ -34,7 +39,32 @@ impl SharedState {
     })
   }
 
+  pub(crate) fn test_memory_with_enumeration_limits(
+    namespace: &str,
+    page_size: usize,
+    max_items: usize,
+  ) -> Arc<Self> {
+    let mut state = Self::test_memory(namespace);
+    Arc::get_mut(&mut state)
+      .expect("test shared state should have one owner")
+      .enumeration = super::enumeration::EnumerationLimits {
+      page_size,
+      max_items,
+    };
+    state
+  }
+
   pub(crate) fn test_redis(namespace: &str, url: &str, metrics: Arc<Metrics>) -> Arc<Self> {
+    Self::test_redis_with_features(namespace, url, metrics, false, false)
+  }
+
+  pub(crate) fn test_redis_with_features(
+    namespace: &str,
+    url: &str,
+    metrics: Arc<Metrics>,
+    person_proof: bool,
+    cache: bool,
+  ) -> Arc<Self> {
     let config = SharedStateBackendConfig {
       name: "pool-warning-test".to_string(),
       kind: SharedStateBackendKind::Redis,
@@ -66,14 +96,19 @@ impl SharedState {
       connection_lease: Duration::from_secs(30),
       cache_lock: Duration::from_secs(5),
       cache_chunk_bytes: 1_048_576,
+      operation_timeout: Duration::from_millis(250),
+      enumeration: super::enumeration::EnumerationLimits {
+        page_size: 128,
+        max_items: 4_096,
+      },
       backends,
       rate_limits: None,
       connection_limits: None,
-      person_proof: None,
-      upstream_health: Some(backend),
+      person_proof: person_proof.then_some(backend.clone()),
+      upstream_health: Some(backend.clone()),
       pool_warning_limiter: Arc::default(),
       sticky_sessions: None,
-      cache: None,
+      cache: cache.then_some(backend.clone()),
       reload: None,
       cleanup: CleanupDispatcher::new(),
     })

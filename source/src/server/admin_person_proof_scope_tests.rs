@@ -50,7 +50,7 @@ async fn person_proof_clearance_list_requires_wildcard_resource() {
     "resource-person-proof-list-deny",
     person_proof_status_scope_config,
     "GET",
-    "/admin/v1/waf/person-proof/clearances",
+    "/admin/v1/waf/person-proof/clearances?cursor=not-a-valid-cursor",
     "",
   )
   .await

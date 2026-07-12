@@ -16,6 +16,9 @@ mod redis_security;
 
 pub use redis_security::{RedisAuthConfig, RedisPlaintextPolicy, RedisTlsConfig, RedisTrustStore};
 
+const MAX_SHARED_STATE_ENUMERATION_PAGE_SIZE: usize = 1_000;
+const MAX_SHARED_STATE_ENUMERATION_MAX_ITEMS_PER_OPERATION: usize = 65_536;
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SharedStateConfig {
   #[serde(default)]
@@ -30,6 +33,10 @@ pub struct SharedStateConfig {
   pub default_backend: Option<String>,
   #[serde(default = "default_shared_state_operation_timeout_ms")]
   pub operation_timeout_ms: u64,
+  #[serde(default = "default_shared_state_enumeration_page_size")]
+  pub enumeration_page_size: usize,
+  #[serde(default = "default_shared_state_enumeration_max_items_per_operation")]
+  pub enumeration_max_items_per_operation: usize,
   #[serde(default = "default_shared_state_connection_lease_ms")]
   pub connection_lease_ms: u64,
   #[serde(default = "default_shared_state_cache_lock_ms")]
@@ -65,6 +72,9 @@ impl Default for SharedStateConfig {
       instance_id_env: default_shared_state_instance_id_env(),
       default_backend: None,
       operation_timeout_ms: default_shared_state_operation_timeout_ms(),
+      enumeration_page_size: default_shared_state_enumeration_page_size(),
+      enumeration_max_items_per_operation: default_shared_state_enumeration_max_items_per_operation(
+      ),
       connection_lease_ms: default_shared_state_connection_lease_ms(),
       cache_lock_ms: default_shared_state_cache_lock_ms(),
       rate_limits_backend: None,
@@ -91,6 +101,26 @@ impl SharedStateConfig {
     validate_optional_non_empty("shared_state.instance_id_env", Some(&self.instance_id_env))?;
     if self.operation_timeout_ms == 0 || self.connection_lease_ms == 0 || self.cache_lock_ms == 0 {
       bail!("shared_state timeout and lease values must be greater than 0");
+    }
+    if self.enumeration_page_size == 0 || self.enumeration_max_items_per_operation == 0 {
+      bail!("shared_state enumeration limits must be greater than 0");
+    }
+    if self.enumeration_page_size > self.enumeration_max_items_per_operation {
+      bail!(
+        "shared_state.enumeration_page_size must not exceed enumeration_max_items_per_operation"
+      );
+    }
+    if self.enumeration_page_size > MAX_SHARED_STATE_ENUMERATION_PAGE_SIZE {
+      bail!(
+        "shared_state.enumeration_page_size must not exceed {MAX_SHARED_STATE_ENUMERATION_PAGE_SIZE}"
+      );
+    }
+    if self.enumeration_max_items_per_operation
+      > MAX_SHARED_STATE_ENUMERATION_MAX_ITEMS_PER_OPERATION
+    {
+      bail!(
+        "shared_state.enumeration_max_items_per_operation must not exceed {MAX_SHARED_STATE_ENUMERATION_MAX_ITEMS_PER_OPERATION}"
+      );
     }
     if self.backends.is_empty() {
       bail!("shared_state.backends must include at least one backend when enabled=true");
@@ -508,6 +538,14 @@ fn default_shared_state_instance_id_env() -> String {
 
 fn default_shared_state_operation_timeout_ms() -> u64 {
   500
+}
+
+fn default_shared_state_enumeration_page_size() -> usize {
+  128
+}
+
+fn default_shared_state_enumeration_max_items_per_operation() -> usize {
+  4_096
 }
 
 fn default_shared_state_connection_lease_ms() -> u64 {

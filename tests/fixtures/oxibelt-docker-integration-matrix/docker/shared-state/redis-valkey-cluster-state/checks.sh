@@ -4,14 +4,25 @@ run_case_checks() {
   assert_shared_rate_limit
   assert_redis_shared_rate_limit_bucket_cap
   assert_shared_person_proof
+  assert_shared_person_proof_admin_pages
   assert_shared_pool_health
   assert_shared_cache_uri_isolation
   assert_shared_cache
+  assert_no_redis_keys_commands
+}
+
+assert_no_redis_keys_commands() {
+  local commandstats
+  commandstats="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli INFO commandstats; else redis-cli INFO commandstats; fi')"
+  if grep -Eq '^cmdstat_keys:calls=[1-9]' <<<"${commandstats}"; then
+    echo "${commandstats}" >&2
+    fail_with_diagnostics "OxiBelt shared-state fixture must not issue Redis KEYS"
+  fi
 }
 
 assert_redis_reload_generation() {
   local keys
-  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli KEYS "matrix-shared:reload:instance:*"; else redis-cli KEYS "matrix-shared:reload:instance:*"; fi')"
+  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli --scan --pattern "matrix-shared:reload:instance:*"; else redis-cli --scan --pattern "matrix-shared:reload:instance:*"; fi')"
   if ! grep -F 'matrix-shared:reload:instance:proxy-a' <<<"${keys}" >/dev/null ||
      ! grep -F 'matrix-shared:reload:instance:proxy-b' <<<"${keys}" >/dev/null; then
     echo "${keys}" >&2
@@ -42,7 +53,7 @@ assert_shared_person_proof() {
   challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.20")"
   assert_response_jq "${challenge}" '.body | contains("person-proof")'
 
-  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli KEYS "matrix-shared:person-proof:reuse:challenge:*"; else redis-cli KEYS "matrix-shared:person-proof:reuse:challenge:*"; fi')"
+  keys="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli --scan --pattern "matrix-shared:person-proof:reuse:challenge:*"; else redis-cli --scan --pattern "matrix-shared:person-proof:reuse:challenge:*"; fi')"
   if [[ -n "${keys}" ]]; then
     echo "${keys}" >&2
     fail_with_diagnostics "challenge issuance should not reserve shared person-proof replay state in Redis"
@@ -57,8 +68,31 @@ assert_shared_person_proof() {
   assert_response_jq "${replay}" '.body | contains("person-proof")'
 }
 
+assert_shared_person_proof_admin_pages() {
+  local first_challenge second_challenge first_page second_page first_cursor first_hash second_hash
+  first_challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.25")"
+  solve_person_proof_cookie "${first_challenge}" "203.0.113.27" "203.0.113.28" >/dev/null
+  second_challenge="$(client_request_with_headers "example.test" "/app/proof" 403 "GET" "" "X-Forwarded-For: 203.0.113.26")"
+  solve_person_proof_cookie "${second_challenge}" "203.0.113.29" "203.0.113.30" >/dev/null
+
+  first_page="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/waf/person-proof/clearances?limit=1" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_body_jq "${first_page}" '(.clearances | length) == 1 and (.pagination.next_cursor | type == "string") and (.clearances[0].clearance_hash | test("^clearance:[0-9a-f]{64}$"))'
+  first_cursor="$(jq -r '.body | fromjson | .pagination.next_cursor' <<<"${first_page}")"
+  second_page="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/waf/person-proof/clearances?limit=1&cursor=${first_cursor}" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  assert_body_jq "${second_page}" '(.clearances | length) == 1 and (.clearances[0].clearance_hash | test("^clearance:[0-9a-f]{64}$"))'
+  first_hash="$(jq -r '.body | fromjson | .clearances[0].clearance_hash' <<<"${first_page}")"
+  second_hash="$(jq -r '.body | fromjson | .clearances[0].clearance_hash' <<<"${second_page}")"
+  if [[ "${first_hash}" == "${second_hash}" ]]; then
+    echo "${first_page}" >&2
+    echo "${second_page}" >&2
+    fail_with_diagnostics "person-proof clearance pagination returned a duplicate instead of the next shared marker"
+  fi
+}
+
 solve_person_proof_cookie() {
   local response="$1"
+  local session_client_ip="${2:-203.0.113.23}"
+  local verify_client_ip="${3:-203.0.113.24}"
   local parsed session session_path verify_path difficulty nonce verify_body verify
   parsed="$(jq -r '.body' <<<"${response}" | python3 -c '
 import hashlib
@@ -96,9 +130,9 @@ while True:
   verify_path="$(sed -n '3p' <<<"${parsed}")"
   nonce="$(sed -n '4p' <<<"${parsed}")"
 
-  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: 203.0.113.23" >/dev/null
+  client_request_with_headers "example.test" "${session_path}?session=${session}" 200 "GET" "" "X-Forwarded-For: ${session_client_ip}" >/dev/null
   verify_body="$(python3 -c 'import json, sys; print(json.dumps({"session": sys.argv[1], "response": {"token": sys.argv[2], "fields": {}}}))' "${session}" "${nonce}")"
-  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: 203.0.113.24" "Content-Type: application/json")"
+  verify="$(client_request_with_headers "example.test" "${verify_path}" 200 "POST" "${verify_body}" "X-Forwarded-For: ${verify_client_ip}" "Content-Type: application/json")"
   jq -r '.headers["set-cookie"]' <<<"${verify}" | cut -d';' -f1
 }
 

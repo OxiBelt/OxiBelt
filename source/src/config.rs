@@ -3285,6 +3285,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "default_backend",
       "dynamic_policy_backend",
       "enabled",
+      "enumeration_max_items_per_operation",
+      "enumeration_page_size",
       "instance_id_env",
       "namespace",
       "operation_timeout_ms",

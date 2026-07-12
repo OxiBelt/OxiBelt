@@ -605,6 +605,7 @@ impl ResponseCache {
       .lookup_shared_async(
         &operation.policy.name,
         operation.policy.background_refresh,
+        operation.policy.max_vary_variants_per_key,
         &operation.partition,
         &operation.base_key,
         ctx,
@@ -1110,7 +1111,7 @@ impl ResponseCache {
     host: &str,
     uri: &str,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     let count = self.purge_exact_partition(policy, scheme, host, uri, partition);
     let shared_count = match self
       .shared_state
@@ -1120,11 +1121,11 @@ impl ResponseCache {
       Some(shared) => {
         shared
           .cache_purge_exact(policy, scheme, host, uri, partition)
-          .await
+          .await?
       }
       None => 0,
     };
-    count.saturating_add(shared_count)
+    Ok(count.saturating_add(shared_count))
   }
 
   pub fn purge_prefix(&self, policy: &str, scheme: &str, host: &str, path_prefix: &str) -> usize {
@@ -1170,7 +1171,7 @@ impl ResponseCache {
     host: &str,
     path_prefix: &str,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     let count = self.purge_prefix_partition(policy, scheme, host, path_prefix, partition);
     let shared_count = match self
       .shared_state
@@ -1180,11 +1181,11 @@ impl ResponseCache {
       Some(shared) => {
         shared
           .cache_purge_prefix(policy, scheme, host, path_prefix, partition)
-          .await
+          .await?
       }
       None => 0,
     };
-    count.saturating_add(shared_count)
+    Ok(count.saturating_add(shared_count))
   }
 
   pub fn purge_tag(
@@ -1232,7 +1233,7 @@ impl ResponseCache {
     scheme: Option<&str>,
     host: Option<&str>,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     let count = self.purge_tag_partition(policy, tag, scheme, host, partition);
     let shared_count = match self
       .shared_state
@@ -1242,11 +1243,11 @@ impl ResponseCache {
       Some(shared) => {
         shared
           .cache_purge_tag(policy, tag, scheme, host, partition)
-          .await
+          .await?
       }
       None => 0,
     };
-    count.saturating_add(shared_count)
+    Ok(count.saturating_add(shared_count))
   }
 
   pub fn stats(&self) -> CacheStats {

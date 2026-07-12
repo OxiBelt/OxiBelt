@@ -4934,6 +4934,84 @@ name = "{name}"
 }
 
 #[test]
+fn shared_state_enumeration_limits_default_and_validate() {
+  let temp_dir = common::TempDir::new("shared-state-enumeration-limits");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-enumeration-limits");
+  let backend = r#"
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#;
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+{}
+"#,
+    common::minimal_config_toml(&cert_path, &key_path),
+    backend,
+  );
+  let config: Config = toml::from_str(&raw).expect("default enumeration config should parse");
+  config
+    .validate()
+    .expect("default enumeration config should validate");
+  assert_eq!(config.shared_state.enumeration_page_size, 128);
+  assert_eq!(
+    config.shared_state.enumeration_max_items_per_operation,
+    4_096
+  );
+
+  for (settings, expected) in [
+    (
+      "enumeration_page_size = 0",
+      "shared_state enumeration limits must be greater than 0",
+    ),
+    (
+      "enumeration_max_items_per_operation = 0",
+      "shared_state enumeration limits must be greater than 0",
+    ),
+    (
+      "enumeration_page_size = 129\nenumeration_max_items_per_operation = 128",
+      "shared_state.enumeration_page_size must not exceed enumeration_max_items_per_operation",
+    ),
+    (
+      "enumeration_page_size = 1001\nenumeration_max_items_per_operation = 4096",
+      "shared_state.enumeration_page_size must not exceed 1000",
+    ),
+    (
+      "enumeration_max_items_per_operation = 65537",
+      "shared_state.enumeration_max_items_per_operation must not exceed 65536",
+    ),
+  ] {
+    let raw = format!(
+      r#"
+{}
+
+[shared_state]
+enabled = true
+{}
+{}
+"#,
+      common::minimal_config_toml(&cert_path, &key_path),
+      settings,
+      backend,
+    );
+    let config: Config = toml::from_str(&raw).expect("invalid enumeration config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid enumeration limits should fail validation");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected validation error: {error}"
+    );
+  }
+}
+
+#[test]
 fn shared_state_redis_pool_unknown_fields_fail_strict_shape_validation() {
   let temp_dir = common::TempDir::new("shared-state-redis-pool-unknown");
   let (cert_path, key_path) =

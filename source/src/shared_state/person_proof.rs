@@ -1,17 +1,17 @@
-use anyhow::{Context, anyhow};
-use serde::Serialize;
+use anyhow::{anyhow, bail};
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 
+use super::enumeration::{EnumerationCursor, EnumerationLimits};
 #[cfg(test)]
-use super::MemoryBackend;
-#[cfg(test)]
-use super::purge_expired_values;
-use super::{Backend, PostgresBackend, RedisBackend, SharedState};
-use super::{now_unix_ms, ttl_from_expires_ms};
+use super::now_unix_ms;
+use super::{Backend, SharedState, ttl_from_expires_ms};
 
 const PERSON_PROOF_REUSE_CLEARANCE_PREFIX: &str = "person-proof:reuse:clearance:";
 const PERSON_PROOF_REUSE_CHALLENGE_PREFIX: &str = "person-proof:reuse:challenge:";
 const PERSON_PROOF_REVOKED_CLEARANCE_PREFIX: &str = "person-proof:revoked:clearance:";
-const PERSON_PROOF_ADMIN_SCAN_COUNT: usize = 128;
+const PERSON_PROOF_CLEARANCE_CURSOR_VERSION: u8 = 1;
+const PERSON_PROOF_CLEARANCE_CURSOR_MAX_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PersonProofSharedStatus {
@@ -31,6 +31,13 @@ pub struct PersonProofSharedClearance {
 pub struct PersonProofSharedClearancePage {
   pub clearances: Vec<PersonProofSharedClearance>,
   pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PersonProofClearanceCursor {
+  version: u8,
+  scope: String,
+  position: EnumerationCursor,
 }
 
 impl SharedState {
@@ -144,9 +151,13 @@ impl SharedState {
     let Some(backend) = &self.person_proof else {
       return Ok(PersonProofSharedStatus::default());
     };
-    backend
-      .person_proof_status(&self.key("person-proof:"))
-      .await
+    let prefix = self.key("person-proof:");
+    tokio::time::timeout(
+      self.operation_timeout,
+      backend.person_proof_status(&prefix, self.enumeration),
+    )
+    .await
+    .map_err(|_| anyhow!("person proof shared status enumeration timed out"))?
   }
 
   pub async fn person_proof_list_clearances(
@@ -160,261 +171,193 @@ impl SharedState {
         next_cursor: None,
       });
     };
-    backend
-      .person_proof_clearances(
-        &self.key(PERSON_PROOF_REUSE_CLEARANCE_PREFIX),
-        limit,
-        cursor,
-      )
-      .await
+    let prefix = self.key(PERSON_PROOF_REUSE_CLEARANCE_PREFIX);
+    let position = decode_clearance_cursor(cursor, &prefix, backend)?;
+    let (clearances, next_cursor) = tokio::time::timeout(
+      self.operation_timeout,
+      backend.person_proof_clearances(&prefix, limit, position, self.enumeration),
+    )
+    .await
+    .map_err(|_| anyhow!("person proof clearance enumeration timed out"))??;
+    Ok(PersonProofSharedClearancePage {
+      clearances,
+      next_cursor: next_cursor
+        .map(|position| encode_clearance_cursor(&prefix, backend, position))
+        .transpose()?,
+    })
   }
 }
 
 impl Backend {
-  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
-    match self {
-      Self::Redis(redis) => {
-        redis
-          .runtime
-          .execute("person_proof", || redis.person_proof_status(prefix))
-          .await
+  async fn person_proof_status(
+    &self,
+    prefix: &str,
+    limits: EnumerationLimits,
+  ) -> anyhow::Result<PersonProofSharedStatus> {
+    let mut cursor = None;
+    let mut status = PersonProofSharedStatus::default();
+    let mut examined = 0_usize;
+    for _ in 0..limits.max_rounds() {
+      let remaining = limits.max_items.saturating_sub(examined);
+      if remaining == 0 {
+        self.record_enumeration("person_proof_status", "cap_exhausted", 1);
+        bail!("person proof status enumeration reached its configured item limit");
       }
-      Self::Postgres(pg) => {
-        pg.runtime
-          .execute("person_proof", || pg.person_proof_status(prefix))
-          .await
+      let page = self
+        .enumeration_keys(
+          prefix,
+          cursor.as_ref(),
+          limits.page_size.min(remaining).max(1),
+          "person_proof_status",
+        )
+        .await?;
+      for key in &page.keys {
+        person_proof_status_add_key(&mut status, key, prefix);
       }
-      #[cfg(test)]
-      Self::Memory(memory) => memory.person_proof_status(prefix),
+      examined = examined.saturating_add(page.keys.len());
+      cursor = page.next_cursor;
+      if cursor.is_none() {
+        return Ok(status);
+      }
     }
+    self.record_enumeration("person_proof_status", "cap_exhausted", 1);
+    bail!("person proof status enumeration reached its configured scan-round limit")
   }
 
   async fn person_proof_clearances(
     &self,
     prefix: &str,
     limit: usize,
-    cursor: Option<&str>,
-  ) -> anyhow::Result<PersonProofSharedClearancePage> {
-    match self {
-      Self::Redis(redis) => {
-        redis
-          .runtime
-          .execute("person_proof", || {
-            redis.person_proof_clearances(prefix, limit, cursor)
-          })
-          .await
+    cursor: Option<EnumerationCursor>,
+    limits: EnumerationLimits,
+  ) -> anyhow::Result<(Vec<PersonProofSharedClearance>, Option<EnumerationCursor>)> {
+    let mut cursor = cursor;
+    let mut clearances = Vec::new();
+    let mut examined = 0_usize;
+    for _ in 0..limits.max_rounds() {
+      if clearances.len() >= limit {
+        return Ok((clearances, cursor));
       }
-      Self::Postgres(pg) => {
-        pg.runtime
-          .execute("person_proof", || {
-            pg.person_proof_clearances(prefix, limit, cursor)
-          })
-          .await
+      if examined >= limits.max_items {
+        self.record_enumeration("person_proof_clearances", "cap_exhausted", 1);
+        return Ok((clearances, cursor));
       }
-      #[cfg(test)]
-      Self::Memory(memory) => memory.person_proof_clearances(prefix, limit, cursor),
-    }
-  }
-}
-
-#[cfg(test)]
-impl MemoryBackend {
-  fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
-    let mut values = self
-      .values
-      .lock()
-      .expect("memory shared state lock poisoned");
-    let now = now_unix_ms();
-    purge_expired_values(&mut values, now);
-    Ok(person_proof_status_from_keys(
-      values.keys().filter(|key| key.starts_with(prefix)),
-      prefix,
-    ))
-  }
-
-  fn person_proof_clearances(
-    &self,
-    prefix: &str,
-    limit: usize,
-    cursor: Option<&str>,
-  ) -> anyhow::Result<PersonProofSharedClearancePage> {
-    let offset = parse_person_proof_cursor(cursor)?;
-    let mut values = self
-      .values
-      .lock()
-      .expect("memory shared state lock poisoned");
-    let now = now_unix_ms();
-    purge_expired_values(&mut values, now);
-    let mut entries = values
-      .iter()
-      .filter_map(|(key, value)| person_proof_clearance_from_key(key, prefix, value.expires_at_ms))
-      .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.clearance_hash.cmp(&right.clearance_hash));
-    let page = entries
-      .into_iter()
-      .skip(offset)
-      .take(limit.saturating_add(1))
-      .collect::<Vec<_>>();
-    let next_cursor = (page.len() > limit).then(|| (offset + limit).to_string());
-    Ok(PersonProofSharedClearancePage {
-      clearances: page.into_iter().take(limit).collect(),
-      next_cursor,
-    })
-  }
-}
-
-impl RedisBackend {
-  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
-    let mut cursor = "0".to_string();
-    let mut keys = Vec::new();
-    loop {
-      let (batch, next_cursor) = self
-        .scan_keys(
-          &format!("{prefix}*"),
-          &cursor,
-          PERSON_PROOF_ADMIN_SCAN_COUNT,
+      let remaining_results = limit.saturating_sub(clearances.len()).max(1);
+      let remaining_items = limits.max_items.saturating_sub(examined).max(1);
+      let page = self
+        .enumeration_keys(
+          prefix,
+          cursor.as_ref(),
+          limits
+            .page_size
+            .min(remaining_results)
+            .min(remaining_items)
+            .max(1),
+          "person_proof_clearances",
         )
         .await?;
-      keys.extend(batch);
-      let Some(next_cursor) = next_cursor else {
-        break;
-      };
-      cursor = next_cursor;
-    }
-    Ok(person_proof_status_from_keys(keys.iter(), prefix))
-  }
-
-  async fn person_proof_clearances(
-    &self,
-    prefix: &str,
-    limit: usize,
-    cursor: Option<&str>,
-  ) -> anyhow::Result<PersonProofSharedClearancePage> {
-    let mut cursor = cursor.unwrap_or("0").to_string();
-    let mut entries = Vec::new();
-    let next_cursor = loop {
-      let (keys, next_cursor) = self
-        .scan_keys(
-          &format!("{prefix}*"),
-          &cursor,
-          PERSON_PROOF_ADMIN_SCAN_COUNT,
-        )
+      let expirations = self
+        .enumeration_expirations(&page.keys, "person_proof_clearances")
         .await?;
-      for key in keys {
-        let expires_at_ms = self.expires_at_ms(&key).await?;
-        if expires_at_ms == Some(0) {
+      for (key, expiration) in page.keys.iter().zip(expirations) {
+        examined = examined.saturating_add(1);
+        let Some(expires_at_unix_ms) = expiration else {
           continue;
-        }
-        if let Some(entry) = person_proof_clearance_from_key(&key, prefix, expires_at_ms) {
-          entries.push(entry);
-        }
-        if entries.len() >= limit {
-          break;
+        };
+        if let Some(entry) = person_proof_clearance_from_key(key, prefix, expires_at_unix_ms) {
+          clearances.push(entry);
         }
       }
-      if entries.len() >= limit || next_cursor.is_none() {
-        break next_cursor;
+      cursor = page.next_cursor;
+      if cursor.is_none() {
+        return Ok((clearances, None));
       }
-      cursor = next_cursor.expect("checked above");
-    };
-    Ok(PersonProofSharedClearancePage {
-      clearances: entries,
-      next_cursor,
-    })
+    }
+    self.record_enumeration("person_proof_clearances", "cap_exhausted", 1);
+    bail!("person proof clearance enumeration reached its configured scan-round limit")
   }
 }
 
-impl PostgresBackend {
-  async fn person_proof_status(&self, prefix: &str) -> anyhow::Result<PersonProofSharedStatus> {
-    let pattern = format!("{prefix}%");
-    let keys: Vec<String> = sqlx::query_scalar(
-      "SELECT key FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
-    )
-    .bind(pattern)
-    .bind(now_unix_ms())
-    .fetch_all(&self.pool)
-    .await?;
-    Ok(person_proof_status_from_keys(keys.iter(), prefix))
-  }
-
-  async fn person_proof_clearances(
-    &self,
-    prefix: &str,
-    limit: usize,
-    cursor: Option<&str>,
-  ) -> anyhow::Result<PersonProofSharedClearancePage> {
-    let offset = parse_person_proof_cursor(cursor)?;
-    let pattern = format!("{prefix}%");
-    let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
-    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
-    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
-      "SELECT key, expires_at_ms FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) ORDER BY key LIMIT $3 OFFSET $4",
-    )
-    .bind(pattern)
-    .bind(now_unix_ms())
-    .bind(fetch_limit)
-    .bind(offset)
-    .fetch_all(&self.pool)
-    .await?;
-    let mut entries = rows
-      .into_iter()
-      .filter_map(|(key, expires_at_ms)| {
-        person_proof_clearance_from_key(&key, prefix, expires_at_ms)
-      })
-      .collect::<Vec<_>>();
-    let next_cursor = (entries.len() > limit).then(|| {
-      offset
-        .saturating_add(i64::try_from(limit).unwrap_or(i64::MAX))
-        .to_string()
-    });
-    entries.truncate(limit);
-    Ok(PersonProofSharedClearancePage {
-      clearances: entries,
-      next_cursor,
-    })
-  }
-}
-
-fn parse_person_proof_cursor(cursor: Option<&str>) -> anyhow::Result<usize> {
-  let Some(cursor) = cursor else {
-    return Ok(0);
-  };
-  cursor
-    .parse::<usize>()
-    .context("person proof cursor must be an unsigned offset")
-}
-
-fn person_proof_status_from_keys<'a>(
-  keys: impl Iterator<Item = &'a String>,
+fn person_proof_status_add_key(
+  status: &mut PersonProofSharedStatus,
+  key: &str,
   person_proof_prefix: &str,
-) -> PersonProofSharedStatus {
+) {
   let reuse_prefix = format!("{person_proof_prefix}reuse:");
   let clearance_prefix = format!("{person_proof_prefix}reuse:clearance:");
   let challenge_prefix = format!("{person_proof_prefix}reuse:challenge:");
   let revoked_prefix = format!("{person_proof_prefix}revoked:clearance:");
-  let mut status = PersonProofSharedStatus::default();
-  for key in keys {
-    if let Some(hash) = key.strip_prefix(&clearance_prefix) {
-      if is_sha256_hex(hash) {
-        status.active_clearance_count += 1;
-      } else {
-        status.legacy_raw_key_count += 1;
-      }
-    } else if let Some(hash) = key.strip_prefix(&challenge_prefix) {
-      if is_sha256_hex(hash) {
-        status.challenge_replay_marker_count += 1;
-      } else {
-        status.legacy_raw_key_count += 1;
-      }
-    } else if let Some(hash) = key.strip_prefix(&revoked_prefix) {
-      if is_sha256_hex(hash) {
-        status.revoked_clearance_count += 1;
-      }
-    } else if key.starts_with(&reuse_prefix) {
+  if let Some(hash) = key.strip_prefix(&clearance_prefix) {
+    if is_sha256_hex(hash) {
+      status.active_clearance_count += 1;
+    } else {
       status.legacy_raw_key_count += 1;
     }
+  } else if let Some(hash) = key.strip_prefix(&challenge_prefix) {
+    if is_sha256_hex(hash) {
+      status.challenge_replay_marker_count += 1;
+    } else {
+      status.legacy_raw_key_count += 1;
+    }
+  } else if let Some(hash) = key.strip_prefix(&revoked_prefix) {
+    if is_sha256_hex(hash) {
+      status.revoked_clearance_count += 1;
+    }
+  } else if key.starts_with(&reuse_prefix) {
+    status.legacy_raw_key_count += 1;
   }
-  status
+}
+
+fn encode_clearance_cursor(
+  prefix: &str,
+  backend: &Backend,
+  position: EnumerationCursor,
+) -> anyhow::Result<String> {
+  let payload = PersonProofClearanceCursor {
+    version: PERSON_PROOF_CLEARANCE_CURSOR_VERSION,
+    scope: clearance_cursor_scope(prefix, backend),
+    position,
+  };
+  let raw = serde_json::to_vec(&payload)?;
+  Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
+}
+
+fn decode_clearance_cursor(
+  cursor: Option<&str>,
+  prefix: &str,
+  backend: &Backend,
+) -> anyhow::Result<Option<EnumerationCursor>> {
+  let Some(cursor) = cursor else {
+    return Ok(None);
+  };
+  if cursor.len() > PERSON_PROOF_CLEARANCE_CURSOR_MAX_BYTES {
+    bail!("person proof clearance cursor is invalid");
+  }
+  let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    .decode(cursor)
+    .map_err(|_| anyhow!("person proof clearance cursor is invalid"))?;
+  let decoded: PersonProofClearanceCursor = serde_json::from_slice(&raw)
+    .map_err(|_| anyhow!("person proof clearance cursor is invalid"))?;
+  if decoded.version != PERSON_PROOF_CLEARANCE_CURSOR_VERSION
+    || decoded.scope != clearance_cursor_scope(prefix, backend)
+  {
+    bail!("person proof clearance cursor is invalid");
+  }
+  Ok(Some(decoded.position))
+}
+
+fn clearance_cursor_scope(prefix: &str, backend: &Backend) -> String {
+  let backend_scope = backend.enumeration_cursor_scope();
+  let mut scope = Vec::with_capacity(
+    prefix
+      .len()
+      .saturating_add(backend_scope.len())
+      .saturating_add(1),
+  );
+  scope.extend_from_slice(prefix.as_bytes());
+  scope.push(0);
+  scope.extend_from_slice(backend_scope.as_bytes());
+  base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(crate::crypto::sha256(&scope))
 }
 
 fn person_proof_clearance_from_key(
@@ -435,10 +378,58 @@ fn is_sha256_hex(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use std::io::{Error, ErrorKind};
+  use std::sync::Arc;
+  use std::time::Duration;
+
   use super::*;
+  use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+  use tokio::net::TcpListener;
+  use tokio::net::tcp::OwnedReadHalf;
 
   const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  async fn read_resp_command(
+    reader: &mut BufReader<OwnedReadHalf>,
+  ) -> std::io::Result<Vec<Vec<u8>>> {
+    let mut header = String::new();
+    reader.read_line(&mut header).await?;
+    let count = header
+      .strip_prefix('*')
+      .and_then(|line| line.trim_end().parse::<usize>().ok())
+      .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid RESP array header"))?;
+    let mut command = Vec::with_capacity(count);
+    for _ in 0..count {
+      let mut length = String::new();
+      reader.read_line(&mut length).await?;
+      let length = length
+        .strip_prefix('$')
+        .and_then(|line| line.trim_end().parse::<usize>().ok())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "invalid RESP bulk header"))?;
+      let mut value = vec![0; length + 2];
+      reader.read_exact(&mut value).await?;
+      if value[length..] != *b"\r\n" {
+        return Err(Error::new(
+          ErrorKind::InvalidData,
+          "invalid RESP bulk terminator",
+        ));
+      }
+      value.truncate(length);
+      command.push(value);
+    }
+    Ok(command)
+  }
+
+  fn scan_response(keys: &[String]) -> Vec<u8> {
+    let mut response = format!("*2\r\n$1\r\n0\r\n*{}\r\n", keys.len()).into_bytes();
+    for key in keys {
+      response.extend_from_slice(format!("${}\r\n", key.len()).as_bytes());
+      response.extend_from_slice(key.as_bytes());
+      response.extend_from_slice(b"\r\n");
+    }
+    response
+  }
 
   #[tokio::test]
   async fn person_proof_admin_projection_lists_only_hash_keyed_clearances() {
@@ -533,6 +524,212 @@ mod tests {
         .person_proof_consume_clearance("clearance.v2.raw", HASH_A)
         .await
         .expect("legacy clearance should be gone")
+    );
+  }
+
+  #[tokio::test]
+  async fn person_proof_clearance_cursor_is_opaque_scoped_and_complete() {
+    let state = SharedState::test_memory("cursor-a");
+    let expires = now_unix_ms() + 60_000;
+    for hash in [HASH_A, HASH_B] {
+      assert!(
+        state
+          .person_proof_remember(&format!("clearance:{hash}"), expires)
+          .await
+          .expect("hash clearance should store")
+      );
+    }
+
+    let first = state
+      .person_proof_list_clearances(1, None)
+      .await
+      .expect("first clearance page should load");
+    assert_eq!(first.clearances.len(), 1);
+    assert_eq!(
+      first.clearances[0].clearance_hash,
+      format!("clearance:{HASH_A}")
+    );
+    let cursor = first.next_cursor.expect("first page should continue");
+    assert_ne!(
+      cursor, "1",
+      "shared cursors must not expose numeric offsets"
+    );
+
+    let second = state
+      .person_proof_list_clearances(1, Some(&cursor))
+      .await
+      .expect("second clearance page should load");
+    assert_eq!(second.clearances.len(), 1);
+    assert_eq!(
+      second.clearances[0].clearance_hash,
+      format!("clearance:{HASH_B}")
+    );
+    assert!(second.next_cursor.is_none());
+
+    let other_scope = SharedState::test_memory("cursor-b");
+    assert!(
+      other_scope
+        .person_proof_list_clearances(1, Some(&cursor))
+        .await
+        .expect_err("a cursor from another namespace must be rejected")
+        .to_string()
+        .contains("cursor is invalid")
+    );
+    assert!(
+      state
+        .person_proof_list_clearances(1, Some("not-a-cursor"))
+        .await
+        .expect_err("a malformed cursor must be rejected")
+        .to_string()
+        .contains("cursor is invalid")
+    );
+  }
+
+  #[tokio::test]
+  async fn redis_clearance_pages_replay_scan_tails_and_pipeline_ttls() {
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+      Ok(listener) => listener,
+      Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+      Err(error) => panic!("test listener should bind: {error}"),
+    };
+    let address = listener
+      .local_addr()
+      .expect("test listener should have an address");
+    let namespace = "redis-clearance-pages";
+    let prefix = format!("{namespace}:{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}");
+    let keys = vec![format!("{prefix}{HASH_A}"), format!("{prefix}{HASH_B}")];
+    let expected_match = format!("{prefix}*").into_bytes();
+    let server = tokio::spawn(async move {
+      let (stream, _) = listener.accept().await.expect("client should connect");
+      let (reader, mut writer) = stream.into_split();
+      let mut reader = BufReader::new(reader);
+
+      for expected_count in [b"1".as_slice(), b"1".as_slice()] {
+        assert_eq!(
+          read_resp_command(&mut reader)
+            .await
+            .expect("SCAN should use RESP framing"),
+          vec![
+            b"SCAN".to_vec(),
+            b"0".to_vec(),
+            b"MATCH".to_vec(),
+            expected_match.clone(),
+            b"COUNT".to_vec(),
+            expected_count.to_vec(),
+          ]
+        );
+        writer
+          .write_all(&scan_response(&keys))
+          .await
+          .expect("SCAN response should write");
+        let pttl = read_resp_command(&mut reader)
+          .await
+          .expect("PTTL should use RESP framing");
+        assert_eq!(pttl[0], b"PTTL");
+        writer
+          .write_all(b":60000\r\n")
+          .await
+          .expect("PTTL response should write");
+      }
+
+      assert_eq!(
+        read_resp_command(&mut reader)
+          .await
+          .expect("third SCAN should use RESP framing"),
+        vec![
+          b"SCAN".to_vec(),
+          b"0".to_vec(),
+          b"MATCH".to_vec(),
+          expected_match,
+          b"COUNT".to_vec(),
+          b"2".to_vec(),
+        ]
+      );
+      writer
+        .write_all(&scan_response(&keys))
+        .await
+        .expect("third SCAN response should write");
+      assert_eq!(
+        read_resp_command(&mut reader)
+          .await
+          .expect("first pipelined PTTL should use RESP framing"),
+        vec![b"PTTL".to_vec(), keys[0].as_bytes().to_vec()]
+      );
+      assert_eq!(
+        read_resp_command(&mut reader)
+          .await
+          .expect("second pipelined PTTL should use RESP framing"),
+        vec![b"PTTL".to_vec(), keys[1].as_bytes().to_vec()]
+      );
+      writer
+        .write_all(b":60000\r\n:60000\r\n")
+        .await
+        .expect("pipelined PTTL responses should write");
+    });
+
+    let state = SharedState::test_redis_with_features(
+      namespace,
+      &format!("redis://{address}"),
+      crate::metrics::Metrics::new(),
+      true,
+      false,
+    );
+    let first = state
+      .person_proof_list_clearances(1, None)
+      .await
+      .expect("first Redis clearance page should load");
+    assert_eq!(
+      first.clearances[0].clearance_hash,
+      format!("clearance:{HASH_A}")
+    );
+    let cursor = first.next_cursor.expect("first Redis page should continue");
+    let second = state
+      .person_proof_list_clearances(1, Some(&cursor))
+      .await
+      .expect("second Redis clearance page should load");
+    assert_eq!(
+      second.clearances[0].clearance_hash,
+      format!("clearance:{HASH_B}")
+    );
+    assert!(second.next_cursor.is_none());
+
+    let full_page = state
+      .person_proof_list_clearances(2, None)
+      .await
+      .expect("Redis clearance page should pipeline TTL reads");
+    assert_eq!(full_page.clearances.len(), 2);
+    tokio::time::timeout(Duration::from_secs(1), server)
+      .await
+      .expect("Redis fixture should finish")
+      .expect("Redis fixture should not panic");
+  }
+
+  #[tokio::test]
+  async fn person_proof_status_fails_instead_of_returning_partial_counts_at_the_cap() {
+    let mut state = SharedState::test_memory("status-cap");
+    Arc::get_mut(&mut state)
+      .expect("test state should have one owner")
+      .enumeration = EnumerationLimits {
+      page_size: 1,
+      max_items: 1,
+    };
+    let expires = now_unix_ms() + 60_000;
+    for hash in [HASH_A, HASH_B] {
+      assert!(
+        state
+          .person_proof_remember(&format!("clearance:{hash}"), expires)
+          .await
+          .expect("hash clearance should store")
+      );
+    }
+
+    assert!(
+      state
+        .person_proof_admin_status()
+        .await
+        .expect_err("status must not report partial counts at the configured cap")
+        .to_string()
+        .contains("configured item limit")
     );
   }
 }

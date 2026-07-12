@@ -28,6 +28,41 @@ impl SharedState {
     request_headers: &HeaderMap,
     request_no_cache: bool,
     background_refresh: bool,
+    max_vary_variants: usize,
+  ) -> anyhow::Result<Option<CacheLookup>> {
+    tokio::time::timeout(
+      self.operation_timeout,
+      self.cache_lookup_inner(
+        policy,
+        scheme,
+        host,
+        partition,
+        base_key,
+        uri,
+        method,
+        request_headers,
+        request_no_cache,
+        background_refresh,
+        max_vary_variants,
+      ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("shared cache lookup enumeration timed out"))?
+  }
+  #[allow(clippy::too_many_arguments)]
+  async fn cache_lookup_inner(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    partition: &str,
+    base_key: &str,
+    uri: &str,
+    method: &Method,
+    request_headers: &HeaderMap,
+    request_no_cache: bool,
+    background_refresh: bool,
+    max_vary_variants: usize,
   ) -> anyhow::Result<Option<CacheLookup>> {
     let Some(backend) = &self.cache else {
       return Ok(None);
@@ -55,73 +90,97 @@ impl SharedState {
     {
       return Ok(Some(lookup));
     }
-
     let index_prefix =
       self.shared_cache_index_prefix(policy, scheme, host, partition, base_key, uri);
-    for (index_key, value) in backend.raw_entries(&index_prefix).await? {
-      let Ok(variant_key) = String::from_utf8(value) else {
-        let _ = backend.delete(&index_key).await;
-        continue;
-      };
-      let entry_key = self.shared_cache_entry_key(&variant_key);
-      let Some(bytes) = backend.get(&entry_key).await? else {
-        let _ = backend.delete(&index_key).await;
-        continue;
-      };
-      let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes) else {
-        let _ = backend.delete(&index_key).await;
-        continue;
-      };
-      if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
-        || !shared_vary_matches(&entry.vary, request_headers)
-      {
-        continue;
+    let mut cursor = None;
+    let mut inspected = 0_usize;
+    for _ in 0..self.enumeration.max_rounds() {
+      let remaining = max_vary_variants
+        .max(1)
+        .min(self.enumeration.max_items.saturating_sub(inspected));
+      if remaining == 0 {
+        backend.record_enumeration("cache_index", "cap_exhausted", 1);
+        break;
       }
-      if let Some(lookup) = self
-        .cache_lookup_entry(
-          backend,
-          Some(&entry_key),
-          Some(&index_key),
-          entry,
-          method,
-          request_headers,
-          request_no_cache,
-          background_refresh,
-          now,
+      let page = backend
+        .enumeration_keys(
+          &index_prefix,
+          cursor.as_ref(),
+          self.enumeration.page_size.min(remaining).max(1),
+          "cache_index",
         )
-        .await?
-      {
-        return Ok(Some(lookup));
+        .await?;
+      inspected = inspected.saturating_add(page.keys.len());
+      let values = backend
+        .enumeration_values(&page.keys, "cache_index")
+        .await?;
+      let mut candidates = Vec::new();
+      let mut cleanup = Vec::new();
+      for (index_key, value) in page.keys.iter().zip(values) {
+        let Some(value) = value else {
+          cleanup.push(index_key.clone());
+          continue;
+        };
+        let Ok(variant_key) = String::from_utf8(value) else {
+          cleanup.push(index_key.clone());
+          continue;
+        };
+        candidates.push((index_key.clone(), self.shared_cache_entry_key(&variant_key)));
+      }
+      let entry_keys = candidates
+        .iter()
+        .map(|(_, entry_key)| entry_key.clone())
+        .collect::<Vec<_>>();
+      let entries = backend
+        .enumeration_values(&entry_keys, "cache_index")
+        .await?;
+      for ((index_key, entry_key), bytes) in candidates.into_iter().zip(entries) {
+        let Some(bytes) = bytes else {
+          cleanup.push(index_key);
+          continue;
+        };
+        let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes) else {
+          cleanup.push(index_key);
+          continue;
+        };
+        if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
+          || !shared_vary_matches(&entry.vary, request_headers)
+        {
+          continue;
+        }
+        if let Some(lookup) = self
+          .cache_lookup_entry(
+            backend,
+            Some(&entry_key),
+            Some(&index_key),
+            entry,
+            method,
+            request_headers,
+            request_no_cache,
+            background_refresh,
+            now,
+          )
+          .await?
+        {
+          if !cleanup.is_empty() {
+            backend.enumeration_delete(&cleanup, "cache_index").await?;
+          }
+          return Ok(Some(lookup));
+        }
+      }
+      if !cleanup.is_empty() {
+        backend.enumeration_delete(&cleanup, "cache_index").await?;
+      }
+      cursor = page.next_cursor;
+      if cursor.is_none() {
+        break;
       }
     }
-
-    let entries = backend.cache_entries(&self.key("cache:entry:")).await?;
-    for entry in entries {
-      if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
-        || !shared_vary_matches(&entry.vary, request_headers)
-      {
-        continue;
-      }
-      self.cache_put_index(&entry).await;
-      let entry_key = self.shared_cache_entry_key(&entry.variant_key);
-      let index_key = self.shared_cache_index_key(&entry);
-      return self
-        .cache_lookup_entry(
-          backend,
-          Some(&entry_key),
-          Some(&index_key),
-          entry,
-          method,
-          request_headers,
-          request_no_cache,
-          background_refresh,
-          now,
-        )
-        .await;
+    if cursor.is_some() {
+      backend.record_enumeration("cache_index", "cap_exhausted", 1);
     }
     Ok(None)
   }
-
   #[allow(clippy::too_many_arguments)]
   async fn cache_lookup_entry(
     &self,
@@ -214,7 +273,6 @@ impl SharedState {
     }
     Ok(Some(CacheLookup::Fresh(cache_entry)))
   }
-
   pub async fn cache_put(&self, entry: &SharedCacheEntry) {
     let Some(backend) = &self.cache else {
       return;
@@ -234,7 +292,6 @@ impl SharedState {
       warn!(error = %error, "failed to write shared cache entry");
     }
   }
-
   async fn cache_put_inner(
     &self,
     backend: &Backend,
@@ -403,7 +460,7 @@ impl SharedState {
     host: &str,
     uri: &str,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     self
       .cache_purge(|entry| {
         entry.policy == policy
@@ -422,7 +479,7 @@ impl SharedState {
     host: &str,
     path_prefix: &str,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     self
       .cache_purge(|entry| {
         entry.policy == policy
@@ -445,7 +502,7 @@ impl SharedState {
     scheme: Option<&str>,
     host: Option<&str>,
     partition: Option<&str>,
-  ) -> usize {
+  ) -> anyhow::Result<usize> {
     self
       .cache_purge(|entry| {
         entry.policy == policy
@@ -457,27 +514,67 @@ impl SharedState {
       .await
   }
 
-  async fn cache_purge(&self, matches: impl Fn(&SharedCacheEntry) -> bool) -> usize {
+  async fn cache_purge(
+    &self,
+    matches: impl Fn(&SharedCacheEntry) -> bool,
+  ) -> anyhow::Result<usize> {
     let Some(backend) = &self.cache else {
-      return 0;
+      return Ok(0);
     };
-    let Ok(entries) = backend
-      .cache_entries_with_keys(&self.key("cache:entry:"))
-      .await
-    else {
-      return 0;
-    };
-    let mut purged = 0;
-    for (key, entry) in entries {
-      if matches(&entry) && backend.delete(&key).await.is_ok() {
-        let _ = backend.delete(&self.shared_cache_index_key(&entry)).await;
-        for chunk_key in &entry.body_chunks {
-          let _ = backend.delete(chunk_key).await;
+    let prefix = self.key("cache:entry:");
+    let operation = async {
+      let mut cursor = None;
+      let mut examined = 0_usize;
+      let mut purged = 0_usize;
+      for _ in 0..self.enumeration.max_rounds() {
+        let remaining = self.enumeration.max_items.saturating_sub(examined);
+        if remaining == 0 {
+          backend.record_enumeration("cache_purge", "cap_exhausted", 1);
+          anyhow::bail!("shared cache purge enumeration reached its configured item limit");
         }
-        purged += 1;
+        let page = backend
+          .enumeration_keys(
+            &prefix,
+            cursor.as_ref(),
+            self.enumeration.page_size.min(remaining).max(1),
+            "cache_purge",
+          )
+          .await?;
+        examined = examined.saturating_add(page.keys.len());
+        let values = backend
+          .enumeration_values(&page.keys, "cache_purge")
+          .await?;
+        let mut delete_keys = Vec::new();
+        for (key, value) in page.keys.iter().zip(values) {
+          let Some(value) = value else {
+            continue;
+          };
+          let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&value) else {
+            continue;
+          };
+          if matches(&entry) {
+            delete_keys.push(key.clone());
+            delete_keys.push(self.shared_cache_index_key(&entry));
+            delete_keys.extend(entry.body_chunks.iter().cloned());
+            purged = purged.saturating_add(1);
+          }
+        }
+        for delete_batch in delete_keys.chunks(self.enumeration.page_size.max(1)) {
+          backend
+            .enumeration_delete(delete_batch, "cache_purge")
+            .await?;
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+          return Ok(purged);
+        }
       }
-    }
-    purged
+      backend.record_enumeration("cache_purge", "cap_exhausted", 1);
+      anyhow::bail!("shared cache purge enumeration reached its configured scan-round limit")
+    };
+    tokio::time::timeout(self.operation_timeout, operation)
+      .await
+      .map_err(|_| anyhow::anyhow!("shared cache purge enumeration timed out"))?
   }
 
   async fn shared_cache_entry_to_cache_entry(

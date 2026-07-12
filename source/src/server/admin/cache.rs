@@ -6,7 +6,7 @@ use anyhow::bail;
 use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -271,10 +271,21 @@ pub(in crate::server) async fn cache_purge_json_response(
       if !authorize_cache_target(authorization, "cache:PurgeObject", policy, Some(host)) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_exact_partition_async(policy, scheme, host, uri, partition)
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_json",
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_exact_partition(policy, scheme, host, uri, partition)
@@ -303,10 +314,21 @@ pub(in crate::server) async fn cache_purge_json_response(
       if !authorize_cache_target(authorization, "cache:PurgePrefix", policy, Some(host)) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_prefix_partition_async(policy, scheme, host, path_prefix, partition)
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_prefix_json",
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_prefix_partition(policy, scheme, host, path_prefix, partition)
@@ -331,7 +353,7 @@ pub(in crate::server) async fn cache_purge_json_response(
       ) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_tag_partition_async(
           policy,
@@ -340,7 +362,18 @@ pub(in crate::server) async fn cache_purge_json_response(
           body.host.as_deref(),
           partition,
         )
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_tag_json",
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_tag_partition(
@@ -415,6 +448,28 @@ fn audit_rejected_cache_purge(
   );
 }
 
+fn cache_purge_unavailable_response(
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  operation: &'static str,
+  error: impl std::fmt::Display,
+) -> Response<ProxyBody> {
+  warn!(peer = %peer_addr, actor = %actor.name, operation, error = %error, "shared cache purge did not complete");
+  admin_audit(
+    peer_addr,
+    actor,
+    operation,
+    None,
+    None,
+    AdminAuditOutcome::Rejected,
+    Some("shared cache purge unavailable"),
+  );
+  text_response(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "shared cache purge unavailable",
+  )
+}
+
 fn header_map_from_strings(
   headers: std::collections::HashMap<String, String>,
 ) -> Result<HeaderMap, &'static str> {
@@ -486,10 +541,21 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_exact_partition_async(policy, purge_scheme, host, uri, partition)
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            operation,
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_exact_partition(policy, purge_scheme, host, uri, partition)
@@ -533,10 +599,21 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_prefix_partition_async(policy, purge_scheme, host, path_prefix, partition)
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            operation,
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
@@ -568,7 +645,7 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
-      let purged = snapshot
+      let purged = match snapshot
         .cache
         .purge_tag_partition_async(
           policy,
@@ -577,7 +654,18 @@ pub(in crate::server) async fn cache_purge_response(
           host,
           partition,
         )
-        .await;
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            operation,
+            error,
+          );
+        }
+      };
       let external_reports = snapshot
         .cache
         .purge_external_tag_partition(

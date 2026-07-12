@@ -1294,6 +1294,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1451,6 +1454,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1489,6 +1495,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -6327,7 +6336,8 @@
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Opaque continuation cursor. Shared-state cursors are versioned and namespace-bound; discard them after a backend or deployment change."
               }
             },
             "additionalProperties": false

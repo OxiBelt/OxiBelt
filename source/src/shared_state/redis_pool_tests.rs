@@ -396,6 +396,167 @@ async fn timed_out_command_discards_its_connection_before_reuse() {
 }
 
 #[tokio::test]
+async fn pipeline_flushes_all_commands_before_reading_and_reuses_connection() {
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("test listener should bind");
+  let address = listener
+    .local_addr()
+    .expect("test listener should have an address");
+  let accepted = Arc::new(AtomicUsize::new(0));
+  let server_accepted = accepted.clone();
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.expect("client should connect");
+    server_accepted.fetch_add(1, Ordering::Relaxed);
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let first = read_command(&mut reader)
+      .await
+      .expect("first pipeline command should use RESP framing");
+    let second = read_command(&mut reader)
+      .await
+      .expect("second pipeline command should use RESP framing");
+    assert_eq!(first, vec![b"PTTL".to_vec(), b"clearance:a".to_vec()]);
+    assert_eq!(second, vec![b"PTTL".to_vec(), b"clearance:b".to_vec()]);
+    writer
+      .write_all(b":100\r\n:200\r\n")
+      .await
+      .expect("pipeline responses should write");
+    let follow_up = read_command(&mut reader)
+      .await
+      .expect("connection should remain reusable after every response is read");
+    assert_eq!(follow_up, vec![b"GET".to_vec(), b"after-pipeline".to_vec()]);
+    writer
+      .write_all(b"$1\r\nv\r\n")
+      .await
+      .expect("follow-up response should write");
+  });
+
+  let config = pool_config(format!("redis://{address}"), 100);
+  let pool = RedisPool::new(
+    &config,
+    Duration::from_millis(200),
+    &CryptoConfig::default(),
+    RedisPlaintextPolicy::Allow,
+    Metrics::new(),
+  )
+  .expect("pool should build");
+  let responses = pool
+    .pipeline(&[
+      vec![b"PTTL".to_vec(), b"clearance:a".to_vec()],
+      vec![b"PTTL".to_vec(), b"clearance:b".to_vec()],
+    ])
+    .await
+    .expect("pipeline should receive every response");
+  assert!(matches!(
+    responses.as_slice(),
+    [super::Resp::Int(100), super::Resp::Int(200)]
+  ));
+  let response = pool
+    .command(&[b"GET".to_vec(), b"after-pipeline".to_vec()])
+    .await
+    .expect("reused connection should accept the next command");
+  assert!(matches!(response, super::Resp::Bulk(Some(value)) if value == b"v"));
+  server.await.expect("test server should not panic");
+  assert_eq!(accepted.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn partial_pipeline_response_discards_connection_before_reuse() {
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("test listener should bind");
+  let address = listener
+    .local_addr()
+    .expect("test listener should have an address");
+  let accepted = Arc::new(AtomicUsize::new(0));
+  let server_accepted = accepted.clone();
+  let (partial_response_tx, partial_response_rx) = oneshot::channel();
+  let server = tokio::spawn(async move {
+    let (first, _) = listener
+      .accept()
+      .await
+      .expect("first client should connect");
+    server_accepted.fetch_add(1, Ordering::Relaxed);
+    let (first_reader, mut first_writer) = first.into_split();
+    let mut first_reader = BufReader::new(first_reader);
+    assert_eq!(
+      read_command(&mut first_reader)
+        .await
+        .expect("first pipeline command should use RESP framing"),
+      vec![b"PTTL".to_vec(), b"clearance:a".to_vec()]
+    );
+    assert_eq!(
+      read_command(&mut first_reader)
+        .await
+        .expect("second pipeline command should use RESP framing"),
+      vec![b"PTTL".to_vec(), b"clearance:b".to_vec()]
+    );
+    first_writer
+      .write_all(b":100\r\n")
+      .await
+      .expect("partial pipeline response should write");
+    let _ = partial_response_tx.send(());
+
+    let (second, _) = listener
+      .accept()
+      .await
+      .expect("replacement client should connect");
+    server_accepted.fetch_add(1, Ordering::Relaxed);
+    let (second_reader, mut second_writer) = second.into_split();
+    let mut second_reader = BufReader::new(second_reader);
+    assert_eq!(
+      read_command(&mut second_reader)
+        .await
+        .expect("replacement command should use RESP framing"),
+      vec![b"GET".to_vec(), b"replacement".to_vec()]
+    );
+    second_writer
+      .write_all(b"$1\r\nv\r\n")
+      .await
+      .expect("replacement response should write");
+  });
+
+  let config = pool_config(format!("redis://{address}"), 20);
+  let pool = RedisPool::new(
+    &config,
+    Duration::from_millis(100),
+    &CryptoConfig::default(),
+    RedisPlaintextPolicy::Allow,
+    Metrics::new(),
+  )
+  .expect("pool should build");
+  let first_pool = pool.clone();
+  let pipeline = tokio::spawn(async move {
+    first_pool
+      .pipeline(&[
+        vec![b"PTTL".to_vec(), b"clearance:a".to_vec()],
+        vec![b"PTTL".to_vec(), b"clearance:b".to_vec()],
+      ])
+      .await
+  });
+  partial_response_rx
+    .await
+    .expect("server should send one pipeline response");
+  assert!(
+    pipeline
+      .await
+      .expect("pipeline task should not panic")
+      .is_err(),
+    "a partial pipeline response must fail rather than reuse a desynchronized connection"
+  );
+  tokio::time::sleep(Duration::from_millis(5)).await;
+
+  let response = pool
+    .command(&[b"GET".to_vec(), b"replacement".to_vec()])
+    .await
+    .expect("replacement command should use a new connection");
+  assert!(matches!(response, super::Resp::Bulk(Some(value)) if value == b"v"));
+  server.await.expect("test server should not panic");
+  assert_eq!(accepted.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn zero_waiters_rejects_excess_work_without_opening_another_socket() {
   let listener = TcpListener::bind("127.0.0.1:0")
     .await

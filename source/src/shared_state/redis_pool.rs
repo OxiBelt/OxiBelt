@@ -17,7 +17,7 @@ use crate::metrics::{Metrics, SharedStatePoolStatus};
 use super::redis_connection::{
   ReconnectCircuit, RedisConnection, RedisConnectionManager, RedisManagerError, RedisPoolIdentity,
 };
-use super::redis_protocol::{Resp, read_resp, write_resp_command};
+use super::redis_protocol::{Resp, read_resp, write_resp_command, write_resp_commands};
 use super::runtime::SharedStateTimeout;
 
 type RedisObject = Object<RedisConnectionManager>;
@@ -188,6 +188,69 @@ impl RedisPool {
         self.record_connection_event("command_timeout");
         self.refresh_metrics();
         self.timeout("command timed out")
+      }
+    }
+  }
+
+  pub(super) async fn pipeline(&self, commands: &[Vec<Vec<u8>>]) -> anyhow::Result<Vec<Resp>> {
+    if commands.is_empty() {
+      return Ok(Vec::new());
+    }
+    let status_refresh = PoolStatusRefresh::new(self.inner.clone());
+    let admission = match self.inner.admission.clone().try_acquire_owned() {
+      Ok(permit) => permit,
+      Err(_) => {
+        self.record_acquisition("queue_full");
+        bail!(
+          "shared state Redis backend {} command queue is full",
+          self.inner.backend_name
+        );
+      }
+    };
+    let timeouts = Timeouts {
+      wait: Some(self.inner.settings.pool_wait_timeout),
+      create: Some(self.inner.identity.connect_timeout),
+      recycle: Some(self.inner.settings.command_timeout),
+    };
+    let object = match self.inner.pool.timeout_get(&timeouts).await {
+      Ok(object) => object,
+      Err(error) => return self.pool_error(error),
+    };
+    drop(status_refresh);
+    self.record_acquisition("success");
+    let mut lease = RedisCommandLease::new(object, admission, self.inner.clone());
+    lease.mark_command_started();
+    let command_refs = commands.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let result = tokio::time::timeout(self.inner.settings.command_timeout, async {
+      write_resp_commands(&mut lease.connection_mut().writer, &command_refs).await?;
+      let mut responses = Vec::with_capacity(command_refs.len());
+      for _ in &command_refs {
+        responses.push(
+          read_resp(&mut lease.connection_mut().reader)
+            .await
+            .context("failed to read Redis pipeline response")?,
+        );
+      }
+      Ok::<_, anyhow::Error>(responses)
+    })
+    .await;
+    match result {
+      Ok(Ok(responses)) => {
+        lease.mark_reusable();
+        self.refresh_metrics();
+        Ok(responses)
+      }
+      Ok(Err(_)) => {
+        self.refresh_metrics();
+        bail!(
+          "shared state Redis backend {} pipeline failed",
+          self.inner.backend_name
+        );
+      }
+      Err(_) => {
+        self.record_connection_event("command_timeout");
+        self.refresh_metrics();
+        self.timeout("pipeline timed out")
       }
     }
   }

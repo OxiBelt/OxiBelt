@@ -95,7 +95,8 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
   assert_eq!(
     second
       .purge_tag_partition_async("default", "release-1", None, None, None)
-      .await,
+      .await
+      .expect("shared tag purge should complete"),
     2
   );
   assert!(
@@ -173,14 +174,60 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
         "/asset/app.css?body=shared",
         None,
       )
-      .await,
+      .await
+      .expect("shared exact purge should complete"),
     2
   );
   assert!(second.lookup_async(ctx).await.is_none());
 }
 
 #[tokio::test]
-async fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
+async fn shared_cache_purge_propagates_an_enumeration_cap_error() {
+  let shared =
+    crate::shared_state::SharedState::test_memory_with_enumeration_limits("cache-purge-cap", 1, 1);
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
+  let second = ResponseCache::new(&config, Some(shared)).unwrap();
+  let headers = HeaderMap::new();
+  for uri in ["/asset/first.css", "/asset/second.css"] {
+    let uri = uri.parse::<Uri>().expect("fixture URI should parse");
+    assert_eq!(
+      first
+        .insert_async(
+          CacheInsertContext {
+            policy_name: Some("default"),
+            scheme: "https",
+            host: "example.test",
+            method: &Method::GET,
+            uri: &uri,
+            request_headers: &headers,
+          },
+          CacheEntry::memory(
+            StatusCode::OK,
+            HeaderMap::new(),
+            Bytes::from_static(b"shared")
+          ),
+        )
+        .await,
+      CacheInsertOutcome::Stored
+    );
+  }
+
+  assert!(
+    second
+      .purge_prefix_partition_async("default", "https", "example.test", "/asset", None)
+      .await
+      .expect_err("an incomplete shared purge must be reported to the Admin boundary")
+      .to_string()
+      .contains("configured item limit")
+  );
+}
+
+#[tokio::test]
+async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
   let shared = crate::shared_state::SharedState::test_memory("cache-index-backfill");
   let config = CacheConfig {
     enabled: true,
@@ -223,23 +270,23 @@ async fn shared_cache_legacy_entry_scan_backfills_lookup_index() {
   }
   assert!(shared.test_cache_raw_keys("cache:index:").is_empty());
 
-  match second
-    .lookup_async(CacheLookupContext {
-      policy_name: Some("default"),
-      scheme: "https",
-      host: "example.test",
-      method: &Method::GET,
-      uri: &uri,
-      request_headers: &headers,
-    })
-    .await
-  {
-    Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"legacy-cache")),
-    other => panic!("expected legacy shared cache hit, got {other:?}"),
-  }
   assert!(
-    !shared.test_cache_raw_keys("cache:index:").is_empty(),
-    "legacy full-scan lookup should backfill shared cache index"
+    second
+      .lookup_async(CacheLookupContext {
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+      })
+      .await
+      .is_none(),
+    "a legacy shared entry without its narrow index must not trigger a namespace-wide lookup"
+  );
+  assert!(
+    shared.test_cache_raw_keys("cache:index:").is_empty(),
+    "a cache miss must not recreate a legacy index pointer"
   );
 }
 
@@ -353,7 +400,8 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
   assert_eq!(
     second
       .purge_exact_partition_async("default", "https", "example.test", "/asset/large.bin", None)
-      .await,
+      .await
+      .expect("shared exact purge should complete"),
     1
   );
 }

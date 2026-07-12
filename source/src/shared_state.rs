@@ -23,6 +23,7 @@ use crate::limits::ParsedRate;
 use crate::metrics::Metrics;
 
 mod cache_store;
+mod enumeration;
 mod feature_flags;
 mod person_proof;
 mod rate_limits;
@@ -53,6 +54,8 @@ pub struct SharedState {
   connection_lease: Duration,
   cache_lock: Duration,
   cache_chunk_bytes: usize,
+  operation_timeout: Duration,
+  enumeration: enumeration::EnumerationLimits,
   backends: HashMap<String, Arc<Backend>>,
   rate_limits: Option<Arc<Backend>>,
   connection_limits: Option<Arc<Backend>>,
@@ -242,6 +245,11 @@ impl SharedState {
       connection_lease: Duration::from_millis(shared.connection_lease_ms),
       cache_lock: Duration::from_millis(shared.cache_lock_ms),
       cache_chunk_bytes: config.cache.stream_chunk_bytes,
+      operation_timeout: Duration::from_millis(shared.operation_timeout_ms),
+      enumeration: enumeration::EnumerationLimits {
+        page_size: shared.enumeration_page_size,
+        max_items: shared.enumeration_max_items_per_operation,
+      },
       backends,
       rate_limits,
       connection_limits,
@@ -920,56 +928,6 @@ impl Backend {
       Self::Memory(memory) => memory.counter_add(key, delta, ttl),
     }
   }
-
-  async fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<SharedCacheEntry>> {
-    Ok(
-      self
-        .cache_entries_with_keys(prefix)
-        .await?
-        .into_iter()
-        .map(|(_, entry)| entry)
-        .collect(),
-    )
-  }
-
-  async fn cache_entries_with_keys(
-    &self,
-    prefix: &str,
-  ) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
-    match self {
-      Self::Redis(redis) => {
-        redis
-          .runtime
-          .execute("cache_lookup", || redis.cache_entries(prefix))
-          .await
-      }
-      Self::Postgres(pg) => {
-        pg.runtime
-          .execute("cache_lookup", || pg.cache_entries(prefix))
-          .await
-      }
-      #[cfg(test)]
-      Self::Memory(memory) => memory.cache_entries(prefix),
-    }
-  }
-
-  async fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    match self {
-      Self::Redis(redis) => {
-        redis
-          .runtime
-          .execute("cache_lookup", || redis.raw_entries(prefix))
-          .await
-      }
-      Self::Postgres(pg) => {
-        pg.runtime
-          .execute("cache_lookup", || pg.raw_entries(prefix))
-          .await
-      }
-      #[cfg(test)]
-      Self::Memory(memory) => memory.raw_entries(prefix),
-    }
-  }
 }
 
 #[cfg(test)]
@@ -1217,20 +1175,6 @@ impl MemoryBackend {
     })?;
     let record: HealthRecord = serde_json::from_slice(&value)?;
     Ok(record.healthy)
-  }
-
-  fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
-    Ok(
-      self
-        .raw_entries(prefix)?
-        .into_iter()
-        .filter_map(|(key, value)| {
-          serde_json::from_slice(&value)
-            .ok()
-            .map(|entry| (key, entry))
-        })
-        .collect(),
-    )
   }
 
   fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
@@ -1519,102 +1463,6 @@ return 1
     }
     Ok(value)
   }
-
-  async fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
-    Ok(
-      self
-        .raw_entries(prefix)
-        .await?
-        .into_iter()
-        .filter_map(|(key, value)| {
-          serde_json::from_slice(&value)
-            .ok()
-            .map(|entry| (key, entry))
-        })
-        .collect(),
-    )
-  }
-
-  async fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let pattern = format!("{prefix}*");
-    let keys = match self
-      .command(&[b"KEYS".to_vec(), pattern.as_bytes().to_vec()])
-      .await?
-    {
-      Resp::Array(items) => items
-        .into_iter()
-        .filter_map(|item| match item {
-          Resp::Bulk(Some(bytes)) => String::from_utf8(bytes).ok(),
-          _ => None,
-        })
-        .collect::<Vec<_>>(),
-      other => bail!("unexpected Redis KEYS response: {other:?}"),
-    };
-    let mut entries = Vec::new();
-    for key in keys {
-      if let Resp::Bulk(Some(bytes)) = self
-        .command(&[b"GET".to_vec(), key.as_bytes().to_vec()])
-        .await?
-      {
-        entries.push((key, bytes));
-      }
-    }
-    Ok(entries)
-  }
-
-  async fn scan_keys(
-    &self,
-    pattern: &str,
-    cursor: &str,
-    count: usize,
-  ) -> anyhow::Result<(Vec<String>, Option<String>)> {
-    let response = self
-      .command(&[
-        b"SCAN".to_vec(),
-        cursor.as_bytes().to_vec(),
-        b"MATCH".to_vec(),
-        pattern.as_bytes().to_vec(),
-        b"COUNT".to_vec(),
-        count.max(1).to_string().into_bytes(),
-      ])
-      .await?;
-    let Resp::Array(items) = response else {
-      bail!("unexpected Redis SCAN response");
-    };
-    if items.len() != 2 {
-      bail!("unexpected Redis SCAN item count");
-    }
-    let next_cursor = match &items[0] {
-      Resp::Bulk(Some(bytes)) => String::from_utf8(bytes.clone())?,
-      Resp::Simple(value) => value.clone(),
-      other => bail!("unexpected Redis SCAN cursor response: {other:?}"),
-    };
-    let keys = match &items[1] {
-      Resp::Array(keys) => keys
-        .iter()
-        .filter_map(|item| match item {
-          Resp::Bulk(Some(bytes)) => String::from_utf8(bytes.clone()).ok(),
-          Resp::Simple(value) => Some(value.clone()),
-          _ => None,
-        })
-        .collect::<Vec<_>>(),
-      other => bail!("unexpected Redis SCAN keys response: {other:?}"),
-    };
-    let next_cursor = (next_cursor != "0").then_some(next_cursor);
-    Ok((keys, next_cursor))
-  }
-
-  async fn expires_at_ms(&self, key: &str) -> anyhow::Result<Option<i64>> {
-    match self
-      .command(&[b"PTTL".to_vec(), key.as_bytes().to_vec()])
-      .await?
-    {
-      Resp::Int(ttl) if ttl >= 0 => Ok(Some(now_unix_ms().saturating_add(ttl))),
-      Resp::Int(-1) => Ok(None),
-      Resp::Int(-2) => Ok(Some(0)),
-      other => bail!("unexpected Redis PTTL response: {other:?}"),
-    }
-  }
 }
 
 impl PostgresBackend {
@@ -1842,33 +1690,6 @@ impl PostgresBackend {
     .fetch_one(&self.pool)
     .await?;
     Ok(value.max(0) as usize)
-  }
-
-  async fn cache_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, SharedCacheEntry)>> {
-    Ok(
-      self
-        .raw_entries(prefix)
-        .await?
-        .into_iter()
-        .filter_map(|(key, value)| {
-          serde_json::from_slice(&value)
-            .ok()
-            .map(|entry| (key, entry))
-        })
-        .collect(),
-    )
-  }
-
-  async fn raw_entries(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let pattern = format!("{prefix}%");
-    let rows = sqlx::query_as(
-      "SELECT key, value FROM oxibelt_shared_state WHERE key LIKE $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
-    )
-    .bind(pattern)
-    .bind(now_unix_ms())
-    .fetch_all(&self.pool)
-    .await?;
-    Ok(rows)
   }
 }
 
