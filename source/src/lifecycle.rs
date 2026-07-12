@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub struct LifecycleState {
   admin_draining: AtomicBool,
+  overload_draining: AtomicBool,
   shutdown_draining: AtomicBool,
   drain_tx: watch::Sender<bool>,
 }
@@ -21,6 +22,7 @@ impl Default for LifecycleState {
     let (drain_tx, _) = watch::channel(false);
     Self {
       admin_draining: AtomicBool::new(false),
+      overload_draining: AtomicBool::new(false),
       shutdown_draining: AtomicBool::new(false),
       drain_tx,
     }
@@ -29,7 +31,9 @@ impl Default for LifecycleState {
 
 impl LifecycleState {
   pub fn is_draining(&self) -> bool {
-    self.admin_draining.load(Ordering::Relaxed) || self.shutdown_draining.load(Ordering::Relaxed)
+    self.admin_draining.load(Ordering::Relaxed)
+      || self.overload_draining.load(Ordering::Relaxed)
+      || self.shutdown_draining.load(Ordering::Relaxed)
   }
 
   pub fn reason(&self) -> &'static str {
@@ -37,6 +41,8 @@ impl LifecycleState {
       "shutdown"
     } else if self.admin_draining.load(Ordering::Relaxed) {
       "admin"
+    } else if self.overload_draining.load(Ordering::Relaxed) {
+      "overload"
     } else {
       "ready"
     }
@@ -49,6 +55,16 @@ impl LifecycleState {
 
   pub fn clear_admin_draining(&self) {
     self.admin_draining.store(false, Ordering::Relaxed);
+    self.publish();
+  }
+
+  pub fn set_overload_draining(&self) {
+    self.overload_draining.store(true, Ordering::Relaxed);
+    self.publish();
+  }
+
+  pub fn clear_overload_draining(&self) {
+    self.overload_draining.store(false, Ordering::Relaxed);
     self.publish();
   }
 
@@ -157,30 +173,6 @@ impl ConnectionDrain {
         .data_plane
         .as_ref()
         .is_some_and(|drain| *drain.borrow())
-  }
-}
-
-pub(crate) async fn wait_for_listener_or_data_plane_drain(
-  listener: &mut watch::Receiver<bool>,
-  data_plane: &mut watch::Receiver<bool>,
-) {
-  if *listener.borrow() || *data_plane.borrow() {
-    return;
-  }
-
-  loop {
-    tokio::select! {
-      changed = listener.changed() => {
-        if changed.is_err() || *listener.borrow() {
-          return;
-        }
-      }
-      changed = data_plane.changed() => {
-        if changed.is_err() || *data_plane.borrow() {
-          return;
-        }
-      }
-    }
   }
 }
 

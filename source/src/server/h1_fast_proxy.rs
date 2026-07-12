@@ -23,6 +23,7 @@ use tokio_rustls::server::TlsStream;
 use tracing::{debug, trace, warn};
 
 use crate::config::{ConnectionLimitIdentityMode, ForwardedClientIpSource, HttpListenerMode};
+use crate::overload::OverloadState;
 use crate::proxy::http as proxy_http;
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{BoxError, ProxyBody};
@@ -85,6 +86,12 @@ pub(super) async fn try_handle_connection(
   let mut head_buffer = Vec::with_capacity(512);
   let mut served_requests = 0_usize;
   loop {
+    if snapshot.overload.state() != OverloadState::Normal {
+      return Ok(H1FastProxyPreflight::Continue {
+        io: Box::new(PrefixedIo::new(stream, buffer)),
+        served_requests,
+      });
+    }
     if served_requests >= snapshot.config.limits.max_requests_per_connection {
       trace!("TLS H1 pre-Hyper proxy fast path reached request limit");
       return Ok(H1FastProxyPreflight::Continue {
@@ -135,6 +142,12 @@ pub(super) async fn try_handle_connection(
       }
       ReadRequestOutcome::Request(request) => request,
     };
+    if snapshot.overload.state() != OverloadState::Normal {
+      return Ok(H1FastProxyPreflight::Continue {
+        io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
+        served_requests,
+      });
+    }
 
     let Some(mut prepared) =
       prepare_fast_proxy_request(&parsed, snapshot.as_ref(), peer_addr, tls.as_ref())
@@ -151,6 +164,15 @@ pub(super) async fn try_handle_connection(
         served_requests,
       });
     }
+    let _overload_request = match snapshot.overload.try_admit_request(Version::HTTP_11) {
+      Ok(lease) => lease,
+      Err(_) => {
+        return Ok(H1FastProxyPreflight::Continue {
+          io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
+          served_requests,
+        });
+      }
+    };
 
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
     snapshot.record_hot_path_request();

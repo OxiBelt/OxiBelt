@@ -9,12 +9,14 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, Response};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
+
+use crate::limits::ConnectionPermit;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
@@ -269,6 +271,14 @@ where
     _guard: guard,
   }
   .boxed()
+}
+
+pub(crate) fn with_connection_permit(
+  response: Response<ProxyBody>,
+  permit: ConnectionPermit,
+) -> Response<ProxyBody> {
+  let (parts, body) = response.into_parts();
+  Response::from_parts(parts, with_drop_guard(body, permit))
 }
 
 struct ChannelBody {

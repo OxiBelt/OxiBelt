@@ -51,6 +51,7 @@ mod flow_helpers;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod observability;
+mod overload;
 pub(crate) mod person_proof;
 pub(crate) mod request;
 pub(crate) mod request_framing;
@@ -74,11 +75,12 @@ pub(crate) mod warm;
 pub(crate) use warm::warm_cache_request;
 
 pub(crate) use self::access_log::SystemAccessLogContext;
-use self::alt_svc::apply_alt_svc_header;
 #[cfg(test)]
 use self::alt_svc::should_add_alt_svc;
+use self::alt_svc::{apply_alt_svc_header, apply_response_alt_svc};
 use self::body::{
   BodyTimeoutKind, ProxyBody, boxed_error, error_indicates_body_timeout, error_is_timeout,
+  with_connection_permit,
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
 use self::flow_helpers::{
@@ -92,6 +94,7 @@ use self::headers::{
 use self::observability::{
   record_request_observability, record_websocket_session_end, request_observability_start,
 };
+use self::overload::{content_length, overload_response, with_overload_request_lease};
 use self::person_proof::handle_person_proof_api;
 use self::request::{RebuildRequestOptions, rebuild_request};
 use self::request_framing::{
@@ -114,7 +117,9 @@ pub(crate) use self::response_timeout::{
 pub(crate) use self::response_timeout::{
   downstream_response_send_timeout, with_downstream_response_timeout,
 };
-use self::retry::{EffectiveRetryPolicy, send_one_shot, send_pool_with_retry, send_with_retry};
+use self::retry::{
+  EffectiveRetryPolicy, send_one_shot_with_state, send_pool_with_retry, send_with_retry,
+};
 use self::route_action_runtime as route_runtime;
 use self::semantics::filter_trailers;
 use self::upstream::select_request_upstream;
@@ -340,6 +345,21 @@ where
     access_log_metadata_enabled,
     system_access_log_enabled,
   );
+  let overload_request_lease = match state.overload.try_admit_request(request_version) {
+    Ok(lease) => lease,
+    Err(_) => {
+      let response = overload_response(state.as_ref(), request_version);
+      emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
+      record_request_observability(
+        &state,
+        &access_log,
+        &response,
+        trace_context,
+        telemetry_start,
+      );
+      return response;
+    }
+  };
   let mut request_connection_permit = None;
   let response = handle_inner_impl(
     request,
@@ -365,6 +385,7 @@ where
   } else {
     response
   };
+  let response = with_overload_request_lease(response, overload_request_lease);
   emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
   record_request_observability(
     &state,
@@ -403,6 +424,13 @@ where
 
   if state.lifecycle.is_draining() {
     return draining_response();
+  }
+
+  if state
+    .overload
+    .reject_large_request_body(content_length(request.headers()))
+  {
+    return overload_response(state.as_ref(), request.version());
   }
 
   if let Err(rejection) =
@@ -543,6 +571,12 @@ where
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
+  if state
+    .overload
+    .reject_priority(resolved.route.priority_class)
+  {
+    return route_security.apply(overload_response(state.as_ref(), request_version));
+  }
   if !route_matches_selected_tls_negotiation_policy(state.as_ref(), tls.as_ref(), resolved.route) {
     warn!(
       sni = ?tls.sni,
@@ -1246,12 +1280,13 @@ where
     );
   }
 
-  let request = match buffer_request_body(request, &effective_buffering).await {
-    Ok(request) => request,
-    Err(error) => {
-      return route_security.apply(request_buffering_error_response(error));
-    }
-  };
+  let request =
+    match buffering::buffer_request_body(request, &effective_buffering, state.as_ref()).await {
+      Ok(request) => request,
+      Err(error) => {
+        return route_security.apply(request_buffering_error_response(error));
+      }
+    };
   let cache_enabled_for_route = resolved.execution_plan.features.cache
     && state
       .cache
@@ -1748,7 +1783,7 @@ where
         let result = if retry_policy.enabled {
           send_with_retry(client, outbound, timeouts, state, &retry_policy).await
         } else {
-          send_one_shot(client, outbound, timeouts).await
+          send_one_shot_with_state(client, outbound, timeouts, state.as_ref()).await
         };
         result.map(|mut response| {
           if let Some(capture) = early_hints_capture {
@@ -2074,43 +2109,6 @@ where
   response
 }
 
-async fn buffer_request_body(
-  request: Request<ProxyBody>,
-  effective: &buffering::EffectiveBuffering,
-) -> Result<Request<ProxyBody>, buffering::BufferingError> {
-  if effective.request.is_streaming() {
-    return Ok(request);
-  }
-  let (parts, body) = request.into_parts();
-  let body = buffering::buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
-  Ok(Request::from_parts(parts, body))
-}
-
-fn apply_response_alt_svc(
-  response: &mut Response<ProxyBody>,
-  state: &AppSnapshot,
-  downstream_scheme: &str,
-  request_version: http::Version,
-  listener_bind: Option<SocketAddr>,
-) {
-  let status = response.status();
-  apply_alt_svc_header(
-    response.headers_mut(),
-    status,
-    state,
-    downstream_scheme,
-    request_version,
-    listener_bind,
-  );
-}
-
-fn with_connection_permit(
-  response: Response<ProxyBody>,
-  permit: ConnectionPermit,
-) -> Response<ProxyBody> {
-  let (parts, body) = response.into_parts();
-  Response::from_parts(parts, body::with_drop_guard(body, permit))
-}
 struct TunnelConnectionLimitHold {
   _request_permit: Option<ConnectionPermit>,
   _first_request_context: Option<ConnectionLimitContext>,

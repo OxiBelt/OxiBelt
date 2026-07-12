@@ -38,6 +38,7 @@ mod listener_socket;
 pub mod metrics;
 pub mod mitigation;
 pub mod netport_switcher;
+pub mod overload;
 mod pool_health;
 pub mod pools;
 pub mod proxy;

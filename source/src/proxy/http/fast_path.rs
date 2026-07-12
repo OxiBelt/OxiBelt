@@ -29,7 +29,8 @@ use crate::waf::{
 
 use super::flow_helpers::elapsed_ms;
 use super::{
-  EffectiveRetryPolicy, EffectiveTimeouts, send_one_shot, send_pool_with_retry, send_with_retry,
+  EffectiveRetryPolicy, EffectiveTimeouts, send_one_shot_with_state, send_pool_with_retry,
+  send_with_retry,
 };
 
 mod compiled;
@@ -57,11 +58,9 @@ use self::decision::PlainProxyFastPathMissReason;
 pub(crate) use self::decision::plain_proxy_fast_path_decision;
 use self::direct::{direct_http_retry_enabled, select_direct_fast_path_upstream};
 pub(crate) use self::direct_h1::DirectH1Pools;
-use self::direct_h1::{DirectH1SendResult, try_send_direct_h1};
 pub(crate) use self::direct_h2::DirectH2Pools;
-use self::direct_h2::{DirectH2SendResult, try_send_direct_h2};
 use self::direct_transport::{
-  DirectFastPathTransport, DirectTransportAttempt, direct_fast_path_transport,
+  DirectTransportAttempt, attempt_direct_transport, direct_fast_path_transport,
 };
 use self::downstream_direct_h1::{
   DownstreamDirectH1Preparation, DownstreamDirectH1RequestBuild, DownstreamDirectH1RequestOptions,

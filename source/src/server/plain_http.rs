@@ -16,9 +16,10 @@ use tokio::sync::watch;
 use tracing::{debug, trace, warn};
 
 use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode};
-use crate::lifecycle::{ConnectionDrain, wait_for_listener_or_data_plane_drain};
+use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+use crate::overload::OverloadState;
 use crate::proxy::http;
 use crate::proxy::http::fast_path::stage_timing;
 use crate::proxy::http::response::{
@@ -124,6 +125,7 @@ pub(super) async fn handle_connection(
   let request_count = Arc::new(AtomicUsize::new(served_requests));
   let request_state = snapshot.clone();
   let tls_metadata = Arc::new(WafTlsMetadata::default());
+  let request_drain = drain.clone();
   let service = service_fn(move |request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let request_index = if state.config.listeners.http_mode == HttpListenerMode::Proxy {
@@ -133,7 +135,7 @@ pub(super) async fn handle_connection(
     };
     let connection_limit_context = connection_limit_context.clone();
     let tls_metadata = tls_metadata.clone();
-    let drain = drain.clone();
+    let drain = request_drain.clone();
     async move {
       let _request_guard = state.runtime_introspection_guard(RuntimeCounter::Http1Request);
       match state.config.listeners.http_mode {
@@ -183,27 +185,28 @@ pub(super) async fn handle_connection(
     .keep_alive(true);
   let io = super::http_io::InstrumentedDownstreamIo::new(io, snapshot.metrics.clone(), "h1", "tcp");
   let connection = builder.serve_connection(TokioIo::new(io), service);
+  let mut graceful_drain = drain;
   let result = if snapshot.http1_upgrades_possible {
     let connection = connection.with_upgrades();
     tokio::pin!(connection);
-    if *shutdown.borrow() || *data_plane_drain.borrow() {
+    if graceful_drain.is_draining() {
       connection.as_mut().graceful_shutdown();
     }
     tokio::select! {
       result = &mut connection => result,
-      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+      _ = graceful_drain.wait_for_drain() => {
         connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
     }
   } else {
     tokio::pin!(connection);
-    if *shutdown.borrow() || *data_plane_drain.borrow() {
+    if graceful_drain.is_draining() {
       connection.as_mut().graceful_shutdown();
     }
     tokio::select! {
       result = &mut connection => result,
-      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+      _ = graceful_drain.wait_for_drain() => {
         connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
@@ -254,6 +257,12 @@ async fn try_sendfile_fast_path_inner(
   let mut response_head_buffer = Vec::with_capacity(512);
   let mut served_requests = 0_usize;
   loop {
+    if snapshot.overload.state() != OverloadState::Normal {
+      return Ok(SendfilePreflight::Continue {
+        io: PlainHttpIo::new(stream, buffer),
+        served_requests,
+      });
+    }
     if served_requests >= snapshot.config.limits.max_requests_per_connection {
       trace!("plain HTTP static sendfile fast path reached request limit");
       return Ok(SendfilePreflight::Done);
@@ -288,6 +297,14 @@ async fn try_sendfile_fast_path_inner(
       }
       ReadRequestOutcome::Request(request) => request,
     };
+    if snapshot.overload.state() != OverloadState::Normal {
+      let mut prefix = request.raw;
+      prefix.extend_from_slice(&request.remaining);
+      return Ok(SendfilePreflight::Continue {
+        io: PlainHttpIo::new(stream, prefix),
+        served_requests,
+      });
+    }
     let plan_started_at = stage_timing::start(snapshot.request_path_features.stage_timing_metrics);
     let plan =
       eligible_static_plan(&request, snapshot.as_ref(), peer_addr, transport_metadata).await;
@@ -311,6 +328,20 @@ async fn try_sendfile_fast_path_inner(
         io: PlainHttpIo::new(stream, prefix),
         served_requests,
       });
+    };
+    let _overload_request = match snapshot
+      .overload
+      .try_admit_request(::http::Version::HTTP_11)
+    {
+      Ok(lease) => lease,
+      Err(_) => {
+        let mut prefix = request.raw;
+        prefix.extend_from_slice(&request.remaining);
+        return Ok(SendfilePreflight::Continue {
+          io: PlainHttpIo::new(stream, prefix),
+          served_requests,
+        });
+      }
     };
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);
 

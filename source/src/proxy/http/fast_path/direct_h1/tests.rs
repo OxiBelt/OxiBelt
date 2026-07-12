@@ -604,6 +604,8 @@ async fn send_and_recycle_direct_get(
     prepared,
     timeouts,
     DirectH1RuntimeBackend::TokioHyper,
+    true,
+    None,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: false,

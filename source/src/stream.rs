@@ -244,6 +244,10 @@ async fn serve_stream_listener(
           }
         };
         let connection_config = config.clone();
+        let overload_connection = match state.snapshot().overload.try_admit_connection() {
+          Ok(lease) => lease,
+          Err(_) => continue,
+        };
         let permit = match acquire_connection_permit(&state, peer_addr).await {
           Ok(permit) => permit,
           Err(error) => {
@@ -263,6 +267,7 @@ async fn serve_stream_listener(
           .guard(RuntimeCounter::StreamListenerConnection);
         let task_state = state.clone();
         connections.spawn(async move {
+          let _overload_connection = overload_connection;
           let _introspection_guard = introspection_guard;
           let result = proxy_stream_connection(
             downstream,

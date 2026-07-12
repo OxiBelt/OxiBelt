@@ -22,7 +22,7 @@ use crate::proxy::http as http_proxy;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::stage_timing as timing;
-use crate::proxy::http::response::is_silent_close_response;
+use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::server::downstream_quic_tls_metadata;
@@ -160,6 +160,7 @@ pub(crate) async fn handle_downstream_connection(
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
+  let mut lifecycle_drain = snapshot.lifecycle.subscribe();
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
   let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
   let request_task_timing = request_tasks::RequestTaskTiming::new(snapshot.clone(), timing_enabled);
@@ -200,6 +201,14 @@ pub(crate) async fn handle_downstream_connection(
       request_tasks.abort_all().await;
       return Ok(());
     }
+    if *lifecycle_drain.borrow() {
+      h3_connection
+        .shutdown(0)
+        .await
+        .context("failed to send HTTP/3 graceful shutdown")?;
+      request_tasks.wait_all().await;
+      return Ok(());
+    }
     let receive_started = timing::start(timing_enabled);
     let resolver = tokio::select! {
       biased;
@@ -213,6 +222,17 @@ pub(crate) async fn handle_downstream_connection(
       changed = data_plane_drain.changed() => {
         if changed.is_ok() && *data_plane_drain.borrow() {
           request_tasks.abort_all().await;
+          return Ok(());
+        }
+        continue;
+      }
+      changed = lifecycle_drain.changed() => {
+        if changed.is_err() || *lifecycle_drain.borrow() {
+          h3_connection
+            .shutdown(0)
+            .await
+            .context("failed to send HTTP/3 graceful shutdown")?;
+          request_tasks.wait_all().await;
           return Ok(());
         }
         continue;
@@ -272,6 +292,21 @@ pub(crate) async fn handle_downstream_connection(
     http_proxy::early_data::strip_untrusted_header(request.headers_mut());
 
     if is_webtransport_request(&request) {
+      let _overload_request = match snapshot.overload.try_admit_request(::http::Version::HTTP_3) {
+        Ok(lease) => lease,
+        Err(_) => {
+          let mut response = text_response(snapshot.overload.response_status(), "overloaded");
+          if let Ok(value) =
+            ::http::HeaderValue::from_str(&snapshot.overload.retry_after_seconds().to_string())
+          {
+            response
+              .headers_mut()
+              .insert(::http::header::RETRY_AFTER, value);
+          }
+          respond_to_h3_request(stream, response).await?;
+          continue;
+        }
+      };
       request_tasks.wait_all().await;
       webtransport_bridge::serve_webtransport_connection(
         h3_connection,
@@ -563,7 +598,7 @@ pub(crate) async fn forward_request(
 ) -> anyhow::Result<Response<ProxyBody>> {
   if let Some(pool) = state.h3_clients.for_upstream(&upstream.name) {
     return pool
-      .forward_request(request, upstream, timeouts, &state.metrics)
+      .forward_request(request, upstream, timeouts, &state.metrics, &state.overload)
       .await;
   }
 
@@ -576,6 +611,9 @@ pub(crate) async fn forward_one_shot_request(
   state: &AppSnapshot,
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<ProxyBody>> {
+  let _pending = state
+    .overload
+    .lease(crate::overload::WorkKind::PendingUpstreamRequests, 1);
   let uri = request.uri().clone();
   state
     .metrics

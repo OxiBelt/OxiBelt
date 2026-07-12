@@ -145,6 +145,11 @@ include = ["conf.d/*.toml"]
 [telemetry]
 [telemetry.tracing]
 [health]
+[overload]
+[overload.thresholds]
+[overload.actions.soft]
+[overload.actions.hard]
+[overload.reserved_capacity]
 [security.headers]
 [[security.header_policies]]
 [waf]
@@ -983,6 +988,74 @@ status = 429
 ```
 
 Limit values must be greater than zero. `limits.max_request_body_bytes` is the default request body cap and can be overridden per route with `routes.limits.max_request_body_bytes`. Top-level rate limit keys are `global`, `route`, `client_ip`, `client_ip_route`, `client_ip_path`, `access_token`, `access_token_route`, `access_token_path`, `client_ip_prefix`, `client_ip_prefix_route`, `client_ip_prefix_path`, `tls_fingerprint`, `tls_fingerprint_route`, `composite_client`, `composite_client_route`, `asn`, and `asn_route`; `client-ip` style spellings are accepted as compatibility aliases for the client-IP keys. `global` uses one bucket shared by all clients, and when it has no `routes` filter it runs before route matching for the earliest rejection point. `route` uses one bucket per resolved route. `routes` restricts a rate limit to named routes. Access-token limits must set `access_token_source` to either `trusted_authorization_bearer` or `trusted_header`. `trusted_authorization_bearer` reads only `Authorization: Bearer <token>` and must not set `token_header`; `trusted_header` reads only `token_header` and ignores any client-supplied `Authorization` value. Token values are hashed before storage, and missing configured tokens fall back to the client IP bucket. This is a breaking hardening change for existing `access_token*` configs: add `access_token_source` during migration, and avoid using arbitrary pre-auth bearer values as the only budget on public routes. Prefer `route`, `client_ip*`, `client_ip_prefix*`, `tls_fingerprint*`, `composite_client*`, and Person proof identities before trusting app/API access tokens. `client_ip_prefix*` canonicalizes the resolved client IP with `ipv4_prefix_bits` and `ipv6_prefix_bits`. `tls_fingerprint*` hashes OxiBelt's downstream TLS fingerprint and falls back to the client IP when unavailable. `asn*` uses `[client_identity.asn]` lookup and falls back to the client IP when no ASN is available. `composite_client*` hashes canonical `part=value` pairs from `identity_parts`, which may include `client_ip_prefix`, `user_agent`, `tls_fingerprint`, and `asn`; missing parts fall back to the client IP where possible instead of a shared unknown bucket. Top-level `[[rate_limits]]` rejects WAF-only `token_binding_hash*` and `person_proof_clearance*` keys. `max_buckets` caps the number of buckets kept for a single rate limit, defaults to `16384`, and should be lowered for attacker-controlled key modes when a route expects low identity cardinality. In enforcing mode, a request that would create a new bucket after the cap is reached is rejected with the rate limit status until an existing bucket expires or can be reclaimed; monitor mode stops adding new buckets after the cap. Rate and connection limit state is process-local by default. When `[shared_state].enabled = true` and the relevant feature maps to a backend, route rate token buckets, WAF `rate_limit` action buckets, and downstream connection leases are shared across instances. The shared rate-limit path supports both Redis-compatible and PostgreSQL backends and enforces `max_buckets` per configured limit before creating a new distributed bucket. `max_connections` applies at downstream accept time. `max_requests_per_connection` caps HTTP/1.1 requests, HTTP/2 streams, and ordinary HTTP/3 request streams on one downstream connection. `max_connections_per_ip` and `[[connection_limits]]` use the configured `connection_limit_identity`: `proxy_protocol` counts the direct peer or trusted PROXY protocol source for the whole connection, `first_request_real_ip` binds the connection to the first trusted Real-IP header value, and `per_request_real_ip` acquires a lease per HTTP request until its response body finishes. Active WebTransport sessions also acquire dedicated total and per-IP session leases; in Real-IP modes they must also acquire the same normal per-IP and named connection leases as ordinary requests for that identity. When not set, `max_webtransport_sessions` and `max_webtransport_sessions_per_ip` inherit `max_connections` and `max_connections_per_ip`, while `max_webtransport_sessions_per_connection` caps multiplexing on one downstream HTTP/3 connection. For HTTP/1 CONNECT, Upgrade tunnels, and WebTransport sessions, Real-IP connection leases remain held until the upgraded tunnel, session, or first-request connection context closes. TCP stream listeners use direct peer IPs. TLS handshake and header timeouts are listener-wide because no route is known yet; body, response-send, WebSocket, WebTransport idle timeouts can be overridden per route.
+
+### Global Overload Manager
+
+`[overload]` is disabled by default, preserving existing admission behavior. When enabled, OxiBelt samples process RSS, cgroup/host memory, open file descriptors, cgroup CPU usage, event-loop lag, and fixed-vocabulary active-work counters. It enters `soft` after `soft_enter_samples` consecutive soft breaches and enters `hard` immediately on a hard breach. Recovery requires `recovery_samples` samples below `recovery_ratio` times every soft threshold. A failed process probe retains the last good sample and enters hard overload only after `signal_stale_timeout_ms`; startup rejects enabled configurations whose critical RSS or descriptor probes are unavailable.
+
+```toml
+[overload]
+enabled = true
+sample_interval = "250ms"
+soft_enter_samples = 2
+recovery_samples = 8
+recovery_ratio = 0.90
+signal_stale_timeout_ms = 2000
+
+[overload.thresholds]
+memory_soft_ratio = 0.75
+memory_hard_ratio = 0.90
+fd_soft_ratio = 0.75
+fd_hard_ratio = 0.90
+cpu_soft_ratio = 0.85
+cpu_hard_ratio = 0.95
+event_loop_lag_soft = "25ms"
+event_loop_lag_hard = "100ms"
+shared_state_waiters_soft = 100
+shared_state_waiters_hard = 500
+# active_requests_soft = 500
+# active_requests_hard = 1000
+
+[overload.actions.soft]
+disable_cache_fill = true
+compression_level_cap = 2
+reject_priority_classes = ["background", "crawler"]
+retry_budget_multiplier = 0.5
+waf_body_inspection_concurrency_cap = 0
+decompression_concurrency_cap = 0
+prefer_cached_or_stale = true
+
+[overload.actions.hard]
+reject_new_connections = true
+reject_new_streams = true
+reject_new_requests = true
+stop_large_request_bodies = true
+large_request_body_threshold_bytes = 1048576
+disable_cache_fill = true
+disable_compression = true
+disable_retries = true
+disable_request_mirroring = true
+reject_expensive_waf_bodies = true
+enter_recoverable_drain = true
+fail_readiness = true
+response_status = 503
+retry_after = "3s"
+
+[overload.reserved_capacity]
+file_descriptors = 64
+admin_connections = 32
+admin_requests = 32
+health_connections = 8
+health_requests = 8
+metrics_connections = 4
+metrics_requests = 4
+```
+
+Each optional active-work threshold must be configured as a soft/hard pair with `0 < soft < hard`. Ratios require `0 < soft < hard <= 1`; a `compression_level_cap` must be `0..9` (`0` leaves compression effort unchanged); retry multipliers are finite values in `0..=1`; and hard response status must be `5xx`. `0` WAF/decompression caps select an automatic CPU-sized bound. When overload protection is enabled, `reserved_capacity` bounds dedicated Admin, health, and metrics listener slots separately from public admission, and its file-descriptor reserve is included in the public FD-pressure calculation. It is never granted from client-selected route metadata.
+
+Hard overload rejects new public TCP/QUIC connections and HTTP streams/requests with the configured generic response. HTTP/1 responses include `Connection: close`; HTTP/2 and HTTP/3 do not. Known oversized bodies are rejected, and unknown-length bodies are conservatively rejected before body reads. Hard overload can set an independent recoverable lifecycle drain; it never clears an Admin or shutdown drain. Health responses always include `X-OxiBelt-Overload-State`; configured hard overload returns readiness `503` with `Retry-After` while liveness remains available.
+
+Soft pressure blocks new cache-fill leaders and background refreshes while preserving completed cache hits, caps compression quality, reduces retry attempts, and rejects only trusted route classes selected below. Cache stale responses remain subject to their existing configured stale windows; overload does not widen cache freshness policy. Client `Priority` headers never select an overload priority class.
 
 ```toml
 [shared_state]
@@ -2651,6 +2724,7 @@ upstream = "app"
 # cache = "default"
 # compression = "default" # default | off | named policy
 # security_headers = "default" # default | off | named policy
+# priority_class = "default" # admin | health | security_callback | interactive | default | background | crawler
 
 [routes.match]
 # methods = ["GET", "HEAD"]
@@ -2802,6 +2876,7 @@ Fields:
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 - `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
+- `priority_class`: trusted configuration-assigned overload class. It defaults to `default`. P1 overload shedding acts only on `background` and `crawler`; `admin`, `health`, `security_callback`, and `interactive` are accepted stable labels but do not create public-listener reservations. Never derive this value from a client header or route name.
 - `waf.http_body_compression`: optional route override for compressed HTTP request/response bodies before WAF body inspection. `inherit` uses the global setting, `off` disables the transform for the route, and `transform` enables it for that route.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.

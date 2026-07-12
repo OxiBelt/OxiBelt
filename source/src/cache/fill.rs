@@ -9,7 +9,10 @@ use std::time::{Duration, SystemTime};
 
 use tokio::sync::Notify;
 
+use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
 use crate::shared_state::SharedCacheLock;
+
+use super::{CacheLookupContext, ResponseCache, request_no_store};
 
 const FILL_SHARDS: usize = 64;
 const SHORT_SUPPRESSION_TTL: Duration = Duration::from_secs(1);
@@ -69,6 +72,7 @@ pub struct CacheFillGuard {
   key: String,
   notify: Arc<Notify>,
   _shared_lock: Option<SharedCacheLock>,
+  _overload_lease: Option<WorkLease>,
 }
 
 impl CacheFillGuard {
@@ -130,7 +134,11 @@ impl CacheFillCoordinator {
     })
   }
 
-  pub(crate) fn begin(self: &Arc<Self>, key: String) -> CacheFillDecision {
+  pub(crate) fn begin(
+    self: &Arc<Self>,
+    key: String,
+    overload: Option<Arc<OverloadRuntime>>,
+  ) -> CacheFillDecision {
     let shard_index = shard_index(&key);
     let now = SystemTime::now();
     let mut shard = self.shards[shard_index]
@@ -154,6 +162,7 @@ impl CacheFillCoordinator {
       key,
       notify,
       _shared_lock: None,
+      _overload_lease: overload.map(|runtime| runtime.lease(WorkKind::CacheFillConcurrency, 1)),
     })
   }
 
@@ -191,6 +200,47 @@ impl CacheFillCoordinator {
       .inflight
       .remove(key)
       .unwrap_or_else(|| fallback.clone())
+  }
+}
+
+impl ResponseCache {
+  pub(crate) fn begin_fill_decision(
+    self: &Arc<Self>,
+    ctx: CacheLookupContext<'_>,
+  ) -> Option<CacheFillDecision> {
+    if !self.config.lock || !self.policy_enabled(ctx.policy_name, ctx.method) {
+      return None;
+    }
+    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+      return None;
+    }
+    let overload = self
+      .overload
+      .read()
+      .expect("cache overload lock poisoned")
+      .clone();
+    if overload
+      .as_ref()
+      .is_some_and(|runtime| runtime.cache_fill_disabled() || runtime.prefer_cached_or_stale())
+    {
+      return None;
+    }
+    let key = self
+      .operation_context(
+        ctx.policy_name,
+        ctx.scheme,
+        ctx.host,
+        ctx.method,
+        ctx.uri,
+        ctx.request_headers,
+      )?
+      .fill_key;
+    match self.fills.begin(key.clone(), overload) {
+      CacheFillDecision::Leader(guard) => Some(CacheFillDecision::Leader(guard)),
+      CacheFillDecision::Follower(waiter) => Some(CacheFillDecision::Follower(waiter)),
+      CacheFillDecision::SharedConflict => Some(CacheFillDecision::SharedConflict),
+      CacheFillDecision::Suppressed(reason) => Some(CacheFillDecision::Suppressed(reason)),
+    }
   }
 }
 

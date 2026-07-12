@@ -264,6 +264,10 @@ fn spawn_tcp_acceptor(
               }
             };
             let snapshot = state.snapshot();
+            let overload_connection = match snapshot.overload.try_admit_connection() {
+              Ok(lease) => lease,
+              Err(_) => continue,
+            };
             let connection_drain = ConnectionDrain::new(
               shutdown.clone(),
               snapshot.lifecycle.subscribe(),
@@ -287,6 +291,7 @@ fn spawn_tcp_acceptor(
             next_stream_id = next_stream_id.wrapping_add(1024);
             let stream_id = next_stream_id;
             connections.spawn(async move {
+              let _overload_connection = overload_connection;
               let _introspection_guard = introspection_guard;
               conn_state.snapshot().metrics.record_turn_event(
                 &conn_config.name,

@@ -23,6 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
 
 use crate::config::{CompressionConfig, CompressionPolicyConfig, CompressionProxiedPredicate};
+use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
 
 use super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error};
 
@@ -36,10 +37,26 @@ const ENCODING_PREFERENCE: [CompressionEncoding; 4] = [
 #[derive(Debug)]
 pub(crate) struct CompressionState {
   semaphore: Arc<Semaphore>,
+  overload: Option<Arc<OverloadRuntime>>,
 }
 
 impl CompressionState {
+  #[cfg(test)]
   pub(crate) fn new(config: &CompressionConfig) -> Arc<Self> {
+    Self::new_with_overload(config, None)
+  }
+
+  pub(crate) fn new_with_runtime(
+    config: &CompressionConfig,
+    overload: Arc<OverloadRuntime>,
+  ) -> Arc<Self> {
+    Self::new_with_overload(config, Some(overload))
+  }
+
+  fn new_with_overload(
+    config: &CompressionConfig,
+    overload: Option<Arc<OverloadRuntime>>,
+  ) -> Arc<Self> {
     let limit = if config.max_concurrent_responses == 0 {
       std::thread::available_parallelism()
         .map(|parallelism| parallelism.get().saturating_mul(2))
@@ -51,12 +68,34 @@ impl CompressionState {
 
     Arc::new(Self {
       semaphore: Arc::new(Semaphore::new(limit)),
+      overload,
     })
   }
 
-  fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
-    self.semaphore.clone().try_acquire_owned().ok()
+  fn level_cap(&self) -> Option<u8> {
+    self
+      .overload
+      .as_ref()
+      .and_then(|runtime| runtime.compression_level_cap())
   }
+
+  fn try_acquire(&self) -> Option<CompressionPermit> {
+    if self.level_cap() == Some(0) {
+      return None;
+    }
+    Some(CompressionPermit {
+      _semaphore: self.semaphore.clone().try_acquire_owned().ok()?,
+      _overload: self
+        .overload
+        .as_ref()
+        .map(|runtime| runtime.lease(WorkKind::CompressionJobs, 1)),
+    })
+  }
+}
+
+struct CompressionPermit {
+  _semaphore: OwnedSemaphorePermit,
+  _overload: Option<WorkLease>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,11 +189,17 @@ pub(crate) fn maybe_compress_response(
   if !config.enabled {
     return response;
   }
-  let Some(policy) = policy_for_route(config, route_compression) else {
+  let Some(mut policy) = policy_for_route(config, route_compression) else {
     return response;
   };
   if !policy.enabled {
     return response;
+  }
+  if let Some(cap) = state.level_cap() {
+    if cap == 0 {
+      return response;
+    }
+    policy.level = policy.level.min(cap);
   }
   if request_headers.contains_key(RANGE) {
     return response;
@@ -476,7 +521,7 @@ fn compress_body(
   body: ProxyBody,
   encoding: CompressionEncoding,
   level: u8,
-  permit: OwnedSemaphorePermit,
+  permit: CompressionPermit,
 ) -> ProxyBody {
   let reader = BufReader::new(ProxyBodyReader::new(body, permit));
   let level = CompressionLevel::Precise(i32::from(level));
@@ -499,11 +544,11 @@ where
 struct ProxyBodyReader {
   body: ProxyBody,
   current: Bytes,
-  _permit: OwnedSemaphorePermit,
+  _permit: CompressionPermit,
 }
 
 impl ProxyBodyReader {
-  fn new(body: ProxyBody, permit: OwnedSemaphorePermit) -> Self {
+  fn new(body: ProxyBody, permit: CompressionPermit) -> Self {
     Self {
       body,
       current: Bytes::new(),

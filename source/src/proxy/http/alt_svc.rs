@@ -4,6 +4,26 @@ use http::{HeaderMap, StatusCode};
 
 use crate::state::AppSnapshot;
 
+use super::body::ProxyBody;
+
+pub(super) fn apply_response_alt_svc(
+  response: &mut http::Response<ProxyBody>,
+  state: &AppSnapshot,
+  downstream_scheme: &str,
+  request_version: http::Version,
+  listener_bind: Option<SocketAddr>,
+) {
+  let status = response.status();
+  apply_alt_svc_header(
+    response.headers_mut(),
+    status,
+    state,
+    downstream_scheme,
+    request_version,
+    listener_bind,
+  );
+}
+
 pub(super) fn apply_alt_svc_header(
   headers: &mut HeaderMap,
   status: StatusCode,

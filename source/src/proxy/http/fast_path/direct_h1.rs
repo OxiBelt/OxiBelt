@@ -20,6 +20,7 @@ use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
   DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
 };
+use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 
@@ -254,6 +255,8 @@ pub(super) async fn try_send_direct_h1(
   direct_selection_used: bool,
   request_body_mode: FastPathRequestBodyMode,
   retry_policy_enabled: bool,
+  allow_reconnect_retry: bool,
+  overload: Option<Arc<OverloadRuntime>>,
   direct_h1_io_mode: RuntimeDirectH1IoMode,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
@@ -307,6 +310,8 @@ pub(super) async fn try_send_direct_h1(
     prepared,
     timeouts,
     DirectH1RuntimeBackend::from_config(direct_h1_io_mode),
+    allow_reconnect_retry,
+    overload,
     DirectH1SendMetricOptions {
       hot_path_metrics,
       diagnostic_metrics,
@@ -367,6 +372,7 @@ fn direct_h1_guard_miss(
   None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_prepared_request(
   pool: Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
@@ -374,6 +380,8 @@ async fn send_prepared_request(
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
   runtime_backend: DirectH1RuntimeBackend,
+  allow_reconnect_retry: bool,
+  overload: Option<Arc<OverloadRuntime>>,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
   if metric_options.hot_path_metrics {
@@ -421,6 +429,8 @@ async fn send_prepared_request(
             protocol,
             prepared,
             timeouts,
+            allow_reconnect_retry,
+            overload,
             metric_options,
           )
           .await;
@@ -439,15 +449,28 @@ async fn send_prepared_request(
     anyhow::bail!("runtime.direct_h1_io = \"compio\" is Linux-only");
   }
 
-  send_prepared_request_hyper(pool, metrics, protocol, prepared, timeouts, metric_options).await
+  send_prepared_request_hyper(
+    pool,
+    metrics,
+    protocol,
+    prepared,
+    timeouts,
+    allow_reconnect_retry,
+    overload,
+    metric_options,
+  )
+  .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_prepared_request_hyper(
   pool: Arc<DirectH1Pool>,
   metrics: &Arc<Metrics>,
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
+  allow_reconnect_retry: bool,
+  overload: Option<Arc<OverloadRuntime>>,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
   let pool_take_started = timing::start(metric_options.timing_enabled);
@@ -493,7 +516,9 @@ async fn send_prepared_request_hyper(
     }
   };
 
-  let mut retry = reused.then(|| prepared.retry_request()).flatten();
+  let mut retry = (allow_reconnect_retry && reused)
+    .then(|| prepared.retry_request())
+    .flatten();
   let send_result = send_request_with_timing(
     &mut sender,
     prepared.into_request(),
@@ -506,6 +531,11 @@ async fn send_prepared_request_hyper(
   let response = match send_result {
     Ok(response) => response,
     Err(DirectH1SendAttemptError::Hyper(error)) if reused => {
+      if overload.as_ref().is_some_and(|runtime| {
+        runtime.retries_disabled() || runtime.retry_budget_multiplier() < 1.0
+      }) {
+        return Err(error.into());
+      }
       let Some(retry) = retry.take() else {
         return Err(error.into());
       };
@@ -521,6 +551,9 @@ async fn send_prepared_request_hyper(
         metric_options.timing_enabled,
       )
       .await?;
+      let _retry = overload
+        .as_ref()
+        .map(|runtime| runtime.lease(WorkKind::RetryConcurrency, 1));
       let retry_result = send_request_with_timing(
         &mut sender,
         retry.into_request(),

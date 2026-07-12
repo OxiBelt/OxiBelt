@@ -138,8 +138,9 @@ impl ReloadManager {
       } else {
         active.stream_pool_generation.saturating_add(1)
       };
-    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
+    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new_with_runtime(
       &config.waf.http_body_compression,
+      active.overload.clone(),
     );
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
@@ -170,6 +171,7 @@ impl ReloadManager {
       waf_body_coding,
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
+      overload: active.overload.clone(),
       telemetry: active.telemetry.clone(),
       ipm,
       dynamic_policy: active.dynamic_policy.clone(),
@@ -308,8 +310,9 @@ impl ReloadManager {
       } else {
         active.stream_pool_generation.saturating_add(1)
       };
-    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new(
+    let waf_body_coding = crate::proxy::http::waf_body_coding::WafBodyCodingState::new_with_runtime(
       &config.waf.http_body_compression,
+      active.overload.clone(),
     );
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
@@ -340,6 +343,7 @@ impl ReloadManager {
       waf_body_coding,
       static_files: active.static_files.clone(),
       metrics: active.metrics.clone(),
+      overload: active.overload.clone(),
       telemetry: active.telemetry.clone(),
       ipm,
       dynamic_policy: active.dynamic_policy.clone(),

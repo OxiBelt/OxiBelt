@@ -467,8 +467,6 @@ impl PlainProxyFastPath {
     )
     .then(Instant::now);
     let mut report_pool_success = false;
-    let mut direct_h1_lease = None;
-    let mut direct_h2_lease = None;
     let transport_selection_started = timing::start(timing_enabled);
     let direct_transport = direct_fast_path_transport(upstream_version, direct_candidate);
     timing::record_transport_selection(
@@ -478,63 +476,23 @@ impl PlainProxyFastPath {
       transport_selection_started,
     );
     let transport_started = timing::start(timing_enabled);
-    let direct_attempt = match direct_transport {
-      Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
-        &state.direct_h1_pools,
-        &state.metrics,
-        upstream_index,
-        upstream,
-        upstream_version,
-        request_version,
-        true,
-        request_body_mode,
-        retry_policy.enabled,
-        state.effective_direct_h1_io,
-        outbound,
-        timeouts,
-        snapshot.request_path_features.hot_path_metrics,
-        snapshot.request_path_features.hot_path_diagnostic_metrics,
-        timing_enabled,
-      )
-      .await
-      {
-        DirectH1SendResult::Sent(result) => {
-          DirectTransportAttempt::Sent(result.map(|mut direct| {
-            direct_h1_lease = direct.take_lease();
-            direct.response
-          }))
-        }
-        DirectH1SendResult::Fallback(outbound) => DirectTransportAttempt::Fallback(outbound),
-      },
-      Some(DirectFastPathTransport::H2) => match try_send_direct_h2(
-        &state.direct_h2_pools,
-        &state.metrics,
-        upstream_index,
-        upstream,
-        upstream_version,
-        request_version,
-        true,
-        request_body_mode,
-        outbound,
-        timeouts,
-        snapshot.request_path_features.hot_path_metrics,
-        timing_enabled,
-      )
-      .await
-      {
-        DirectH2SendResult::Sent(result) => {
-          DirectTransportAttempt::Sent(result.map(|mut direct| {
-            direct_h2_lease = direct.take_lease();
-            direct
-              .response
-              .map(|body| body.map_err(body::boxed_error).boxed())
-          }))
-        }
-        DirectH2SendResult::Fallback(outbound) => DirectTransportAttempt::Fallback(outbound),
-      },
-      None => DirectTransportAttempt::Fallback(outbound),
-    };
-    let upstream_response_result = match direct_attempt {
+    let direct_outcome = attempt_direct_transport(
+      direct_transport,
+      snapshot,
+      upstream_index,
+      upstream,
+      upstream_version,
+      request_version,
+      request_body_mode,
+      retry_policy.enabled,
+      outbound,
+      timeouts,
+      timing_enabled,
+    )
+    .await;
+    let mut direct_h1_lease = direct_outcome.h1_lease;
+    let mut direct_h2_lease = direct_outcome.h2_lease;
+    let upstream_response_result = match direct_outcome.attempt {
       DirectTransportAttempt::Sent(result) => {
         timing::transport_result(
           snapshot,
@@ -599,7 +557,7 @@ impl PlainProxyFastPath {
         } else if retry_policy.enabled {
           send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
         } else {
-          send_one_shot(client, outbound, timeouts).await
+          send_one_shot_with_state(client, outbound, timeouts, state.as_ref()).await
         };
         timing::general_result(snapshot, metric_protocol, result.is_ok(), general_started);
         result.map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))

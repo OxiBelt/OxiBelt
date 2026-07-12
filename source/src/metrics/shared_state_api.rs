@@ -12,6 +12,10 @@ pub(crate) struct SharedStatePoolStatus {
 }
 
 impl Metrics {
+  pub(crate) fn shared_state_waiters(&self) -> u64 {
+    self.shared_state.waiters()
+  }
+
   pub(crate) fn configure_shared_state_metrics(&self, buckets_ms: &[u64]) {
     self.shared_state.configure(buckets_ms);
   }

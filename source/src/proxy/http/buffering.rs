@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
-use http::HeaderMap;
+use http::{HeaderMap, Request};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::fs::{File, OpenOptions};
@@ -17,6 +17,8 @@ use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tracing::warn;
 
 use crate::config::{BufferingMode, Config, RouteConfig};
+use crate::overload::WorkKind;
+use crate::state::AppSnapshot;
 
 use super::body::{BoxError, ProxyBody, boxed_error};
 
@@ -125,6 +127,29 @@ pub(crate) async fn buffer_body(
     }
     BufferingMode::Spool => buffer_spooled(body, policy, temp_dir).await,
   }
+}
+
+pub(crate) async fn buffer_request_body(
+  request: Request<ProxyBody>,
+  effective: &EffectiveBuffering,
+  state: &AppSnapshot,
+) -> Result<Request<ProxyBody>, BufferingError> {
+  if effective.request.is_streaming() {
+    return Ok(request);
+  }
+  let buffered_bytes = request
+    .headers()
+    .get(http::header::CONTENT_LENGTH)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(effective.request.max_memory_body_bytes as u64)
+    .min(effective.request.max_memory_body_bytes as u64);
+  let _buffered = state
+    .overload
+    .lease(WorkKind::RequestBodyBufferedBytes, buffered_bytes);
+  let (parts, body) = request.into_parts();
+  let body = buffer_body(body, effective.request, effective.temp_dir.as_deref()).await?;
+  Ok(Request::from_parts(parts, body))
 }
 
 pub(crate) fn cleanup_stale_temp_files(temp_dir: &Path) {
@@ -662,6 +687,7 @@ private_key = "/tmp/key.pem"
       cache: None,
       compression: None,
       security_headers: None,
+      priority_class: Default::default(),
       buffering: RouteBufferingConfig {
         request: Some(BufferingMode::Streaming),
         response: Some(BufferingMode::Spool),

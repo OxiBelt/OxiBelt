@@ -64,6 +64,7 @@ pub(crate) async fn capture_request_body_for_waf(
         };
         return Ok((request, Some(captured)));
       }
+      let _inspection = transform_state.inspection_lease()?;
       capture_proxy_request_prefix(request, limit)
         .await
         .map(|(request, captured)| (request, Some(captured)))
@@ -111,6 +112,7 @@ pub(crate) async fn capture_response_body_for_waf(
         };
         return Ok((body, Some(captured)));
       }
+      let _inspection = transform_state.inspection_lease()?;
       capture_proxy_body_prefix(body, limit, positive_content_length(headers))
         .await
         .map(|(body, captured)| (body, Some(captured)))
@@ -152,6 +154,7 @@ pub(crate) fn request_body_capture_error_response(
       }
     }
     WafBodyCaptureError::Coding(error) => match error.kind() {
+      WafBodyCodingErrorKind::Overloaded => (StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
       WafBodyCodingErrorKind::Unsupported => (
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "unsupported content encoding",
@@ -190,6 +193,7 @@ pub(crate) fn response_body_capture_error_response(
       }
     }
     WafBodyCaptureError::Coding(error) => match error.kind() {
+      WafBodyCodingErrorKind::Overloaded => (StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
       WafBodyCodingErrorKind::DecodeTimeout | WafBodyCodingErrorKind::BodyReadTimeout => (
         StatusCode::GATEWAY_TIMEOUT,
         "upstream response body timed out",

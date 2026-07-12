@@ -252,6 +252,7 @@ mod tests {
       cache: None,
       compression: None,
       security_headers: None,
+      priority_class: Default::default(),
       buffering: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),

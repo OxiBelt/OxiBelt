@@ -24,6 +24,9 @@ pub(crate) struct AppConnectionSnapshot {
 
 impl AppHandle {
   pub fn new(snapshot: AppSnapshot) -> Self {
+    snapshot
+      .overload
+      .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
     let (data_plane_drain, _) = watch::channel(false);
     Self {
       current: Arc::new(RwLock::new(AppGeneration {
@@ -51,6 +54,9 @@ impl AppHandle {
   }
 
   pub fn replace(&self, snapshot: AppSnapshot) {
+    snapshot
+      .overload
+      .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
     let (data_plane_drain, _) = watch::channel(false);
     let previous = {
       let mut current = self.current.write().expect("app snapshot lock poisoned");
@@ -70,16 +76,20 @@ impl AppHandle {
     expected: &Arc<AppSnapshot>,
     snapshot: AppSnapshot,
   ) -> bool {
+    let snapshot = Arc::new(snapshot);
     let (data_plane_drain, _) = watch::channel(false);
     let previous = {
       let mut current = self.current.write().expect("app snapshot lock poisoned");
       if !Arc::ptr_eq(&current.snapshot, expected) {
         return false;
       }
+      snapshot
+        .overload
+        .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
       std::mem::replace(
         &mut *current,
         AppGeneration {
-          snapshot: Arc::new(snapshot),
+          snapshot,
           data_plane_drain,
         },
       )

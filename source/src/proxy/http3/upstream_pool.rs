@@ -17,6 +17,7 @@ use super::{
   send_h3_request,
 };
 use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::tls;
@@ -214,7 +215,9 @@ impl UpstreamH3Pool {
     upstream: &UpstreamConfig,
     timeouts: EffectiveTimeouts,
     metrics: &Arc<crate::metrics::Metrics>,
+    overload: &Arc<OverloadRuntime>,
   ) -> anyhow::Result<Response<ProxyBody>> {
+    let _pending = overload.lease(WorkKind::PendingUpstreamRequests, 1);
     let uri = request.uri().clone();
     metrics.record_http_upstream_client_request("h3", "https", "primary");
     let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;

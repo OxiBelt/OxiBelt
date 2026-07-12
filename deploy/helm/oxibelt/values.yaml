@@ -163,6 +163,11 @@ config:
     format = "prometheus"
     detail = "basic"
 
+    # Keep overload shedding opt-in for chart upgrades. Operators can enable
+    # and tune the full [overload] block through config.inline.
+    [overload]
+    enabled = false
+
     {{ include "oxibelt.adminConfig" . }}
 
 # `helm_immutable` is the ordinary Helm-managed content-addressed ConfigMap

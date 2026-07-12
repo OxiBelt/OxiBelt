@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use crate::admin_audit::{AdminAuditHandle, AdminAuditReservation};
 use crate::config::{QuicSocketConfig, QuicTransportConfig};
 use crate::lifecycle::TaskRegistry;
+use crate::overload::ControlPlane;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::proxy::http3::{is_webtransport_request, respond_to_h3_request};
@@ -208,10 +209,19 @@ async fn serve_admin_http3(
           return Ok(());
         };
         let peer_addr = connecting.remote_address();
+        let Some(control_connection) = state
+          .snapshot()
+          .overload
+          .try_admit_control_connection(ControlPlane::Admin)
+        else {
+          connecting.refuse();
+          continue;
+        };
         let connection_state = state.clone();
         let connection_operations = admin_operations.clone();
         let connection_shutdown = shutdown.clone();
         connections.spawn(async move {
+          let _control_connection = control_connection;
           match connecting.await {
             Ok(connection) => {
               if let Err(error) = handle_admin_http3_connection(
@@ -281,6 +291,21 @@ async fn handle_admin_http3_connection(
       .context("failed to resolve admin HTTP/3 request")?;
     let path = request.uri().path().to_string();
     if matches_operation_event_webtransport_path(&path) && is_webtransport_request(&request) {
+      let Some(_control_request) = state
+        .snapshot()
+        .overload
+        .try_admit_control_request(ControlPlane::Admin)
+      else {
+        respond_to_h3_request(
+          stream,
+          text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control capacity exhausted",
+          ),
+        )
+        .await?;
+        continue;
+      };
       return handle_operation_event_webtransport(
         request,
         stream,
@@ -316,6 +341,16 @@ async fn admin_http3_response(
   listener_bind: SocketAddr,
   path: &str,
 ) -> Response<ProxyBody> {
+  let Some(_control_request) = state
+    .snapshot()
+    .overload
+    .try_admit_control_request(ControlPlane::Admin)
+  else {
+    return text_response(
+      StatusCode::SERVICE_UNAVAILABLE,
+      "control capacity exhausted",
+    );
+  };
   let (audit, reservation) = match begin_admin_h3_audit(request, state, peer_addr) {
     Ok(value) => value,
     Err(response) => return *response,

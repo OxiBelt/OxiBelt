@@ -12,7 +12,7 @@ use crate::state::AppSnapshot;
 
 use super::EffectiveTimeouts;
 use super::body::ProxyBody;
-use super::retry::send_one_shot;
+use super::retry::send_one_shot_with_state;
 use super::route_action_runtime;
 use super::route_actions::{self, RouteActionRenderContext};
 use super::upstream::select_pool_upstream;
@@ -27,6 +27,10 @@ pub(super) fn spawn_request_mirrors(
   host: &str,
   downstream_scheme: &str,
 ) {
+  if state.overload.request_mirroring_disabled() {
+    state.metrics.record_request_mirror_skip();
+    return;
+  }
   for mirror in route_action_runtime::enabled_mirrors(route) {
     if !matches!(*outbound.method(), Method::GET | Method::HEAD) {
       state.metrics.record_request_mirror_skip();
@@ -106,7 +110,8 @@ pub(super) fn spawn_request_mirrors(
         mirror_state.metrics.record_request_mirror_skip();
         return;
       };
-      match send_one_shot(client, mirror_request, timeouts).await {
+      match send_one_shot_with_state(client, mirror_request, timeouts, mirror_state.as_ref()).await
+      {
         Ok(_) => mirror_state.metrics.record_request_mirror_success(),
         Err(error) => {
           mirror_state.metrics.record_request_mirror_error();

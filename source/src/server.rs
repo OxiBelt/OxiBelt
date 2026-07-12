@@ -25,9 +25,10 @@ use tracing::{info, warn};
 use crate::admin_audit::AdminAuditHandle;
 use crate::config::{AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides};
 use crate::identity::Cidr;
-use crate::lifecycle::{ConnectionDrain, TaskRegistry, wait_for_listener_or_data_plane_drain};
+use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
+use crate::overload::ControlPlane;
 use crate::pool_health;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::{SilentClose, is_silent_close_response, text_response};
@@ -77,6 +78,7 @@ mod file_sync_path;
 mod h1_fast_proxy;
 mod http_io;
 mod listener_sets;
+mod ops;
 mod plain_http;
 mod prefixed_io;
 #[cfg(test)]
@@ -87,6 +89,7 @@ use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
 use admin_stream_pools::admin_stream_pools_response;
 use admin_upstream_pools::admin_upstream_pools_response;
+use ops::{OpsKind, serve_ops_listener};
 pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "config_load",
   "file_sync",
@@ -243,6 +246,12 @@ impl OpsTasks {
     }));
     let (tx, rx) = watch::channel(false);
     shutdown.push(tx);
+    let task_state = state.clone();
+    tasks.push(tokio::spawn(async move {
+      crate::overload::run_sampler(task_state, rx).await;
+    }));
+    let (tx, rx) = watch::channel(false);
+    shutdown.push(tx);
     let task_state = state;
     tasks.push(tokio::spawn(async move {
       crate::upstream_discovery::run_dynamic_upstream_discovery(task_state, rx).await;
@@ -258,77 +267,6 @@ impl Drop for OpsTasks {
     }
     for task in &self.tasks {
       task.abort();
-    }
-  }
-}
-
-#[derive(Clone, Copy)]
-enum OpsKind {
-  Metrics,
-  Health,
-}
-
-async fn serve_ops_listener(
-  listener: TcpListener,
-  state: AppHandle,
-  mut shutdown: watch::Receiver<bool>,
-  kind: OpsKind,
-) -> anyhow::Result<()> {
-  loop {
-    tokio::select! {
-      biased;
-      changed = shutdown.changed() => {
-        if changed.is_ok() && *shutdown.borrow() {
-          return Ok(());
-        }
-      }
-      accepted = listener.accept() => {
-        let (stream, peer_addr) = match accepted {
-          Ok(value) => value,
-          Err(error) => {
-            warn!(error = %error, "failed to accept ops connection");
-            continue;
-          }
-        };
-        crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "ops listener");
-        let state = state.clone();
-        tokio::spawn(async move {
-          let service = service_fn(move |request: hyper::Request<Incoming>| {
-            let state = state.clone();
-            async move { Ok::<_, Infallible>(ops_response(request, state, kind)) }
-          });
-          if let Err(error) = hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
-            .await
-          {
-            warn!(peer = %peer_addr, error = %error, "ops connection failed");
-          }
-        });
-      }
-    }
-  }
-}
-
-fn ops_response(
-  request: hyper::Request<Incoming>,
-  state: AppHandle,
-  kind: OpsKind,
-) -> Response<ProxyBody> {
-  match kind {
-    OpsKind::Metrics => {
-      let snapshot = state.snapshot();
-      let body = snapshot.metrics.prometheus(
-        &snapshot.config.metrics,
-        snapshot.cache.stats(),
-        snapshot.tls_resumption.server_session_storage_stats(),
-      );
-      text_response(StatusCode::OK, &body)
-    }
-    OpsKind::Health => {
-      let snapshot = state.snapshot();
-      let path = request.uri().path();
-      rollout_identity::health_response(snapshot.as_ref(), path)
-        .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"))
     }
   }
 }
@@ -364,9 +302,17 @@ async fn serve_admin_listener(
         };
         crate::tcp_socket::enable_tcp_nodelay(&stream, peer_addr, "admin listener");
         let state = state.clone();
+        let Some(control_connection) = state
+          .snapshot()
+          .overload
+          .try_admit_control_connection(ControlPlane::Admin)
+        else {
+          continue;
+        };
         let admin_control = admin_control.clone();
         let admin_operations = admin_operations.clone();
         tokio::spawn(async move {
+          let _control_connection = control_connection;
           if let Err(error) =
             handle_admin_connection(
               stream,
@@ -597,6 +543,16 @@ async fn admin_response(
   listener_bind: SocketAddr,
   scheme: &'static str,
 ) -> Response<ProxyBody> {
+  let Some(_control_request) = state
+    .snapshot()
+    .overload
+    .try_admit_control_request(ControlPlane::Admin)
+  else {
+    return text_response(
+      StatusCode::SERVICE_UNAVAILABLE,
+      "control capacity exhausted",
+    );
+  };
   let (audit, audit_reservation) =
     match admin_audit_gate::reserve_or_reject(&mut request, &state, peer_addr, scheme) {
       Ok(reservation) => reservation,
@@ -1805,6 +1761,10 @@ async fn serve_tcp(
             let connection_shutdown = shutdown.clone();
             let connection_snapshot = connection_state.snapshot;
             let data_plane_drain = connection_state.data_plane_drain;
+            let overload_connection = match connection_snapshot.overload.try_admit_connection() {
+              Ok(lease) => lease,
+              Err(_) => continue,
+            };
             let connection_drain = ConnectionDrain::with_data_plane(
               connection_shutdown.clone(),
               connection_snapshot.lifecycle.subscribe(),
@@ -1812,6 +1772,7 @@ async fn serve_tcp(
               long_connection_close_delay,
             );
             connections.spawn(async move {
+                let _overload_connection = overload_connection;
                 let result = match kind {
                   TcpListenerKind::Https => handle_connection(
                     stream,
@@ -1897,6 +1858,13 @@ async fn serve_http3(
                 }
                 continue;
             }
+            let overload_connection = match connection_snapshot.overload.try_admit_connection() {
+                Ok(lease) => lease,
+                Err(_) => {
+                    connecting.refuse();
+                    continue;
+                }
+            };
             let connection_shutdown = shutdown.clone();
             let connection_drain = ConnectionDrain::with_data_plane(
               connection_shutdown.clone(),
@@ -1906,6 +1874,7 @@ async fn serve_http3(
             );
             let peer_addr = connecting.remote_address();
             connections.spawn(async move {
+                let _overload_connection = overload_connection;
                 match connecting.await {
                     Ok(connection) => {
                         if let Err(error) = http3::handle_downstream_connection(
@@ -2084,13 +2053,14 @@ async fn handle_connection(
   let h1_tls_metadata = tls_metadata.clone();
   let h1_request_count = request_count.clone();
   let request_state = handshake_state.clone();
+  let request_drain = drain.clone();
   let service = service_fn(move |mut request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
     let forwarded_header_cache = forwarded_header_cache.clone();
     let request_index = request_count.fetch_add(1, Ordering::Relaxed);
     let connection_limit_context = connection_limit_context.clone();
-    let drain = drain.clone();
+    let drain = request_drain.clone();
     async move {
       request
         .extensions_mut()
@@ -2136,12 +2106,13 @@ async fn handle_connection(
     let io = prefixed_io::PrefixedIo::new(tls_stream, early_data_prefix);
     let connection = builder.serve_connection(TokioIo::new(io), service);
     tokio::pin!(connection);
-    if *shutdown.borrow() || *data_plane_drain.borrow() {
+    let mut graceful_drain = drain;
+    if graceful_drain.is_draining() {
       connection.as_mut().graceful_shutdown();
     }
     let result = tokio::select! {
       result = &mut connection => result,
-      _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+      _ = graceful_drain.wait_for_drain() => {
         connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
@@ -2193,27 +2164,28 @@ async fn handle_connection(
     let io =
       http_io::InstrumentedDownstreamIo::new(io, handshake_state.metrics.clone(), "h1", "tls");
     let connection = builder.serve_connection(TokioIo::new(io), service);
+    let mut graceful_drain = drain;
     let result = if handshake_state.http1_upgrades_possible {
       let connection = connection.with_upgrades();
       tokio::pin!(connection);
-      if *shutdown.borrow() || *data_plane_drain.borrow() {
+      if graceful_drain.is_draining() {
         connection.as_mut().graceful_shutdown();
       }
       tokio::select! {
         result = &mut connection => result,
-        _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        _ = graceful_drain.wait_for_drain() => {
           connection.as_mut().graceful_shutdown();
           (&mut connection).await
         }
       }
     } else {
       tokio::pin!(connection);
-      if *shutdown.borrow() || *data_plane_drain.borrow() {
+      if graceful_drain.is_draining() {
         connection.as_mut().graceful_shutdown();
       }
       tokio::select! {
         result = &mut connection => result,
-        _ = wait_for_listener_or_data_plane_drain(&mut shutdown, &mut data_plane_drain) => {
+        _ = graceful_drain.wait_for_drain() => {
           connection.as_mut().graceful_shutdown();
           (&mut connection).await
         }

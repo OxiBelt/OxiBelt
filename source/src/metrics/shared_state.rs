@@ -110,6 +110,21 @@ impl HistogramSeries {
 }
 
 impl SharedStateMetrics {
+  pub(super) fn waiters(&self) -> u64 {
+    let inner = self.lock();
+    let queued = inner
+      .queued
+      .values()
+      .map(|value| (*value).max(0) as u64)
+      .sum::<u64>();
+    let pool_waiters = inner
+      .pool_status
+      .values()
+      .map(|status| status.waiting as u64)
+      .sum::<u64>();
+    queued.saturating_add(pool_waiters)
+  }
+
   pub(super) fn configure(&self, buckets_ms: &[u64]) {
     if buckets_ms.is_empty() {
       return;

@@ -280,11 +280,12 @@ pub async fn build_support_bundle(
   let runtime_snapshot = build_runtime_snapshot(snapshot);
   let waf = build_waf_snapshot(snapshot);
   let dynamic_policy = build_dynamic_policy_snapshot(snapshot).await;
-  let metrics = snapshot.metrics.prometheus(
+  let mut metrics = snapshot.metrics.prometheus(
     &snapshot.config.metrics,
     snapshot.cache.stats(),
     snapshot.tls_resumption.server_session_storage_stats(),
   );
+  snapshot.overload.append_prometheus(&mut metrics);
   SupportBundle {
     metadata: SupportBundleMetadata {
       format_version: SUPPORT_BUNDLE_FORMAT_VERSION,

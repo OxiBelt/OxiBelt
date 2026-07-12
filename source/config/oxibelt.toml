@@ -898,6 +898,17 @@ bind = "127.0.0.1:9091"
 ready_path = "/ready"
 live_path = "/live"
 
+# Process-wide overload shedding is compatible opt-in. When enabled, OxiBelt
+# samples cgroup/process pressure and automatically recovers after the
+# configured hysteresis window. See docs/Configuration.md for all thresholds.
+[overload]
+enabled = false
+sample_interval = "250ms"
+soft_enter_samples = 2
+recovery_samples = 8
+recovery_ratio = 0.90
+signal_stale_timeout_ms = 2000
+
 [security.headers]
 hsts = false
 hsts_max_age_seconds = 31536000

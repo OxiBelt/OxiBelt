@@ -17,9 +17,9 @@ use oxibelt::config::{
   ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind, ForwardedClientIpSource,
   ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
   KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
-  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
-  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
-  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
+  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
+  ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
+  RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
   StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
   TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
@@ -61,6 +61,45 @@ fn config_parses_trusted_upstream_ca_certificates() {
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert_eq!(config.proxy.trusted_ca_certs, vec![ca_path]);
+}
+
+#[test]
+fn overload_configuration_and_trusted_route_priority_validate() {
+  let temp_dir = common::TempDir::new("overload-config");
+  let config_path = write_loadable_config(&temp_dir, "overload-config", |raw| {
+    let mut raw = raw.replace(
+      "upstream = \"app\"\n",
+      "upstream = \"app\"\npriority_class = \"background\"\n",
+    );
+    raw.push_str(
+      r#"
+
+[overload]
+enabled = true
+sample_interval = "250ms"
+
+[overload.thresholds]
+event_loop_lag_soft = "25ms"
+event_loop_lag_hard = "100ms"
+active_requests_soft = 4
+active_requests_hard = 8
+
+[overload.actions.soft]
+retry_budget_multiplier = 0.5
+
+[overload.actions.hard]
+response_status = 503
+retry_after = "3s"
+"#,
+    );
+    raw
+  });
+  let config = Config::load(&config_path).expect("overload config should load");
+  assert!(config.overload.enabled);
+  assert_eq!(config.routes[0].priority_class, PriorityClass::Background);
+  assert_eq!(config.overload.thresholds.active_requests_hard, Some(8));
+  assert_eq!(config.overload.sample_interval_ms, 250);
+  assert_eq!(config.overload.actions.hard.retry_after_seconds, 3);
 }
 
 #[test]

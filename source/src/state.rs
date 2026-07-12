@@ -12,6 +12,7 @@ use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
 use crate::metrics::Metrics;
 use crate::mitigation::MitigationSink;
+use crate::overload::OverloadRuntime;
 use crate::pools::PoolState;
 use crate::proxy::http::buffering;
 use crate::proxy::http::compression::CompressionState;
@@ -40,15 +41,16 @@ use crate::webtransport_admin::WebTransportAdminRegistry;
 use anyhow::Context;
 use http::{HeaderValue, StatusCode};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
+mod alt_svc;
 pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
 mod stream_pool_update;
 mod upstream_clients;
 
+pub(crate) use alt_svc::AltSvcHeaderValues;
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
 use stream_pool_update::next_stream_pool_generation;
@@ -85,6 +87,7 @@ pub struct AppSnapshot {
   pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
+  pub overload: Arc<OverloadRuntime>,
   pub telemetry: TelemetryRuntime,
   pub ipm: IpmRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
@@ -109,30 +112,6 @@ pub struct AppSnapshot {
   pub(crate) request_path_features: RequestPathFeaturePlan,
   pub(crate) alt_svc_header_values: AltSvcHeaderValues,
   pub(crate) http1_upgrades_possible: bool,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct AltSvcHeaderValues {
-  default: Option<HeaderValue>,
-  by_listener_bind: HashMap<SocketAddr, HeaderValue>,
-}
-
-impl AltSvcHeaderValues {
-  pub(crate) fn is_some(&self) -> bool {
-    self.default.is_some()
-  }
-
-  pub(crate) fn for_listener_bind(&self, listener_bind: Option<SocketAddr>) -> Option<HeaderValue> {
-    listener_bind
-      .and_then(|bind| self.by_listener_bind.get(&bind))
-      .or(self.default.as_ref())
-      .cloned()
-  }
-
-  #[cfg(test)]
-  pub(crate) fn default_value(&self) -> Option<&HeaderValue> {
-    self.default.as_ref()
-  }
 }
 
 impl AppSnapshot {
@@ -207,6 +186,15 @@ impl AppSnapshot {
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let lifecycle = previous
+      .map(|snapshot| snapshot.lifecycle.clone())
+      .unwrap_or_default();
+    let overload = previous
+      .map(|snapshot| snapshot.overload.clone())
+      .unwrap_or_else(|| OverloadRuntime::new(&config.overload));
+    if config.overload.enabled {
+      overload.bootstrap_validate()?;
+    }
     let outbound_revocation = tls::OutboundRevocationRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build outbound TLS revocation runtime")?;
@@ -284,6 +272,7 @@ impl AppSnapshot {
     let cache =
       ResponseCache::new_with_external(&config.cache, shared_state.clone(), external_cache)
         .context("failed to build response cache")?;
+    cache.set_overload_runtime(overload.clone());
     let telemetry = match previous {
       Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)
         .context("failed to build telemetry runtime")?,
@@ -293,8 +282,9 @@ impl AppSnapshot {
           .context("failed to build telemetry runtime")?,
       },
     };
-    let compression = CompressionState::new(&config.compression);
-    let waf_body_coding = WafBodyCodingState::new(&config.waf.http_body_compression);
+    let compression = CompressionState::new_with_runtime(&config.compression, overload.clone());
+    let waf_body_coding =
+      WafBodyCodingState::new_with_runtime(&config.waf.http_body_compression, overload.clone());
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
     let ipm = IpmRuntime::new(&config)
@@ -318,9 +308,6 @@ impl AppSnapshot {
     let mitigation = MitigationSink::new(&config, metrics.clone())
       .await
       .context("failed to build mitigation sink")?;
-    let lifecycle = previous
-      .map(|snapshot| snapshot.lifecycle.clone())
-      .unwrap_or_default();
     let access_log_runtime = AccessLogRuntime::new(&config.access_log, &config.crypto)
       .await
       .context("failed to build access log runtime")?;
@@ -471,6 +458,7 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
+      overload,
       telemetry,
       ipm,
       dynamic_policy,
@@ -574,7 +562,10 @@ impl AppSnapshot {
       .context("failed to build precomputed Alt-Svc header values")?;
     let static_files =
       StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
-    let waf_body_coding = WafBodyCodingState::new(&config.waf.http_body_compression);
+    let waf_body_coding = WafBodyCodingState::new_with_runtime(
+      &config.waf.http_body_compression,
+      previous.overload.clone(),
+    );
     let client_identity = ClientIdentityRuntime::new(&config, &control_http)
       .await
       .context("failed to build client identity runtime")?;
@@ -630,6 +621,7 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
+      overload: previous.overload.clone(),
       telemetry: previous.telemetry.clone(),
       ipm,
       dynamic_policy: previous.dynamic_policy.clone(),

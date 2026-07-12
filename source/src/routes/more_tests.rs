@@ -53,6 +53,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     cache: None,
     compression: None,
     security_headers: None,
+    priority_class: Default::default(),
     buffering: Default::default(),
     limits: Default::default(),
     timeouts: Default::default(),

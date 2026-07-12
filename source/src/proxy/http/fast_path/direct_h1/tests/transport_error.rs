@@ -47,6 +47,8 @@ async fn compio_connect_backoff_routes_h2_to_hyper_direct_h1() -> anyhow::Result
     prepared,
     direct_h1_test_timeouts(),
     DirectH1RuntimeBackend::Compio,
+    true,
+    None,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: true,

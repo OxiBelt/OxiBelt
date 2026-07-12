@@ -8,14 +8,30 @@ use crate::state::AppSnapshot;
 
 pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Response<ProxyBody>> {
   if path == snapshot.config.health.ready_path {
+    if snapshot.lifecycle.reason() == "overload"
+      && snapshot.config.overload.actions.hard.fail_readiness
+    {
+      let mut response = with_rollout_identity_headers(
+        text_response(StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
+        snapshot,
+      );
+      if let Ok(value) =
+        ::http::HeaderValue::from_str(&snapshot.overload.retry_after_seconds().to_string())
+      {
+        response
+          .headers_mut()
+          .insert(::http::header::RETRY_AFTER, value);
+      }
+      return Some(response);
+    }
     if snapshot.lifecycle.is_draining() {
-      return Some(with_backend_status_header(
+      return Some(with_rollout_identity_headers(
         text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"),
         snapshot,
       ));
     }
     if !snapshot.config.rollout.is_ready() {
-      return Some(with_backend_status_header(
+      return Some(with_rollout_identity_headers(
         text_response(
           StatusCode::SERVICE_UNAVAILABLE,
           "config revision not applied",
@@ -50,7 +66,7 @@ fn with_rollout_identity_headers(
 ) -> Response<ProxyBody> {
   let response =
     with_config_revision_headers(response, snapshot.config.rollout.applied_header_values());
-  with_backend_status_header(response, snapshot)
+  with_overload_status_header(with_backend_status_header(response, snapshot), snapshot)
 }
 
 fn with_backend_status_header(
@@ -72,6 +88,17 @@ fn with_backend_status_value(
   response.headers_mut().insert(
     ::http::HeaderName::from_static("x-oxibelt-backend-status"),
     ::http::HeaderValue::from_static(status),
+  );
+  response
+}
+
+fn with_overload_status_header(
+  mut response: Response<ProxyBody>,
+  snapshot: &AppSnapshot,
+) -> Response<ProxyBody> {
+  response.headers_mut().insert(
+    ::http::HeaderName::from_static("x-oxibelt-overload-state"),
+    ::http::HeaderValue::from_static(snapshot.overload.state_label()),
   );
   response
 }

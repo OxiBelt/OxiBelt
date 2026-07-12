@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -22,6 +22,7 @@ use crate::config::{
   CacheAdmissionConfig, CacheConfig, CachePolicyConfig, CacheStaleIfErrorConfig, CacheStore,
   default_cache_tmpfs_dir,
 };
+use crate::overload::OverloadRuntime;
 use crate::shared_state::SharedState;
 
 mod entry;
@@ -300,6 +301,7 @@ pub struct ResponseCache {
   inner: Mutex<CacheInner>,
   shared_state: Option<Arc<SharedState>>,
   external_cache: ExternalCacheRuntime,
+  overload: RwLock<Option<Arc<OverloadRuntime>>>,
 }
 
 impl ResponseCache {
@@ -391,6 +393,7 @@ impl ResponseCache {
       inner: Mutex::new(CacheInner::default()),
       shared_state,
       external_cache,
+      overload: RwLock::new(None),
     });
     cache.load_disk_entries();
     Ok(cache)
@@ -398,6 +401,10 @@ impl ResponseCache {
 
   pub fn enabled(&self) -> bool {
     self.config.enabled
+  }
+
+  pub(crate) fn set_overload_runtime(&self, overload: Arc<OverloadRuntime>) {
+    *self.overload.write().expect("cache overload lock poisoned") = Some(overload);
   }
 
   pub(crate) fn shared_cache_enabled(&self) -> bool {
@@ -660,37 +667,6 @@ impl ResponseCache {
         CacheFillDecision::SharedConflict => Some(CacheFillPermit::SharedConflict),
         CacheFillDecision::Suppressed(_) => None,
       })
-  }
-
-  pub(crate) fn begin_fill_decision(
-    self: &Arc<Self>,
-    ctx: CacheLookupContext<'_>,
-  ) -> Option<CacheFillDecision> {
-    if !self.config.lock {
-      return None;
-    }
-    if !self.policy_enabled(ctx.policy_name, ctx.method) {
-      return None;
-    }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
-      return None;
-    }
-    let key = self
-      .operation_context(
-        ctx.policy_name,
-        ctx.scheme,
-        ctx.host,
-        ctx.method,
-        ctx.uri,
-        ctx.request_headers,
-      )?
-      .fill_key;
-    match self.fills.begin(key.clone()) {
-      CacheFillDecision::Leader(guard) => Some(CacheFillDecision::Leader(guard)),
-      CacheFillDecision::Follower(waiter) => Some(CacheFillDecision::Follower(waiter)),
-      CacheFillDecision::SharedConflict => Some(CacheFillDecision::SharedConflict),
-      CacheFillDecision::Suppressed(reason) => Some(CacheFillDecision::Suppressed(reason)),
-    }
   }
 
   pub(crate) async fn begin_fill_decision_async(
@@ -1407,6 +1383,15 @@ impl ResponseCache {
     policy_name: Option<&str>,
   ) -> Option<OwnedSemaphorePermit> {
     if !self.background_refresh_enabled(policy_name) {
+      return None;
+    }
+    if self
+      .overload
+      .read()
+      .expect("cache overload lock poisoned")
+      .as_ref()
+      .is_some_and(|runtime| runtime.cache_fill_disabled() || runtime.prefer_cached_or_stale())
+    {
       return None;
     }
     let name = policy_name.unwrap_or("default");

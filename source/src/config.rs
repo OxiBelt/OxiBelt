@@ -36,6 +36,7 @@ mod listener;
 mod loader;
 mod logging;
 mod outbound_revocation;
+mod overload;
 mod quic;
 mod rate_limit;
 mod retry;
@@ -89,6 +90,7 @@ use loader::{
 };
 pub use logging::*;
 pub use outbound_revocation::*;
+pub use overload::*;
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use rate_limit::*;
@@ -142,6 +144,7 @@ pub struct Config {
   pub metrics: MetricsConfig,
   pub telemetry: TelemetryConfig,
   pub health: HealthConfig,
+  pub overload: OverloadConfig,
   pub security: SecurityConfig,
   pub database: DatabaseConfig,
   pub shared_state: SharedStateConfig,
@@ -200,6 +203,8 @@ struct RawConfig {
   telemetry: TelemetryConfig,
   #[serde(default)]
   health: HealthConfig,
+  #[serde(default)]
+  overload: OverloadConfig,
   #[serde(default)]
   security: SecurityConfig,
   #[serde(default)]
@@ -264,6 +269,7 @@ impl TryFrom<RawConfig> for Config {
       metrics: raw.metrics,
       telemetry: raw.telemetry,
       health: raw.health,
+      overload: raw.overload,
       security: raw.security,
       database: raw.database,
       shared_state: raw.shared_state,
@@ -525,6 +531,7 @@ impl Config {
       && self.metrics == other.metrics
       && self.telemetry == other.telemetry
       && self.health == other.health
+      && self.overload == other.overload
       && self.security == other.security
       && self.database == other.database
       && self.shared_state == other.shared_state
@@ -906,6 +913,7 @@ impl Config {
     self.validate_ipm()?;
     self.validate_admin()?;
     self.validate_metrics_and_health()?;
+    self.overload.validate()?;
     self.telemetry.validate()?;
     security_headers::validate_security_headers(self)?;
     crypto::validate_crypto(self)?;
@@ -3184,6 +3192,90 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "format",
       "histogram_buckets_ms",
     ][..],
+    "overload" => &[
+      "enabled",
+      "sample_interval_ms",
+      "sample_interval",
+      "soft_enter_samples",
+      "recovery_samples",
+      "recovery_ratio",
+      "signal_stale_timeout_ms",
+      "thresholds",
+      "actions",
+      "reserved_capacity",
+    ][..],
+    "overload.thresholds" => &[
+      "memory_soft_ratio",
+      "memory_hard_ratio",
+      "fd_soft_ratio",
+      "fd_hard_ratio",
+      "cpu_soft_ratio",
+      "cpu_hard_ratio",
+      "event_loop_lag_soft_ms",
+      "event_loop_lag_hard_ms",
+      "event_loop_lag_soft",
+      "event_loop_lag_hard",
+      "shared_state_waiters_soft",
+      "shared_state_waiters_hard",
+      "downstream_connections_soft",
+      "downstream_connections_hard",
+      "active_requests_soft",
+      "active_requests_hard",
+      "h2_streams_soft",
+      "h2_streams_hard",
+      "h3_streams_soft",
+      "h3_streams_hard",
+      "pending_upstream_requests_soft",
+      "pending_upstream_requests_hard",
+      "retry_concurrency_soft",
+      "retry_concurrency_hard",
+      "cache_fill_concurrency_soft",
+      "cache_fill_concurrency_hard",
+      "waf_body_inspection_concurrency_soft",
+      "waf_body_inspection_concurrency_hard",
+      "compression_jobs_soft",
+      "compression_jobs_hard",
+      "decompression_jobs_soft",
+      "decompression_jobs_hard",
+      "request_body_buffered_bytes_soft",
+      "request_body_buffered_bytes_hard",
+    ][..],
+    "overload.actions" => &["soft", "hard"][..],
+    "overload.actions.soft" => &[
+      "disable_cache_fill",
+      "compression_level_cap",
+      "reject_priority_classes",
+      "retry_budget_multiplier",
+      "waf_body_inspection_concurrency_cap",
+      "decompression_concurrency_cap",
+      "prefer_cached_or_stale",
+    ][..],
+    "overload.actions.hard" => &[
+      "reject_new_connections",
+      "reject_new_streams",
+      "reject_new_requests",
+      "stop_large_request_bodies",
+      "large_request_body_threshold_bytes",
+      "disable_cache_fill",
+      "disable_compression",
+      "disable_retries",
+      "disable_request_mirroring",
+      "reject_expensive_waf_bodies",
+      "enter_recoverable_drain",
+      "fail_readiness",
+      "response_status",
+      "retry_after_seconds",
+      "retry_after",
+    ][..],
+    "overload.reserved_capacity" => &[
+      "file_descriptors",
+      "admin_connections",
+      "admin_requests",
+      "health_connections",
+      "health_requests",
+      "metrics_connections",
+      "metrics_requests",
+    ][..],
     "telemetry" => &["tracing"][..],
     "telemetry.tracing" => &[
       "enabled",
@@ -3472,6 +3564,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "replace_prefix_with",
       "retry",
       "security_headers",
+      "priority_class",
       "connect_tunneling",
       "generic_http_upgrade",
       "grpc_web",
