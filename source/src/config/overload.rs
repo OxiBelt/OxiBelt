@@ -474,7 +474,7 @@ impl OverloadReservedCapacity {
 }
 
 fn validate_ratio_pair(name: &str, soft: f64, hard: f64) -> anyhow::Result<()> {
-  if !soft.is_finite() || !hard.is_finite() || !(0.0 < soft && soft < hard && hard <= 1.0) {
+  if !(soft.is_finite() && hard.is_finite() && 0.0 < soft && soft < hard && hard <= 1.0) {
     bail!(
       "overload.thresholds.{name}_soft_ratio and {name}_hard_ratio must satisfy 0 < soft < hard <= 1"
     );
