@@ -40,7 +40,7 @@ use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTran
 use super::plain_http::parse::{ParsedPlainRequest, ReadRequestOutcome, header_has_token};
 use super::plain_http::response_head::response_head_bytes;
 use super::prefixed_io::PrefixedIo;
-
+mod admission;
 pub(super) enum H1FastProxyPreflight {
   Done,
   Continue {
@@ -48,7 +48,6 @@ pub(super) enum H1FastProxyPreflight {
     served_requests: usize,
   },
 }
-
 impl H1FastProxyPreflight {
   pub(super) fn into_continue(self) -> Option<(PrefixedIo<TlsStream<TcpStream>>, usize)> {
     match self {
@@ -60,7 +59,6 @@ impl H1FastProxyPreflight {
     }
   }
 }
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_handle_connection(
   mut stream: TlsStream<TcpStream>,
@@ -172,6 +170,18 @@ pub(super) async fn try_handle_connection(
           served_requests,
         });
       }
+    };
+    let Some((_circuit_breaker_request, _route_circuit_breaker_request)) = admission::admit(
+      snapshot.as_ref(),
+      prepared.resolved.route.priority_class,
+      &prepared.resolved.route.name,
+    )
+    .await
+    else {
+      return Ok(H1FastProxyPreflight::Continue {
+        io: Box::new(PrefixedIo::new(stream, replay_prefix(parsed))),
+        served_requests,
+      });
     };
 
     let _request_guard = snapshot.runtime_introspection_guard(RuntimeCounter::Http1Request);

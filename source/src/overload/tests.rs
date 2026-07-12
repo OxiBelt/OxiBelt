@@ -167,6 +167,48 @@ fn control_plane_capacity_is_independent_of_public_admission() {
 }
 
 #[test]
+fn control_plane_capacity_remains_bounded_when_pressure_sampling_is_disabled() {
+  let config = OverloadConfig {
+    enabled: false,
+    reserved_capacity: crate::config::OverloadReservedCapacity {
+      metrics_connections: 1,
+      metrics_requests: 1,
+      ..Default::default()
+    },
+    ..Default::default()
+  };
+  let runtime = OverloadRuntime::new(&config);
+
+  let connection = runtime
+    .try_admit_control_connection(ControlPlane::Metrics)
+    .expect("the configured metrics connection slot should be available");
+  assert!(
+    runtime
+      .try_admit_control_connection(ControlPlane::Metrics)
+      .is_none(),
+    "control-plane connections must remain bounded when overload sampling is off"
+  );
+  let request = runtime
+    .try_admit_control_request(ControlPlane::Metrics)
+    .expect("the configured metrics request slot should be available");
+  assert!(
+    runtime
+      .try_admit_control_request(ControlPlane::Metrics)
+      .is_none(),
+    "control-plane requests must remain bounded when overload sampling is off"
+  );
+
+  drop(connection);
+  drop(request);
+  assert!(
+    runtime
+      .try_admit_control_connection(ControlPlane::Metrics)
+      .is_some(),
+    "dropping a control connection lease must restore its slot"
+  );
+}
+
+#[test]
 fn probe_failure_uses_a_stale_grace_window_before_hard_overload() {
   let runtime = OverloadRuntime::new(&OverloadConfig {
     enabled: true,

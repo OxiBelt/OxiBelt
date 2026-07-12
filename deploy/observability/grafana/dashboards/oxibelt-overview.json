@@ -552,9 +552,21 @@
         {
           "expr": "sum by (scope_kind, state) (oxibelt_circuit_breaker_state)",
           "legendFormat": "circuit {{scope_kind}}: {{state}}"
+        },
+        {
+          "expr": "sum by (priority) (oxibelt_circuit_breaker_priority_queued)",
+          "legendFormat": "priority queued: {{priority}}"
+        },
+        {
+          "expr": "sum by (priority, reason) (rate(oxibelt_circuit_breaker_priority_rejections_total[$__rate_interval]))",
+          "legendFormat": "priority rejects/s: {{priority}} {{reason}}"
+        },
+        {
+          "expr": "sum by (priority, capacity) (oxibelt_circuit_breaker_priority_active)",
+          "legendFormat": "priority active: {{priority}} {{capacity}}"
         }
       ],
-      "title": "Global Overload Protection",
+      "title": "Global Overload and Priority Capacity",
       "type": "timeseries"
     }
   ],

@@ -172,7 +172,22 @@ where
       return response;
     }
   };
-  let circuit_breaker_request_lease = match state.circuit_breakers.admit_global_request(None).await
+  let priority_admission = priority_admission::classify(
+    &request,
+    peer_addr,
+    tls.as_ref(),
+    state.as_ref(),
+    protocol,
+    transport_network,
+  );
+  let circuit_breaker_request_lease = match state
+    .circuit_breakers
+    .admit_priority_global_request(
+      priority_admission.class,
+      priority_admission.reservation_eligible,
+      None,
+    )
+    .await
   {
     Ok(lease) => lease,
     Err(rejection) => {

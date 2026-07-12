@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-use crate::config::{CircuitBreakerFailureConfig, Config};
+use crate::config::{CircuitBreakerFailureConfig, Config, PriorityClass};
 
 use super::configuration::{
   deduplicate_allocations, elapsed_ms, queue_timeout, resolve_scopes, scoped_allocations,
 };
+use super::priority::{PriorityAdmissionState, PriorityLease};
 use super::queue::{AdmissionQueues, QueueKey, QueuedWaiter, WaiterTicket};
 use super::types::{
   Allocation, CIRCUIT_STATE_COUNT, CircuitState, REJECTION_REASON_COUNT, ResourceKind,
@@ -19,7 +20,8 @@ use super::types::{
 };
 
 pub use super::types::{
-  AdmissionRejection, AdmissionRejectionReason, CircuitOutcome, CircuitOutcomeFailure,
+  AdmissionLease, AdmissionRejection, AdmissionRejectionReason, CircuitOutcome,
+  CircuitOutcomeFailure,
 };
 
 #[derive(Debug)]
@@ -37,12 +39,18 @@ pub(super) struct RuntimeState {
   pub(super) queue_wait_ms: u64,
   pub(super) attempts: [u64; 5],
   pub(super) transition_sequence: u64,
+  pub(super) priority: PriorityAdmissionState,
 }
 
 impl RuntimeState {
   fn from_config(config: &Config) -> Self {
     let (scopes, retry) = resolve_scopes(config);
     let breaker = &config.circuit_breakers;
+    let global_request_limit = scopes
+      .get(&ScopeKey::Global)
+      .expect("global circuit-breaker scope is present")
+      .limits
+      .resource(ResourceKind::Request);
     Self {
       scopes,
       waiters: AdmissionQueues::default(),
@@ -57,6 +65,7 @@ impl RuntimeState {
       queue_wait_ms: 0,
       attempts: [0; 5],
       transition_sequence: 0,
+      priority: PriorityAdmissionState::from_config(&breaker.priority, global_request_limit),
     }
   }
 
@@ -78,6 +87,15 @@ impl RuntimeState {
     self.failure = breaker.failure.clone();
     self.response_status = breaker.response_status;
     self.capacity_retry_after = Duration::from_millis(breaker.capacity_retry_after_ms);
+    let global_request_limit = self
+      .scopes
+      .get(&ScopeKey::Global)
+      .expect("global circuit-breaker scope is present")
+      .limits
+      .resource(ResourceKind::Request);
+    self
+      .priority
+      .configure(&breaker.priority, global_request_limit);
     if !breaker.enabled || !breaker.failure.enabled {
       for scope in self.scopes.values_mut() {
         scope.circuit.close();
@@ -85,7 +103,7 @@ impl RuntimeState {
     }
   }
 
-  fn can_admit(&self, allocations: &[Allocation]) -> bool {
+  pub(super) fn can_admit(&self, allocations: &[Allocation]) -> bool {
     allocations.iter().all(|allocation| {
       self.scopes.get(&allocation.scope).is_some_and(|scope| {
         let limit = allocation.effective_limit(scope);
@@ -94,7 +112,7 @@ impl RuntimeState {
     })
   }
 
-  fn can_queue(&self, allocations: &[Allocation]) -> bool {
+  pub(super) fn can_queue(&self, allocations: &[Allocation]) -> bool {
     allocations.iter().all(|allocation| {
       self.scopes.get(&allocation.scope).is_some_and(|scope| {
         let limit = allocation.effective_limit(scope);
@@ -103,7 +121,10 @@ impl RuntimeState {
     })
   }
 
-  fn queue_rejection_reason(&self, allocations: &[Allocation]) -> AdmissionRejectionReason {
+  pub(super) fn queue_rejection_reason(
+    &self,
+    allocations: &[Allocation],
+  ) -> AdmissionRejectionReason {
     if allocations.iter().any(|allocation| {
       self.scopes.get(&allocation.scope).is_some_and(|scope| {
         let limit = allocation.effective_limit(scope);
@@ -116,7 +137,7 @@ impl RuntimeState {
     }
   }
 
-  fn increment_active(&mut self, allocations: &[Allocation]) {
+  pub(super) fn increment_active(&mut self, allocations: &[Allocation]) {
     for allocation in allocations {
       let scope = self
         .scopes
@@ -274,7 +295,7 @@ impl RuntimeState {
       self.transitions[from as usize][to as usize].saturating_add(1);
   }
 
-  fn reject(&mut self, reason: AdmissionRejectionReason) {
+  pub(super) fn reject(&mut self, reason: AdmissionRejectionReason) {
     self.rejections[reason as usize] = self.rejections[reason as usize].saturating_add(1);
   }
 }
@@ -283,7 +304,7 @@ impl RuntimeState {
 pub struct CircuitBreakerRuntime {
   pub(super) enabled: AtomicBool,
   pub(super) state: Mutex<RuntimeState>,
-  notify: Notify,
+  pub(super) notify: Notify,
 }
 
 impl std::fmt::Debug for CircuitBreakerRuntime {
@@ -352,6 +373,15 @@ impl CircuitBreakerRuntime {
   }
 
   pub async fn admit_global_request(
+    self: &Arc<Self>,
+    deadline: Option<Instant>,
+  ) -> Result<AdmissionLease, AdmissionRejection> {
+    self
+      .admit_priority_global_request(PriorityClass::Default, false, deadline)
+      .await
+  }
+
+  pub(super) async fn admit_global_request_unprioritized(
     self: &Arc<Self>,
     deadline: Option<Instant>,
   ) -> Result<AdmissionLease, AdmissionRejection> {
@@ -661,12 +691,21 @@ impl CircuitBreakerRuntime {
     }
   }
 
-  fn release(&self, allocations: &[Allocation], probes: &[ScopeKey], outcome: CircuitOutcome) {
+  pub(super) fn release(
+    &self,
+    allocations: &[Allocation],
+    probes: &[ScopeKey],
+    priority: Option<PriorityLease>,
+    outcome: CircuitOutcome,
+  ) {
     let mut state = self
       .state
       .lock()
       .expect("circuit-breaker state lock poisoned");
     state.decrement_active(allocations);
+    if let Some(priority) = priority {
+      state.priority.release(priority);
+    }
     if outcome == CircuitOutcome::Neutral {
       state.abandon_circuits(probes);
     } else {
@@ -674,58 +713,5 @@ impl CircuitBreakerRuntime {
     }
     drop(state);
     self.notify.notify_waiters();
-  }
-}
-
-/// RAII admission permit. Dropping it releases every composite resource slot.
-pub struct AdmissionLease {
-  runtime: Option<Arc<CircuitBreakerRuntime>>,
-  allocations: Vec<Allocation>,
-  probes: Vec<ScopeKey>,
-  outcome: CircuitOutcome,
-}
-
-impl std::fmt::Debug for AdmissionLease {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    formatter
-      .debug_struct("AdmissionLease")
-      .field("enabled", &self.runtime.is_some())
-      .finish_non_exhaustive()
-  }
-}
-
-impl AdmissionLease {
-  fn disabled() -> Self {
-    Self {
-      runtime: None,
-      allocations: Vec::new(),
-      probes: Vec::new(),
-      outcome: CircuitOutcome::Neutral,
-    }
-  }
-
-  fn enabled(
-    runtime: Arc<CircuitBreakerRuntime>,
-    allocations: Vec<Allocation>,
-    probes: Vec<ScopeKey>,
-  ) -> Self {
-    Self {
-      runtime: Some(runtime),
-      allocations,
-      probes,
-      outcome: CircuitOutcome::Neutral,
-    }
-  }
-
-  pub fn record_outcome(&mut self, outcome: CircuitOutcome) {
-    self.outcome = outcome;
-  }
-}
-
-impl Drop for AdmissionLease {
-  fn drop(&mut self) {
-    if let Some(runtime) = self.runtime.take() {
-      runtime.release(&self.allocations, &self.probes, self.outcome);
-    }
   }
 }

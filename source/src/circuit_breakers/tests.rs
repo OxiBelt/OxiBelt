@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{CapacitySetting, Config};
+use crate::config::{
+  CapacitySetting, CircuitBreakerPriorityClassConfig, Config, PriorityClass,
+  PriorityRejectionPolicy,
+};
 
 use super::{
   AdmissionLease, AdmissionRejectionReason, CircuitBreakerRuntime, CircuitOutcome,
@@ -35,6 +38,31 @@ async fn wait_for_queued(
   assert!(
     metrics.contains(&expected),
     "expected queued metric: {expected}"
+  );
+}
+
+async fn wait_for_priority_queued(
+  runtime: &CircuitBreakerRuntime,
+  priority: PriorityClass,
+  expected: usize,
+) {
+  let expected = format!(
+    "oxibelt_circuit_breaker_priority_queued{{priority=\"{}\"}} {expected}",
+    priority.as_str()
+  );
+  for _ in 0..64 {
+    let mut metrics = String::new();
+    runtime.append_prometheus(&mut metrics);
+    if metrics.contains(&expected) {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  let mut metrics = String::new();
+  runtime.append_prometheus(&mut metrics);
+  assert!(
+    metrics.contains(&expected),
+    "expected priority queued metric: {expected}"
   );
 }
 
@@ -356,6 +384,202 @@ async fn queue_timeout_is_not_extended_by_notifications() {
   notifier.abort();
   let _ = notifier.await;
   drop(first);
+}
+
+#[tokio::test]
+async fn background_priority_cannot_consume_all_global_capacity() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  let runtime = CircuitBreakerRuntime::new(&config);
+
+  let first_background = runtime
+    .admit_priority_global_request(PriorityClass::Background, false, None)
+    .await
+    .expect("first background request should fit its class cap");
+  let second_background = runtime
+    .admit_priority_global_request(PriorityClass::Background, false, None)
+    .await
+    .expect("second background request should fit its class cap");
+  assert_eq!(
+    runtime
+      .admit_priority_global_request(PriorityClass::Background, false, None)
+      .await
+      .expect_err("background must not use more than half of global capacity")
+      .reason,
+    AdmissionRejectionReason::ActiveLimit
+  );
+
+  let first_default = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("shared capacity should remain available to default traffic");
+  let second_default = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("background traffic must not consume the final shared slot");
+  let mut metrics = String::new();
+  runtime.append_prometheus(&mut metrics);
+  assert!(metrics.contains(
+    "oxibelt_circuit_breaker_priority_rejections_total{priority=\"background\",reason=\"share_limit\"} 1"
+  ));
+
+  drop(first_background);
+  drop(second_background);
+  drop(first_default);
+  drop(second_default);
+}
+
+#[tokio::test]
+async fn public_routes_cannot_claim_an_authenticated_request_reservation() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  config
+    .circuit_breakers
+    .priority
+    .classes
+    .push(CircuitBreakerPriorityClassConfig {
+      name: PriorityClass::SecurityCallback,
+      reserved_requests: Some(1),
+      max_share: Some(1.0),
+      max_pending_requests: Some(CapacitySetting::Fixed(0)),
+      pending_queue_timeout_ms: None,
+      rejection_policy: Some(PriorityRejectionPolicy::Reject),
+    });
+  let runtime = CircuitBreakerRuntime::new(&config);
+
+  let first_default = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("first shared slot should be admitted");
+  let second_default = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("second shared slot should be admitted");
+  let third_default = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("third shared slot should be admitted");
+
+  assert_eq!(
+    runtime
+      .admit_priority_global_request(PriorityClass::SecurityCallback, false, None)
+      .await
+      .expect_err("unauthenticated public traffic must not borrow a reserved slot")
+      .reason,
+    AdmissionRejectionReason::ActiveLimit
+  );
+  let trusted = runtime
+    .admit_priority_global_request(PriorityClass::SecurityCallback, true, None)
+    .await
+    .expect("trusted classification should use the strict reservation");
+
+  let mut metrics = String::new();
+  runtime.append_prometheus(&mut metrics);
+  assert!(metrics.contains(
+    "oxibelt_circuit_breaker_priority_capacity{priority=\"security_callback\",capacity=\"reserved\"} 1"
+  ));
+  assert!(metrics.contains(
+    "oxibelt_circuit_breaker_priority_active{priority=\"security_callback\",capacity=\"reserved\"} 1"
+  ));
+
+  drop(first_default);
+  drop(second_default);
+  drop(third_default);
+  drop(trusted);
+}
+
+#[tokio::test]
+async fn shared_priority_waiters_remain_fifo_across_classes() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(2);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 1_000;
+  let runtime = CircuitBreakerRuntime::new(&config);
+  let first = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("first request should occupy global capacity");
+  let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+  let interactive_runtime = runtime.clone();
+  let interactive_sender = sender.clone();
+  let interactive_waiter = tokio::spawn(async move {
+    let lease = interactive_runtime
+      .admit_priority_global_request(PriorityClass::Interactive, false, None)
+      .await
+      .expect("interactive waiter should be admitted after release");
+    interactive_sender
+      .send(("interactive", lease))
+      .expect("interactive receiver should remain available");
+  });
+  wait_for_priority_queued(&runtime, PriorityClass::Interactive, 1).await;
+
+  let default_runtime = runtime.clone();
+  let default_waiter = tokio::spawn(async move {
+    let lease = default_runtime
+      .admit_priority_global_request(PriorityClass::Default, false, None)
+      .await
+      .expect("default waiter should be admitted after the older waiter releases");
+    sender
+      .send(("default", lease))
+      .expect("default receiver should remain available");
+  });
+  wait_for_priority_queued(&runtime, PriorityClass::Default, 1).await;
+
+  drop(first);
+  let (name, interactive_lease) = tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+    .await
+    .expect("one priority waiter should be admitted")
+    .expect("interactive waiter should send its lease");
+  assert_eq!(
+    name, "interactive",
+    "older compatible priority work must progress first"
+  );
+  drop(interactive_lease);
+
+  let (name, default_lease) = tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+    .await
+    .expect("the next priority waiter should be admitted")
+    .expect("default waiter should send its lease");
+  assert_eq!(name, "default");
+  drop(default_lease);
+  interactive_waiter
+    .await
+    .expect("interactive waiter task should not panic");
+  default_waiter
+    .await
+    .expect("default waiter task should not panic");
+}
+
+#[tokio::test]
+async fn cancelling_a_priority_waiter_releases_its_class_queue_slot() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 1_000;
+  let runtime = CircuitBreakerRuntime::new(&config);
+  let first = runtime
+    .admit_priority_global_request(PriorityClass::Default, false, None)
+    .await
+    .expect("first request should occupy global capacity");
+  let queued_runtime = runtime.clone();
+  let queued = tokio::spawn(async move {
+    queued_runtime
+      .admit_priority_global_request(PriorityClass::Interactive, false, None)
+      .await
+  });
+  wait_for_priority_queued(&runtime, PriorityClass::Interactive, 1).await;
+
+  queued.abort();
+  let _ = queued.await;
+  wait_for_priority_queued(&runtime, PriorityClass::Interactive, 0).await;
+  drop(first);
+  runtime
+    .admit_priority_global_request(PriorityClass::Interactive, false, None)
+    .await
+    .expect("cancelled priority waiter must not leak global or class capacity");
 }
 
 #[tokio::test]

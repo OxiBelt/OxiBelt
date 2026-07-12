@@ -22,6 +22,18 @@ pub enum PriorityClass {
 }
 
 impl PriorityClass {
+  pub const COUNT: usize = 7;
+
+  pub const ALL: [Self; Self::COUNT] = [
+    Self::Admin,
+    Self::Health,
+    Self::SecurityCallback,
+    Self::Interactive,
+    Self::Default,
+    Self::Background,
+    Self::Crawler,
+  ];
+
   pub const fn as_str(self) -> &'static str {
     match self {
       Self::Admin => "admin",
@@ -36,6 +48,18 @@ impl PriorityClass {
 
   pub const fn is_soft_sheddable(self) -> bool {
     matches!(self, Self::Background | Self::Crawler)
+  }
+
+  pub const fn index(self) -> usize {
+    match self {
+      Self::Admin => 0,
+      Self::Health => 1,
+      Self::SecurityCallback => 2,
+      Self::Interactive => 3,
+      Self::Default => 4,
+      Self::Background => 5,
+      Self::Crawler => 6,
+    }
   }
 }
 

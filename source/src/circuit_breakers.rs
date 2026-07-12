@@ -7,6 +7,7 @@
 mod circuit;
 mod configuration;
 mod metrics;
+mod priority;
 mod queue;
 mod resources;
 mod runtime;

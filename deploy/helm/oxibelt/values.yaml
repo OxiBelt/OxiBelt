@@ -168,8 +168,12 @@ config:
     [overload]
     enabled = false
 
-    # Circuit breakers are enabled by default and resolve `"auto"` per Pod.
-    # Set enabled = false only as a temporary compatibility escape hatch.
+    # Circuit breakers and priority admission are enabled by default and resolve
+    # `"auto"` per Pod. Low-priority background/crawler traffic is share-capped;
+    # configure any public request reserve only for IPM- or mTLS-authenticated
+    # routes. Dedicated Admin, health, and metrics slots remain bounded even
+    # while overload pressure sampling is disabled. Set enabled = false only as
+    # a temporary compatibility escape hatch.
     [circuit_breakers]
     enabled = true
 

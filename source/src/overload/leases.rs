@@ -84,16 +84,6 @@ pub struct ControlLease {
   slot: ControlSlot,
 }
 
-impl ControlLease {
-  fn disabled(plane: ControlPlane, slot: ControlSlot) -> Self {
-    Self {
-      runtime: None,
-      plane,
-      slot,
-    }
-  }
-}
-
 impl Drop for ControlLease {
   fn drop(&mut self) {
     let Some(runtime) = self.runtime.as_ref() else {
@@ -222,9 +212,6 @@ impl OverloadRuntime {
     plane: ControlPlane,
     slot: ControlSlot,
   ) -> Option<ControlLease> {
-    if !self.enabled.load(Ordering::Relaxed) {
-      return Some(ControlLease::disabled(plane, slot));
-    }
     let config = self
       .config
       .read()

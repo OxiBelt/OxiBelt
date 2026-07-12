@@ -55,6 +55,7 @@ pub(crate) mod headers;
 pub(crate) mod observability;
 mod overload;
 pub(crate) mod person_proof;
+mod priority_admission;
 pub(crate) mod request;
 pub(crate) mod request_framing;
 mod request_mirror;

@@ -18,13 +18,14 @@ use oxibelt::config::{
   ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
   HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
   LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
-  OutboundOcspMode, PriorityClass, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
-  QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode,
-  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
-  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
-  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
-  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  OutboundOcspMode, PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
+  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
+  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
+  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
+  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+  UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -105,10 +106,9 @@ retry_after = "3s"
 #[test]
 fn circuit_breakers_parse_global_and_route_overrides() {
   let temp_dir = common::TempDir::new("circuit-breakers-config");
-  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "circuit-breakers");
-  let base = common::minimal_config_toml(&cert_path, &key_path);
-  let raw = format!(
-    r#"
+  let config_path = write_loadable_config(&temp_dir, "circuit-breakers", |base| {
+    format!(
+      r#"
 {base}
 
 [circuit_breakers]
@@ -120,6 +120,17 @@ capacity_retry_after = "1s"
 max_active_requests = 64
 max_pending_requests = 0
 pending_queue_timeout = "50ms"
+
+[circuit_breakers.priority]
+enabled = true
+
+[[circuit_breakers.priority.classes]]
+name = "security_callback"
+reserved_requests = 4
+max_share = 0.5
+max_pending_requests = 2
+pending_queue_timeout = "40ms"
+rejection_policy = "queue"
 
 [circuit_breakers.retry_budget]
 percent = 0.25
@@ -155,12 +166,9 @@ max_streams = 6
 id = "primary"
 origin = "http://backend.internal"
 "#
-  );
-
-  let config: Config = toml::from_str(&raw).expect("circuit-breaker config should parse");
-  config
-    .validate()
-    .expect("circuit-breaker config should validate");
+    )
+  });
+  let config = Config::load(&config_path).expect("circuit-breaker config should load strictly");
   assert_eq!(
     config.circuit_breakers.global.max_active_requests,
     CapacitySetting::Fixed(64)
@@ -170,6 +178,24 @@ origin = "http://backend.internal"
     CapacitySetting::Fixed(0)
   );
   assert_eq!(config.circuit_breakers.capacity_retry_after_ms, 1_000);
+  let priority = config
+    .circuit_breakers
+    .priority
+    .classes
+    .first()
+    .expect("priority class override should parse");
+  assert_eq!(priority.name, PriorityClass::SecurityCallback);
+  assert_eq!(priority.reserved_requests, Some(4));
+  assert_eq!(priority.max_share, Some(0.5));
+  assert_eq!(
+    priority.max_pending_requests,
+    Some(CapacitySetting::Fixed(2))
+  );
+  assert_eq!(priority.pending_queue_timeout_ms, Some(40));
+  assert_eq!(
+    priority.rejection_policy,
+    Some(PriorityRejectionPolicy::Queue)
+  );
   assert_eq!(config.circuit_breakers.retry_budget.percent, 0.25);
   assert_eq!(
     config.circuit_breakers.failure.on,

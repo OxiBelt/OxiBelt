@@ -54,8 +54,10 @@ fn grafana_dashboard_is_valid_json_with_oxibelt_promql() {
   assert!(
     raw.contains("oxibelt_circuit_breaker_queued")
       && raw.contains("oxibelt_circuit_breaker_rejections_total")
-      && raw.contains("oxibelt_circuit_breaker_state"),
-    "dashboard should include circuit-breaker queue, rejection, and state signals"
+      && raw.contains("oxibelt_circuit_breaker_state")
+      && raw.contains("oxibelt_circuit_breaker_priority_queued")
+      && raw.contains("oxibelt_circuit_breaker_priority_rejections_total"),
+    "dashboard should include circuit-breaker and priority-admission signals"
   );
 }
 

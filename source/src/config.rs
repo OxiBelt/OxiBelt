@@ -3300,6 +3300,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "pool_defaults",
       "retry_budget",
       "failure",
+      "priority",
     ][..],
     "circuit_breakers.global"
     | "circuit_breakers.route_defaults"
@@ -3320,6 +3321,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_queue",
       "queue_timeout_ms",
       "queue_timeout",
+    ][..],
+    "circuit_breakers.priority" => &["enabled", "classes"][..],
+    "circuit_breakers.priority.classes" => &[
+      "name",
+      "reserved_requests",
+      "max_share",
+      "max_pending_requests",
+      "pending_queue_timeout_ms",
+      "pending_queue_timeout",
+      "rejection_policy",
     ][..],
     "circuit_breakers.failure" => &[
       "enabled",

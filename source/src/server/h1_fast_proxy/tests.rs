@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::Config;
+use crate::config::{CapacitySetting, Config, PriorityClass};
 use crate::proxy::http::response::{silent_close_response, text_response};
 
 mod common {
@@ -75,6 +75,41 @@ max_version = "tls1.2"
       &secure_tls
     )
     .is_some()
+  );
+}
+
+#[tokio::test]
+async fn guarded_fast_path_holds_priority_and_route_admission_leases() {
+  let temp_dir = common::TempDir::new("h1-fast-proxy-priority-admission");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "h1-fast-proxy-priority-admission");
+  let mut config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("config should parse");
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(2);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  config.circuit_breakers.route_defaults.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.route_defaults.max_pending_requests = CapacitySetting::Fixed(0);
+  config.validate().expect("config should validate");
+  let route = config.routes[0].name.clone();
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+
+  let first = admission::admit(&snapshot, PriorityClass::Default, &route)
+    .await
+    .expect("first fast-path request should acquire both leases");
+  assert!(
+    admission::admit(&snapshot, PriorityClass::Default, &route)
+      .await
+      .is_none(),
+    "route capacity must reject fast-path work even while global capacity remains"
+  );
+  drop(first);
+  assert!(
+    admission::admit(&snapshot, PriorityClass::Default, &route)
+      .await
+      .is_some(),
+    "dropping fast-path leases must restore both priority and route capacity"
   );
 }
 

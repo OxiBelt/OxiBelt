@@ -7,6 +7,13 @@
 use anyhow::bail;
 use serde::{Deserialize, Deserializer};
 
+mod priority;
+
+pub use priority::{
+  CircuitBreakerPriorityClassConfig, CircuitBreakerPriorityConfig, PriorityRejectionPolicy,
+};
+pub(crate) use priority::{PriorityClassPolicy, max_class_requests};
+
 /// A finite capacity or a process-local value resolved from available resources.
 ///
 /// TOML accepts either a positive integer or the string `"auto"`. Pending
@@ -359,6 +366,8 @@ pub struct CircuitBreakersConfig {
   pub retry_budget: CircuitBreakerRetryBudgetConfig,
   #[serde(default)]
   pub failure: CircuitBreakerFailureConfig,
+  #[serde(default)]
+  pub priority: CircuitBreakerPriorityConfig,
 }
 
 impl Default for CircuitBreakersConfig {
@@ -372,6 +381,7 @@ impl Default for CircuitBreakersConfig {
       pool_defaults: CircuitBreakerScopeConfig::default(),
       retry_budget: CircuitBreakerRetryBudgetConfig::default(),
       failure: CircuitBreakerFailureConfig::default(),
+      priority: CircuitBreakerPriorityConfig::default(),
     }
   }
 }
@@ -392,7 +402,10 @@ impl CircuitBreakersConfig {
       .pool_defaults
       .validate("circuit_breakers.pool_defaults")?;
     self.retry_budget.validate()?;
-    self.failure.validate()
+    self.failure.validate()?;
+    self
+      .priority
+      .validate(self.global.max_active_requests.fixed())
   }
 }
 

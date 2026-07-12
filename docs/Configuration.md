@@ -1057,7 +1057,7 @@ metrics_connections = 4
 metrics_requests = 4
 ```
 
-Each optional active-work threshold must be configured as a soft/hard pair with `0 < soft < hard`. Ratios require `0 < soft < hard <= 1`; a `compression_level_cap` must be `0..9` (`0` leaves compression effort unchanged); retry multipliers are finite values in `0..=1`; and hard response status must be `5xx`. `0` WAF/decompression caps select an automatic CPU-sized bound. When overload protection is enabled, `reserved_capacity` bounds dedicated Admin, health, and metrics listener slots separately from public admission, and its file-descriptor reserve is included in the public FD-pressure calculation. It is never granted from client-selected route metadata.
+Each optional active-work threshold must be configured as a soft/hard pair with `0 < soft < hard`. Ratios require `0 < soft < hard <= 1`; a `compression_level_cap` must be `0..9` (`0` leaves compression effort unchanged); retry multipliers are finite values in `0..=1`; and hard response status must be `5xx`. `0` WAF/decompression caps select an automatic CPU-sized bound. `reserved_capacity` always bounds dedicated Admin, health, and metrics listener slots separately from public admission, including when `[overload].enabled = false`; its file-descriptor reserve is included in the public FD-pressure calculation. It is never granted from client-selected route metadata.
 
 Hard overload rejects new public TCP/QUIC connections and HTTP streams/requests with the configured generic response. HTTP/1 responses include `Connection: close`; HTTP/2 and HTTP/3 do not. Known oversized bodies are rejected, and unknown-length bodies are conservatively rejected before body reads. Hard overload can set an independent recoverable lifecycle drain; it never clears an Admin or shutdown drain. Health responses always include `X-OxiBelt-Overload-State`; configured hard overload returns readiness `503` with `Retry-After` while liveness remains available.
 
@@ -1112,9 +1112,28 @@ open_timeout = "1s"
 max_open_timeout = "30s"
 half_open_max_probes = 1
 half_open_successes = 2
+
+[circuit_breakers.priority]
+enabled = true
+
+[[circuit_breakers.priority.classes]]
+name = "security_callback"
+reserved_requests = 8
+max_share = 0.50
+max_pending_requests = 8
+pending_queue_timeout = "50ms"
+rejection_policy = "queue" # queue | reject
 ```
 
 `"auto"` resolves once per process from cgroup CPU quota/cpuset, cgroup memory, file-descriptor limits, and the configured body buffers. In Kubernetes, OxiBelt uses projected CPU and memory requests only when the container has no corresponding hard cgroup limit. The global request default is CPU and memory bounded; route and pool defaults are smaller intersections, so an individual dependency cannot consume all process capacity. Limits are per Pod, not cluster-wide; add replicas to increase aggregate capacity. `max_pending_requests = 0` disables waiting and rejects immediately. Configured route names and pool names are the only scope labels exported to Prometheus; paths, hosts, clients, URLs, and raw errors are never labels.
+
+### Priority Classes and Reserved Capacity
+
+`[circuit_breakers.priority]` applies a fixed-vocabulary priority scheduler to the global downstream request limit. The supported classes are `admin`, `health`, `security_callback`, `interactive`, `default`, `background`, and `crawler`; a route receives its class only from its own `priority_class` configuration. By default, `background` is capped at `50%` of the global request capacity and `crawler` at `25%`; both reject immediately instead of queueing. Other classes can use the whole class-share cap and inherit the bounded global queue. This preserves at least one class of shared capacity because the combined `background` and `crawler` maximum shares must remain below `1`.
+
+Each `[[circuit_breakers.priority.classes]]` entry may override one fixed class. `max_share` is a finite fraction in `(0, 1]`; `max_pending_requests` accepts a non-negative integer or `"auto"`; `pending_queue_timeout` bounds only that class's wait; and `rejection_policy = "reject"` forbids a positive class queue. The scheduler keeps FIFO order within each class lane and selects the oldest admissible shared waiter across classes, while an authenticated waiter can use an available dedicated reservation. This prevents a blocked route or low-priority class from starving compatible traffic.
+
+`reserved_requests` is strict and non-borrowable: all configured reservations are removed from the public shared request pool, and validation requires at least one shared slot plus a reservation no larger than that class's `max_share`. A public request can use a reservation only after its selected route independently succeeds local IPM authorization or matches a verified TCP TLS client-certificate rule. Route labels, route names, and client-controlled `Priority` headers never grant a reservation. QUIC/HTTP/3 does not expose peer client-certificate metadata to this matcher, so HTTP/3 reservation eligibility is IPM-only. `admin` and `health` route classes may not reserve public request slots; their separately bounded listener connection/request slots, together with metrics capacity, remain under `[overload.reserved_capacity]` even when pressure sampling is disabled.
 
 The failure circuit is applied to upstream-backed route and pool attempts while existing per-server passive health and outlier ejection remain separate. A circuit opens after either `consecutive_failures` or the rolling `failure_ratio` once `minimum_requests` are present, then permits only `half_open_max_probes` after the open interval. Successful probes close it after `half_open_successes`; failed probes reopen it with capped backoff. Downstream cancellation is neutral. Retry backoff, queueing, and every attempt consume the request's upstream deadline. When breakers are enabled and retry itself is enabled, omitted legacy zero-backoff settings resolve to a bounded jittered `25ms`–`250ms` backoff; disable the breaker explicitly to retain historical zero-backoff retry behavior.
 
@@ -2948,7 +2967,7 @@ Fields:
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 - `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
-- `priority_class`: trusted configuration-assigned overload class. It defaults to `default`. P1 overload shedding acts only on `background` and `crawler`; `admin`, `health`, `security_callback`, and `interactive` are accepted stable labels but do not create public-listener reservations. Never derive this value from a client header or route name.
+- `priority_class`: trusted configuration-assigned admission and overload class. It defaults to `default`. Soft overload shedding acts only on `background` and `crawler`; priority admission additionally caps `background` at `50%` and `crawler` at `25%` by default. A label alone never grants reserved request capacity: the selected route must independently pass local IPM authorization or match a verified TCP TLS client certificate. `admin` and `health` never create public-listener reservations; their capacity belongs to the dedicated listener controls. Never derive this value from a client header or route name, and ignore HTTP `Priority` for admission.
 - `waf.http_body_compression`: optional route override for compressed HTTP request/response bodies before WAF body inspection. `inherit` uses the global setting, `off` disables the transform for the route, and `transform` enables it for that route.
 
 Route path values must start with `/` and must not contain control characters, backslashes, query strings, fragments, dot segments, or encoded dot/slash separators such as `%2e`, `%2f`, or `%5c`.

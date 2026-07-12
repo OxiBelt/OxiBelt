@@ -1,5 +1,6 @@
 //! Shared admission state types kept separate from the hot runtime methods.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::circuit::FailureCircuit;
@@ -257,4 +258,74 @@ pub(super) struct RetryBudget {
   pub(super) max: usize,
   pub(super) queue: usize,
   pub(super) timeout: Duration,
+}
+
+/// RAII admission permit. Dropping it releases every composite resource slot.
+pub struct AdmissionLease {
+  runtime: Option<Arc<super::runtime::CircuitBreakerRuntime>>,
+  allocations: Vec<Allocation>,
+  probes: Vec<ScopeKey>,
+  priority: Option<super::priority::PriorityLease>,
+  outcome: CircuitOutcome,
+}
+
+impl std::fmt::Debug for AdmissionLease {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("AdmissionLease")
+      .field("enabled", &self.runtime.is_some())
+      .finish_non_exhaustive()
+  }
+}
+
+impl AdmissionLease {
+  pub(super) fn disabled() -> Self {
+    Self {
+      runtime: None,
+      allocations: Vec::new(),
+      probes: Vec::new(),
+      priority: None,
+      outcome: CircuitOutcome::Neutral,
+    }
+  }
+
+  pub(super) fn enabled(
+    runtime: Arc<super::runtime::CircuitBreakerRuntime>,
+    allocations: Vec<Allocation>,
+    probes: Vec<ScopeKey>,
+  ) -> Self {
+    Self {
+      runtime: Some(runtime),
+      allocations,
+      probes,
+      priority: None,
+      outcome: CircuitOutcome::Neutral,
+    }
+  }
+
+  pub(super) fn enabled_with_priority(
+    runtime: Arc<super::runtime::CircuitBreakerRuntime>,
+    allocations: Vec<Allocation>,
+    priority: super::priority::PriorityLease,
+  ) -> Self {
+    Self {
+      runtime: Some(runtime),
+      allocations,
+      probes: Vec::new(),
+      priority: Some(priority),
+      outcome: CircuitOutcome::Neutral,
+    }
+  }
+
+  pub fn record_outcome(&mut self, outcome: CircuitOutcome) {
+    self.outcome = outcome;
+  }
+}
+
+impl Drop for AdmissionLease {
+  fn drop(&mut self) {
+    if let Some(runtime) = self.runtime.take() {
+      runtime.release(&self.allocations, &self.probes, self.priority, self.outcome);
+    }
+  }
 }

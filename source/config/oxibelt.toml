@@ -964,6 +964,20 @@ max_open_timeout_ms = 30000
 half_open_max_probes = 1
 half_open_successes = 2
 
+# Priority admission reserves are strict and require trusted local IPM or a
+# verified TCP mTLS route match. Low-priority defaults cap `background` at 50%
+# and `crawler` at 25%; public routes never obtain a reserve from HTTP headers.
+[circuit_breakers.priority]
+enabled = true
+
+# [[circuit_breakers.priority.classes]]
+# name = "security_callback"
+# reserved_requests = 8
+# max_share = 0.50
+# max_pending_requests = 8
+# pending_queue_timeout_ms = 50
+# rejection_policy = "queue" # queue | reject
+
 [security.headers]
 hsts = false
 hsts_max_age_seconds = 31536000

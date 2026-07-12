@@ -98,6 +98,7 @@ impl CircuitBreakerRuntime {
         }
       }
     }
+    state.priority.append_prometheus(output);
   }
 }
 
