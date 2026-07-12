@@ -4,17 +4,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::failure_policy::{BackendFailureBinding, BackendFailureRegistry};
 use super::redis_pool::RedisPool;
 use super::runtime::{BackendRuntime, CleanupDispatcher};
 use super::{Backend, MemoryBackend, RedisBackend, SharedState};
 use crate::config::{
   CryptoConfig, RedisPlaintextPolicy, SharedStateBackendConfig, SharedStateBackendKind,
+  SharedStateFailurePolicies,
 };
 use crate::metrics::Metrics;
 
 impl SharedState {
   pub fn test_memory(namespace: &str) -> Arc<Self> {
+    Self::test_memory_with_failure_policies(namespace, SharedStateFailurePolicies::default())
+  }
+
+  pub(crate) fn test_memory_with_failure_policies(
+    namespace: &str,
+    policies: SharedStateFailurePolicies,
+  ) -> Arc<Self> {
     let backend = Arc::new(Backend::Memory(MemoryBackend::default()));
+    let failure_registry = Arc::new(BackendFailureRegistry::new(
+      &policies,
+      [
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+      ],
+      Metrics::new(),
+    ));
     Arc::new(Self {
       namespace: Arc::from(namespace),
       instance_id: Arc::from("test-instance"),
@@ -35,8 +57,21 @@ impl SharedState {
       sticky_sessions: Some(backend.clone()),
       cache: Some(backend.clone()),
       reload: Some(backend),
+      failure_registry,
       cleanup: CleanupDispatcher::new(),
     })
+  }
+
+  pub(crate) fn test_fail_next_rate_limit(&self) {
+    if let Some(Backend::Memory(memory)) = self.rate_limits.as_deref() {
+      memory.inject_failure_once();
+    }
+  }
+
+  pub(crate) fn test_fail_next_connection_limit(&self) {
+    if let Some(Backend::Memory(memory)) = self.connection_limits.as_deref() {
+      memory.inject_failure_once();
+    }
   }
 
   pub(crate) fn test_memory_with_enumeration_limits(
@@ -86,10 +121,28 @@ impl SharedState {
         metrics.clone(),
       )
       .expect("test Redis pool should build"),
-      runtime: BackendRuntime::new(&config, "redis", Duration::from_millis(250), metrics),
+      runtime: BackendRuntime::new(
+        &config,
+        "redis",
+        Duration::from_millis(250),
+        metrics.clone(),
+      ),
     }));
     let mut backends = HashMap::new();
     backends.insert(config.name.clone(), backend.clone());
+    let failure_registry = Arc::new(BackendFailureRegistry::new(
+      &SharedStateFailurePolicies::default(),
+      [
+        BackendFailureBinding::from_backend(None),
+        BackendFailureBinding::from_backend(None),
+        BackendFailureBinding::from_backend(person_proof.then_some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(None),
+        BackendFailureBinding::from_backend(cache.then_some(backend.as_ref())),
+        BackendFailureBinding::from_backend(None),
+      ],
+      metrics,
+    ));
     Arc::new(Self {
       namespace: Arc::from(namespace),
       instance_id: Arc::from("test-instance"),
@@ -110,6 +163,7 @@ impl SharedState {
       sticky_sessions: None,
       cache: cache.then_some(backend.clone()),
       reload: None,
+      failure_registry,
       cleanup: CleanupDispatcher::new(),
     })
   }

@@ -49,6 +49,41 @@ shared_state_delay_timeout_metric_present() {
   jq -r '.body' <<<"${response}" | grep -F "${metric}" | grep -F 'backend="cluster"' | grep -F "kind=\"${backend_kind}\"" | grep -F 'outcome="timeout"' >/dev/null
 }
 
+shared_state_delay_assert_failure_policy_observability() {
+  local response="$1"
+  local backend_kind="$2"
+  local metrics
+  metrics="$(jq -r '.body' <<<"${response}")"
+  if ! grep -F 'oxibelt_backend_feature_degraded{' <<<"${metrics}" \
+    | grep -F 'feature="connection_limits"' \
+    | grep -F 'backend="cluster"' \
+    | grep -F "kind=\"${backend_kind}\"" \
+    | grep -F 'mode="reject_new_only"' \
+    | grep -F ' 1' >/dev/null; then
+    printf '%s\n' "${metrics}" >&2
+    fail_with_diagnostics "expected degraded connection-limit backend policy metric after delay"
+  fi
+  if ! grep -F 'oxibelt_backend_failure_policy_applied_total{' <<<"${metrics}" \
+    | grep -F 'feature="connection_limits"' \
+    | grep -F 'backend="cluster"' \
+    | grep -F "kind=\"${backend_kind}\"" \
+    | grep -F 'mode="reject_new_only"' \
+    | grep -F 'failure_kind="operation_error"' >/dev/null; then
+    printf '%s\n' "${metrics}" >&2
+    fail_with_diagnostics "expected bounded backend failure-policy counter after delay"
+  fi
+}
+
+shared_state_delay_assert_backend_status() {
+  local response="$1"
+  local expected="$2"
+  if ! jq -e --arg expected "${expected}" \
+    '.headers["x-oxibelt-backend-status"] == $expected' <<<"${response}" >/dev/null; then
+    printf '%s\n' "${response}" >&2
+    fail_with_diagnostics "expected x-oxibelt-backend-status=${expected}"
+  fi
+}
+
 shared_state_delay_launch_requests() {
   local output_path="$1"
   docker exec "${http_container}" sh -ceu '
@@ -258,6 +293,10 @@ run_shared_state_delay_isolation() {
   done
   shared_state_delay_assert_metrics_during_delay "${metrics_response}" "${backend_kind}"
   shared_state_delay_wait_for_requests "${delayed_requests_log}"
+  metrics_response="$(shared_state_delay_probe 9090 ops.test /metrics)" || fail_with_diagnostics "metrics endpoint did not remain responsive after shared-state failure"
+  shared_state_delay_assert_failure_policy_observability "${metrics_response}" "${backend_kind}"
+  live_response="$(shared_state_delay_probe 9091 ops.test /live)" || fail_with_diagnostics "live endpoint did not remain responsive after shared-state failure"
+  shared_state_delay_assert_backend_status "${live_response}" "degraded"
   if [[ -n "${resume_callback}" && "${resume_phase}" == "before_post_delay_metrics" ]]; then
     shared_state_delay_resume_backend "${resume_callback}"
   fi
@@ -266,4 +305,6 @@ run_shared_state_delay_isolation() {
     shared_state_delay_resume_backend "${resume_callback}"
   fi
   shared_state_delay_assert_recovery
+  live_response="$(shared_state_delay_probe 9091 ops.test /live)" || fail_with_diagnostics "live endpoint did not remain responsive after shared-state recovery"
+  shared_state_delay_assert_backend_status "${live_response}" "healthy"
 }

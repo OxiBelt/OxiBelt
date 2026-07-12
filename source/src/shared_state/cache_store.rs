@@ -3,15 +3,14 @@
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 use std::path::Path;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::warn;
 
 use crate::cache::{CacheEntry, CacheLookup, Revalidation, StaleEntry};
 
 use super::{
-  Backend, CleanupDispatcher, SharedCacheEntry, SharedState, SharedVaryMatcher, now_unix_ms,
-  random_hex,
+  Backend, SharedCacheEntry, SharedCacheLock, SharedState, SharedStateFeature, SharedVaryMatcher,
+  now_unix_ms, random_hex,
 };
 
 impl SharedState {
@@ -30,7 +29,7 @@ impl SharedState {
     background_refresh: bool,
     max_vary_variants: usize,
   ) -> anyhow::Result<Option<CacheLookup>> {
-    tokio::time::timeout(
+    let result = match tokio::time::timeout(
       self.operation_timeout,
       self.cache_lookup_inner(
         policy,
@@ -47,7 +46,12 @@ impl SharedState {
       ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("shared cache lookup enumeration timed out"))?
+    {
+      Ok(result) => result,
+      Err(_) => Err(anyhow::anyhow!("shared cache lookup enumeration timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
+    result
   }
   #[allow(clippy::too_many_arguments)]
   async fn cache_lookup_inner(
@@ -288,6 +292,7 @@ impl SharedState {
       }
       None => self.cache_put_inner(backend, entry).await,
     };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
     if let Err(error) = result {
       warn!(error = %error, "failed to write shared cache entry");
     }
@@ -437,20 +442,21 @@ impl SharedState {
     let backend = backend.clone();
     let key = self.key(&format!("cache:lock:{fill_key}"));
     let token = random_hex(16)?;
-    match backend
+    let result = match backend
       .put_if_absent(&key, token.as_bytes(), Some(self.cache_lock))
       .await
     {
-      Ok(true) => Ok(Some(SharedCacheLock {
+      Ok(true) => Ok(Some(SharedCacheLock::new(
         backend,
         key,
         token,
-        cleanup: self.cleanup.clone(),
-        released: false,
-      })),
+        self.cleanup.clone(),
+      ))),
       Ok(false) => Ok(None),
       Err(error) => Err(error.context("failed to acquire shared cache fill lock")),
-    }
+    };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
+    result
   }
 
   pub async fn cache_purge_exact(
@@ -572,9 +578,12 @@ impl SharedState {
       backend.record_enumeration("cache_purge", "cap_exhausted", 1);
       anyhow::bail!("shared cache purge enumeration reached its configured scan-round limit")
     };
-    tokio::time::timeout(self.operation_timeout, operation)
-      .await
-      .map_err(|_| anyhow::anyhow!("shared cache purge enumeration timed out"))?
+    let result = match tokio::time::timeout(self.operation_timeout, operation).await {
+      Ok(result) => result,
+      Err(_) => Err(anyhow::anyhow!("shared cache purge enumeration timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
+    result
   }
 
   async fn shared_cache_entry_to_cache_entry(
@@ -621,36 +630,6 @@ impl SharedState {
 async fn delete_shared_chunks(backend: &Backend, chunks: &[String]) {
   for chunk_key in chunks {
     let _ = backend.delete(chunk_key).await;
-  }
-}
-
-#[derive(Debug)]
-pub struct SharedCacheLock {
-  backend: Arc<Backend>,
-  key: String,
-  token: String,
-  cleanup: Arc<CleanupDispatcher>,
-  released: bool,
-}
-
-impl SharedCacheLock {
-  pub async fn unlock(&mut self) -> anyhow::Result<()> {
-    if self.released {
-      return Ok(());
-    }
-    self.backend.unlock(&self.key, &self.token).await?;
-    self.released = true;
-    Ok(())
-  }
-}
-
-impl Drop for SharedCacheLock {
-  fn drop(&mut self) {
-    if !self.released {
-      self
-        .cleanup
-        .defer_unlock(self.backend.clone(), self.key.clone(), self.token.clone());
-    }
   }
 }
 

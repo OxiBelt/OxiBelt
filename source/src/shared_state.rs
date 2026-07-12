@@ -6,6 +6,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -23,8 +25,10 @@ use crate::limits::ParsedRate;
 use crate::metrics::Metrics;
 
 mod atomic_updates;
+mod cache_lock;
 mod cache_store;
 mod enumeration;
+mod failure_policy;
 mod feature_flags;
 mod person_proof;
 mod rate_limits;
@@ -39,11 +43,14 @@ mod sticky_sessions;
 #[cfg(test)]
 mod test_support;
 
+use failure_policy::{BackendFailureBinding, BackendFailureRegistry};
 use redis_pool::RedisPool;
 use redis_protocol::{Resp, expect_ok};
 use runtime::{BackendRuntime, CleanupDispatcher, SharedPoolWarningLimiter};
 
-pub use cache_store::{SharedCacheLock, shared_header_values};
+pub use cache_lock::SharedCacheLock;
+pub use cache_store::shared_header_values;
+pub(crate) use failure_policy::{BackendFeatureFailureStatus, SharedStateFeature};
 pub use person_proof::{
   PersonProofSharedClearance, PersonProofSharedClearancePage, PersonProofSharedStatus,
 };
@@ -66,6 +73,7 @@ pub struct SharedState {
   sticky_sessions: Option<Arc<Backend>>,
   cache: Option<Arc<Backend>>,
   reload: Option<Arc<Backend>>,
+  failure_registry: Arc<BackendFailureRegistry>,
   cleanup: Arc<CleanupDispatcher>,
 }
 
@@ -96,6 +104,7 @@ struct MemoryBackend {
   counters: Arc<Mutex<HashMap<String, MemoryCounter>>>,
   leases: Arc<Mutex<HashMap<String, MemoryLease>>>,
   rate_indexes: Arc<Mutex<HashMap<String, HashMap<String, i64>>>>,
+  fail_next_operation: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -319,6 +328,19 @@ impl SharedState {
     let sticky_sessions = pick(&shared.sticky_sessions_backend);
     let cache = pick(&shared.cache_backend);
     let reload = pick(&shared.reload_backend);
+    let failure_registry = Arc::new(BackendFailureRegistry::new(
+      &shared.failure_policies,
+      [
+        BackendFailureBinding::from_backend(rate_limits.as_deref()),
+        BackendFailureBinding::from_backend(connection_limits.as_deref()),
+        BackendFailureBinding::from_backend(person_proof.as_deref()),
+        BackendFailureBinding::from_backend(upstream_health.as_deref()),
+        BackendFailureBinding::from_backend(sticky_sessions.as_deref()),
+        BackendFailureBinding::from_backend(cache.as_deref()),
+        BackendFailureBinding::from_backend(reload.as_deref()),
+      ],
+      metrics,
+    ));
     let state = Arc::new(Self {
       namespace: Arc::from(shared.namespace.as_str()),
       instance_id: Arc::from(instance_id),
@@ -339,6 +361,7 @@ impl SharedState {
       sticky_sessions,
       cache,
       reload,
+      failure_registry,
       cleanup: CleanupDispatcher::new(),
     });
     state.record_reload_generation(config).await;
@@ -385,6 +408,41 @@ impl SharedState {
     &self.instance_id
   }
 
+  pub(crate) fn backend_failure_mode(
+    &self,
+    feature: SharedStateFeature,
+  ) -> crate::config::BackendFailureMode {
+    self.failure_registry.mode(feature)
+  }
+
+  pub(crate) fn record_backend_local_fallback(&self, feature: SharedStateFeature) {
+    self.failure_registry.record_local_fallback(feature);
+  }
+
+  pub(crate) fn record_backend_stale_snapshot(&self, feature: SharedStateFeature) {
+    self.failure_registry.record_stale_snapshot(feature);
+  }
+
+  pub(crate) fn backend_failure_status(&self) -> &'static str {
+    if self.failure_registry.is_degraded() {
+      "degraded"
+    } else {
+      "healthy"
+    }
+  }
+
+  pub(crate) fn backend_failure_statuses(&self) -> Vec<BackendFeatureFailureStatus> {
+    self.failure_registry.statuses()
+  }
+
+  fn observe_backend_result<T>(&self, feature: SharedStateFeature, result: &anyhow::Result<T>) {
+    if result.is_ok() {
+      self.failure_registry.record_success(feature);
+    } else {
+      self.failure_registry.record_failure(feature);
+    }
+  }
+
   pub async fn take_rate_token(
     &self,
     name: &str,
@@ -398,7 +456,7 @@ impl SharedState {
     };
     let bucket_key = self.key(&format!("rate:{name}:{key}"));
     let index_key = self.key(&format!("rate-index:{name}"));
-    backend
+    let result = backend
       .rate_take(
         &index_key,
         &bucket_key,
@@ -407,7 +465,9 @@ impl SharedState {
         max_buckets.max(1),
         rate_bucket_ttl(rate, burst),
       )
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::RateLimits, &result);
+    result
   }
 
   pub async fn take_rate_token_bucket(
@@ -420,14 +480,16 @@ impl SharedState {
       return Ok(SharedRateLimitOutcome::Allowed);
     };
     let key = self.key(&format!("rate:{bucket}"));
-    backend
+    let result = backend
       .rate_take_bucket(
         &key,
         rate.per_second(),
         burst.max(1),
         rate_bucket_ttl(rate, burst),
       )
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::RateLimits, &result);
+    result
   }
 
   pub(crate) async fn acquire_connections(
@@ -451,7 +513,7 @@ impl SharedState {
       connection_lease_fingerprint(&keys, &limits, self.connection_lease),
       keys,
     );
-    match backend
+    let result = match backend
       .connection_acquire(&lease.keys, &limits, self.connection_lease, &lease)
       .await
     {
@@ -463,7 +525,9 @@ impl SharedState {
           .defer_connection_release(backend.clone(), lease);
         Err(error)
       }
-    }
+    };
+    self.observe_backend_result(SharedStateFeature::ConnectionLimits, &result);
+    result
   }
 
   pub(crate) async fn release_connections(&self, lease: SharedCounterLease) {
@@ -473,7 +537,9 @@ impl SharedState {
     let Some(backend) = &self.connection_limits else {
       return;
     };
-    if let Err(error) = backend.connection_release(&lease).await {
+    let result = backend.connection_release(&lease).await;
+    self.observe_backend_result(SharedStateFeature::ConnectionLimits, &result);
+    if let Err(error) = result {
       warn!(error = %error, "failed to release shared connection limits");
       self
         .cleanup
@@ -486,7 +552,9 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key(&format!("pool:health:{upstream_name}"));
-    Ok(backend.health_get(&key).await?.map(|record| record.healthy))
+    let result = backend.health_get(&key).await;
+    self.observe_backend_result(SharedStateFeature::UpstreamHealth, &result);
+    Ok(result?.map(|record| record.healthy))
   }
 
   pub(crate) fn should_log_pool_warning(&self) -> bool {
@@ -505,17 +573,17 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key(&format!("pool:health:{upstream_name}"));
-    Ok(Some(
-      backend
-        .health_report(
-          &key,
-          success,
-          enabled,
-          healthy_threshold,
-          unhealthy_threshold,
-        )
-        .await?,
-    ))
+    let result = backend
+      .health_report(
+        &key,
+        success,
+        enabled,
+        healthy_threshold,
+        unhealthy_threshold,
+      )
+      .await;
+    self.observe_backend_result(SharedStateFeature::UpstreamHealth, &result);
+    Ok(Some(result?))
   }
 
   pub async fn pool_active(&self, upstream_name: &str) -> anyhow::Result<Option<usize>> {
@@ -523,7 +591,9 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key(&format!("pool:active:{upstream_name}"));
-    Ok(Some(backend.counter_get(&key).await?))
+    let result = backend.counter_get(&key).await;
+    self.observe_backend_result(SharedStateFeature::UpstreamHealth, &result);
+    Ok(Some(result?))
   }
 
   pub async fn pool_active_add(
@@ -535,11 +605,11 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key(&format!("pool:active:{upstream_name}"));
-    Ok(Some(
-      backend
-        .counter_add(&key, delta, Some(self.connection_lease))
-        .await?,
-    ))
+    let result = backend
+      .counter_add(&key, delta, Some(self.connection_lease))
+      .await;
+    self.observe_backend_result(SharedStateFeature::UpstreamHealth, &result);
+    Ok(Some(result?))
   }
 
   /// Acquires one lease-backed shared active-count slot for an upstream.
@@ -561,7 +631,7 @@ impl SharedState {
       counter_lease_fingerprint(&key, self.connection_lease),
       vec![key.clone()],
     );
-    match backend
+    let result = match backend
       .counter_lease_acquire(&key, self.connection_lease, &lease)
       .await
     {
@@ -574,7 +644,9 @@ impl SharedState {
         );
         Err(error)
       }
-    }
+    };
+    self.observe_backend_result(SharedStateFeature::UpstreamHealth, &result);
+    result
   }
 
   pub async fn record_reload_generation(&self, config: &Config) {
@@ -584,10 +656,11 @@ impl SharedState {
     let key = self.key(&format!("reload:instance:{}", self.instance_id));
     let hash = config_hash(config);
     let value = format!("{}:{}", now_unix_ms(), hash);
-    if let Err(error) = backend
+    let result = backend
       .put(&key, value.as_bytes(), Some(Duration::from_secs(300)))
-      .await
-    {
+      .await;
+    self.observe_backend_result(SharedStateFeature::Reload, &result);
+    if let Err(error) = result {
       warn!(error = %error, "failed to write shared reload generation heartbeat");
     }
   }
@@ -723,6 +796,15 @@ impl Backend {
     }
   }
 
+  fn failure_identity(&self) -> (Arc<str>, &'static str) {
+    match self {
+      Self::Redis(redis) => (redis.runtime.name.clone(), redis.runtime.kind),
+      Self::Postgres(postgres) => (postgres.runtime.name.clone(), postgres.runtime.kind),
+      #[cfg(test)]
+      Self::Memory(_) => (Arc::from("memory"), "memory"),
+    }
+  }
+
   fn operation_timeout(&self) -> Option<Duration> {
     self.runtime().map(|runtime| runtime.operation_timeout)
   }
@@ -775,14 +857,19 @@ impl Backend {
           .await
       }
       #[cfg(test)]
-      Self::Memory(memory) => memory.rate_take(
-        limit_name,
-        key,
-        rate_per_second,
-        burst,
-        max_buckets,
-        bucket_ttl,
-      ),
+      Self::Memory(memory) => {
+        if memory.take_forced_failure() {
+          bail!("injected shared-state memory backend failure");
+        }
+        memory.rate_take(
+          limit_name,
+          key,
+          rate_per_second,
+          burst,
+          max_buckets,
+          bucket_ttl,
+        )
+      }
     }
   }
 
@@ -810,7 +897,12 @@ impl Backend {
           .await
       }
       #[cfg(test)]
-      Self::Memory(memory) => memory.rate_take_bucket(key, rate_per_second, burst, bucket_ttl),
+      Self::Memory(memory) => {
+        if memory.take_forced_failure() {
+          bail!("injected shared-state memory backend failure");
+        }
+        memory.rate_take_bucket(key, rate_per_second, burst, bucket_ttl)
+      }
     }
   }
 
@@ -838,7 +930,12 @@ impl Backend {
           .await
       }
       #[cfg(test)]
-      Self::Memory(memory) => memory.connection_acquire_atomic(keys, limits, ttl, lease),
+      Self::Memory(memory) => {
+        if memory.take_forced_failure() {
+          bail!("injected shared-state memory backend failure");
+        }
+        memory.connection_acquire_atomic(keys, limits, ttl, lease)
+      }
     }
   }
 
@@ -1145,6 +1242,14 @@ impl Backend {
 
 #[cfg(test)]
 impl MemoryBackend {
+  fn inject_failure_once(&self) {
+    self.fail_next_operation.store(true, Ordering::Release);
+  }
+
+  fn take_forced_failure(&self) -> bool {
+    self.fail_next_operation.swap(false, Ordering::AcqRel)
+  }
+
   fn get_or_init_bytes(
     &self,
     key: &str,

@@ -101,8 +101,9 @@ pub use route_static_files::*;
 pub use runtime_hardening::*;
 pub use security_headers::*;
 pub use shared_state::{
-  RedisAuthConfig, RedisPlaintextPolicy, RedisPoolConfig, RedisTlsConfig, RedisTrustStore,
-  SharedStateBackendConfig, SharedStateBackendKind, SharedStateConfig,
+  BackendFailureMode, RedisAuthConfig, RedisPlaintextPolicy, RedisPoolConfig, RedisTlsConfig,
+  RedisTrustStore, SharedStateBackendConfig, SharedStateBackendKind, SharedStateConfig,
+  SharedStateFailurePolicies,
 };
 pub(crate) use shared_state::{
   RedisPoolSettings, default_shared_state_namespace, validate_redis_connection_url,
@@ -3287,6 +3288,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "enabled",
       "enumeration_max_items_per_operation",
       "enumeration_page_size",
+      "failure_policies",
       "instance_id_env",
       "namespace",
       "operation_timeout_ms",
@@ -3297,6 +3299,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "reload_backend",
       "sticky_sessions_backend",
       "upstream_health_backend",
+    ][..],
+    "shared_state.failure_policies" => &[
+      "cache",
+      "connection_limits",
+      "person_proof",
+      "rate_limits",
+      "reload",
+      "sticky_sessions",
+      "upstream_health",
     ][..],
     "shared_state.backends" => &[
       "connect_timeout_ms",

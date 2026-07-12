@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 use anyhow::bail;
 use http::HeaderValue;
 
-use crate::config::UpstreamPoolConfig;
+use crate::config::{BackendFailureMode, UpstreamPoolConfig};
 use crate::metrics::Metrics;
-use crate::shared_state::SharedState;
+use crate::shared_state::{SharedState, SharedStateFeature};
 
 use super::{PoolRuntime, PoolSelection, PoolState, now_millis, set_server_health};
 
@@ -42,6 +42,11 @@ impl PoolState {
         }
         Ok(None) => {}
         Err(error) => {
+          if shared.backend_failure_mode(SharedStateFeature::StickySessions)
+            == BackendFailureMode::LocalFallback
+          {
+            shared.record_backend_local_fallback(SharedStateFeature::StickySessions);
+          }
           tracing::warn!(pool = %pool.config.name, error = %error, "failed to load shared sticky session secret");
         }
       }
@@ -94,9 +99,10 @@ impl PoolState {
         Ok(Some(lease)) => selection.shared_lease = Some(lease),
         Ok(None) => {}
         Err(error) if shared.should_log_pool_warning() => {
+          record_upstream_health_stale_snapshot(shared);
           tracing::warn!(error = %error, upstream = %selection.upstream_name, "failed to update shared upstream active count");
         }
-        Err(_) => {}
+        Err(_) => record_upstream_health_stale_snapshot(shared),
       }
     }
     Ok(selection)
@@ -138,6 +144,7 @@ impl PoolState {
       }
       Ok(None) => {}
       Err(error) => {
+        record_upstream_health_stale_snapshot(shared);
         if shared.should_log_pool_warning() {
           tracing::warn!(error = %error, upstream = %upstream_name, "failed to report shared upstream health");
         }
@@ -165,6 +172,7 @@ impl PoolState {
       let (server, health, active) = match result {
         Ok(result) => result,
         Err(error) => {
+          record_upstream_health_stale_snapshot(&shared);
           if shared.should_log_pool_warning() {
             tracing::warn!(error = %error, "shared upstream pool refresh task failed");
           }
@@ -175,6 +183,7 @@ impl PoolState {
         Ok(Some(healthy)) => set_server_health(&server, healthy, now_millis()),
         Ok(None) => {}
         Err(error) => {
+          record_upstream_health_stale_snapshot(&shared);
           if shared.should_log_pool_warning() {
             tracing::warn!(error = %error, upstream = %server.upstream_name, "failed to refresh shared upstream health");
           }
@@ -190,6 +199,14 @@ impl PoolState {
         }
       }
     }
+  }
+}
+
+fn record_upstream_health_stale_snapshot(shared: &SharedState) {
+  if shared.backend_failure_mode(SharedStateFeature::UpstreamHealth)
+    == BackendFailureMode::StaleSnapshot
+  {
+    shared.record_backend_stale_snapshot(SharedStateFeature::UpstreamHealth);
   }
 }
 

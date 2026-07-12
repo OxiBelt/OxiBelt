@@ -42,6 +42,15 @@ upstream_health_backend = "cluster"
 cache_backend = "cluster"
 reload_backend = "cluster"
 
+[shared_state.failure_policies]
+rate_limits = "fail_closed"
+connection_limits = "reject_new_only"
+person_proof = "fail_closed"
+upstream_health = "stale_snapshot"
+sticky_sessions = "local_fallback"
+cache = "local_fallback"
+reload = "fail_open"
+
 [[shared_state.backends]]
 name = "cluster"
 kind = "postgres"

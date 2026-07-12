@@ -100,6 +100,64 @@ impl Metrics {
       .enumeration(backend, kind, scope, event, count);
   }
 
+  pub(crate) fn register_backend_failure_feature(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    feature: &'static str,
+    mode: &'static str,
+  ) {
+    self.backend_failure.register(backend, kind, feature, mode);
+  }
+
+  pub(crate) fn record_backend_failure_policy(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    feature: &'static str,
+    mode: &'static str,
+    failure_kind: &'static str,
+  ) {
+    self
+      .backend_failure
+      .policy_applied(backend, kind, feature, mode, failure_kind);
+  }
+
+  pub(crate) fn record_backend_feature_recovery(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    feature: &'static str,
+    mode: &'static str,
+  ) {
+    self.backend_failure.recovered(backend, kind, feature, mode);
+  }
+
+  pub(crate) fn record_backend_local_fallback(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    feature: &'static str,
+    mode: &'static str,
+  ) {
+    self
+      .backend_failure
+      .local_fallback_entered(backend, kind, feature, mode);
+  }
+
+  pub(crate) fn record_backend_stale_snapshot_age(
+    &self,
+    backend: &str,
+    kind: &'static str,
+    feature: &'static str,
+    mode: &'static str,
+    age_seconds: u64,
+  ) {
+    self
+      .backend_failure
+      .stale_snapshot_age(backend, kind, feature, mode, age_seconds);
+  }
+
   pub(super) fn append_shared_state_prometheus(&self, output: &mut String) {
     self.shared_state.append_prometheus(output);
   }

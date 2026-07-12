@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::LimitKey;
+use crate::config::{BackendFailureMode, LimitKey, SharedStateFailurePolicies};
 use std::time::Duration;
 
 fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
@@ -166,6 +166,110 @@ async fn shared_state_enforces_rate_and_connection_limits_across_instances() {
       .await
       .is_ok()
   );
+}
+
+#[tokio::test]
+async fn shared_failure_local_fallback_is_bounded_and_recovers_without_replaying_state() {
+  let policies = SharedStateFailurePolicies {
+    rate_limits: BackendFailureMode::LocalFallback,
+    connection_limits: BackendFailureMode::LocalFallback,
+    ..SharedStateFailurePolicies::default()
+  };
+  let shared = SharedState::test_memory_with_failure_policies("limit-local-fallback", policies);
+  let state = LimitState::new(Some(shared.clone()));
+  let ip = "203.0.113.10".parse().unwrap();
+  let rate_limits = [rate_limit_config("fallback-rate", RateLimitKey::ClientIp)];
+
+  shared.test_fail_next_rate_limit();
+  assert_eq!(state.check_rate_limits_async(ip, &rate_limits).await, None);
+  assert_eq!(shared.backend_failure_status(), "degraded");
+
+  // The second injected backend failure uses the already-consumed bounded
+  // process-local token rather than replaying the failed distributed take.
+  shared.test_fail_next_rate_limit();
+  assert_eq!(
+    state.check_rate_limits_async(ip, &rate_limits).await,
+    Some(StatusCode::TOO_MANY_REQUESTS)
+  );
+
+  // A fresh backend decision recovers the feature independently of the local
+  // fallback bucket and clears the degraded status.
+  assert_eq!(state.check_rate_limits_async(ip, &rate_limits).await, None);
+  assert_eq!(shared.backend_failure_status(), "healthy");
+
+  let limits = LimitsConfig {
+    max_connections: 1,
+    max_connections_per_ip: 1,
+    ..LimitsConfig::default()
+  };
+  shared.test_fail_next_connection_limit();
+  let local_permit = state
+    .acquire_global_connection_async(&limits)
+    .await
+    .expect("local fallback should admit the first bounded connection");
+  drop(local_permit);
+
+  // The fallback permit never acquired a shared lease, so a recovered backend
+  // can admit exactly one fresh shared lease without a stale double count.
+  let mut shared_permit = state
+    .acquire_global_connection_async(&limits)
+    .await
+    .expect("recovered backend should admit a fresh lease");
+  shared_permit.release().await;
+
+  // Exercise every remaining policy through a deterministic failed token
+  // operation. Stale/reject modes remain conservative because the operation
+  // may have consumed a token before its failure was observed.
+  for (mode, expected) in [
+    (
+      BackendFailureMode::FailClosed,
+      Some(StatusCode::SERVICE_UNAVAILABLE),
+    ),
+    (BackendFailureMode::FailOpen, None),
+    (
+      BackendFailureMode::StaleSnapshot,
+      Some(StatusCode::SERVICE_UNAVAILABLE),
+    ),
+    (
+      BackendFailureMode::RejectNewOnly,
+      Some(StatusCode::SERVICE_UNAVAILABLE),
+    ),
+  ] {
+    let shared = SharedState::test_memory_with_failure_policies(
+      &format!("limit-policy-{}", mode.as_str()),
+      SharedStateFailurePolicies {
+        rate_limits: mode,
+        ..SharedStateFailurePolicies::default()
+      },
+    );
+    let state = LimitState::new(Some(shared.clone()));
+    shared.test_fail_next_rate_limit();
+    assert_eq!(
+      state.check_rate_limits_async(ip, &rate_limits).await,
+      expected
+    );
+    assert_eq!(shared.backend_failure_status(), "degraded");
+  }
+
+  // `reject_new_only` never disturbs an acquired lease and recovery creates a
+  // single fresh lease after the original holder releases it.
+  let shared = SharedState::test_memory("limit-reject-new-only");
+  let state = LimitState::new(Some(shared.clone()));
+  let mut existing = state
+    .acquire_global_connection_async(&limits)
+    .await
+    .expect("initial shared lease should be acquired");
+  shared.test_fail_next_connection_limit();
+  assert_eq!(
+    state.acquire_global_connection_async(&limits).await.err(),
+    Some(StatusCode::SERVICE_UNAVAILABLE)
+  );
+  existing.release().await;
+  let mut recovered = state
+    .acquire_global_connection_async(&limits)
+    .await
+    .expect("recovered backend should create one new lease");
+  recovered.release().await;
 }
 
 #[tokio::test]

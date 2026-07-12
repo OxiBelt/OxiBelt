@@ -1004,6 +1004,15 @@ cache_backend = "cluster"
 reload_backend = "cluster"
 dynamic_policy_backend = "cluster"
 
+[shared_state.failure_policies]
+rate_limits = "fail_closed"
+connection_limits = "reject_new_only"
+person_proof = "fail_closed"
+upstream_health = "stale_snapshot"
+sticky_sessions = "local_fallback"
+cache = "local_fallback"
+reload = "fail_open"
+
 [[shared_state.backends]]
 name = "cluster"
 kind = "redis" # redis | postgres
@@ -1031,6 +1040,22 @@ mode = "off" # off | verify_full, PostgreSQL only
 ```
 
 Shared state is opt-in. If it is disabled, features keep their local in-process behavior. When it is enabled, an omitted feature mapping uses `default_backend`, or the first configured backend when `default_backend` is not set. Backends are named, and each feature maps to one backend; OxiBelt does not mirror writes or fall back through backend chains. Exactly one of `connection_url` or `connection_url_env` is required per backend. Effective config dumps redact shared-state `connection_url` values.
+
+`[shared_state.failure_policies]` makes the post-activation failure decision explicit for every shared-state feature. It does not relax startup or reload activation: a PostgreSQL connect/init failure, a required Redis prewarm failure, or a failed secure Redis/auth preflight still prevents the new snapshot from becoming active. The defaults above preserve the previous behavior and are the secure-profile baseline.
+
+| Feature | Default | Supported modes | Post-activation behavior |
+| --- | --- | --- | --- |
+| `rate_limits` | `fail_closed` | all five modes | Rejects when a distributed token decision cannot be made. `local_fallback` uses the bounded process-local bucket; `fail_open` permits the operation. `stale_snapshot` and `reject_new_only` are conservative for a consumptive token decision and reject rather than replaying a prior result. |
+| `connection_limits` | `reject_new_only` | all five modes | Existing leases are never revoked because the backend is unavailable; a new lease is rejected. `local_fallback` applies the bounded process-local limit and `fail_open` admits without a shared lease. A stale count is never used to admit a new lease. |
+| `person_proof` | `fail_closed` | `fail_closed` | Replay prevention, clearance revocation, and the Person proof Admin mutation stay fail closed. This field must remain `fail_closed`; OxiBelt rejects a weaker value during configuration validation. |
+| `upstream_health` | `stale_snapshot` | `stale_snapshot` | Keeps the last successfully observed shared health/active-count state while backend I/O is unavailable. |
+| `sticky_sessions` | `local_fallback` | `local_fallback`, `fail_open` | Retains the process-local sticky secret when the shared secret cannot be read. `fail_open` continues with the current process-local secret without recording a fallback entry. |
+| `cache` | `local_fallback` | `local_fallback`, `fail_open` | Treats a failed shared-cache read as a local miss; local L1 and normal origin handling remain available. `fail_open` continues without the distributed lookup. Administrative shared cache purges still return an error rather than reporting a partial success. |
+| `reload` | `fail_open` | `fail_open` | Logs a failed cross-instance generation heartbeat and continues the already-active process configuration. |
+
+`fail_closed` rejects the feature operation, `fail_open` continues without a distributed decision, `local_fallback` uses only the feature's bounded process-local state, `stale_snapshot` uses only an already-published non-mutating observation, and `reject_new_only` preserves existing work while refusing new distributed reservations. Unsupported feature/mode pairs are rejected during configuration validation rather than silently behaving like a different policy. No mode retries an ambiguous distributed mutation after timeout or cancellation. Local fallback is per process, has no cluster-wide guarantee, and is intentionally visible in health and metrics. Use `fail_closed` for security controls unless the availability trade-off has been explicitly reviewed.
+
+The existing feature-specific controls remain authoritative; the central shared-state table does not silently override them. DynamicPolicy `use_last_good` retains its last good snapshot, `disabled_on_error` disables matching, and `fail_closed_on_startup` keeps activation strict; `ipm.fail_closed = false` uses the static IPM configuration while refresh retains the last good dynamic snapshot; Admin audit `enforcing` rejects protected Admin work before handler execution when queue admission fails while `best_effort` records the failure; mitigation `failure_policy = "closed"` or `"open"` remains its direct sink policy.
 
 `operation_timeout_ms` remains the absolute deadline for each shared-state operation. `enumeration_page_size` defaults to `128` and bounds one shared-state scan page; it must be between `1` and `1000`. `enumeration_max_items_per_operation` defaults to `4096` and bounds total work for a complete status or purge operation; it must be between `1` and `65536`. The page size cannot exceed the total limit. PostgreSQL uses its existing operation concurrency permit. Redis uses one persistent FIFO pool per configured backend: `max_connections` is its physical socket cap, and `max_waiters` bounds active-plus-waiting Redis commands at `max_connections + max_waiters`; excess commands fail immediately. `pool_wait_timeout_ms`, connection creation, health recycling, and `command_timeout_ms` are independently bounded and still cannot outlive the outer operation deadline. Defaults preserve lazy startup with zero idle connections, four waiters per allowed Redis connection, and inherited wait/command timeouts. A positive `min_idle_connections` is a startup and reload requirement: the configured backend must prewarm that many sockets before the new snapshot activates. Unchanged plaintext pools retain their existing sockets; changed endpoint credentials or pool settings create a draining replacement generation. Every `rediss://` pool is rebuilt on a full reload so changed trust roots or client-certificate material at the same path cannot be retained.
 

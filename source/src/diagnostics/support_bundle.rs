@@ -17,11 +17,13 @@ use crate::tls::TlsServerSessionStorageStats;
 use super::{DiagnosticReport, DoctorOptions, diagnose_config};
 
 mod process;
+mod shared_state;
 #[cfg(test)]
 mod tests;
 mod tls;
 pub use process::ProcessSnapshot;
 use process::process_snapshot;
+pub use shared_state::BackendFailurePolicySnapshot;
 pub use tls::{DownstreamTlsCertificateRuntimeSnapshot, TlsRuntimeSnapshot};
 
 const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 1;
@@ -210,6 +212,7 @@ pub struct SharedStateSnapshot {
   pub backend_count: usize,
   pub default_backend: Option<String>,
   pub feature_backends: BTreeMap<String, Option<String>>,
+  pub failure_policies: BTreeMap<String, BackendFailurePolicySnapshot>,
   pub runtime_connected: bool,
 }
 
@@ -469,7 +472,8 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
       namespace: snapshot.config.shared_state.namespace.clone(),
       backend_count: snapshot.config.shared_state.backends.len(),
       default_backend: snapshot.config.shared_state.default_backend.clone(),
-      feature_backends: shared_state_feature_backends(snapshot),
+      feature_backends: shared_state::feature_backends(snapshot),
+      failure_policies: shared_state::failure_policies(snapshot),
       runtime_connected: snapshot.shared_state.is_some(),
     },
     dynamic_policy: DynamicPolicyRuntimeSnapshot {
@@ -622,68 +626,6 @@ fn tls_stats_snapshot(stats: TlsServerSessionStorageStats) -> TlsSessionStorageS
     lock_wait_ns: stats.lock_wait_ns,
     put_duration_ns: stats.put_duration_ns,
   }
-}
-
-fn shared_state_feature_backends(snapshot: &AppSnapshot) -> BTreeMap<String, Option<String>> {
-  let shared = &snapshot.config.shared_state;
-  BTreeMap::from([
-    (
-      "rate_limits".to_string(),
-      shared
-        .rate_limits_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "connection_limits".to_string(),
-      shared
-        .connection_limits_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "person_proof".to_string(),
-      shared
-        .person_proof_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "upstream_health".to_string(),
-      shared
-        .upstream_health_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "sticky_sessions".to_string(),
-      shared
-        .sticky_sessions_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "cache".to_string(),
-      shared
-        .cache_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "reload".to_string(),
-      shared
-        .reload_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-    (
-      "dynamic_policy".to_string(),
-      shared
-        .dynamic_policy_backend
-        .clone()
-        .or(shared.default_backend.clone()),
-    ),
-  ])
 }
 
 fn now_unix_ms() -> u64 {

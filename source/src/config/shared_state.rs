@@ -57,6 +57,12 @@ pub struct SharedStateConfig {
   pub reload_backend: Option<String>,
   #[serde(default)]
   pub dynamic_policy_backend: Option<String>,
+  /// Per-feature behavior when an already-active shared-state backend fails.
+  ///
+  /// This does not weaken activation: backend connection and configured
+  /// prewarm failures still prevent a new runtime snapshot from publishing.
+  #[serde(default)]
+  pub failure_policies: SharedStateFailurePolicies,
   #[serde(default, rename = "admin_tokens_backend")]
   legacy_admin_tokens_backend: Option<String>,
   #[serde(default)]
@@ -85,10 +91,105 @@ impl Default for SharedStateConfig {
       cache_backend: None,
       reload_backend: None,
       dynamic_policy_backend: None,
+      failure_policies: SharedStateFailurePolicies::default(),
       legacy_admin_tokens_backend: None,
       backends: Vec::new(),
     }
   }
+}
+
+/// The post-activation behavior selected for a shared-state feature when its
+/// configured backend cannot complete an operation.
+///
+/// The mode is intentionally feature-agnostic here. Runtime consumers map it
+/// only to bounded, feature-safe actions; for example, a connection limiter
+/// can reject a new lease without disturbing existing leases.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendFailureMode {
+  FailClosed,
+  FailOpen,
+  LocalFallback,
+  StaleSnapshot,
+  RejectNewOnly,
+}
+
+impl BackendFailureMode {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::FailClosed => "fail_closed",
+      Self::FailOpen => "fail_open",
+      Self::LocalFallback => "local_fallback",
+      Self::StaleSnapshot => "stale_snapshot",
+      Self::RejectNewOnly => "reject_new_only",
+    }
+  }
+}
+
+/// Fixed, low-cardinality failure policies for the shared-state feature set.
+///
+/// Defaults deliberately preserve the behavior that existed before this
+/// table was introduced. Operators can now make an intentional,
+/// reviewable post-activation choice per feature without changing startup
+/// activation requirements.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+pub struct SharedStateFailurePolicies {
+  #[serde(default = "default_rate_limits_failure_mode")]
+  pub rate_limits: BackendFailureMode,
+  #[serde(default = "default_connection_limits_failure_mode")]
+  pub connection_limits: BackendFailureMode,
+  #[serde(default = "default_person_proof_failure_mode")]
+  pub person_proof: BackendFailureMode,
+  #[serde(default = "default_upstream_health_failure_mode")]
+  pub upstream_health: BackendFailureMode,
+  #[serde(default = "default_sticky_sessions_failure_mode")]
+  pub sticky_sessions: BackendFailureMode,
+  #[serde(default = "default_cache_failure_mode")]
+  pub cache: BackendFailureMode,
+  #[serde(default = "default_reload_failure_mode")]
+  pub reload: BackendFailureMode,
+}
+
+impl Default for SharedStateFailurePolicies {
+  fn default() -> Self {
+    Self {
+      rate_limits: default_rate_limits_failure_mode(),
+      connection_limits: default_connection_limits_failure_mode(),
+      person_proof: default_person_proof_failure_mode(),
+      upstream_health: default_upstream_health_failure_mode(),
+      sticky_sessions: default_sticky_sessions_failure_mode(),
+      cache: default_cache_failure_mode(),
+      reload: default_reload_failure_mode(),
+    }
+  }
+}
+
+const fn default_rate_limits_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::FailClosed
+}
+
+const fn default_connection_limits_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::RejectNewOnly
+}
+
+const fn default_person_proof_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::FailClosed
+}
+
+const fn default_upstream_health_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::StaleSnapshot
+}
+
+const fn default_sticky_sessions_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::LocalFallback
+}
+
+const fn default_cache_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::LocalFallback
+}
+
+const fn default_reload_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::FailOpen
 }
 
 impl SharedStateConfig {
@@ -96,6 +197,7 @@ impl SharedStateConfig {
     if !self.enabled {
       return Ok(());
     }
+    self.failure_policies.validate()?;
     validate_optional_non_empty("shared_state.namespace", Some(&self.namespace))?;
     validate_shared_state_namespace(&self.namespace)?;
     validate_optional_non_empty("shared_state.instance_id_env", Some(&self.instance_id_env))?;
@@ -178,6 +280,57 @@ impl SharedStateConfig {
     }
     Ok(())
   }
+}
+
+impl SharedStateFailurePolicies {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.person_proof != BackendFailureMode::FailClosed {
+      bail!(
+        "shared_state.failure_policies.person_proof must be fail_closed to preserve Person proof replay and revocation enforcement"
+      );
+    }
+    validate_failure_mode(
+      "upstream_health",
+      self.upstream_health,
+      &[BackendFailureMode::StaleSnapshot],
+    )?;
+    validate_failure_mode(
+      "sticky_sessions",
+      self.sticky_sessions,
+      &[
+        BackendFailureMode::LocalFallback,
+        BackendFailureMode::FailOpen,
+      ],
+    )?;
+    validate_failure_mode(
+      "cache",
+      self.cache,
+      &[
+        BackendFailureMode::LocalFallback,
+        BackendFailureMode::FailOpen,
+      ],
+    )?;
+    validate_failure_mode("reload", self.reload, &[BackendFailureMode::FailOpen])
+  }
+}
+
+fn validate_failure_mode(
+  feature: &str,
+  selected: BackendFailureMode,
+  allowed: &[BackendFailureMode],
+) -> anyhow::Result<()> {
+  if allowed.contains(&selected) {
+    return Ok(());
+  }
+  let supported = allowed
+    .iter()
+    .map(|mode| mode.as_str())
+    .collect::<Vec<_>>()
+    .join(", ");
+  bail!(
+    "shared_state.failure_policies.{feature} does not support {}; supported mode(s): {supported}",
+    selected.as_str()
+  )
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

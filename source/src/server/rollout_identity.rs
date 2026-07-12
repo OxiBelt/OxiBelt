@@ -9,12 +9,18 @@ use crate::state::AppSnapshot;
 pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Response<ProxyBody>> {
   if path == snapshot.config.health.ready_path {
     if snapshot.lifecycle.is_draining() {
-      return Some(text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"));
+      return Some(with_backend_status_header(
+        text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"),
+        snapshot,
+      ));
     }
     if !snapshot.config.rollout.is_ready() {
-      return Some(text_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "config revision not applied",
+      return Some(with_backend_status_header(
+        text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "config revision not applied",
+        ),
+        snapshot,
       ));
     }
     return Some(with_rollout_identity_headers(
@@ -42,7 +48,32 @@ fn with_rollout_identity_headers(
   response: Response<ProxyBody>,
   snapshot: &AppSnapshot,
 ) -> Response<ProxyBody> {
-  with_config_revision_headers(response, snapshot.config.rollout.applied_header_values())
+  let response =
+    with_config_revision_headers(response, snapshot.config.rollout.applied_header_values());
+  with_backend_status_header(response, snapshot)
+}
+
+fn with_backend_status_header(
+  response: Response<ProxyBody>,
+  snapshot: &AppSnapshot,
+) -> Response<ProxyBody> {
+  let status = snapshot
+    .shared_state
+    .as_deref()
+    .map(|shared| shared.backend_failure_status())
+    .unwrap_or("healthy");
+  with_backend_status_value(response, status)
+}
+
+fn with_backend_status_value(
+  mut response: Response<ProxyBody>,
+  status: &'static str,
+) -> Response<ProxyBody> {
+  response.headers_mut().insert(
+    ::http::HeaderName::from_static("x-oxibelt-backend-status"),
+    ::http::HeaderValue::from_static(status),
+  );
+  response
 }
 
 fn with_config_revision_headers(
@@ -99,5 +130,11 @@ mod tests {
         .is_none()
     );
     assert!(response.headers().get("x-oxibelt-config-digest").is_none());
+  }
+
+  #[test]
+  fn backend_status_header_uses_only_the_fixed_health_values() {
+    let response = with_backend_status_value(text_response(StatusCode::OK, "ready"), "degraded");
+    assert_eq!(response.headers()["x-oxibelt-backend-status"], "degraded");
   }
 }

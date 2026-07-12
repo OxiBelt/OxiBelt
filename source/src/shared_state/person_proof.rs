@@ -7,7 +7,7 @@ use super::enumeration::{EnumerationCursor, EnumerationLimits};
 use super::now_unix_ms;
 use super::{
   Backend, PersonProofRevocationIdempotency, PersonProofRevocationResult, SharedState,
-  ttl_from_expires_ms,
+  SharedStateFeature, ttl_from_expires_ms,
 };
 
 const PERSON_PROOF_REUSE_CLEARANCE_PREFIX: &str = "person-proof:reuse:clearance:";
@@ -49,7 +49,9 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key("person-proof:secret:v1");
-    let secret = backend.get_or_init_bytes(&key, 32, None).await?;
+    let result = backend.get_or_init_bytes(&key, 32, None).await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    let secret = result?;
     let bytes: [u8; 32] = secret
       .as_slice()
       .try_into()
@@ -66,18 +68,22 @@ impl SharedState {
       return Ok(true);
     };
     let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend
+    let result = backend
       .put_if_absent(&self.key(&format!("person-proof:reuse:{key}")), b"1", ttl)
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_consume(&self, key: &str) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(false);
     };
-    backend
+    let result = backend
       .take_key(&self.key(&format!("person-proof:reuse:{key}")))
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_mark_challenge_used(
@@ -92,9 +98,11 @@ impl SharedState {
     let legacy_key = self.key(&format!("{PERSON_PROOF_REUSE_CHALLENGE_PREFIX}{token}"));
     let hash_key = self.key(&format!("{PERSON_PROOF_REUSE_CHALLENGE_PREFIX}{hash}"));
     let ttl = ttl_from_expires_ms(expires_at_ms);
-    backend
+    let result = backend
       .person_proof_mark_challenge_used(&legacy_key, &hash_key, ttl)
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_consume_clearance(
@@ -108,19 +116,22 @@ impl SharedState {
     let revoked_key = self.key(&format!("{PERSON_PROOF_REVOKED_CLEARANCE_PREFIX}{hash}"));
     let key = self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{hash}"));
     let legacy_key = self.key(&format!("{PERSON_PROOF_REUSE_CLEARANCE_PREFIX}{token}"));
-    backend
+    let result = backend
       .person_proof_consume_clearance(&revoked_key, &key, &legacy_key)
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_clearance_revoked(&self, hash: &str) -> anyhow::Result<bool> {
     let Some(backend) = &self.person_proof else {
       return Ok(false);
     };
-    backend
+    let result = backend
       .get(&self.key(&format!("{PERSON_PROOF_REVOKED_CLEARANCE_PREFIX}{hash}")))
-      .await
-      .map(|value| value.is_some())
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result.map(|value| value.is_some())
   }
 
   pub(crate) async fn person_proof_revoke_clearance_hash(
@@ -145,7 +156,7 @@ impl SharedState {
         record.key_digest
       ))
     });
-    backend
+    let result = backend
       .person_proof_revoke_clearance(
         &tombstone_key,
         &active_key,
@@ -154,7 +165,9 @@ impl SharedState {
         idempotency_key.as_deref(),
         idempotency.map(|record| record.request_fingerprint.as_str()),
       )
-      .await
+      .await;
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofSharedStatus> {
@@ -162,12 +175,17 @@ impl SharedState {
       return Ok(PersonProofSharedStatus::default());
     };
     let prefix = self.key("person-proof:");
-    tokio::time::timeout(
+    let result = match tokio::time::timeout(
       self.operation_timeout,
       backend.person_proof_status(&prefix, self.enumeration),
     )
     .await
-    .map_err(|_| anyhow!("person proof shared status enumeration timed out"))?
+    {
+      Ok(result) => result,
+      Err(_) => Err(anyhow!("person proof shared status enumeration timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    result
   }
 
   pub async fn person_proof_list_clearances(
@@ -183,12 +201,17 @@ impl SharedState {
     };
     let prefix = self.key(PERSON_PROOF_REUSE_CLEARANCE_PREFIX);
     let position = decode_clearance_cursor(cursor, &prefix, backend)?;
-    let (clearances, next_cursor) = tokio::time::timeout(
+    let result = match tokio::time::timeout(
       self.operation_timeout,
       backend.person_proof_clearances(&prefix, limit, position, self.enumeration),
     )
     .await
-    .map_err(|_| anyhow!("person proof clearance enumeration timed out"))??;
+    {
+      Ok(result) => result,
+      Err(_) => Err(anyhow!("person proof clearance enumeration timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::PersonProof, &result);
+    let (clearances, next_cursor) = result?;
     Ok(PersonProofSharedClearancePage {
       clearances,
       next_cursor: next_cursor

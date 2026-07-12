@@ -2,6 +2,9 @@
 
 use tracing::warn;
 
+use crate::config::BackendFailureMode;
+use crate::shared_state::SharedStateFeature;
+
 use super::{CacheLookup, CacheLookupContext, ResponseCache, request_no_cache};
 
 impl ResponseCache {
@@ -43,6 +46,11 @@ impl ResponseCache {
       }
       Ok(None) => None,
       Err(error) => {
+        if shared.backend_failure_mode(SharedStateFeature::Cache)
+          == BackendFailureMode::LocalFallback
+        {
+          shared.record_backend_local_fallback(SharedStateFeature::Cache);
+        }
         warn!(error = %error, "shared cache lookup failed; falling back to local miss");
         None
       }

@@ -12,6 +12,7 @@ use crate::tls::TlsServerSessionStorageStats;
 
 mod admin_audit;
 mod auth;
+mod backend_failure;
 mod crlite;
 mod detail;
 pub(crate) mod fast_path;
@@ -74,6 +75,7 @@ pub struct Metrics {
   sni_forward: sni_forward::SniForwardMetrics,
   stream: stream::StreamMetrics,
   shared_state: shared_state::SharedStateMetrics,
+  backend_failure: backend_failure::BackendFailureMetrics,
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
@@ -625,8 +627,9 @@ impl Metrics {
     self.append_http_io_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
     self.append_stream_prometheus(&mut output);
-    self.append_upstream_pool_prometheus(&mut output);
+    self.pool.append_prometheus(&mut output);
     self.append_shared_state_prometheus(&mut output);
+    self.backend_failure.append_prometheus(&mut output);
     append_metric(
       &mut output,
       "oxibelt_cache_disk_recovered_entries_total",
@@ -715,10 +718,6 @@ impl Metrics {
       self.append_detailed_prometheus(&mut output);
     }
     output
-  }
-
-  fn append_upstream_pool_prometheus(&self, output: &mut String) {
-    self.pool.append_prometheus(output);
   }
 
   fn append_fast_path_prometheus(&self, output: &mut String) {

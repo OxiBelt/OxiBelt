@@ -7,23 +7,24 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
   AccessLogSchema, AccessTokenRateLimitSource, AdminAuditExportSink, AdminAuditMode,
-  AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode, BufferingMode, CacheStore,
-  ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
-  CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
-  ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
-  CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
-  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
-  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
-  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
-  OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides,
-  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
-  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
-  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
-  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode, BackendFailureMode,
+  BufferingMode, CacheStore, ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage,
+  ClientIdentityAsnMode, CompressionConfig, CompressionProxiedPredicate,
+  CompressionUpstreamAcceptEncodingMode, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
+  CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, CryptoPrimitiveBackend,
+  CryptoPrimitiveProvider, DatabaseMitigationMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
+  EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
+  ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind, ForwardedClientIpSource,
+  ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
+  KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
+  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityMode, ProxyProtocolEgressMode,
+  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
+  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
+  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
+  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
+  UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -4671,6 +4672,15 @@ operation_timeout_ms = 250
 connection_lease_ms = 30000
 cache_lock_ms = 5000
 
+[shared_state.failure_policies]
+rate_limits = "local_fallback"
+connection_limits = "reject_new_only"
+person_proof = "fail_closed"
+upstream_health = "stale_snapshot"
+sticky_sessions = "local_fallback"
+cache = "fail_open"
+reload = "fail_open"
+
 [[shared_state.backends]]
 name = "redis-main"
 kind = "redis"
@@ -4726,6 +4736,159 @@ max_connections = 2
   assert_eq!(redis_pool.max_waiters, Some(16));
   assert_eq!(redis_pool.pool_wait_timeout_ms, Some(25));
   assert_eq!(redis_pool.command_timeout_ms, Some(100));
+  assert_eq!(
+    config.shared_state.failure_policies.rate_limits,
+    BackendFailureMode::LocalFallback
+  );
+  assert_eq!(
+    config.shared_state.failure_policies.connection_limits,
+    BackendFailureMode::RejectNewOnly
+  );
+  assert_eq!(
+    config.shared_state.failure_policies.cache,
+    BackendFailureMode::FailOpen
+  );
+}
+
+#[test]
+fn shared_state_failure_policy_defaults_preserve_existing_behavior() {
+  let defaults = oxibelt::config::SharedStateFailurePolicies::default();
+
+  assert_eq!(defaults.rate_limits, BackendFailureMode::FailClosed);
+  assert_eq!(
+    defaults.connection_limits,
+    BackendFailureMode::RejectNewOnly
+  );
+  assert_eq!(defaults.person_proof, BackendFailureMode::FailClosed);
+  assert_eq!(defaults.upstream_health, BackendFailureMode::StaleSnapshot);
+  assert_eq!(defaults.sticky_sessions, BackendFailureMode::LocalFallback);
+  assert_eq!(defaults.cache, BackendFailureMode::LocalFallback);
+  assert_eq!(defaults.reload, BackendFailureMode::FailOpen);
+}
+
+#[test]
+fn shared_state_person_proof_failure_policy_cannot_weaken_replay_enforcement() {
+  let temp_dir = common::TempDir::new("shared-state-person-proof-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-person-proof-policy");
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+
+[shared_state.failure_policies]
+person_proof = "fail_open"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("Person proof replay enforcement must stay fail closed");
+  assert!(
+    error
+      .to_string()
+      .contains("shared_state.failure_policies.person_proof must be fail_closed"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_state_failure_policies_reject_unsupported_feature_mode_pairs() {
+  let temp_dir = common::TempDir::new("shared-state-unsupported-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-unsupported-policy");
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+
+[shared_state.failure_policies]
+upstream_health = "fail_open"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("unsupported mode must not silently change health semantics");
+  assert!(
+    error
+      .to_string()
+      .contains("shared_state.failure_policies.upstream_health does not support fail_open"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_state_failure_policies_reject_unknown_modes() {
+  let temp_dir = common::TempDir::new("shared-state-failure-policy-mode");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-failure-policy-mode");
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+
+[shared_state.failure_policies]
+rate_limits = "not_a_policy"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let error = toml::from_str::<Config>(&raw).expect_err("unknown policy mode should not parse");
+  assert!(
+    error.to_string().contains("unknown variant `not_a_policy`"),
+    "unexpected parse error: {error}"
+  );
+}
+
+#[test]
+fn shared_state_failure_policies_reject_unknown_fields_in_strict_mode() {
+  let temp_dir = common::TempDir::new("shared-state-failure-policy-unknown");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-failure-policy-unknown");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "[[upstreams]]",
+    r#"[shared_state.failure_policies]
+rate_limits = "fail_closed"
+unexpected = "fail_open"
+
+[[upstreams]]"#,
+  );
+  let config_path = temp_dir.path().join("oxibelt.toml");
+  std::fs::write(&config_path, raw).expect("failed to write test config");
+
+  let error = Config::load(&config_path).expect_err("unknown failure policy field should fail");
+  assert!(
+    error.to_string().contains(
+      "configuration contains unknown field(s): shared_state.failure_policies.unexpected"
+    ),
+    "unexpected error: {error}"
+  );
 }
 
 #[test]

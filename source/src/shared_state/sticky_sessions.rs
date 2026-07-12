@@ -3,7 +3,7 @@
 
 use anyhow::anyhow;
 
-use super::SharedState;
+use super::{SharedState, SharedStateFeature};
 
 impl SharedState {
   pub fn has_sticky_sessions(&self) -> bool {
@@ -15,7 +15,9 @@ impl SharedState {
       return Ok(None);
     };
     let key = self.key(&format!("sticky-session:secret:{pool_name}:v1"));
-    let secret = backend.get_or_init_bytes(&key, 32, None).await?;
+    let result = backend.get_or_init_bytes(&key, 32, None).await;
+    self.observe_backend_result(SharedStateFeature::StickySessions, &result);
+    let secret = result?;
     let bytes: [u8; 32] = secret
       .as_slice()
       .try_into()

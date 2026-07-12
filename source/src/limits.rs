@@ -14,13 +14,13 @@ use crate::config::{
   AccessTokenRateLimitSource, ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig,
   RateLimitIdentityPart, RateLimitKey,
 };
-use crate::shared_state::{
-  ConnectionScope, SharedConnectionAcquire, SharedCounterLease, SharedRateLimitOutcome, SharedState,
-};
+use crate::shared_state::{SharedCounterLease, SharedState};
 use crate::waf::PersonProofTokenBinding;
 
 #[path = "limits/context.rs"]
 mod context;
+#[path = "limits/shared_failure.rs"]
+mod shared_failure;
 #[path = "limits/sybil_identity.rs"]
 pub(crate) mod sybil_identity;
 #[path = "limits/webtransport.rs"]
@@ -263,39 +263,6 @@ impl LimitState {
     self
       .acquire_scopes_async(Self::connection_specs(ip, limits, connection_limits))
       .await
-  }
-
-  async fn acquire_scopes_async(
-    self: &Arc<Self>,
-    specs: Vec<ConnectionAcquireSpec>,
-  ) -> Result<ConnectionPermit, StatusCode> {
-    if let Some(shared) = &self.shared_state
-      && shared.has_connection_limits()
-    {
-      let scopes = specs
-        .iter()
-        .map(|spec| ConnectionScope {
-          key: spec.key.as_str(),
-          limit: spec.limit,
-          status: spec.status,
-        })
-        .collect::<Vec<_>>();
-      let acquired = shared.acquire_connections(&scopes).await;
-      drop(scopes);
-      return match acquired {
-        Ok(SharedConnectionAcquire::Acquired(lease)) => Ok(ConnectionPermit {
-          state: self.clone(),
-          local_release: LocalConnectionRelease::default(),
-          shared_lease: Some(lease),
-        }),
-        Ok(SharedConnectionAcquire::Denied(status)) => Err(status),
-        Err(error) => {
-          tracing::warn!(error = %error, "shared connection limit backend failed closed");
-          Err(StatusCode::SERVICE_UNAVAILABLE)
-        }
-      };
-    }
-    self.acquire_scopes_local(specs)
   }
 
   fn acquire_scopes_local(
@@ -650,38 +617,6 @@ impl LimitState {
       mode: limit.mode,
       status: limit.status,
     })
-  }
-
-  async fn check_rate_limit_bucket(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
-    if let Some(shared) = &self.shared_state
-      && shared.has_rate_limits()
-    {
-      let result = if spec.key.is_empty() {
-        shared
-          .take_rate_token_bucket(spec.name, spec.rate, spec.burst)
-          .await
-      } else {
-        shared
-          .take_rate_token(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
-          .await
-      };
-      match result {
-        Ok(SharedRateLimitOutcome::Allowed) => {}
-        Ok(SharedRateLimitOutcome::RateLimited | SharedRateLimitOutcome::BucketCapExceeded) => {
-          if spec.mode == LimitMode::Enforcing {
-            return Some(
-              StatusCode::from_u16(spec.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-            );
-          }
-        }
-        Err(error) => {
-          tracing::warn!(error = %error, "shared rate limit backend failed closed");
-          return Some(StatusCode::SERVICE_UNAVAILABLE);
-        }
-      }
-      return None;
-    }
-    self.check_rate_limit_bucket_local(spec)
   }
 
   fn check_rate_limit_bucket_local(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {

@@ -959,6 +959,17 @@ cache_lock_ms = 10000
 # reload_backend = "cluster"
 # dynamic_policy_backend = "cluster"
 
+[shared_state.failure_policies]
+# These defaults preserve the existing post-activation behavior. They do not
+# relax backend startup/prewarm requirements.
+rate_limits = "fail_closed"
+connection_limits = "reject_new_only"
+person_proof = "fail_closed"
+upstream_health = "stale_snapshot"
+sticky_sessions = "local_fallback"
+cache = "local_fallback"
+reload = "fail_open"
+
 # [[shared_state.backends]]
 # name = "cluster"
 # kind = "redis" # redis | postgres

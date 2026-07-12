@@ -56,6 +56,9 @@ default_backend = "cluster"
 operation_timeout_ms = 1500
 rate_limits_backend = "cluster"
 
+[shared_state.failure_policies]
+rate_limits = "fail_closed"
+
 [[shared_state.backends]]
 name = "cluster"
 kind = "postgres"
