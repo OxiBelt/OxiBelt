@@ -2533,6 +2533,7 @@ docker create \
   --label "${test_label}" \
   --network "${network_name}" \
   --network-alias proxy \
+  --network-alias proxy-a \
   -e OXIBELT_ADMIN_TOKEN=matrix-admin-token \
   -e OXIBELT_VIEWER_TOKEN=matrix-viewer-token \
   -e OXIBELT_UPSTREAM_TOKEN=matrix-upstream-token \
