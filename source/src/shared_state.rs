@@ -22,6 +22,7 @@ use crate::config::{
 use crate::limits::ParsedRate;
 use crate::metrics::Metrics;
 
+mod atomic_updates;
 mod cache_store;
 mod enumeration;
 mod feature_flags;
@@ -93,6 +94,7 @@ struct PostgresBackend {
 struct MemoryBackend {
   values: Arc<Mutex<HashMap<String, MemoryValue>>>,
   counters: Arc<Mutex<HashMap<String, MemoryCounter>>>,
+  leases: Arc<Mutex<HashMap<String, MemoryLease>>>,
   rate_indexes: Arc<Mutex<HashMap<String, HashMap<String, i64>>>>,
 }
 
@@ -110,12 +112,90 @@ struct MemoryCounter {
   expires_at_ms: Option<i64>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct MemoryLease {
+  fingerprint: String,
+  expires_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionScope<'a> {
   pub key: &'a str,
   pub limit: usize,
   pub status: StatusCode,
 }
+
+/// An opaque, backend-bound counter lease.  A lease marker makes a release
+/// idempotent and prevents a stale permit from decrementing a newer counter
+/// generation after its own TTL has elapsed.
+#[derive(Debug, Clone)]
+pub(crate) struct SharedCounterLease {
+  marker_key: String,
+  fingerprint: String,
+  keys: Vec<String>,
+}
+
+impl SharedCounterLease {
+  fn new(marker_key: String, fingerprint: String, keys: Vec<String>) -> Self {
+    Self {
+      marker_key,
+      fingerprint,
+      keys,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub(crate) enum SharedConnectionAcquire {
+  Acquired(SharedCounterLease),
+  Denied(StatusCode),
+}
+
+/// The durable portion of a Person-proof clearance revocation response.
+///
+/// This is deliberately small and contains only hash-derived state, so it is
+/// safe to retain for the lifetime of an optional idempotency record.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub(crate) struct PersonProofRevocationResult {
+  pub(crate) removed_active: bool,
+  pub(crate) expires_at_ms: i64,
+}
+
+/// Digest-only idempotency material for the narrow Person-proof Admin
+/// mutation. Raw header values never reach storage or log fields.
+#[derive(Debug, Clone)]
+pub(crate) struct PersonProofRevocationIdempotency {
+  pub(crate) key_digest: String,
+  pub(crate) request_fingerprint: String,
+}
+
+impl PersonProofRevocationIdempotency {
+  pub(crate) fn new(key: &str, clearance_hash: &str, supplied_ttl_seconds: Option<u64>) -> Self {
+    let key_digest = hex_encode(&crate::crypto::sha256(key.as_bytes()));
+    let supplied_ttl = supplied_ttl_seconds
+      .map(|ttl| format!("ttl:{ttl}"))
+      .unwrap_or_else(|| "ttl:omitted".to_string());
+    let request_fingerprint = hex_encode(&crate::crypto::sha256(
+      format!("person-proof-revoke:v1\0{clearance_hash}\0{supplied_ttl}").as_bytes(),
+    ));
+    Self {
+      key_digest,
+      request_fingerprint,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct PersonProofIdempotencyConflict;
+
+impl std::fmt::Display for PersonProofIdempotencyConflict {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("person proof idempotency key was reused with a different request")
+  }
+}
+
+impl std::error::Error for PersonProofIdempotencyConflict {}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SharedRateLimitOutcome {
@@ -350,34 +430,54 @@ impl SharedState {
       .await
   }
 
-  pub async fn acquire_connections(
+  pub(crate) async fn acquire_connections(
     &self,
     scopes: &[ConnectionScope<'_>],
-  ) -> anyhow::Result<Option<StatusCode>> {
+  ) -> anyhow::Result<SharedConnectionAcquire> {
     let Some(backend) = &self.connection_limits else {
-      return Ok(None);
+      return Ok(SharedConnectionAcquire::Acquired(SharedCounterLease::new(
+        String::new(),
+        String::new(),
+        Vec::new(),
+      )));
     };
     let keys = scopes
       .iter()
       .map(|scope| self.key(&format!("conn:{}", scope.key)))
       .collect::<Vec<_>>();
     let limits = scopes.iter().map(|scope| scope.limit).collect::<Vec<_>>();
-    let denied = backend
-      .connection_acquire(&keys, &limits, self.connection_lease)
-      .await?;
-    Ok(denied.map(|index| scopes[index].status))
+    let lease = SharedCounterLease::new(
+      self.key(&format!("lease:connection:{}", random_hex(16)?)),
+      connection_lease_fingerprint(&keys, &limits, self.connection_lease),
+      keys,
+    );
+    match backend
+      .connection_acquire(&lease.keys, &limits, self.connection_lease, &lease)
+      .await
+    {
+      Ok(Some(index)) => Ok(SharedConnectionAcquire::Denied(scopes[index].status)),
+      Ok(None) => Ok(SharedConnectionAcquire::Acquired(lease)),
+      Err(error) => {
+        self
+          .cleanup
+          .defer_connection_release(backend.clone(), lease);
+        Err(error)
+      }
+    }
   }
 
-  pub async fn release_connections(&self, scopes: &[String]) {
+  pub(crate) async fn release_connections(&self, lease: SharedCounterLease) {
+    if lease.marker_key.is_empty() {
+      return;
+    }
     let Some(backend) = &self.connection_limits else {
       return;
     };
-    let keys = scopes
-      .iter()
-      .map(|scope| self.key(&format!("conn:{scope}")))
-      .collect::<Vec<_>>();
-    if let Err(error) = backend.connection_release(&keys).await {
+    if let Err(error) = backend.connection_release(&lease).await {
       warn!(error = %error, "failed to release shared connection limits");
+      self
+        .cleanup
+        .defer_connection_release(backend.clone(), lease);
     }
   }
 
@@ -442,6 +542,41 @@ impl SharedState {
     ))
   }
 
+  /// Acquires one lease-backed shared active-count slot for an upstream.
+  ///
+  /// Pool selection intentionally remains available when the optional shared
+  /// backend is unavailable.  If an acquire timed out after the backend may
+  /// have committed it, queue an idempotent release for the marker rather than
+  /// retrying the mutation.
+  pub(crate) async fn pool_active_acquire(
+    &self,
+    upstream_name: &str,
+  ) -> anyhow::Result<Option<SharedCounterLease>> {
+    let Some(backend) = &self.upstream_health else {
+      return Ok(None);
+    };
+    let key = self.key(&format!("pool:active:{upstream_name}"));
+    let lease = SharedCounterLease::new(
+      self.key(&format!("lease:pool-active:{}", random_hex(16)?)),
+      counter_lease_fingerprint(&key, self.connection_lease),
+      vec![key.clone()],
+    );
+    match backend
+      .counter_lease_acquire(&key, self.connection_lease, &lease)
+      .await
+    {
+      Ok(()) => Ok(Some(lease)),
+      Err(error) => {
+        self.cleanup.defer_counter_lease_release(
+          backend.clone(),
+          lease,
+          self.pool_warning_limiter.clone(),
+        );
+        Err(error)
+      }
+    }
+  }
+
   pub async fn record_reload_generation(&self, config: &Config) {
     let Some(backend) = &self.reload else {
       return;
@@ -457,26 +592,28 @@ impl SharedState {
     }
   }
 
-  pub(crate) fn defer_connection_release(&self, scopes: &[String]) {
+  pub(crate) fn defer_connection_release(&self, lease: SharedCounterLease) {
+    if lease.marker_key.is_empty() {
+      return;
+    }
     let Some(backend) = &self.connection_limits else {
       return;
     };
-    let keys = scopes
-      .iter()
-      .map(|scope| self.key(&format!("conn:{scope}")))
-      .collect();
-    self.cleanup.defer_connection_release(backend.clone(), keys);
+    self
+      .cleanup
+      .defer_connection_release(backend.clone(), lease);
   }
 
-  pub(crate) fn defer_pool_active_add(&self, upstream_name: &str, delta: i64) {
+  pub(crate) fn defer_pool_active_release(&self, lease: SharedCounterLease) {
+    if lease.marker_key.is_empty() {
+      return;
+    }
     let Some(backend) = &self.upstream_health else {
       return;
     };
-    self.cleanup.defer_counter_add(
+    self.cleanup.defer_counter_lease_release(
       backend.clone(),
-      self.key(&format!("pool:active:{upstream_name}")),
-      delta,
-      Some(self.connection_lease),
+      lease,
       self.pool_warning_limiter.clone(),
     );
   }
@@ -484,6 +621,28 @@ impl SharedState {
   fn key(&self, suffix: &str) -> String {
     format!("{}:{suffix}", self.namespace)
   }
+}
+
+fn connection_lease_fingerprint(keys: &[String], limits: &[usize], ttl: Duration) -> String {
+  let mut entries = keys
+    .iter()
+    .zip(limits)
+    .map(|(key, limit)| (key.as_str(), *limit))
+    .collect::<Vec<_>>();
+  entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+  let mut material = format!("connection-lease:{}\n", atomic_updates::ttl_millis(ttl));
+  for (key, limit) in entries {
+    material.push_str(key);
+    material.push(':');
+    material.push_str(&limit.to_string());
+    material.push('\n');
+  }
+  hex_encode(&crate::crypto::sha256(material.as_bytes()))
+}
+
+fn counter_lease_fingerprint(key: &str, ttl: Duration) -> String {
+  let material = format!("counter-lease:{}:{key}", atomic_updates::ttl_millis(ttl));
+  hex_encode(&crate::crypto::sha256(material.as_bytes()))
 }
 
 /// Runs a one-shot Redis health probe through the same URL validation,
@@ -660,43 +819,91 @@ impl Backend {
     keys: &[String],
     limits: &[usize],
     ttl: Duration,
+    lease: &SharedCounterLease,
   ) -> anyhow::Result<Option<usize>> {
     match self {
       Self::Redis(redis) => {
         redis
           .runtime
           .execute("connection_acquire", || {
-            redis.connection_acquire(keys, limits, ttl)
+            redis.connection_acquire_atomic(keys, limits, ttl, lease)
           })
           .await
       }
       Self::Postgres(pg) => {
         pg.runtime
           .execute("connection_acquire", || {
-            pg.connection_acquire(keys, limits, ttl)
+            pg.connection_acquire_atomic(keys, limits, ttl, lease)
           })
           .await
       }
       #[cfg(test)]
-      Self::Memory(memory) => memory.connection_acquire(keys, limits, ttl),
+      Self::Memory(memory) => memory.connection_acquire_atomic(keys, limits, ttl, lease),
     }
   }
 
-  async fn connection_release(&self, keys: &[String]) -> anyhow::Result<()> {
+  async fn connection_release(&self, lease: &SharedCounterLease) -> anyhow::Result<()> {
     match self {
       Self::Redis(redis) => {
         redis
           .runtime
-          .execute("connection_release", || redis.connection_release(keys))
+          .execute("connection_release", || {
+            redis.connection_release_atomic(lease)
+          })
           .await
       }
       Self::Postgres(pg) => {
         pg.runtime
-          .execute("connection_release", || pg.connection_release(keys))
+          .execute("connection_release", || pg.connection_release_atomic(lease))
           .await
       }
       #[cfg(test)]
-      Self::Memory(memory) => memory.connection_release(keys),
+      Self::Memory(memory) => memory.connection_release_atomic(lease),
+    }
+  }
+
+  async fn counter_lease_acquire(
+    &self,
+    key: &str,
+    ttl: Duration,
+    lease: &SharedCounterLease,
+  ) -> anyhow::Result<()> {
+    match self {
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("counter_update", || {
+            redis.counter_lease_acquire_atomic(key, ttl, lease)
+          })
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("counter_update", || {
+            pg.counter_lease_acquire_atomic(key, ttl, lease)
+          })
+          .await
+      }
+      #[cfg(test)]
+      Self::Memory(memory) => memory.counter_lease_acquire_atomic(key, ttl, lease),
+    }
+  }
+
+  async fn counter_lease_release(&self, lease: &SharedCounterLease) -> anyhow::Result<()> {
+    match self {
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("counter_update", || redis.connection_release_atomic(lease))
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("counter_update", || pg.connection_release_atomic(lease))
+          .await
+      }
+      #[cfg(test)]
+      Self::Memory(memory) => memory.connection_release_atomic(lease),
     }
   }
 
@@ -711,13 +918,15 @@ impl Backend {
         redis
           .runtime
           .execute("value_get_or_init", || {
-            redis.get_or_init_bytes(key, len, ttl)
+            redis.get_or_init_bytes_atomic(key, len, ttl)
           })
           .await
       }
       Self::Postgres(pg) => {
         pg.runtime
-          .execute("value_get_or_init", || pg.get_or_init_bytes(key, len, ttl))
+          .execute("value_get_or_init", || {
+            pg.get_or_init_bytes_atomic(key, len, ttl)
+          })
           .await
       }
       #[cfg(test)]
@@ -742,7 +951,9 @@ impl Backend {
       }
       Self::Postgres(pg) => {
         pg.runtime
-          .execute("value_put_if_absent", || pg.put_if_absent(key, value, ttl))
+          .execute("value_put_if_absent", || {
+            pg.put_if_absent_atomic(key, value, ttl)
+          })
           .await
       }
       #[cfg(test)]
@@ -854,7 +1065,7 @@ impl Backend {
         redis
           .runtime
           .execute("health_update", || {
-            redis.health_report(
+            redis.health_report_atomic(
               key,
               success,
               enabled,
@@ -867,7 +1078,7 @@ impl Backend {
       Self::Postgres(pg) => {
         pg.runtime
           .execute("health_update", || {
-            pg.health_report(
+            pg.health_report_atomic(
               key,
               success,
               enabled,
@@ -916,12 +1127,14 @@ impl Backend {
       Self::Redis(redis) => {
         redis
           .runtime
-          .execute("counter_update", || redis.counter_add(key, delta, ttl))
+          .execute("counter_update", || {
+            redis.counter_add_atomic(key, delta, ttl)
+          })
           .await
       }
       Self::Postgres(pg) => {
         pg.runtime
-          .execute("counter_update", || pg.counter_add(key, delta, ttl))
+          .execute("counter_update", || pg.counter_add_atomic(key, delta, ttl))
           .await
       }
       #[cfg(test)]
@@ -932,51 +1145,6 @@ impl Backend {
 
 #[cfg(test)]
 impl MemoryBackend {
-  fn connection_acquire(
-    &self,
-    keys: &[String],
-    limits: &[usize],
-    ttl: Duration,
-  ) -> anyhow::Result<Option<usize>> {
-    let mut counters = self
-      .counters
-      .lock()
-      .expect("memory shared counter lock poisoned");
-    let now = now_unix_ms();
-    purge_expired_counters(&mut counters, now);
-    for (index, key) in keys.iter().enumerate() {
-      if counters.get(key).map(|item| item.counter).unwrap_or(0) >= limits[index] as i64 {
-        return Ok(Some(index));
-      }
-    }
-    let expires_at_ms = Some(now + ttl.as_millis().min(i64::MAX as u128) as i64);
-    for key in keys {
-      let entry = counters.entry(key.clone()).or_insert(MemoryCounter {
-        counter: 0,
-        expires_at_ms,
-      });
-      entry.counter += 1;
-      entry.expires_at_ms = expires_at_ms;
-    }
-    Ok(None)
-  }
-
-  fn connection_release(&self, keys: &[String]) -> anyhow::Result<()> {
-    let mut counters = self
-      .counters
-      .lock()
-      .expect("memory shared counter lock poisoned");
-    for key in keys {
-      if let Some(entry) = counters.get_mut(key) {
-        entry.counter = entry.counter.saturating_sub(1);
-        if entry.counter == 0 {
-          counters.remove(key);
-        }
-      }
-    }
-    Ok(())
-  }
-
   fn get_or_init_bytes(
     &self,
     key: &str,
@@ -996,7 +1164,7 @@ impl MemoryBackend {
       .entry(key.to_string())
       .or_insert_with(|| MemoryValue {
         value: random,
-        expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+        expires_at_ms: ttl.map(|ttl| atomic_updates::expiry_after(now, ttl)),
       });
     Ok(value.value.clone())
   }
@@ -1015,7 +1183,7 @@ impl MemoryBackend {
       key.to_string(),
       MemoryValue {
         value: value.to_vec(),
-        expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+        expires_at_ms: ttl.map(|ttl| atomic_updates::expiry_after(now, ttl)),
       },
     );
     Ok(true)
@@ -1040,8 +1208,7 @@ impl MemoryBackend {
         key.to_string(),
         MemoryValue {
           value: value.to_vec(),
-          expires_at_ms: ttl
-            .map(|ttl| now_unix_ms() + ttl.as_millis().min(i64::MAX as u128) as i64),
+          expires_at_ms: ttl.map(|ttl| atomic_updates::expiry_after(now_unix_ms(), ttl)),
         },
       );
     Ok(())
@@ -1096,7 +1263,7 @@ impl MemoryBackend {
       key.to_string(),
       MemoryValue {
         value: next.clone(),
-        expires_at_ms: ttl.map(|ttl| now + ttl.as_millis().min(i64::MAX as u128) as i64),
+        expires_at_ms: ttl.map(|ttl| atomic_updates::expiry_after(now, ttl)),
       },
     );
     Ok(next)
@@ -1129,7 +1296,7 @@ impl MemoryBackend {
     });
     entry.counter = (entry.counter + delta).max(0);
     if let Some(ttl) = ttl {
-      entry.expires_at_ms = Some(now + ttl.as_millis().min(i64::MAX as u128) as i64);
+      entry.expires_at_ms = Some(atomic_updates::expiry_after(now, ttl));
     }
     Ok(entry.counter as usize)
   }
@@ -1151,26 +1318,16 @@ impl MemoryBackend {
     unhealthy_threshold: u32,
   ) -> anyhow::Result<bool> {
     let value = self.update_bytes(key, None, |current| {
-      let mut record: HealthRecord = current
+      let record: HealthRecord = current
         .and_then(|bytes| serde_json::from_slice(bytes).ok())
         .unwrap_or_default();
-      if !enabled {
-        record.healthy = true;
-        record.consecutive_successes = 0;
-        record.consecutive_failures = 0;
-      } else if success {
-        record.consecutive_successes = record.consecutive_successes.saturating_add(1);
-        record.consecutive_failures = 0;
-        if record.consecutive_successes >= healthy_threshold.max(1) {
-          record.healthy = true;
-        }
-      } else {
-        record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-        record.consecutive_successes = 0;
-        if record.consecutive_failures >= unhealthy_threshold.max(1) {
-          record.healthy = false;
-        }
-      }
+      let record = atomic_updates::apply_health_report(
+        record,
+        success,
+        enabled,
+        healthy_threshold,
+        unhealthy_threshold,
+      );
       serde_json::to_vec(&record).map_err(Into::into)
     })?;
     let record: HealthRecord = serde_json::from_slice(&value)?;
@@ -1197,86 +1354,6 @@ impl MemoryBackend {
 impl RedisBackend {
   async fn command(&self, args: &[Vec<u8>]) -> anyhow::Result<Resp> {
     self.pool.command(args).await
-  }
-
-  async fn connection_acquire(
-    &self,
-    keys: &[String],
-    limits: &[usize],
-    ttl: Duration,
-  ) -> anyhow::Result<Option<usize>> {
-    let script = r#"
-for i = 1, #KEYS do
-  local current = tonumber(redis.call('GET', KEYS[i]) or '0')
-  local limit = tonumber(ARGV[i])
-  if current >= limit then
-    return i
-  end
-end
-local ttl = tonumber(ARGV[#ARGV])
-for i = 1, #KEYS do
-  redis.call('INCR', KEYS[i])
-  redis.call('PEXPIRE', KEYS[i], ttl)
-end
-return 0
-"#;
-    let mut args = vec![
-      b"EVAL".to_vec(),
-      script.as_bytes().to_vec(),
-      keys.len().to_string().into_bytes(),
-    ];
-    args.extend(keys.iter().map(|key| key.as_bytes().to_vec()));
-    args.extend(limits.iter().map(|limit| limit.to_string().into_bytes()));
-    args.push(
-      ttl
-        .as_millis()
-        .min(i64::MAX as u128)
-        .to_string()
-        .into_bytes(),
-    );
-    let value = self.command(&args).await?.into_i64()?;
-    Ok((value > 0).then_some(value as usize - 1))
-  }
-
-  async fn connection_release(&self, keys: &[String]) -> anyhow::Result<()> {
-    let script = r#"
-for i = 1, #KEYS do
-  local current = tonumber(redis.call('GET', KEYS[i]) or '0')
-  if current <= 1 then
-    redis.call('DEL', KEYS[i])
-  else
-    redis.call('DECR', KEYS[i])
-  end
-end
-return 1
-"#;
-    let mut args = vec![
-      b"EVAL".to_vec(),
-      script.as_bytes().to_vec(),
-      keys.len().to_string().into_bytes(),
-    ];
-    args.extend(keys.iter().map(|key| key.as_bytes().to_vec()));
-    let _ = self.command(&args).await?;
-    Ok(())
-  }
-
-  async fn get_or_init_bytes(
-    &self,
-    key: &str,
-    len: usize,
-    ttl: Option<Duration>,
-  ) -> anyhow::Result<Vec<u8>> {
-    let mut value = vec![0u8; len];
-    crate::crypto::random_fill(&mut value)
-      .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
-    let _ = self.put_if_absent(key, &value, ttl).await?;
-    match self
-      .command(&[b"GET".to_vec(), key.as_bytes().to_vec()])
-      .await?
-    {
-      Resp::Bulk(Some(bytes)) => Ok(bytes),
-      _ => bail!("shared Redis key {key} did not contain bytes"),
-    }
   }
 
   async fn put_if_absent(
@@ -1386,38 +1463,6 @@ return 1
     }
   }
 
-  async fn health_report(
-    &self,
-    key: &str,
-    success: bool,
-    enabled: bool,
-    healthy_threshold: u32,
-    unhealthy_threshold: u32,
-  ) -> anyhow::Result<bool> {
-    let mut record = self.health_get(key).await?.unwrap_or_default();
-    if success {
-      record.consecutive_failures = 0;
-      record.consecutive_successes = record.consecutive_successes.saturating_add(1);
-      if !enabled || record.consecutive_successes >= healthy_threshold {
-        record.healthy = true;
-      }
-    } else {
-      record.consecutive_successes = 0;
-      record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-      if enabled && record.consecutive_failures >= unhealthy_threshold {
-        record.healthy = false;
-      }
-    }
-    self
-      .put(
-        key,
-        &serde_json::to_vec(&record)?,
-        Some(Duration::from_secs(3600)),
-      )
-      .await?;
-    Ok(record.healthy)
-  }
-
   async fn counter_get(&self, key: &str) -> anyhow::Result<usize> {
     match self
       .command(&[b"GET".to_vec(), key.as_bytes().to_vec()])
@@ -1432,127 +1477,9 @@ return 1
       other => bail!("unexpected Redis counter response: {other:?}"),
     }
   }
-
-  async fn counter_add(
-    &self,
-    key: &str,
-    delta: i64,
-    ttl: Option<Duration>,
-  ) -> anyhow::Result<usize> {
-    let value = self
-      .command(&[
-        b"INCRBY".to_vec(),
-        key.as_bytes().to_vec(),
-        delta.to_string().into_bytes(),
-      ])
-      .await?
-      .into_i64()?
-      .max(0) as usize;
-    if let Some(ttl) = ttl {
-      let _ = self
-        .command(&[
-          b"PEXPIRE".to_vec(),
-          key.as_bytes().to_vec(),
-          ttl
-            .as_millis()
-            .min(i64::MAX as u128)
-            .to_string()
-            .into_bytes(),
-        ])
-        .await?;
-    }
-    Ok(value)
-  }
 }
 
 impl PostgresBackend {
-  async fn connection_acquire(
-    &self,
-    keys: &[String],
-    limits: &[usize],
-    ttl: Duration,
-  ) -> anyhow::Result<Option<usize>> {
-    let mut tx = self.pool.begin().await?;
-    let now = now_unix_ms();
-    let expires = now + ttl.as_millis().min(i64::MAX as u128) as i64;
-    for (index, key) in keys.iter().enumerate() {
-      let current: Option<i64> = sqlx::query_scalar(
-        "SELECT counter FROM oxibelt_shared_counters WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) FOR UPDATE",
-      )
-      .bind(key)
-      .bind(now)
-      .fetch_optional(&mut *tx)
-      .await?;
-      if current.unwrap_or(0) >= limits[index] as i64 {
-        tx.rollback().await?;
-        return Ok(Some(index));
-      }
-    }
-    for key in keys {
-      sqlx::query(
-        "INSERT INTO oxibelt_shared_counters (key, counter, expires_at_ms) VALUES ($1, 1, $2)
-         ON CONFLICT (key) DO UPDATE SET counter = oxibelt_shared_counters.counter + 1, expires_at_ms = EXCLUDED.expires_at_ms",
-      )
-      .bind(key)
-      .bind(expires)
-      .execute(&mut *tx)
-      .await?;
-    }
-    tx.commit().await?;
-    Ok(None)
-  }
-
-  async fn connection_release(&self, keys: &[String]) -> anyhow::Result<()> {
-    for key in keys {
-      sqlx::query(
-        "UPDATE oxibelt_shared_counters SET counter = GREATEST(counter - 1, 0) WHERE key = $1",
-      )
-      .bind(key)
-      .execute(&self.pool)
-      .await?;
-    }
-    Ok(())
-  }
-
-  async fn get_or_init_bytes(
-    &self,
-    key: &str,
-    len: usize,
-    ttl: Option<Duration>,
-  ) -> anyhow::Result<Vec<u8>> {
-    let mut random = vec![0u8; len];
-    crate::crypto::random_fill(&mut random)
-      .map_err(|_| anyhow!("failed to generate shared state random bytes"))?;
-    let _ = self.put_if_absent(key, &random, ttl).await?;
-    sqlx::query_scalar::<_, Vec<u8>>(
-      "SELECT value FROM oxibelt_shared_state WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
-    )
-    .bind(key)
-    .bind(now_unix_ms())
-    .fetch_one(&self.pool)
-    .await
-    .map_err(Into::into)
-  }
-
-  async fn put_if_absent(
-    &self,
-    key: &str,
-    value: &[u8],
-    ttl: Option<Duration>,
-  ) -> anyhow::Result<bool> {
-    let expires = ttl.map(|ttl| now_unix_ms() + ttl.as_millis().min(i64::MAX as u128) as i64);
-    let result = sqlx::query(
-      "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms) VALUES ($1, $2, $3)
-       ON CONFLICT (key) DO NOTHING",
-    )
-    .bind(key)
-    .bind(value)
-    .bind(expires)
-    .execute(&self.pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-  }
-
   async fn take_key(&self, key: &str) -> anyhow::Result<bool> {
     let result = sqlx::query(
       "DELETE FROM oxibelt_shared_state WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
@@ -1565,7 +1492,8 @@ impl PostgresBackend {
   }
 
   async fn put(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> anyhow::Result<()> {
-    let expires = ttl.map(|ttl| now_unix_ms() + ttl.as_millis().min(i64::MAX as u128) as i64);
+    let now = now_unix_ms();
+    let expires = ttl.map(|ttl| atomic_updates::expiry_after(now, ttl));
     sqlx::query(
       "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms) VALUES ($1, $2, $3)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at_ms = EXCLUDED.expires_at_ms",
@@ -1617,50 +1545,6 @@ impl PostgresBackend {
       .transpose()
   }
 
-  async fn health_report(
-    &self,
-    key: &str,
-    success: bool,
-    enabled: bool,
-    healthy_threshold: u32,
-    unhealthy_threshold: u32,
-  ) -> anyhow::Result<bool> {
-    let mut tx = self.pool.begin().await?;
-    let raw: Option<Vec<u8>> =
-      sqlx::query_scalar("SELECT value FROM oxibelt_shared_state WHERE key = $1 FOR UPDATE")
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let mut record: HealthRecord = raw
-      .as_deref()
-      .and_then(|bytes| serde_json::from_slice(bytes).ok())
-      .unwrap_or_default();
-    if success {
-      record.consecutive_failures = 0;
-      record.consecutive_successes = record.consecutive_successes.saturating_add(1);
-      if !enabled || record.consecutive_successes >= healthy_threshold {
-        record.healthy = true;
-      }
-    } else {
-      record.consecutive_successes = 0;
-      record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-      if enabled && record.consecutive_failures >= unhealthy_threshold {
-        record.healthy = false;
-      }
-    }
-    let value = serde_json::to_vec(&record)?;
-    sqlx::query(
-      "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms) VALUES ($1, $2, NULL)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at_ms = NULL",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(record.healthy)
-  }
-
   async fn counter_get(&self, key: &str) -> anyhow::Result<usize> {
     let value: Option<i64> = sqlx::query_scalar(
       "SELECT counter FROM oxibelt_shared_counters WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
@@ -1670,26 +1554,6 @@ impl PostgresBackend {
     .fetch_optional(&self.pool)
     .await?;
     Ok(value.unwrap_or(0).max(0) as usize)
-  }
-
-  async fn counter_add(
-    &self,
-    key: &str,
-    delta: i64,
-    ttl: Option<Duration>,
-  ) -> anyhow::Result<usize> {
-    let expires = ttl.map(|ttl| now_unix_ms() + ttl.as_millis().min(i64::MAX as u128) as i64);
-    let value: i64 = sqlx::query_scalar(
-      "INSERT INTO oxibelt_shared_counters (key, counter, expires_at_ms) VALUES ($1, GREATEST($2, 0), $3)
-       ON CONFLICT (key) DO UPDATE SET counter = GREATEST(oxibelt_shared_counters.counter + $2, 0), expires_at_ms = COALESCE(EXCLUDED.expires_at_ms, oxibelt_shared_counters.expires_at_ms)
-       RETURNING counter",
-    )
-    .bind(key)
-    .bind(delta)
-    .bind(expires)
-    .fetch_one(&self.pool)
-    .await?;
-    Ok(value.max(0) as usize)
   }
 }
 
@@ -1736,6 +1600,22 @@ async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        counter bigint NOT NULL,
        expires_at_ms bigint NULL
      )",
+  )
+  .execute(pool)
+  .await?;
+  sqlx::query(
+    "CREATE TABLE IF NOT EXISTS oxibelt_shared_idempotency (
+       record_key text PRIMARY KEY,
+       fingerprint bytea NOT NULL,
+       result bytea NOT NULL,
+       expires_at_ms bigint NOT NULL
+     )",
+  )
+  .execute(pool)
+  .await?;
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS oxibelt_shared_idempotency_expires
+     ON oxibelt_shared_idempotency (expires_at_ms)",
   )
   .execute(pool)
   .await?;

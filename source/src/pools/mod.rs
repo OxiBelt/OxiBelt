@@ -16,7 +16,7 @@ use crate::config::{
   upstream_pool_server_id,
 };
 use crate::metrics::Metrics;
-use crate::shared_state::SharedState;
+use crate::shared_state::{SharedCounterLease, SharedState};
 
 mod health;
 mod selection;
@@ -143,6 +143,7 @@ pub struct PoolSelection {
   pub upstream_name: String,
   server: Arc<PoolServerRuntime>,
   shared_state: Option<Arc<SharedState>>,
+  shared_lease: Option<SharedCounterLease>,
   sticky_cookie: Option<HeaderValue>,
 }
 
@@ -176,8 +177,10 @@ pub struct PoolServerRuntimeSnapshot {
 impl Drop for PoolSelection {
   fn drop(&mut self) {
     self.server.local_active.fetch_sub(1, Ordering::Relaxed);
-    if let Some(shared) = &self.shared_state {
-      shared.defer_pool_active_add(&self.upstream_name, -1);
+    if let Some(lease) = self.shared_lease.take()
+      && let Some(shared) = &self.shared_state
+    {
+      shared.defer_pool_active_release(lease);
     }
   }
 }
@@ -565,6 +568,7 @@ impl PoolState {
       upstream_name: server.upstream_name.clone(),
       server,
       shared_state: self.shared_state.clone(),
+      shared_lease: None,
       sticky_cookie,
     }
   }

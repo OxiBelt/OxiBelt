@@ -14,7 +14,9 @@ use crate::config::{
   AccessTokenRateLimitSource, ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig,
   RateLimitIdentityPart, RateLimitKey,
 };
-use crate::shared_state::{ConnectionScope, SharedRateLimitOutcome, SharedState};
+use crate::shared_state::{
+  ConnectionScope, SharedConnectionAcquire, SharedCounterLease, SharedRateLimitOutcome, SharedState,
+};
 use crate::waf::PersonProofTokenBinding;
 
 #[path = "limits/context.rs"]
@@ -270,15 +272,10 @@ impl LimitState {
     if let Some(shared) = &self.shared_state
       && shared.has_connection_limits()
     {
-      let owned_scopes = specs
-        .iter()
-        .map(|spec| spec.key.clone())
-        .collect::<Vec<_>>();
       let scopes = specs
         .iter()
-        .enumerate()
-        .map(|(index, spec)| ConnectionScope {
-          key: owned_scopes[index].as_str(),
+        .map(|spec| ConnectionScope {
+          key: spec.key.as_str(),
           limit: spec.limit,
           status: spec.status,
         })
@@ -286,12 +283,12 @@ impl LimitState {
       let acquired = shared.acquire_connections(&scopes).await;
       drop(scopes);
       return match acquired {
-        Ok(None) => Ok(ConnectionPermit {
+        Ok(SharedConnectionAcquire::Acquired(lease)) => Ok(ConnectionPermit {
           state: self.clone(),
           local_release: LocalConnectionRelease::default(),
-          shared_scopes: owned_scopes,
+          shared_lease: Some(lease),
         }),
-        Ok(Some(status)) => Err(status),
+        Ok(SharedConnectionAcquire::Denied(status)) => Err(status),
         Err(error) => {
           tracing::warn!(error = %error, "shared connection limit backend failed closed");
           Err(StatusCode::SERVICE_UNAVAILABLE)
@@ -358,7 +355,7 @@ impl LimitState {
     Ok(ConnectionPermit {
       state: self.clone(),
       local_release,
-      shared_scopes: Vec::new(),
+      shared_lease: None,
     })
   }
 
@@ -730,15 +727,15 @@ impl LimitState {
     }
   }
 
-  async fn release_shared_connection(&self, scopes: &[String]) {
+  async fn release_shared_connection(&self, lease: SharedCounterLease) {
     if let Some(shared) = &self.shared_state {
-      shared.release_connections(scopes).await;
+      shared.release_connections(lease).await;
     }
   }
 
-  fn defer_shared_connection_release(&self, scopes: &[String]) {
+  fn defer_shared_connection_release(&self, lease: SharedCounterLease) {
     if let Some(shared) = &self.shared_state {
-      shared.defer_connection_release(scopes);
+      shared.defer_connection_release(lease);
     }
   }
 }
@@ -746,32 +743,26 @@ impl LimitState {
 pub struct ConnectionPermit {
   state: Arc<LimitState>,
   local_release: LocalConnectionRelease,
-  shared_scopes: Vec<String>,
+  shared_lease: Option<SharedCounterLease>,
 }
 
 impl ConnectionPermit {
   pub async fn release(&mut self) {
-    if self.shared_scopes.is_empty() {
-      self.state.release_connection(&self.local_release);
+    if let Some(lease) = self.shared_lease.take() {
+      self.state.release_shared_connection(lease).await;
     } else {
-      self
-        .state
-        .release_shared_connection(&self.shared_scopes)
-        .await;
+      self.state.release_connection(&self.local_release);
     }
     self.local_release = LocalConnectionRelease::default();
-    self.shared_scopes.clear();
   }
 }
 
 impl Drop for ConnectionPermit {
   fn drop(&mut self) {
-    if self.shared_scopes.is_empty() {
-      self.state.release_connection(&self.local_release);
+    if let Some(lease) = self.shared_lease.take() {
+      self.state.defer_shared_connection_release(lease);
     } else {
-      self
-        .state
-        .defer_shared_connection_release(&self.shared_scopes);
+      self.state.release_connection(&self.local_release);
     }
   }
 }

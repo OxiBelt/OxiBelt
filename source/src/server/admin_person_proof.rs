@@ -1,7 +1,7 @@
 //! Admin Person proof operational endpoints.
 //! Responses expose only hash-derived identifiers and aggregate state.
 
-use ::http::{Response, StatusCode};
+use ::http::{HeaderMap, Response, StatusCode};
 use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::json;
@@ -9,6 +9,7 @@ use tracing::warn;
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
+use crate::shared_state::PersonProofIdempotencyConflict;
 use crate::state::AppSnapshot;
 
 use super::admin::json_response;
@@ -18,6 +19,7 @@ use super::admin_resource;
 
 const DEFAULT_CLEARANCE_LIST_LIMIT: usize = 100;
 const MAX_CLEARANCE_LIST_LIMIT: usize = 1000;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
 #[derive(Debug, Deserialize)]
 struct RevokeClearanceRequest {
@@ -99,6 +101,7 @@ pub(super) async fn admin_person_proof_response(
       )
     }
     (&::http::Method::POST, "/admin/v1/waf/person-proof/clearances/revoke") => {
+      let idempotency_key = revocation_idempotency_key(request.headers());
       let body = match collect_admin_json::<RevokeClearanceRequest>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
@@ -113,14 +116,45 @@ pub(super) async fn admin_person_proof_response(
       if !authorization.is_allowed("waf:RevokePersonProofClearance", &resource) {
         return Some(text_response(StatusCode::FORBIDDEN, "forbidden"));
       }
+      let idempotency_key = match idempotency_key {
+        Ok(key) => key,
+        Err(error) => return Some(text_response(StatusCode::BAD_REQUEST, &error.to_string())),
+      };
       Some(
         match snapshot
           .waf
-          .person_proof_admin_revoke_clearance_async(&hash, body.ttl_seconds)
+          .person_proof_admin_revoke_clearance_with_idempotency_async(
+            &hash,
+            body.ttl_seconds,
+            idempotency_key.as_deref(),
+          )
           .await
         {
           Ok(result) => json_response(StatusCode::OK, &result),
-          Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+          Err(error)
+            if error
+              .downcast_ref::<PersonProofIdempotencyConflict>()
+              .is_some() =>
+          {
+            text_response(
+              StatusCode::CONFLICT,
+              "person proof idempotency key was reused with a different request",
+            )
+          }
+          Err(error)
+            if error
+              .to_string()
+              .starts_with("person proof clearance revocation ttl_seconds") =>
+          {
+            text_response(StatusCode::BAD_REQUEST, &error.to_string())
+          }
+          Err(error) => {
+            warn!(error = %error, "person proof clearance revocation did not complete");
+            text_response(
+              StatusCode::SERVICE_UNAVAILABLE,
+              "person proof shared state unavailable",
+            )
+          }
         },
       )
     }
@@ -138,6 +172,30 @@ pub(super) async fn admin_person_proof_response(
     }
     _ => Some(text_response(StatusCode::NOT_FOUND, "not found")),
   }
+}
+
+fn revocation_idempotency_key(headers: &HeaderMap) -> anyhow::Result<Option<String>> {
+  let values = headers.get_all("idempotency-key");
+  let mut values = values.iter();
+  let Some(value) = values.next() else {
+    return Ok(None);
+  };
+  if values.next().is_some() {
+    anyhow::bail!("Idempotency-Key must be supplied at most once");
+  }
+  let value = value
+    .to_str()
+    .map_err(|_| anyhow::anyhow!("Idempotency-Key must contain visible ASCII characters"))?;
+  if value.is_empty()
+    || value.len() > MAX_IDEMPOTENCY_KEY_BYTES
+    || !value.bytes().all(|byte| byte.is_ascii_graphic())
+  {
+    anyhow::bail!(
+      "Idempotency-Key must contain 1 to {} visible ASCII characters",
+      MAX_IDEMPOTENCY_KEY_BYTES
+    );
+  }
+  Ok(Some(value.to_string()))
 }
 
 struct ClearanceListQuery {
@@ -163,4 +221,36 @@ fn clearance_list_query(query: Option<&str>) -> anyhow::Result<ClearanceListQuer
     }
   }
   Ok(ClearanceListQuery { limit, cursor })
+}
+
+#[cfg(test)]
+mod tests {
+  use ::http::{HeaderMap, HeaderValue};
+
+  use super::revocation_idempotency_key;
+
+  #[test]
+  fn revocation_idempotency_key_accepts_one_visible_ascii_value() {
+    let mut headers = HeaderMap::new();
+    headers.insert("Idempotency-Key", HeaderValue::from_static("retry-key_01"));
+    assert_eq!(
+      revocation_idempotency_key(&headers).unwrap().as_deref(),
+      Some("retry-key_01")
+    );
+  }
+
+  #[test]
+  fn revocation_idempotency_key_rejects_duplicate_or_non_visible_values() {
+    let mut duplicate = HeaderMap::new();
+    duplicate.append("Idempotency-Key", HeaderValue::from_static("first"));
+    duplicate.append("Idempotency-Key", HeaderValue::from_static("second"));
+    assert!(revocation_idempotency_key(&duplicate).is_err());
+
+    let mut whitespace = HeaderMap::new();
+    whitespace.insert(
+      "Idempotency-Key",
+      HeaderValue::from_static("contains space"),
+    );
+    assert!(revocation_idempotency_key(&whitespace).is_err());
+  }
 }

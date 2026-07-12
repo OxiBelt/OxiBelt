@@ -49,6 +49,7 @@ impl PersonProofEngine {
     Ok(true)
   }
 
+  #[cfg(test)]
   pub(super) async fn consume_reuse_token_async(
     &self,
     key: &str,
@@ -94,9 +95,20 @@ impl PersonProofEngine {
     {
       return shared.person_proof_consume_clearance(token, &hash).await;
     }
-    self
-      .consume_reuse_token_async(&format!("clearance:{hash}"), now)
-      .await
+    let mut active = self
+      .active_reuse_tokens
+      .lock()
+      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
+    let mut revoked = self
+      .revoked_clearances
+      .lock()
+      .map_err(|_| anyhow!("person proof revocation state is unavailable"))?;
+    purge_expired_reuse_tokens(&mut active, now);
+    purge_expired_reuse_tokens(&mut revoked, now);
+    if revoked.contains_key(&hash) {
+      return Ok(false);
+    }
+    Ok(active.remove(&format!("clearance:{hash}")).is_some())
   }
 
   pub(super) async fn clearance_revoked_async(&self, hash: &str, now: i64) -> anyhow::Result<bool> {
@@ -150,19 +162,6 @@ impl PersonProofEngine {
     Ok(true)
   }
 
-  pub(super) fn consume_reuse_token(&self, key: &str, now: i64) -> anyhow::Result<bool> {
-    if let Some(shared) = &self.shared_state {
-      let _ = shared;
-      bail!("person proof shared reuse state requires asynchronous evaluation");
-    }
-    let mut active = self
-      .active_reuse_tokens
-      .lock()
-      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
-    purge_expired_reuse_tokens(&mut active, now);
-    Ok(active.remove(key).is_some())
-  }
-
   pub(super) fn mark_challenge_token_used(
     &self,
     token: &str,
@@ -184,7 +183,20 @@ impl PersonProofEngine {
     {
       bail!("person proof shared reuse state requires asynchronous evaluation");
     }
-    self.consume_reuse_token(&format!("clearance:{hash}"), now)
+    let mut active = self
+      .active_reuse_tokens
+      .lock()
+      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
+    let mut revoked = self
+      .revoked_clearances
+      .lock()
+      .map_err(|_| anyhow!("person proof revocation state is unavailable"))?;
+    purge_expired_reuse_tokens(&mut active, now);
+    purge_expired_reuse_tokens(&mut revoked, now);
+    if revoked.contains_key(&hash) {
+      return Ok(false);
+    }
+    Ok(active.remove(&format!("clearance:{hash}")).is_some())
   }
 
   pub(super) fn clearance_revoked(&self, hash: &str, now: i64) -> anyhow::Result<bool> {

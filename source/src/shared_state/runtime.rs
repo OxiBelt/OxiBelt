@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::config::SharedStateBackendConfig;
 use crate::metrics::Metrics;
 
-use super::Backend;
+use super::{Backend, SharedCounterLease};
 
 const SHARED_POOL_WARNING_INTERVAL_MS: u64 = 60_000;
 
@@ -275,19 +275,17 @@ fn duration_ms(started: Instant) -> u64 {
 enum CleanupRequest {
   ConnectionRelease {
     backend: Arc<Backend>,
-    keys: Vec<String>,
+    lease: SharedCounterLease,
+  },
+  CounterLeaseRelease {
+    backend: Arc<Backend>,
+    lease: SharedCounterLease,
+    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
   },
   Unlock {
     backend: Arc<Backend>,
     key: String,
     token: String,
-  },
-  CounterAdd {
-    backend: Arc<Backend>,
-    key: String,
-    delta: i64,
-    ttl: Option<Duration>,
-    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
   },
 }
 
@@ -310,8 +308,21 @@ impl CleanupDispatcher {
     }
   }
 
-  pub(super) fn defer_connection_release(&self, backend: Arc<Backend>, keys: Vec<String>) {
-    self.try_send(CleanupRequest::ConnectionRelease { backend, keys });
+  pub(super) fn defer_connection_release(&self, backend: Arc<Backend>, lease: SharedCounterLease) {
+    self.try_send(CleanupRequest::ConnectionRelease { backend, lease });
+  }
+
+  pub(super) fn defer_counter_lease_release(
+    &self,
+    backend: Arc<Backend>,
+    lease: SharedCounterLease,
+    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
+  ) {
+    self.try_send(CleanupRequest::CounterLeaseRelease {
+      backend,
+      lease,
+      pool_warning_limiter,
+    });
   }
 
   pub(super) fn defer_unlock(&self, backend: Arc<Backend>, key: String, token: String) {
@@ -322,28 +333,11 @@ impl CleanupDispatcher {
     });
   }
 
-  pub(super) fn defer_counter_add(
-    &self,
-    backend: Arc<Backend>,
-    key: String,
-    delta: i64,
-    ttl: Option<Duration>,
-    pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
-  ) {
-    self.try_send(CleanupRequest::CounterAdd {
-      backend,
-      key,
-      delta,
-      ttl,
-      pool_warning_limiter,
-    });
-  }
-
   fn try_send(&self, request: CleanupRequest) {
     let backend = match &request {
       CleanupRequest::ConnectionRelease { backend, .. }
-      | CleanupRequest::Unlock { backend, .. }
-      | CleanupRequest::CounterAdd { backend, .. } => backend.clone(),
+      | CleanupRequest::CounterLeaseRelease { backend, .. }
+      | CleanupRequest::Unlock { backend, .. } => backend.clone(),
     };
     let Some(sender) = &self.sender else {
       backend.record_cleanup_drop();
@@ -358,24 +352,22 @@ impl CleanupDispatcher {
 async fn cleanup_worker(mut receiver: mpsc::Receiver<CleanupRequest>) {
   while let Some(request) = receiver.recv().await {
     let (result, pool_warning_limiter) = match request {
-      CleanupRequest::ConnectionRelease { backend, keys } => {
-        (backend.connection_release(&keys).await, None)
+      CleanupRequest::ConnectionRelease { backend, lease } => {
+        (backend.connection_release(&lease).await, None)
       }
+      CleanupRequest::CounterLeaseRelease {
+        backend,
+        lease,
+        pool_warning_limiter,
+      } => (
+        backend.counter_lease_release(&lease).await,
+        Some(pool_warning_limiter),
+      ),
       CleanupRequest::Unlock {
         backend,
         key,
         token,
       } => (backend.unlock(&key, &token).await, None),
-      CleanupRequest::CounterAdd {
-        backend,
-        key,
-        delta,
-        ttl,
-        pool_warning_limiter,
-      } => (
-        backend.counter_add(&key, delta, ttl).await.map(|_| ()),
-        Some(pool_warning_limiter),
-      ),
     };
     if let Err(error) = result
       && pool_warning_limiter

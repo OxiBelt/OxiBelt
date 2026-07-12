@@ -174,7 +174,19 @@ partial aggregate count. Clearance listing always returns only its bounded page
 plus a continuation cursor.
 `POST /admin/v1/waf/person-proof/clearances/revoke` accepts only a bare SHA-256
 value or canonical `clearance:<sha256>` value and creates an exact-match
-revocation tombstone.
+revocation tombstone. It optionally accepts exactly one `Idempotency-Key`
+header containing 1 through 128 visible ASCII characters. OxiBelt retains only
+the SHA-256 digest of that key. While the revocation tombstone remains active
+(at most 24 hours), repeating the same key with the same normalized clearance
+hash and the same supplied `ttl_seconds` representation (omitted and explicit
+values are distinct) returns the original response, including its original
+expiry. Reusing the key with a different request returns `409`; malformed or
+repeated headers return `400`; and a configured shared backend that cannot
+commit the operation returns `503`. This retry contract is intentionally scoped
+to this one Person proof mutation and does not make other Admin writes
+idempotent. Process-local mode bounds live replay records; when that bound is
+full, a new keyed mutation returns `503` rather than evicting a still-live
+record.
 
 These endpoints never return raw session material, raw clearance credentials,
 provider responses, token-binding payloads, MACs, or the shared Person proof

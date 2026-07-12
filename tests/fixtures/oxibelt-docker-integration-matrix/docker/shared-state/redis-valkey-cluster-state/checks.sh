@@ -5,6 +5,7 @@ run_case_checks() {
   assert_redis_shared_rate_limit_bucket_cap
   assert_shared_person_proof
   assert_shared_person_proof_admin_pages
+  assert_shared_person_proof_admin_revocation
   assert_shared_pool_health
   assert_shared_cache_uri_isolation
   assert_shared_cache
@@ -86,6 +87,35 @@ assert_shared_person_proof_admin_pages() {
     echo "${first_page}" >&2
     echo "${second_page}" >&2
     fail_with_diagnostics "person-proof clearance pagination returned a duplicate instead of the next shared marker"
+  fi
+}
+
+assert_shared_person_proof_admin_revocation() {
+  local page clearance_hash hash revoke_body first replay conflict tombstone active idempotency_count
+  page="$(plain_client_request_with_headers_to_target "proxy-a" 9092 "proxy-a" "/admin/v1/waf/person-proof/clearances?limit=1" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
+  clearance_hash="$(jq -r '.body | fromjson | .clearances[0].clearance_hash' <<<"${page}")"
+  hash="${clearance_hash#clearance:}"
+  if [[ ! "${hash}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "${page}" >&2
+    fail_with_diagnostics "expected a canonical Person proof clearance hash before revocation"
+  fi
+  revoke_body="$(python3 -c 'import json, sys; print(json.dumps({"clearance_hash": sys.argv[1], "ttl_seconds": 60}))' "${clearance_hash}")"
+  first="$(plain_client_request_with_headers_to_target "proxy-a" 9092 "proxy-a" "/admin/v1/waf/person-proof/clearances/revoke" 200 "POST" "${revoke_body}" "Authorization: Bearer matrix-admin-token" "Content-Type: application/json" "Idempotency-Key: matrix-person-proof-revoke")"
+  replay="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/waf/person-proof/clearances/revoke" 200 "POST" "${revoke_body}" "Authorization: Bearer matrix-admin-token" "Content-Type: application/json" "Idempotency-Key: matrix-person-proof-revoke")"
+  assert_body_jq "${first}" '.revoked == true and .removed_active == true and (.expires_at_unix_ms | type == "number")'
+  if [[ "$(jq -cS '.body | fromjson' <<<"${first}")" != "$(jq -cS '.body | fromjson' <<<"${replay}")" ]]; then
+    echo "${first}" >&2
+    echo "${replay}" >&2
+    fail_with_diagnostics "same Person proof idempotency key must replay the original response across proxies"
+  fi
+  conflict="$(plain_client_request_with_headers_to_target "proxy-b" 9092 "proxy-b" "/admin/v1/waf/person-proof/clearances/revoke" 409 "POST" "$(python3 -c 'import json, sys; print(json.dumps({"clearance_hash": sys.argv[1], "ttl_seconds": 61}))' "${clearance_hash}")" "Authorization: Bearer matrix-admin-token" "Content-Type: application/json" "Idempotency-Key: matrix-person-proof-revoke")"
+  assert_response_jq "${conflict}" '.status == 409'
+  tombstone="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli EXISTS "$1"; else redis-cli EXISTS "$1"; fi' sh "matrix-shared:person-proof:revoked:clearance:${hash}")"
+  active="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli EXISTS "$1"; else redis-cli EXISTS "$1"; fi' sh "matrix-shared:person-proof:reuse:clearance:${hash}")"
+  idempotency_count="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli --scan --pattern "matrix-shared:admin-idempotency:person-proof-revoke:*"; else redis-cli --scan --pattern "matrix-shared:admin-idempotency:person-proof-revoke:*"; fi' | wc -l | tr -d '[:space:]')"
+  if [[ "${tombstone}" != "1" || "${active}" != "0" || "${idempotency_count}" != "1" ]]; then
+    echo "tombstone=${tombstone} active=${active} idempotency_count=${idempotency_count}" >&2
+    fail_with_diagnostics "Person proof revocation must atomically tombstone, remove the active marker, and retain one digest-only replay record"
   fi
 }
 

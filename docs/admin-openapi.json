@@ -1509,6 +1509,11 @@
         ],
         "operationId": "revokeWafPersonProofClearance",
         "summary": "Revoke one Person proof clearance by hash.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PersonProofRevocationIdempotencyKey"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -1538,6 +1543,12 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -3897,6 +3908,18 @@
           "type": "string"
         },
         "description": "Optional ETag from the corresponding status endpoint. When supplied, it is enforced as a precondition."
+      },
+      "PersonProofRevocationIdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7E]+$"
+        },
+        "description": "Optional retry key for Person proof clearance revocation. The same key and normalized request replay the original result while its tombstone remains active; reusing it with a different request returns 409."
       },
       "AdminListLimit": {
         "name": "limit",

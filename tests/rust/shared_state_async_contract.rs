@@ -24,6 +24,9 @@ fn assert_absent(path: &str, source: &str, forbidden: &str) {
 fn shared_state_backend_implementation_has_no_blocking_bridge() {
   let files = [
     "source/src/shared_state.rs",
+    "source/src/shared_state/atomic_updates.rs",
+    "source/src/shared_state/atomic_updates/postgres.rs",
+    "source/src/shared_state/atomic_updates/memory.rs",
     "source/src/shared_state/cache_store.rs",
     "source/src/shared_state/enumeration.rs",
     "source/src/shared_state/feature_flags.rs",
@@ -54,6 +57,7 @@ fn shared_state_backend_implementation_has_no_blocking_bridge() {
 fn shared_state_enumeration_never_issues_the_redis_keys_command() {
   for path in [
     "source/src/shared_state.rs",
+    "source/src/shared_state/atomic_updates.rs",
     "source/src/shared_state/cache_store.rs",
     "source/src/shared_state/enumeration.rs",
     "source/src/shared_state/person_proof.rs",

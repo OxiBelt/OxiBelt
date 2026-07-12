@@ -81,7 +81,7 @@ impl PoolState {
       bail!("unknown upstream pool {pool_name}");
     };
     self.refresh_shared_pool_view(&pool).await;
-    let selection = self.select_with_cookie_header_excluding(
+    let mut selection = self.select_with_cookie_header_excluding(
       pool_name,
       client_ip,
       hash_key,
@@ -89,11 +89,15 @@ impl PoolState {
       cookie_header,
       excluded_upstreams,
     )?;
-    if let Some(shared) = &self.shared_state
-      && let Err(error) = shared.pool_active_add(&selection.upstream_name, 1).await
-      && shared.should_log_pool_warning()
-    {
-      tracing::warn!(error = %error, upstream = %selection.upstream_name, "failed to update shared upstream active count");
+    if let Some(shared) = &self.shared_state {
+      match shared.pool_active_acquire(&selection.upstream_name).await {
+        Ok(Some(lease)) => selection.shared_lease = Some(lease),
+        Ok(None) => {}
+        Err(error) if shared.should_log_pool_warning() => {
+          tracing::warn!(error = %error, upstream = %selection.upstream_name, "failed to update shared upstream active count");
+        }
+        Err(_) => {}
+      }
     }
     Ok(selection)
   }

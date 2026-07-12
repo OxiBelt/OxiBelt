@@ -286,6 +286,29 @@ fn person_proof_admin_schemas_stay_hash_only() {
 }
 
 #[test]
+fn person_proof_revocation_documents_its_narrow_idempotency_contract() {
+  let spec = openapi();
+  let operation = &spec["paths"]["/admin/v1/waf/person-proof/clearances/revoke"]["post"];
+  assert_eq!(
+    operation["parameters"][0]["$ref"],
+    "#/components/parameters/PersonProofRevocationIdempotencyKey"
+  );
+  let parameter = &spec["components"]["parameters"]["PersonProofRevocationIdempotencyKey"];
+  assert_eq!(parameter["in"], "header");
+  assert_eq!(parameter["required"], false);
+  assert_eq!(parameter["schema"]["minLength"], 1);
+  assert_eq!(parameter["schema"]["maxLength"], 128);
+  assert_eq!(
+    operation["responses"]["409"]["$ref"],
+    "#/components/responses/Conflict"
+  );
+  assert_eq!(
+    operation["responses"]["503"]["$ref"],
+    "#/components/responses/ServiceUnavailable"
+  );
+}
+
+#[test]
 fn downstream_tls_status_documents_bounded_crlite_status() {
   let spec = openapi();
   let schema = &spec["paths"]["/admin/v1/tls/downstream"]["get"]["responses"]["200"]["content"]["application/json"]

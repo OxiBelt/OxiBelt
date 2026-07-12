@@ -2,8 +2,19 @@ use anyhow::{Context, anyhow, bail};
 use serde::Serialize;
 
 use super::person_proof::{PersonProofEngine, now_unix_ms, purge_expired_reuse_tokens};
+use crate::shared_state::{
+  PersonProofIdempotencyConflict, PersonProofRevocationIdempotency, PersonProofRevocationResult,
+};
 
 const MAX_ADMIN_REVOKE_TTL_SECONDS: u64 = 86_400;
+pub(super) const MAX_LOCAL_ADMIN_IDEMPOTENCY_RECORDS: usize = 2_048;
+
+#[derive(Debug, Clone)]
+pub(super) struct PersonProofRevocationReplay {
+  pub(super) fingerprint: String,
+  pub(super) removed_active: bool,
+  pub(super) expires_at_ms: i64,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonProofAdminStatus {
@@ -109,40 +120,39 @@ impl PersonProofEngine {
     hash: &str,
     ttl_seconds: Option<u64>,
   ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    self
+      .admin_revoke_clearance_with_idempotency_async(hash, ttl_seconds, None)
+      .await
+  }
+
+  pub(super) async fn admin_revoke_clearance_with_idempotency_async(
+    &self,
+    hash: &str,
+    ttl_seconds: Option<u64>,
+    idempotency_key: Option<&str>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    let hash = normalize_clearance_hash(hash)?;
+    let supplied_ttl_seconds = ttl_seconds;
+    let ttl_seconds = self.validate_revoke_ttl(ttl_seconds)?;
+    let now = now_unix_ms()?;
+    let expires_at = revocation_expires_at(now, ttl_seconds);
+    let idempotency = idempotency_key
+      .map(|key| PersonProofRevocationIdempotency::new(key, &hash, supplied_ttl_seconds));
     if let Some(shared) = &self.shared_state
       && shared.person_proof_enabled()
     {
-      let hash = normalize_clearance_hash(hash)?;
-      let ttl_seconds = ttl_seconds.unwrap_or_else(|| self.max_policy_ttl_seconds());
-      if ttl_seconds == 0 {
-        bail!("person proof clearance revocation ttl_seconds must be greater than 0");
-      }
-      if ttl_seconds > MAX_ADMIN_REVOKE_TTL_SECONDS {
-        bail!(
-          "person proof clearance revocation ttl_seconds must be at most {}",
-          MAX_ADMIN_REVOKE_TTL_SECONDS
-        );
-      }
-      let now = now_unix_ms()?;
-      let expires_at = now
-        .checked_add(
-          i64::try_from(ttl_seconds)
-            .unwrap_or(i64::MAX / 1000)
-            .saturating_mul(1000),
-        )
-        .unwrap_or(i64::MAX);
-      let removed_active = shared
-        .person_proof_revoke_clearance_hash(&hash, expires_at)
+      let result = shared
+        .person_proof_revoke_clearance_hash(&hash, expires_at, idempotency.as_ref())
         .await?;
       return Ok(PersonProofAdminRevokeResult {
         clearance_hash: format!("clearance:{hash}"),
         revoked: true,
-        removed_active,
+        removed_active: result.removed_active,
         store_scope: "shared",
-        expires_at_unix_ms: expires_at,
+        expires_at_unix_ms: result.expires_at_ms,
       });
     }
-    self.admin_revoke_clearance(hash, ttl_seconds)
+    self.local_revoke_result(&hash, expires_at, idempotency.as_ref())
   }
 
   pub(super) fn admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
@@ -252,24 +262,9 @@ impl PersonProofEngine {
     ttl_seconds: Option<u64>,
   ) -> anyhow::Result<PersonProofAdminRevokeResult> {
     let hash = normalize_clearance_hash(hash)?;
-    let ttl_seconds = ttl_seconds.unwrap_or_else(|| self.max_policy_ttl_seconds());
-    if ttl_seconds == 0 {
-      bail!("person proof clearance revocation ttl_seconds must be greater than 0");
-    }
-    if ttl_seconds > MAX_ADMIN_REVOKE_TTL_SECONDS {
-      bail!(
-        "person proof clearance revocation ttl_seconds must be at most {}",
-        MAX_ADMIN_REVOKE_TTL_SECONDS
-      );
-    }
+    let ttl_seconds = self.validate_revoke_ttl(ttl_seconds)?;
     let now = now_unix_ms()?;
-    let expires_at = now
-      .checked_add(
-        i64::try_from(ttl_seconds)
-          .unwrap_or(i64::MAX / 1000)
-          .saturating_mul(1000),
-      )
-      .unwrap_or(i64::MAX);
+    let expires_at = revocation_expires_at(now, ttl_seconds);
 
     if let Some(shared) = &self.shared_state
       && shared.person_proof_enabled()
@@ -278,29 +273,7 @@ impl PersonProofEngine {
       bail!("person proof shared administration requires asynchronous evaluation");
     }
 
-    let key = format!("clearance:{hash}");
-    let removed_active = self
-      .active_reuse_tokens
-      .lock()
-      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?
-      .remove(&key)
-      .is_some();
-    self
-      .revoked_clearances
-      .lock()
-      .map_err(|_| anyhow!("person proof revocation state is unavailable"))?
-      .insert(hash.to_string(), expires_at);
-    Ok(PersonProofAdminRevokeResult {
-      clearance_hash: format!("clearance:{hash}"),
-      revoked: true,
-      removed_active,
-      store_scope: if self.policies.is_empty() {
-        "disabled"
-      } else {
-        "process_local"
-      },
-      expires_at_unix_ms: expires_at,
-    })
+    self.local_revoke_result(&hash, expires_at, None)
   }
 
   pub(super) fn normalize_admin_clearance_hash(hash: &str) -> anyhow::Result<String> {
@@ -316,6 +289,104 @@ impl PersonProofEngine {
       .unwrap_or(MAX_ADMIN_REVOKE_TTL_SECONDS)
       .max(1)
   }
+
+  fn validate_revoke_ttl(&self, ttl_seconds: Option<u64>) -> anyhow::Result<u64> {
+    let ttl_seconds = ttl_seconds.unwrap_or_else(|| self.max_policy_ttl_seconds());
+    if ttl_seconds == 0 {
+      bail!("person proof clearance revocation ttl_seconds must be greater than 0");
+    }
+    if ttl_seconds > MAX_ADMIN_REVOKE_TTL_SECONDS {
+      bail!(
+        "person proof clearance revocation ttl_seconds must be at most {}",
+        MAX_ADMIN_REVOKE_TTL_SECONDS
+      );
+    }
+    Ok(ttl_seconds)
+  }
+
+  fn local_revoke_result(
+    &self,
+    hash: &str,
+    expires_at_ms: i64,
+    idempotency: Option<&PersonProofRevocationIdempotency>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    let now = now_unix_ms()?;
+    let mut active = self
+      .active_reuse_tokens
+      .lock()
+      .map_err(|_| anyhow!("person proof reuse token state is unavailable"))?;
+    let mut revoked = self
+      .revoked_clearances
+      .lock()
+      .map_err(|_| anyhow!("person proof revocation state is unavailable"))?;
+    let mut replay = self
+      .revocation_idempotency
+      .lock()
+      .map_err(|_| anyhow!("person proof idempotency state is unavailable"))?;
+    purge_expired_reuse_tokens(&mut active, now);
+    purge_expired_reuse_tokens(&mut revoked, now);
+    replay.retain(|_, record| record.expires_at_ms > now);
+
+    if let Some(idempotency) = idempotency
+      && let Some(record) = replay.get(&idempotency.key_digest)
+    {
+      if record.fingerprint != idempotency.request_fingerprint {
+        return Err(anyhow::Error::new(PersonProofIdempotencyConflict));
+      }
+      return Ok(PersonProofAdminRevokeResult {
+        clearance_hash: format!("clearance:{hash}"),
+        revoked: true,
+        removed_active: record.removed_active,
+        store_scope: if self.policies.is_empty() {
+          "disabled"
+        } else {
+          "process_local"
+        },
+        expires_at_unix_ms: record.expires_at_ms,
+      });
+    }
+
+    if idempotency.is_some() && replay.len() >= MAX_LOCAL_ADMIN_IDEMPOTENCY_RECORDS {
+      bail!("person proof idempotency record capacity exhausted");
+    }
+
+    let result = PersonProofRevocationResult {
+      removed_active: active.remove(&format!("clearance:{hash}")).is_some(),
+      expires_at_ms,
+    };
+    revoked.insert(hash.to_string(), expires_at_ms);
+    if let Some(idempotency) = idempotency {
+      replay.insert(
+        idempotency.key_digest.clone(),
+        PersonProofRevocationReplay {
+          fingerprint: idempotency.request_fingerprint.clone(),
+          removed_active: result.removed_active,
+          expires_at_ms: result.expires_at_ms,
+        },
+      );
+    }
+    Ok(PersonProofAdminRevokeResult {
+      clearance_hash: format!("clearance:{hash}"),
+      revoked: true,
+      removed_active: result.removed_active,
+      store_scope: if self.policies.is_empty() {
+        "disabled"
+      } else {
+        "process_local"
+      },
+      expires_at_unix_ms: result.expires_at_ms,
+    })
+  }
+}
+
+fn revocation_expires_at(now: i64, ttl_seconds: u64) -> i64 {
+  now
+    .checked_add(
+      i64::try_from(ttl_seconds)
+        .unwrap_or(i64::MAX / 1000)
+        .saturating_mul(1000),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 fn normalize_clearance_hash(value: &str) -> anyhow::Result<String> {

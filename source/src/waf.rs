@@ -1729,6 +1729,18 @@ impl WafEngine {
       .await
   }
 
+  pub async fn person_proof_admin_revoke_clearance_with_idempotency_async(
+    &self,
+    hash: &str,
+    ttl_seconds: Option<u64>,
+    idempotency_key: Option<&str>,
+  ) -> anyhow::Result<PersonProofAdminRevokeResult> {
+    self
+      .person_proof
+      .admin_revoke_clearance_with_idempotency_async(hash, ttl_seconds, idempotency_key)
+      .await
+  }
+
   pub fn normalize_person_proof_admin_clearance_hash(hash: &str) -> anyhow::Result<String> {
     PersonProofEngine::normalize_admin_clearance_hash(hash)
   }

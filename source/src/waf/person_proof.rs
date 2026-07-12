@@ -7,6 +7,7 @@ use anyhow::{Context, anyhow, bail};
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE, VARY};
 use http::{HeaderName, HeaderValue, StatusCode};
 
+use super::person_proof_admin::PersonProofRevocationReplay;
 use super::person_proof_reuse::is_reuse_capacity_error;
 use super::{
   HeaderMutation, PersonProofClearanceConfig, PersonProofClearanceIssueTarget,
@@ -21,6 +22,7 @@ pub(super) struct PersonProofEngine {
   pub(super) policies: Vec<PersonProofPolicy>,
   pub(super) active_reuse_tokens: Arc<Mutex<HashMap<String, i64>>>,
   pub(super) revoked_clearances: Arc<Mutex<HashMap<String, i64>>>,
+  pub(super) revocation_idempotency: Arc<Mutex<HashMap<String, PersonProofRevocationReplay>>>,
   pub(super) max_reuse_tokens: usize,
   pub(super) shared_state: Option<Arc<SharedState>>,
 }
@@ -371,25 +373,29 @@ impl PersonProofEngine {
     shared_state: Option<Arc<SharedState>>,
   ) -> anyhow::Result<Self> {
     let mut secret = [0u8; 32];
-    let (active_reuse_tokens, revoked_clearances) = if let Some(previous) = previous {
-      secret = previous.secret;
-      (
-        previous.active_reuse_tokens.clone(),
-        previous.revoked_clearances.clone(),
-      )
-    } else {
-      crate::crypto::random_fill(&mut secret)
-        .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
-      (
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(Mutex::new(HashMap::new())),
-      )
-    };
+    let (active_reuse_tokens, revoked_clearances, revocation_idempotency) =
+      if let Some(previous) = previous {
+        secret = previous.secret;
+        (
+          previous.active_reuse_tokens.clone(),
+          previous.revoked_clearances.clone(),
+          previous.revocation_idempotency.clone(),
+        )
+      } else {
+        crate::crypto::random_fill(&mut secret)
+          .map_err(|_| anyhow!("failed to generate WAF person proof secret"))?;
+        (
+          Arc::new(Mutex::new(HashMap::new())),
+          Arc::new(Mutex::new(HashMap::new())),
+          Arc::new(Mutex::new(HashMap::new())),
+        )
+      };
     Ok(Self {
       secret,
       policies,
       active_reuse_tokens,
       revoked_clearances,
+      revocation_idempotency,
       max_reuse_tokens,
       shared_state,
     })
@@ -853,9 +859,7 @@ pub(super) fn now_unix_ms() -> anyhow::Result<i64> {
 }
 
 pub(super) fn remaining_seconds(now_unix_ms: i64, expires_unix_ms: i64) -> u64 {
-  expires_unix_ms
-    .saturating_sub(now_unix_ms)
-    .try_into()
+  u64::try_from(expires_unix_ms.saturating_sub(now_unix_ms))
     .map(|millis: u64| millis.div_ceil(1000))
     .unwrap_or(0)
 }
