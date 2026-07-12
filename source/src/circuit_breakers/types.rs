@@ -10,7 +10,7 @@ pub(super) const RESOURCE_KIND_COUNT: usize = 7;
 pub(super) const REJECTION_REASON_COUNT: usize = 5;
 pub(super) const CIRCUIT_STATE_COUNT: usize = 3;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub(super) enum ResourceKind {
   Request,

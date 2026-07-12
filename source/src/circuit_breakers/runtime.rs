@@ -1,6 +1,6 @@
 //! Cancellation-safe composite admission and upstream failure-circuit state.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use crate::config::{CircuitBreakerFailureConfig, Config};
 use super::configuration::{
   deduplicate_allocations, elapsed_ms, queue_timeout, resolve_scopes, scoped_allocations,
 };
-use super::queue::QueuedWaiter;
+use super::queue::{AdmissionQueues, QueueKey, QueuedWaiter, WaiterTicket};
 use super::types::{
   Allocation, CIRCUIT_STATE_COUNT, CircuitState, REJECTION_REASON_COUNT, ResourceKind,
   ResourceLimit, RetryBudget, ScopeKey, ScopeState, Waiter,
@@ -25,7 +25,7 @@ pub use super::types::{
 #[derive(Debug)]
 pub(super) struct RuntimeState {
   pub(super) scopes: HashMap<ScopeKey, ScopeState>,
-  pub(super) waiters: VecDeque<Waiter>,
+  pub(super) waiters: AdmissionQueues,
   pub(super) next_waiter: u64,
   pub(super) retry: RetryBudget,
   pub(super) failure: CircuitBreakerFailureConfig,
@@ -45,7 +45,7 @@ impl RuntimeState {
     let breaker = &config.circuit_breakers;
     Self {
       scopes,
-      waiters: VecDeque::new(),
+      waiters: AdmissionQueues::default(),
       next_waiter: 1,
       retry,
       failure: breaker.failure.clone(),
@@ -148,29 +148,6 @@ impl RuntimeState {
           scope.active[allocation.resource as usize].saturating_sub(1);
       }
     }
-  }
-
-  fn enqueue(&mut self, waiter: Waiter) {
-    for allocation in &waiter.allocations {
-      let scope = self
-        .scopes
-        .get_mut(&allocation.scope)
-        .expect("configured circuit-breaker scope is present");
-      scope.queued[allocation.resource as usize] += 1;
-    }
-    self.waiters.push_back(waiter);
-  }
-
-  fn remove_waiter(&mut self, id: u64) -> Option<Waiter> {
-    let index = self.waiters.iter().position(|waiter| waiter.id == id)?;
-    let waiter = self.waiters.remove(index)?;
-    for allocation in &waiter.allocations {
-      if let Some(scope) = self.scopes.get_mut(&allocation.scope) {
-        scope.queued[allocation.resource as usize] =
-          scope.queued[allocation.resource as usize].saturating_sub(1);
-      }
-    }
-    Some(waiter)
   }
 
   fn circuit_admission(
@@ -535,6 +512,7 @@ impl CircuitBreakerRuntime {
       return Ok(AdmissionLease::disabled());
     }
     let allocations = deduplicate_allocations(allocations);
+    let queue_key = QueueKey::from_allocations(&allocations);
     let mut waiter = QueuedWaiter::new(self.clone());
     loop {
       let notified = self.notify.notified();
@@ -544,21 +522,21 @@ impl CircuitBreakerRuntime {
           .lock()
           .expect("circuit-breaker state lock poisoned");
         if !self.enabled() {
-          if let Some(id) = waiter.take() {
-            state.remove_waiter(id);
+          if let Some(ticket) = waiter.take() {
+            state.remove_waiter(ticket);
           }
           return Ok(AdmissionLease::disabled());
         }
         let is_head = waiter
-          .id()
-          .is_some_and(|id| state.waiters.front().is_some_and(|waiter| waiter.id == id));
-        if (waiter.id().is_none() && state.waiters.is_empty()) || is_head {
+          .ticket()
+          .is_some_and(|ticket| state.waiters.is_head(ticket));
+        if (waiter.ticket().is_none() && state.waiters.is_empty(&queue_key)) || is_head {
           match state.circuit_available(&allocations, Instant::now()) {
             Ok(()) if state.can_admit(&allocations) => {
               match state.circuit_admission(&allocations, Instant::now()) {
                 Ok(probes) => {
-                  if let Some(id) = waiter.take()
-                    && let Some(waiter) = state.remove_waiter(id)
+                  if let Some(ticket) = waiter.take()
+                    && let Some(waiter) = state.remove_waiter(ticket)
                   {
                     state.queue_waits = state.queue_waits.saturating_add(1);
                     state.queue_wait_ms = state
@@ -574,8 +552,8 @@ impl CircuitBreakerRuntime {
                   )))
                 }
                 Err(retry_after) => {
-                  if let Some(id) = waiter.take() {
-                    state.remove_waiter(id);
+                  if let Some(ticket) = waiter.take() {
+                    state.remove_waiter(ticket);
                   }
                   state.reject(AdmissionRejectionReason::CircuitOpen);
                   Some(Err(AdmissionRejection {
@@ -587,8 +565,8 @@ impl CircuitBreakerRuntime {
             }
             Ok(()) => None,
             Err(retry_after) => {
-              if let Some(id) = waiter.take() {
-                state.remove_waiter(id);
+              if let Some(ticket) = waiter.take() {
+                state.remove_waiter(ticket);
               }
               state.reject(AdmissionRejectionReason::CircuitOpen);
               Some(Err(AdmissionRejection {
@@ -605,7 +583,7 @@ impl CircuitBreakerRuntime {
         return result;
       }
 
-      if waiter.id().is_none() {
+      if waiter.ticket().is_none() {
         let mut state = self
           .state
           .lock()
@@ -621,15 +599,28 @@ impl CircuitBreakerRuntime {
         }
         let id = state.next_waiter;
         state.next_waiter = state.next_waiter.wrapping_add(1).max(1);
-        state.enqueue(Waiter {
-          id,
-          allocations: allocations.clone(),
-          queued_at: Instant::now(),
-        });
-        waiter.set(id);
+        let queued_at = Instant::now();
+        let ticket = WaiterTicket::new(id, queue_key.clone(), queued_at);
+        state.enqueue(
+          &ticket,
+          Waiter {
+            id,
+            allocations: allocations.clone(),
+            queued_at,
+          },
+        );
+        waiter.set(ticket);
       }
 
-      let timeout = queue_timeout(&self.state, &allocations, deadline);
+      let timeout = queue_timeout(
+        &self.state,
+        &allocations,
+        deadline,
+        waiter
+          .ticket()
+          .expect("queued waiter has an enqueue time")
+          .queued_at(),
+      );
       if timeout.is_zero() {
         waiter.remove();
         return Err(self.timeout_rejection(exhausted_reason));
@@ -657,13 +648,13 @@ impl CircuitBreakerRuntime {
     }
   }
 
-  pub(super) fn remove_waiter(&self, id: Option<u64>) {
-    if let Some(id) = id {
+  pub(super) fn remove_waiter(&self, ticket: Option<WaiterTicket>) {
+    if let Some(ticket) = ticket {
       let mut state = self
         .state
         .lock()
         .expect("circuit-breaker state lock poisoned");
-      if state.remove_waiter(id).is_some() {
+      if state.remove_waiter(ticket).is_some() {
         drop(state);
         self.notify.notify_waiters();
       }

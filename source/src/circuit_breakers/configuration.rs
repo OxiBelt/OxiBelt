@@ -115,6 +115,7 @@ pub(super) fn queue_timeout(
   state: &Mutex<RuntimeState>,
   allocations: &[Allocation],
   deadline: Option<Instant>,
+  queued_at: Instant,
 ) -> Duration {
   let state = state.lock().expect("circuit-breaker state lock poisoned");
   let configured = allocations
@@ -127,9 +128,12 @@ pub(super) fn queue_timeout(
     })
     .min()
     .unwrap_or(Duration::ZERO);
+  let now = Instant::now();
+  let elapsed = now.saturating_duration_since(queued_at);
+  let remaining = configured.saturating_sub(elapsed);
   deadline
-    .map(|deadline| configured.min(deadline.saturating_duration_since(Instant::now())))
-    .unwrap_or(configured)
+    .map(|deadline| remaining.min(deadline.saturating_duration_since(now)))
+    .unwrap_or(remaining)
 }
 
 pub(super) fn elapsed_ms(started: Instant) -> u64 {

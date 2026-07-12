@@ -12,24 +12,55 @@ fn config() -> Config {
   toml::from_str(include_str!("../../config/oxibelt.toml")).expect("example config parses")
 }
 
+async fn wait_for_queued(
+  runtime: &CircuitBreakerRuntime,
+  scope_kind: &str,
+  scope: &str,
+  kind: &str,
+  expected: usize,
+) {
+  let expected = format!(
+    "oxibelt_circuit_breaker_queued{{scope_kind=\"{scope_kind}\",scope=\"{scope}\",kind=\"{kind}\"}} {expected}"
+  );
+  for _ in 0..64 {
+    let mut metrics = String::new();
+    runtime.append_prometheus(&mut metrics);
+    if metrics.contains(&expected) {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  let mut metrics = String::new();
+  runtime.append_prometheus(&mut metrics);
+  assert!(
+    metrics.contains(&expected),
+    "expected queued metric: {expected}"
+  );
+}
+
 #[tokio::test]
 async fn queue_full_releases_after_lease_drop() {
   let mut config = config();
   config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(1);
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  let route = config.routes[0].name.clone();
+  let mut other_route = config.routes[0].clone();
+  other_route.name = "other-route".to_string();
+  let other_route_name = other_route.name.clone();
+  config.routes.push(other_route);
   let runtime = CircuitBreakerRuntime::new(&config);
   let first = runtime
-    .admit_route_request(&config.routes[0].name, None)
+    .admit_route_request(&route, None)
     .await
     .expect("first request should be admitted");
   let rejection = runtime
-    .admit_route_request(&config.routes[0].name, None)
+    .admit_route_request(&other_route_name, None)
     .await
-    .expect_err("second request should be bounded");
+    .expect_err("global capacity should bound an independent route");
   assert_eq!(rejection.reason, AdmissionRejectionReason::ActiveLimit);
   drop(first);
   runtime
-    .admit_route_request(&config.routes[0].name, None)
+    .admit_route_request(&other_route_name, None)
     .await
     .expect("released request lease should restore capacity");
 }
@@ -77,29 +108,254 @@ async fn cancelling_a_queued_admission_removes_its_waiter() {
       .admit_route_request(&queued_route, None)
       .await
   });
-  for _ in 0..16 {
-    let mut metrics = String::new();
-    runtime.append_prometheus(&mut metrics);
-    if metrics.contains("scope_kind=\"global\",scope=\"global\",kind=\"request\"} 1") {
-      break;
-    }
-    tokio::task::yield_now().await;
-  }
-  let mut metrics = String::new();
-  runtime.append_prometheus(&mut metrics);
-  assert!(metrics.contains("scope_kind=\"global\",scope=\"global\",kind=\"request\"} 1"));
+  wait_for_queued(&runtime, "global", "global", "request", 1).await;
 
   queued.abort();
   let _ = queued.await;
 
-  let mut metrics = String::new();
-  runtime.append_prometheus(&mut metrics);
-  assert!(metrics.contains("scope_kind=\"global\",scope=\"global\",kind=\"request\"} 0"));
+  wait_for_queued(&runtime, "global", "global", "request", 0).await;
   drop(first);
   runtime
     .admit_route_request(&route, None)
     .await
     .expect("cancelled waiter must not block the next admission");
+}
+
+#[tokio::test]
+async fn blocked_route_waiter_does_not_block_spare_global_admission() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 1_000;
+  config.circuit_breakers.route_defaults.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.route_defaults.max_pending_requests = CapacitySetting::Fixed(2);
+  config
+    .circuit_breakers
+    .route_defaults
+    .pending_queue_timeout_ms = 1_000;
+  let route = config.routes[0].name.clone();
+  let runtime = CircuitBreakerRuntime::new(&config);
+
+  let _first_global = runtime
+    .admit_global_request(None)
+    .await
+    .expect("first global request should be admitted");
+  let _first_route = runtime
+    .admit_route_scope_request(&route, None)
+    .await
+    .expect("first route request should be admitted");
+  let _queued_global = runtime
+    .admit_global_request(None)
+    .await
+    .expect("second global request should be admitted");
+  let queued_runtime = runtime.clone();
+  let queued_route = route.clone();
+  let queued = tokio::spawn(async move {
+    queued_runtime
+      .admit_route_scope_request(&queued_route, None)
+      .await
+  });
+  wait_for_queued(&runtime, "route", &route, "request", 1).await;
+
+  let spare_global = tokio::time::timeout(
+    Duration::from_millis(50),
+    runtime.admit_global_request(None),
+  )
+  .await
+  .expect("a route-only waiter must not block spare global capacity")
+  .expect("spare global capacity should be admitted");
+
+  drop(spare_global);
+  wait_for_queued(&runtime, "route", &route, "request", 1).await;
+  queued.abort();
+  let _ = queued.await;
+  wait_for_queued(&runtime, "route", &route, "request", 0).await;
+}
+
+#[tokio::test]
+async fn blocked_request_waiter_does_not_block_later_upstream_admission() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(4);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 1_000;
+  config.circuit_breakers.route_defaults.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.route_defaults.max_pending_requests = CapacitySetting::Fixed(2);
+  config
+    .circuit_breakers
+    .route_defaults
+    .pending_queue_timeout_ms = 1_000;
+  let route = config.routes[0].name.clone();
+  let runtime = CircuitBreakerRuntime::new(&config);
+
+  let _first_global = runtime
+    .admit_global_request(None)
+    .await
+    .expect("first global request should be admitted");
+  let _first_route = runtime
+    .admit_route_scope_request(&route, None)
+    .await
+    .expect("first route request should be admitted");
+  let _queued_global = runtime
+    .admit_global_request(None)
+    .await
+    .expect("second global request should be admitted");
+  let queued_runtime = runtime.clone();
+  let queued_route = route.clone();
+  let queued = tokio::spawn(async move {
+    queued_runtime
+      .admit_route_scope_request(&queued_route, None)
+      .await
+  });
+  wait_for_queued(&runtime, "route", &route, "request", 1).await;
+
+  let upstream = tokio::time::timeout(
+    Duration::from_millis(50),
+    runtime.admit_upstream_attempt(&route, None, None),
+  )
+  .await
+  .expect("a blocked route request must not block later upstream admission")
+  .expect("available upstream capacity should be admitted");
+
+  drop(upstream);
+  queued.abort();
+  let _ = queued.await;
+}
+
+#[tokio::test]
+async fn blocked_route_waiter_does_not_block_another_route() {
+  let mut config = config();
+  config.circuit_breakers.route_defaults.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.route_defaults.max_pending_requests = CapacitySetting::Fixed(2);
+  config
+    .circuit_breakers
+    .route_defaults
+    .pending_queue_timeout_ms = 1_000;
+  let route = config.routes[0].name.clone();
+  let mut other_route = config.routes[0].clone();
+  other_route.name = "independent-route".to_string();
+  let other_route_name = other_route.name.clone();
+  config.routes.push(other_route);
+  let runtime = CircuitBreakerRuntime::new(&config);
+
+  let _first = runtime
+    .admit_route_scope_request(&route, None)
+    .await
+    .expect("first route request should be admitted");
+  let queued_runtime = runtime.clone();
+  let queued_route = route.clone();
+  let queued = tokio::spawn(async move {
+    queued_runtime
+      .admit_route_scope_request(&queued_route, None)
+      .await
+  });
+  wait_for_queued(&runtime, "route", &route, "request", 1).await;
+
+  let independent = tokio::time::timeout(
+    Duration::from_millis(50),
+    runtime.admit_route_scope_request(&other_route_name, None),
+  )
+  .await
+  .expect("a blocked route must not block an independent route")
+  .expect("independent route capacity should be admitted");
+
+  drop(independent);
+  queued.abort();
+  let _ = queued.await;
+}
+
+#[tokio::test]
+async fn compatible_waiters_remain_fifo() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(2);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 1_000;
+  let runtime = CircuitBreakerRuntime::new(&config);
+  let first = runtime
+    .admit_global_request(None)
+    .await
+    .expect("first global request should be admitted");
+  let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+  let first_runtime = runtime.clone();
+  let first_sender = sender.clone();
+  let first_waiter = tokio::spawn(async move {
+    let lease = first_runtime
+      .admit_global_request(None)
+      .await
+      .expect("first queued waiter should be admitted");
+    first_sender
+      .send(("first", lease))
+      .expect("first queued waiter receiver should remain available");
+  });
+  wait_for_queued(&runtime, "global", "global", "request", 1).await;
+
+  let second_runtime = runtime.clone();
+  let second_waiter = tokio::spawn(async move {
+    let lease = second_runtime
+      .admit_global_request(None)
+      .await
+      .expect("second queued waiter should be admitted");
+    sender
+      .send(("second", lease))
+      .expect("second queued waiter receiver should remain available");
+  });
+  wait_for_queued(&runtime, "global", "global", "request", 2).await;
+
+  drop(first);
+  let (name, first_lease) = tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+    .await
+    .expect("a compatible queued waiter should be notified")
+    .expect("first queued waiter should send its lease");
+  assert_eq!(name, "first", "compatible waiters must remain FIFO");
+  drop(first_lease);
+
+  let (name, second_lease) = tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+    .await
+    .expect("the second waiter should be notified after the first releases")
+    .expect("second queued waiter should send its lease");
+  assert_eq!(name, "second");
+  drop(second_lease);
+  first_waiter
+    .await
+    .expect("first waiter task should not panic");
+  second_waiter
+    .await
+    .expect("second waiter task should not panic");
+}
+
+#[tokio::test]
+async fn queue_timeout_is_not_extended_by_notifications() {
+  let mut config = config();
+  config.circuit_breakers.global.max_active_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.pending_queue_timeout_ms = 40;
+  let runtime = CircuitBreakerRuntime::new(&config);
+  let first = runtime
+    .admit_global_request(None)
+    .await
+    .expect("first global request should be admitted");
+  let queued_runtime = runtime.clone();
+  let queued = tokio::spawn(async move { queued_runtime.admit_global_request(None).await });
+  wait_for_queued(&runtime, "global", "global", "request", 1).await;
+
+  let notifier_runtime = runtime.clone();
+  let notifier_config = config.clone();
+  let notifier = tokio::spawn(async move {
+    loop {
+      notifier_runtime.configure(&notifier_config);
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  });
+  let rejection = tokio::time::timeout(Duration::from_millis(150), queued)
+    .await
+    .expect("queue timeout must not restart after notifications")
+    .expect("queued admission task should not panic")
+    .expect_err("waiter should time out while capacity remains occupied");
+  assert_eq!(rejection.reason, AdmissionRejectionReason::QueueTimeout);
+
+  notifier.abort();
+  let _ = notifier.await;
+  drop(first);
 }
 
 #[tokio::test]
