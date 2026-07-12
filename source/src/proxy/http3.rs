@@ -160,7 +160,7 @@ pub(crate) async fn handle_downstream_connection(
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
-  let mut lifecycle_drain = snapshot.lifecycle.subscribe();
+  let mut lifecycle_drain = drain.clone();
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
   let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
   let request_task_timing = request_tasks::RequestTaskTiming::new(snapshot.clone(), timing_enabled);
@@ -201,7 +201,7 @@ pub(crate) async fn handle_downstream_connection(
       request_tasks.abort_all().await;
       return Ok(());
     }
-    if *lifecycle_drain.borrow() {
+    if lifecycle_drain.has_lifecycle_drain_transition() {
       h3_connection
         .shutdown(0)
         .await
@@ -226,16 +226,13 @@ pub(crate) async fn handle_downstream_connection(
         }
         continue;
       }
-      changed = lifecycle_drain.changed() => {
-        if changed.is_err() || *lifecycle_drain.borrow() {
-          h3_connection
-            .shutdown(0)
-            .await
-            .context("failed to send HTTP/3 graceful shutdown")?;
-          request_tasks.wait_all().await;
-          return Ok(());
-        }
-        continue;
+      _ = lifecycle_drain.wait_for_lifecycle_drain_transition() => {
+        h3_connection
+          .shutdown(0)
+          .await
+          .context("failed to send HTTP/3 graceful shutdown")?;
+        request_tasks.wait_all().await;
+        return Ok(());
       }
       accepted = h3_connection.accept() => {
         match accepted {

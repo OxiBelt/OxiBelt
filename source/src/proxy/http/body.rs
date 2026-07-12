@@ -456,6 +456,10 @@ where
     Pin::new(&mut self.body).poll_frame(cx)
   }
 
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
+  }
+
   fn size_hint(&self) -> SizeHint {
     self.body.size_hint()
   }

@@ -189,24 +189,24 @@ pub(super) async fn handle_connection(
   let result = if snapshot.http1_upgrades_possible {
     let connection = connection.with_upgrades();
     tokio::pin!(connection);
-    if graceful_drain.is_draining() {
+    if graceful_drain.is_graceful_connection_draining() {
       connection.as_mut().graceful_shutdown();
     }
     tokio::select! {
       result = &mut connection => result,
-      _ = graceful_drain.wait_for_drain() => {
+      _ = graceful_drain.wait_for_graceful_connection_drain() => {
         connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }
     }
   } else {
     tokio::pin!(connection);
-    if graceful_drain.is_draining() {
+    if graceful_drain.is_graceful_connection_draining() {
       connection.as_mut().graceful_shutdown();
     }
     tokio::select! {
       result = &mut connection => result,
-      _ = graceful_drain.wait_for_drain() => {
+      _ = graceful_drain.wait_for_graceful_connection_drain() => {
         connection.as_mut().graceful_shutdown();
         (&mut connection).await
       }

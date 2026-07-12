@@ -166,6 +166,85 @@ impl ConnectionDrain {
     }
   }
 
+  /// Reports whether this connection should begin graceful protocol shutdown.
+  ///
+  /// A lifecycle drain that was already active when the connection subscribed must still allow a
+  /// request to reach the data plane and receive its deterministic draining response. Listener
+  /// and data-plane generation drains remain immediately actionable.
+  pub(crate) fn is_graceful_connection_draining(&self) -> bool {
+    *self.listener.borrow()
+      || self.has_lifecycle_drain_transition()
+      || self
+        .data_plane
+        .as_ref()
+        .is_some_and(|drain| *drain.borrow())
+  }
+
+  /// Waits for a drain transition that applies to this established connection.
+  pub(crate) async fn wait_for_graceful_connection_drain(&mut self) {
+    if self.is_graceful_connection_draining() {
+      return;
+    }
+
+    if let Some(data_plane) = &mut self.data_plane {
+      loop {
+        tokio::select! {
+          changed = self.listener.changed() => {
+            if changed.is_err() || *self.listener.borrow() {
+              return;
+            }
+          }
+          changed = self.lifecycle.changed() => {
+            if changed.is_err() || *self.lifecycle.borrow() {
+              return;
+            }
+          }
+          changed = data_plane.changed() => {
+            if changed.is_err() || *data_plane.borrow() {
+              return;
+            }
+          }
+        }
+      }
+    } else {
+      loop {
+        tokio::select! {
+          changed = self.listener.changed() => {
+            if changed.is_err() || *self.listener.borrow() {
+              return;
+            }
+          }
+          changed = self.lifecycle.changed() => {
+            if changed.is_err() || *self.lifecycle.borrow() {
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /// Returns true only when this receiver observed lifecycle drain after subscription.
+  pub(crate) fn has_lifecycle_drain_transition(&self) -> bool {
+    match self.lifecycle.has_changed() {
+      Ok(changed) => changed && *self.lifecycle.borrow(),
+      Err(_) => true,
+    }
+  }
+
+  /// Waits for a lifecycle drain transition after this connection subscribed.
+  pub(crate) async fn wait_for_lifecycle_drain_transition(&mut self) {
+    if self.has_lifecycle_drain_transition() {
+      return;
+    }
+
+    loop {
+      if self.lifecycle.changed().await.is_err() || *self.lifecycle.borrow() {
+        return;
+      }
+    }
+  }
+
   pub(crate) fn is_draining(&self) -> bool {
     *self.listener.borrow()
       || *self.lifecycle.borrow()
@@ -310,24 +389,64 @@ mod tests {
       .send(true)
       .expect("listener drain signal should send");
     assert!(drain.is_draining());
+    assert!(drain.is_graceful_connection_draining());
     listener_tx
       .send(false)
       .expect("listener ready signal should send");
     assert!(!drain.is_draining());
+    assert!(!drain.is_graceful_connection_draining());
 
     lifecycle.set_admin_draining();
     assert!(drain.is_draining());
+    assert!(drain.is_graceful_connection_draining());
     lifecycle.clear_admin_draining();
     assert!(!drain.is_draining());
+    assert!(!drain.is_graceful_connection_draining());
 
     data_plane_tx
       .send(true)
       .expect("data-plane drain signal should send");
     assert!(drain.is_draining());
+    assert!(drain.is_graceful_connection_draining());
     data_plane_tx
       .send(false)
       .expect("data-plane ready signal should send");
     assert!(!drain.is_draining());
+    assert!(!drain.is_graceful_connection_draining());
+  }
+
+  #[tokio::test]
+  async fn graceful_connection_drain_ignores_active_lifecycle_until_next_transition() {
+    let lifecycle = LifecycleState::default();
+    let _lifecycle_observer = lifecycle.subscribe();
+    lifecycle.set_admin_draining();
+    let (_listener_tx, listener_rx) = watch::channel(false);
+    let mut drain =
+      ConnectionDrain::new(listener_rx, lifecycle.subscribe(), Duration::from_millis(1));
+
+    assert!(drain.is_draining());
+    assert!(!drain.is_graceful_connection_draining());
+    assert!(
+      tokio::time::timeout(
+        Duration::from_millis(10),
+        drain.wait_for_graceful_connection_drain(),
+      )
+      .await
+      .is_err()
+    );
+
+    lifecycle.clear_admin_draining();
+    let wait = tokio::spawn(async move {
+      drain.wait_for_graceful_connection_drain().await;
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!wait.is_finished());
+
+    lifecycle.set_admin_draining();
+    tokio::time::timeout(Duration::from_secs(1), wait)
+      .await
+      .expect("the next lifecycle drain should close the established connection")
+      .expect("connection drain task should not panic");
   }
 
   #[tokio::test]

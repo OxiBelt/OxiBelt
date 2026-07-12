@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use super::{
   BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body,
-  error_is_timeout, known_small_no_trailers_body, with_backpressure_send_timeout,
+  error_is_timeout, known_small_no_trailers_body, with_backpressure_send_timeout, with_drop_guard,
   with_poll_send_timeout, with_read_timeout,
 };
 
@@ -68,6 +68,19 @@ async fn known_small_no_trailers_body_preserves_empty_end_stream() {
   assert!(body.is_end_stream());
   assert_eq!(body.size_hint().exact(), Some(0));
   assert!(body.frame().await.is_none());
+}
+
+#[tokio::test]
+async fn drop_guard_preserves_inner_end_stream_state() {
+  let mut body = with_drop_guard(known_small_no_trailers_body(Bytes::new()), ());
+  assert!(body.is_end_stream());
+  assert_eq!(body.size_hint().exact(), Some(0));
+  assert!(body.frame().await.is_none());
+
+  let mut body = with_drop_guard(known_small_no_trailers_body(Bytes::from_static(b"ok")), ());
+  assert!(!body.is_end_stream());
+  assert!(body.frame().await.is_some());
+  assert!(body.is_end_stream());
 }
 
 #[tokio::test]
