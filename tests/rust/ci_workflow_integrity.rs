@@ -973,7 +973,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "tests/scripts/check-helm-admin-config.sh",
     "name: Validate Helm base configuration",
     "tests/scripts/check-helm-base-config.sh",
-    "helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0",
+    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
     "version: v0.26.0",
     "kubectl_version: v1.31.4",
     "install_only: true",
