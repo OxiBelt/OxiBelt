@@ -100,6 +100,7 @@ openssl-sys = { version = "0.9.117", features = ["vendored"] }
 [dev-dependencies]
 clubcard = { version = "0.3.3", features = ["builder"] }
 pretty_assertions = "1.4.1"
+tokio = { version = "1.52.3", features = ["test-util"] }
 
 [[bin]]
 name = "oxibelt-docker-integration-matrix"
