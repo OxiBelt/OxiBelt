@@ -168,6 +168,11 @@ config:
     [overload]
     enabled = false
 
+    # Circuit breakers are enabled by default and resolve `"auto"` per Pod.
+    # Set enabled = false only as a temporary compatibility escape hatch.
+    [circuit_breakers]
+    enabled = true
+
     {{ include "oxibelt.adminConfig" . }}
 
 # `helm_immutable` is the ordinary Helm-managed content-addressed ConfigMap

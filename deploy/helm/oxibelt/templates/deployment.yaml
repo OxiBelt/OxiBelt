@@ -64,8 +64,18 @@ spec:
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
-        {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") }}
         env:
+        # Requests are only used when the container has no cgroup hard cap;
+        # OxiBelt otherwise prefers the actual cgroup quota/limit.
+        - name: OXIBELT_KUBERNETES_CPU_REQUEST
+          valueFrom:
+            resourceFieldRef:
+              resource: requests.cpu
+        - name: OXIBELT_KUBERNETES_MEMORY_REQUEST_BYTES
+          valueFrom:
+            resourceFieldRef:
+              resource: requests.memory
+              divisor: "1"
         {{- if .Values.admin.enabled }}
         - name: OXIBELT_ADMIN_TOKEN
           valueFrom:
@@ -93,7 +103,6 @@ spec:
         {{- end }}
         {{- with .Values.extraEnv }}
 {{ toYaml . | indent 8 }}
-        {{- end }}
         {{- end }}
         ports:
         {{- if .Values.service.ports.http.enabled }}

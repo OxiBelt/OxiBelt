@@ -555,20 +555,48 @@ impl PlainProxyFastPath {
             success.response
           })
         } else if retry_policy.enabled {
-          send_with_retry(client, outbound, timeouts, state.as_ref(), &retry_policy).await
+          send_with_retry(
+            client,
+            outbound,
+            timeouts,
+            state.as_ref(),
+            &retry_policy,
+            Some(super::super::retry::RetryAdmissionContext {
+              route_name: &resolved.route.name,
+              pool_name: None,
+            }),
+          )
+          .await
         } else {
-          send_one_shot_with_state(client, outbound, timeouts, state.as_ref()).await
+          send_one_shot_with_state(
+            client,
+            outbound,
+            timeouts,
+            state.as_ref(),
+            Some(super::super::retry::RetryAdmissionContext {
+              route_name: &resolved.route.name,
+              pool_name: None,
+            }),
+          )
+          .await
         };
         timing::general_result(snapshot, metric_protocol, result.is_ok(), general_started);
         result.map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))
       }
     };
-    let upstream_response = match upstream_response_result {
+    let mut upstream_response = match upstream_response_result {
       Ok(response) => response,
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
           return with_route_security_headers(
             text_response(StatusCode::REQUEST_TIMEOUT, "request body timed out"),
+            &state.config.security,
+            resolved.route,
+          );
+        }
+        if let Some(rejection) = super::super::circuit_breakers::admission_rejection(&error) {
+          return with_route_security_headers(
+            super::super::circuit_breakers::rejection_response(state.as_ref(), rejection),
             &state.config.security,
             resolved.route,
           );
@@ -608,6 +636,7 @@ impl PlainProxyFastPath {
     if let Some(upstream_first_byte_time_ms) = upstream_first_byte_time_ms {
       access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
     }
+    let upstream_stream_lease = super::super::retry::take_stream_lease(&mut upstream_response);
     let (parts, response_body) = upstream_response.into_parts();
     let response_body_started = timing::start(timing_enabled);
     let compiled_known_small_noop_candidate = compiled_known_small_noop_static_candidate(
@@ -668,7 +697,7 @@ impl PlainProxyFastPath {
       );
     }
     let finalize_started = timing::start(timing_enabled);
-    finalize_response(
+    let response = finalize_response(
       snapshot,
       resolved,
       request_version,
@@ -703,6 +732,10 @@ impl PlainProxyFastPath {
       inlined_known_small_body,
       trailers_handled,
       timeouts.response_send,
-    )
+    );
+    match upstream_stream_lease {
+      Some(lease) => super::super::circuit_breakers::with_request_lease(response, lease),
+      None => response,
+    }
   }
 }

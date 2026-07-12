@@ -11,14 +11,20 @@ use bytes::Bytes;
 use http::Uri;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
+use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use tower_service::Service;
 
-use crate::config::{CryptoConfig, HttpVersion, ProxyHttp2Config, UpstreamConfig};
+use crate::circuit_breakers::{AdmissionLease, CircuitBreakerRuntime};
+use crate::config::{
+  CryptoConfig, HttpVersion, ProxyHttp2Config, UpstreamConfig, UpstreamPoolConfig,
+  upstream_pool_server_id,
+};
 use crate::metrics::Metrics;
+use crate::pools::synthetic_upstream_name_for_id;
 use crate::tls;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -155,16 +161,88 @@ pub(crate) struct InstrumentedConnector<C> {
   metrics: Arc<Metrics>,
   version: &'static str,
   pool: &'static str,
+  circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  circuit_pool: Option<Arc<str>>,
 }
 
 impl<C> InstrumentedConnector<C> {
-  fn new(inner: C, metrics: Arc<Metrics>, version: &'static str, pool: &'static str) -> Self {
+  fn new(
+    inner: C,
+    metrics: Arc<Metrics>,
+    version: &'static str,
+    pool: &'static str,
+    circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+    circuit_pool: Option<Arc<str>>,
+  ) -> Self {
     Self {
       inner,
       metrics,
       version,
       pool,
+      circuit_breakers,
+      circuit_pool,
     }
+  }
+}
+
+/// Holds a connection admission for the lifetime of a pooled transport.
+pub(crate) struct AdmissionConnection<C> {
+  inner: C,
+  _lease: Option<AdmissionLease>,
+}
+
+impl<C> Connection for AdmissionConnection<C>
+where
+  C: Connection,
+{
+  fn connected(&self) -> Connected {
+    self.inner.connected()
+  }
+}
+
+impl<C> HyperRead for AdmissionConnection<C>
+where
+  C: HyperRead + Unpin,
+{
+  fn poll_read(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: ReadBufCursor<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+  }
+}
+
+impl<C> HyperWrite for AdmissionConnection<C>
+where
+  C: HyperWrite + Unpin,
+{
+  fn poll_write(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.inner.is_write_vectored()
+  }
+
+  fn poll_write_vectored(
+    self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> Poll<std::io::Result<usize>> {
+    Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
   }
 }
 
@@ -172,13 +250,19 @@ impl<C> Service<Uri> for InstrumentedConnector<C>
 where
   C: Service<Uri> + Send + 'static,
   C::Future: Send + 'static,
+  C::Response: HyperRead + HyperWrite + Connection + Send + Unpin + 'static,
+  C::Error: Into<BoxError>,
 {
-  type Response = C::Response;
-  type Error = C::Error;
+  type Response = AdmissionConnection<C::Response>;
+  type Error = BoxError;
   type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
   fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-    self.inner.poll_ready(cx)
+    match self.inner.poll_ready(cx) {
+      Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+      Poll::Ready(Err(error)) => Poll::Ready(Err(error.into())),
+      Poll::Pending => Poll::Pending,
+    }
   }
 
   fn call(&mut self, dst: Uri) -> Self::Future {
@@ -189,13 +273,27 @@ where
     let metrics = self.metrics.clone();
     let version = self.version;
     let pool = self.pool;
+    let circuit_breakers = self.circuit_breakers.clone();
+    let circuit_pool = self.circuit_pool.clone();
     let future = self.inner.call(dst);
     Box::pin(async move {
-      let result = future.await;
+      let lease = match circuit_breakers {
+        Some(runtime) => Some(
+          runtime
+            .admit_upstream_connection(circuit_pool.as_deref(), None)
+            .await
+            .map_err(|error| -> BoxError { Box::new(error) })?,
+        ),
+        None => None,
+      };
+      let result: Result<C::Response, BoxError> = future.await.map_err(Into::into);
       if result.is_ok() {
         metrics.record_http_upstream_client_connection_created(version, scheme, pool);
       }
-      result
+      result.map(|inner| AdmissionConnection {
+        inner,
+        _lease: lease,
+      })
     })
   }
 }
@@ -210,12 +308,15 @@ pub(super) fn build_clients(
   outbound_revocation: &tls::OutboundRevocationRuntime,
   metrics: Arc<Metrics>,
   pool_label: &'static str,
+  circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  circuit_pools: &[UpstreamPoolConfig],
 ) -> anyhow::Result<UpstreamClientPools> {
   let mut by_upstream = HashMap::new();
   let mut pools = Vec::with_capacity(upstreams.len());
 
   for upstream in upstreams {
     let index = pools.len();
+    let circuit_pool = circuit_pool_for_upstream(&upstream.name, circuit_pools);
     let pool = build_client_pool(
       upstream,
       extra_root_certs,
@@ -225,6 +326,8 @@ pub(super) fn build_clients(
       outbound_revocation,
       metrics.clone(),
       pool_label,
+      circuit_breakers.clone(),
+      circuit_pool,
     )
     .with_context(|| format!("failed to build clients for upstream {}", upstream.name))?;
     by_upstream.insert(upstream.name.clone(), index);
@@ -244,6 +347,8 @@ fn build_client_pool(
   outbound_revocation: &tls::OutboundRevocationRuntime,
   metrics: Arc<Metrics>,
   pool_label: &'static str,
+  circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  circuit_pool: Option<Arc<str>>,
 ) -> anyhow::Result<ClientPool> {
   let revocation_policy = outbound_revocation.policy_for_upstream(upstream);
   let root_certs;
@@ -288,8 +393,19 @@ fn build_client_pool(
     .https_or_http()
     .enable_http1()
     .wrap_connector(h1_http);
-  let h1_connector = InstrumentedConnector::new(h1_connector, metrics.clone(), "h1", pool_label);
+  let h1_connector = InstrumentedConnector::new(
+    h1_connector,
+    metrics.clone(),
+    "h1",
+    pool_label,
+    circuit_breakers.clone(),
+    circuit_pool.clone(),
+  );
   let mut h1_builder = Client::builder(TokioExecutor::new());
+  // Keep every retry visible to OxiBelt's deadline, retry budget, and circuit
+  // accounting. Hyper-util otherwise retries a cancelled reused connection
+  // before the request reaches our retry policy.
+  h1_builder.retry_canceled_requests(false);
   apply_client_pool_defaults(&mut h1_builder, upstream);
   let h1_only = h1_builder.build(h1_connector);
 
@@ -303,21 +419,36 @@ fn build_client_pool(
     .enable_http1()
     .enable_http2()
     .wrap_connector(negotiated_http);
-  let negotiated_connector =
-    InstrumentedConnector::new(negotiated_connector, metrics.clone(), "h2", pool_label);
+  let negotiated_connector = InstrumentedConnector::new(
+    negotiated_connector,
+    metrics.clone(),
+    "h2",
+    pool_label,
+    circuit_breakers.clone(),
+    circuit_pool.clone(),
+  );
   let mut negotiated_builder = Client::builder(TokioExecutor::new());
+  negotiated_builder.retry_canceled_requests(false);
   crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder, http2_config);
   apply_client_pool_defaults(&mut negotiated_builder, upstream);
   let negotiated = negotiated_builder.build(negotiated_connector);
 
   let mut h2c_builder = Client::builder(TokioExecutor::new());
+  h2c_builder.retry_canceled_requests(false);
   h2c_builder.http2_only(true);
   crate::h2_tuning::apply_legacy_client_defaults(&mut h2c_builder, http2_config);
   apply_client_pool_defaults(&mut h2c_builder, upstream);
   let mut h2c_http = HttpConnector::new();
   h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   h2c_http.set_nodelay(true);
-  let h2c_http = InstrumentedConnector::new(h2c_http, metrics.clone(), "h2c", pool_label);
+  let h2c_http = InstrumentedConnector::new(
+    h2c_http,
+    metrics.clone(),
+    "h2c",
+    pool_label,
+    circuit_breakers,
+    circuit_pool,
+  );
   let h2c = h2c_builder.build(h2c_http);
 
   Ok(ClientPool {
@@ -327,6 +458,21 @@ fn build_client_pool(
     metrics,
     pool_label,
   })
+}
+
+fn circuit_pool_for_upstream(
+  upstream_name: &str,
+  pools: &[UpstreamPoolConfig],
+) -> Option<Arc<str>> {
+  pools
+    .iter()
+    .find(|pool| {
+      pool.servers.iter().enumerate().any(|(index, server)| {
+        synthetic_upstream_name_for_id(&pool.name, &upstream_pool_server_id(index, server))
+          == upstream_name
+      })
+    })
+    .map(|pool| Arc::<str>::from(pool.name.as_str()))
 }
 
 fn apply_client_pool_defaults(
@@ -350,10 +496,11 @@ fn metric_scheme(uri: &Uri) -> &'static str {
 mod tests {
   use std::future::{Ready, ready};
 
+  use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
   use hyper_util::client::legacy::connect::{Connected, Connection};
-  use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
   use super::*;
+  use crate::config::{CapacitySetting, Config};
 
   #[derive(Clone)]
   struct FakeConnector;
@@ -380,17 +527,17 @@ mod tests {
     }
   }
 
-  impl AsyncRead for FakeIo {
+  impl HyperRead for FakeIo {
     fn poll_read(
       self: Pin<&mut Self>,
       _cx: &mut Context<'_>,
-      _buf: &mut ReadBuf<'_>,
+      _buf: ReadBufCursor<'_>,
     ) -> Poll<std::io::Result<()>> {
-      Poll::Pending
+      Poll::Ready(Ok(()))
     }
   }
 
-  impl AsyncWrite for FakeIo {
+  impl HyperWrite for FakeIo {
     fn poll_write(
       self: Pin<&mut Self>,
       _cx: &mut Context<'_>,
@@ -411,7 +558,8 @@ mod tests {
   #[tokio::test]
   async fn connector_records_pool_miss_and_created_connection() {
     let metrics = Metrics::new();
-    let mut connector = InstrumentedConnector::new(FakeConnector, metrics.clone(), "h1", "primary");
+    let mut connector =
+      InstrumentedConnector::new(FakeConnector, metrics.clone(), "h1", "primary", None, None);
     connector
       .call("http://example.test/".parse().expect("URI should parse"))
       .await
@@ -428,5 +576,25 @@ mod tests {
     assert!(body.contains(
       "oxibelt_http_upstream_client_connections_created_total{version=\"h1\",scheme=\"http\",pool=\"primary\"} 1"
     ));
+  }
+
+  #[tokio::test]
+  async fn connector_holds_connection_admission_for_transport_lifetime() {
+    let mut config: Config =
+      toml::from_str(include_str!("../../config/oxibelt.toml")).expect("example config parses");
+    config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(1);
+    config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+    let runtime = CircuitBreakerRuntime::new(&config);
+    let metrics = Metrics::new();
+    let mut connector =
+      InstrumentedConnector::new(FakeConnector, metrics, "h1", "primary", Some(runtime), None);
+    let uri: Uri = "http://example.test/".parse().expect("URI should parse");
+    let first = connector
+      .call(uri.clone())
+      .await
+      .expect("first connection should be admitted");
+    assert!(connector.call(uri.clone()).await.is_err());
+    drop(first);
+    assert!(connector.call(uri).await.is_ok());
   }
 }

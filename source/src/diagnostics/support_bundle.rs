@@ -286,6 +286,7 @@ pub async fn build_support_bundle(
     snapshot.tls_resumption.server_session_storage_stats(),
   );
   snapshot.overload.append_prometheus(&mut metrics);
+  snapshot.circuit_breakers.append_prometheus(&mut metrics);
   SupportBundle {
     metadata: SupportBundleMetadata {
       format_version: SUPPORT_BUNDLE_FORMAT_VERSION,

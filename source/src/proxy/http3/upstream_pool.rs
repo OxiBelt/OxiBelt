@@ -16,6 +16,7 @@ use super::{
   H3_POOL_SELECTION_RETRIES, H3SendRequest, connect_h3_upstream, resolve_upstream_addr,
   send_h3_request,
 };
+use crate::circuit_breakers::{AdmissionLease, CircuitBreakerRuntime};
 use crate::config::{Config, HttpVersion, UpstreamConfig};
 use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
@@ -33,6 +34,7 @@ impl UpstreamH3Pools {
     config: &Config,
     tls_resumption: &tls::TlsResumptionState,
     outbound_revocation: &tls::OutboundRevocationRuntime,
+    circuit_breakers: Arc<CircuitBreakerRuntime>,
   ) -> anyhow::Result<Self> {
     if !config.quic.upstream_pool.enabled {
       return Ok(Self::default());
@@ -64,6 +66,7 @@ impl UpstreamH3Pools {
           client_config: quic_config,
           quic_config: config.quic.clone(),
           quic_host_key_base_dir: config.source_paths.cert_dir.clone(),
+          circuit_breakers: circuit_breakers.clone(),
           entries: Mutex::new(HashMap::new()),
         }),
       );
@@ -81,6 +84,7 @@ pub(super) struct UpstreamH3Pool {
   client_config: h3_quinn::quinn::ClientConfig,
   quic_config: crate::config::QuicConfig,
   quic_host_key_base_dir: Option<PathBuf>,
+  circuit_breakers: Arc<CircuitBreakerRuntime>,
   entries: Mutex<HashMap<H3PoolKey, Arc<H3PoolSlot>>>,
 }
 
@@ -92,6 +96,7 @@ struct H3PoolKey {
 
 struct PooledH3Connection {
   _endpoint: h3_quinn::quinn::Endpoint,
+  _connection_admission: AdmissionLease,
   connection: h3_quinn::quinn::Connection,
   send_request: H3SendRequest,
   created_at: Instant,
@@ -298,6 +303,11 @@ impl UpstreamH3Pool {
     metrics: &Arc<crate::metrics::Metrics>,
   ) -> anyhow::Result<Arc<PooledH3Connection>> {
     metrics.record_http_upstream_client_pool_miss("h3", "https", "primary");
+    let connection_admission = self
+      .circuit_breakers
+      .admit_upstream_connection(None, Instant::now().checked_add(timeouts.upstream_connect))
+      .await
+      .map_err(anyhow::Error::new)?;
     let connected = connect_h3_upstream(
       key.server_name.clone(),
       key.remote_addr,
@@ -310,6 +320,7 @@ impl UpstreamH3Pool {
     metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
     let entry = Arc::new(PooledH3Connection {
       _endpoint: connected.endpoint,
+      _connection_admission: connection_admission,
       connection: connected.connection,
       send_request: connected.send_request,
       created_at: Instant::now(),

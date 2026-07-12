@@ -50,6 +50,7 @@ fn test_timeouts() -> super::super::EffectiveTimeouts {
     websocket_idle: Duration::from_secs(30),
     webtransport_idle: Duration::from_secs(30),
     upstream_connect: Duration::from_secs(30),
+    upstream_request: Duration::from_secs(30),
     upstream_first_byte: Duration::from_secs(30),
     upstream_read: Duration::from_secs(30),
     upstream_send: Duration::from_secs(30),

@@ -909,6 +909,61 @@ recovery_samples = 8
 recovery_ratio = 0.90
 signal_stale_timeout_ms = 2000
 
+# Process-local bounded admission remains active independently of pressure
+# sampling. Capacity is resolved per OxiBelt process from cgroup limits (or
+# Kubernetes requests when no hard cgroup limit is present), so replica count
+# scales aggregate capacity linearly.
+[circuit_breakers]
+enabled = true
+response_status = 503
+capacity_retry_after_ms = 1000
+
+[circuit_breakers.global]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout_ms = 50
+max_connections = "auto"
+max_streams = "auto"
+max_body_inspection_jobs = "auto"
+max_decompression_jobs = "auto"
+
+[circuit_breakers.route_defaults]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout_ms = 50
+max_connections = "auto"
+max_streams = "auto"
+max_body_inspection_jobs = "auto"
+max_decompression_jobs = "auto"
+
+[circuit_breakers.pool_defaults]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout_ms = 50
+max_connections = "auto"
+max_streams = "auto"
+max_body_inspection_jobs = "auto"
+max_decompression_jobs = "auto"
+
+[circuit_breakers.retry_budget]
+percent = 0.10
+min_concurrency = 1
+max_concurrency = "auto"
+max_queue = "auto"
+queue_timeout_ms = 25
+
+[circuit_breakers.failure]
+enabled = true
+on = ["connect_error", "first_byte_timeout", "response_read_timeout", "protocol_error", "502", "503", "504"]
+consecutive_failures = 5
+minimum_requests = 20
+failure_ratio = 0.50
+window_ms = 10000
+open_timeout_ms = 1000
+max_open_timeout_ms = 30000
+half_open_max_probes = 1
+half_open_successes = 2
+
 [security.headers]
 hsts = false
 hsts_max_age_seconds = 31536000

@@ -1,7 +1,7 @@
 //! Immutable runtime snapshots and shared client pools; reloads swap snapshots so in-flight work can finish against a consistent view.
 use crate::access_log::{AccessLogRuntime, AccessLogSinks, AccessLogSource, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
-use crate::cache::{ExternalCacheRuntime, ResponseCache};
+use crate::cache::ResponseCache;
 use crate::client_identity::ClientIdentityRuntime;
 use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
@@ -33,13 +33,12 @@ use crate::runtime_introspection::{
 use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
 use crate::stream::pools::StreamPoolState;
-use crate::telemetry::TelemetryRuntime;
-use crate::tls;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
 use crate::webtransport_admin::WebTransportAdminRegistry;
+use crate::{telemetry::TelemetryRuntime, tls};
 use anyhow::Context;
-use http::{HeaderValue, StatusCode};
+use http::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -50,7 +49,7 @@ mod request_path_features;
 mod stream_pool_update;
 mod upstream_clients;
 
-pub(crate) use alt_svc::AltSvcHeaderValues;
+pub(crate) use alt_svc::{AltSvcHeaderValues, build_alt_svc_header_values};
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
 use stream_pool_update::next_stream_pool_generation;
@@ -88,6 +87,7 @@ pub struct AppSnapshot {
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
   pub overload: Arc<OverloadRuntime>,
+  pub circuit_breakers: Arc<crate::circuit_breakers::CircuitBreakerRuntime>,
   pub telemetry: TelemetryRuntime,
   pub ipm: IpmRuntime,
   pub dynamic_policy: DynamicPolicyRuntime,
@@ -195,6 +195,10 @@ impl AppSnapshot {
     if config.overload.enabled {
       overload.bootstrap_validate()?;
     }
+    let circuit_breakers = previous
+      .map(|snapshot| snapshot.circuit_breakers.clone())
+      .unwrap_or_else(|| crate::circuit_breakers::CircuitBreakerRuntime::new(&config));
+    circuit_breakers.configure(&config);
     let outbound_revocation = tls::OutboundRevocationRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build outbound TLS revocation runtime")?;
@@ -207,6 +211,8 @@ impl AppSnapshot {
       &outbound_revocation,
       metrics.clone(),
       "primary",
+      Some(circuit_breakers.clone()),
+      &config.upstream_pools,
     )
     .context("failed to build upstream HTTP clients")?;
     let direct_h1_pools = DirectH1Pools::new(&upstreams);
@@ -229,11 +235,18 @@ impl AppSnapshot {
       &outbound_revocation,
       metrics.clone(),
       "health",
+      Some(circuit_breakers.clone()),
+      &config.upstream_pools,
     )
     .context("failed to build upstream health-check HTTP clients")?;
-    let h3_clients =
-      UpstreamH3Pools::new(&upstreams, &config, &tls_resumption, &outbound_revocation)
-        .context("failed to build upstream HTTP/3 pools")?;
+    let h3_clients = UpstreamH3Pools::new(
+      &upstreams,
+      &config,
+      &tls_resumption,
+      &outbound_revocation,
+      circuit_breakers.clone(),
+    )
+    .context("failed to build upstream HTTP/3 pools")?;
     let control_http = ControlHttpClient::new_with_crypto_and_revocation(
       &config.proxy.trusted_ca_certs,
       &config.crypto,
@@ -267,7 +280,7 @@ impl AppSnapshot {
     pools.publish_server_count_metrics();
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
-    let external_cache = ExternalCacheRuntime::new(&config, metrics.clone())
+    let external_cache = crate::cache::ExternalCacheRuntime::new(&config, metrics.clone())
       .context("failed to build external cache handlers")?;
     let cache =
       ResponseCache::new_with_external(&config.cache, shared_state.clone(), external_cache)
@@ -459,6 +472,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics,
       overload,
+      circuit_breakers,
       telemetry,
       ipm,
       dynamic_policy,
@@ -497,6 +511,8 @@ impl AppSnapshot {
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
     let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
+    let circuit_breakers = previous.circuit_breakers.clone();
+    circuit_breakers.configure(&config);
     let clients = build_clients(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -506,6 +522,8 @@ impl AppSnapshot {
       &previous.outbound_revocation,
       previous.metrics.clone(),
       "primary",
+      Some(circuit_breakers.clone()),
+      &config.upstream_pools,
     )
     .context("failed to build upstream HTTP clients")?;
     let direct_h1_pools = DirectH1Pools::new(&upstreams);
@@ -528,6 +546,8 @@ impl AppSnapshot {
       &previous.outbound_revocation,
       previous.metrics.clone(),
       "health",
+      Some(circuit_breakers.clone()),
+      &config.upstream_pools,
     )
     .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(
@@ -535,6 +555,7 @@ impl AppSnapshot {
       &config,
       &previous.tls_resumption,
       &previous.outbound_revocation,
+      circuit_breakers.clone(),
     )
     .context("failed to build upstream HTTP/3 pools")?;
     let control_http = ControlHttpClient::new_with_crypto_and_revocation(
@@ -622,6 +643,7 @@ impl AppSnapshot {
       static_files: Arc::new(static_files),
       metrics,
       overload: previous.overload.clone(),
+      circuit_breakers,
       telemetry: previous.telemetry.clone(),
       ipm,
       dynamic_policy: previous.dynamic_policy.clone(),
@@ -693,49 +715,6 @@ fn build_upstream_uri_parts(
     by_index.push(parts);
   }
   Ok((by_name, by_index))
-}
-
-pub(crate) fn build_alt_svc_header_values(config: &Config) -> anyhow::Result<AltSvcHeaderValues> {
-  if !config.listeners.http3 || !config.quic.alt_svc.enabled {
-    return Ok(AltSvcHeaderValues::default());
-  }
-
-  let port_overrides = config
-    .quic
-    .alt_svc
-    .port_overrides
-    .iter()
-    .map(|port_override| (port_override.bind, port_override.advertised_port))
-    .collect::<HashMap<_, _>>();
-  let mut values = AltSvcHeaderValues::default();
-  for bind in &config.listeners.https_binds {
-    let advertised_port = port_overrides
-      .get(bind)
-      .copied()
-      .unwrap_or_else(|| bind.port());
-    let value = build_alt_svc_header_value(
-      advertised_port,
-      config.quic.alt_svc.max_age_seconds,
-      config.quic.alt_svc.persist,
-    )?;
-    if *bind == config.listeners.https_bind {
-      values.default = Some(value.clone());
-    }
-    values.by_listener_bind.insert(*bind, value);
-  }
-  Ok(values)
-}
-
-fn build_alt_svc_header_value(
-  advertised_port: u16,
-  max_age_seconds: u64,
-  persist: bool,
-) -> anyhow::Result<HeaderValue> {
-  let mut value = format!("h3=\":{}\"; ma={}", advertised_port, max_age_seconds);
-  if persist {
-    value.push_str("; persist=1");
-  }
-  HeaderValue::from_str(&value).context("invalid Alt-Svc header value")
 }
 
 #[cfg(test)]

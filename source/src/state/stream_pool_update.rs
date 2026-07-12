@@ -10,6 +10,8 @@ impl AppSnapshot {
   ) -> anyhow::Result<Self> {
     let stream_pool_generation = next_stream_pool_generation(&config, Some(previous));
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
+    let circuit_breakers = previous.circuit_breakers.clone();
+    circuit_breakers.configure(&config);
 
     Ok(Self {
       config,
@@ -39,6 +41,7 @@ impl AppSnapshot {
       static_files: previous.static_files.clone(),
       metrics: previous.metrics.clone(),
       overload: previous.overload.clone(),
+      circuit_breakers,
       telemetry: previous.telemetry.clone(),
       ipm: previous.ipm.clone(),
       dynamic_policy: previous.dynamic_policy.clone(),

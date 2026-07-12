@@ -18,6 +18,10 @@ use super::upstream::select_pool_upstream_excluding;
 use super::version::{select_upstream_http_version, upstream_request_version};
 use super::{EffectiveTimeouts, UpstreamFirstByteTimeout, full_body, is_idempotent, parts_clone};
 
+mod admission;
+use admission::send_attempt;
+pub(super) use admission::take_stream_lease;
+
 #[derive(Clone, Debug)]
 pub(super) struct EffectiveRetryPolicy {
   pub(super) enabled: bool,
@@ -41,6 +45,17 @@ pub(super) enum AttemptFailure {
   Status(StatusCode),
 }
 
+/// Configured identities for one normal upstream attempt.
+///
+/// Cache refreshes and mirrors deliberately pass `None`: they have no
+/// request-derived route identity and must not invent one for metrics or
+/// circuit state.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RetryAdmissionContext<'a> {
+  pub(super) route_name: &'a str,
+  pub(super) pool_name: Option<&'a str>,
+}
+
 impl EffectiveRetryPolicy {
   pub(super) fn disabled_direct() -> Self {
     Self {
@@ -62,10 +77,18 @@ impl EffectiveRetryPolicy {
   pub(super) fn for_route(config: &Config, route: &RouteConfig) -> Self {
     let retry = &config.proxy.retry;
     let route_retry = route.retry.as_ref();
+    let enabled = route_retry
+      .and_then(|config| config.enabled)
+      .unwrap_or(retry.enabled);
+    let configured_backoff_base = route_retry
+      .and_then(|config| config.backoff_base_ms)
+      .unwrap_or(retry.backoff_base_ms);
+    let configured_backoff_max = route_retry
+      .and_then(|config| config.backoff_max_ms)
+      .unwrap_or(retry.backoff_max_ms);
+    let breaker_backoff_defaults = config.circuit_breakers.enabled && enabled;
     Self {
-      enabled: route_retry
-        .and_then(|config| config.enabled)
-        .unwrap_or(retry.enabled),
+      enabled,
       tries: route_retry
         .and_then(|config| config.tries)
         .unwrap_or(retry.tries)
@@ -87,18 +110,23 @@ impl EffectiveRetryPolicy {
         .and_then(|config| config.retry_non_idempotent)
         .unwrap_or(retry.retry_non_idempotent),
       backoff_base: Duration::from_millis(
-        route_retry
-          .and_then(|config| config.backoff_base_ms)
-          .unwrap_or(retry.backoff_base_ms),
+        if breaker_backoff_defaults && configured_backoff_base == 0 {
+          25
+        } else {
+          configured_backoff_base
+        },
       ),
       backoff_max: Duration::from_millis(
-        route_retry
-          .and_then(|config| config.backoff_max_ms)
-          .unwrap_or(retry.backoff_max_ms),
+        if breaker_backoff_defaults && configured_backoff_max == 0 {
+          250
+        } else {
+          configured_backoff_max
+        },
       ),
-      jitter: route_retry
-        .and_then(|config| config.jitter)
-        .unwrap_or(retry.jitter),
+      jitter: breaker_backoff_defaults
+        || route_retry
+          .and_then(|config| config.jitter)
+          .unwrap_or(retry.jitter),
       reselect_pool_on_retry: route_retry
         .and_then(|config| config.reselect_pool_on_retry)
         .unwrap_or(retry.reselect_pool_on_retry),
@@ -219,55 +247,77 @@ pub(super) async fn send_with_retry(
   timeouts: EffectiveTimeouts,
   state: &AppSnapshot,
   policy: &EffectiveRetryPolicy,
+  admission: Option<RetryAdmissionContext<'_>>,
 ) -> anyhow::Result<Response<Incoming>> {
   let policy = policy.adjusted_for_overload(state.overload.as_ref());
   if !policy.enabled || !retry_body_can_be_buffered(&request, state) {
-    return send_one_shot_with_state(client, request, timeouts, state).await;
+    return send_one_shot_with_state(client, request, timeouts, state, admission).await;
   }
 
+  let deadline = retry_deadline(&policy, timeouts);
   let (parts, body) = request.into_parts();
-  let body = body
-    .collect()
+  let remaining = deadline.saturating_duration_since(Instant::now());
+  if remaining.is_zero() {
+    anyhow::bail!("upstream retry budget exhausted before request-body buffering");
+  }
+  let body = tokio::time::timeout(remaining, body.collect())
     .await
+    .map_err(|_| anyhow::anyhow!("upstream retry budget exhausted while buffering request body"))?
     .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?
     .to_bytes();
   let _buffered_body = state
     .overload
     .lease(WorkKind::RequestBodyBufferedBytes, body.len() as u64);
-  let deadline = retry_deadline(&policy);
   let mut last_error = None;
+  let mut last_response = None;
   for attempt in 0..policy.tries {
     let Some(attempt_timeout) = policy.attempt_timeout(timeouts.upstream_first_byte, deadline)
     else {
       break;
     };
     let outbound = Request::from_parts(parts_clone(&parts), full_body(body.clone()));
-    let _retry = (attempt > 0).then(|| state.overload.lease(WorkKind::RetryConcurrency, 1));
-    let _pending = state.overload.lease(WorkKind::PendingUpstreamRequests, 1);
-    match tokio::time::timeout(attempt_timeout, client.request(outbound)).await {
-      Ok(Ok(response)) => {
+    match send_attempt(
+      client,
+      outbound,
+      attempt_timeout,
+      Some(deadline),
+      state,
+      admission,
+      attempt > 0,
+    )
+    .await
+    {
+      Ok(response) => {
         let failure = AttemptFailure::Status(response.status());
         if policy.matches_failure(failure) {
-          last_error = Some(retryable_status_error(response.status()));
           if !has_remaining_attempt(&policy, attempt) {
-            break;
+            return Ok(response);
           }
+          last_response = Some(response);
           sleep_before_retry(&policy, attempt, deadline).await;
           continue;
         }
         return Ok(response);
       }
-      Ok(Err(error)) => {
-        last_error = Some(error.into());
-        if !policy.matches_failure(AttemptFailure::ConnectError)
-          || !has_remaining_attempt(&policy, attempt)
+      Err(error) => {
+        if super::circuit_breakers::admission_rejection(&error).is_some()
+          && let Some(response) = last_response.take()
         {
-          break;
+          return Ok(response);
         }
-      }
-      Err(_) => {
-        last_error = Some(UpstreamFirstByteTimeout::new(attempt_timeout).into());
-        if !policy.matches_failure(AttemptFailure::ReadTimeout)
+        let failure = if error.downcast_ref::<UpstreamFirstByteTimeout>().is_some() {
+          AttemptFailure::ReadTimeout
+        } else {
+          AttemptFailure::ConnectError
+        };
+        last_error = Some(error);
+        // Hyper's generic client error does not prove whether any body bytes
+        // reached the upstream. Retrying a non-empty body after that ambiguous
+        // boundary can duplicate a partial write, even for an idempotent
+        // method. Status-based retries remain safe because a response proves
+        // the attempt completed.
+        if !body.is_empty()
+          || !policy.matches_failure(failure)
           || !has_remaining_attempt(&policy, attempt)
         {
           break;
@@ -277,19 +327,10 @@ pub(super) async fn send_with_retry(
     sleep_before_retry(&policy, attempt, deadline).await;
   }
 
-  Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
-}
-
-pub(super) async fn send_one_shot(
-  client: UpstreamClientRef<'_>,
-  request: Request<ProxyBody>,
-  timeouts: EffectiveTimeouts,
-) -> anyhow::Result<Response<Incoming>> {
-  match tokio::time::timeout(timeouts.upstream_first_byte, client.request(request)).await {
-    Ok(Ok(response)) => Ok(response),
-    Ok(Err(error)) => Err(error.into()),
-    Err(_) => Err(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte).into()),
+  if let Some(response) = last_response {
+    return Ok(response);
   }
+  Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
 }
 
 pub(super) async fn send_one_shot_with_state(
@@ -297,9 +338,18 @@ pub(super) async fn send_one_shot_with_state(
   request: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
   state: &AppSnapshot,
+  admission: Option<RetryAdmissionContext<'_>>,
 ) -> anyhow::Result<Response<Incoming>> {
-  let _pending = state.overload.lease(WorkKind::PendingUpstreamRequests, 1);
-  send_one_shot(client, request, timeouts).await
+  send_attempt(
+    client,
+    request,
+    timeouts.upstream_first_byte.min(timeouts.upstream_request),
+    Instant::now().checked_add(timeouts.upstream_request),
+    state,
+    admission,
+    false,
+  )
+  .await
 }
 
 pub(super) struct PoolRetrySuccess {
@@ -340,7 +390,18 @@ pub(super) async fn send_pool_with_retry(
   };
 
   if !policy.enabled || !retry_body_can_be_buffered(&request, state) {
-    return match send_one_shot_with_state(initial_client, request, timeouts, state).await {
+    return match send_one_shot_with_state(
+      initial_client,
+      request,
+      timeouts,
+      state,
+      Some(RetryAdmissionContext {
+        route_name: &route.name,
+        pool_name: route.upstream_pool.as_deref(),
+      }),
+    )
+    .await
+    {
       Ok(response) => {
         let report_success = should_report_pool_response_success(&policy, response.status());
         Ok(PoolRetrySuccess {
@@ -354,20 +415,27 @@ pub(super) async fn send_pool_with_retry(
     };
   }
 
+  let deadline = retry_deadline(&policy, timeouts);
   let (parts, body) = request.into_parts();
-  let body = body
-    .collect()
+  let remaining = deadline.saturating_duration_since(Instant::now());
+  if remaining.is_zero() {
+    anyhow::bail!("upstream retry budget exhausted before request-body buffering");
+  }
+  let body = tokio::time::timeout(remaining, body.collect())
     .await
+    .map_err(|_| anyhow::anyhow!("upstream retry budget exhausted while buffering request body"))?
     .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?
     .to_bytes();
   let _buffered_body = state
     .overload
     .lease(WorkKind::RequestBodyBufferedBytes, body.len() as u64);
-  let deadline = retry_deadline(&policy);
   let mut current_upstream_index = initial_upstream_index;
   let mut current_selection = Some(initial_pool_selection);
   let mut failed_upstreams = Vec::new();
   let mut last_error = None;
+  let mut last_response = None;
+  let mut last_response_selection = None;
+  let mut last_response_upstream_index = None;
   let Some(pool_name) = request_waf
     .upstream_pool_override
     .as_deref()
@@ -379,6 +447,7 @@ pub(super) async fn send_pool_with_retry(
 
   for attempt in 0..policy.tries {
     if attempt > 0 && policy.reselect_pool_on_retry {
+      drop(current_selection.take());
       let selected = match select_pool_upstream_excluding(
         state,
         pool_name,
@@ -461,13 +530,23 @@ pub(super) async fn send_pool_with_retry(
     attempt_parts.uri = target_uri;
     attempt_parts.version = upstream_request_version(upstream_version);
     let outbound = Request::from_parts(attempt_parts, full_body(body.clone()));
-    let _retry = (attempt > 0).then(|| state.overload.lease(WorkKind::RetryConcurrency, 1));
-    let _pending = state.overload.lease(WorkKind::PendingUpstreamRequests, 1);
-    match tokio::time::timeout(attempt_timeout, client.request(outbound)).await {
-      Ok(Ok(response)) => {
+    match send_attempt(
+      client,
+      outbound,
+      attempt_timeout,
+      Some(deadline),
+      state,
+      Some(RetryAdmissionContext {
+        route_name: &route.name,
+        pool_name: Some(pool_name),
+      }),
+      attempt > 0,
+    )
+    .await
+    {
+      Ok(response) => {
         let failure = AttemptFailure::Status(response.status());
         if policy.matches_failure(failure) {
-          last_error = Some(retryable_status_error(response.status()));
           report_pool_attempt_failure(
             state,
             upstream,
@@ -477,8 +556,22 @@ pub(super) async fn send_pool_with_retry(
           )
           .await;
           if !has_remaining_attempt(&policy, attempt) {
-            break;
+            let pool_selection = current_selection
+              .take()
+              .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
+            return Ok(PoolRetrySuccess {
+              response,
+              upstream_index: current_upstream_index,
+              pool_selection,
+              report_success: false,
+            });
           }
+          let selection = current_selection
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
+          last_response = Some(response);
+          last_response_selection = Some(selection);
+          last_response_upstream_index = Some(current_upstream_index);
           sleep_before_retry(&policy, attempt, deadline).await;
           continue;
         }
@@ -492,9 +585,30 @@ pub(super) async fn send_pool_with_retry(
           report_success: true,
         });
       }
-      Ok(Err(error)) => {
-        last_error = Some(error.into());
-        let failure = AttemptFailure::ConnectError;
+      Err(error) => {
+        if super::circuit_breakers::admission_rejection(&error).is_some()
+          && let Some(response) = last_response.take()
+        {
+          drop(current_selection.take());
+          let pool_selection = last_response_selection
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
+          let upstream_index = last_response_upstream_index
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the response index"))?;
+          return Ok(PoolRetrySuccess {
+            response,
+            upstream_index,
+            pool_selection,
+            report_success: false,
+          });
+        }
+        let failure = if error.downcast_ref::<UpstreamFirstByteTimeout>().is_some() {
+          AttemptFailure::ReadTimeout
+        } else {
+          AttemptFailure::ConnectError
+        };
+        last_error = Some(error);
         let retryable = policy.matches_failure(failure);
         if retryable {
           report_pool_attempt_failure(
@@ -506,25 +620,7 @@ pub(super) async fn send_pool_with_retry(
           )
           .await;
         }
-        if !retryable || !has_remaining_attempt(&policy, attempt) {
-          break;
-        }
-      }
-      Err(_) => {
-        last_error = Some(UpstreamFirstByteTimeout::new(attempt_timeout).into());
-        let failure = AttemptFailure::ReadTimeout;
-        let retryable = policy.matches_failure(failure);
-        if retryable {
-          report_pool_attempt_failure(
-            state,
-            upstream,
-            &mut current_selection,
-            &mut failed_upstreams,
-            &policy,
-          )
-          .await;
-        }
-        if !retryable || !has_remaining_attempt(&policy, attempt) {
+        if !body.is_empty() || !retryable || !has_remaining_attempt(&policy, attempt) {
           break;
         }
       }
@@ -532,13 +628,28 @@ pub(super) async fn send_pool_with_retry(
     sleep_before_retry(&policy, attempt, deadline).await;
   }
 
+  if let Some(response) = last_response {
+    drop(current_selection.take());
+    let pool_selection = last_response_selection
+      .take()
+      .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
+    let upstream_index = last_response_upstream_index
+      .take()
+      .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the response index"))?;
+    return Ok(PoolRetrySuccess {
+      response,
+      upstream_index,
+      pool_selection,
+      report_success: false,
+    });
+  }
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
 }
 
 async fn report_pool_attempt_failure(
   state: &AppSnapshot,
   upstream: &UpstreamConfig,
-  current_selection: &mut Option<PoolSelection>,
+  _current_selection: &mut Option<PoolSelection>,
   failed_upstreams: &mut Vec<String>,
   policy: &EffectiveRetryPolicy,
 ) {
@@ -550,9 +661,9 @@ async fn report_pool_attempt_failure(
   {
     failed_upstreams.push(upstream.name.clone());
   }
-  if policy.reselect_pool_on_retry {
-    drop(current_selection.take());
-  }
+  // Keep the selected-server lease through bounded backoff. If a retry budget
+  // rejects the next attempt we can return a retryable upstream response
+  // without losing the response's selected-server lifetime.
 }
 
 async fn report_pool_passive_failure(
@@ -595,9 +706,9 @@ fn retry_body_can_be_buffered(request: &Request<ProxyBody>, state: &AppSnapshot)
     .is_some_and(|upper| upper <= state.config.proxy.buffering.max_memory_body_bytes as u64)
 }
 
-fn retry_deadline(policy: &EffectiveRetryPolicy) -> Instant {
+fn retry_deadline(policy: &EffectiveRetryPolicy, timeouts: EffectiveTimeouts) -> Instant {
   Instant::now()
-    .checked_add(policy.total_budget)
+    .checked_add(policy.total_budget.min(timeouts.upstream_request))
     .unwrap_or_else(Instant::now)
 }
 
@@ -612,10 +723,6 @@ async fn sleep_before_retry(policy: &EffectiveRetryPolicy, attempt: usize, deadl
   if !backoff.is_zero() {
     tokio::time::sleep(backoff).await;
   }
-}
-
-fn retryable_status_error(status: StatusCode) -> anyhow::Error {
-  anyhow::anyhow!("upstream returned retryable status {status}")
 }
 
 fn random_jitter(max: Duration) -> Duration {

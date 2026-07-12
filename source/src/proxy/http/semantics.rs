@@ -189,6 +189,7 @@ pub(super) fn cap_timeouts_for_grpc(
     upstream_first_byte: deadline < timeouts.upstream_first_byte,
   };
   timeouts.upstream_first_byte = timeouts.upstream_first_byte.min(deadline);
+  timeouts.upstream_request = timeouts.upstream_request.min(deadline);
   timeouts.upstream_read = timeouts.upstream_read.min(deadline);
   (timeouts, caps)
 }
@@ -406,6 +407,7 @@ mod tests {
       websocket_idle: Duration::from_secs(30),
       webtransport_idle: Duration::from_secs(30),
       upstream_connect: Duration::from_secs(3),
+      upstream_request: Duration::from_secs(30),
       upstream_first_byte: Duration::from_secs(30),
       upstream_read: Duration::from_secs(30),
       upstream_send: Duration::from_secs(30),
@@ -414,6 +416,7 @@ mod tests {
     let (timeouts, caps) = cap_timeouts_for_grpc(timeouts, &headers, true);
 
     assert_eq!(timeouts.upstream_first_byte, Duration::ZERO);
+    assert_eq!(timeouts.upstream_request, Duration::ZERO);
     assert_eq!(timeouts.upstream_read, Duration::ZERO);
     assert_eq!(
       caps,

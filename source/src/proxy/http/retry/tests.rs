@@ -203,6 +203,21 @@ per_attempt_timeout_ms = 100
 }
 
 #[test]
+fn enabled_breakers_supply_bounded_jittered_retry_defaults() {
+  let policy = retry_policy(
+    r#"
+[proxy.retry]
+enabled = true
+"#,
+    "",
+    Method::GET,
+  );
+  assert_eq!(policy.backoff_base, Duration::from_millis(25));
+  assert_eq!(policy.backoff_max, Duration::from_millis(250));
+  assert!(policy.jitter);
+}
+
+#[test]
 fn pool_passive_health_reporting_requires_retry_enabled_policy() {
   let route_disabled = retry_policy(
     r#"

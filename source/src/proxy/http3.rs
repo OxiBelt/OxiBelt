@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
@@ -636,6 +636,11 @@ pub(crate) async fn forward_one_shot_request(
   )
   .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
   let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+  let connection_admission = state
+    .circuit_breakers
+    .admit_upstream_connection(None, Instant::now().checked_add(timeouts.upstream_connect))
+    .await
+    .map_err(anyhow::Error::new)?;
   let connected = connect_h3_upstream(
     server_name,
     remote_addr,
@@ -650,6 +655,7 @@ pub(crate) async fn forward_one_shot_request(
     .record_http_upstream_client_connection_created("h3", "https", "primary");
   let guard = OneShotH3Connection {
     _endpoint: connected.endpoint,
+    _connection_admission: connection_admission,
     connection: connected.connection,
     driver_task: connected.driver_task,
   };
@@ -663,6 +669,7 @@ pub(crate) async fn forward_one_shot_request(
 
 struct OneShotH3Connection {
   _endpoint: h3_quinn::quinn::Endpoint,
+  _connection_admission: crate::circuit_breakers::AdmissionLease,
   connection: h3_quinn::quinn::Connection,
   driver_task: JoinHandle<()>,
 }

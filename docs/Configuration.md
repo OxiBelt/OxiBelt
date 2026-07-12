@@ -150,6 +150,12 @@ include = ["conf.d/*.toml"]
 [overload.actions.soft]
 [overload.actions.hard]
 [overload.reserved_capacity]
+[circuit_breakers]
+[circuit_breakers.global]
+[circuit_breakers.route_defaults]
+[circuit_breakers.pool_defaults]
+[circuit_breakers.retry_budget]
+[circuit_breakers.failure]
 [security.headers]
 [[security.header_policies]]
 [waf]
@@ -1056,6 +1062,61 @@ Each optional active-work threshold must be configured as a soft/hard pair with 
 Hard overload rejects new public TCP/QUIC connections and HTTP streams/requests with the configured generic response. HTTP/1 responses include `Connection: close`; HTTP/2 and HTTP/3 do not. Known oversized bodies are rejected, and unknown-length bodies are conservatively rejected before body reads. Hard overload can set an independent recoverable lifecycle drain; it never clears an Admin or shutdown drain. Health responses always include `X-OxiBelt-Overload-State`; configured hard overload returns readiness `503` with `Retry-After` while liveness remains available.
 
 Soft pressure blocks new cache-fill leaders and background refreshes while preserving completed cache hits, caps compression quality, reduces retry attempts, and rejects only trusted route classes selected below. Cache stale responses remain subject to their existing configured stale windows; overload does not widen cache freshness policy. Client `Priority` headers never select an overload priority class.
+
+### Request, Queue, and Retry Circuit Breakers
+
+`[circuit_breakers]` is enabled by default. It is a process-local guard that is independent of `[overload]`: normal work is admitted only while the global and configured route/pool limits have capacity, and bounded FIFO queues reject rather than accumulating unbounded waiters. `enabled = false` is a compatibility escape hatch that restores the pre-breaker admission behavior. Circuit-breaker rejections use the configured `5xx` response (default `503`) and `Retry-After`; unlike hard overload, they do not close reusable HTTP/1 connections and never make readiness fail.
+
+```toml
+[circuit_breakers]
+enabled = true
+response_status = 503
+capacity_retry_after = "1s"
+
+[circuit_breakers.global]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout = "50ms"
+max_connections = "auto"
+max_streams = "auto"
+max_body_inspection_jobs = "auto"
+max_decompression_jobs = "auto"
+
+[circuit_breakers.route_defaults]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout = "50ms"
+
+[circuit_breakers.pool_defaults]
+max_active_requests = "auto"
+max_pending_requests = "auto"
+pending_queue_timeout = "50ms"
+max_connections = "auto"
+max_streams = "auto"
+
+[circuit_breakers.retry_budget]
+percent = 0.10
+min_concurrency = 1
+max_concurrency = "auto"
+max_queue = "auto"
+queue_timeout = "25ms"
+
+[circuit_breakers.failure]
+enabled = true
+on = ["connect_error", "first_byte_timeout", "response_read_timeout", "protocol_error", "502", "503", "504"]
+consecutive_failures = 5
+minimum_requests = 20
+failure_ratio = 0.50
+window = "10s"
+open_timeout = "1s"
+max_open_timeout = "30s"
+half_open_max_probes = 1
+half_open_successes = 2
+```
+
+`"auto"` resolves once per process from cgroup CPU quota/cpuset, cgroup memory, file-descriptor limits, and the configured body buffers. In Kubernetes, OxiBelt uses projected CPU and memory requests only when the container has no corresponding hard cgroup limit. The global request default is CPU and memory bounded; route and pool defaults are smaller intersections, so an individual dependency cannot consume all process capacity. Limits are per Pod, not cluster-wide; add replicas to increase aggregate capacity. `max_pending_requests = 0` disables waiting and rejects immediately. Configured route names and pool names are the only scope labels exported to Prometheus; paths, hosts, clients, URLs, and raw errors are never labels.
+
+The failure circuit is applied to upstream-backed route and pool attempts while existing per-server passive health and outlier ejection remain separate. A circuit opens after either `consecutive_failures` or the rolling `failure_ratio` once `minimum_requests` are present, then permits only `half_open_max_probes` after the open interval. Successful probes close it after `half_open_successes`; failed probes reopen it with capped backoff. Downstream cancellation is neutral. Retry backoff, queueing, and every attempt consume the request's upstream deadline. When breakers are enabled and retry itself is enabled, omitted legacy zero-backoff settings resolve to a bounded jittered `25ms`–`250ms` backoff; disable the breaker explicitly to retain historical zero-backoff retry behavior.
 
 ```toml
 [shared_state]
@@ -2685,6 +2746,8 @@ HTTP health success is `(expected_status OR expected_status_ranges) AND expected
 
 Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally. `slow_start` and `outlier_ejection` are opt-in and disabled by default. When slow start is enabled, newly added, discovered, or recovered servers ramp from `min_weight_percent` to full effective weight over `duration_ms` across all pool algorithms, including sticky fallback, rendezvous, EWMA, and least-time scoring. When outlier ejection is enabled, passive retry/health failures can temporarily exclude a server after `consecutive_failures`; the ejection duration starts at `base_ejection_ms`, backs off per ejection count, and is capped by `max_ejection_ms`. If no ready, healthy, non-ejected server remains, OxiBelt preserves the existing fail-closed upstream-pool response.
 
+`[upstream_pools.circuit_breaker]` is a sparse override of `[circuit_breakers.pool_defaults]`. Use it for a dependency-wide active-request, pending-queue, physical-connection, or stream cap; it does not reinterpret `[[upstream_pools.servers]].max_conns`, which remains the existing selected-server request cap. Pool circuit failures are aggregate attempt outcomes and complement, rather than replace, per-server passive health and outlier ejection.
+
 Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a JSON document from a path under the config directory, for example `source/config/discovery/app-pool.json` when running from the repository layout. `provider = "nomad"` polls `GET /v1/service/:service_name`; when `watch = true`, OxiBelt uses Nomad blocking-query `index` and `wait` parameters derived from successful `X-Nomad-Index` responses and `watch_timeout_seconds`. Nomad `token_env` is read from the environment and sent only as `X-Nomad-Token`; bearer-style configuration is intentionally not exposed in OxiBelt TOML. Nomad responses are treated as untrusted input: entries need non-empty service IDs, matching service names, valid addresses and ports, and generated `http`/`https` origins. Invalid discovery responses or rejected runtime updates keep the previous active pool state. The file discovery document shape is:
 
 ```json
@@ -2830,6 +2893,13 @@ upstream = "app"
 # exclude_failed_pool_upstreams = true
 # report_passive_health = true
 
+[routes.circuit_breaker]
+# max_active_requests = 64
+# max_pending_requests = 16
+# pending_queue_timeout = "25ms"
+# max_body_inspection_jobs = 2
+# max_decompression_jobs = 2
+
 # Static routes only. These options require static_root.
 #[routes.static_files]
 # directory_index = ["index.html"]
@@ -2859,6 +2929,8 @@ Route limit overrides are optional. `routes.limits.max_request_body_bytes` inher
 Route buffering overrides are optional. Omitted values inherit from `[proxy.buffering]`; `temp_dir` is always global. CONNECT tunnels, HTTP Upgrade, and WebTransport forwarding remain streaming even when buffering is enabled.
 
 Route retry overrides are optional. Omitted values inherit from `[proxy.retry]`, while each configured `[routes.retry]` field replaces only that global field. A route can set `enabled = true` to opt into retry when global retry is disabled, or `enabled = false` to opt out when global retry is enabled. The same duplicate-write warning for global `retry_non_idempotent = true` applies to route-level retry.
+
+`[routes.circuit_breaker]` is a sparse override of `[circuit_breakers.route_defaults]`; each configured field replaces only that default. It gates work after route resolution and before WAF/body processing. Route request capacity is logical request/stream capacity, not a partition of a reusable multiplexed upstream connection.
 
 Fields:
 

@@ -18,6 +18,7 @@ pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig
     keepalive: UpstreamPoolKeepaliveConfig::default(),
     slow_start: UpstreamPoolSlowStartConfig::default(),
     outlier_ejection: UpstreamPoolOutlierEjectionConfig::default(),
+    circuit_breaker: None,
     servers: vec![
       UpstreamPoolServerConfig {
         id: None,

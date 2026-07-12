@@ -540,6 +540,18 @@
         {
           "expr": "sum(rate(oxibelt_overload_rejections_total[$__rate_interval]))",
           "legendFormat": "rejections/s"
+        },
+        {
+          "expr": "sum by (scope_kind) (oxibelt_circuit_breaker_queued)",
+          "legendFormat": "circuit queued: {{scope_kind}}"
+        },
+        {
+          "expr": "sum by (reason) (rate(oxibelt_circuit_breaker_rejections_total[$__rate_interval]))",
+          "legendFormat": "circuit rejects/s: {{reason}}"
+        },
+        {
+          "expr": "sum by (scope_kind, state) (oxibelt_circuit_breaker_state)",
+          "legendFormat": "circuit {{scope_kind}}: {{state}}"
         }
       ],
       "title": "Global Overload Protection",

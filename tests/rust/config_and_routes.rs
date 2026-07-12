@@ -8,23 +8,23 @@ use base64::Engine;
 use oxibelt::config::{
   AccessLogSchema, AccessTokenRateLimitSource, AdminAuditExportSink, AdminAuditMode,
   AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode, BackendFailureMode,
-  BufferingMode, CacheStore, ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage,
-  ClientIdentityAsnMode, CompressionConfig, CompressionProxiedPredicate,
-  CompressionUpstreamAcceptEncodingMode, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
-  CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, CryptoPrimitiveBackend,
-  CryptoPrimitiveProvider, DatabaseMitigationMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
-  EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
-  ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind, ForwardedClientIpSource,
-  ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
-  KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
-  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
-  ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
-  RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
-  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
-  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
-  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-  UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  BufferingMode, CacheStore, CapacitySetting, CircuitFailureCondition,
+  ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
+  CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
+  ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
+  CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
+  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
+  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
+  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
+  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
+  OutboundOcspMode, PriorityClass, PriorityMode, ProxyProtocolEgressMode, ProxyProtocolVersion,
+  QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode,
+  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -100,6 +100,97 @@ retry_after = "3s"
   assert_eq!(config.overload.thresholds.active_requests_hard, Some(8));
   assert_eq!(config.overload.sample_interval_ms, 250);
   assert_eq!(config.overload.actions.hard.retry_after_seconds, 3);
+}
+
+#[test]
+fn circuit_breakers_parse_global_and_route_overrides() {
+  let temp_dir = common::TempDir::new("circuit-breakers-config");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "circuit-breakers");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let raw = format!(
+    r#"
+{base}
+
+[circuit_breakers]
+enabled = true
+response_status = 503
+capacity_retry_after = "1s"
+
+[circuit_breakers.global]
+max_active_requests = 64
+max_pending_requests = 0
+pending_queue_timeout = "50ms"
+
+[circuit_breakers.retry_budget]
+percent = 0.25
+min_concurrency = 2
+max_concurrency = 8
+max_queue = 16
+queue_timeout = "25ms"
+
+[circuit_breakers.failure]
+on = ["connect_error", "503"]
+consecutive_failures = 3
+minimum_requests = 5
+failure_ratio = 0.75
+window = "10s"
+open_timeout = "1s"
+max_open_timeout = "5s"
+half_open_max_probes = 1
+half_open_successes = 2
+
+[routes.circuit_breaker]
+max_active_requests = 12
+max_pending_requests = 4
+pending_queue_timeout = "20ms"
+
+[[upstream_pools]]
+name = "backend"
+
+[upstream_pools.circuit_breaker]
+max_connections = 3
+max_streams = 6
+
+[[upstream_pools.servers]]
+id = "primary"
+origin = "http://backend.internal"
+"#
+  );
+
+  let config: Config = toml::from_str(&raw).expect("circuit-breaker config should parse");
+  config
+    .validate()
+    .expect("circuit-breaker config should validate");
+  assert_eq!(
+    config.circuit_breakers.global.max_active_requests,
+    CapacitySetting::Fixed(64)
+  );
+  assert_eq!(
+    config.circuit_breakers.global.max_pending_requests,
+    CapacitySetting::Fixed(0)
+  );
+  assert_eq!(config.circuit_breakers.capacity_retry_after_ms, 1_000);
+  assert_eq!(config.circuit_breakers.retry_budget.percent, 0.25);
+  assert_eq!(
+    config.circuit_breakers.failure.on,
+    vec![
+      CircuitFailureCondition::ConnectError,
+      CircuitFailureCondition::Status503,
+    ]
+  );
+  let route = config.routes[0]
+    .circuit_breaker
+    .as_ref()
+    .expect("route circuit-breaker override should parse");
+  assert_eq!(route.max_active_requests, Some(CapacitySetting::Fixed(12)));
+  assert_eq!(route.pending_queue_timeout_ms, Some(20));
+  let pool = config
+    .upstream_pools
+    .first()
+    .and_then(|pool| pool.circuit_breaker.as_ref())
+    .expect("pool circuit-breaker override should parse");
+  assert_eq!(pool.max_connections, Some(CapacitySetting::Fixed(3)));
+  assert_eq!(pool.max_streams, Some(CapacitySetting::Fixed(6)));
 }
 
 #[test]

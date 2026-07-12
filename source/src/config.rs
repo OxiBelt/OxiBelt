@@ -20,6 +20,7 @@ mod admin_runtime;
 mod allowed_keys;
 mod cache_external;
 mod cache_sections;
+mod circuit_breakers;
 mod client_identity;
 mod compression;
 mod crlite;
@@ -68,6 +69,7 @@ pub use cache_external::{
 pub use cache_sections::{
   CacheAdmissionConfig, CachePolicyRuleConfig, CacheStaleIfErrorConfig, CacheSurrogateConfig,
 };
+pub use circuit_breakers::*;
 pub use client_identity::*;
 pub use compression::*;
 pub use crlite::*;
@@ -145,6 +147,7 @@ pub struct Config {
   pub telemetry: TelemetryConfig,
   pub health: HealthConfig,
   pub overload: OverloadConfig,
+  pub circuit_breakers: CircuitBreakersConfig,
   pub security: SecurityConfig,
   pub database: DatabaseConfig,
   pub shared_state: SharedStateConfig,
@@ -205,6 +208,8 @@ struct RawConfig {
   health: HealthConfig,
   #[serde(default)]
   overload: OverloadConfig,
+  #[serde(default)]
+  circuit_breakers: CircuitBreakersConfig,
   #[serde(default)]
   security: SecurityConfig,
   #[serde(default)]
@@ -270,6 +275,7 @@ impl TryFrom<RawConfig> for Config {
       telemetry: raw.telemetry,
       health: raw.health,
       overload: raw.overload,
+      circuit_breakers: raw.circuit_breakers,
       security: raw.security,
       database: raw.database,
       shared_state: raw.shared_state,
@@ -532,6 +538,7 @@ impl Config {
       && self.telemetry == other.telemetry
       && self.health == other.health
       && self.overload == other.overload
+      && self.circuit_breakers == other.circuit_breakers
       && self.security == other.security
       && self.database == other.database
       && self.shared_state == other.shared_state
@@ -914,6 +921,7 @@ impl Config {
     self.validate_admin()?;
     self.validate_metrics_and_health()?;
     self.overload.validate()?;
+    self.circuit_breakers.validate()?;
     self.telemetry.validate()?;
     security_headers::validate_security_headers(self)?;
     crypto::validate_crypto(self)?;
@@ -1014,6 +1022,9 @@ impl Config {
         );
       }
       upstream_pool::validate_pool_policy(pool)?;
+      if let Some(circuit_breaker) = &pool.circuit_breaker {
+        circuit_breaker.validate(&format!("upstream_pools {} circuit_breaker", pool.name))?;
+      }
       let mut server_ids = HashSet::new();
       for (index, server) in pool.servers.iter().enumerate() {
         let server_id = upstream_pool_server_id(index, server);
@@ -1266,6 +1277,9 @@ impl Config {
             route.name
           );
         }
+      }
+      if let Some(circuit_breaker) = &route.circuit_breaker {
+        circuit_breaker.validate(&format!("route {} circuit_breaker", route.name))?;
       }
     }
     route::validate_route_match_conflicts(&self.routes)?;
@@ -3276,6 +3290,52 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "metrics_connections",
       "metrics_requests",
     ][..],
+    "circuit_breakers" => &[
+      "enabled",
+      "response_status",
+      "capacity_retry_after_ms",
+      "capacity_retry_after",
+      "global",
+      "route_defaults",
+      "pool_defaults",
+      "retry_budget",
+      "failure",
+    ][..],
+    "circuit_breakers.global"
+    | "circuit_breakers.route_defaults"
+    | "circuit_breakers.pool_defaults" => &[
+      "max_active_requests",
+      "max_pending_requests",
+      "pending_queue_timeout_ms",
+      "pending_queue_timeout",
+      "max_connections",
+      "max_streams",
+      "max_body_inspection_jobs",
+      "max_decompression_jobs",
+    ][..],
+    "circuit_breakers.retry_budget" => &[
+      "percent",
+      "min_concurrency",
+      "max_concurrency",
+      "max_queue",
+      "queue_timeout_ms",
+      "queue_timeout",
+    ][..],
+    "circuit_breakers.failure" => &[
+      "enabled",
+      "on",
+      "consecutive_failures",
+      "minimum_requests",
+      "failure_ratio",
+      "window_ms",
+      "window",
+      "open_timeout_ms",
+      "open_timeout",
+      "max_open_timeout_ms",
+      "max_open_timeout",
+      "half_open_max_probes",
+      "half_open_successes",
+    ][..],
     "telemetry" => &["tracing"][..],
     "telemetry.tracing" => &[
       "enabled",
@@ -3471,6 +3531,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "servers",
       "slow_start",
       "sticky_cookie",
+      "circuit_breaker",
     ][..],
     "upstream_pools.discovery" => &[
       "datacenter",
@@ -3552,6 +3613,16 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       crlite::CRLITE_MANAGED_CONFIG_KEYS
     }
     "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
+    "upstream_pools.circuit_breaker" | "routes.circuit_breaker" => &[
+      "max_active_requests",
+      "max_pending_requests",
+      "pending_queue_timeout_ms",
+      "pending_queue_timeout",
+      "max_connections",
+      "max_streams",
+      "max_body_inspection_jobs",
+      "max_decompression_jobs",
+    ][..],
     "routes" => &[
       "actions",
       "buffering",
@@ -3563,6 +3634,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "path_prefix",
       "replace_prefix_with",
       "retry",
+      "circuit_breaker",
       "security_headers",
       "priority_class",
       "connect_tunneling",
@@ -5150,6 +5222,8 @@ pub struct UpstreamPoolConfig {
   pub slow_start: UpstreamPoolSlowStartConfig,
   #[serde(default)]
   pub outlier_ejection: UpstreamPoolOutlierEjectionConfig,
+  #[serde(default)]
+  pub circuit_breaker: Option<CircuitBreakerScopeOverride>,
   #[serde(default)]
   pub servers: Vec<UpstreamPoolServerConfig>,
   #[serde(default)]

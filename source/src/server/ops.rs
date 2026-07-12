@@ -106,6 +106,7 @@ fn ops_response(
         snapshot.tls_resumption.server_session_storage_stats(),
       );
       snapshot.overload.append_prometheus(&mut body);
+      snapshot.circuit_breakers.append_prometheus(&mut body);
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {

@@ -110,7 +110,14 @@ pub(super) fn spawn_request_mirrors(
         mirror_state.metrics.record_request_mirror_skip();
         return;
       };
-      match send_one_shot_with_state(client, mirror_request, timeouts, mirror_state.as_ref()).await
+      match send_one_shot_with_state(
+        client,
+        mirror_request,
+        timeouts,
+        mirror_state.as_ref(),
+        None,
+      )
+      .await
       {
         Ok(_) => mirror_state.metrics.record_request_mirror_success(),
         Err(error) => {

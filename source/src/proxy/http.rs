@@ -17,8 +17,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::{
-  Config, ConnectionLimitIdentityMode, HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode,
-  RouteConfig, UpstreamConfig,
+  ConnectionLimitIdentityMode, HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, RouteConfig,
+  UpstreamConfig,
 };
 use crate::dynamic_policy::{DynamicPolicyRequest, DynamicPolicyTerminal};
 use crate::external_auth::ExternalAuthOutcome;
@@ -32,7 +32,7 @@ use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryRuntime, TraceContext};
 use crate::waf::{
   BodyNeed, WafProtocol, WafRequestInput, WafResponseInput, WafTlsMetadata,
-  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations, request_protocol,
+  WafTransportMetadataInput, WafTransportNetwork, apply_header_mutations,
 };
 
 pub(crate) mod access_log;
@@ -44,8 +44,10 @@ mod cache_refresh;
 mod cache_status;
 mod cache_streaming;
 mod cache_wait;
+mod circuit_breakers;
 pub(crate) mod compression;
 pub(crate) mod early_data;
+mod entry;
 pub(crate) mod fast_path;
 mod flow_helpers;
 pub(crate) mod grpc_web;
@@ -63,6 +65,7 @@ mod route_action_runtime;
 mod route_actions;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
+mod timeouts;
 mod tls_policy;
 pub(crate) mod upstream;
 pub(crate) mod uri;
@@ -83,6 +86,12 @@ use self::body::{
   with_connection_permit,
 };
 use self::cache_status::{CacheHeaderOutcome as CacheOutcome, CacheHeaderReason as CacheReason};
+use self::circuit_breakers::{
+  rejection_response as circuit_breaker_rejection_response,
+  with_request_lease as with_circuit_breaker_request_lease,
+};
+pub(crate) use self::entry::handle_inner;
+pub(crate) use self::entry::{handle, handle_http3, handle_with_forwarded_header_cache};
 use self::flow_helpers::{
   elapsed_ms, emit_system_access_log, record_route_cache_event, record_route_cache_fill_stage,
   select_forwarded_client_addr, tags_ref,
@@ -118,7 +127,8 @@ pub(crate) use self::response_timeout::{
   downstream_response_send_timeout, with_downstream_response_timeout,
 };
 use self::retry::{
-  EffectiveRetryPolicy, send_one_shot_with_state, send_pool_with_retry, send_with_retry,
+  EffectiveRetryPolicy, RetryAdmissionContext, send_one_shot_with_state, send_pool_with_retry,
+  send_with_retry,
 };
 use self::route_action_runtime as route_runtime;
 use self::semantics::filter_trailers;
@@ -127,6 +137,7 @@ use self::uri::validate_downstream_path;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DownstreamListenerBind(pub(crate) SocketAddr);
+pub(crate) use self::timeouts::EffectiveTimeouts;
 use self::version::select_upstream_http_version;
 pub(crate) use self::waf_body_capture::{
   capture_request_body_for_waf, capture_response_body_for_waf, request_body_capture_error_response,
@@ -136,269 +147,8 @@ use self::waf_body_coding::has_non_identity_content_encoding;
 pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
 pub(crate) use tls_policy::route_matches_selected_tls_negotiation_policy;
 
-#[derive(Clone, Copy)]
-pub(crate) struct EffectiveTimeouts {
-  pub(crate) response_send: Duration,
-  pub(crate) websocket_idle: Duration,
-  pub(crate) webtransport_idle: Duration,
-  pub(crate) upstream_connect: Duration,
-  pub(crate) upstream_first_byte: Duration,
-  pub(crate) upstream_read: Duration,
-  pub(crate) upstream_send: Duration,
-}
-
-impl EffectiveTimeouts {
-  pub(crate) fn new(config: &Config, route: &RouteConfig, upstream: &UpstreamConfig) -> Self {
-    let timeouts = &route.timeouts;
-    let upstream_request_ms = timeouts
-      .upstream_request_timeout_ms
-      .unwrap_or(upstream.request_timeout_ms);
-    let upstream_first_byte_ms = timeouts
-      .upstream_first_byte_timeout_ms
-      .unwrap_or(upstream.first_byte_timeout_ms)
-      .min(upstream_request_ms);
-    Self {
-      response_send: Duration::from_millis(
-        timeouts
-          .response_send_timeout_ms
-          .unwrap_or(config.limits.response_send_timeout_ms),
-      ),
-      websocket_idle: Duration::from_millis(
-        timeouts
-          .websocket_idle_timeout_ms
-          .unwrap_or(config.limits.websocket_idle_timeout_ms),
-      ),
-      webtransport_idle: Duration::from_millis(
-        timeouts
-          .webtransport_idle_timeout_ms
-          .unwrap_or(config.limits.webtransport_idle_timeout_ms),
-      ),
-      upstream_connect: Duration::from_millis(
-        timeouts
-          .upstream_connect_timeout_ms
-          .unwrap_or(upstream.connect_timeout_ms),
-      ),
-      upstream_first_byte: Duration::from_millis(upstream_first_byte_ms),
-      upstream_read: Duration::from_millis(
-        timeouts
-          .upstream_read_timeout_ms
-          .unwrap_or(upstream.read_timeout_ms),
-      ),
-      upstream_send: Duration::from_millis(
-        timeouts
-          .upstream_send_timeout_ms
-          .unwrap_or(upstream.send_timeout_ms),
-      ),
-    }
-  }
-
-  fn route_body_only(config: &Config, route: &RouteConfig) -> Duration {
-    Duration::from_millis(
-      route
-        .timeouts
-        .client_body_timeout_ms
-        .unwrap_or(config.limits.client_body_timeout_ms),
-    )
-  }
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle(
-  request: Request<Incoming>,
-  peer_addr: std::net::SocketAddr,
-  tcp_max_hop: Option<u8>,
-  transport_metadata: WafTransportMetadataInput<'static>,
-  tls: Arc<WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  state: Arc<AppSnapshot>,
-  downstream_scheme: &'static str,
-  drain: ConnectionDrain,
-) -> Response<ProxyBody> {
-  handle_with_forwarded_header_cache(
-    request,
-    peer_addr,
-    tcp_max_hop,
-    transport_metadata,
-    tls,
-    connection_limit_context,
-    None,
-    state,
-    downstream_scheme,
-    drain,
-  )
-  .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_with_forwarded_header_cache(
-  request: Request<Incoming>,
-  peer_addr: std::net::SocketAddr,
-  tcp_max_hop: Option<u8>,
-  transport_metadata: WafTransportMetadataInput<'static>,
-  tls: Arc<WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  forwarded_header_cache: Option<headers::ForwardedHeaderCache>,
-  state: Arc<AppSnapshot>,
-  downstream_scheme: &'static str,
-  drain: ConnectionDrain,
-) -> Response<ProxyBody> {
-  let protocol = request_protocol(request.headers());
-  handle_inner(
-    request,
-    peer_addr,
-    tcp_max_hop,
-    transport_metadata,
-    tls,
-    connection_limit_context,
-    forwarded_header_cache,
-    state,
-    protocol,
-    WafTransportNetwork::Tcp,
-    true,
-    downstream_scheme,
-    drain,
-  )
-  .await
-}
-
-pub(crate) async fn handle_http3(
-  request: Request<ProxyBody>,
-  peer_addr: std::net::SocketAddr,
-  udp_connection_id: &str,
-  tls: Arc<WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  state: Arc<AppSnapshot>,
-  drain: ConnectionDrain,
-) -> Response<ProxyBody> {
-  handle_inner(
-    request,
-    peer_addr,
-    None,
-    WafTransportMetadataInput {
-      udp_connection_id: Some(udp_connection_id),
-      ..WafTransportMetadataInput::default()
-    },
-    tls,
-    connection_limit_context,
-    None,
-    state,
-    WafProtocol::Http,
-    WafTransportNetwork::Udp,
-    false,
-    "https",
-    drain,
-  )
-  .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_inner<B>(
-  mut request: Request<B>,
-  peer_addr: std::net::SocketAddr,
-  tcp_max_hop: Option<u8>,
-  transport_metadata: WafTransportMetadataInput<'_>,
-  tls: Arc<WafTlsMetadata>,
-  connection_limit_context: Option<ConnectionLimitContext>,
-  forwarded_header_cache: Option<headers::ForwardedHeaderCache>,
-  state: Arc<AppSnapshot>,
-  protocol: WafProtocol,
-  transport_network: WafTransportNetwork,
-  _reject_connect: bool,
-  downstream_scheme: &'static str,
-  drain: ConnectionDrain,
-) -> Response<ProxyBody>
-where
-  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
-  B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
-{
-  let request_version = request.version();
-  let downstream_receive_started =
-    fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
-  early_data::strip_untrusted_header(request.headers_mut());
-  if transport_network != WafTransportNetwork::Udp {
-    fast_path::stage_timing::record(
-      state.as_ref(),
-      fast_path::stage_timing::PATH_PLAIN_PROXY,
-      fast_path::stage_timing::protocol(request_version),
-      fast_path::stage_timing::STAGE_DOWNSTREAM_PROTOCOL_RECEIVE,
-      fast_path::stage_timing::OUTCOME_OK,
-      downstream_receive_started,
-    );
-  }
-  let system_access_log_enabled = state.request_path_features.system_access_log;
-  let trace_context = if state.request_path_features.telemetry {
-    state.telemetry.context_from_headers(request.headers())
-  } else {
-    None
-  };
-  let telemetry_start = request_observability_start(&state, trace_context);
-  let access_log_metadata_enabled = system_access_log_enabled || telemetry_start.is_some();
-  let mut access_log = SystemAccessLogContext::new(
-    &request,
-    peer_addr,
-    tcp_max_hop,
-    system_access_log_enabled.then(|| tls.clone()),
-    protocol,
-    transport_network,
-    transport_metadata,
-    downstream_scheme,
-    access_log_metadata_enabled,
-    system_access_log_enabled,
-  );
-  let overload_request_lease = match state.overload.try_admit_request(request_version) {
-    Ok(lease) => lease,
-    Err(_) => {
-      let response = overload_response(state.as_ref(), request_version);
-      emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
-      record_request_observability(
-        &state,
-        &access_log,
-        &response,
-        trace_context,
-        telemetry_start,
-      );
-      return response;
-    }
-  };
-  let mut request_connection_permit = None;
-  let response = handle_inner_impl(
-    request,
-    peer_addr,
-    tcp_max_hop,
-    transport_metadata,
-    tls,
-    connection_limit_context,
-    forwarded_header_cache,
-    &state,
-    protocol,
-    transport_network,
-    _reject_connect,
-    downstream_scheme,
-    drain,
-    &mut access_log,
-    &mut request_connection_permit,
-    trace_context,
-  )
-  .await;
-  let response = if let Some(permit) = request_connection_permit {
-    with_connection_permit(response, permit)
-  } else {
-    response
-  };
-  let response = with_overload_request_lease(response, overload_request_lease);
-  emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
-  record_request_observability(
-    &state,
-    &access_log,
-    &response,
-    trace_context,
-    telemetry_start,
-  );
-  response
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_inner_impl<B>(
+pub(super) async fn handle_inner_impl<B>(
   request: Request<B>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
@@ -591,6 +341,16 @@ where
     return route_security.apply(response);
   }
   access_log.set_route_name(&resolved.route.name);
+  let route_circuit_breaker_lease = match state
+    .circuit_breakers
+    .admit_route_scope_request(&resolved.route.name, None)
+    .await
+  {
+    Ok(lease) => lease,
+    Err(rejection) => {
+      return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+    }
+  };
   let max_request_body_bytes = resolved
     .route
     .effective_max_request_body_bytes(&state.config.limits);
@@ -655,7 +415,9 @@ where
     )
     .await
     {
-      Ok(response) => return response,
+      Ok(response) => {
+        return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+      }
       Err(request) => request,
     }
   } else {
@@ -691,7 +453,9 @@ where
     )
     .await
     {
-      Ok(response) => return response,
+      Ok(response) => {
+        return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+      }
       Err(request) => request,
     }
   } else {
@@ -978,6 +742,35 @@ where
       BodyTimeoutKind::DownstreamRequestRead,
     )
   });
+  let request_inspection_lease =
+    if request_method != Method::CONNECT && request_body_need != BodyNeed::None {
+      match state
+        .circuit_breakers
+        .admit_body_inspection(&resolved.route.name, None)
+        .await
+      {
+        Ok(lease) => Some(lease),
+        Err(rejection) => {
+          return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+        }
+      }
+    } else {
+      None
+    };
+  let request_decompression_lease = if request_waf_body_compression_transform {
+    match state
+      .circuit_breakers
+      .admit_decompression(&resolved.route.name, None)
+      .await
+    {
+      Ok(lease) => Some(lease),
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    }
+  } else {
+    None
+  };
   let (request, captured_body) =
     if request_method != Method::CONNECT && request_body_need != BodyNeed::None {
       match capture_request_body_for_waf(
@@ -1053,6 +846,8 @@ where
   request_waf
     .response_header_mutations
     .extend(dynamic_challenge_response_mutations);
+  drop(request_decompression_lease);
+  drop(request_inspection_lease);
 
   if !request_waf.tags.is_empty() {
     let tags = tags.get_or_insert_with(HashMap::new);
@@ -1088,7 +883,7 @@ where
       state.config.proxy.static_files.inline_max_bytes,
     )
     .await;
-    return static_files::finalize_response(
+    let response = static_files::finalize_response(
       response,
       state.as_ref(),
       resolved.route,
@@ -1113,10 +908,11 @@ where
       access_log,
     )
     .await;
+    return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   }
 
   if request_method == Method::CONNECT {
-    return handle_connect_request(
+    let response = handle_connect_request(
       request,
       state,
       &resolved,
@@ -1131,6 +927,7 @@ where
       trace_context,
     )
     .await;
+    return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   }
 
   if is_upgrade_request(&request) {
@@ -1186,7 +983,7 @@ where
     )
     .await
     {
-      return response;
+      return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
     }
     return route_security.text(
       StatusCode::NOT_IMPLEMENTED,
@@ -1219,6 +1016,7 @@ where
   };
   let mut upstream = selected.upstream;
   let mut upstream_index = selected.upstream_index;
+  let selected_pool_name = selected.pool_name().map(str::to_string);
   let pool_retry_cookie = selected
     .pool_name()
     .and_then(|_| pool_cookie_header.cloned());
@@ -1445,7 +1243,7 @@ where
       &mut revalidation_entry,
       true,
     ) {
-      return response;
+      return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
     }
   } else if cache_enabled_for_route {
     state.metrics.record_cache_miss();
@@ -1504,7 +1302,7 @@ where
               false,
             )
           {
-            return response;
+            return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
           }
           break;
         }
@@ -1569,7 +1367,7 @@ where
               &mut revalidation_entry,
               false,
             ) {
-              return response;
+              return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
             }
           } else {
             state.metrics.record_cache_miss();
@@ -1598,7 +1396,7 @@ where
           )
           .await
           {
-            return response;
+            return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
           }
           break;
         }
@@ -1621,6 +1419,34 @@ where
   let upstream_started_at = Instant::now();
   let mut report_pool_success = true;
   let upstream_response = if upstream_version == HttpVersion::H3 {
+    let mut upstream_admission = match state
+      .circuit_breakers
+      .admit_upstream_attempt(
+        &resolved.route.name,
+        selected_pool_name.as_deref(),
+        Instant::now().checked_add(timeouts.upstream_request),
+      )
+      .await
+    {
+      Ok(lease) => lease,
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    };
+    let upstream_stream_lease = match state
+      .circuit_breakers
+      .admit_upstream_stream(
+        &resolved.route.name,
+        selected_pool_name.as_deref(),
+        Instant::now().checked_add(timeouts.upstream_request),
+      )
+      .await
+    {
+      Ok(lease) => lease,
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    };
     match tokio::time::timeout(
       timeouts.upstream_first_byte,
       crate::proxy::http3::forward_request(outbound, upstream, state.as_ref(), timeouts),
@@ -1628,6 +1454,9 @@ where
     .await
     {
       Err(_) => {
+        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
+          crate::circuit_breakers::CircuitOutcomeFailure::FirstByteTimeout,
+        ));
         if should_report_upstream_request_failure(true, grpc_timeout_caps) {
           state.pools.report_failure_async(&upstream.name).await;
         }
@@ -1669,10 +1498,19 @@ where
         );
       }
       Ok(Ok(response)) => {
+        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
+          crate::circuit_breakers::CircuitOutcomeFailure::Status(response.status().as_u16()),
+        ));
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
-        response
+        with_circuit_breaker_request_lease(response, upstream_stream_lease)
       }
       Ok(Err(error)) => {
+        if let Some(rejection) = circuit_breakers::admission_rejection(&error) {
+          return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+        }
+        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
+          crate::circuit_breakers::CircuitOutcomeFailure::ConnectError,
+        ));
         state.pools.report_failure_async(&upstream.name).await;
         warn!(
             error = %error,
@@ -1781,9 +1619,30 @@ where
         })
       } else {
         let result = if retry_policy.enabled {
-          send_with_retry(client, outbound, timeouts, state, &retry_policy).await
+          send_with_retry(
+            client,
+            outbound,
+            timeouts,
+            state,
+            &retry_policy,
+            Some(RetryAdmissionContext {
+              route_name: &resolved.route.name,
+              pool_name: None,
+            }),
+          )
+          .await
         } else {
-          send_one_shot_with_state(client, outbound, timeouts, state.as_ref()).await
+          send_one_shot_with_state(
+            client,
+            outbound,
+            timeouts,
+            state.as_ref(),
+            Some(RetryAdmissionContext {
+              route_name: &resolved.route.name,
+              pool_name: None,
+            }),
+          )
+          .await
         };
         result.map(|mut response| {
           if let Some(capture) = early_hints_capture {
@@ -1804,13 +1663,21 @@ where
       .await
     };
     match result {
-      Ok(response) => {
+      Ok(mut response) => {
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
-        response.map(|body| body.map_err(boxed_error).boxed())
+        let stream_lease = retry::take_stream_lease(&mut response);
+        let response = response.map(|body| body.map_err(boxed_error).boxed());
+        match stream_lease {
+          Some(lease) => with_circuit_breaker_request_lease(response, lease),
+          None => response,
+        }
       }
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {
           return route_security.text(StatusCode::REQUEST_TIMEOUT, "request body timed out");
+        }
+        if let Some(rejection) = circuit_breakers::admission_rejection(&error) {
+          return route_security.apply(circuit_breaker_rejection_response(state, rejection));
         }
         let upstream_first_byte_timeout = error_is_upstream_first_byte_timeout(&error);
         if !pool_failures_reported
@@ -1969,6 +1836,34 @@ where
   );
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
+  let response_inspection_lease = if response_body_need != BodyNeed::None {
+    match state
+      .circuit_breakers
+      .admit_body_inspection(&resolved.route.name, None)
+      .await
+    {
+      Ok(lease) => Some(lease),
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    }
+  } else {
+    None
+  };
+  let response_decompression_lease = if response_waf_body_compression_transform {
+    match state
+      .circuit_breakers
+      .admit_decompression(&resolved.route.name, None)
+      .await
+    {
+      Ok(lease) => Some(lease),
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    }
+  } else {
+    None
+  };
   let (body, captured_response_body) = if response_body_need != BodyNeed::None {
     match capture_response_body_for_waf(
       parts.version,
@@ -2050,6 +1945,8 @@ where
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
+  drop(response_decompression_lease);
+  drop(response_inspection_lease);
   route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   cache_status::strip_headers(&mut parts.headers);
   let mut response_buffering = effective_buffering.response;
@@ -2105,6 +2002,7 @@ where
   let mut response =
     with_downstream_response_timeout(response, timeouts.response_send, transport_network);
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
+  let response = with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   state.record_hot_path_response(response.status());
   response
 }

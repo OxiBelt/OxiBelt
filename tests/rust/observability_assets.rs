@@ -51,6 +51,12 @@ fn grafana_dashboard_is_valid_json_with_oxibelt_promql() {
       "dashboard expression should use OxiBelt metrics: {expression}"
     );
   }
+  assert!(
+    raw.contains("oxibelt_circuit_breaker_queued")
+      && raw.contains("oxibelt_circuit_breaker_rejections_total")
+      && raw.contains("oxibelt_circuit_breaker_state"),
+    "dashboard should include circuit-breaker queue, rejection, and state signals"
+  );
 }
 
 #[test]

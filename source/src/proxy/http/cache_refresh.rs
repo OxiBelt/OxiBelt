@@ -134,7 +134,7 @@ async fn background_refresh(
     return Ok(());
   };
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
-  let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy).await?;
+  let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy, None).await?;
   let (mut parts, body) = response.into_parts();
   if parts.status == StatusCode::NOT_MODIFIED {
     state

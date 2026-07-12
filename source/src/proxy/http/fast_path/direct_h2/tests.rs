@@ -668,6 +668,7 @@ fn direct_h2_test_timeouts() -> EffectiveTimeouts {
     websocket_idle: timeout,
     webtransport_idle: timeout,
     upstream_connect: timeout,
+    upstream_request: timeout,
     upstream_first_byte: timeout,
     upstream_read: timeout,
     upstream_send: timeout,
