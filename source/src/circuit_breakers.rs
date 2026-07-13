@@ -14,6 +14,8 @@ mod runtime;
 mod types;
 
 #[cfg(test)]
+mod priority_tests;
+#[cfg(test)]
 mod queue_fairness_tests;
 #[cfg(test)]
 mod tests;

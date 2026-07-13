@@ -101,6 +101,10 @@ impl ResolvedPriorityPolicy {
       rejection_policy: policy.rejection_policy,
     }
   }
+
+  fn max_shared_requests(self) -> usize {
+    self.max_requests.saturating_sub(self.reserved_requests)
+  }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -208,6 +212,9 @@ impl PriorityAdmissionState {
     if reservation_eligible && self.active[index].reserved < policy.reserved_requests {
       return Some(PriorityLeaseKind::Reserved);
     }
+    if self.active[index].shared >= policy.max_shared_requests() {
+      return None;
+    }
     let untracked_active = global_active.saturating_sub(self.total_active());
     (self.shared_active.saturating_add(untracked_active) < self.shared_capacity)
       .then_some(PriorityLeaseKind::Shared)
@@ -267,8 +274,9 @@ impl PriorityAdmissionState {
   ) -> Option<PriorityRejectionReason> {
     let policy = self.policies[class.index()];
     if policy.rejection_policy == PriorityRejectionPolicy::Reject {
+      let active = self.active[class.index()];
       return Some(
-        if self.active[class.index()].total() >= policy.max_requests {
+        if active.total() >= policy.max_requests || active.shared >= policy.max_shared_requests() {
           PriorityRejectionReason::ShareLimit
         } else {
           PriorityRejectionReason::Policy
