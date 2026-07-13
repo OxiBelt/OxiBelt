@@ -27,6 +27,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "security",
+      "external-auth-forwarded-uri",
+      "external auth receives origin-relative HTTP/2 and HTTP/3 request targets",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "security",
       "grpc-timeout-pool-health",
       "client gRPC deadlines do not poison passive upstream pool health",
       ExpectStart::Success,

@@ -369,8 +369,13 @@ fn add_forward_auth_headers(
       headers.insert(name.clone(), value.clone());
     }
   }
+  let forwarded_uri = context
+    .uri
+    .path_and_query()
+    .map(|value| value.as_str())
+    .unwrap_or("/");
   insert_header(headers, "x-forwarded-method", context.method.as_str());
-  insert_header(headers, "x-forwarded-uri", &context.uri.to_string());
+  insert_header(headers, "x-forwarded-uri", forwarded_uri);
   insert_header(headers, "x-forwarded-host", context.host);
   insert_header(headers, "x-forwarded-proto", context.downstream_scheme);
   insert_header(headers, "x-forwarded-for", &context.client_ip.to_string());
@@ -380,7 +385,7 @@ fn add_forward_auth_headers(
     "x-original-url",
     &format!(
       "{}://{}{}",
-      context.downstream_scheme, context.host, context.uri
+      context.downstream_scheme, context.host, forwarded_uri
     ),
   );
 }

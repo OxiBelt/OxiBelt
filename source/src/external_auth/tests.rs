@@ -72,6 +72,50 @@ fn assert_metric(output: &str, metric: &str, value: u64) {
   );
 }
 
+fn projected_forward_auth_headers(uri: &'static str) -> HeaderMap {
+  let provider = provider_with_headers(&[], &[]);
+  let method = Method::GET;
+  let uri = http::Uri::from_static(uri);
+  let request_headers = HeaderMap::new();
+  let context = ExternalAuthRequestContext {
+    method: &method,
+    uri: &uri,
+    headers: &request_headers,
+    client_ip: "192.0.2.10".parse().expect("valid client IP"),
+    host: "vault.example.test",
+    downstream_scheme: "https",
+    route_name: "vault-admin",
+  };
+  let mut headers = HeaderMap::new();
+  add_forward_auth_headers(&mut headers, &provider, &context);
+  headers
+}
+
+#[test]
+fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
+  for (uri, expected_uri) in [
+    ("/admin?view=summary", "/admin?view=summary"),
+    (
+      "https://vault.example.test/admin?view=summary",
+      "/admin?view=summary",
+    ),
+    ("vault.example.test:443", "/"),
+  ] {
+    let headers = projected_forward_auth_headers(uri);
+
+    assert_eq!(headers["x-forwarded-uri"], expected_uri);
+    assert_eq!(
+      headers["x-original-url"],
+      format!("https://vault.example.test{expected_uri}")
+    );
+    assert_eq!(headers["x-forwarded-method"], "GET");
+    assert_eq!(headers["x-forwarded-host"], "vault.example.test");
+    assert_eq!(headers["x-forwarded-proto"], "https");
+    assert_eq!(headers["x-forwarded-for"], "192.0.2.10");
+    assert_eq!(headers["x-forwarded-route"], "vault-admin");
+  }
+}
+
 #[test]
 fn bearer_token_accepts_case_insensitive_scheme_and_rejects_ambiguous_values() {
   let mut headers = HeaderMap::new();
