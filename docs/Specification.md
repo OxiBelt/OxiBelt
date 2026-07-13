@@ -75,10 +75,11 @@ select a profile. Operators still declare route-specific egress dependencies
 and validate enforcement with their cluster CNI.
 
 The profile is a configuration-security baseline, not an attestation that all
-medium-scale edge controls are complete. Complete Kubernetes topology/drain
-lifecycle behavior (P1-10), certificate-to-IPM identity binding (P1-12),
-general mutation idempotency (P1-13), stronger audit guarantees (P1-14), and
-build commit/provenance or release attestations (P2) remain separate work.
+medium-scale edge controls are complete. Its Helm companion now supplies the
+P1-10 topology and drain lifecycle contract on Kubernetes 1.31 or later, but
+certificate-to-IPM identity binding (P1-12), general mutation idempotency
+(P1-13), stronger audit guarantees (P1-14), and build commit/provenance or
+release attestations (P2) remain separate work.
 
 ## Request Pipeline
 
@@ -250,7 +251,7 @@ Hot reload modes:
 - `downstream_tls`: reload the current downstream certificate, private key, static OCSP response, or live OCSP runtime.
 - `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
-Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place. Successful reloads publish a new data-plane snapshot and gracefully drain HTTP connections that captured the previous snapshot, even when listener binds do not change. Successful full reloads also activate replacement listeners before old listener generations drain, so readiness remains OK for the active instance while in-flight requests on the old generation finish. HTTP/1.1 and HTTP/2 listener or snapshot-generation drain asks Hyper to gracefully close old connections; HTTP/3 stops accepting on drained generations and closes endpoints after the graceful timeout when a listener generation is retired. Upgraded tunnels, WebTransport, and TCP stream bridges are protected by the configured long-connection close delay, but new request streams received by a drained WebTransport HTTP/3 bridge are rejected instead of being evaluated against the old snapshot.
+Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place. Successful reloads publish a new data-plane snapshot and gracefully drain HTTP connections that captured the previous snapshot, even when listener binds do not change. Successful full reloads also activate replacement listeners before old listener generations drain, so readiness remains OK for the active instance while in-flight requests on the old generation finish. HTTP/1.1 and HTTP/2 listener or snapshot-generation drain asks Hyper to gracefully close old connections; HTTP/3 stops accepting new streams and sends graceful connection shutdown before its endpoint closes after the graceful timeout when a listener generation is retired. Upgraded tunnels, WebTransport, and TCP stream bridges are protected by the configured long-connection close delay, but new request streams received by a drained WebTransport HTTP/3 bridge are rejected instead of being evaluated against the old snapshot.
 
 Kubernetes-native immutable rollout mode is intentionally outside this
 in-process reload model. It requires `runtime.hot_reload.mode = "off"` and a
@@ -313,7 +314,22 @@ Lifecycle endpoints are:
 - `GET /admin/v1/dynamic-policies/status`: requires `dynamic-policy:GetStatus` on `status/current`, returns the PostgreSQL-backed dynamic-policy generation and ETag.
 - `POST /admin/v1/dynamic-policies`, `POST /admin/v1/dynamic-policies/import`, `PATCH /admin/v1/dynamic-policies/{id}`, and `DELETE /admin/v1/dynamic-policies/{id}`: require matching `If-Match` with the dynamic-policy status ETag; missing ETags return `428`, stale ETags return `412`. `POST /admin/v1/dynamic-policies/apply` accepts optional `If-Match`: omitted ETags are allowed, supplied stale ETags return `412`.
 
-Admin and process drain make readiness return `503 draining`, keep liveness `200 live`, and reject new data-plane requests with `503 draining` plus `Connection: close`. Existing in-flight requests continue. `SIGTERM` and Ctrl-C follow the same shutdown sequence: mark draining, wait `shutdown_delay_ms`, then drain listeners up to `graceful_timeout_ms`.
+Admin and process drain make readiness return `503 draining`, keep liveness `200 live`, and reject new data-plane requests with `503 draining` plus `Connection: close`. Existing in-flight requests continue. On Unix, `SIGUSR1` enters the same drain-only state without exiting, so a local supervisor can withdraw readiness and allow the ordinary/long-lived windows to run before final termination. HTTP/2 uses graceful shutdown/GOAWAY and HTTP/3 sends graceful connection shutdown while refusing new streams. `SIGTERM` and Ctrl-C follow the final shutdown sequence: mark or retain draining, wait `shutdown_delay_ms`, then drain listeners up to `graceful_timeout_ms`.
+
+For Kubernetes Deployments, the chart's optional managed distribution adds
+release-scoped hostname `DoNotSchedule` spread with `maxSkew: 1` and
+`minDomains: 2`, best-effort zone `ScheduleAnyway` spread with `maxSkew: 1`,
+and preferred same-release hostname anti-affinity. A PDB uses exactly one of
+`minAvailable` or `maxUnavailable`; the secure companion selects three replicas
+and `maxUnavailable: 1`. Its chart-owned pre-stop hook sends `SIGUSR1` and
+waits 300 seconds within a 360-second termination grace. Kubernetes-only
+placement policy is not added to DaemonSets, which already have one Pod per
+eligible node; their secure rollout uses zero unavailable plus one surge.
+The generic managed spread policy requires Kubernetes 1.30 or later and the
+secure companion requires Kubernetes 1.31 or later. QUIC connection state is
+process-local: clients may migrate addresses only while the original Pod is
+alive and must reconnect when a Pod is replaced; HTTP/3/WebTransport session
+state never transfers between replicas.
 
 ## Configuration and Path Model
 

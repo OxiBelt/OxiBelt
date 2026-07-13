@@ -211,14 +211,12 @@ pub(super) async fn acquire_permit_or_stop(
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
-          request_tasks.abort_all().await;
           return Ok(None);
         }
         continue;
       }
       changed = data_plane_drain.changed() => {
         if changed.is_ok() && *data_plane_drain.borrow() {
-          request_tasks.abort_all().await;
           return Ok(None);
         }
         continue;

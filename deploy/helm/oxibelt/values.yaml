@@ -26,6 +26,9 @@ workload:
     revisionHistoryLimit: 3
   daemonSet:
     maxUnavailable: 1
+    # Keep the unprofiled DaemonSet rollout behavior unchanged. A positive
+    # surge is rendered only when an operator or a companion preset opts in.
+    maxSurge: 0
     minReadySeconds: 5
     revisionHistoryLimit: 3
 
@@ -41,6 +44,13 @@ serviceAccount:
 # chart users. The edge-secure-medium v1 preset uses 360 seconds.
 lifecycle:
   terminationGracePeriodSeconds: 0
+  # When enabled, the chart sends the OxiBelt drain-only signal to PID 1 and
+  # waits for this bounded period before Kubernetes sends its termination
+  # signal. The command is chart-owned rather than operator-provided so values
+  # cannot inject an arbitrary lifecycle hook.
+  preStop:
+    enabled: false
+    drainSeconds: 300
 
 kubernetesDiscovery:
   serviceAccountToken:
@@ -367,6 +377,33 @@ autoscaling:
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+  # Set `minAvailable` to null before selecting `maxUnavailable`; a rendered
+  # PodDisruptionBudget must use exactly one of the two fields.
+  maxUnavailable: null
+  # Empty preserves Kubernetes' existing default. `AlwaysAllow` is available
+  # only on Kubernetes 1.31 or later and is selected by the secure preset.
+  unhealthyPodEvictionPolicy: ""
+
+# Distribution is opt-in to preserve existing single-node chart installs.
+# When enabled, generated selectors scope only this Helm release. The managed
+# anti-affinity block merges with raw `affinity`, but rejects a second raw
+# `podAntiAffinity` block so no scheduler policy is silently lost.
+podDistribution:
+  enabled: false
+  nodeSpread:
+    enabled: true
+    maxSkew: 1
+    # minDomains is rendered with every enabled hostname constraint and
+    # Kubernetes permits it only with DoNotSchedule.
+    minDomains: 2
+    whenUnsatisfiable: DoNotSchedule
+  zoneSpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  podAntiAffinity:
+    enabled: true
+    weight: 100
 
 nodeSelector: {}
 tolerations: []

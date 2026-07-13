@@ -25,7 +25,10 @@ spec:
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: {{ .Values.workload.daemonSet.maxUnavailable }}
+      maxUnavailable: {{ int .Values.workload.daemonSet.maxUnavailable }}
+      {{- if gt (int .Values.workload.daemonSet.maxSurge) 0 }}
+      maxSurge: {{ int .Values.workload.daemonSet.maxSurge }}
+      {{- end }}
   selector:
     matchLabels:
 {{ include "oxibelt.selectorLabels" . | indent 6 }}
@@ -55,7 +58,7 @@ spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
       automountServiceAccountToken: false
       {{- if gt (int .Values.lifecycle.terminationGracePeriodSeconds) 0 }}
-      terminationGracePeriodSeconds: {{ .Values.lifecycle.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ int .Values.lifecycle.terminationGracePeriodSeconds }}
       {{- end }}
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
@@ -67,6 +70,15 @@ spec:
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
+        {{- if .Values.lifecycle.preStop.enabled }}
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -ec
+              - {{ printf "kill -USR1 1; exec sleep %d" (int .Values.lifecycle.preStop.drainSeconds) | quote }}
+        {{- end }}
         {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") }}
         env:
         {{- if .Values.admin.enabled }}

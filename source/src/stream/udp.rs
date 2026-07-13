@@ -45,6 +45,7 @@ pub(super) async fn serve_udp_listener(
   socket: UdpSocket,
   config: StreamListenerConfig,
   state: AppHandle,
+  mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   _connections: TaskRegistry,
 ) -> anyhow::Result<()> {
@@ -55,10 +56,17 @@ pub(super) async fn serve_udp_listener(
   let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
   let mut expire = tokio::time::interval(Duration::from_secs(5));
   let mut udp_batch = udp_batch_enabled(config.udp_batch);
+  let mut quiescing = *quiesce.borrow();
 
   loop {
     tokio::select! {
       biased;
+      changed = quiesce.changed() => {
+        if changed.is_err() || *quiesce.borrow() {
+          quiescing = true;
+          info!(name = %config.name, bind = %bind, "UDP stream listener quiesced");
+        }
+      }
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
           info!(name = %config.name, bind = %bind, "UDP stream listener stopped");
@@ -79,7 +87,7 @@ pub(super) async fn serve_udp_listener(
           Err(error) => return Err(error).context("failed to receive UDP stream datagram"),
         };
         for (peer_addr, datagram) in datagrams {
-          if let Err(error) = proxy_udp_datagram(&socket, &mut flows, &config, &state, peer_addr, &datagram).await {
+          if let Err(error) = proxy_udp_datagram(&socket, &mut flows, &config, &state, peer_addr, &datagram, !quiescing).await {
             warn!(name = %config.name, peer = %peer_addr, error = %error, "UDP stream datagram failed");
           }
         }
@@ -142,6 +150,7 @@ async fn proxy_udp_datagram(
   state: &AppHandle,
   peer_addr: SocketAddr,
   datagram: &[u8],
+  allow_new_flow: bool,
 ) -> anyhow::Result<()> {
   expire_udp_flows(
     flows,
@@ -149,7 +158,11 @@ async fn proxy_udp_datagram(
     state,
     &config.name,
   );
-  if !flows.contains_key(&peer_addr) {
+  let known_flow = flows.contains_key(&peer_addr);
+  if !udp_flow_admitted(allow_new_flow, known_flow) {
+    return Ok(());
+  }
+  if !known_flow {
     let Some((route_name, resolved)) =
       classify_udp_flow(config, state, peer_addr, datagram).await?
     else {
@@ -271,6 +284,10 @@ async fn proxy_udp_datagram(
       .add_stream_bytes("udp", datagram.len() as u64);
   }
   Ok(())
+}
+
+fn udp_flow_admitted(allow_new_flow: bool, known_flow: bool) -> bool {
+  allow_new_flow || known_flow
 }
 
 async fn classify_udp_flow(
@@ -479,6 +496,7 @@ mod tests {
       &state,
       attacker_peer,
       b"not a QUIC Initial",
+      true,
     )
     .await?;
 
@@ -491,5 +509,12 @@ mod tests {
       "unroutable new UDP peer must not create a replacement flow"
     );
     Ok(())
+  }
+
+  #[test]
+  fn quiescing_udp_listener_keeps_existing_flow_and_rejects_new_peer() {
+    assert!(udp_flow_admitted(false, true));
+    assert!(!udp_flow_admitted(false, false));
+    assert!(udp_flow_admitted(true, false));
   }
 }

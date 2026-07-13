@@ -212,7 +212,7 @@ workers = 1
   let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
   demux
-    .handle_datagram(b"not a QUIC Initial", peer, &state)
+    .handle_datagram(b"not a QUIC Initial", peer, &state, true)
     .await
     .expect("parse failures should be rejected without surfacing an I/O error");
 
@@ -279,7 +279,7 @@ async fn parse_failure_queues_default_when_no_classification_is_required() {
   let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
   demux
-    .handle_datagram(b"not a QUIC Initial", peer, &state)
+    .handle_datagram(b"not a QUIC Initial", peer, &state, true)
     .await
     .expect("unclassified local datagram should queue");
 

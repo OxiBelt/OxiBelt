@@ -23,11 +23,56 @@ quic:
   hostKeySecretName: oxibelt-quic-host-key
   hostKeySecretKey: quic-host-key.b64
 
-# Covers the profile's 10-second readiness withdrawal, 30-second ordinary
-# drain, and 300-second long-connection drain with a small orchestration
-# margin.
+replicaCount: 3
+
+# Keep a three-Pod floor whether or not an HPA is enabled later. The Deployment
+# strategy retains ready capacity while the DaemonSet strategy uses surge to
+# avoid an unavailable eligible node during its update.
+autoscaling:
+  minReplicas: 3
+
+workload:
+  deployment:
+    maxUnavailable: 0
+    maxSurge: 1
+  daemonSet:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# The fixed chart-owned hook sends SIGUSR1 to OxiBelt before Kubernetes sends
+# the final termination signal. 360 seconds covers the profile's 300-second
+# long-connection drain, 10-second readiness withdrawal, 30-second ordinary
+# drain, and a 20-second orchestration margin.
 lifecycle:
   terminationGracePeriodSeconds: 360
+  preStop:
+    enabled: true
+    drainSeconds: 300
+
+# This companion profile targets Kubernetes 1.31 or later. It keeps replicas
+# on distinct hostnames whenever scheduling capacity permits, prefers separate
+# zones without making a single-zone cluster unschedulable, and protects only
+# one voluntary disruption at a time.
+podDistribution:
+  enabled: true
+  nodeSpread:
+    enabled: true
+    maxSkew: 1
+    minDomains: 2
+    whenUnsatisfiable: DoNotSchedule
+  zoneSpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: null
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 # The companion preset enables the portable NetworkPolicy baseline. It exposes
 # only public listener ports to arbitrary Internet sources; monitoring and

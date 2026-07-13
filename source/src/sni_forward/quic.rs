@@ -36,10 +36,11 @@ impl BoundQuicForwardSocket {
   pub(crate) fn start(
     &self,
     state: AppHandle,
+    quiesce: watch::Receiver<bool>,
     shutdown: watch::Receiver<bool>,
   ) -> JoinHandle<anyhow::Result<()>> {
     let socket = self.socket.clone();
-    tokio::spawn(async move { socket.run(state, shutdown).await })
+    tokio::spawn(async move { socket.run(state, quiesce, shutdown).await })
   }
 }
 
@@ -95,6 +96,7 @@ pub(crate) fn bind_sni_or_plain_server_endpoints(
 
 pub(crate) fn spawn_demux_tasks(
   demuxes: Vec<BoundQuicForwardSocket>,
+  quiesce: watch::Receiver<bool>,
   shutdown: watch::Receiver<bool>,
   state: AppHandle,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
@@ -103,10 +105,14 @@ pub(crate) fn spawn_demux_tasks(
     .into_iter()
     .map(|demux| {
       let demux_shutdown = shutdown.clone();
+      let demux_quiesce = quiesce.clone();
       let demux_state = state.clone();
       let demux_error_tx = error_tx.clone();
       tokio::spawn(async move {
-        match demux.start(demux_state, demux_shutdown).await {
+        match demux
+          .start(demux_state, demux_quiesce, demux_shutdown)
+          .await
+        {
           Ok(Ok(())) => {}
           Ok(Err(error)) => {
             let _ = demux_error_tx.send(error.context("SNI forwarding QUIC demux failed"));
@@ -218,15 +224,23 @@ impl QuicDemuxSocket {
   async fn run(
     self: Arc<Self>,
     state: AppHandle,
+    mut quiesce: watch::Receiver<bool>,
     mut shutdown: watch::Receiver<bool>,
   ) -> anyhow::Result<()> {
     let bind = self.socket.local_addr()?;
     let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
     let mut expire = tokio::time::interval(Duration::from_secs(5));
+    let mut quiescing = *quiesce.borrow();
     info!(bind = %bind, "SNI forwarding QUIC demux started");
     loop {
       tokio::select! {
         biased;
+        changed = quiesce.changed() => {
+          if changed.is_err() || *quiesce.borrow() {
+            quiescing = true;
+            info!(bind = %bind, "SNI forwarding QUIC demux quiesced");
+          }
+        }
         changed = shutdown.changed() => {
           if changed.is_ok() && *shutdown.borrow() {
             self.expire_all(&state.snapshot());
@@ -240,7 +254,7 @@ impl QuicDemuxSocket {
         received = self.socket.recv_from(&mut buffer) => {
           let (len, peer) = received.context("failed to receive QUIC UDP datagram")?;
           let datagram = &buffer[..len];
-          if let Err(error) = self.handle_datagram(datagram, peer, &state).await {
+          if let Err(error) = self.handle_datagram(datagram, peer, &state, !quiescing).await {
             warn!(peer = %peer, error = %error, "failed to classify QUIC datagram for SNI forwarding");
           }
         }
@@ -253,6 +267,7 @@ impl QuicDemuxSocket {
     datagram: &[u8],
     peer: SocketAddr,
     state: &AppHandle,
+    allow_new_session: bool,
   ) -> anyhow::Result<()> {
     let snapshot = state.snapshot();
     let sni_forward_enabled = snapshot.config.sni_forward.has_quic();
@@ -260,11 +275,6 @@ impl QuicDemuxSocket {
       .quic_server_config
       .as_ref()
       .is_some_and(|config| config.requires_sni_policy_demux());
-    if !sni_forward_enabled && !sni_policy_demux {
-      self.queue_local(0, datagram, peer);
-      return Ok(());
-    }
-
     match self.known_action(datagram, peer, snapshot.as_ref()) {
       DatagramAction::QueueLocal(index) => {
         self.queue_local(index, datagram, peer);
@@ -278,6 +288,14 @@ impl QuicDemuxSocket {
         return Ok(());
       }
       DatagramAction::Classify => {}
+    }
+
+    if !allow_new_session {
+      return Ok(());
+    }
+    if !sni_forward_enabled && !sni_policy_demux {
+      self.queue_local(0, datagram, peer);
+      return Ok(());
     }
 
     let initial = extract_initial_sni(datagram);

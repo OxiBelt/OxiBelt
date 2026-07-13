@@ -35,6 +35,7 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["workload"]["deployment"]["maxUnavailable"], 0);
   assert_eq!(values["workload"]["deployment"]["maxSurge"], 1);
   assert_eq!(values["workload"]["daemonSet"]["maxUnavailable"], 1);
+  assert_eq!(values["workload"]["daemonSet"]["maxSurge"], 0);
   assert_eq!(values["service"]["type"], "LoadBalancer");
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
   assert_eq!(values["operationalProfile"]["name"], "");
@@ -45,6 +46,31 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["quic"]["hostKeySecretName"], "");
   assert_eq!(values["quic"]["hostKeySecretKey"], "quic-host-key.b64");
   assert_eq!(values["lifecycle"]["terminationGracePeriodSeconds"], 0);
+  assert_eq!(values["lifecycle"]["preStop"]["enabled"], false);
+  assert_eq!(values["lifecycle"]["preStop"]["drainSeconds"], 300);
+  assert_eq!(values["podDistribution"]["enabled"], false);
+  assert_eq!(values["podDistribution"]["nodeSpread"]["maxSkew"], 1);
+  assert_eq!(values["podDistribution"]["nodeSpread"]["minDomains"], 2);
+  assert_eq!(
+    values["podDistribution"]["nodeSpread"]["whenUnsatisfiable"],
+    "DoNotSchedule"
+  );
+  assert_eq!(
+    values["podDistribution"]["zoneSpread"]["whenUnsatisfiable"],
+    "ScheduleAnyway"
+  );
+  assert_eq!(
+    values["podDistribution"]["podAntiAffinity"]["enabled"],
+    true
+  );
+  assert_eq!(values["podDistribution"]["podAntiAffinity"]["weight"], 100);
+  assert_eq!(values["podDisruptionBudget"]["enabled"], true);
+  assert_eq!(values["podDisruptionBudget"]["minAvailable"], 1);
+  assert!(values["podDisruptionBudget"]["maxUnavailable"].is_null());
+  assert_eq!(
+    values["podDisruptionBudget"]["unhealthyPodEvictionPolicy"],
+    ""
+  );
   assert_eq!(
     values["serviceAccount"]["automountServiceAccountToken"],
     false
@@ -150,6 +176,29 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     "monitor"
   );
   assert_eq!(
+    schema["properties"]["lifecycle"]["properties"]["preStop"]["properties"]["drainSeconds"]["maximum"],
+    86400
+  );
+  assert_eq!(
+    schema["properties"]["podDistribution"]["properties"]["nodeSpread"]["properties"]["minDomains"]
+      ["minimum"],
+    1
+  );
+  assert_eq!(
+    schema["properties"]["podDistribution"]["properties"]["zoneSpread"]["properties"]["whenUnsatisfiable"]
+      ["enum"][1],
+    "ScheduleAnyway"
+  );
+  assert_eq!(
+    schema["properties"]["podDisruptionBudget"]["properties"]["maxUnavailable"]["anyOf"][1]["type"],
+    "null"
+  );
+  assert_eq!(
+    schema["properties"]["podDisruptionBudget"]["properties"]["unhealthyPodEvictionPolicy"]["enum"]
+      [2],
+    "AlwaysAllow"
+  );
+  assert_eq!(
     schema["properties"]["quic"]["properties"]["hostKeySecretKey"]["pattern"],
     "^[A-Za-z0-9._-]+$"
   );
@@ -219,6 +268,49 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     360
   );
   assert_eq!(
+    edge_secure_medium_example["lifecycle"]["preStop"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_example["lifecycle"]["preStop"]["drainSeconds"],
+    300
+  );
+  assert_eq!(edge_secure_medium_example["replicaCount"], 3);
+  assert_eq!(edge_secure_medium_example["autoscaling"]["minReplicas"], 3);
+  assert_eq!(
+    edge_secure_medium_example["workload"]["daemonSet"]["maxUnavailable"],
+    0
+  );
+  assert_eq!(
+    edge_secure_medium_example["workload"]["daemonSet"]["maxSurge"],
+    1
+  );
+  assert_eq!(
+    edge_secure_medium_example["podDistribution"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_example["podDistribution"]["nodeSpread"]["whenUnsatisfiable"],
+    "DoNotSchedule"
+  );
+  assert_eq!(
+    edge_secure_medium_example["podDistribution"]["zoneSpread"]["whenUnsatisfiable"],
+    "ScheduleAnyway"
+  );
+  assert_eq!(
+    edge_secure_medium_example["podDistribution"]["podAntiAffinity"]["weight"],
+    100
+  );
+  assert!(edge_secure_medium_example["podDisruptionBudget"]["minAvailable"].is_null());
+  assert_eq!(
+    edge_secure_medium_example["podDisruptionBudget"]["maxUnavailable"],
+    1
+  );
+  assert_eq!(
+    edge_secure_medium_example["podDisruptionBudget"]["unhealthyPodEvictionPolicy"],
+    "AlwaysAllow"
+  );
+  assert_eq!(
     edge_secure_medium_example["admin"]["service"]["enabled"],
     false
   );
@@ -257,6 +349,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       .join("tests/scripts/check-helm-service-account-token.sh")
       .is_file(),
     "the ServiceAccount token Helm renderer check should be present"
+  );
+  assert!(
+    repo_root()
+      .join("tests/scripts/check-helm-pod-lifecycle.sh")
+      .is_file(),
+    "the Pod lifecycle Helm renderer check should be present"
   );
   let expected = [
     "templates/_helpers.tpl",
@@ -298,6 +396,10 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "quic.hostKeySecretName",
     "path: quic-host-key.b64",
     "terminationGracePeriodSeconds",
+    "topologySpreadConstraints:",
+    "lifecycle:",
+    "kill -USR1 1; exec sleep %d",
+    "oxibelt.deploymentAffinity",
     "emptyDir: {}",
     "OXIBELT_ADMIN_TOKEN",
     "maxUnavailable: {{ .Values.workload.deployment.maxUnavailable }}",
@@ -353,7 +455,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   let daemonset = read_repo("deploy/helm/oxibelt/templates/daemonset.yaml");
   for needle in [
     "minReadySeconds: {{ .Values.workload.daemonSet.minReadySeconds }}",
-    "maxUnavailable: {{ .Values.workload.daemonSet.maxUnavailable }}",
+    "maxUnavailable: {{ int .Values.workload.daemonSet.maxUnavailable }}",
+    "maxSurge: {{ int .Values.workload.daemonSet.maxSurge }}",
     "checksum/oxibelt-config",
     "OXIBELT_CONFIG_ROLLOUT_MODE",
     "{{- if and .Values.config.create (not .Values.config.existingConfigMap) }}\n        oxibelt.dev/config-revision: {{ include \"oxibelt.configMapName\" . | quote }}",
@@ -370,6 +473,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "quic.hostKeySecretName",
     "path: quic-host-key.b64",
     "terminationGracePeriodSeconds",
+    "lifecycle:",
+    "kill -USR1 1; exec sleep %d",
     "oxibelt.validateKubernetesServiceAccount",
     "automountServiceAccountToken: false",
     "oxibelt.kubernetesApiAccessEnabled",
@@ -440,6 +545,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "oxibelt.validateOperationalProfile",
     "quic.hostKeySecretName",
     "lifecycle.terminationGracePeriodSeconds",
+    "oxibelt.validateLifecycle",
+    "lifecycle.preStop.drainSeconds",
+    "oxibelt.validatePodDistribution",
+    "podDistribution.podAntiAffinity.enabled cannot be combined",
+    "oxibelt.validatePodDisruptionBudget",
+    "podDisruptionBudget requires exactly one of minAvailable or maxUnavailable",
+    "oxibelt.deploymentAffinity",
     "oxibelt.validateNetworkPolicy",
     "networkPolicy.cilium.enabled requires networkPolicy.enabled=true",
     "kubernetes-api egress destination",
@@ -466,6 +578,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
 
   let pdb = read_repo("deploy/helm/oxibelt/templates/pdb.yaml");
   assert!(pdb.contains("kind: PodDisruptionBudget"));
+  assert!(pdb.contains("maxUnavailable"));
+  assert!(pdb.contains("unhealthyPodEvictionPolicy"));
 
   let hpa = read_repo("deploy/helm/oxibelt/templates/hpa.yaml");
   assert!(hpa.contains("apiVersion: autoscaling/v2"));

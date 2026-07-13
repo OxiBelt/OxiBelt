@@ -311,6 +311,17 @@ tls:
 quic:
   hostKeySecretName: oxibelt-quic-host-key
   hostKeySecretKey: quic-host-key.b64
+lifecycle:
+  preStop:
+    enabled: true
+    drainSeconds: 300
+  terminationGracePeriodSeconds: 360
+podDistribution:
+  enabled: true
+podDisruptionBudget:
+  minAvailable: null
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
 networkPolicy:
   enabled: true
   ingress:
@@ -338,9 +349,12 @@ or external-dependency traffic; policy enforcement also requires a compatible
 cluster CNI. The preset inherits the chart's default data-plane behavior: it
 does not mount a Kubernetes API token or grant discovery RBAC. Token projection
 and API access remain an explicit chart-level discovery choice. The preset does
-not claim topology/PDB lifecycle, certificate-to-IPM identity binding, general
-mutation idempotency, stronger audit guarantees, image provenance, or release
-attestations. Those remain separate P1/P2 work.
+select a three-replica minimum, managed hostname/zone distribution, preferred
+same-release anti-affinity, a one-Pod PDB disruption budget, and the fixed
+300-second `SIGUSR1` pre-stop drain inside a 360-second grace period. It
+requires Kubernetes 1.31 or later. It does not claim certificate-to-IPM
+identity binding, general mutation idempotency, stronger audit guarantees,
+image provenance, or release attestations. Those remain separate P1/P2 work.
 
 ## Includes
 
@@ -542,11 +556,26 @@ read_write_paths = []
 
 `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
-`[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1 and HTTP/2 requests to finish before force-closing remaining connection tasks. Successful reloads also drain existing HTTP connections that captured the previous data-plane snapshot, even when listener binds do not change, so new requests use the replacement snapshot on new connections. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed; drained WebTransport bridges keep existing sessions for that grace window but reject new request streams immediately. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
+`[runtime.drain]` controls reload and shutdown draining. `graceful_timeout_ms` is the maximum time a stopped listener generation waits for active HTTP/1.1, HTTP/2, and HTTP/3 request work (including an HTTP/3 graceful-shutdown control write) before force-closing remaining connection tasks. Successful reloads also drain existing HTTP connections that captured the previous data-plane snapshot, even when listener binds do not change, so new requests use the replacement snapshot on new connections. `long_connection_close_delay_ms` protects upgraded WebSocket/generic Upgrade, CONNECT, WebTransport, and TCP stream bridges after a drain signal before they are closed; drained WebTransport bridges keep existing sessions for that grace window but reject new request streams immediately. `shutdown_delay_ms` marks the instance draining and waits before listener drain begins; `0` is allowed. `graceful_timeout_ms` and `long_connection_close_delay_ms` must be greater than zero.
+
+On Unix, `SIGUSR1` starts the same irreversible drain-only state without
+requesting process exit. The first signal records lifecycle reason `shutdown`,
+makes readiness return `503 draining`, immediately quiesces public admission,
+asks HTTP/2 to send GOAWAY, and starts HTTP/3 graceful connection drain while
+existing work uses the configured ordinary and long-connection windows. TCP
+acceptors stop; QUIC accept loops retain only enough work to discard newly
+queued handshakes while established connections drain. UDP stream, TURN, and
+SNI-QUIC paths retain known flows/CIDs while refusing new ones. Control and
+health tasks stay available.
+Repeated `SIGUSR1` is idempotent and does not reset a drain deadline.
+`SIGTERM` or Ctrl-C then performs final shutdown without clearing that drain
+state. This process-local signal is intended for a trusted local supervisor
+such as the chart-owned Kubernetes pre-stop hook; it is not a network control
+API and does not bypass Admin/IPM authorization.
 
 `poll_interval_ms` must be greater than zero. CLI flags `--hot-reload-mode` and `--hot-reload-poll-interval-ms` override TOML values and emit warnings when they differ.
 
-`[runtime.netport_switcher]` is an opt-in Linux root wrapper for privileged data-plane ports. When enabled, the wrapper creates a Unix control socket under `socket_dir`, starts the main OxiBelt process as `main_uid:main_gid`, and brokers only startup-allowed privileged binds for HTTPS TCP, HTTP/3 UDP, plain HTTP, stream TCP/UDP, and WebRTC TURN UDP/TCP/TLS. The wrapper needs `CAP_NET_BIND_SERVICE` to bind low ports and `CAP_SETUID`/`CAP_SETGID` to launch the child as `main_uid:main_gid`. The broker validates protocol, bind address, purpose, worker count, `SO_REUSEPORT`, TCP backlog, and UDP buffer options before passing a socket FD over `SCM_RIGHTS`. Admin, metrics, and health listeners are control/ops surfaces and are never brokered. `pidfd_supervision = true` uses Linux pidfds for child signal forwarding when available and falls back to PID signaling if pidfd setup fails. `--check` and `--dump-effective-config` remain offline validation commands and do not require the wrapper socket.
+`[runtime.netport_switcher]` is an opt-in Linux root wrapper for privileged data-plane ports. When enabled, the wrapper creates a Unix control socket under `socket_dir`, starts the main OxiBelt process as `main_uid:main_gid`, and brokers only startup-allowed privileged binds for HTTPS TCP, HTTP/3 UDP, plain HTTP, stream TCP/UDP, and WebRTC TURN UDP/TCP/TLS. The wrapper needs `CAP_NET_BIND_SERVICE` to bind low ports and `CAP_SETUID`/`CAP_SETGID` to launch the child as `main_uid:main_gid`. The broker validates protocol, bind address, purpose, worker count, `SO_REUSEPORT`, TCP backlog, and UDP buffer options before passing a socket FD over `SCM_RIGHTS`. Admin, metrics, and health listeners are control/ops surfaces and are never brokered. `pidfd_supervision = true` uses Linux pidfds for child signal forwarding when available and falls back to PID signaling if pidfd setup fails; it forwards the drain-only `SIGUSR1` signal as well as normal shutdown/reload signals. `--check` and `--dump-effective-config` remain offline validation commands and do not require the wrapper socket.
 
 `[runtime.hardening]` contains Linux hardening hooks. `close_range = "auto"` marks file descriptors `3..` close-on-exec with `close_range(CLOSE_RANGE_CLOEXEC)` when the kernel supports it; `required` fails startup on error. `seccomp.mode = "log"` or `"enforce"` is intended for the generated backend-aware OCI profiles under `deploy/seccomp/` (`oxibelt-tokio.json`, `oxibelt-compio.json`, and `oxibelt-netport-switcher.json`) and fails closed if requested in-process. `landlock.mode = "enforce"` installs a Landlock filesystem sandbox from `read_paths` and `read_write_paths`; at least one allowlist path is required, unsupported kernels fail startup, and the sandbox is applied after config validation and before listeners start.
 

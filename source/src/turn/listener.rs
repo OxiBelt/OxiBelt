@@ -34,6 +34,7 @@ use super::protocol::*;
 
 pub struct TurnListenerTask {
   key: TurnListenerKey,
+  quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
   graceful_timeout: Duration,
@@ -124,6 +125,7 @@ impl BoundTurnListener {
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
     drop(snapshot);
+    let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let edge = EdgeState::default();
     let key = self.key();
@@ -151,6 +153,7 @@ impl BoundTurnListener {
         index,
         self.config.clone(),
         state.clone(),
+        quiesce_rx.clone(),
         shutdown_rx.clone(),
         error_tx.clone(),
         connections.clone(),
@@ -168,6 +171,7 @@ impl BoundTurnListener {
         index,
         self.config.clone(),
         state.clone(),
+        quiesce_rx.clone(),
         shutdown_rx.clone(),
         error_tx.clone(),
         connections.clone(),
@@ -180,6 +184,7 @@ impl BoundTurnListener {
     tasks.push(spawn_health_task(state, shutdown_rx.clone()));
     TurnListenerTask {
       key,
+      quiesce,
       shutdown,
       connections,
       graceful_timeout,
@@ -199,12 +204,17 @@ impl TurnListenerTask {
     &self.key
   }
 
+  pub(crate) fn quiesce(&self) {
+    let _ = self.quiesce.send(true);
+  }
+
   pub(crate) fn drain_background(self) {
     drop(self.drain());
   }
 
   pub(crate) fn drain(self) -> JoinHandle<()> {
     tokio::spawn(async move {
+      let _ = self.quiesce.send(true);
       let _ = self.shutdown.send(true);
       let wait_connections = self.connections.clone();
       let wait = async {
@@ -231,6 +241,7 @@ fn spawn_tcp_acceptor(
   worker_index: usize,
   config: WebRtcTurnListenerConfig,
   state: AppHandle,
+  mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
   connections: TaskRegistry,
@@ -248,6 +259,12 @@ fn spawn_tcp_acceptor(
       loop {
         tokio::select! {
           biased;
+          changed = quiesce.changed() => {
+            if changed.is_err() || *quiesce.borrow() {
+              info!(name = %config.name, bind = %bind, transport, worker = worker_index, "WebRTC TURN listener quiesced");
+              return Ok(());
+            }
+          }
           changed = shutdown.changed() => {
             if changed.is_ok() && *shutdown.borrow() {
               info!(name = %config.name, bind = %bind, transport, worker = worker_index, "WebRTC TURN listener stopped");
@@ -353,6 +370,14 @@ async fn serve_turn_udp(
       }
       received = socket.recv_from(&mut buffer) => {
         let (len, client_addr) = received.context("failed to receive TURN UDP datagram")?;
+        let quiescing = state.snapshot().lifecycle.is_shutdown_draining();
+        let known_client = match config.mode {
+          WebRtcTurnListenerMode::ProxyPool => sessions.contains_key(&client_addr),
+          WebRtcTurnListenerMode::EdgeRelay => edge.has_udp_client(client_addr).await,
+        };
+        if !udp_client_admitted(quiescing, known_client) {
+          continue;
+        }
         state.snapshot().metrics.record_turn_event(&config.name, "udp", "datagram_received");
         let packet = &buffer[..len];
         match config.mode {
@@ -366,6 +391,10 @@ async fn serve_turn_udp(
       }
     }
   }
+}
+
+fn udp_client_admitted(quiescing: bool, known_client: bool) -> bool {
+  !quiescing || known_client
 }
 
 struct UdpProxySession {

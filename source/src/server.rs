@@ -80,7 +80,10 @@ mod http_io;
 mod listener_sets;
 mod ops;
 mod plain_http;
+#[cfg(test)]
+mod pod_lifecycle_tests;
 mod prefixed_io;
+mod process_signals;
 #[cfg(test)]
 mod reload_tests;
 mod rollout_identity;
@@ -90,6 +93,9 @@ use admin_operations::AdminOperationRuntime;
 use admin_stream_pools::admin_stream_pools_response;
 use admin_upstream_pools::admin_upstream_pools_response;
 use ops::{OpsKind, serve_ops_listener};
+use process_signals::{
+  ProcessSignal, ProcessSignals, begin_process_predrain, graceful_process_shutdown,
+};
 pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "config_load",
   "file_sync",
@@ -146,6 +152,7 @@ pub async fn serve(
     admin_operations.clone(),
   )
   .await?;
+  let mut process_signals = ProcessSignals::new()?;
   let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
   let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
     match config_path {
@@ -172,6 +179,7 @@ pub async fn serve(
       admin_control,
       runtime_overrides,
       reload,
+      &mut process_signals,
     )
     .await
   } else {
@@ -182,6 +190,7 @@ pub async fn serve(
       &mut admin_control_rx,
       admin_control,
       runtime_overrides,
+      &mut process_signals,
     )
     .await
   }
@@ -910,13 +919,16 @@ async fn serve_until_shutdown(
   admin_control_rx: &mut mpsc::UnboundedReceiver<AdminControlCommand>,
   admin_control: AdminControlHandle,
   runtime_overrides: RuntimeOverrides,
+  process_signals: &mut ProcessSignals,
 ) -> anyhow::Result<()> {
   let mut rollback: Option<RollbackSnapshot> = None;
   loop {
     tokio::select! {
-      result = shutdown_signal() => {
-          result?;
-          return graceful_process_shutdown(&state, listeners).await;
+      result = process_signals.recv() => {
+          match result? {
+            ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
+            ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
+          }
       }
       Some(error) = error_rx.recv() => return Err(error),
       Some(command) = admin_control_rx.recv() => {
@@ -941,6 +953,7 @@ async fn serve_with_reload(
   admin_control: AdminControlHandle,
   runtime_overrides: RuntimeOverrides,
   mut reload: ReloadManager,
+  process_signals: &mut ProcessSignals,
 ) -> anyhow::Result<()> {
   #[cfg(unix)]
   let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -951,9 +964,11 @@ async fn serve_with_reload(
     let poll_sleep = tokio::time::sleep(reload.poll_interval());
     tokio::pin!(poll_sleep);
     tokio::select! {
-        result = shutdown_signal() => {
-            result?;
-            return graceful_process_shutdown(&state, listeners).await;
+        result = process_signals.recv() => {
+            match result? {
+              ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
+              ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
+            }
         }
         Some(error) = error_rx.recv() => return Err(error),
         Some(command) = admin_control_rx.recv() => {
@@ -966,50 +981,14 @@ async fn serve_with_reload(
               &mut rollback,
             ).await;
         }
-        _ = &mut poll_sleep => {
+        _ = &mut poll_sleep, if !state.snapshot().lifecycle.is_shutdown_draining() => {
             reload.reload_if_changed(ReloadTrigger::Poll, &state, listeners).await;
         }
-        _ = hup.recv() => {
+        _ = hup.recv(), if !state.snapshot().lifecycle.is_shutdown_draining() => {
             reload.reload_if_changed(ReloadTrigger::Signal, &state, listeners).await;
         }
     }
   }
-}
-
-async fn shutdown_signal() -> anyhow::Result<()> {
-  #[cfg(unix)]
-  {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-      .context("failed to install SIGTERM listener")?;
-    tokio::select! {
-      result = tokio::signal::ctrl_c() => {
-        result.context("failed to wait for ctrl_c signal")?;
-      }
-      _ = term.recv() => {}
-    }
-  }
-  #[cfg(not(unix))]
-  {
-    tokio::signal::ctrl_c()
-      .await
-      .context("failed to wait for ctrl_c signal")?;
-  }
-  info!("shutdown signal received");
-  Ok(())
-}
-
-async fn graceful_process_shutdown(
-  state: &AppHandle,
-  listeners: &mut ListenerSupervisor,
-) -> anyhow::Result<()> {
-  let snapshot = state.snapshot();
-  snapshot.lifecycle.start_shutdown();
-  let shutdown_delay = Duration::from_millis(snapshot.config.runtime.drain.shutdown_delay_ms);
-  if !shutdown_delay.is_zero() {
-    tokio::time::sleep(shutdown_delay).await;
-  }
-  listeners.shutdown(snapshot.as_ref()).await;
-  Ok(())
 }
 
 pub(crate) struct ListenerSupervisor {
@@ -1023,10 +1002,12 @@ pub(crate) struct ListenerSupervisor {
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
   admin_control: AdminControlHandle,
   admin_operations: AdminOperationRuntime,
+  quiescing: bool,
 }
 
 struct TcpListenerTask {
   options: TcpListenOptions,
+  quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
   drain_timeouts: DrainTimeouts,
@@ -1052,6 +1033,7 @@ struct Http3ListenerTask {
   socket: crate::config::QuicSocketConfig,
   transport: crate::config::QuicTransportConfig,
   endpoints: Vec<h3_quinn::quinn::Endpoint>,
+  quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
   drain_timeouts: DrainTimeouts,
@@ -1126,6 +1108,7 @@ impl ListenerSupervisor {
       error_tx,
       admin_control,
       admin_operations,
+      quiescing: false,
     };
     let pending = supervisor.prepare(&snapshot).await?;
     supervisor.commit(pending, &snapshot, state);
@@ -1136,6 +1119,9 @@ impl ListenerSupervisor {
     &self,
     snapshot: &AppSnapshot,
   ) -> anyhow::Result<PendingListenerUpdate> {
+    if self.quiescing {
+      bail!("data-plane listeners are quiescing");
+    }
     let tcp_options = TcpListenOptions::from(&snapshot.config.runtime.accept);
     let desired_tcp = if snapshot.config.needs_https_listener() {
       snapshot.config.listeners.https_binds.clone()
@@ -1387,6 +1373,7 @@ impl ListenerSupervisor {
   }
 
   async fn shutdown(&mut self, snapshot: &AppSnapshot) {
+    self.quiesce();
     let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
     let mut tasks = Vec::new();
     for task in std::mem::take(&mut self.tcp).into_values() {
@@ -1416,6 +1403,25 @@ impl ListenerSupervisor {
     }
     let _ = futures_util::future::join_all(tasks).await;
   }
+
+  fn quiesce(&mut self) {
+    self.quiescing = true;
+    for task in self.tcp.values() {
+      task.quiesce();
+    }
+    for task in self.http.values() {
+      task.quiesce();
+    }
+    for task in self.http3.values() {
+      task.quiesce();
+    }
+    for task in &self.streams {
+      task.quiesce();
+    }
+    for task in &self.turns {
+      task.quiesce();
+    }
+  }
 }
 
 impl Drop for ListenerSupervisor {
@@ -1442,6 +1448,10 @@ impl Drop for ListenerSupervisor {
 }
 
 impl TcpListenerTask {
+  fn quiesce(&self) {
+    let _ = self.quiesce.send(true);
+  }
+
   fn drain_background(self) {
     drop(self.drain());
   }
@@ -1449,12 +1459,14 @@ impl TcpListenerTask {
   fn drain(self) -> JoinHandle<()> {
     tokio::spawn(async move {
       let TcpListenerTask {
+        quiesce,
         shutdown,
         connections,
         drain_timeouts,
         tasks,
         ..
       } = self;
+      let _ = quiesce.send(true);
       let _ = shutdown.send(true);
       let wait_connections = connections.clone();
       let wait = async {
@@ -1480,6 +1492,7 @@ impl BoundTcpListener {
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     drain_timeouts: DrainTimeouts,
   ) -> TcpListenerTask {
+    let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let options = self.options;
     let kind = self.kind;
@@ -1491,6 +1504,7 @@ impl BoundTcpListener {
       .enumerate()
       .map(|(worker_index, listener)| {
         let worker_shutdown = shutdown_rx.clone();
+        let worker_quiesce = quiesce_rx.clone();
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
         let worker_connections = connections.clone();
@@ -1499,6 +1513,7 @@ impl BoundTcpListener {
             listener,
             kind,
             worker_state,
+            worker_quiesce,
             worker_shutdown,
             worker_index,
             accept_error_backoff,
@@ -1514,6 +1529,7 @@ impl BoundTcpListener {
       .collect();
     TcpListenerTask {
       options,
+      quiesce,
       shutdown,
       connections,
       drain_timeouts,
@@ -1523,6 +1539,10 @@ impl BoundTcpListener {
 }
 
 impl Http3ListenerTask {
+  fn quiesce(&self) {
+    let _ = self.quiesce.send(true);
+  }
+
   fn drain_background(self) {
     drop(self.drain());
   }
@@ -1531,12 +1551,14 @@ impl Http3ListenerTask {
     tokio::spawn(async move {
       let Http3ListenerTask {
         endpoints,
+        quiesce,
         shutdown,
         connections,
         drain_timeouts,
         tasks,
         ..
       } = self;
+      let _ = quiesce.send(true);
       let _ = shutdown.send(true);
       let wait_endpoints = endpoints.clone();
       let wait_connections = connections.clone();
@@ -1569,6 +1591,7 @@ impl BoundHttp3Listener {
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     drain_timeouts: DrainTimeouts,
   ) -> Http3ListenerTask {
+    let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let socket = self.socket;
@@ -1576,6 +1599,7 @@ impl BoundHttp3Listener {
     let connections = TaskRegistry::default();
     let mut tasks = crate::sni_forward::quic::spawn_demux_tasks(
       self.sni_forward_quic,
+      quiesce_rx.clone(),
       shutdown_rx.clone(),
       state.clone(),
       error_tx.clone(),
@@ -1588,6 +1612,7 @@ impl BoundHttp3Listener {
         .enumerate()
         .map(|(worker_index, endpoint)| {
           let worker_shutdown = shutdown_rx.clone();
+          let worker_quiesce = quiesce_rx.clone();
           let worker_state = state.clone();
           let worker_error_tx = error_tx.clone();
           let worker_connections = connections.clone();
@@ -1595,6 +1620,7 @@ impl BoundHttp3Listener {
             if let Err(error) = serve_http3(
               endpoint,
               worker_state,
+              worker_quiesce,
               worker_shutdown,
               worker_index,
               worker_connections,
@@ -1612,6 +1638,7 @@ impl BoundHttp3Listener {
       socket,
       transport,
       endpoints: self.endpoints,
+      quiesce,
       shutdown,
       connections,
       drain_timeouts,
@@ -1726,6 +1753,7 @@ async fn serve_tcp(
   listener: TcpListener,
   kind: TcpListenerKind,
   state: AppHandle,
+  mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
   accept_error_backoff: Duration,
@@ -1740,6 +1768,12 @@ async fn serve_tcp(
   loop {
     tokio::select! {
         biased;
+        changed = quiesce.changed() => {
+            if changed.is_err() || *quiesce.borrow() {
+              info!(bind = %bind, worker = worker_index, "downstream TCP listener quiesced");
+              return Ok(());
+            }
+        }
         changed = shutdown.changed() => {
             if changed.is_ok() && *shutdown.borrow() {
               info!(bind = %bind, worker = worker_index, "downstream TCP listener stopped");
@@ -1823,6 +1857,7 @@ fn bind_http3_listener(
 async fn serve_http3(
   endpoint: h3_quinn::quinn::Endpoint,
   state: AppHandle,
+  mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
   connections: TaskRegistry,
@@ -1831,21 +1866,47 @@ async fn serve_http3(
   let bind = endpoint
     .local_addr()
     .context("failed to read HTTP/3 listener address")?;
+  let mut shutting_down = *shutdown.borrow();
+  let mut quiescing = *quiesce.borrow() || shutting_down;
   info!(bind = %bind, worker = worker_index, "downstream HTTP/3 listener started");
 
   loop {
     tokio::select! {
         biased;
+        changed = quiesce.changed() => {
+            if changed.is_err() || *quiesce.borrow() {
+              if !quiescing {
+                info!(bind = %bind, worker = worker_index, "downstream HTTP/3 listener quiesced");
+              }
+              quiescing = true;
+            }
+        }
         changed = shutdown.changed() => {
             if changed.is_ok() && *shutdown.borrow() {
               info!(bind = %bind, worker = worker_index, "downstream HTTP/3 listener stopped");
             }
+            quiescing = true;
+            shutting_down = true;
+        }
+        _ = connections.wait_idle(), if shutting_down => {
+            // `Endpoint::close` is safe only after every accepted connection has
+            // finished. It then prevents a final race from re-queuing an Initial
+            // after this worker stops consuming `endpoint.accept()`.
+            endpoint.close(0u32.into(), b"listener drained");
             return Ok(());
         }
         connecting = endpoint.accept() => {
             let Some(connecting) = connecting else {
                 return Ok(());
             };
+            if quiescing {
+                // The endpoint driver continues receiving QUIC Initial packets while
+                // established connections drain. Consume every queued Incoming so an
+                // unauthenticated peer cannot accumulate Quinn's pending-handshake
+                // buffer during pre-drain, but retain already accepted connections.
+                connecting.ignore();
+                continue;
+            }
             let connection_state = state.connection_snapshot();
             let connection_snapshot = connection_state.snapshot;
             let data_plane_drain = connection_state.data_plane_drain;

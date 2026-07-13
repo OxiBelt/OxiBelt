@@ -32,6 +32,16 @@ pub(super) struct EdgeState {
   clients: Arc<Mutex<HashMap<EdgeClient, EdgeClientState>>>,
 }
 
+impl EdgeState {
+  pub(super) async fn has_udp_client(&self, client: SocketAddr) -> bool {
+    self
+      .clients
+      .lock()
+      .await
+      .contains_key(&EdgeClient::Udp(client))
+  }
+}
+
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 enum EdgeClient {
   Udp(SocketAddr),

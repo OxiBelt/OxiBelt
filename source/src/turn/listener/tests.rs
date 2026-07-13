@@ -129,3 +129,10 @@ async fn expire_udp_sessions_keeps_active_reader_task() -> anyhow::Result<()> {
   assert_reader_aborted(&dropped).await;
   Ok(())
 }
+
+#[test]
+fn turn_udp_quiesce_keeps_known_clients_and_rejects_new_clients() {
+  assert!(udp_client_admitted(false, false));
+  assert!(udp_client_admitted(true, true));
+  assert!(!udp_client_admitted(true, false));
+}

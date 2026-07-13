@@ -9,6 +9,7 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt"
 profile_values="${chart_dir}/examples/edge-secure-medium-v1-values.yaml"
+profile_kube_version="1.31.0"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 
@@ -99,7 +100,7 @@ done
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-edge-secure-medium.XXXXXX")"
 
 helm lint --strict "${chart_dir}" >"${work_dir}/lint-default.log"
-helm lint --strict "${chart_dir}" -f "${profile_values}" >"${work_dir}/lint-profile.log"
+helm lint --strict "${chart_dir}" --kube-version "${profile_kube_version}" -f "${profile_values}" >"${work_dir}/lint-profile.log"
 
 render defaults
 assert_not_contains "${work_dir}/defaults.yaml" "profile = \"edge-secure-medium\""
@@ -116,7 +117,7 @@ assert_contains "${work_dir}/public_tls_names.yaml" "require_sni = true"
 assert_contains "${work_dir}/public_tls_names.yaml" "reject_unknown_sni = true"
 assert_not_contains "${work_dir}/public_tls_names.yaml" "profile = \"edge-secure-medium\""
 
-render profile_enforcing -f "${profile_values}"
+render profile_enforcing --kube-version "${profile_kube_version}" -f "${profile_values}"
 assert_contains "${work_dir}/profile_enforcing.yaml" "profile = \"edge-secure-medium\""
 assert_contains "${work_dir}/profile_enforcing.yaml" "profile_version = 1"
 assert_contains "${work_dir}/profile_enforcing.yaml" "[waf]"
@@ -129,6 +130,13 @@ assert_following_line "${work_dir}/profile_enforcing.yaml" "[overload]" "enabled
 assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-quic-host-key"
 assert_contains "${work_dir}/profile_enforcing.yaml" "path: quic-host-key.b64"
 assert_contains "${work_dir}/profile_enforcing.yaml" "terminationGracePeriodSeconds: 360"
+assert_contains "${work_dir}/profile_enforcing.yaml" "topologySpreadConstraints:"
+assert_contains "${work_dir}/profile_enforcing.yaml" "topologyKey: kubernetes.io/hostname"
+assert_contains "${work_dir}/profile_enforcing.yaml" "topologyKey: topology.kubernetes.io/zone"
+assert_contains "${work_dir}/profile_enforcing.yaml" "podAntiAffinity:"
+assert_contains "${work_dir}/profile_enforcing.yaml" "maxUnavailable: 1"
+assert_contains "${work_dir}/profile_enforcing.yaml" "unhealthyPodEvictionPolicy: AlwaysAllow"
+assert_contains "${work_dir}/profile_enforcing.yaml" "kill -USR1 1; exec sleep 300"
 assert_not_contains "${work_dir}/profile_enforcing.yaml" "# Source: oxibelt/templates/admin-service.yaml"
 [[ "$(grep -F -c -- "kind: NetworkPolicy" "${work_dir}/profile_enforcing.yaml")" == "3" ]] \
   || die "secure profile must render public, metrics, and egress NetworkPolicies"
@@ -138,22 +146,26 @@ assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-metrics-ingr
 assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-egress"
 assert_contains "${work_dir}/profile_enforcing.yaml" "app.kubernetes.io/name: prometheus"
 
-render profile_monitor -f "${profile_values}" --set-string operationalProfile.wafMode=monitor
+render profile_monitor --kube-version "${profile_kube_version}" -f "${profile_values}" --set-string operationalProfile.wafMode=monitor
 assert_contains "${work_dir}/profile_monitor.yaml" "mode = \"monitor\""
 enforcing_checksum="$(grep -m 1 -F "checksum/oxibelt-config:" "${work_dir}/profile_enforcing.yaml")"
 monitor_checksum="$(grep -m 1 -F "checksum/oxibelt-config:" "${work_dir}/profile_monitor.yaml")"
 [[ "${enforcing_checksum}" != "${monitor_checksum}" ]] \
   || die "changing the profile-derived WAF mode did not change the generated configuration digest"
 
-render profile_daemonset -f "${profile_values}" --set-string workload.kind=DaemonSet
+render profile_daemonset --kube-version "${profile_kube_version}" -f "${profile_values}" --set-string workload.kind=DaemonSet
 assert_contains "${work_dir}/profile_daemonset.yaml" "kind: DaemonSet"
 assert_contains "${work_dir}/profile_daemonset.yaml" "name: oxibelt-quic-host-key"
 assert_contains "${work_dir}/profile_daemonset.yaml" "path: quic-host-key.b64"
 assert_contains "${work_dir}/profile_daemonset.yaml" "readOnly: true"
 assert_contains "${work_dir}/profile_daemonset.yaml" "terminationGracePeriodSeconds: 360"
+assert_contains "${work_dir}/profile_daemonset.yaml" "maxUnavailable: 0"
+assert_contains "${work_dir}/profile_daemonset.yaml" "maxSurge: 1"
+assert_not_contains "${work_dir}/profile_daemonset.yaml" "topologySpreadConstraints:"
 
 expect_failure_contains profile_external_config \
   "operationalProfile.name requires chart-owned config.create=true with no config.existingConfigMap" \
+  --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
   --set config.create=false \
   --set-string config.existingConfigMap=operator-managed-base \
@@ -161,6 +173,7 @@ expect_failure_contains profile_external_config \
 
 expect_failure_contains profile_missing_server_names \
   "operationalProfile edge-secure-medium requires tls.serverNames" \
+  --kube-version "${profile_kube_version}" \
   --set-string operationalProfile.name=edge-secure-medium \
   --set operationalProfile.version=1 \
   --set lifecycle.terminationGracePeriodSeconds=360 \
@@ -168,28 +181,33 @@ expect_failure_contains profile_missing_server_names \
 
 expect_failure_contains profile_missing_quic_host_key \
   "operationalProfile edge-secure-medium requires quic.hostKeySecretName" \
+  --kube-version "${profile_kube_version}" \
   --set-string operationalProfile.name=edge-secure-medium \
   --set operationalProfile.version=1 \
   --set lifecycle.terminationGracePeriodSeconds=360 \
   --set-string tls.serverNames[0]=edge.example.test
 
 expect_failure_contains profile_short_grace \
-  "operationalProfile edge-secure-medium requires lifecycle.terminationGracePeriodSeconds of at least 340" \
+  "operationalProfile edge-secure-medium requires lifecycle.terminationGracePeriodSeconds of at least 360" \
+  --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
   --set lifecycle.terminationGracePeriodSeconds=339
 
 expect_failure_contains profile_unsupported_version \
   "operationalProfile edge-secure-medium supports only version 1" \
+  --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
   --set operationalProfile.version=2
 
 expect_failure_contains profile_metrics_disabled \
   "operationalProfile edge-secure-medium requires metrics.enabled=true" \
+  --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
   --set metrics.enabled=false
 
 expect_failure_contains profile_admin_enabled \
   "operationalProfile edge-secure-medium keeps admin.enabled=false because the chart does not render the required IPM and durable audit configuration" \
+  --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
   --skip-schema-validation \
   --set admin.enabled=true

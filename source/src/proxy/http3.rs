@@ -160,6 +160,7 @@ pub(crate) async fn handle_downstream_connection(
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
+  let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
   let mut lifecycle_drain = drain.clone();
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
   let timing_enabled = snapshot.request_path_features.stage_timing_metrics;
@@ -198,41 +199,28 @@ pub(crate) async fn handle_downstream_connection(
       );
     }
     if *shutdown.borrow() || *data_plane_drain.borrow() {
-      request_tasks.abort_all().await;
-      return Ok(());
+      return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
     }
     if lifecycle_drain.has_lifecycle_drain_transition() {
-      h3_connection
-        .shutdown(0)
-        .await
-        .context("failed to send HTTP/3 graceful shutdown")?;
-      request_tasks.wait_all().await;
-      return Ok(());
+      return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
     }
     let receive_started = timing::start(timing_enabled);
     let resolver = tokio::select! {
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
-          request_tasks.abort_all().await;
-          return Ok(());
+          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
         }
         continue;
       }
       changed = data_plane_drain.changed() => {
         if changed.is_ok() && *data_plane_drain.borrow() {
-          request_tasks.abort_all().await;
-          return Ok(());
+          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
         }
         continue;
       }
       _ = lifecycle_drain.wait_for_lifecycle_drain_transition() => {
-        h3_connection
-          .shutdown(0)
-          .await
-          .context("failed to send HTTP/3 graceful shutdown")?;
-        request_tasks.wait_all().await;
-        return Ok(());
+        return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
       }
       accepted = h3_connection.accept() => {
         match accepted {
@@ -341,7 +329,10 @@ pub(crate) async fn handle_downstream_connection(
       .await
       {
         Ok(Some(permit)) => permit,
-        Ok(None) => return Ok(()),
+        Ok(None) => {
+          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout)
+            .await;
+        }
         Err(error) => {
           if timing_enabled {
             timing::record(
@@ -432,7 +423,8 @@ pub(crate) async fn handle_downstream_connection(
       )
       .await
       {
-        return Ok(());
+        return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout)
+          .await;
       }
       continue;
     }
@@ -454,6 +446,35 @@ pub(crate) async fn handle_downstream_connection(
         spawn_started,
       );
     }
+  }
+}
+
+async fn graceful_h3_shutdown(
+  h3_connection: &mut H3ServerConnection,
+  request_tasks: &mut request_tasks::RequestTaskSet,
+  graceful_timeout: Duration,
+) -> anyhow::Result<()> {
+  let deadline = tokio::time::Instant::now() + graceful_timeout;
+  match tokio::time::timeout_at(deadline, h3_connection.shutdown(0)).await {
+    Ok(result) => result.context("failed to send HTTP/3 graceful shutdown")?,
+    Err(_) => {
+      request_tasks.abort_all().await;
+      return Ok(());
+    }
+  }
+  wait_for_h3_request_tasks(request_tasks, deadline).await;
+  Ok(())
+}
+
+async fn wait_for_h3_request_tasks(
+  request_tasks: &mut request_tasks::RequestTaskSet,
+  deadline: tokio::time::Instant,
+) {
+  if tokio::time::timeout_at(deadline, request_tasks.wait_all())
+    .await
+    .is_err()
+  {
+    request_tasks.abort_all().await;
   }
 }
 
@@ -508,10 +529,7 @@ where
       request_tasks.spawn_inline_future(inline);
       true
     }
-    InlinePollOutcome::Stop => {
-      request_tasks.abort_all().await;
-      false
-    }
+    InlinePollOutcome::Stop => false,
   }
 }
 

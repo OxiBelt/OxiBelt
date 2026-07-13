@@ -36,6 +36,10 @@ impl LifecycleState {
       || self.shutdown_draining.load(Ordering::Relaxed)
   }
 
+  pub fn is_shutdown_draining(&self) -> bool {
+    self.shutdown_draining.load(Ordering::Acquire)
+  }
+
   pub fn reason(&self) -> &'static str {
     if self.shutdown_draining.load(Ordering::Relaxed) {
       "shutdown"
@@ -68,9 +72,12 @@ impl LifecycleState {
     self.publish();
   }
 
-  pub fn start_shutdown(&self) {
-    self.shutdown_draining.store(true, Ordering::Relaxed);
+  pub fn start_shutdown(&self) -> bool {
+    if self.shutdown_draining.swap(true, Ordering::AcqRel) {
+      return false;
+    }
     self.publish();
+    true
   }
 
   pub fn subscribe(&self) -> watch::Receiver<bool> {
@@ -362,13 +369,30 @@ mod tests {
     assert!(lifecycle.is_draining());
     assert_eq!(lifecycle.reason(), "admin");
 
-    lifecycle.start_shutdown();
+    assert!(lifecycle.start_shutdown());
     assert!(lifecycle.is_draining());
     assert_eq!(lifecycle.reason(), "shutdown");
 
     lifecycle.clear_admin_draining();
     assert!(lifecycle.is_draining());
     assert_eq!(lifecycle.reason(), "shutdown");
+  }
+
+  #[test]
+  fn repeated_shutdown_does_not_republish_or_reset_drain() {
+    let lifecycle = LifecycleState::default();
+    let mut drain = lifecycle.subscribe();
+
+    assert!(lifecycle.start_shutdown());
+    assert!(drain.has_changed().expect("first shutdown should publish"));
+    assert!(*drain.borrow_and_update());
+
+    assert!(!lifecycle.start_shutdown());
+    assert!(
+      !drain
+        .has_changed()
+        .expect("shutdown sender should remain available")
+    );
   }
 
   #[test]

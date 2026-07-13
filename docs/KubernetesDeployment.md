@@ -290,6 +290,88 @@ one-at-a-time rolling update (`maxUnavailable: 1`) with the same ready and
 history defaults. Override these values only with an availability analysis for
 the target topology.
 
+## Pod Distribution and Lifecycle
+
+The ordinary chart keeps topology and pre-stop draining disabled so existing
+single-node installations do not become unschedulable or acquire a longer
+termination path on upgrade. Enable the managed Deployment policy only on a
+cluster with at least three eligible worker nodes and two labelled zones:
+
+```yaml
+replicaCount: 3
+
+podDistribution:
+  enabled: true
+  nodeSpread:
+    maxSkew: 1
+    minDomains: 2
+    whenUnsatisfiable: DoNotSchedule
+  zoneSpread:
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: null
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+lifecycle:
+  preStop:
+    enabled: true
+    drainSeconds: 300
+  terminationGracePeriodSeconds: 360
+```
+
+The managed policy applies only to `Deployment` workloads. It requires
+different `kubernetes.io/hostname` values when capacity permits, uses an
+identical-release selector, prefers an even
+`topology.kubernetes.io/zone` distribution without blocking a single-zone
+cluster, and adds preferred same-release hostname anti-affinity. It merges
+with raw `affinity` but rejects a raw `affinity.podAntiAffinity` block when the
+managed policy is active, rather than silently discarding either policy.
+`minDomains` requires `DoNotSchedule` and Kubernetes 1.30 or later. The secure companion requires
+Kubernetes 1.31 or later because it also selects
+`unhealthyPodEvictionPolicy: AlwaysAllow`.
+
+A rendered PDB always uses exactly one of `minAvailable` and
+`maxUnavailable`. For three secure-profile replicas, `maxUnavailable: 1`
+allows one voluntary disruption while the Deployment strategy retains at least
+two Ready Pods during a normal update. A PDB does not protect against an
+involuntary node loss; three replicas on distinct nodes keep two running after
+one verified worker failure. The chart intentionally does not render this PDB
+or managed spread policy for a DaemonSet: it already places at most one Pod on
+each eligible node. The secure DaemonSet setting instead uses
+`maxUnavailable: 0` plus `maxSurge: 1`.
+
+When `lifecycle.preStop.enabled` is true, the chart renders only the fixed
+command `kill -USR1 1; exec sleep <drainSeconds>`. The duration is a validated
+integer, not an operator-supplied shell fragment. `SIGUSR1` starts OxiBelt's
+drain-only state before Kubernetes sends its final termination signal: readiness
+withdraws, new traffic is rejected, HTTP/2 emits graceful shutdown/GOAWAY, and
+HTTP/3 stops accepting new streams while permitted work drains. Kubernetes
+counts pre-stop time inside `terminationGracePeriodSeconds`; choose a grace
+period that covers the pre-stop delay, the runtime shutdown delay, the ordinary
+graceful timeout, and an orchestration margin. The secure companion's
+`300 + 10 + 30 + 20 = 360` second budget is its supported contract.
+
+Long-lived WebSocket, Upgrade, CONNECT, WebTransport, and stream sessions use
+the runtime long-connection delay after drain begins. QUIC connection state is
+process-local: address migration may continue only while the original Pod is
+alive; a Pod replacement cannot transfer HTTP/3 or WebTransport sessions to a
+different Pod, so clients must reconnect after the graceful drain. This is why
+the Service must expose both TCP and UDP for HTTPS/HTTP/3 and why a pre-stop
+window is required before forced exit.
+
+In `kubernetes_immutable` mode, `/ready` additionally stays unavailable until
+the exact assigned revision and raw digest have been applied. An older healthy
+ReplicaSet remains ready until it is selected for replacement; a Pod whose own
+assigned digest does not match its mounted immutable configuration is never
+ready.
+
 ## Gateway Controller Pairing
 
 The Gateway controller never calls a load-balanced OxiBelt Admin Service to

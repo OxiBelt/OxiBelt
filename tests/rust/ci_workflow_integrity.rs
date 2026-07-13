@@ -399,6 +399,11 @@ fn kubernetes_immutable_rollout_script_text() -> String {
     .expect("Kubernetes immutable rollout script should be readable")
 }
 
+fn kubernetes_pod_lifecycle_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-pod-lifecycle.sh"))
+    .expect("Kubernetes Pod lifecycle script should be readable")
+}
+
 fn kubernetes_network_policy_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-network-policy.sh"))
     .expect("Kubernetes NetworkPolicy script should be readable")
@@ -716,6 +721,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "docker-external-benchmark-image",
     "docker-integration-helper-images",
     "kubernetes-immutable-rollout",
+    "kubernetes-pod-lifecycle",
     "kubernetes-network-policy",
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
@@ -1039,6 +1045,11 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "x-oxibelt-config-revision",
     "x-oxibelt-config-digest",
     "ConfigMap raw bytes do not match the Pod-assigned digest",
+    "stale_config_pod_is_running_and_unready",
+    "a running but unready stale-config Pod",
+    "stale-config-${run_id}",
+    "unready health response from stale config Pod",
+    "oxibelt.dev/config-digest",
     "logs \"deployment/${controller_release}\"",
     "--all-containers=true --prefix --previous --tail=200",
   ] {
@@ -1060,6 +1071,95 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     assert!(
       !script.contains(forbidden),
       "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-pod-lifecycle")
+    .expect("workflow should define the Kubernetes Pod lifecycle job");
+  let job_text = workflow_job_text(&workflow, "kubernetes-pod-lifecycle");
+  let script = kubernetes_pod_lifecycle_script_text();
+
+  assert_eq!(
+    job.needs,
+    vec!["docker-alpine-musl-image-amd64".to_owned()],
+    "the Kubernetes Pod lifecycle job should consume the already-scanned AMD64 OxiBelt image artifact"
+  );
+  for expected in [
+    "name: Kubernetes Pod distribution and lifecycle",
+    "runs-on: ubuntu-26.04",
+    "actions: read",
+    "contents: read",
+    "timeout-minutes: 35",
+    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "version: v3.16.4",
+    "name: Validate Helm Pod distribution and lifecycle",
+    "tests/scripts/check-helm-pod-lifecycle.sh",
+    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    "version: v0.26.0",
+    "kubectl_version: v1.31.4",
+    "install_only: true",
+    "tests/scripts/select-amd64-docker-image-artifact.sh auto",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
+    "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
+    "OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS: \"600\"",
+    "OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE: \"1\"",
+    "tests/scripts/run-kubernetes-pod-lifecycle.sh",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Kubernetes Pod lifecycle CI job should include {expected}"
+    );
+  }
+
+  for expected in [
+    "kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30",
+    "OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS must be a decimal value from 180 through 900",
+    "Skipping Kubernetes Pod lifecycle test; set OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE=1 to run it.",
+    "'- role: worker'",
+    "Kind lifecycle cluster must expose exactly three worker nodes",
+    "io.x-k8s.kind.cluster",
+    "topology.kubernetes.io/zone",
+    "podDistribution.enabled=true",
+    "lifecycle.preStop.enabled=true",
+    "lifecycle.preStop.drainSeconds=10",
+    "lifecycle.terminationGracePeriodSeconds=45",
+    "podDisruptionBudget.maxUnavailable=1",
+    "podDisruptionBudget.unhealthyPodEvictionPolicy=AlwaysAllow",
+    "--kube-context \"kind-${cluster_name}\"",
+    "topologySpreadConstraints | length) == 2",
+    "rolling update reduced ready capacity below two Pods",
+    "terminating Pod endpoint withdrawal before exit",
+    "kubernetes.io/service-name=${service_name}",
+    "docker stop \"${worker_to_stop}\"",
+    "two surviving Ready Pods after a verified worker loss",
+    "docker container inspect --format '{{.State.Running}}'",
+    "kind delete cluster --name \"${cluster_name}\"",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Kubernetes Pod lifecycle script should preserve {expected}"
+    );
+  }
+
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "docker network prune",
+    "kubectl delete --all",
+    "kubectl delete namespace --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Kubernetes Pod lifecycle script must not contain unsafe or secret-disclosing operation {forbidden}"
     );
   }
 }

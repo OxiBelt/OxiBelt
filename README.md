@@ -87,7 +87,7 @@ cargo run --manifest-path source/Cargo.toml -- \
 
 Send `SIGHUP` to trigger an immediate reload check when hot reload is enabled.
 
-Full reloads activate replacement listeners before old listener generations drain. OxiBelt also handles Ctrl-C and `SIGTERM` by marking the instance draining, keeping `/live` healthy, returning `503` from `/ready`, optionally waiting `runtime.drain.shutdown_delay_ms`, and then draining listeners up to `runtime.drain.graceful_timeout_ms`. Long-lived WebSocket, generic Upgrade, CONNECT, WebTransport, and TCP stream bridges get `runtime.drain.long_connection_close_delay_ms` before forced close.
+Full reloads activate replacement listeners before old listener generations drain. OxiBelt also handles Ctrl-C and `SIGTERM` by marking the instance draining, keeping `/live` healthy, returning `503` from `/ready`, optionally waiting `runtime.drain.shutdown_delay_ms`, and then draining listeners up to `runtime.drain.graceful_timeout_ms`. On Unix, `SIGUSR1` starts that irreversible drain without exiting so a trusted local supervisor can withdraw readiness before final termination. Long-lived WebSocket, generic Upgrade, CONNECT, WebTransport, and TCP stream bridges get `runtime.drain.long_connection_close_delay_ms` before forced close.
 
 The admin listener exposes lifecycle control when enabled:
 
@@ -154,15 +154,17 @@ It selects v1, takes public SNI names, and projects one named Secret entry for
 the stable QUIC host key without embedding any secret material. That projected
 Secret value must be the base64 text for 64 random bytes, as described in the
 configuration reference. The normal chart defaults remain unprofiled. The
-secure Helm companion enables the opt-in NetworkPolicy baseline, but operators
-must still declare every route-specific egress dependency and validate it with
-their enforcing CNI. ServiceAccount token mounting is chart-level hardening:
-data-plane Pods have no Kubernetes API token by default, while explicitly
-configured API discovery receives a bounded projected credential and scoped
-RBAC. The runtime profile itself does not provide topology/lifecycle,
-certificate-to-IPM identity, general idempotency, stronger audit, or release
-provenance work; see the configuration reference for the complete contract and
-boundaries.
+secure Helm companion requires Kubernetes 1.31+ and selects three replicas,
+hostname/zone distribution, a one-Pod disruption budget, and the fixed
+300-second `SIGUSR1` pre-stop drain inside a 360-second grace. It enables the
+opt-in NetworkPolicy baseline, but operators must still declare every
+route-specific egress dependency and validate it with their enforcing CNI.
+ServiceAccount token mounting is chart-level hardening: data-plane Pods have no
+Kubernetes API token by default, while explicitly configured API discovery
+receives a bounded projected credential and scoped RBAC. The runtime profile
+itself does not provide certificate-to-IPM identity, general idempotency,
+stronger audit, or release-provenance work; see the configuration reference for
+the complete contract and boundaries.
 
 ## Documentation
 

@@ -131,6 +131,74 @@ async fn h3_inline_request_hands_off_pending_future() {
   );
 }
 
+#[tokio::test]
+async fn h3_inline_drain_preserves_previously_active_request() {
+  let mut request_tasks = request_tasks::RequestTaskSet::with_active_limit(2);
+  let existing_permit = request_tasks
+    .try_acquire_permit()
+    .expect("existing request permit should be available");
+  request_tasks.spawn_inline_future(Box::pin(async move {
+    let _permit = existing_permit;
+    futures_util::future::pending::<()>().await;
+  }));
+  let inline_permit = request_tasks
+    .try_acquire_permit()
+    .expect("inline request permit should be available");
+  let (shutdown_tx, mut shutdown) = watch::channel(false);
+  let (_drain_tx, mut data_plane_drain) = watch::channel(false);
+  shutdown_tx.send(true).unwrap();
+
+  assert!(
+    !run_h3_inline_until_blocked_or_stop(
+      async move {
+        let _permit = inline_permit;
+        futures_util::future::pending::<()>().await;
+      },
+      &mut request_tasks,
+      &mut shutdown,
+      &mut data_plane_drain,
+    )
+    .await
+  );
+
+  let released_inline_permit = request_tasks
+    .try_acquire_permit()
+    .expect("stopped inline request should release only its permit");
+  assert!(
+    request_tasks.try_acquire_permit().is_none(),
+    "pre-existing request must remain active for graceful H3 shutdown"
+  );
+  drop(released_inline_permit);
+  request_tasks.abort_all().await;
+}
+
+#[tokio::test]
+async fn h3_graceful_shutdown_timeout_aborts_stalled_request_tasks() {
+  let mut request_tasks = request_tasks::RequestTaskSet::with_active_limit(1);
+  let held_permit = request_tasks
+    .try_acquire_permit()
+    .expect("held permit should be available");
+  request_tasks.spawn_inline_future(Box::pin(async move {
+    let _permit = held_permit;
+    futures_util::future::pending::<()>().await;
+  }));
+
+  wait_for_h3_request_tasks(
+    &mut request_tasks,
+    tokio::time::Instant::now() + Duration::from_millis(1),
+  )
+  .await;
+
+  assert!(
+    request_tasks.is_empty(),
+    "stalled request task should be reaped"
+  );
+  assert!(
+    request_tasks.try_acquire_permit().is_some(),
+    "timed-out graceful shutdown should release the active request permit"
+  );
+}
+
 fn h3_request(method: Method) -> Request<()> {
   Request::builder()
     .method(method)

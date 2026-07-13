@@ -224,9 +224,165 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validateLifecycle" -}}
+{{- $lifecycle := .Values.lifecycle -}}
+{{- if not (kindIs "map" $lifecycle) -}}
+{{- fail "lifecycle must be an object" -}}
+{{- end -}}
+{{- if not (hasKey $lifecycle "terminationGracePeriodSeconds") -}}
+{{- fail "lifecycle.terminationGracePeriodSeconds is required" -}}
+{{- end -}}
+{{- $terminationGracePeriodSeconds := toString $lifecycle.terminationGracePeriodSeconds -}}
+{{- if not (regexMatch "^[0-9]{1,9}$" $terminationGracePeriodSeconds) -}}
+{{- fail "lifecycle.terminationGracePeriodSeconds must be a non-negative integer no greater than 999999999" -}}
+{{- end -}}
+{{- $preStop := $lifecycle.preStop -}}
+{{- if not (kindIs "map" $preStop) -}}
+{{- fail "lifecycle.preStop must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $preStop "enabled")) (not (kindIs "bool" $preStop.enabled)) -}}
+{{- fail "lifecycle.preStop.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (hasKey $preStop "drainSeconds") -}}
+{{- fail "lifecycle.preStop.drainSeconds is required" -}}
+{{- end -}}
+{{- $drainSeconds := toString $preStop.drainSeconds -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,4}$" $drainSeconds) -}}
+{{- fail "lifecycle.preStop.drainSeconds must be an integer between 1 and 86400" -}}
+{{- end -}}
+{{- if gt (int $drainSeconds) 86400 -}}
+{{- fail "lifecycle.preStop.drainSeconds must be an integer between 1 and 86400" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validatePositiveInteger" -}}
+{{- $value := toString .value -}}
+{{- $field := .field -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,8}$" $value) -}}
+{{- fail (printf "%s must be a positive integer no greater than 999999999" $field) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validatePodDistribution" -}}
+{{- $distribution := .Values.podDistribution -}}
+{{- if not (kindIs "map" $distribution) -}}
+{{- fail "podDistribution must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $distribution "enabled")) (not (kindIs "bool" $distribution.enabled)) -}}
+{{- fail "podDistribution.enabled must be a boolean" -}}
+{{- end -}}
+{{- $nodeSpread := $distribution.nodeSpread -}}
+{{- if not (kindIs "map" $nodeSpread) -}}
+{{- fail "podDistribution.nodeSpread must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $nodeSpread "enabled")) (not (kindIs "bool" $nodeSpread.enabled)) -}}
+{{- fail "podDistribution.nodeSpread.enabled must be a boolean" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $nodeSpread.maxSkew "field" "podDistribution.nodeSpread.maxSkew") -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $nodeSpread.minDomains "field" "podDistribution.nodeSpread.minDomains") -}}
+{{- if not (has $nodeSpread.whenUnsatisfiable (list "DoNotSchedule" "ScheduleAnyway")) -}}
+{{- fail "podDistribution.nodeSpread.whenUnsatisfiable must be DoNotSchedule or ScheduleAnyway" -}}
+{{- end -}}
+{{- if and $distribution.enabled $nodeSpread.enabled (ne $nodeSpread.whenUnsatisfiable "DoNotSchedule") -}}
+{{- fail "podDistribution.nodeSpread.minDomains requires podDistribution.nodeSpread.whenUnsatisfiable=DoNotSchedule" -}}
+{{- end -}}
+{{- if and $distribution.enabled $nodeSpread.enabled (not (semverCompare ">=1.30.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "podDistribution.nodeSpread.minDomains requires Kubernetes 1.30 or later" -}}
+{{- end -}}
+{{- $zoneSpread := $distribution.zoneSpread -}}
+{{- if not (kindIs "map" $zoneSpread) -}}
+{{- fail "podDistribution.zoneSpread must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $zoneSpread "enabled")) (not (kindIs "bool" $zoneSpread.enabled)) -}}
+{{- fail "podDistribution.zoneSpread.enabled must be a boolean" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $zoneSpread.maxSkew "field" "podDistribution.zoneSpread.maxSkew") -}}
+{{- if not (has $zoneSpread.whenUnsatisfiable (list "DoNotSchedule" "ScheduleAnyway")) -}}
+{{- fail "podDistribution.zoneSpread.whenUnsatisfiable must be DoNotSchedule or ScheduleAnyway" -}}
+{{- end -}}
+{{- $podAntiAffinity := $distribution.podAntiAffinity -}}
+{{- if not (kindIs "map" $podAntiAffinity) -}}
+{{- fail "podDistribution.podAntiAffinity must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $podAntiAffinity "enabled")) (not (kindIs "bool" $podAntiAffinity.enabled)) -}}
+{{- fail "podDistribution.podAntiAffinity.enabled must be a boolean" -}}
+{{- end -}}
+{{- $weight := toString $podAntiAffinity.weight -}}
+{{- if or (not (regexMatch "^[1-9][0-9]{0,2}$" $weight)) (gt (int $weight) 100) -}}
+{{- fail "podDistribution.podAntiAffinity.weight must be an integer between 1 and 100" -}}
+{{- end -}}
+{{- $affinity := .Values.affinity -}}
+{{- if not (kindIs "map" $affinity) -}}
+{{- fail "affinity must be an object" -}}
+{{- end -}}
+{{- if and $distribution.enabled $podAntiAffinity.enabled (hasKey $affinity "podAntiAffinity") -}}
+{{- fail "podDistribution.podAntiAffinity.enabled cannot be combined with affinity.podAntiAffinity" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validatePodDisruptionBudgetValue" -}}
+{{- $value := toString .value -}}
+{{- $field := .field -}}
+{{- if not (or (regexMatch "^[0-9]{1,9}$" $value) (regexMatch "^(0|[1-9][0-9]?|100)%$" $value)) -}}
+{{- fail (printf "%s must be a non-negative integer no greater than 999999999 or percentage" $field) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.podDisruptionBudgetValue" -}}
+{{- $value := toString . -}}
+{{- if hasSuffix "%" $value -}}
+{{- $value | quote -}}
+{{- else -}}
+{{- int $value -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validatePodDisruptionBudget" -}}
+{{- $pdb := .Values.podDisruptionBudget -}}
+{{- if not (kindIs "map" $pdb) -}}
+{{- fail "podDisruptionBudget must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $pdb "enabled")) (not (kindIs "bool" $pdb.enabled)) -}}
+{{- fail "podDisruptionBudget.enabled must be a boolean" -}}
+{{- end -}}
+{{- $minAvailable := $pdb.minAvailable -}}
+{{- $maxUnavailable := $pdb.maxUnavailable -}}
+{{- $hasMinAvailable := and (hasKey $pdb "minAvailable") (not (kindIs "invalid" $minAvailable)) -}}
+{{- $hasMaxUnavailable := and (hasKey $pdb "maxUnavailable") (not (kindIs "invalid" $maxUnavailable)) -}}
+{{- if $hasMinAvailable -}}
+{{- include "oxibelt.validatePodDisruptionBudgetValue" (dict "value" $minAvailable "field" "podDisruptionBudget.minAvailable") -}}
+{{- end -}}
+{{- if $hasMaxUnavailable -}}
+{{- include "oxibelt.validatePodDisruptionBudgetValue" (dict "value" $maxUnavailable "field" "podDisruptionBudget.maxUnavailable") -}}
+{{- end -}}
+{{- if and $pdb.enabled (eq $hasMinAvailable $hasMaxUnavailable) -}}
+{{- fail "podDisruptionBudget requires exactly one of minAvailable or maxUnavailable when enabled" -}}
+{{- end -}}
+{{- $unhealthyPodEvictionPolicy := $pdb.unhealthyPodEvictionPolicy -}}
+{{- if or (not (kindIs "string" $unhealthyPodEvictionPolicy)) (not (has $unhealthyPodEvictionPolicy (list "" "IfHealthyBudget" "AlwaysAllow"))) -}}
+{{- fail "podDisruptionBudget.unhealthyPodEvictionPolicy must be empty, IfHealthyBudget, or AlwaysAllow" -}}
+{{- end -}}
+{{- if and $unhealthyPodEvictionPolicy (not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "podDisruptionBudget.unhealthyPodEvictionPolicy requires Kubernetes 1.31 or later" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.deploymentAffinity" -}}
+{{- $affinity := deepCopy .Values.affinity -}}
+{{- if and .Values.podDistribution.enabled .Values.podDistribution.podAntiAffinity.enabled -}}
+{{- $selectorLabels := include "oxibelt.selectorLabels" . | fromYaml -}}
+{{- $term := dict "labelSelector" (dict "matchLabels" $selectorLabels) "topologyKey" "kubernetes.io/hostname" -}}
+{{- $preference := dict "weight" (int .Values.podDistribution.podAntiAffinity.weight) "podAffinityTerm" $term -}}
+{{- $_ := set $affinity "podAntiAffinity" (dict "preferredDuringSchedulingIgnoredDuringExecution" (list $preference)) -}}
+{{- end -}}
+{{- toYaml $affinity -}}
+{{- end -}}
+
 {{- define "oxibelt.validateOperationalProfile" -}}
 {{- include "oxibelt.validatePublicTls" . -}}
 {{- include "oxibelt.validateQuicHostKey" . -}}
+{{- include "oxibelt.validateLifecycle" . -}}
+{{- include "oxibelt.validatePodDistribution" . -}}
 {{- $profile := .Values.operationalProfile -}}
 {{- $name := $profile.name -}}
 {{- $version := int $profile.version -}}
@@ -250,6 +406,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if ne $version 1 -}}
 {{- fail "operationalProfile edge-secure-medium supports only version 1" -}}
 {{- end -}}
+{{- if not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version)) -}}
+{{- fail "operationalProfile edge-secure-medium requires Kubernetes 1.31 or later" -}}
+{{- end -}}
 {{- if not .Values.tls.enabled -}}
 {{- fail "operationalProfile edge-secure-medium requires tls.enabled=true" -}}
 {{- end -}}
@@ -271,8 +430,54 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if .Values.admin.service.enabled -}}
 {{- fail "operationalProfile edge-secure-medium keeps admin.service.enabled=false" -}}
 {{- end -}}
-{{- if lt (int .Values.lifecycle.terminationGracePeriodSeconds) 340 -}}
-{{- fail "operationalProfile edge-secure-medium requires lifecycle.terminationGracePeriodSeconds of at least 340" -}}
+{{- if not .Values.lifecycle.preStop.enabled -}}
+{{- fail "operationalProfile edge-secure-medium requires lifecycle.preStop.enabled=true" -}}
+{{- end -}}
+{{- if lt (int .Values.lifecycle.preStop.drainSeconds) 300 -}}
+{{- fail "operationalProfile edge-secure-medium requires lifecycle.preStop.drainSeconds of at least 300" -}}
+{{- end -}}
+{{- $minimumTerminationGracePeriodSeconds := add (int .Values.lifecycle.preStop.drainSeconds) 60 -}}
+{{- if lt (int .Values.lifecycle.terminationGracePeriodSeconds) $minimumTerminationGracePeriodSeconds -}}
+{{- fail (printf "operationalProfile edge-secure-medium requires lifecycle.terminationGracePeriodSeconds of at least %d" $minimumTerminationGracePeriodSeconds) -}}
+{{- end -}}
+{{- if eq .Values.workload.kind "Deployment" -}}
+{{- if lt (int .Values.replicaCount) 3 -}}
+{{- fail "operationalProfile edge-secure-medium requires replicaCount of at least 3 for a Deployment" -}}
+{{- end -}}
+{{- if or (ne (toString .Values.workload.deployment.maxUnavailable) "0") (ne (toString .Values.workload.deployment.maxSurge) "1") -}}
+{{- fail "operationalProfile edge-secure-medium requires Deployment maxUnavailable=0 and maxSurge=1" -}}
+{{- end -}}
+{{- if lt (int .Values.autoscaling.minReplicas) 3 -}}
+{{- fail "operationalProfile edge-secure-medium requires autoscaling.minReplicas of at least 3" -}}
+{{- end -}}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) -}}
+{{- fail "operationalProfile edge-secure-medium requires autoscaling.maxReplicas to be at least autoscaling.minReplicas" -}}
+{{- end -}}
+{{- if not .Values.podDistribution.enabled -}}
+{{- fail "operationalProfile edge-secure-medium requires podDistribution.enabled=true for a Deployment" -}}
+{{- end -}}
+{{- if or (not .Values.podDistribution.nodeSpread.enabled) (ne (int .Values.podDistribution.nodeSpread.maxSkew) 1) (lt (int .Values.podDistribution.nodeSpread.minDomains) 2) (ne .Values.podDistribution.nodeSpread.whenUnsatisfiable "DoNotSchedule") -}}
+{{- fail "operationalProfile edge-secure-medium requires strict hostname podDistribution.nodeSpread" -}}
+{{- end -}}
+{{- if or (not .Values.podDistribution.zoneSpread.enabled) (ne (int .Values.podDistribution.zoneSpread.maxSkew) 1) (ne .Values.podDistribution.zoneSpread.whenUnsatisfiable "ScheduleAnyway") -}}
+{{- fail "operationalProfile edge-secure-medium requires soft zone podDistribution.zoneSpread" -}}
+{{- end -}}
+{{- if or (not .Values.podDistribution.podAntiAffinity.enabled) (ne (int .Values.podDistribution.podAntiAffinity.weight) 100) -}}
+{{- fail "operationalProfile edge-secure-medium requires preferred hostname podDistribution.podAntiAffinity" -}}
+{{- end -}}
+{{- if not .Values.podDisruptionBudget.enabled -}}
+{{- fail "operationalProfile edge-secure-medium requires podDisruptionBudget.enabled=true for a Deployment" -}}
+{{- end -}}
+{{- if or (not (kindIs "invalid" .Values.podDisruptionBudget.minAvailable)) (ne (toString .Values.podDisruptionBudget.maxUnavailable) "1") -}}
+{{- fail "operationalProfile edge-secure-medium requires podDisruptionBudget.maxUnavailable=1 with minAvailable unset" -}}
+{{- end -}}
+{{- if ne .Values.podDisruptionBudget.unhealthyPodEvictionPolicy "AlwaysAllow" -}}
+{{- fail "operationalProfile edge-secure-medium requires podDisruptionBudget.unhealthyPodEvictionPolicy=AlwaysAllow" -}}
+{{- end -}}
+{{- else if eq .Values.workload.kind "DaemonSet" -}}
+{{- if or (ne (int .Values.workload.daemonSet.maxUnavailable) 0) (lt (int .Values.workload.daemonSet.maxSurge) 1) -}}
+{{- fail "operationalProfile edge-secure-medium requires DaemonSet maxUnavailable=0 with maxSurge of at least 1" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -448,9 +653,24 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 
 {{- define "oxibelt.validateWorkloadRollout" -}}
+{{- if not (has .Values.workload.kind (list "Deployment" "DaemonSet")) -}}
+{{- fail "workload.kind must be Deployment or DaemonSet" -}}
+{{- end -}}
 {{- if eq .Values.workload.kind "Deployment" -}}
 {{- if le (int .Values.workload.deployment.progressDeadlineSeconds) (int .Values.workload.deployment.minReadySeconds) -}}
 {{- fail "workload.deployment.progressDeadlineSeconds must be greater than workload.deployment.minReadySeconds" -}}
+{{- end -}}
+{{- else -}}
+{{- $maxUnavailable := toString .Values.workload.daemonSet.maxUnavailable -}}
+{{- $maxSurge := toString .Values.workload.daemonSet.maxSurge -}}
+{{- if not (regexMatch "^[0-9]{1,9}$" $maxUnavailable) -}}
+{{- fail "workload.daemonSet.maxUnavailable must be a non-negative integer no greater than 999999999" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]{1,9}$" $maxSurge) -}}
+{{- fail "workload.daemonSet.maxSurge must be a non-negative integer no greater than 999999999" -}}
+{{- end -}}
+{{- if and (eq (int $maxUnavailable) 0) (eq (int $maxSurge) 0) -}}
+{{- fail "workload.daemonSet.maxUnavailable and workload.daemonSet.maxSurge cannot both be zero" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -121,6 +121,7 @@ async fn wait_for_child_with_signal_forwarding(
   let mut terminate = signal(SignalKind::terminate()).context("failed to register SIGTERM")?;
   let mut interrupt = signal(SignalKind::interrupt()).context("failed to register SIGINT")?;
   let mut hangup = signal(SignalKind::hangup()).context("failed to register SIGHUP")?;
+  let mut pre_drain = signal(SignalKind::user_defined1()).context("failed to register SIGUSR1")?;
   loop {
     tokio::select! {
       status = &mut wait => {
@@ -130,6 +131,7 @@ async fn wait_for_child_with_signal_forwarding(
       _ = terminate.recv() => child.forward(Signal::SIGTERM)?,
       _ = interrupt.recv() => child.forward(Signal::SIGINT)?,
       _ = hangup.recv() => child.forward(Signal::SIGHUP)?,
+      _ = pre_drain.recv() => child.forward(Signal::SIGUSR1)?,
     }
   }
 }

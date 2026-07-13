@@ -128,6 +128,12 @@
           "items": { "$ref": "#/definitions/ciliumNetworkPolicyPort" }
         }
       }
+    },
+    "nonnegativeIntegerOrPercentage": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "maximum": 999999999 },
+        { "type": "string", "pattern": "^(0|[1-9][0-9]?|100)%$" }
+      ]
     }
   },
   "properties": {
@@ -168,7 +174,8 @@
         "daemonSet": {
           "type": "object",
           "properties": {
-            "maxUnavailable": { "type": "integer", "minimum": 1 },
+            "maxUnavailable": { "type": "integer", "minimum": 0, "maximum": 999999999 },
+            "maxSurge": { "type": "integer", "minimum": 0, "maximum": 999999999 },
             "minReadySeconds": { "type": "integer", "minimum": 0 },
             "revisionHistoryLimit": { "type": "integer", "minimum": 0 }
           }
@@ -180,7 +187,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0, "maximum": 999999999 },
+        "preStop": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "drainSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+          }
+        }
       }
     },
     "serviceAccount": {
@@ -532,7 +547,62 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "minAvailable": { "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "string" }] }
+        "minAvailable": {
+          "anyOf": [
+            { "$ref": "#/definitions/nonnegativeIntegerOrPercentage" },
+            { "type": "null" }
+          ]
+        },
+        "maxUnavailable": {
+          "anyOf": [
+            { "$ref": "#/definitions/nonnegativeIntegerOrPercentage" },
+            { "type": "null" }
+          ]
+        },
+        "unhealthyPodEvictionPolicy": {
+          "type": "string",
+          "enum": ["", "IfHealthyBudget", "AlwaysAllow"]
+        }
+      }
+    },
+    "podDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "nodeSpread": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxSkew": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            "minDomains": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            "whenUnsatisfiable": {
+              "type": "string",
+              "enum": ["DoNotSchedule", "ScheduleAnyway"]
+            }
+          }
+        },
+        "zoneSpread": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxSkew": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            "whenUnsatisfiable": {
+              "type": "string",
+              "enum": ["DoNotSchedule", "ScheduleAnyway"]
+            }
+          }
+        },
+        "podAntiAffinity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "weight": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        }
       }
     }
   },

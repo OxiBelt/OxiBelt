@@ -60,7 +60,27 @@ spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
       automountServiceAccountToken: false
       {{- if gt (int .Values.lifecycle.terminationGracePeriodSeconds) 0 }}
-      terminationGracePeriodSeconds: {{ .Values.lifecycle.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ int .Values.lifecycle.terminationGracePeriodSeconds }}
+      {{- end }}
+      {{- if .Values.podDistribution.enabled }}
+      topologySpreadConstraints:
+      {{- if .Values.podDistribution.nodeSpread.enabled }}
+      - maxSkew: {{ int .Values.podDistribution.nodeSpread.maxSkew }}
+        minDomains: {{ int .Values.podDistribution.nodeSpread.minDomains }}
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: {{ .Values.podDistribution.nodeSpread.whenUnsatisfiable }}
+        labelSelector:
+          matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 12 }}
+      {{- end }}
+      {{- if .Values.podDistribution.zoneSpread.enabled }}
+      - maxSkew: {{ int .Values.podDistribution.zoneSpread.maxSkew }}
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: {{ .Values.podDistribution.zoneSpread.whenUnsatisfiable }}
+        labelSelector:
+          matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 12 }}
+      {{- end }}
       {{- end }}
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
@@ -72,6 +92,15 @@ spec:
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
+        {{- if .Values.lifecycle.preStop.enabled }}
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -ec
+              - {{ printf "kill -USR1 1; exec sleep %d" (int .Values.lifecycle.preStop.drainSeconds) | quote }}
+        {{- end }}
         env:
         # Requests are only used when the container has no cgroup hard cap;
         # OxiBelt otherwise prefers the actual cgroup quota/limit.
@@ -267,5 +296,5 @@ spec:
       tolerations:
 {{ toYaml .Values.tolerations | indent 8 }}
       affinity:
-{{ toYaml .Values.affinity | indent 8 }}
+{{ include "oxibelt.deploymentAffinity" . | indent 8 }}
 {{- end }}

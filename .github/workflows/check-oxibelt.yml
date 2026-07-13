@@ -955,6 +955,57 @@ jobs:
           OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS: "420"
         run: tests/scripts/run-kubernetes-immutable-rollout.sh
 
+  kubernetes-pod-lifecycle:
+    name: Kubernetes Pod distribution and lifecycle
+    runs-on: ubuntu-26.04
+    needs:
+      - docker-alpine-musl-image-amd64
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Validate Helm Pod distribution and lifecycle
+        run: tests/scripts/check-helm-pod-lifecycle.sh
+
+      - name: Install Kind and kubectl
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.26.0
+          kubectl_version: v1.31.4
+          install_only: true
+
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
+      - name: Download AMD64 Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+
+      - name: Run Kubernetes Pod distribution and lifecycle
+        env:
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS: "600"
+          OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE: "1"
+        run: tests/scripts/run-kubernetes-pod-lifecycle.sh
+
   kubernetes-network-policy:
     name: Kubernetes NetworkPolicy (${{ matrix.cni }})
     runs-on: ubuntu-26.04

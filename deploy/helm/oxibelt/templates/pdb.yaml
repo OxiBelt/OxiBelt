@@ -1,3 +1,7 @@
+{{- if and (eq .Values.operationalProfile.name "edge-secure-medium") (not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "operationalProfile edge-secure-medium requires Kubernetes 1.31 or later" -}}
+{{- end -}}
+{{- include "oxibelt.validatePodDisruptionBudget" . -}}
 {{- if and .Values.podDisruptionBudget.enabled (eq .Values.workload.kind "Deployment") }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -6,7 +10,14 @@ metadata:
   labels:
 {{ include "oxibelt.labels" . | indent 4 }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- if not (kindIs "invalid" .Values.podDisruptionBudget.minAvailable) }}
+  minAvailable: {{ include "oxibelt.podDisruptionBudgetValue" .Values.podDisruptionBudget.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ include "oxibelt.podDisruptionBudgetValue" .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  {{- if .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  {{- end }}
   selector:
     matchLabels:
 {{ include "oxibelt.selectorLabels" . | indent 6 }}

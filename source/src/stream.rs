@@ -34,6 +34,7 @@ const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_mill
 pub(crate) struct StreamListenerTask {
   pub(crate) options: TcpListenOptions,
   pub(crate) config: StreamListenerConfig,
+  quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
   graceful_timeout: Duration,
@@ -53,6 +54,10 @@ enum BoundStreamTransport {
 }
 
 impl StreamListenerTask {
+  pub(crate) fn quiesce(&self) {
+    let _ = self.quiesce.send(true);
+  }
+
   pub(crate) fn drain_background(self) {
     drop(self.drain());
   }
@@ -60,12 +65,14 @@ impl StreamListenerTask {
   pub(crate) fn drain(self) -> JoinHandle<()> {
     tokio::spawn(async move {
       let StreamListenerTask {
+        quiesce,
         shutdown,
         connections,
         graceful_timeout,
         tasks,
         ..
       } = self;
+      let _ = quiesce.send(true);
       let _ = shutdown.send(true);
       let wait_connections = connections.clone();
       let wait = async {
@@ -119,6 +126,7 @@ impl BoundStreamListener {
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
   ) -> StreamListenerTask {
+    let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let name = self.config.name.clone();
     let options = self.options;
@@ -138,6 +146,7 @@ impl BoundStreamListener {
         .enumerate()
         .map(|(worker_index, listener)| {
           let worker_shutdown = shutdown_rx.clone();
+          let worker_quiesce = quiesce_rx.clone();
           let worker_config = config.clone();
           let worker_state = state.clone();
           let worker_error_tx = error_tx.clone();
@@ -148,6 +157,7 @@ impl BoundStreamListener {
               listener,
               worker_config,
               worker_state,
+              worker_quiesce,
               worker_shutdown,
               worker_index,
               accept_error_backoff,
@@ -164,6 +174,7 @@ impl BoundStreamListener {
         .collect(),
       BoundStreamTransport::Udp(socket) => {
         let worker_shutdown = shutdown_rx.clone();
+        let worker_quiesce = quiesce_rx.clone();
         let worker_config = config.clone();
         let worker_state = state.clone();
         let worker_error_tx = error_tx.clone();
@@ -178,6 +189,7 @@ impl BoundStreamListener {
                 socket,
                 worker_config,
                 worker_state,
+                worker_quiesce,
                 worker_shutdown,
                 worker_connections,
               )
@@ -195,6 +207,7 @@ impl BoundStreamListener {
     StreamListenerTask {
       options,
       config,
+      quiesce,
       shutdown,
       connections,
       graceful_timeout,
@@ -208,6 +221,7 @@ async fn serve_stream_listener(
   listener: TcpListener,
   config: StreamListenerConfig,
   state: AppHandle,
+  mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   worker_index: usize,
   accept_error_backoff: Duration,
@@ -228,6 +242,12 @@ async fn serve_stream_listener(
   loop {
     tokio::select! {
       biased;
+      changed = quiesce.changed() => {
+        if changed.is_err() || *quiesce.borrow() {
+          info!(name = %config.name, bind = %bind, worker = worker_index, "stream listener quiesced");
+          return Ok(());
+        }
+      }
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
           info!(name = %config.name, bind = %bind, worker = worker_index, "stream listener stopped");

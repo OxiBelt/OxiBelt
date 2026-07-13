@@ -82,6 +82,8 @@ cleanup() {
     "${repo_root}"/tests/.tmp/kubernetes-immutable-rollout-*)
       rm -rf -- "${work_dir}"
       ;;
+    "")
+      ;;
     *)
       echo "refusing to remove unexpected test work directory: ${work_dir}" >&2
       ;;
@@ -230,6 +232,42 @@ check_pod_runtime_proof() {
   port_forward_pid=""
 }
 
+stale_config_pod_is_running_and_unready() {
+  local pod="$1"
+  local pod_json
+  pod_json="$(kube -n "${namespace}" get pod "${pod}" -o json 2>/dev/null)" || return 1
+
+  jq -e '
+    .status.phase == "Running"
+      and all(.status.conditions[]?; .type != "Ready" or .status != "True")
+  ' >/dev/null <<<"${pod_json}"
+}
+
+health_endpoint_is_unready() {
+  local url="$1"
+  local status
+  status="$(curl --silent --show-error --max-time 2 --output /dev/null \
+    --write-out '%{http_code}' "${url}" 2>/dev/null)" || return 1
+  [[ "${status}" == "503" ]]
+}
+
+check_stale_config_pod() {
+  local pod="$1"
+  local port="$2"
+  local url="http://127.0.0.1:${port}/ready"
+
+  kubectl --context "kind-${cluster_name}" -n "${namespace}" port-forward \
+    --address 127.0.0.1 "pod/${pod}" "${port}:9091" \
+    >"${work_dir}/port-forward-${pod}.log" 2>&1 &
+  port_forward_pid="$!"
+  wait_for "unready health response from stale config Pod ${pod}" 60 \
+    health_endpoint_is_unready "${url}"
+
+  kill "${port_forward_pid}" >/dev/null 2>&1 || true
+  wait "${port_forward_pid}" >/dev/null 2>&1 || true
+  port_forward_pid=""
+}
+
 assert_controller_can_i() {
   local expected="$1"
   shift
@@ -297,11 +335,11 @@ external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
 external_base_bootstrap_is_unassigned DaemonSet templates/daemonset.yaml \
   || die "external ConfigMap DaemonSet bootstrap must remain unassigned until controller reconciliation"
 
-cluster_created=1
 kind create cluster \
   --name "${cluster_name}" \
   --image "${kind_node_image}" \
   --wait 120s
+cluster_created=1
 
 kind load docker-image --name "${cluster_name}" "${image}"
 
@@ -711,5 +749,34 @@ for index in "${!pods[@]}"; do
   check_pod_runtime_proof "${pods[${index}]}" "$((21000 + RANDOM % 10000 + index))" "${revision}" "${digest}"
 done
 verify_admin_mtls "$((25000 + RANDOM % 10000))"
+
+# A Pod with a valid mounted immutable configuration but a different assigned
+# digest must keep its process/health listener available while never becoming
+# Ready. Keep the standalone fixture outside the workload selector so it cannot
+# affect controller convergence, Service endpoints, or the PDB.
+stale_pod="stale-config-${run_id}"
+stale_digest="1111111111111111111111111111111111111111111111111111111111111111"
+kube -n "${namespace}" get deployment "${workload_name}" -o json \
+  | jq --arg pod "${stale_pod}" --arg revision "${revision}" --arg digest "${stale_digest}" '
+      {
+        apiVersion: "v1",
+        kind: "Pod",
+        metadata: {
+          name: $pod,
+          labels: {"oxibelt.dev/test": "stale-config"},
+          annotations: (.spec.template.metadata.annotations + {
+            "oxibelt.dev/config-revision": $revision,
+            "oxibelt.dev/config-digest": $digest
+          })
+        },
+        spec: (.spec.template.spec
+          | .restartPolicy = "Never"
+          | .terminationGracePeriodSeconds = 1)
+      }
+    ' \
+  | kube -n "${namespace}" create -f - >/dev/null
+wait_for "a running but unready stale-config Pod" 60 \
+  stale_config_pod_is_running_and_unready "${stale_pod}"
+check_stale_config_pod "${stale_pod}" "$((23000 + RANDOM % 10000))"
 
 echo "Kubernetes immutable three-replica rollout passed"
