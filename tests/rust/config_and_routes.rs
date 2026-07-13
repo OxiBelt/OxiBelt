@@ -153,6 +153,101 @@ fn edge_secure_medium_profile_rejects_missing_waf_enablement_and_weaker_limits()
 }
 
 #[test]
+fn edge_secure_medium_profile_rejects_all_address_trust_unions() {
+  let temp_dir = common::TempDir::new("edge-secure-medium-cidr-unions");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "edge-secure-medium-cidr-unions");
+  let raw = edge_secure_medium_config_toml(&cert_path, &key_path);
+
+  let cases = [
+    (
+      "proxy.real_ip.trusted_proxies",
+      r#"
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["128.0.0.0/1", "0.0.0.0/1"]
+fail_on_untrusted_forwarded_headers = true
+"#,
+    ),
+    (
+      "proxy.real_ip.trusted_proxies",
+      r#"
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["::/1", "8000::/1"]
+fail_on_untrusted_forwarded_headers = true
+"#,
+    ),
+    (
+      "listeners.proxy_protocol.trusted_sources",
+      r#"
+[listeners.proxy_protocol]
+enabled = true
+trusted_sources = ["128.0.0.0/1", "0.0.0.0/1"]
+"#,
+    ),
+    (
+      "listeners.proxy_protocol.trusted_sources",
+      r#"
+[listeners.proxy_protocol]
+enabled = true
+trusted_sources = ["::/1", "8000::/1"]
+"#,
+    ),
+    (
+      "proxy.real_ip.trusted_proxies",
+      r#"
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["0.0.0.0/0"]
+fail_on_untrusted_forwarded_headers = true
+"#,
+    ),
+    (
+      "listeners.proxy_protocol.trusted_sources",
+      r#"
+[listeners.proxy_protocol]
+enabled = true
+trusted_sources = ["::/0"]
+"#,
+    ),
+  ];
+
+  for (field, fragment) in cases {
+    let config: Config =
+      toml::from_str(&format!("{raw}\n{fragment}")).expect("profile config should parse");
+    let error = config
+      .validate()
+      .expect_err("profile should reject all-address trust unions");
+    assert!(
+      error.to_string().contains(field),
+      "unexpected error: {error}"
+    );
+    assert!(
+      error.to_string().contains("forbids all-address trust"),
+      "unexpected error: {error}"
+    );
+  }
+
+  let bounded: Config = toml::from_str(&format!(
+    r#"{raw}
+[proxy.real_ip]
+enabled = true
+trusted_proxies = ["10.0.0.0/9", "10.128.0.0/9", "2001:db8::/32"]
+fail_on_untrusted_forwarded_headers = true
+
+[listeners.proxy_protocol]
+enabled = true
+trusted_sources = ["192.0.2.0/24", "2001:db8:1::/48"]
+"#
+  ))
+  .expect("bounded profile config should parse");
+  bounded
+    .validate()
+    .expect("bounded trusted CIDR allowlists should remain valid");
+}
+
+#[test]
 fn edge_secure_medium_profile_allows_monitor_rollout_and_tighter_limits() {
   let temp_dir = common::TempDir::new("edge-secure-medium-monitor");
   let (cert_path, key_path) =

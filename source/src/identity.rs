@@ -89,6 +89,67 @@ impl Cidr {
   }
 }
 
+/// Returns whether the CIDRs cover every address in either IP family.
+pub(crate) fn cidrs_cover_entire_address_family(cidrs: &[Cidr]) -> bool {
+  let mut ipv4_ranges = Vec::new();
+  let mut ipv6_ranges = Vec::new();
+
+  for cidr in cidrs {
+    match cidr.network {
+      IpAddr::V4(network) => {
+        let start = u128::from(u32::from(network));
+        let host_mask = match cidr.prefix {
+          0 => u32::MAX,
+          32 => 0,
+          prefix => u32::MAX >> prefix,
+        };
+        ipv4_ranges.push((start, start | u128::from(host_mask)));
+      }
+      IpAddr::V6(network) => {
+        let start = u128::from(network);
+        let host_mask = match cidr.prefix {
+          0 => u128::MAX,
+          128 => 0,
+          prefix => u128::MAX >> prefix,
+        };
+        ipv6_ranges.push((start, start | host_mask));
+      }
+    }
+  }
+
+  ranges_cover_entire_address_family(&mut ipv4_ranges, u128::from(u32::MAX))
+    || ranges_cover_entire_address_family(&mut ipv6_ranges, u128::MAX)
+}
+
+fn ranges_cover_entire_address_family(ranges: &mut [(u128, u128)], maximum: u128) -> bool {
+  ranges.sort_unstable_by_key(|(start, _)| *start);
+
+  let mut covered_end = None;
+  for (start, end) in ranges.iter().copied() {
+    let Some(current_end) = covered_end else {
+      if start != 0 {
+        return false;
+      }
+      covered_end = Some(end);
+      if end == maximum {
+        return true;
+      }
+      continue;
+    };
+
+    if start > current_end.saturating_add(1) {
+      return false;
+    }
+    let end = current_end.max(end);
+    if end == maximum {
+      return true;
+    }
+    covered_end = Some(end);
+  }
+
+  false
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustedCidrs {
   cidrs: Vec<Cidr>,
@@ -244,6 +305,32 @@ mod tests {
   }
 
   #[test]
+  fn cidr_unions_detect_complete_address_families() {
+    assert!(cidrs_cover_all(&["0.0.0.0/0"]));
+    assert!(cidrs_cover_all(&["::/0"]));
+    assert!(cidrs_cover_all(&["128.0.0.0/1", "0.0.0.0/1"]));
+    assert!(cidrs_cover_all(&["::/1", "8000::/1"]));
+    assert!(cidrs_cover_all(&[
+      "0.0.0.0/2",
+      "64.0.0.0/2",
+      "128.0.0.0/2",
+      "192.0.0.0/2",
+    ]));
+    assert!(cidrs_cover_all(&["128.0.0.0/1", "0.0.0.0/1", "0.0.0.0/2",]));
+  }
+
+  #[test]
+  fn cidr_unions_keep_incomplete_address_families_allowed() {
+    assert!(!cidrs_cover_all(&["10.0.0.0/9", "10.128.0.0/9"]));
+    assert!(!cidrs_cover_all(&[
+      "0.0.0.0/2",
+      "64.0.0.0/2",
+      "128.0.0.0/2",
+    ]));
+    assert!(!cidrs_cover_all(&["0.0.0.0/1", "8000::/1"]));
+  }
+
+  #[test]
   fn x_forwarded_for_recursive_selects_last_untrusted() {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -257,5 +344,13 @@ mod tests {
     };
     let addr = resolve_client_addr(&headers, "10.0.0.1:443".parse().unwrap(), &config).unwrap();
     assert_eq!(addr.ip(), "198.51.100.7".parse::<IpAddr>().unwrap());
+  }
+
+  fn cidrs_cover_all(values: &[&str]) -> bool {
+    let cidrs = values
+      .iter()
+      .map(|value| Cidr::parse(value).unwrap())
+      .collect::<Vec<_>>();
+    cidrs_cover_entire_address_family(&cidrs)
   }
 }

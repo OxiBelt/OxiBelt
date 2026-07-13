@@ -491,12 +491,14 @@ fn validate_trusted_cidrs(field: &str, values: &[String]) -> anyhow::Result<()> 
   if values.is_empty() {
     bail!("edge-secure-medium v1 requires {field} to be explicit and nonempty");
   }
-  for value in values {
-    let cidr = crate::identity::Cidr::parse(value)
-      .with_context(|| format!("invalid {field} entry {value}"))?;
-    if cidr.prefix() == 0 {
-      bail!("edge-secure-medium v1 forbids all-address trust in {field}");
-    }
+  let cidrs = values
+    .iter()
+    .map(|value| {
+      crate::identity::Cidr::parse(value).with_context(|| format!("invalid {field} entry {value}"))
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
+  if crate::identity::cidrs_cover_entire_address_family(&cidrs) {
+    bail!("edge-secure-medium v1 forbids all-address trust in {field}");
   }
   Ok(())
 }
