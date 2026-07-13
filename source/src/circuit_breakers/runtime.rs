@@ -546,6 +546,7 @@ impl CircuitBreakerRuntime {
     let mut waiter = QueuedWaiter::new(self.clone());
     loop {
       let notified = self.notify.notified();
+      let mut wake_waiters = false;
       let admission = {
         let mut state = self
           .state
@@ -561,42 +562,60 @@ impl CircuitBreakerRuntime {
           .ticket()
           .is_some_and(|ticket| state.waiters.is_head(ticket));
         if (waiter.ticket().is_none() && state.waiters.is_empty(&queue_key)) || is_head {
-          match state.circuit_available(&allocations, Instant::now()) {
-            Ok(()) if state.can_admit(&allocations) => {
-              match state.circuit_admission(&allocations, Instant::now()) {
-                Ok(probes) => {
-                  if let Some(ticket) = waiter.take()
-                    && let Some(waiter) = state.remove_waiter(ticket)
-                  {
-                    state.queue_waits = state.queue_waits.saturating_add(1);
-                    state.queue_wait_ms = state
-                      .queue_wait_ms
-                      .saturating_add(elapsed_ms(waiter.queued_at));
+          let now = Instant::now();
+          match state.circuit_available(&allocations, now) {
+            Ok(()) => {
+              let selected = state
+                .waiters
+                .oldest_admissible_overlap(&queue_key, |candidate| {
+                  state.circuit_available(candidate, now).is_ok() && state.can_admit(candidate)
+                });
+              let selected_for_caller = waiter.ticket().map_or_else(
+                || selected.is_none(),
+                |ticket| selected == Some(ticket.id()),
+              );
+              if selected_for_caller && state.can_admit(&allocations) {
+                match state.circuit_admission(&allocations, now) {
+                  Ok(probes) => {
+                    if let Some(ticket) = waiter.take()
+                      && let Some(queued) = state.remove_waiter(ticket)
+                    {
+                      wake_waiters = true;
+                      state.queue_waits = state.queue_waits.saturating_add(1);
+                      state.queue_wait_ms = state
+                        .queue_wait_ms
+                        .saturating_add(elapsed_ms(queued.queued_at));
+                    }
+                    state.record_attempt(&allocations);
+                    state.increment_active(&allocations);
+                    Some(Ok(AdmissionLease::enabled(
+                      self.clone(),
+                      allocations.clone(),
+                      probes,
+                    )))
                   }
-                  state.record_attempt(&allocations);
-                  state.increment_active(&allocations);
-                  Some(Ok(AdmissionLease::enabled(
-                    self.clone(),
-                    allocations.clone(),
-                    probes,
-                  )))
-                }
-                Err(retry_after) => {
-                  if let Some(ticket) = waiter.take() {
-                    state.remove_waiter(ticket);
+                  Err(retry_after) => {
+                    if let Some(ticket) = waiter.take()
+                      && state.remove_waiter(ticket).is_some()
+                    {
+                      wake_waiters = true;
+                    }
+                    state.reject(AdmissionRejectionReason::CircuitOpen);
+                    Some(Err(AdmissionRejection {
+                      reason: AdmissionRejectionReason::CircuitOpen,
+                      retry_after,
+                    }))
                   }
-                  state.reject(AdmissionRejectionReason::CircuitOpen);
-                  Some(Err(AdmissionRejection {
-                    reason: AdmissionRejectionReason::CircuitOpen,
-                    retry_after,
-                  }))
                 }
+              } else {
+                None
               }
             }
-            Ok(()) => None,
             Err(retry_after) => {
-              if let Some(ticket) = waiter.take() {
-                state.remove_waiter(ticket);
+              if let Some(ticket) = waiter.take()
+                && state.remove_waiter(ticket).is_some()
+              {
+                wake_waiters = true;
               }
               state.reject(AdmissionRejectionReason::CircuitOpen);
               Some(Err(AdmissionRejection {
@@ -609,6 +628,9 @@ impl CircuitBreakerRuntime {
           None
         }
       };
+      if wake_waiters {
+        self.notify.notify_waiters();
+      }
       if let Some(result) = admission {
         return result;
       }

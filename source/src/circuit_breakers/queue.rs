@@ -30,6 +30,10 @@ impl QueueKey {
     });
     Self(entries)
   }
+
+  fn overlaps(&self, other: &Self) -> bool {
+    self.0.iter().any(|allocation| other.0.contains(allocation))
+  }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -54,6 +58,10 @@ impl WaiterTicket {
   pub(super) fn queued_at(&self) -> Instant {
     self.queued_at
   }
+
+  pub(super) const fn id(&self) -> u64 {
+    self.id
+  }
 }
 
 /// FIFO queues partitioned by the complete resource allocation domain.
@@ -73,6 +81,25 @@ impl AdmissionQueues {
       .get(&ticket.key)
       .and_then(VecDeque::front)
       .is_some_and(|waiter| waiter.id == ticket.id)
+  }
+
+  /// Returns the oldest eligible head that shares a resource with `key`.
+  pub(super) fn oldest_admissible_overlap<F>(
+    &self,
+    key: &QueueKey,
+    mut admissible: F,
+  ) -> Option<u64>
+  where
+    F: FnMut(&[Allocation]) -> bool,
+  {
+    self
+      .lanes
+      .iter()
+      .filter(|(candidate_key, _)| key.overlaps(candidate_key))
+      .filter_map(|(_, lane)| lane.front())
+      .filter(|waiter| admissible(&waiter.allocations))
+      .min_by_key(|waiter| (waiter.queued_at, waiter.id))
+      .map(|waiter| waiter.id)
   }
 
   pub(super) fn push(&mut self, ticket: &WaiterTicket, waiter: Waiter) {
