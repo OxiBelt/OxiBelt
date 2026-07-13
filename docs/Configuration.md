@@ -311,6 +311,11 @@ tls:
 quic:
   hostKeySecretName: oxibelt-quic-host-key
   hostKeySecretKey: quic-host-key.b64
+networkPolicy:
+  enabled: true
+  ingress:
+    public:
+      allowAll: true
 ```
 
 The preset renders the top-level selector, public TLS SNI enforcement, and a
@@ -324,9 +329,15 @@ text with `openssl rand -base64 64 > quic-host-key.b64`, then use
 The file projection must contain that base64 text (which decodes to exactly 64
 random bytes); a Kubernetes `data:` field therefore requires one additional
 base64 encoding, while `stringData:` may contain the text directly. The preset keeps
-the Admin Service absent; it does not claim NetworkPolicy, ServiceAccount-token
-hardening, topology/PDB lifecycle, certificate-to-IPM identity binding, general
-mutation idempotency, stronger audit guarantees, image provenance, or release
+the Admin Service absent and enables the chart's portable NetworkPolicy
+baseline. It permits only the public named ports plus the configured Prometheus
+identity, permits DNS to the configured resolver peers, and deliberately leaves
+Admin peers and non-DNS egress empty. Add explicit destinations before enabling
+runtime features that need upstream, shared-state, revocation, Kubernetes API,
+or external-dependency traffic; policy enforcement also requires a compatible
+cluster CNI. The preset does not claim ServiceAccount-token hardening,
+topology/PDB lifecycle, certificate-to-IPM identity binding, general mutation
+idempotency, stronger audit guarantees, image provenance, or release
 attestations. Those remain separate P1/P2 work.
 
 ## Includes

@@ -106,6 +106,8 @@ assert_not_contains "${work_dir}/defaults.yaml" "profile = \"edge-secure-medium\
 assert_not_contains "${work_dir}/defaults.yaml" "profile_version = 1"
 assert_not_contains "${work_dir}/defaults.yaml" "quic-host-key.b64"
 assert_not_contains "${work_dir}/defaults.yaml" "terminationGracePeriodSeconds:"
+assert_not_contains "${work_dir}/defaults.yaml" "kind: NetworkPolicy"
+assert_not_contains "${work_dir}/defaults.yaml" "kind: CiliumNetworkPolicy"
 
 render public_tls_names \
   --set-string tls.serverNames[0]=public.example.test
@@ -128,6 +130,13 @@ assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-quic-host-ke
 assert_contains "${work_dir}/profile_enforcing.yaml" "path: quic-host-key.b64"
 assert_contains "${work_dir}/profile_enforcing.yaml" "terminationGracePeriodSeconds: 360"
 assert_not_contains "${work_dir}/profile_enforcing.yaml" "# Source: oxibelt/templates/admin-service.yaml"
+[[ "$(grep -F -c -- "kind: NetworkPolicy" "${work_dir}/profile_enforcing.yaml")" == "3" ]] \
+  || die "secure profile must render public, metrics, and egress NetworkPolicies"
+assert_not_contains "${work_dir}/profile_enforcing.yaml" "kind: CiliumNetworkPolicy"
+assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-public-ingress"
+assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-metrics-ingress"
+assert_contains "${work_dir}/profile_enforcing.yaml" "name: oxibelt-egress"
+assert_contains "${work_dir}/profile_enforcing.yaml" "app.kubernetes.io/name: prometheus"
 
 render profile_monitor -f "${profile_values}" --set-string operationalProfile.wafMode=monitor
 assert_contains "${work_dir}/profile_monitor.yaml" "mode = \"monitor\""

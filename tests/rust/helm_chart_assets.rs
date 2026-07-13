@@ -46,6 +46,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["quic"]["hostKeySecretKey"], "quic-host-key.b64");
   assert_eq!(values["lifecycle"]["terminationGracePeriodSeconds"], 0);
   assert!(values["sharedState"]["redisSecretProjections"].is_array());
+  assert_eq!(values["networkPolicy"]["enabled"], false);
+  assert_eq!(
+    values["networkPolicy"]["ingress"]["public"]["allowAll"],
+    false
+  );
+  assert!(values["networkPolicy"]["egress"]["destinations"].is_array());
+  assert_eq!(values["networkPolicy"]["cilium"]["enabled"], false);
+  assert!(values["networkPolicy"]["cilium"]["fqdnDestinations"].is_array());
   assert!(values["config"]["inline"].as_str().is_some_and(|inline| {
     inline.contains("[runtime.accept]\nreuse_port = true")
       && inline.contains("[quic.socket]\nreuse_port = true")
@@ -131,6 +139,21 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     schema["properties"]["quic"]["properties"]["hostKeySecretKey"]["pattern"],
     "^[A-Za-z0-9._-]+$"
   );
+  assert_eq!(
+    schema["properties"]["networkPolicy"]["properties"]["enabled"]["type"],
+    "boolean"
+  );
+  assert_eq!(
+    schema["definitions"]["networkPolicyPeer"]["oneOf"]
+      .as_array()
+      .unwrap()
+      .len(),
+    2
+  );
+  assert_eq!(
+    schema["definitions"]["ciliumFqdnDestination"]["properties"]["matchNames"]["items"]["pattern"],
+    "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+  );
 
   let admin_mtls_example = read_yaml("deploy/helm/oxibelt/examples/admin-mtls-values.yaml");
   assert_eq!(admin_mtls_example["admin"]["service"]["type"], "ClusterIP");
@@ -167,6 +190,20 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     edge_secure_medium_example["admin"]["service"]["enabled"],
     false
   );
+  assert_eq!(edge_secure_medium_example["networkPolicy"]["enabled"], true);
+  assert_eq!(
+    edge_secure_medium_example["networkPolicy"]["ingress"]["public"]["allowAll"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_example["networkPolicy"]["ingress"]["metrics"]["from"][0]["namespaceSelector"]
+      ["matchLabels"]["kubernetes.io/metadata.name"],
+    "monitoring"
+  );
+  assert_eq!(
+    edge_secure_medium_example["networkPolicy"]["cilium"]["enabled"],
+    false
+  );
 }
 
 #[test]
@@ -176,6 +213,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       .join("tests/scripts/check-helm-edge-secure-medium-profile.sh")
       .is_file(),
     "the edge-secure-medium Helm renderer check should be present"
+  );
+  assert!(
+    repo_root()
+      .join("tests/scripts/check-helm-network-policy.sh")
+      .is_file(),
+    "the NetworkPolicy Helm renderer check should be present"
   );
   let expected = [
     "templates/_helpers.tpl",
@@ -188,6 +231,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "templates/service.yaml",
     "templates/admin-service.yaml",
     "templates/metrics-service.yaml",
+    "templates/networkpolicy.yaml",
+    "templates/ciliumnetworkpolicy.yaml",
     "templates/pdb.yaml",
     "templates/hpa.yaml",
   ];
@@ -343,6 +388,10 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "oxibelt.validateOperationalProfile",
     "quic.hostKeySecretName",
     "lifecycle.terminationGracePeriodSeconds",
+    "oxibelt.validateNetworkPolicy",
+    "networkPolicy.cilium.enabled requires networkPolicy.enabled=true",
+    "kubernetes-api egress destination",
+    "oxibelt.ciliumSelectorLabels",
   ] {
     assert!(
       helpers.contains(needle),
@@ -372,6 +421,38 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   let rbac = read_repo("deploy/helm/oxibelt/templates/rbac.yaml");
   assert!(rbac.contains("endpointslices"));
   assert!(rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
+
+  let network_policy = read_repo("deploy/helm/oxibelt/templates/networkpolicy.yaml");
+  for needle in [
+    "kind: NetworkPolicy",
+    "public-ingress",
+    "metrics-ingress",
+    "admin-ingress",
+    "port\" \"http\"",
+    "port\" \"http3\"",
+    "networkPolicy.egress.destinations",
+    "policyTypes",
+  ] {
+    assert!(
+      network_policy.contains(needle),
+      "NetworkPolicy template should contain {needle}"
+    );
+  }
+
+  let cilium_network_policy = read_repo("deploy/helm/oxibelt/templates/ciliumnetworkpolicy.yaml");
+  for needle in [
+    "kind: CiliumNetworkPolicy",
+    "toFQDNs",
+    "fqdn-egress",
+    "matchPattern: \"*\"",
+    "oxibelt.ciliumSelectorLabels",
+    "networkPolicy.cilium.enabled",
+  ] {
+    assert!(
+      cilium_network_policy.contains(needle),
+      "Cilium NetworkPolicy template should contain {needle}"
+    );
+  }
 }
 
 #[test]

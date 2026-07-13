@@ -69,12 +69,14 @@ server names, trusted proxy CIDRs, QUIC host-key Secret material, IPM policy,
 and durable-audit connection details. Its projected QUIC Secret item must be
 base64 text representing exactly 64 random bytes (not raw key bytes). The Helm companion preset at
 `deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml` selects the
-same runtime profile and narrowly projects the QUIC host-key Secret; it does
-not make the chart default select a profile.
+same runtime profile, narrowly projects the QUIC host-key Secret, and enables
+the chart's opt-in NetworkPolicy baseline; it does not make the chart default
+select a profile. Operators still declare route-specific egress dependencies
+and validate enforcement with their cluster CNI.
 
 The profile is a configuration-security baseline, not an attestation that all
-medium-scale edge controls are complete. NetworkPolicy (P1-8), default
-ServiceAccount-token hardening (P1-9), complete Kubernetes topology/drain
+medium-scale edge controls are complete. Default ServiceAccount-token hardening
+(P1-9), complete Kubernetes topology/drain
 lifecycle behavior (P1-10), certificate-to-IPM identity binding (P1-12),
 general mutation idempotency (P1-13), stronger audit guarantees (P1-14), and
 build commit/provenance or release attestations (P2) remain separate work.

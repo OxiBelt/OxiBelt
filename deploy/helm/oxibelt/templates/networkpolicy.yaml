@@ -1,0 +1,114 @@
+{{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- if .Values.networkPolicy.enabled -}}
+{{- $public := .Values.networkPolicy.ingress.public -}}
+{{- $metrics := .Values.networkPolicy.ingress.metrics -}}
+{{- $admin := .Values.networkPolicy.ingress.admin -}}
+{{- $dns := .Values.networkPolicy.egress.dns -}}
+{{- $destinations := .Values.networkPolicy.egress.destinations -}}
+{{- $publicPorts := list -}}
+{{- if .Values.service.ports.http.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "http" "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.service.ports.https.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "https" "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.service.ports.http3.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "http3" "protocol" "UDP") -}}
+{{- end -}}
+{{- $publicIngress := list -}}
+{{- if and (gt (len $publicPorts) 0) (or $public.allowAll (gt (len $public.from) 0)) -}}
+{{- $publicRule := dict "ports" $publicPorts -}}
+{{- if not $public.allowAll -}}
+{{- $_ := set $publicRule "from" $public.from -}}
+{{- end -}}
+{{- $publicIngress = append $publicIngress $publicRule -}}
+{{- end -}}
+{{- $metricsIngress := list -}}
+{{- if and .Values.metrics.enabled (gt (len $metrics.from) 0) -}}
+{{- $metricsIngress = append $metricsIngress (dict "from" $metrics.from "ports" (list (dict "port" "metrics" "protocol" "TCP"))) -}}
+{{- end -}}
+{{- $adminIsLoopback := or (eq .Values.admin.bindAddress "127.0.0.1") (eq .Values.admin.bindAddress "::1") -}}
+{{- $adminExposed := and .Values.admin.enabled (not $adminIsLoopback) -}}
+{{- $adminIngress := list -}}
+{{- if and $adminExposed (gt (len $admin.from) 0) -}}
+{{- $adminIngress = append $adminIngress (dict "from" $admin.from "ports" (list (dict "port" "admin" "protocol" "TCP"))) -}}
+{{- end -}}
+{{- $egressRules := list -}}
+{{- if $dns.enabled -}}
+{{- $egressRules = append $egressRules (dict "to" $dns.to "ports" (list (dict "port" 53 "protocol" "TCP") (dict "port" 53 "protocol" "UDP"))) -}}
+{{- end -}}
+{{- range $destination := $destinations -}}
+{{- $destinationPorts := list -}}
+{{- range $port := $destination.ports -}}
+{{- $destinationPort := dict "port" $port.port "protocol" $port.protocol -}}
+{{- if hasKey $port "endPort" -}}
+{{- $_ := set $destinationPort "endPort" $port.endPort -}}
+{{- end -}}
+{{- $destinationPorts = append $destinationPorts $destinationPort -}}
+{{- end -}}
+{{- $egressRules = append $egressRules (dict "to" $destination.to "ports" $destinationPorts) -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "public-ingress") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Ingress
+  ingress:
+{{ toYaml $publicIngress | indent 4 }}
+---
+{{- if .Values.metrics.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "metrics-ingress") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Ingress
+  ingress:
+{{ toYaml $metricsIngress | indent 4 }}
+---
+{{- end }}
+{{- if $adminExposed }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "admin-ingress") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Ingress
+  ingress:
+{{ toYaml $adminIngress | indent 4 }}
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "egress") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Egress
+  egress:
+{{ toYaml $egressRules | indent 4 }}
+{{- end }}

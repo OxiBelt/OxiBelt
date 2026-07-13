@@ -154,8 +154,10 @@ It selects v1, takes public SNI names, and projects one named Secret entry for
 the stable QUIC host key without embedding any secret material. That projected
 Secret value must be the base64 text for 64 random bytes, as described in the
 configuration reference. The normal chart defaults remain unprofiled. The
-profile does not by itself provide the
-separate NetworkPolicy, ServiceAccount-token, topology/lifecycle,
+secure Helm companion enables the opt-in NetworkPolicy baseline, but operators
+must still declare every route-specific egress dependency and validate it with
+their enforcing CNI. The runtime profile itself does not provide
+ServiceAccount-token, topology/lifecycle,
 certificate-to-IPM identity, general idempotency, stronger audit, or release
 provenance work; see the configuration reference for the complete contract and
 boundaries.

@@ -116,6 +116,64 @@ The chart defaults are compatible with the release image's non-root runtime:
 - config, TLS, and OxiRule mounts read-only
 - `/var/cache/oxibelt` backed by an `emptyDir`
 
+### NetworkPolicy
+
+`networkPolicy.enabled` is deliberately `false` in the ordinary chart values
+so an existing installation does not acquire an accidental deny rule during an
+upgrade. Enable it only after mapping every intended data-plane dependency.
+The chart then selects only this release's OxiBelt Pods and renders a portable
+Kubernetes `NetworkPolicy` baseline:
+
+- public ingress is limited to the enabled named `http`, `https`, and `http3`
+  ports. Set `ingress.public.allowAll: true` for an Internet-facing edge, or
+  use nonempty `ingress.public.from` peers for a private ingress boundary.
+- metrics ingress is limited to the named `metrics` port and the explicitly
+  configured monitoring peers.
+- a non-loopback Admin listener is limited to the named `admin` port and the
+  explicitly configured management or controller peers. The chart does not
+  assume that the Gateway Controller calls Admin and adds no controller peer by
+  default.
+- egress is deny-by-default except for TCP/UDP DNS to the configured resolver
+  peers and each explicitly declared destination. A destination has a
+  reviewable category (`upstream`, `shared-state`, `revocation`,
+  `kubernetes-api`, or `external-dependency`), concrete peers, and bounded
+  TCP/UDP ports. The category documents the trust decision; it does not widen
+  the policy. Enabling chart-created Kubernetes discovery RBAC also requires a
+  `kubernetes-api` destination.
+
+The secure companion
+[`edge-secure-medium-v1-values.yaml`](../deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml)
+enables this baseline, permits the intended public named ports, and scopes
+metrics to the `monitoring` namespace's Prometheus identity. It leaves Admin
+peers and non-DNS egress empty. Before using it against a live route set, add
+each upstream, Redis/Valkey or PostgreSQL backend, OCSP/CRL responder, API
+server, and other external dependency that the selected configuration actually
+uses. An undeclared dependency is intentionally unavailable rather than
+implicitly allowed.
+
+The optional `networkPolicy.cilium` section emits a `CiliumNetworkPolicy` only
+when both it and the portable baseline are enabled. It requires an already
+installed Cilium CRD, trusted Cilium DNS-proxy endpoint selectors, and exact
+lower-case FQDNs for every extra external destination; wildcard names and
+empty selectors are rejected. The chart does not install Cilium CRDs. Keep the
+standard DNS peer and the Cilium DNS endpoint selection aligned with the
+resolver path used by the workload.
+
+Render and review the resources before rollout, including the actual Pod and
+namespace labels used by monitoring and management workloads:
+
+```sh
+helm template oxibelt deploy/helm/oxibelt \
+  -f deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml
+```
+
+NetworkPolicy enforcement is supplied by the cluster CNI, not by Kubernetes
+API validation alone. Test the policy with the production CNI and probe
+sources; installed policies selecting the same Pods can combine with this
+baseline. In particular, confirm cluster probe and DNS behavior before a
+production cutover, and keep CNI-specific host/node traffic behavior in the
+deployment review.
+
 ### Admin Listener
 
 Admin API exposure is disabled by default. Its generated listener is loopback

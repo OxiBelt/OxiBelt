@@ -952,6 +952,60 @@ jobs:
           OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS: "420"
         run: tests/scripts/run-kubernetes-immutable-rollout.sh
 
+  kubernetes-network-policy:
+    name: Kubernetes NetworkPolicy (${{ matrix.cni }})
+    runs-on: ubuntu-26.04
+    needs:
+      - test
+      - rust-advisory-checks
+      - test-riscv64-qemu
+      - fuzz-smoke
+    permissions:
+      contents: read
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        cni: [calico, cilium]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Validate Helm NetworkPolicy configuration
+        run: tests/scripts/check-helm-network-policy.sh
+
+      - name: Install kubectl
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.26.0
+          kubectl_version: v1.31.4
+          install_only: true
+
+      - name: Install Minikube
+        env:
+          MINIKUBE_VERSION: v1.38.1
+          MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e
+        run: |
+          minikube_dir="${RUNNER_TEMP}/minikube"
+          mkdir -p "${minikube_dir}/bin"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://github.com/kubernetes/minikube/releases/download/${MINIKUBE_VERSION}/minikube-linux-amd64" \
+            --output "${minikube_dir}/minikube"
+          printf '%s  %s\n' "${MINIKUBE_SHA256}" "${minikube_dir}/minikube" | sha256sum --check --status
+          install -m 0755 "${minikube_dir}/minikube" "${minikube_dir}/bin/minikube"
+          echo "${minikube_dir}/bin" >> "${GITHUB_PATH}"
+
+      - name: Run Kubernetes NetworkPolicy integration
+        env:
+          OXIBELT_NETWORK_POLICY_TIMEOUT_SECONDS: "600"
+        run: tests/scripts/run-kubernetes-network-policy.sh --cni "${{ matrix.cni }}"
+
   docker-integration-config-runtime:
     name: Docker integration config-runtime (${{ matrix.name }})
     runs-on: ubuntu-26.04

@@ -1,0 +1,38 @@
+{{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.cilium.enabled }}
+{{- $cilium := .Values.networkPolicy.cilium -}}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "fqdn-egress") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+{{ include "oxibelt.ciliumSelectorLabels" . | indent 6 }}
+  egress:
+  # DNS proxy visibility is intentionally scoped to trusted configured DNS
+  # endpoints. Exact FQDN connection rules below remain the egress authority.
+  - toEndpoints:
+{{ toYaml $cilium.dns.toEndpoints | indent 6 }}
+    toPorts:
+    - ports:
+      - port: "53"
+        protocol: ANY
+      rules:
+        dns:
+        - matchPattern: "*"
+{{ range $destination := $cilium.fqdnDestinations }}
+  - toFQDNs:
+{{ range $matchName := $destination.matchNames }}
+    - matchName: {{ $matchName | quote }}
+{{ end }}
+    toPorts:
+    - ports:
+{{ range $port := $destination.ports }}
+      - port: {{ toString $port.port | quote }}
+        protocol: {{ $port.protocol }}
+{{ end }}
+{{ end }}
+{{- end }}

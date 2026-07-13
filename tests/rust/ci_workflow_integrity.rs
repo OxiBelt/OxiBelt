@@ -399,6 +399,11 @@ fn kubernetes_immutable_rollout_script_text() -> String {
     .expect("Kubernetes immutable rollout script should be readable")
 }
 
+fn kubernetes_network_policy_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-network-policy.sh"))
+    .expect("Kubernetes NetworkPolicy script should be readable")
+}
+
 fn oxibelt_main_text() -> String {
   fs::read_to_string(repo_root().join("source/src/main.rs"))
     .expect("OxiBelt binary main should be readable")
@@ -711,6 +716,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "docker-external-benchmark-image",
     "docker-integration-helper-images",
     "kubernetes-immutable-rollout",
+    "kubernetes-network-policy",
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
     "docker-image-trivy-scan",
@@ -934,6 +940,7 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
     "docker-integration-helper-images",
+    "kubernetes-network-policy",
   ] {
     let job = jobs
       .get(job_id)
@@ -1041,6 +1048,98 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     assert!(
       !script.contains(forbidden),
       "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-network-policy")
+    .expect("workflow should define the Kubernetes NetworkPolicy job");
+  let job_text = workflow_job_text(&workflow, "kubernetes-network-policy");
+  let script = kubernetes_network_policy_script_text();
+
+  assert_eq!(
+    job.needs,
+    expected_needs(PRIMARY_RUST_GATE_NEEDS),
+    "the NetworkPolicy job should wait for all primary Rust and advisory gates"
+  );
+  for expected in [
+    "name: Kubernetes NetworkPolicy (${{ matrix.cni }})",
+    "runs-on: ubuntu-26.04",
+    "contents: read",
+    "timeout-minutes: 35",
+    "cni: [calico, cilium]",
+    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "version: v3.16.4",
+    "name: Validate Helm NetworkPolicy configuration",
+    "tests/scripts/check-helm-network-policy.sh",
+    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    "kubectl_version: v1.31.4",
+    "install_only: true",
+    "MINIKUBE_VERSION: v1.38.1",
+    "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
+    "sha256sum --check --status",
+    "tests/scripts/run-kubernetes-network-policy.sh --cni \"${{ matrix.cni }}\"",
+    "OXIBELT_NETWORK_POLICY_TIMEOUT_SECONDS: \"600\"",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Kubernetes NetworkPolicy CI job should include {expected}"
+    );
+  }
+
+  for expected in [
+    "usage: $0 --cni <calico|cilium>",
+    "--driver=docker",
+    "--container-runtime=containerd",
+    "--cni=\"${cni}\"",
+    "--kubernetes-version=v1.31.4",
+    "--output=json",
+    "--wait-timeout=\"${timeout_seconds}s\"",
+    "'\"name=rootless\"'",
+    "minikube_root_compatibility=(--force)",
+    "minikube-start.log",
+    "Minikube did not start with the requested ${cni} CNI",
+    "--show-only templates/networkpolicy.yaml",
+    "--show-only templates/ciliumnetworkpolicy.yaml",
+    "expect_denied \"public source reaching metrics\"",
+    "expect_denied \"public source reaching Admin\"",
+    "expect_allowed \"declared data-plane upstream egress\"",
+    "expect_denied \"arbitrary cluster Service egress\"",
+    "expect_allowed \"exact Cilium FQDN egress\"",
+    "expect_denied \"undeclared Cilium FQDN egress\"",
+    "--read-only",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--label \"oxibelt.network-policy-test=${run_id}\"",
+    "registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:",
+    "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
+    "registry.k8s.io/coredns/coredns:v1.14.2@sha256:",
+    "minikube delete --profile \"${profile_name}\"",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Kubernetes NetworkPolicy script should preserve {expected}"
+    );
+  }
+
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "docker network prune",
+    "kubectl delete --all",
+    "kubectl delete namespace --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Kubernetes NetworkPolicy script must not contain unsafe or secret-disclosing operation {forbidden}"
     );
   }
 }

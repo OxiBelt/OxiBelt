@@ -15,6 +15,11 @@ app.kubernetes.io/name: {{ include "oxibelt.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "oxibelt.ciliumSelectorLabels" -}}
+k8s:app.kubernetes.io/name: {{ include "oxibelt.name" . }}
+k8s:app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
 {{- define "oxibelt.labels" -}}
 {{ include "oxibelt.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -406,6 +411,305 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if eq .Values.workload.kind "Deployment" -}}
 {{- if le (int .Values.workload.deployment.progressDeadlineSeconds) (int .Values.workload.deployment.minReadySeconds) -}}
 {{- fail "workload.deployment.progressDeadlineSeconds must be greater than workload.deployment.minReadySeconds" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicyLabelSelector" -}}
+{{- $selector := .selector -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $selector) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- if not (hasKey $selector "matchLabels") -}}
+{{- fail (printf "%s.matchLabels is required" $field) -}}
+{{- end -}}
+{{- $labels := $selector.matchLabels -}}
+{{- if or (not (kindIs "map" $labels)) (eq (len $labels) 0) -}}
+{{- fail (printf "%s.matchLabels must contain at least one label" $field) -}}
+{{- end -}}
+{{- range $key, $value := $labels -}}
+{{- if or (not (kindIs "string" $key)) (not $key) (not (kindIs "string" $value)) (not $value) -}}
+{{- fail (printf "%s.matchLabels must contain nonempty string keys and values" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicyPeer" -}}
+{{- $peer := .peer -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $peer) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- $hasIpBlock := hasKey $peer "ipBlock" -}}
+{{- $hasNamespaceSelector := hasKey $peer "namespaceSelector" -}}
+{{- $hasPodSelector := hasKey $peer "podSelector" -}}
+{{- if and $hasIpBlock (or $hasNamespaceSelector $hasPodSelector) -}}
+{{- fail (printf "%s must use either ipBlock or namespaceSelector/podSelector" $field) -}}
+{{- end -}}
+{{- if and (not $hasIpBlock) (not $hasNamespaceSelector) (not $hasPodSelector) -}}
+{{- fail (printf "%s must declare an ipBlock, namespaceSelector, or podSelector" $field) -}}
+{{- end -}}
+{{- if $hasIpBlock -}}
+{{- $ipBlock := $peer.ipBlock -}}
+{{- if not (kindIs "map" $ipBlock) -}}
+{{- fail (printf "%s.ipBlock must be an object" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $ipBlock "cidr")) (not (kindIs "string" $ipBlock.cidr)) (not $ipBlock.cidr) -}}
+{{- fail (printf "%s.ipBlock.cidr is required" $field) -}}
+{{- end -}}
+{{- if hasKey $ipBlock "except" -}}
+{{- if not (kindIs "slice" $ipBlock.except) -}}
+{{- fail (printf "%s.ipBlock.except must be an array" $field) -}}
+{{- end -}}
+{{- range $exceptIndex, $except := $ipBlock.except -}}
+{{- if or (not (kindIs "string" $except)) (not $except) -}}
+{{- fail (printf "%s.ipBlock.except[%d] must be a nonempty CIDR" $field $exceptIndex) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- else -}}
+{{- if $hasNamespaceSelector -}}
+{{- include "oxibelt.validateNetworkPolicyLabelSelector" (dict "selector" $peer.namespaceSelector "field" (printf "%s.namespaceSelector" $field)) -}}
+{{- end -}}
+{{- if $hasPodSelector -}}
+{{- include "oxibelt.validateNetworkPolicyLabelSelector" (dict "selector" $peer.podSelector "field" (printf "%s.podSelector" $field)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicyPeers" -}}
+{{- $peers := .peers -}}
+{{- $field := .field -}}
+{{- $required := .required -}}
+{{- if not (kindIs "slice" $peers) -}}
+{{- fail (printf "%s must be an array" $field) -}}
+{{- end -}}
+{{- if and $required (eq (len $peers) 0) -}}
+{{- fail (printf "%s must contain at least one peer" $field) -}}
+{{- end -}}
+{{- range $peerIndex, $peer := $peers -}}
+{{- include "oxibelt.validateNetworkPolicyPeer" (dict "peer" $peer "field" (printf "%s[%d]" $field $peerIndex)) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicyPorts" -}}
+{{- $ports := .ports -}}
+{{- $field := .field -}}
+{{- $allowEndPort := .allowEndPort -}}
+{{- if not (kindIs "slice" $ports) -}}
+{{- fail (printf "%s must be an array" $field) -}}
+{{- end -}}
+{{- if eq (len $ports) 0 -}}
+{{- fail (printf "%s must contain at least one port" $field) -}}
+{{- end -}}
+{{- range $portIndex, $port := $ports -}}
+{{- $portField := printf "%s[%d]" $field $portIndex -}}
+{{- if not (kindIs "map" $port) -}}
+{{- fail (printf "%s must be an object" $portField) -}}
+{{- end -}}
+{{- if not (hasKey $port "port") -}}
+{{- fail (printf "%s.port is required" $portField) -}}
+{{- end -}}
+{{- $portText := toString $port.port -}}
+{{- if not (regexMatch "^[0-9]+$" $portText) -}}
+{{- fail (printf "%s.port must be a numeric port" $portField) -}}
+{{- end -}}
+{{- $portNumber := int $port.port -}}
+{{- if or (lt $portNumber 1) (gt $portNumber 65535) -}}
+{{- fail (printf "%s.port must be between 1 and 65535" $portField) -}}
+{{- end -}}
+{{- if or (not (hasKey $port "protocol")) (not (kindIs "string" $port.protocol)) (not (has $port.protocol (list "TCP" "UDP"))) -}}
+{{- fail (printf "%s.protocol must be TCP or UDP" $portField) -}}
+{{- end -}}
+{{- if hasKey $port "endPort" -}}
+{{- if not $allowEndPort -}}
+{{- fail (printf "%s.endPort is not supported for Cilium FQDN destinations" $portField) -}}
+{{- end -}}
+{{- $endPortText := toString $port.endPort -}}
+{{- if not (regexMatch "^[0-9]+$" $endPortText) -}}
+{{- fail (printf "%s.endPort must be a numeric port" $portField) -}}
+{{- end -}}
+{{- $endPortNumber := int $port.endPort -}}
+{{- if or (lt $endPortNumber 1) (gt $endPortNumber 65535) (lt $endPortNumber $portNumber) -}}
+{{- fail (printf "%s.endPort must be between port and 65535" $portField) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicyDestination" -}}
+{{- $destination := .destination -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $destination) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $destination "name")) (not (kindIs "string" $destination.name)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $destination.name)) (gt (len $destination.name) 63) -}}
+{{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "revocation" "kubernetes-api" "external-dependency"))) -}}
+{{- fail (printf "%s.category must be upstream, shared-state, revocation, kubernetes-api, or external-dependency" $field) -}}
+{{- end -}}
+{{- if not (hasKey $destination "to") -}}
+{{- fail (printf "%s.to is required" $field) -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPeers" (dict "peers" $destination.to "field" (printf "%s.to" $field) "required" true) -}}
+{{- if not (hasKey $destination "ports") -}}
+{{- fail (printf "%s.ports is required" $field) -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPorts" (dict "ports" $destination.ports "field" (printf "%s.ports" $field) "allowEndPort" true) -}}
+{{- end -}}
+
+{{- define "oxibelt.validateCiliumFqdnDestination" -}}
+{{- $destination := .destination -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $destination) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $destination "name")) (not (kindIs "string" $destination.name)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $destination.name)) (gt (len $destination.name) 63) -}}
+{{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "revocation" "kubernetes-api" "external-dependency"))) -}}
+{{- fail (printf "%s.category must be upstream, shared-state, revocation, kubernetes-api, or external-dependency" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $destination "matchNames")) (not (kindIs "slice" $destination.matchNames)) (eq (len $destination.matchNames) 0) -}}
+{{- fail (printf "%s.matchNames must contain at least one exact DNS name" $field) -}}
+{{- end -}}
+{{- $seenNames := dict -}}
+{{- range $nameIndex, $matchName := $destination.matchNames -}}
+{{- if or (not (kindIs "string" $matchName)) (gt (len $matchName) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?([.][a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" $matchName)) (ne $matchName (lower $matchName)) -}}
+{{- fail (printf "%s.matchNames[%d] must be a lower-case exact DNS name without wildcards" $field $nameIndex) -}}
+{{- end -}}
+{{- if hasKey $seenNames $matchName -}}
+{{- fail (printf "%s.matchNames must not contain duplicate DNS names" $field) -}}
+{{- end -}}
+{{- $_ := set $seenNames $matchName true -}}
+{{- end -}}
+{{- if not (hasKey $destination "ports") -}}
+{{- fail (printf "%s.ports is required" $field) -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPorts" (dict "ports" $destination.ports "field" (printf "%s.ports" $field) "allowEndPort" false) -}}
+{{- end -}}
+
+{{- define "oxibelt.networkPolicyName" -}}
+{{- $suffix := .suffix -}}
+{{- $baseLength := int (sub 63 (add (len $suffix) 1)) -}}
+{{- $base := include "oxibelt.name" .root | trunc $baseLength | trimSuffix "-" -}}
+{{- printf "%s-%s" $base $suffix -}}
+{{- end -}}
+
+{{- define "oxibelt.validateNetworkPolicy" -}}
+{{- $networkPolicy := .Values.networkPolicy -}}
+{{- if not (kindIs "map" $networkPolicy) -}}
+{{- fail "networkPolicy must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $networkPolicy "enabled")) (not (kindIs "bool" $networkPolicy.enabled)) -}}
+{{- fail "networkPolicy.enabled must be a boolean" -}}
+{{- end -}}
+{{- $cilium := $networkPolicy.cilium -}}
+{{- if not (kindIs "map" $cilium) -}}
+{{- fail "networkPolicy.cilium must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $cilium "enabled")) (not (kindIs "bool" $cilium.enabled)) -}}
+{{- fail "networkPolicy.cilium.enabled must be a boolean" -}}
+{{- end -}}
+{{- if and $cilium.enabled (not $networkPolicy.enabled) -}}
+{{- fail "networkPolicy.cilium.enabled requires networkPolicy.enabled=true" -}}
+{{- end -}}
+{{- if $networkPolicy.enabled -}}
+{{- $ingress := $networkPolicy.ingress -}}
+{{- $egress := $networkPolicy.egress -}}
+{{- if not (kindIs "map" $ingress) -}}
+{{- fail "networkPolicy.ingress must be an object" -}}
+{{- end -}}
+{{- if not (kindIs "map" $egress) -}}
+{{- fail "networkPolicy.egress must be an object" -}}
+{{- end -}}
+{{- $public := $ingress.public -}}
+{{- $metrics := $ingress.metrics -}}
+{{- $admin := $ingress.admin -}}
+{{- if not (kindIs "map" $public) -}}
+{{- fail "networkPolicy.ingress.public must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $public "allowAll")) (not (kindIs "bool" $public.allowAll)) -}}
+{{- fail "networkPolicy.ingress.public.allowAll must be a boolean" -}}
+{{- end -}}
+{{- if not (hasKey $public "from") -}}
+{{- fail "networkPolicy.ingress.public.from is required" -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPeers" (dict "peers" $public.from "field" "networkPolicy.ingress.public.from" "required" false) -}}
+{{- if and $public.allowAll (gt (len $public.from) 0) -}}
+{{- fail "networkPolicy.ingress.public.allowAll cannot be combined with networkPolicy.ingress.public.from" -}}
+{{- end -}}
+{{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled -}}
+{{- if and (or $public.allowAll (gt (len $public.from) 0)) (not $hasPublicListener) -}}
+{{- fail "networkPolicy.ingress.public requires an enabled public listener" -}}
+{{- end -}}
+{{- if or (not (kindIs "map" $metrics)) (not (hasKey $metrics "from")) -}}
+{{- fail "networkPolicy.ingress.metrics.from is required" -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPeers" (dict "peers" $metrics.from "field" "networkPolicy.ingress.metrics.from" "required" false) -}}
+{{- if or (not (kindIs "map" $admin)) (not (hasKey $admin "from")) -}}
+{{- fail "networkPolicy.ingress.admin.from is required" -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPeers" (dict "peers" $admin.from "field" "networkPolicy.ingress.admin.from" "required" false) -}}
+{{- $dns := $egress.dns -}}
+{{- if not (kindIs "map" $dns) -}}
+{{- fail "networkPolicy.egress.dns must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $dns "enabled")) (not (kindIs "bool" $dns.enabled)) -}}
+{{- fail "networkPolicy.egress.dns.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (hasKey $dns "to") -}}
+{{- fail "networkPolicy.egress.dns.to is required" -}}
+{{- end -}}
+{{- include "oxibelt.validateNetworkPolicyPeers" (dict "peers" $dns.to "field" "networkPolicy.egress.dns.to" "required" $dns.enabled) -}}
+{{- if not (hasKey $egress "destinations") -}}
+{{- fail "networkPolicy.egress.destinations is required" -}}
+{{- end -}}
+{{- $destinations := $egress.destinations -}}
+{{- if not (kindIs "slice" $destinations) -}}
+{{- fail "networkPolicy.egress.destinations must be an array" -}}
+{{- end -}}
+{{- $destinationNames := dict -}}
+{{- $hasKubernetesApiDestination := false -}}
+{{- range $destinationIndex, $destination := $destinations -}}
+{{- $destinationField := printf "networkPolicy.egress.destinations[%d]" $destinationIndex -}}
+{{- include "oxibelt.validateNetworkPolicyDestination" (dict "destination" $destination "field" $destinationField) -}}
+{{- if hasKey $destinationNames $destination.name -}}
+{{- fail "networkPolicy.egress.destinations must not reuse a destination name" -}}
+{{- end -}}
+{{- $_ := set $destinationNames $destination.name true -}}
+{{- if eq $destination.category "kubernetes-api" -}}
+{{- $hasKubernetesApiDestination = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.kubernetesDiscovery.rbac.create (not $hasKubernetesApiDestination) -}}
+{{- fail "networkPolicy requires a kubernetes-api egress destination when kubernetesDiscovery.rbac.create=true" -}}
+{{- end -}}
+{{- if $cilium.enabled -}}
+{{- if not $dns.enabled -}}
+{{- fail "networkPolicy.cilium.enabled requires networkPolicy.egress.dns.enabled=true" -}}
+{{- end -}}
+{{- $ciliumDns := $cilium.dns -}}
+{{- if or (not (kindIs "map" $ciliumDns)) (not (hasKey $ciliumDns "toEndpoints")) (not (kindIs "slice" $ciliumDns.toEndpoints)) (eq (len $ciliumDns.toEndpoints) 0) -}}
+{{- fail "networkPolicy.cilium.dns.toEndpoints must contain at least one trusted DNS endpoint selector" -}}
+{{- end -}}
+{{- range $endpointIndex, $endpoint := $ciliumDns.toEndpoints -}}
+{{- include "oxibelt.validateNetworkPolicyLabelSelector" (dict "selector" $endpoint "field" (printf "networkPolicy.cilium.dns.toEndpoints[%d]" $endpointIndex)) -}}
+{{- end -}}
+{{- if or (not (hasKey $cilium "fqdnDestinations")) (not (kindIs "slice" $cilium.fqdnDestinations)) (eq (len $cilium.fqdnDestinations) 0) -}}
+{{- fail "networkPolicy.cilium.fqdnDestinations must contain at least one destination when Cilium is enabled" -}}
+{{- end -}}
+{{- $ciliumDestinationNames := dict -}}
+{{- range $destinationIndex, $destination := $cilium.fqdnDestinations -}}
+{{- $destinationField := printf "networkPolicy.cilium.fqdnDestinations[%d]" $destinationIndex -}}
+{{- include "oxibelt.validateCiliumFqdnDestination" (dict "destination" $destination "field" $destinationField) -}}
+{{- if hasKey $ciliumDestinationNames $destination.name -}}
+{{- fail "networkPolicy.cilium.fqdnDestinations must not reuse a destination name" -}}
+{{- end -}}
+{{- $_ := set $ciliumDestinationNames $destination.name true -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

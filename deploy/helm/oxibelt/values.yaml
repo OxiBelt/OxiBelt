@@ -44,6 +44,71 @@ kubernetesDiscovery:
   rbac:
     create: false
 
+# NetworkPolicy is opt-in for compatibility with existing Helm deployments.
+# When enabled, each omitted peer or destination stays denied rather than
+# widening the data-plane trust boundary. Standard Kubernetes NetworkPolicy is
+# the portable baseline; the optional Cilium section adds exact-FQDN egress for
+# external endpoints whose IPs cannot be maintained as explicit CIDRs.
+networkPolicy:
+  enabled: false
+  ingress:
+    public:
+      # An Internet-facing edge can intentionally expose only its public named
+      # ports. Otherwise, specify one or more source peers below.
+      allowAll: false
+      from: []
+    metrics:
+      # Use a namespace plus a monitoring-Pod identity in one peer when both
+      # boundaries are available.
+      from: []
+    admin:
+      # The chart never assumes that the Gateway Controller uses Admin. Add
+      # explicit management/controller peers only when the listener is used.
+      from: []
+  egress:
+    dns:
+      enabled: true
+      # Override for clusters that do not label their DNS Pods as kube-dns.
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    # Every non-DNS destination must be declared explicitly. `category` is an
+    # audit label; it does not broaden the generated policy.
+    destinations: []
+    # - name: primary-upstream
+    #   category: upstream # upstream | shared-state | revocation | kubernetes-api | external-dependency
+    #   to:
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: application
+    #     podSelector:
+    #       matchLabels:
+    #         app.kubernetes.io/name: upstream
+    #   ports:
+    #   - port: 8443
+    #     protocol: TCP
+  cilium:
+    enabled: false
+    # Cilium labels Kubernetes identities with the `k8s:` source prefix.
+    # Restrict DNS-proxy trust to the selected resolver endpoint(s).
+    dns:
+      toEndpoints:
+      - matchLabels:
+          k8s:io.kubernetes.pod.namespace: kube-system
+          k8s:k8s-app: kube-dns
+    fqdnDestinations: []
+    # - name: ocsp
+    #   category: revocation
+    #   matchNames:
+    #   - ocsp.example.com
+    #   ports:
+    #   - port: 80
+    #     protocol: TCP
+
 service:
   type: LoadBalancer
   annotations: {}

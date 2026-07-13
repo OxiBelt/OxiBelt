@@ -29,6 +29,43 @@ quic:
 lifecycle:
   terminationGracePeriodSeconds: 360
 
+# The companion preset enables the portable NetworkPolicy baseline. It exposes
+# only public listener ports to arbitrary Internet sources; monitoring and
+# egress identities remain explicit and fail closed when replaced or removed.
+networkPolicy:
+  enabled: true
+  ingress:
+    public:
+      allowAll: true
+    metrics:
+      # Replace these labels when the local monitoring deployment differs.
+      from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+    admin:
+      from: []
+  egress:
+    dns:
+      enabled: true
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    # Add every origin, shared-state backend, Kubernetes API, revocation
+    # endpoint CIDR, and other dependency required by the deployed config.
+    destinations: []
+  # Cilium FQDN policy is intentionally opt-in because the baseline chart must
+  # remain portable to any NetworkPolicy-capable CNI.
+  cilium:
+    enabled: false
+
 # Keep the Admin Service absent by default. Enabling Admin is an explicit
 # deployment decision and remains subject to chart and runtime mTLS/audit
 # validation.
