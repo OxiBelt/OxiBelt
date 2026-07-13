@@ -25,7 +25,7 @@ fn current_doctor_includes_external_probe_query() {
     kube_namespace: None,
     all_namespaces: false,
     kube_selector: None,
-    format: DoctorOutputFormat::Text,
+    format: DoctorOutputFormat::NaturalLanguage,
     fail_on: DoctorFailOn::Error,
     external_probes: vec![ExternalProbeKind::SharedState, ExternalProbeKind::Upstream],
   });
@@ -115,6 +115,32 @@ fn local_doctor_cli_conflicts_with_candidate_and_parses_options() {
     "candidate.toml",
   ]);
   assert!(conflict.is_err(), "doctor config and candidate conflict");
+}
+
+#[test]
+fn doctor_defaults_to_natural_language_and_rejects_legacy_text() {
+  let default = Cli::try_parse_from(["oxibeltctl", "doctor"])
+    .expect("doctor should use the natural-language format by default");
+  let Command::Doctor(args) = default.command else {
+    panic!("expected doctor command");
+  };
+  assert_eq!(args.format, DoctorOutputFormat::NaturalLanguage);
+
+  let explicit = Cli::try_parse_from(["oxibeltctl", "doctor", "--format", "natural-language"])
+    .expect("doctor should accept the natural-language format");
+  let Command::Doctor(args) = explicit.command else {
+    panic!("expected doctor command");
+  };
+  assert_eq!(args.format, DoctorOutputFormat::NaturalLanguage);
+
+  let legacy = Cli::try_parse_from(["oxibeltctl", "doctor", "--format", "text"])
+    .expect_err("doctor must reject the legacy text format");
+  assert!(
+    legacy
+      .to_string()
+      .contains("expected natural-language, json, or sarif"),
+    "legacy format error should list the supported doctor formats: {legacy}"
+  );
 }
 
 #[test]

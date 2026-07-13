@@ -129,7 +129,7 @@ impl FromStr for DoctorFailOn {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DoctorOutputFormat {
-  Text,
+  NaturalLanguage,
   Json,
   Sarif,
 }
@@ -139,10 +139,10 @@ impl FromStr for DoctorOutputFormat {
 
   fn from_str(value: &str) -> Result<Self, Self::Err> {
     match value {
-      "text" => Ok(Self::Text),
+      "natural-language" => Ok(Self::NaturalLanguage),
       "json" => Ok(Self::Json),
       "sarif" => Ok(Self::Sarif),
-      _ => bail!("unsupported doctor format {value}; expected text, json, or sarif"),
+      _ => bail!("unsupported doctor format {value}; expected natural-language, json, or sarif"),
     }
   }
 }
@@ -257,7 +257,7 @@ impl DiagnosticReport {
   /// Normalizes a report received from a local or older remote doctor.
   ///
   /// Older Admin endpoints did not serialize `schema_version` or finding
-  /// codes. Filling those additive fields here keeps JSON, text, and SARIF
+  /// codes. Filling those additive fields here keeps JSON, natural-language, and SARIF
   /// output usable during rolling upgrades.
   pub fn normalize(&mut self) {
     if self.schema_version == 0 {
@@ -379,7 +379,7 @@ async fn diagnose_valid_config(config: Config, options: &DoctorOptions) -> Diagn
   report.finish()
 }
 
-pub fn format_text(report: &DiagnosticReport) -> String {
+pub fn format_natural_language(report: &DiagnosticReport) -> String {
   let mut report = report.clone();
   report.normalize();
   let mut out = String::new();

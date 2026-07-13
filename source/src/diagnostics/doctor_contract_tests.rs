@@ -1,4 +1,6 @@
-use super::{DiagnosticReport, DiagnosticSeverity, checks, format_sarif, format_text, tls_checks};
+use super::{
+  DiagnosticReport, DiagnosticSeverity, checks, format_natural_language, format_sarif, tls_checks,
+};
 use crate::config::Config;
 
 mod common {
@@ -9,7 +11,7 @@ mod common {
 }
 
 #[test]
-fn public_report_contract_has_codes_schema_text_and_sarif() {
+fn public_report_contract_has_codes_schema_natural_language_and_sarif() {
   let mut report = DiagnosticReport::new();
   report.push(
     DiagnosticSeverity::Error,
@@ -26,7 +28,7 @@ fn public_report_contract_has_codes_schema_text_and_sarif() {
   assert_eq!(json["findings"][0]["code"], "ADM-001");
   assert_eq!(json["findings"][0]["id"], "admin.public_without_mtls");
   assert!(
-    format_text(&report)
+    format_natural_language(&report)
       .contains("ERROR ADM-001: Admin API is reachable outside loopback without mTLS.")
   );
 

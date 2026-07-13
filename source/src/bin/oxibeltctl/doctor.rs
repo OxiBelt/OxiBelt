@@ -81,8 +81,8 @@ fn print_report(
   args: &DoctorArgs,
 ) -> anyhow::Result<()> {
   match args.format {
-    oxibelt::diagnostics::DoctorOutputFormat::Text => {
-      print!("{}", oxibelt::diagnostics::format_text(report));
+    oxibelt::diagnostics::DoctorOutputFormat::NaturalLanguage => {
+      print!("{}", oxibelt::diagnostics::format_natural_language(report));
     }
     oxibelt::diagnostics::DoctorOutputFormat::Json => {
       println!("{}", serde_json::to_string_pretty(report)?);

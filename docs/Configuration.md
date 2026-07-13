@@ -46,9 +46,11 @@ Run the production preflight doctor without starting listeners:
 oxibeltctl doctor --config source/config/oxibelt.toml
 ```
 
-`oxibeltctl doctor` emits a human-readable report by default and exits non-zero
-for `error` or `critical` findings. Use `--format json` or `--format sarif` for
-automation, `--fail-on critical|error|warning` to tune deploy gates, and repeat
+`oxibeltctl doctor` emits a natural-language report by default (`--format
+natural-language`) and exits non-zero for `error` or `critical` findings. The
+former `--format text` spelling is not accepted. Use `--format json` or
+`--format sarif` for automation, `--fail-on critical|error|warning` to tune
+deploy gates, and repeat
 `--external-probe shared_state|ipm_store|remote_signer|upstream|all` to run
 explicit dependency probes. Without `--external-probe`, doctor only
 loads and validates configuration plus local files, directories, and Unix

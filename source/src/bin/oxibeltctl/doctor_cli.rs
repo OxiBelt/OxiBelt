@@ -61,7 +61,7 @@ pub(crate) struct DoctorArgs {
     requires = "kubernetes"
   )]
   pub(crate) kube_selector: Option<String>,
-  #[arg(long, value_name = "FORMAT", value_parser = parse_output_format, default_value = "text")]
+  #[arg(long, value_name = "FORMAT", value_parser = parse_output_format, default_value = "natural-language")]
   pub(crate) format: DoctorOutputFormat,
   #[arg(long = "fail-on", value_name = "SEVERITY", value_parser = parse_fail_on, default_value = "error")]
   pub(crate) fail_on: DoctorFailOn,
