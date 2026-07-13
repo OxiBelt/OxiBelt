@@ -13,6 +13,8 @@ The current implementation is a production-oriented foundation: configuration is
 - Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
 - WebSocket tunneling, opt-in generic HTTP/1.1 Upgrade and CONNECT tunneling, gRPC-Web translation, and WebTransport forwarding over HTTP/3.
 - Forwarded-header normalization, trusted real-IP handling, PROXY protocol intake, TCP upstream/stream-target PROXY protocol egress, rate limits, connection limits, request limits, and bounded response cache support.
+- A compiled-in, versioned `edge-secure-medium` v1 operational profile for a
+  strict public-edge baseline, with an inspectable expanded configuration.
 - Opt-in TCP/UDP stream listeners for raw L4 forwarding to fixed targets or stream pools, with visible TLS/QUIC SNI-aware passthrough routing.
 - OxiRule request, response, and stream WAF rules for rejection, header mutation, tags, response replacement, upstream selection, Person proof challenges, structured access logs, bounded HTTP body scanning, WebSocket/WebTransport payload inspection, and optional CRS-compatible anomaly scoring.
 - Request-wide structured system access logs with OCSF or ECS JSON stdout and OTLP Logs delivery.
@@ -107,10 +109,52 @@ Argon2id PHC hash in `[[ipm.credentials]].break_glass_access_token_hash`.
 Break-glass access credentials are accepted on the Admin listener only and are
 ignored for downstream route IPM requests.
 
+### `edge-secure-medium` v1
+
+Select the built-in secure-medium profile at the top level of the main
+configuration or an included module:
+
+```toml
+profile = "edge-secure-medium"
+# Optional in source: omission is permanently pinned to version 1.
+profile_version = 1
+
+[waf]
+enabled = true
+```
+
+The profile is compiled into the binary; it is not a remote catalog and does
+not download profile content. It supplies the strict v1 baseline, but public
+server names, TLS certificate/key or remote-signer material, trusted proxy
+CIDRs, IPM/audit settings, and a stable QUIC host key when HTTP/3 is enabled
+remain deliberate operator inputs. The expanded, redacted effective output
+always materializes `profile_version = 1`:
+
+```sh
+cargo run --manifest-path source/Cargo.toml -- \
+  --config source/config/oxibelt.toml \
+  --dump-effective-config
+```
+
+For Kubernetes, start from
+[deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml](deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml).
+It selects v1, takes public SNI names, and projects one named Secret entry for
+the stable QUIC host key without embedding any secret material. That projected
+Secret value must be the base64 text for 64 random bytes, as described in the
+configuration reference. The normal chart defaults remain unprofiled. The
+profile does not by itself provide the
+separate NetworkPolicy, ServiceAccount-token, topology/lifecycle,
+certificate-to-IPM identity, general idempotency, stronger audit, or release
+provenance work; see the configuration reference for the complete contract and
+boundaries.
+
 ## Documentation
 
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
 - [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, validation, and examples.
+- [Operational-profile contract](docs/Configuration.md#operational-profiles):
+  `edge-secure-medium` v1 syntax, protected defaults, required inputs, Helm
+  companion values, and compatibility rules.
 - [Gateway API controller](docs/GatewayAPI.md): Kubernetes GatewayClass,
   Gateway, HTTPRoute, TLSRoute, ReferenceGrant, and Service translation.
 - [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.

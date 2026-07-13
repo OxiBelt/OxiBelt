@@ -3,7 +3,9 @@
 
 use anyhow::{Context, anyhow, bail};
 
-use super::{Config, ConfigPathRoots, redact_effective_toml, validate_merged_toml_shape};
+use super::{
+  Config, ConfigPathRoots, operational_profile, redact_effective_toml, validate_merged_toml_shape,
+};
 
 impl Config {
   pub fn load_admin_inline_toml(raw: &str, active: &Self) -> anyhow::Result<Self> {
@@ -27,6 +29,7 @@ impl Config {
   ) -> anyhow::Result<toml::Value> {
     let mut value: toml::Value = toml::from_str(raw).context("failed to parse inline TOML")?;
     reject_inline_include(&value)?;
+    operational_profile::apply_to_toml(&mut value)?;
     validate_merged_toml_shape(&value)?;
     let config = Self::load_admin_inline_toml(raw, active)?;
     config.validate()?;

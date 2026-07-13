@@ -4,6 +4,7 @@
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::admin_audit::AdminAuditHandle;
 use crate::diagnostics::{DoctorOptions, ExternalProbeKind};
@@ -193,7 +194,8 @@ pub(super) async fn admin_diagnostics_response(
               move |context| async move {
                 context.ensure_not_cancelled()?;
                 context.progress("collecting", None, None).await;
-                let status = admin_control.status().await;
+                let status =
+                  append_operational_profile_status(admin_control.status().await, &active.config);
                 let effective = admin_control
                   .effective_config()
                   .await
@@ -216,7 +218,7 @@ pub(super) async fn admin_diagnostics_response(
           },
         );
       }
-      let status = admin_control.status().await;
+      let status = append_operational_profile_status(admin_control.status().await, &active.config);
       let effective = admin_control
         .effective_config()
         .await
@@ -404,7 +406,8 @@ async fn enqueue_support_bundle_operation(
       move |context| async move {
         context.ensure_not_cancelled()?;
         context.progress("collecting", None, None).await;
-        let status = admin_control.status().await;
+        let status =
+          append_operational_profile_status(admin_control.status().await, &active.config);
         let effective = admin_control
           .effective_config()
           .await
@@ -421,6 +424,22 @@ async fn enqueue_support_bundle_operation(
     Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
     Err(error) => admin_operations::enqueue_error_response(error),
   }
+}
+
+fn append_operational_profile_status(
+  mut status: serde_json::Value,
+  config: &crate::config::Config,
+) -> serde_json::Value {
+  let Some(profile) = config.operational_profile.as_ref() else {
+    return status;
+  };
+  if let Some(status) = status.as_object_mut() {
+    status.insert(
+      "operational_profile".to_string(),
+      json!({ "name": profile.name(), "version": profile.version() }),
+    );
+  }
+  status
 }
 
 async fn enqueue_completed_report<T>(

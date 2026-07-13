@@ -1,0 +1,38 @@
+# `edge-secure-medium` v1 deployment preset. Create the referenced Secrets
+# separately; this file names Secret keys only and contains no key material.
+# Replace `edge.example.test` and Secret names with production values before
+# applying this preset.
+
+operationalProfile:
+  name: edge-secure-medium
+  version: 1
+  # Use `monitor` only for an explicit, temporary WAF rollout phase.
+  wafMode: enforcing
+
+tls:
+  enabled: true
+  secretName: oxibelt-public-tls
+  serverNames:
+  - edge.example.test
+
+# The mounted Secret value must be base64 text for exactly 64 random bytes.
+# `kubectl create secret generic ... --from-file=quic-host-key.b64` preserves
+# that text; a Kubernetes `data:` manifest must base64-encode the text again.
+# The chart projects only this item to `/etc/oxibelt/cert/quic-host-key.b64`.
+quic:
+  hostKeySecretName: oxibelt-quic-host-key
+  hostKeySecretKey: quic-host-key.b64
+
+# Covers the profile's 10-second readiness withdrawal, 30-second ordinary
+# drain, and 300-second long-connection drain with a small orchestration
+# margin.
+lifecycle:
+  terminationGracePeriodSeconds: 360
+
+# Keep the Admin Service absent by default. Enabling Admin is an explicit
+# deployment decision and remains subject to chart and runtime mTLS/audit
+# validation.
+admin:
+  enabled: false
+  service:
+    enabled: false

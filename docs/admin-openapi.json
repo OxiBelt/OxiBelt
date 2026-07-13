@@ -513,10 +513,10 @@
           "config"
         ],
         "operationId": "getConfigStatus",
-        "summary": "Fetch active config revision, ETag, rollback state, last operation, and immutable rollout identity.",
+        "summary": "Fetch active config revision, selected operational profile, ETag, rollback state, last operation, and immutable rollout identity.",
         "responses": {
           "200": {
-            "description": "Active configuration status with additive immutable rollout identity.",
+            "description": "Active configuration status with additive operational-profile and immutable rollout identity.",
             "headers": {
               "X-OxiBelt-Request-Id": {
                 "$ref": "#/components/headers/AdminRequestId"
@@ -533,6 +533,9 @@
                     "rollout"
                   ],
                   "properties": {
+                    "operational_profile": {
+                      "$ref": "#/components/schemas/OperationalProfileStatus"
+                    },
                     "rollout": {
                       "$ref": "#/components/schemas/ConfigRolloutStatus"
                     }
@@ -5569,6 +5572,24 @@
           },
           "draining": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OperationalProfileStatus": {
+        "description": "Built-in operational profile selected by the active configuration. This field is omitted when no profile is selected.",
+        "type": "object",
+        "required": [
+          "name",
+          "version"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
           }
         },
         "additionalProperties": false

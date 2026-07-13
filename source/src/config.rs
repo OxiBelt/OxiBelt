@@ -36,6 +36,7 @@ mod limits;
 mod listener;
 mod loader;
 mod logging;
+mod operational_profile;
 mod outbound_revocation;
 mod overload;
 mod quic;
@@ -91,6 +92,7 @@ use loader::{
   absolute_config_path, load_toml_with_includes, load_toml_with_includes_and_overrides,
 };
 pub use logging::*;
+pub use operational_profile::OperationalProfile;
 pub use outbound_revocation::*;
 pub use overload::*;
 pub(crate) use quic::RawQuicTransportConfig;
@@ -162,6 +164,7 @@ pub struct Config {
   pub webrtc_turn_listeners: Vec<WebRtcTurnListenerConfig>,
   pub routes: Vec<RouteConfig>,
   pub waf: WafConfig,
+  pub operational_profile: Option<OperationalProfile>,
   pub source_paths: ConfigSourcePaths,
   pub rollout: ConfigRolloutIdentity,
 }
@@ -290,6 +293,7 @@ impl TryFrom<RawConfig> for Config {
       webrtc_turn_listeners,
       routes: raw.routes,
       waf: raw.waf,
+      operational_profile: None,
       source_paths: ConfigSourcePaths::default(),
       rollout: ConfigRolloutIdentity::default(),
     })
@@ -302,14 +306,18 @@ impl<'de> Deserialize<'de> for Config {
     D: serde::Deserializer<'de>,
   {
     let mut value = toml::Value::deserialize(deserializer)?;
+    let operational_profile =
+      operational_profile::apply_to_toml(&mut value).map_err(serde::de::Error::custom)?;
     let diagnostics =
       lb_policy_compat::normalize_toml_from_config(&mut value).map_err(serde::de::Error::custom)?;
     lb_policy_compat::ensure_supported(&diagnostics).map_err(serde::de::Error::custom)?;
     reject_removed_access_log_config(&value).map_err(serde::de::Error::custom)?;
-    RawConfig::deserialize(value)
+    let mut config: Self = RawConfig::deserialize(value)
       .map_err(serde::de::Error::custom)?
       .try_into()
-      .map_err(serde::de::Error::custom)
+      .map_err(serde::de::Error::custom)?;
+    config.operational_profile = operational_profile;
+    Ok(config)
   }
 }
 
@@ -384,6 +392,7 @@ impl Config {
   pub fn load_effective_toml_redacted(path: &Path) -> anyhow::Result<toml::Value> {
     let loaded = load_toml_with_includes(path)?;
     let mut value = loaded.value;
+    operational_profile::apply_to_toml(&mut value)?;
     normalize_merged_lb_policy_compat(&mut value)?;
     validate_merged_toml_shape(&value)?;
     let config = Self::load(path)?;
@@ -399,6 +408,7 @@ impl Config {
   ) -> anyhow::Result<LbPolicyCompatReport> {
     let loaded = load_toml_with_includes(path)?;
     let mut value = loaded.value;
+    operational_profile::apply_to_toml(&mut value)?;
     let diagnostics = lb_policy_compat::normalize_toml_with_profile(&mut value, profile);
     let converted_toml = toml::to_string_pretty(&value)
       .with_context(|| format!("failed to render converted TOML from {}", path.display()))?;
@@ -520,6 +530,7 @@ impl Config {
   pub fn non_waf_equivalent(&self, other: &Self) -> bool {
     self.logging == other.logging
       && self.config == other.config
+      && self.operational_profile == other.operational_profile
       && self.runtime == other.runtime
       && self.rollout == other.rollout
       && self.crypto == other.crypto
@@ -1293,6 +1304,7 @@ impl Config {
     self.tls.crlite.validate()?;
     self.client_identity.validate()?;
     crate::waf::validate_config(self)?;
+    operational_profile::validate(self)?;
 
     Ok(())
   }

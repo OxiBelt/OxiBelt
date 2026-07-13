@@ -94,6 +94,18 @@ fn immutable_rollout_status_and_mutation_boundaries_are_documented() {
     rollout["$ref"], "#/components/schemas/ConfigRolloutStatus",
     "config status must expose additive immutable rollout identity"
   );
+  let operational_profile = &status["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+    ["operational_profile"];
+  assert_eq!(
+    operational_profile["$ref"], "#/components/schemas/OperationalProfileStatus",
+    "config status must expose a selected operational profile when present"
+  );
+
+  let operational_profile_schema = &spec["components"]["schemas"]["OperationalProfileStatus"];
+  assert_eq!(
+    operational_profile_schema["properties"]["version"]["minimum"],
+    1
+  );
 
   let rollout_schema = &spec["components"]["schemas"]["ConfigRolloutStatus"];
   assert_eq!(

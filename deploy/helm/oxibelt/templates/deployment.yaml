@@ -2,8 +2,10 @@
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateWorkloadRollout" . -}}
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
+{{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
+{{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- if eq .Values.workload.kind "Deployment" }}
 apiVersion: apps/v1
 kind: Deployment
@@ -54,6 +56,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
+      {{- if gt (int .Values.lifecycle.terminationGracePeriodSeconds) 0 }}
+      terminationGracePeriodSeconds: {{ .Values.lifecycle.terminationGracePeriodSeconds }}
+      {{- end }}
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
@@ -151,7 +156,7 @@ spec:
         - name: config
           mountPath: {{ .Values.config.mountPath }}
           readOnly: true
-        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections }}
+        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey }}
         - name: tls
           mountPath: {{ include "oxibelt.certMountPath" . }}
           readOnly: true
@@ -181,7 +186,7 @@ spec:
           - key: gateway-config-directory
             path: {{ .Values.configRollout.managedConfigPath | quote }}
 {{ end }}
-      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections }}
+      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey }}
       - name: tls
         projected:
           # Decimal 288 is POSIX mode 0440. Kubernetes applies the Pod fsGroup
@@ -191,6 +196,13 @@ spec:
           {{- if .Values.tls.enabled }}
           - secret:
               name: {{ required "tls.secretName is required when tls.enabled=true" .Values.tls.secretName }}
+          {{- end }}
+          {{- if $hasQuicHostKey }}
+          - secret:
+              name: {{ required "quic.hostKeySecretName is required when projecting a QUIC host key" .Values.quic.hostKeySecretName }}
+              items:
+              - key: {{ .Values.quic.hostKeySecretKey | quote }}
+                path: quic-host-key.b64
           {{- end }}
           {{- if and .Values.admin.enabled .Values.admin.tls.enabled }}
           - secret:

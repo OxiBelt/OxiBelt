@@ -63,6 +63,28 @@ fn config_status_keeps_runtime_fields_under_a_nested_rollout_object() {
   assert!(status["desired_revision"].is_null());
 }
 
+#[test]
+fn config_status_includes_the_selected_operational_profile() {
+  let temp_dir = common::TempDir::new("admin-profile-status");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-profile-status");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replacen(
+      "[logging]",
+      "profile = \"edge-secure-medium\"\n\n[logging]",
+      1,
+    )
+    .replacen("[tls]\n", "[tls]\nserver_names = [\"example.com\"]\n", 1)
+    + "\n[waf]\nenabled = true\n";
+  let config: Config = toml::from_str(&raw).expect("profile config should parse");
+  let mut status = json!({ "revision": 1 });
+
+  append_operational_profile_status(&mut status, &config);
+
+  assert_eq!(status["operational_profile"]["name"], "edge-secure-medium");
+  assert_eq!(status["operational_profile"]["version"], 1);
+}
+
 fn sync_request(
   apply: admin_control::AdminApplyMode,
   operations: Vec<admin_control::AdminFileOperation>,

@@ -37,7 +37,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["workload"]["daemonSet"]["maxUnavailable"], 1);
   assert_eq!(values["service"]["type"], "LoadBalancer");
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
+  assert_eq!(values["operationalProfile"]["name"], "");
+  assert_eq!(values["operationalProfile"]["version"], 1);
+  assert_eq!(values["operationalProfile"]["wafMode"], "enforcing");
   assert_eq!(values["tls"]["secretName"], "oxibelt-tls");
+  assert!(values["tls"]["serverNames"].is_array());
+  assert_eq!(values["quic"]["hostKeySecretName"], "");
+  assert_eq!(values["quic"]["hostKeySecretKey"], "quic-host-key.b64");
+  assert_eq!(values["lifecycle"]["terminationGracePeriodSeconds"], 0);
   assert!(values["sharedState"]["redisSecretProjections"].is_array());
   assert!(values["config"]["inline"].as_str().is_some_and(|inline| {
     inline.contains("[runtime.accept]\nreuse_port = true")
@@ -112,6 +119,18 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     schema["properties"]["admin"]["properties"]["mtls"]["properties"]["verifyDepth"]["maximum"],
     255
   );
+  assert_eq!(
+    schema["properties"]["operationalProfile"]["properties"]["name"]["enum"][1],
+    "edge-secure-medium"
+  );
+  assert_eq!(
+    schema["properties"]["operationalProfile"]["properties"]["wafMode"]["enum"][1],
+    "monitor"
+  );
+  assert_eq!(
+    schema["properties"]["quic"]["properties"]["hostKeySecretKey"]["pattern"],
+    "^[A-Za-z0-9._-]+$"
+  );
 
   let admin_mtls_example = read_yaml("deploy/helm/oxibelt/examples/admin-mtls-values.yaml");
   assert_eq!(admin_mtls_example["admin"]["service"]["type"], "ClusterIP");
@@ -121,10 +140,43 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     admin_mtls_example["admin"]["tls"]["serverNames"][0],
     "oxibelt-admin.oxibelt.svc.cluster.local"
   );
+
+  let edge_secure_medium_example =
+    read_yaml("deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml");
+  assert_eq!(
+    edge_secure_medium_example["operationalProfile"]["name"],
+    "edge-secure-medium"
+  );
+  assert_eq!(
+    edge_secure_medium_example["operationalProfile"]["version"],
+    1
+  );
+  assert_eq!(
+    edge_secure_medium_example["tls"]["serverNames"][0],
+    "edge.example.test"
+  );
+  assert_eq!(
+    edge_secure_medium_example["quic"]["hostKeySecretKey"],
+    "quic-host-key.b64"
+  );
+  assert_eq!(
+    edge_secure_medium_example["lifecycle"]["terminationGracePeriodSeconds"],
+    360
+  );
+  assert_eq!(
+    edge_secure_medium_example["admin"]["service"]["enabled"],
+    false
+  );
 }
 
 #[test]
 fn data_plane_chart_templates_cover_production_runtime_contracts() {
+  assert!(
+    repo_root()
+      .join("tests/scripts/check-helm-edge-secure-medium-profile.sh")
+      .is_file(),
+    "the edge-secure-medium Helm renderer check should be present"
+  );
   let expected = [
     "templates/_helpers.tpl",
     "templates/NOTES.txt",
@@ -160,6 +212,9 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "admin-client-ca/ca.crt",
     "sharedState.redisSecretProjections",
     "redis/%s/%s",
+    "quic.hostKeySecretName",
+    "path: quic-host-key.b64",
+    "terminationGracePeriodSeconds",
     "emptyDir: {}",
     "OXIBELT_ADMIN_TOKEN",
     "maxUnavailable: {{ .Values.workload.deployment.maxUnavailable }}",
@@ -222,6 +277,9 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "admin-client-ca/ca.crt",
     "sharedState.redisSecretProjections",
     "redis/%s/%s",
+    "quic.hostKeySecretName",
+    "path: quic-host-key.b64",
+    "terminationGracePeriodSeconds",
   ] {
     assert!(
       daemonset.contains(needle),
@@ -253,6 +311,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "gateway-config-directory",
     "gateway-config-directory: \"\"",
     "oxibelt.validateAdmin",
+    "oxibelt.validateOperationalProfile",
   ] {
     assert!(
       configmap.contains(needle),
@@ -279,6 +338,11 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "admin-server/tls.crt",
     "validateRedisSecretProjections",
     "sharedState.redisSecretProjections[].items[].path",
+    "oxibelt.operationalProfileConfig",
+    "oxibelt.operationalProfileWafConfig",
+    "oxibelt.validateOperationalProfile",
+    "quic.hostKeySecretName",
+    "lifecycle.terminationGracePeriodSeconds",
   ] {
     assert!(
       helpers.contains(needle),

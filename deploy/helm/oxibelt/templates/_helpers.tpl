@@ -33,8 +33,33 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.operationalProfileConfig" -}}
+{{- if .Values.operationalProfile.name -}}
+profile = {{ .Values.operationalProfile.name | quote }}
+profile_version = {{ .Values.operationalProfile.version }}
+{{ end -}}
+{{- end -}}
+
+{{- define "oxibelt.operationalProfileWafConfig" -}}
+{{- if .Values.operationalProfile.name }}
+[waf]
+enabled = true
+mode = {{ .Values.operationalProfile.wafMode | quote }}
+{{ end -}}
+{{- end -}}
+
+{{- define "oxibelt.publicTlsConfig" -}}
+{{- if .Values.tls.serverNames -}}
+server_names = {{ .Values.tls.serverNames | toJson }}
+require_sni = true
+reject_unknown_sni = true
+{{ end -}}
+{{- end -}}
+
 {{- define "oxibelt.generatedConfigContent" -}}
+{{- include "oxibelt.operationalProfileConfig" . -}}
 {{- tpl .Values.config.inline . -}}
+{{- include "oxibelt.operationalProfileWafConfig" . -}}
 {{- end -}}
 
 {{- define "oxibelt.certMountPath" -}}
@@ -122,6 +147,92 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validatePublicTls" -}}
+{{- if and .Values.tls.serverNames (not .Values.tls.enabled) -}}
+{{- fail "tls.serverNames requires tls.enabled=true" -}}
+{{- end -}}
+{{- $seenServerNames := dict -}}
+{{- range $serverName := .Values.tls.serverNames -}}
+{{- if not (regexMatch "^([*][.])?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?([.][A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$" $serverName) -}}
+{{- fail "tls.serverNames must contain valid DNS names or leftmost wildcards" -}}
+{{- end -}}
+{{- $normalizedServerName := lower $serverName -}}
+{{- if hasKey $seenServerNames $normalizedServerName -}}
+{{- fail "tls.serverNames must not contain duplicate names" -}}
+{{- end -}}
+{{- $_ := set $seenServerNames $normalizedServerName true -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateQuicHostKey" -}}
+{{- $secretName := .Values.quic.hostKeySecretName -}}
+{{- if $secretName -}}
+{{- if or (gt (len $secretName) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $secretName)) -}}
+{{- fail "quic.hostKeySecretName must be a safe Kubernetes Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._-]+$" .Values.quic.hostKeySecretKey) -}}
+{{- fail "quic.hostKeySecretKey must be a safe Kubernetes Secret key" -}}
+{{- end -}}
+{{- if and .Values.tls.enabled (eq $secretName .Values.tls.secretName) -}}
+{{- fail "quic.hostKeySecretName must differ from tls.secretName so the host key remains narrowly projected" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateOperationalProfile" -}}
+{{- include "oxibelt.validatePublicTls" . -}}
+{{- include "oxibelt.validateQuicHostKey" . -}}
+{{- $profile := .Values.operationalProfile -}}
+{{- $name := $profile.name -}}
+{{- $version := int $profile.version -}}
+{{- if lt $version 1 -}}
+{{- fail "operationalProfile.version must be at least 1" -}}
+{{- end -}}
+{{- if and (not $name) (ne $version 1) -}}
+{{- fail "operationalProfile.version requires a nonempty operationalProfile.name" -}}
+{{- end -}}
+{{- if $name -}}
+{{- if ne $name "edge-secure-medium" -}}
+{{- fail "operationalProfile.name must be edge-secure-medium" -}}
+{{- end -}}
+{{- if not (has $profile.wafMode (list "enforcing" "monitor")) -}}
+{{- fail "operationalProfile.wafMode must be enforcing or monitor" -}}
+{{- end -}}
+{{- if or (not .Values.config.create) .Values.config.existingConfigMap -}}
+{{- fail "operationalProfile.name requires chart-owned config.create=true with no config.existingConfigMap" -}}
+{{- end -}}
+{{- if eq $name "edge-secure-medium" -}}
+{{- if ne $version 1 -}}
+{{- fail "operationalProfile edge-secure-medium supports only version 1" -}}
+{{- end -}}
+{{- if not .Values.tls.enabled -}}
+{{- fail "operationalProfile edge-secure-medium requires tls.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.tls.secretName -}}
+{{- fail "operationalProfile edge-secure-medium requires tls.secretName" -}}
+{{- end -}}
+{{- if eq (len .Values.tls.serverNames) 0 -}}
+{{- fail "operationalProfile edge-secure-medium requires tls.serverNames" -}}
+{{- end -}}
+{{- if not .Values.quic.hostKeySecretName -}}
+{{- fail "operationalProfile edge-secure-medium requires quic.hostKeySecretName" -}}
+{{- end -}}
+{{- if not .Values.metrics.enabled -}}
+{{- fail "operationalProfile edge-secure-medium requires metrics.enabled=true" -}}
+{{- end -}}
+{{- if .Values.admin.enabled -}}
+{{- fail "operationalProfile edge-secure-medium keeps admin.enabled=false because the chart does not render the required IPM and durable audit configuration" -}}
+{{- end -}}
+{{- if .Values.admin.service.enabled -}}
+{{- fail "operationalProfile edge-secure-medium keeps admin.service.enabled=false" -}}
+{{- end -}}
+{{- if lt (int .Values.lifecycle.terminationGracePeriodSeconds) 340 -}}
+{{- fail "operationalProfile edge-secure-medium requires lifecycle.terminationGracePeriodSeconds of at least 340" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.validateConfigRollout" -}}
 {{- $mode := .Values.configRollout.mode -}}
 {{- if not (has $mode (list "helm_immutable" "kubernetes_immutable")) -}}
@@ -205,10 +316,11 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $configMountPath := trimSuffix "/" .Values.config.mountPath -}}
 {{- $expectedCertMountPath := include "oxibelt.certMountPath" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
+{{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- if or (not (hasPrefix "/" $configMountPath)) (eq $configMountPath "/") -}}
 {{- fail "config.mountPath must be an absolute non-root directory" -}}
 {{- end -}}
-{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
+{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
 {{- fail "tls.mountPath must be the cert sibling of config.mountPath" -}}
 {{- end -}}
 {{- if and $admin.service.enabled (not $admin.enabled) -}}

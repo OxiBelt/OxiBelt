@@ -2,6 +2,18 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "operationalProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["", "edge-secure-medium"]
+        },
+        "version": { "type": "integer", "minimum": 1 },
+        "wafMode": { "type": "string", "enum": ["enforcing", "monitor"] }
+      }
+    },
     "image": {
       "type": "object",
       "properties": {
@@ -35,6 +47,13 @@
       }
     },
     "replicaCount": { "type": "integer", "minimum": 1 },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
     "service": {
       "type": "object",
       "properties": {
@@ -114,7 +133,27 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "secretName": { "type": "string" },
-        "mountPath": { "type": "string", "minLength": 1 }
+        "mountPath": { "type": "string", "minLength": 1 },
+        "serverNames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "quic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostKeySecretName": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+          "maxLength": 253
+        },
+        "hostKeySecretKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$"
+        }
       }
     },
     "sharedState": {

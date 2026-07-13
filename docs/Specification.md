@@ -24,6 +24,61 @@ The implementation is optimized for:
 
 OxiBelt currently targets Rust 1.96 and uses `rustls` with the `aws-lc-rs` crypto provider. The default downstream TLS 1.3 key exchange group set enables `X25519MLKEM768`, `X25519`, `secp256r1`, and `secp384r1`; downstream TLS 1.3 and TLS 1.2 cipher suites can be restricted with `tls.1_3.ciphers` and `tls.1_2.groups`. Deployments can omit the hybrid group with `tls.1_3.key_exchange_groups` when cold-handshake CPU cost matters more than post-quantum hybrid negotiation.
 
+## Secure Operational Profile
+
+`profile = "edge-secure-medium"` selects the compiled-in v1 public-edge
+baseline. The optional `profile_version = 1` is an explicit pin; omitting it
+also selects v1 permanently rather than following a future latest version. v1
+is a compatibility contract: its defaults and protected boundaries will not be
+silently changed. The active redacted effective configuration materializes the
+version, and a change to the selected name or version is a full configuration
+change rather than an OxiRule-only reload.
+
+Profiles are not dynamically loaded. OxiBelt does not accept local profile
+files, profile URLs, remote catalogs, or unreviewed operator-defined profile
+definitions. The compiled-in catalog can add separately documented and tested
+name/version entries, but `edge-secure-medium` v1 is the only shipped
+operational profile. A configuration without `profile` retains its historical
+behavior.
+
+Expansion occurs before typed configuration validation. Built-in profile values
+are the lowest-precedence layer; explicit TOML, including includes, overrides
+them; supported runtime configuration overrides are last. Arrays replace rather
+than append. A profile-protected value can be overridden only when it preserves
+the v1 boundary. Invalid selectors and unsafe weakening are rejected even when
+unknown-field compatibility is enabled.
+
+The v1 boundary requires TLS 1.3, explicit public SNI names (with the literal
+`*` rejected) and downstream
+certificate/key or remote-signer material, strict SNI rejection, QUIC Retry,
+disabled TCP/QUIC early data, a stable explicit QUIC host key when HTTP/3 is
+enabled, finite public request/connection/stream/body limits, strict framing
+and trailer handling, overwritten forwarding metadata, and explicit trusted
+proxy CIDRs before Real-IP or PROXY protocol use. It requires source TOML to
+declare `[waf] enabled = true`; it defaults WAF to enforcing mode while allowing
+an explicit monitor-mode rollout. It also preserves fail-closed WAF behavior,
+exact/provenance-pinned rulepacks, bounded overload and circuit-breaker
+controls, detailed metrics and health endpoints, no remote plaintext
+Redis/Valkey, and an Admin listener that is disabled by default and tightly
+validated if enabled. Lifecycle defaults provide a 10-second shutdown delay,
+a 30-second ordinary drain, and a 300-second long-connection close delay.
+
+This baseline intentionally does not invent credentials or infrastructure
+policy. Operators supply certificates, key/signer material, trust roots,
+server names, trusted proxy CIDRs, QUIC host-key Secret material, IPM policy,
+and durable-audit connection details. Its projected QUIC Secret item must be
+base64 text representing exactly 64 random bytes (not raw key bytes). The Helm companion preset at
+`deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml` selects the
+same runtime profile and narrowly projects the QUIC host-key Secret; it does
+not make the chart default select a profile.
+
+The profile is a configuration-security baseline, not an attestation that all
+medium-scale edge controls are complete. NetworkPolicy (P1-8), default
+ServiceAccount-token hardening (P1-9), complete Kubernetes topology/drain
+lifecycle behavior (P1-10), certificate-to-IPM identity binding (P1-12),
+general mutation idempotency (P1-13), stronger audit guarantees (P1-14), and
+build commit/provenance or release attestations (P2) remain separate work.
+
 ## Request Pipeline
 
 At a high level, each HTTP transaction follows this order:
@@ -228,8 +283,8 @@ Lifecycle endpoints are:
 - `GET /admin/v1/openapi.json`: requires `admin:ReadMetadata` on `metadata/openapi`, returns the canonical OpenAPI 3.1 Admin API contract from `docs/admin-openapi.json`.
 - `GET /admin/v1/capabilities`: requires `admin:ReadMetadata` on `metadata/capabilities`, returns API version, package version, feature flags, and Admin request-size limits.
 - `GET /admin/v1/version`: requires `admin:ReadMetadata` on `metadata/version`, returns API version, package name, and package version.
-- `GET /admin/v1/config/status`: requires `config:GetStatus`, returns active config revision, ETag, rollback availability, and last admin operation status; immutable-rollout Pods additionally report their instance ID, rollout mode, desired/applied revision, raw digest, and apply state.
-- `GET /admin/v1/config/effective`: requires `config:GetEffective`, returns the redacted active effective TOML and ETag.
+- `GET /admin/v1/config/status`: requires `config:GetStatus`, returns active config revision, resolved operational-profile name/version when selected, ETag, rollback availability, and last admin operation status; immutable-rollout Pods additionally report their instance ID, rollout mode, desired/applied revision, raw digest, and apply state.
+- `GET /admin/v1/config/effective`: requires `config:GetEffective`, returns the redacted active effective TOML and ETag, including the canonical profile/version and injected v1 defaults when a profile is selected.
 - `POST /admin/v1/config/validate`: requires `config:Validate`, validates submitted TOML against the active path roots without installing it.
 - `POST /admin/v1/config/diff`: requires `config:Diff`, returns a coarse redacted effective-config diff for submitted TOML.
 - `POST /admin/v1/config/load`: requires `config:Load` and matching `If-Match`, installs a runtime-only config snapshot. Changes to `[admin]` additionally require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config`; changes to `[ipm]` additionally require `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config`. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.

@@ -15,6 +15,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "config-valid",
+      "edge-secure-medium-v1",
+      "edge-secure-medium v1 expands, starts, and forwards",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "config-valid",
       "modular-include-glob",
       "configuration split through sorted include globs",
       ExpectStart::Success,

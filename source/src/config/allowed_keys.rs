@@ -21,6 +21,8 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "logging",
   "metrics",
   "overload",
+  "profile",
+  "profile_version",
   "proxy",
   "quic",
   "rate_limits",

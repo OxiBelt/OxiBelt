@@ -144,8 +144,10 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:GetStatus", "*") {
         return permission_denied(authorization.actor, "config:GetStatus");
       }
+      let snapshot = state.snapshot();
       let mut status = admin_control.status().await;
-      append_rollout_status(&mut status, &state.snapshot().config.rollout);
+      append_rollout_status(&mut status, &snapshot.config.rollout);
+      append_operational_profile_status(&mut status, &snapshot.config);
       admin::json_response(StatusCode::OK, &status)
     }
     (&::http::Method::GET, "/admin/v1/config/effective") => {
@@ -280,6 +282,18 @@ fn append_rollout_status(
 ) {
   if let Some(status) = status.as_object_mut() {
     status.insert("rollout".to_string(), rollout.status_fields());
+  }
+}
+
+fn append_operational_profile_status(status: &mut serde_json::Value, config: &Config) {
+  let Some(profile) = config.operational_profile.as_ref() else {
+    return;
+  };
+  if let Some(status) = status.as_object_mut() {
+    status.insert(
+      "operational_profile".to_string(),
+      json!({ "name": profile.name(), "version": profile.version() }),
+    );
   }
 }
 

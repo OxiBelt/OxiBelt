@@ -47,6 +47,153 @@ fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
     .to_string()
 }
 
+fn edge_secure_medium_config_toml(cert_path: &Path, key_path: &Path) -> String {
+  let raw = common::minimal_config_toml(cert_path, key_path)
+    .replacen(
+      "[logging]",
+      "profile = \"edge-secure-medium\"\n\n[logging]",
+      1,
+    )
+    .replacen("[tls]\n", "[tls]\nserver_names = [\"example.com\"]\n", 1);
+  format!("{raw}\n[waf]\nenabled = true\n")
+}
+
+#[test]
+fn edge_secure_medium_profile_expands_and_validates_the_v1_baseline() {
+  let temp_dir = common::TempDir::new("edge-secure-medium");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "edge-secure-medium");
+  let raw = edge_secure_medium_config_toml(&cert_path, &key_path);
+
+  let config: Config = toml::from_str(&raw).expect("profile config should parse");
+  config.validate().expect("profile config should validate");
+
+  let profile = config
+    .operational_profile
+    .as_ref()
+    .expect("profile selection should be retained");
+  assert_eq!(profile.name(), "edge-secure-medium");
+  assert_eq!(profile.version(), 1);
+  assert_eq!(config.tls.min_version, TlsVersion::Tls13);
+  assert_eq!(config.tls.max_version, TlsVersion::Tls13);
+  assert!(config.tls.require_sni);
+  assert!(config.tls.reject_unknown_sni);
+  assert_eq!(config.quic.zero_rtt, QuicZeroRttMode::Off);
+  assert!(config.quic.retry);
+  assert_eq!(config.limits.max_headers, 128);
+  assert!(config.waf.enabled);
+  assert_eq!(config.waf.mode, WafMode::Enforcing);
+  assert!(!config.admin.enabled);
+  assert_eq!(
+    config.waf.http_body_compression.mode,
+    WafHttpBodyCompressionMode::Transform
+  );
+}
+
+#[test]
+fn edge_secure_medium_profile_rejects_missing_waf_enablement_and_weaker_limits() {
+  let temp_dir = common::TempDir::new("edge-secure-medium-rejections");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "edge-secure-medium-rejections");
+  let raw = edge_secure_medium_config_toml(&cert_path, &key_path);
+
+  let missing_waf_enablement = raw.replace("[waf]\nenabled = true", "[waf]");
+  let config: Config =
+    toml::from_str(&missing_waf_enablement).expect("profile config should still parse");
+  let error = config
+    .validate()
+    .expect_err("profile should require an explicit WAF enabled state");
+  assert!(
+    error.to_string().contains("explicit waf.enabled = true"),
+    "unexpected error: {error}"
+  );
+
+  let weakened_limits = format!("{raw}\n[limits]\nmax_headers = 129\n");
+  let config: Config = toml::from_str(&weakened_limits).expect("profile config should parse");
+  let error = config
+    .validate()
+    .expect_err("profile should reject weaker limits");
+  assert!(
+    error.to_string().contains("limits may be tightened"),
+    "unexpected error: {error}"
+  );
+
+  let weakened_webtransport =
+    format!("{raw}\n[limits]\nmax_webtransport_sessions_per_connection = 257\n");
+  let config: Config = toml::from_str(&weakened_webtransport).expect("profile config should parse");
+  let error = config
+    .validate()
+    .expect_err("profile should reject weaker WebTransport limits");
+  assert!(
+    error.to_string().contains("limits may be tightened"),
+    "unexpected error: {error}"
+  );
+
+  let weakened_quic_endpoint =
+    format!("{raw}\n[quic.downstream.transport]\nmax_concurrent_bidi_streams = 513\n");
+  let config: Config =
+    toml::from_str(&weakened_quic_endpoint).expect("profile config should parse");
+  let error = config
+    .validate()
+    .expect_err("profile should reject weaker downstream QUIC stream limits");
+  assert!(
+    error.to_string().contains("limits may be tightened"),
+    "unexpected error: {error}"
+  );
+
+  let weakened_parser = format!("{raw}\n[config]\nstrict_unknown_fields = false\n");
+  let config: Config = toml::from_str(&weakened_parser).expect("profile config should parse");
+  let error = config
+    .validate()
+    .expect_err("profile should reject weaker parser behavior");
+  assert!(
+    error.to_string().contains("strict configuration parsing"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn edge_secure_medium_profile_allows_monitor_rollout_and_tighter_limits() {
+  let temp_dir = common::TempDir::new("edge-secure-medium-monitor");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "edge-secure-medium-monitor");
+  let raw = edge_secure_medium_config_toml(&cert_path, &key_path).replace(
+    "[waf]\nenabled = true",
+    "[waf]\nenabled = true\nmode = \"monitor\"",
+  );
+  let raw = format!("{raw}\n[limits]\nmax_headers = 64\n");
+
+  let config: Config = toml::from_str(&raw).expect("profile config should parse");
+  config
+    .validate()
+    .expect("monitor rollout and tighter limits should remain valid");
+
+  assert_eq!(config.waf.mode, WafMode::Monitor);
+  assert_eq!(config.limits.max_headers, 64);
+}
+
+#[test]
+fn edge_secure_medium_effective_config_materializes_the_pinned_version() {
+  let temp_dir = common::TempDir::new("edge-secure-medium-effective");
+  let config_path = write_loadable_config(&temp_dir, "edge-secure-medium-effective", |raw| {
+    raw
+      .replacen(
+        "[logging]",
+        "profile = \"edge-secure-medium\"\n\n[logging]",
+        1,
+      )
+      .replacen("[tls]\n", "[tls]\nserver_names = [\"example.com\"]\n", 1)
+      + "\n[waf]\nenabled = true\n"
+  });
+
+  let value = Config::load_effective_toml_redacted(&config_path)
+    .expect("effective profile config should load");
+  assert_eq!(value["profile"].as_str(), Some("edge-secure-medium"));
+  assert_eq!(value["profile_version"].as_integer(), Some(1));
+  assert_eq!(value["tls"]["min_version"].as_str(), Some("tls1.3"));
+  assert_eq!(value["waf"]["enabled"].as_bool(), Some(true));
+}
+
 #[test]
 fn config_parses_trusted_upstream_ca_certificates() {
   let temp_dir = common::TempDir::new("config");

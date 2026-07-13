@@ -87,6 +87,8 @@ A typical configuration may contain:
 
 ```toml
 include = ["conf.d/*.toml"]
+profile = "edge-secure-medium"
+profile_version = 1
 
 [config]
 [access_log]
@@ -174,6 +176,116 @@ Required routing inputs:
 
 - At least one `[[routes]]`, `[sni_forward]` rule/default target, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
 - Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, or terminal `actions.redirect`.
+
+## Operational Profiles
+
+Operational profiles are compiled-in, versioned configuration baselines. They
+reduce omission and configuration drift, but do not replace the operator's
+deployment-specific policy, certificate, identity, or Secret management. The
+only shipped profile is `edge-secure-medium` version `1`:
+
+```toml
+profile = "edge-secure-medium"
+# Optional in source. Omission permanently selects version 1.
+profile_version = 1
+
+[tls]
+server_names = ["edge.example.com"]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[waf]
+# This must be explicitly present and true in the source TOML or an include.
+enabled = true
+```
+
+`profile = "edge-secure-medium"` always selects v1 when
+`profile_version` is omitted; it does not mean "latest." The redacted
+effective configuration materializes `profile_version = 1`, so saved output
+is an explicit compatibility pin. `profile_version` without `profile`, an
+unknown or malformed name/version pair, or more than one effective selector is
+rejected even when `[config] strict_unknown_fields = false`.
+
+Profile definitions are built into the OxiBelt binary. There are no profile
+files, URLs, remote catalogs, or operator-supplied profile definitions. The
+catalog representation can add separately documented name/version entries in a
+future release, but v1 will not change silently. This operational-profile
+feature is separate from the `oxibeltctl mitigate <profile>` local/remote
+dynamic-policy rendering feature described later in this document.
+
+Profile expansion happens before typed configuration validation. Precedence is
+compiled-in profile defaults, then explicit merged TOML (including all
+`include` files), then supported runtime/CLI configuration overrides. An
+explicit scalar or table leaf replaces the profile leaf; an explicit array
+replaces the profile array rather than appending to it. A profile-protected
+value is accepted only when the result preserves the v1 security boundary;
+unsafe weakening is rejected rather than silently clamped. Configurations
+without `profile` keep their existing defaults and behavior.
+
+### `edge-secure-medium` v1 contract
+
+The profile supplies these baseline values and validates the resulting
+configuration. Required credentials and deployment-specific names deliberately
+remain explicit rather than being synthesized by the profile.
+
+| Area | v1 baseline and required operator inputs |
+| --- | --- |
+| Public TLS and QUIC | TLS is TLS 1.3 only; SNI is required and unknown SNI is rejected. Configure explicit public `tls.server_names` (the literal `*` is rejected) plus a certificate/key pair or the existing remote signer. HTTP/3 enables QUIC Retry, disables QUIC 0-RTT and TCP early data, and requires an explicit stable `quic.host_key_file`; do not use generated restart-local key material for a public HTTP/3 listener. |
+| Resource bounds | The fixed public ceilings are `65,536` connections, `128` connections per IP, `65,536` WebTransport sessions, `128` WebTransport sessions per IP, `256` WebTransport sessions per connection, `1,000` requests per connection, `128` headers, `128` bytes per header name, `8,192` bytes per header value and URI, `65,536` aggregate header bytes, and `10 MiB` request and decoded-body caps. The decoded-body expansion ratio is `20`; downstream HTTP/2 and QUIC bidirectional/unidirectional stream caps are `1,024` and `512` respectively. The QUIC ceiling applies to the base, downstream, and upstream transport override blocks. Explicit profile overrides may tighten these caps but may not raise them. |
+| Framing and client identity | Ambiguous HTTP framing and unsafe trailers remain rejected/sanitized; ordinary request trailers default to `drop` while native gRPC trailers remain available. Forwarding metadata is overwritten. Real-IP is disabled by default. Enabling Real-IP or PROXY protocol requires a nonempty, concrete trusted-source CIDR allowlist; all-address CIDRs are rejected. |
+| WAF and rulepacks | `[waf] enabled = true` must be explicit in source TOML or an include. The profile defaults to `mode = "enforcing"`, fail-closed WAF evaluation, fail-closed duplicate metadata handling, and bounded body transform, regex, and evaluation budgets. A deliberate `mode = "monitor"` override is allowed for a staged rollout, but disabling the WAF is not. Rulepack selection must use exact paths and required manifest versions; wildcard rulepack files are rejected and remotely installed rulepacks must retain SHA-256 provenance. |
+| Shared state, overload, and telemetry | Existing overload and circuit-breaker admission controls are enabled with their bounded control-plane capacity. Detailed metrics, health endpoints, and the existing system/WAF/Admin access-log sources are enabled by default; operators still choose their log-delivery policy. Remote Redis/Valkey backends may not use plaintext `redis://`; configure verified `rediss://` and any required trust or client-auth material explicitly. |
+| Admin | Admin is disabled by default. If enabled, it must use a dedicated non-data-plane bind, TLS 1.3, required client certificates, IPM authorization, and enforcing durable PostgreSQL audit storage. Certificates, trust roots, principals, policies, and audit connection material remain operator inputs. |
+| Lifecycle | Shutdown readiness delay is `10` seconds, ordinary graceful drain is at least `30` seconds, and long-lived connection close delay is at least `300` seconds. Overrides may lengthen these values but may not shorten the v1 guarantees. |
+
+Use the regular validation and effective-config surfaces to inspect the exact
+expanded result before deployment:
+
+```sh
+oxibelt --config source/config/oxibelt.toml --check
+oxibelt --config source/config/oxibelt.toml --dump-effective-config
+```
+
+When Admin is enabled, `GET /admin/v1/config/status` reports the resolved
+profile name/version and `GET /admin/v1/config/effective` returns the same
+redacted, expanded TOML. Support bundles include this profile metadata and the
+redacted effective configuration. Treat a selected profile or version change
+as a full configuration change, not an OxiRule-only reload.
+
+### Helm companion preset
+
+The optional Helm companion preset is
+`deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml`. It is not
+selected by the chart's default values, preserving existing chart upgrade
+behavior. Its public interface is:
+
+```yaml
+operationalProfile:
+  name: edge-secure-medium
+  version: 1
+tls:
+  serverNames:
+    - edge.example.com
+quic:
+  hostKeySecretName: oxibelt-quic-host-key
+  hostKeySecretKey: quic-host-key.b64
+```
+
+The preset renders the top-level selector, public TLS SNI enforcement, and a
+read-only projection of just the named QUIC host-key Secret entry at the path
+used by `quic.host_key_file`. It contains no certificate, private key, or host
+key material. Operators must supply their own TLS Secret/configuration and a
+stable base64-text QUIC host key in the named Secret, then replace the example
+server name and Secret references before installation. Generate the mounted
+text with `openssl rand -base64 64 > quic-host-key.b64`, then use
+`kubectl create secret generic oxibelt-quic-host-key --from-file=quic-host-key.b64`.
+The file projection must contain that base64 text (which decodes to exactly 64
+random bytes); a Kubernetes `data:` field therefore requires one additional
+base64 encoding, while `stringData:` may contain the text directly. The preset keeps
+the Admin Service absent; it does not claim NetworkPolicy, ServiceAccount-token
+hardening, topology/PDB lifecycle, certificate-to-IPM identity binding, general
+mutation idempotency, stronger audit guarantees, image provenance, or release
+attestations. Those remain separate P1/P2 work.
 
 ## Includes
 

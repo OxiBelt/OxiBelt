@@ -6,6 +6,16 @@ image:
 nameOverride: ""
 replicaCount: 2
 
+# Leave `name` empty to retain the chart's existing, unprofiled behavior.
+# A selected profile is rendered as top-level OxiBelt TOML before `config.inline`
+# and therefore has a content-addressed ConfigMap revision of its own.
+operationalProfile:
+  name: ""
+  version: 1
+  # `monitor` is the explicit temporary rollout state; the profile otherwise
+  # starts in enforcing mode.
+  wafMode: enforcing # enforcing | monitor
+
 workload:
   kind: Deployment # Deployment | DaemonSet
   deployment:
@@ -23,6 +33,12 @@ serviceAccount:
   create: true
   name: ""
   automountServiceAccountToken: true
+
+# A nonzero value is emitted on the Pod spec. The default intentionally omits
+# the field to preserve Kubernetes' existing 30-second default for unprofiled
+# chart users. The edge-secure-medium v1 preset uses 360 seconds.
+lifecycle:
+  terminationGracePeriodSeconds: 0
 
 kubernetesDiscovery:
   rbac:
@@ -132,6 +148,11 @@ config:
     [runtime.accept]
     reuse_port = true
 
+    {{- if .Values.quic.hostKeySecretName }}
+    [quic]
+    host_key_file = "quic-host-key.b64"
+
+    {{- end }}
     # HTTP/3 uses automatic QUIC socket workers by default. Keep the listener
     # socket policy aligned with the multi-worker runtime invariant.
     [quic.socket]
@@ -150,6 +171,7 @@ config:
     private_key = "tls.key"
     min_version = "tls1.3"
     max_version = "tls1.3"
+    {{ include "oxibelt.publicTlsConfig" . }}
 
     [health]
     enabled = true
@@ -161,12 +183,13 @@ config:
     enabled = {{ .Values.metrics.enabled }}
     bind = "0.0.0.0:9090"
     format = "prometheus"
-    detail = "basic"
+    detail = {{ if .Values.operationalProfile.name }}"detailed"{{ else }}"basic"{{ end }}
 
-    # Keep overload shedding opt-in for chart upgrades. Operators can enable
-    # and tune the full [overload] block through config.inline.
+    # Keep overload shedding opt-in for unprofiled chart upgrades. The secure
+    # operational profile requires it while operators can tune the full block
+    # through config.inline.
     [overload]
-    enabled = false
+    enabled = {{ if .Values.operationalProfile.name }}true{{ else }}false{{ end }}
 
     # Circuit breakers and priority admission are enabled by default and resolve
     # `"auto"` per Pod. Low-priority background/crawler traffic is share-capped;
@@ -193,6 +216,17 @@ tls:
   enabled: true
   secretName: oxibelt-tls
   mountPath: /etc/oxibelt/cert
+  # Providing names turns on required SNI and unknown-SNI rejection for the
+  # public certificate. Leave empty for existing unprofiled behavior.
+  serverNames: []
+
+# Project exactly one Secret item whose mounted value is base64 text for a
+# 64-byte QUIC host key into the certificate root as `quic-host-key.b64`. The
+# profile preset requires this Secret but the unprofiled chart leaves it opt-in
+# for compatibility.
+quic:
+  hostKeySecretName: ""
+  hostKeySecretKey: quic-host-key.b64
 
 # Project Redis TLS, ACL username, and ACL password keys into the same
 # certificate root that OxiBelt resolves for `shared_state.backends.redis_*`.
