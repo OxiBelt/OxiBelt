@@ -373,6 +373,18 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
+  # Enable only with the edge-secure-medium profile and the companion Prometheus
+  # Adapter mapping. The 24-request target is a source-derived starter value,
+  # not a benchmarked capacity promise; tune it from production saturation and
+  # latency evidence.
+  activeRequests:
+    enabled: false
+    targetAverageValue: 24
+  # These limits apply only when activeRequests is enabled. They prevent an
+  # HPA scale-down from racing the chart-owned pre-stop drain lifecycle.
+  scaleDown:
+    stabilizationWindowSeconds: 300
+    periodSeconds: 300
 
 podDisruptionBudget:
   enabled: true

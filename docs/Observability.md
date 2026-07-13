@@ -97,10 +97,42 @@ The bundle is intentionally small:
   provisions the dashboard directory.
 - `deploy/observability/grafana/dashboards/oxibelt-overview.json`: a starter
   dashboard based only on public-safe `oxibelt_*` metrics.
+- `deploy/observability/prometheus-adapter-oxibelt-values.yaml`: a narrowly
+  scoped values overlay for a separately operated Prometheus Adapter. It maps
+  only the fixed per-Pod active-request gauge to
+  `oxibelt_active_http_requests` under `custom.metrics.k8s.io`.
 
 When using the assets in Compose or another orchestrator, mount the Grafana
 dashboard file into `/etc/grafana/provisioning/dashboards/oxibelt/` and mount
 the provisioning directories under `/etc/grafana/provisioning/`.
+
+## Kubernetes Active-Request Autoscaling
+
+OxiBelt exposes the low-cardinality raw gauge
+`oxibelt_overload_active_work{kind="active_http_requests"}`. The `kind` value
+is a fixed vocabulary, so this metric does not put routes, client identities,
+URLs, or upstream names into Prometheus labels. The companion adapter overlay
+requires Kubernetes-provided `namespace` and `pod` scrape labels and exposes
+only the fixed alias `oxibelt_active_http_requests` for per-Pod HPA use.
+The chart accepts this HPA mode only with `edge-secure-medium`, whose overload
+sampler maintains the active-work gauge.
+
+The overlay sets a 30-second adapter relist interval and disables the adapter
+chart's broad default rules. It is a values file, not an adapter installation:
+the cluster monitoring owner remains responsible for the adapter chart version,
+image provenance, `APIService`, and cluster-scoped RBAC. See
+[KubernetesDeployment.md](KubernetesDeployment.md#health-and-metrics) for the
+HPA values, rollout command, and diagnostics. Merge the overlay with the
+adapter's existing values that define the actual Prometheus endpoint and its
+TLS/authentication; this OxiBelt-specific file deliberately does not guess a
+cluster service name.
+
+Autoscaling observes the metric after the Prometheus scrape, adapter relist and
+query, and HPA controller sync loops. Treat that combined lag as part of the
+control loop when choosing targets and alerts. If the adapter cannot return the
+custom metric, investigate the scrape labels, adapter discovery, and HPA events
+before lowering thresholds; CPU may still scale up while the unavailable custom
+metric blocks scale-down.
 
 ## Operator Questions
 

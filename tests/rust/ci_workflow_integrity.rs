@@ -1100,6 +1100,8 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "version: v3.16.4",
     "name: Validate Helm Pod distribution and lifecycle",
     "tests/scripts/check-helm-pod-lifecycle.sh",
+    "name: Validate Helm autoscaling configuration",
+    "tests/scripts/check-helm-autoscaling.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
     "version: v0.26.0",
     "kubectl_version: v1.31.4",

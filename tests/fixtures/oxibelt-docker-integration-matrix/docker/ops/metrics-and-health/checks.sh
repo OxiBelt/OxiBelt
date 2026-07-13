@@ -12,4 +12,6 @@ run_case_checks() {
 
   response="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
   assert_response_jq "${response}" '.body | contains("oxibelt_requests_total")'
+  assert_response_jq "${response}" '.body | contains("# TYPE oxibelt_overload_active_work gauge")'
+  assert_response_jq "${response}" '.body | contains("oxibelt_overload_active_work{kind=\\\"active_http_requests\\\"}")'
 }

@@ -1,0 +1,25 @@
+# Values overlay for prometheus-community/prometheus-adapter.
+#
+# Apply this to an adapter release operated by the cluster monitoring team.
+# It intentionally adds only the fixed OxiBelt per-Pod active-request metric;
+# this data-plane chart does not install an APIService or cluster-scoped RBAC.
+# Merge it with the adapter's existing values that set `prometheus.url` and
+# TLS/authentication for the cluster's actual Prometheus endpoint.
+metricsRelistInterval: 30s
+
+rules:
+  # Do not expose the chart's broad default resource rules through this
+  # OxiBelt-specific overlay. Operators can deliberately add their own rules.
+  default: false
+  custom:
+  - seriesQuery: 'oxibelt_overload_active_work{namespace!="",pod!="",kind="active_http_requests"}'
+    resources:
+      overrides:
+        namespace:
+          resource: namespace
+        pod:
+          resource: pod
+    name:
+      matches: "^oxibelt_overload_active_work$"
+      as: "oxibelt_active_http_requests"
+    metricsQuery: 'max(oxibelt_overload_active_work{<<.LabelMatchers>>,kind="active_http_requests"}) by (<<.GroupBy>>)'

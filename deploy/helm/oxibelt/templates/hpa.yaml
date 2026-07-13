@@ -1,4 +1,5 @@
-{{- if and .Values.autoscaling.enabled (eq .Values.workload.kind "Deployment") }}
+{{- include "oxibelt.validateAutoscaling" . -}}
+{{- if .Values.autoscaling.enabled }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -19,4 +20,21 @@ spec:
       target:
         type: Utilization
         averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  {{- if .Values.autoscaling.activeRequests.enabled }}
+  - type: Pods
+    pods:
+      metric:
+        name: oxibelt_active_http_requests
+      target:
+        type: AverageValue
+        averageValue: {{ .Values.autoscaling.activeRequests.targetAverageValue }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.scaleDown.stabilizationWindowSeconds }}
+      selectPolicy: Min
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: {{ .Values.autoscaling.scaleDown.periodSeconds }}
+  {{- end }}
 {{- end }}

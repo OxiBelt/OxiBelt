@@ -79,6 +79,34 @@ fn observability_bundle_wires_prometheus_and_grafana_assets() {
 }
 
 #[test]
+fn prometheus_adapter_values_expose_only_the_fixed_active_request_metric() {
+  let adapter = read_observability("prometheus-adapter-oxibelt-values.yaml");
+  let values: Value = serde_saphyr::from_str(&adapter)
+    .expect("Prometheus Adapter OxiBelt values overlay should parse as YAML");
+  assert_eq!(values["metricsRelistInterval"], "30s");
+  assert_eq!(values["rules"]["default"], false);
+  assert_eq!(
+    values["rules"]["custom"][0]["name"]["as"],
+    "oxibelt_active_http_requests"
+  );
+  assert!(adapter.contains("metricsRelistInterval: 30s"));
+  assert!(adapter.contains("default: false"));
+  assert!(adapter.contains(
+    "seriesQuery: 'oxibelt_overload_active_work{namespace!=\"\",pod!=\"\",kind=\"active_http_requests\"}'"
+  ));
+  assert!(adapter.contains("resource: namespace"));
+  assert!(adapter.contains("resource: pod"));
+  assert!(adapter.contains("as: \"oxibelt_active_http_requests\""));
+  assert!(adapter.contains(
+    "metricsQuery: 'max(oxibelt_overload_active_work{<<.LabelMatchers>>,kind=\"active_http_requests\"}) by (<<.GroupBy>>)'")
+  );
+  assert!(
+    !adapter.contains("apiVersion:"),
+    "the OxiBelt overlay must not install adapter APIService or RBAC resources"
+  );
+}
+
+#[test]
 fn observability_docs_keep_opt_in_private_defaults() {
   let docs = read_repo("docs/Observability.md");
   assert!(docs.contains("bind = \"127.0.0.1:9090\""));
@@ -86,6 +114,8 @@ fn observability_docs_keep_opt_in_private_defaults() {
   assert!(docs.contains("private Docker or"));
   assert!(docs.contains("propagate_trace_context = false"));
   assert!(docs.contains("GET /admin/v1/waf/rule-hits"));
+  assert!(docs.contains("oxibelt_active_http_requests"));
+  assert!(docs.contains("combined lag"));
 }
 
 #[test]

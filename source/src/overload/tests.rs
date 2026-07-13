@@ -236,7 +236,15 @@ fn prometheus_output_uses_only_fixed_overload_labels() {
   let mut output = String::new();
   runtime.append_prometheus(&mut output);
   assert!(output.contains("oxibelt_overload_state{state=\"normal\"} 1"));
-  assert!(output.contains("oxibelt_overload_active_work{kind=\"active_http_requests\"}"));
+  assert!(output.contains("# TYPE oxibelt_overload_active_work gauge\n"));
+  assert!(output.contains("oxibelt_overload_active_work{kind=\"active_http_requests\"} 0"));
+  let request = runtime
+    .try_admit_request(Version::HTTP_11)
+    .expect("enabled overload runtime should admit an ordinary request");
+  output.clear();
+  runtime.append_prometheus(&mut output);
+  assert!(output.contains("oxibelt_overload_active_work{kind=\"active_http_requests\"} 1"));
+  drop(request);
   assert!(
     output.contains("oxibelt_overload_control_plane_capacity{plane=\"admin\",kind=\"connection\"}")
   );

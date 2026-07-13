@@ -48,6 +48,19 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["lifecycle"]["terminationGracePeriodSeconds"], 0);
   assert_eq!(values["lifecycle"]["preStop"]["enabled"], false);
   assert_eq!(values["lifecycle"]["preStop"]["drainSeconds"], 300);
+  assert_eq!(values["autoscaling"]["enabled"], false);
+  assert_eq!(values["autoscaling"]["minReplicas"], 2);
+  assert_eq!(values["autoscaling"]["maxReplicas"], 10);
+  assert_eq!(values["autoscaling"]["activeRequests"]["enabled"], false);
+  assert_eq!(
+    values["autoscaling"]["activeRequests"]["targetAverageValue"],
+    24
+  );
+  assert_eq!(
+    values["autoscaling"]["scaleDown"]["stabilizationWindowSeconds"],
+    300
+  );
+  assert_eq!(values["autoscaling"]["scaleDown"]["periodSeconds"], 300);
   assert_eq!(values["podDistribution"]["enabled"], false);
   assert_eq!(values["podDistribution"]["nodeSpread"]["maxSkew"], 1);
   assert_eq!(values["podDistribution"]["nodeSpread"]["minDomains"], 2);
@@ -178,6 +191,20 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(
     schema["properties"]["lifecycle"]["properties"]["preStop"]["properties"]["drainSeconds"]["maximum"],
     86400
+  );
+  assert_eq!(
+    schema["properties"]["autoscaling"]["properties"]["activeRequests"]["properties"]["targetAverageValue"]
+      ["minimum"],
+    1
+  );
+  assert_eq!(
+    schema["properties"]["autoscaling"]["properties"]["scaleDown"]["properties"]["stabilizationWindowSeconds"]
+      ["maximum"],
+    3600
+  );
+  assert_eq!(
+    schema["properties"]["autoscaling"]["properties"]["scaleDown"]["properties"]["periodSeconds"]["maximum"],
+    1800
   );
   assert_eq!(
     schema["properties"]["podDistribution"]["properties"]["nodeSpread"]["properties"]["minDomains"]
@@ -328,6 +355,33 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     edge_secure_medium_example["networkPolicy"]["cilium"]["enabled"],
     false
   );
+
+  let edge_secure_medium_autoscaling_example =
+    read_yaml("deploy/helm/oxibelt/examples/edge-secure-medium-v1-autoscaling-values.yaml");
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["minReplicas"],
+    3
+  );
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["activeRequests"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["activeRequests"]["targetAverageValue"],
+    24
+  );
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["scaleDown"]["stabilizationWindowSeconds"],
+    300
+  );
+  assert_eq!(
+    edge_secure_medium_autoscaling_example["autoscaling"]["scaleDown"]["periodSeconds"],
+    360
+  );
 }
 
 #[test]
@@ -355,6 +409,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       .join("tests/scripts/check-helm-pod-lifecycle.sh")
       .is_file(),
     "the Pod lifecycle Helm renderer check should be present"
+  );
+  assert!(
+    repo_root()
+      .join("tests/scripts/check-helm-autoscaling.sh")
+      .is_file(),
+    "the autoscaling Helm renderer check should be present"
   );
   let expected = [
     "templates/_helpers.tpl",
@@ -547,6 +607,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "lifecycle.terminationGracePeriodSeconds",
     "oxibelt.validateLifecycle",
     "lifecycle.preStop.drainSeconds",
+    "oxibelt.validateAutoscaling",
+    "autoscaling.activeRequests.enabled=true requires autoscaling.enabled=true",
+    "autoscaling.activeRequests.enabled=true requires metrics.enabled=true",
+    "autoscaling.activeRequests.enabled=true requires operationalProfile.name=edge-secure-medium",
+    "autoscaling.scaleDown.stabilizationWindowSeconds",
+    "autoscaling.scaleDown.periodSeconds",
     "oxibelt.validatePodDistribution",
     "podDistribution.podAntiAffinity.enabled cannot be combined",
     "oxibelt.validatePodDisruptionBudget",
@@ -584,6 +650,10 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   let hpa = read_repo("deploy/helm/oxibelt/templates/hpa.yaml");
   assert!(hpa.contains("apiVersion: autoscaling/v2"));
   assert!(hpa.contains("kind: HorizontalPodAutoscaler"));
+  assert!(hpa.contains("oxibelt.validateAutoscaling"));
+  assert!(hpa.contains("name: oxibelt_active_http_requests"));
+  assert!(hpa.contains("type: AverageValue"));
+  assert!(hpa.contains("selectPolicy: Min"));
 
   let metrics = read_repo("deploy/helm/oxibelt/templates/metrics-service.yaml");
   assert!(metrics.contains("targetPort: metrics"));

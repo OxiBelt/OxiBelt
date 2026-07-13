@@ -540,7 +540,23 @@
         "enabled": { "type": "boolean" },
         "minReplicas": { "type": "integer", "minimum": 1 },
         "maxReplicas": { "type": "integer", "minimum": 1 },
-        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "activeRequests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "targetAverageValue": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "scaleDown": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "stabilizationWindowSeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
+            "periodSeconds": { "type": "integer", "minimum": 1, "maximum": 1800 }
+          }
+        }
       }
     },
     "podDisruptionBudget": {

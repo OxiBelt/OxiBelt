@@ -281,7 +281,68 @@ projection disabled.
 
 The chart enables OxiBelt health and basic Prometheus metrics in the generated config. Pods use readiness, liveness, and startup probes against the health listener. The metrics Service is enabled by default so a cluster scraper can target the named `metrics` port.
 
-Horizontal scaling is chart-owned only through the optional `autoscaling` block, which renders an `autoscaling/v2` HPA for Deployment workloads. The metrics Service remains available whether or not HPA rendering is enabled.
+Horizontal scaling is chart-owned only through the optional `autoscaling` block,
+which renders an `autoscaling/v2` HPA for `Deployment` workloads. Its default
+HPA metric is CPU utilization. Set `autoscaling.activeRequests.enabled: true`
+to add the per-Pod custom metric `oxibelt_active_http_requests` alongside CPU;
+the HPA takes the higher replica recommendation. The metrics Service remains
+available whether or not HPA rendering is enabled. DaemonSets deliberately
+reject HPA values instead of silently rendering no scaler.
+
+The custom metric is a fixed adapter alias for OxiBelt's existing raw gauge:
+
+```text
+oxibelt_overload_active_work{kind="active_http_requests"}
+```
+
+Prometheus must attach Kubernetes `namespace` and `pod` labels while scraping
+the metrics Service. Deploy the separately operated Prometheus Adapter with the
+fixed mapping in
+[`prometheus-adapter-oxibelt-values.yaml`](../deploy/observability/prometheus-adapter-oxibelt-values.yaml).
+Review and pin the adapter chart and image through the cluster's normal supply
+chain before installing it; the OxiBelt chart intentionally does not install an
+adapter `APIService` or cluster-scoped RBAC. For example, use a reviewed adapter
+release with the overlay:
+
+```sh
+helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+  --namespace monitoring --create-namespace \
+  --version <reviewed-version> \
+  -f deploy/observability/prometheus-adapter-oxibelt-values.yaml
+```
+
+Layer the active-request overlay after the secure base profile. It preserves the
+base profile's CPU target and adds a source-derived starting target of 24 active
+HTTP requests per Pod; it is not a measured capacity guarantee. Tune it only
+from production saturation, latency, and overload evidence.
+
+```sh
+helm upgrade --install oxibelt deploy/helm/oxibelt \
+  --namespace edge --create-namespace \
+  -f deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml \
+  -f deploy/helm/oxibelt/examples/edge-secure-medium-v1-autoscaling-values.yaml
+```
+
+Active-request HPA mode requires the `edge-secure-medium` profile, which turns
+on the runtime overload sampler that owns the active-work gauge, plus
+`autoscaling.enabled=true`, `metrics.enabled=true`, an enabled fixed pre-stop
+drain, and a positive termination grace period. The chart rejects a scale-down
+stabilization window shorter than the drain and a one-Pod scale-down period
+shorter than the termination grace. The secure overlay therefore keeps a 300-second
+stabilization window and permits at most one Pod removal every 360 seconds.
+CPU-only HPA mode preserves Kubernetes defaults for scale-down behavior.
+
+Allow for Prometheus scrape delay, adapter relist/query delay, and the HPA
+controller sync before treating the custom metric as absent or stale. A missing
+custom metric can prevent a safe scale-down, while the CPU metric can still
+recommend a scale-up. Check the adapter and HPA before changing targets:
+
+```sh
+kubectl get --raw \
+  "/apis/custom.metrics.k8s.io/v1beta1/namespaces/edge/pods/*/oxibelt_active_http_requests"
+kubectl -n edge describe hpa oxibelt
+kubectl -n edge get hpa oxibelt -o yaml
+```
 
 Deployment defaults are deliberately conservative for immutable configuration:
 `maxUnavailable: 0`, `maxSurge: 1`, `minReadySeconds: 5`,

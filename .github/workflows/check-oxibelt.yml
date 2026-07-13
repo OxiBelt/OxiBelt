@@ -977,6 +977,9 @@ jobs:
       - name: Validate Helm Pod distribution and lifecycle
         run: tests/scripts/check-helm-pod-lifecycle.sh
 
+      - name: Validate Helm autoscaling configuration
+        run: tests/scripts/check-helm-autoscaling.sh
+
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:

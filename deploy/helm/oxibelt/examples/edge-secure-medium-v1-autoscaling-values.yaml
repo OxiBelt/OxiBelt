@@ -1,0 +1,18 @@
+# Add this overlay after edge-secure-medium-v1-values.yaml to enable an
+# adapter-backed, drain-safe HPA. It contains no credentials or cluster-wide
+# adapter installation; deploy/observability/prometheus-adapter-oxibelt-values.yaml
+# is the companion values overlay for the separately managed adapter release.
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  activeRequests:
+    enabled: true
+    # This is a source-derived starter threshold, not a capacity guarantee.
+    targetAverageValue: 24
+  scaleDown:
+    # Must cover the 300-second pre-stop drain in the base secure profile.
+    stabilizationWindowSeconds: 300
+    # Must cover the base profile's 360-second termination grace period.
+    periodSeconds: 360

@@ -255,6 +255,105 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validateAutoscaling" -}}
+{{- $autoscaling := .Values.autoscaling -}}
+{{- if not (kindIs "map" $autoscaling) -}}
+{{- fail "autoscaling must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $autoscaling "enabled")) (not (kindIs "bool" $autoscaling.enabled)) -}}
+{{- fail "autoscaling.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (hasKey $autoscaling "minReplicas") -}}
+{{- fail "autoscaling.minReplicas is required" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $autoscaling.minReplicas "field" "autoscaling.minReplicas") -}}
+{{- if not (hasKey $autoscaling "maxReplicas") -}}
+{{- fail "autoscaling.maxReplicas is required" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $autoscaling.maxReplicas "field" "autoscaling.maxReplicas") -}}
+{{- if lt (int $autoscaling.maxReplicas) (int $autoscaling.minReplicas) -}}
+{{- if and (kindIs "map" .Values.operationalProfile) (eq .Values.operationalProfile.name "edge-secure-medium") -}}
+{{- fail "operationalProfile edge-secure-medium requires autoscaling.maxReplicas to be at least autoscaling.minReplicas" -}}
+{{- else -}}
+{{- fail "autoscaling.maxReplicas must be at least autoscaling.minReplicas" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (hasKey $autoscaling "targetCPUUtilizationPercentage") -}}
+{{- fail "autoscaling.targetCPUUtilizationPercentage is required" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $autoscaling.targetCPUUtilizationPercentage "field" "autoscaling.targetCPUUtilizationPercentage") -}}
+{{- if gt (int $autoscaling.targetCPUUtilizationPercentage) 100 -}}
+{{- fail "autoscaling.targetCPUUtilizationPercentage must be between 1 and 100" -}}
+{{- end -}}
+{{- $activeRequests := $autoscaling.activeRequests -}}
+{{- if not (kindIs "map" $activeRequests) -}}
+{{- fail "autoscaling.activeRequests must be an object" -}}
+{{- end -}}
+{{- if or (not (hasKey $activeRequests "enabled")) (not (kindIs "bool" $activeRequests.enabled)) -}}
+{{- fail "autoscaling.activeRequests.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (hasKey $activeRequests "targetAverageValue") -}}
+{{- fail "autoscaling.activeRequests.targetAverageValue is required" -}}
+{{- end -}}
+{{- include "oxibelt.validatePositiveInteger" (dict "value" $activeRequests.targetAverageValue "field" "autoscaling.activeRequests.targetAverageValue") -}}
+{{- $scaleDown := $autoscaling.scaleDown -}}
+{{- if not (kindIs "map" $scaleDown) -}}
+{{- fail "autoscaling.scaleDown must be an object" -}}
+{{- end -}}
+{{- if not (hasKey $scaleDown "stabilizationWindowSeconds") -}}
+{{- fail "autoscaling.scaleDown.stabilizationWindowSeconds is required" -}}
+{{- end -}}
+{{- $stabilizationWindowSeconds := toString $scaleDown.stabilizationWindowSeconds -}}
+{{- if or (not (regexMatch "^[0-9]{1,4}$" $stabilizationWindowSeconds)) (gt (int $stabilizationWindowSeconds) 3600) -}}
+{{- fail "autoscaling.scaleDown.stabilizationWindowSeconds must be an integer between 0 and 3600" -}}
+{{- end -}}
+{{- if not (hasKey $scaleDown "periodSeconds") -}}
+{{- fail "autoscaling.scaleDown.periodSeconds is required" -}}
+{{- end -}}
+{{- $periodSeconds := toString $scaleDown.periodSeconds -}}
+{{- if or (not (regexMatch "^[1-9][0-9]{0,3}$" $periodSeconds)) (gt (int $periodSeconds) 1800) -}}
+{{- fail "autoscaling.scaleDown.periodSeconds must be an integer between 1 and 1800" -}}
+{{- end -}}
+{{- if and $autoscaling.enabled (ne .Values.workload.kind "Deployment") -}}
+{{- fail "autoscaling.enabled=true requires workload.kind=Deployment" -}}
+{{- end -}}
+{{- if $activeRequests.enabled -}}
+{{- if not $autoscaling.enabled -}}
+{{- fail "autoscaling.activeRequests.enabled=true requires autoscaling.enabled=true" -}}
+{{- end -}}
+{{- include "oxibelt.validateLifecycle" . -}}
+{{- $metrics := .Values.metrics -}}
+{{- if not (kindIs "map" $metrics) -}}
+{{- fail "metrics must be an object when autoscaling.activeRequests.enabled=true" -}}
+{{- end -}}
+{{- if or (not (hasKey $metrics "enabled")) (not (kindIs "bool" $metrics.enabled)) -}}
+{{- fail "metrics.enabled must be a boolean when autoscaling.activeRequests.enabled=true" -}}
+{{- end -}}
+{{- if not $metrics.enabled -}}
+{{- fail "autoscaling.activeRequests.enabled=true requires metrics.enabled=true" -}}
+{{- end -}}
+{{- $operationalProfile := .Values.operationalProfile -}}
+{{- if not (kindIs "map" $operationalProfile) -}}
+{{- fail "operationalProfile must be an object when autoscaling.activeRequests.enabled=true" -}}
+{{- end -}}
+{{- if ne $operationalProfile.name "edge-secure-medium" -}}
+{{- fail "autoscaling.activeRequests.enabled=true requires operationalProfile.name=edge-secure-medium so the active-work gauge is sampled" -}}
+{{- end -}}
+{{- if not .Values.lifecycle.preStop.enabled -}}
+{{- fail "autoscaling.activeRequests.enabled=true requires lifecycle.preStop.enabled=true" -}}
+{{- end -}}
+{{- if le (int .Values.lifecycle.terminationGracePeriodSeconds) 0 -}}
+{{- fail "autoscaling.activeRequests.enabled=true requires lifecycle.terminationGracePeriodSeconds greater than zero" -}}
+{{- end -}}
+{{- if lt (int $stabilizationWindowSeconds) (int .Values.lifecycle.preStop.drainSeconds) -}}
+{{- fail "autoscaling.scaleDown.stabilizationWindowSeconds must be at least lifecycle.preStop.drainSeconds when autoscaling.activeRequests.enabled=true" -}}
+{{- end -}}
+{{- if lt (int $periodSeconds) (int .Values.lifecycle.terminationGracePeriodSeconds) -}}
+{{- fail "autoscaling.scaleDown.periodSeconds must be at least lifecycle.terminationGracePeriodSeconds when autoscaling.activeRequests.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.validatePositiveInteger" -}}
 {{- $value := toString .value -}}
 {{- $field := .field -}}
