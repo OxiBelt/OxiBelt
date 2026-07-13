@@ -125,6 +125,12 @@ assert_contains "${work_dir}/secure_profile.yaml" "app.kubernetes.io/name: prome
 assert_contains "${work_dir}/secure_profile.yaml" "k8s-app: kube-dns"
 assert_not_contains "${work_dir}/secure_profile.yaml" "endPort:"
 
+render portable_show_only \
+  --set networkPolicy.enabled=true \
+  --show-only templates/networkpolicy.yaml
+assert_count "${work_dir}/portable_show_only.yaml" "kind: NetworkPolicy" 3
+assert_not_contains "${work_dir}/portable_show_only.yaml" "kind: CiliumNetworkPolicy"
+
 for workload_kind in Deployment DaemonSet; do
   render "secure_${workload_kind}" -f "${secure_values}" \
     --set-string "workload.kind=${workload_kind}"
@@ -155,6 +161,15 @@ render cilium_fqdn \
   --set-json 'networkPolicy.cilium.fqdnDestinations=[{"name":"ocsp","category":"revocation","matchNames":["ocsp.example.com"],"ports":[{"port":80,"protocol":"TCP"}]}]'
 assert_contains "${work_dir}/cilium_fqdn.yaml" "kind: CiliumNetworkPolicy"
 assert_contains "${work_dir}/cilium_fqdn.yaml" "k8s:app.kubernetes.io/name: oxibelt"
+
+render cilium_fqdn_show_only \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.cilium.enabled=true \
+  --set-json 'networkPolicy.cilium.fqdnDestinations=[{"name":"ocsp","category":"revocation","matchNames":["ocsp.example.com"],"ports":[{"port":80,"protocol":"TCP"}]}]' \
+  --show-only templates/networkpolicy.yaml \
+  --show-only templates/ciliumnetworkpolicy.yaml
+assert_count "${work_dir}/cilium_fqdn_show_only.yaml" "kind: NetworkPolicy" 3
+assert_contains "${work_dir}/cilium_fqdn_show_only.yaml" "kind: CiliumNetworkPolicy"
 assert_contains "${work_dir}/cilium_fqdn.yaml" "matchName: \"ocsp.example.com\""
 assert_contains "${work_dir}/cilium_fqdn.yaml" "matchPattern: \"*\""
 

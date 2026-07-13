@@ -15,6 +15,8 @@ work_dir=""
 profile_name=""
 external_allowed_container=""
 external_denied_container=""
+external_allowed_ip=""
+external_denied_ip=""
 
 # Kubernetes v1.31.4 publishes agnhost 2.52. The multi-architecture manifest
 # digest keeps the fixture portable while remaining immutable.
@@ -34,6 +36,57 @@ require_command() {
 
 kubectl_cmd() {
   kubectl --kubeconfig "${KUBECONFIG}" "$@"
+}
+
+is_ipv4_address() {
+  local address="$1"
+  local octet
+  local -a octets
+
+  [[ "${address}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<<"${address}"
+  for octet in "${octets[@]}"; do
+    (( 10#${octet} <= 255 )) || return 1
+  done
+}
+
+docker_network_ipv4() {
+  local network="$1"
+  local container="$2"
+
+  docker network inspect "${network}" \
+    --format '{{range .Containers}}{{println .Name .IPv4Address}}{{end}}' |
+    awk -v expected_container="${container}" '
+      $1 == expected_container {
+        sub(/\/.*/, "", $2)
+        print $2
+        exit
+      }
+    '
+}
+
+wait_for_distinct_docker_network_ipv4s() {
+  local network="$1"
+  local allowed_container="$2"
+  local denied_container="$3"
+  local allowed_ip
+  local denied_ip
+  local attempt
+
+  for attempt in {1..10}; do
+    allowed_ip="$(docker_network_ipv4 "${network}" "${allowed_container}" 2>/dev/null || true)"
+    denied_ip="$(docker_network_ipv4 "${network}" "${denied_container}" 2>/dev/null || true)"
+    if is_ipv4_address "${allowed_ip}" \
+      && is_ipv4_address "${denied_ip}" \
+      && [[ "${allowed_ip}" != "${denied_ip}" ]]; then
+      external_allowed_ip="${allowed_ip}"
+      external_denied_ip="${denied_ip}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  die "Cilium FQDN fixtures did not receive distinct IPv4 addresses on Minikube Docker network"
 }
 
 diagnose() {
@@ -305,10 +358,12 @@ if [[ "${cni}" == "cilium" ]]; then
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
     "${agnhost_image}" /agnhost netexec --http-port=8080 --udp-port=-1 >/dev/null
 
-  allowed_ip="$(docker inspect "${external_allowed_container}" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')"
-  denied_ip="$(docker inspect "${external_denied_container}" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')"
-  [[ -n "${allowed_ip}" && -n "${denied_ip}" && "${allowed_ip}" != "${denied_ip}" ]] \
-    || die "Cilium FQDN fixtures must receive distinct Docker-network addresses"
+  wait_for_distinct_docker_network_ipv4s \
+    "${minikube_network}" \
+    "${external_allowed_container}" \
+    "${external_denied_container}"
+  allowed_ip="${external_allowed_ip}"
+  denied_ip="${external_denied_ip}"
   allowed_name="allowed-${run_id}.oxibelt.test"
   denied_name="denied-${run_id}.oxibelt.test"
 
@@ -633,12 +688,16 @@ if [[ "${cni}" == "cilium" ]]; then
 EOF
 fi
 
+helm_show_only=(--show-only templates/networkpolicy.yaml)
+if [[ "${cni}" == "cilium" ]]; then
+  helm_show_only+=(--show-only templates/ciliumnetworkpolicy.yaml)
+fi
+
 helm template network-policy "${chart_dir}" \
   --namespace "${data_namespace}" \
   -f "${admin_values}" \
   -f "${policy_values}" \
-  --show-only templates/networkpolicy.yaml \
-  --show-only templates/ciliumnetworkpolicy.yaml >"${work_dir}/policies.yaml"
+  "${helm_show_only[@]}" >"${work_dir}/policies.yaml"
 kubectl_cmd -n "${data_namespace}" apply -f "${work_dir}/policies.yaml"
 
 target_host="target.${data_namespace}.svc.cluster.local"

@@ -1106,6 +1106,11 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "Minikube did not start with the requested ${cni} CNI",
     "--show-only templates/networkpolicy.yaml",
     "--show-only templates/ciliumnetworkpolicy.yaml",
+    "helm_show_only=(--show-only templates/networkpolicy.yaml)",
+    "helm_show_only+=(--show-only templates/ciliumnetworkpolicy.yaml)",
+    "docker network inspect \"${network}\"",
+    "wait_for_distinct_docker_network_ipv4s",
+    "Cilium FQDN fixtures did not receive distinct IPv4 addresses on Minikube Docker network",
     "expect_denied \"public source reaching metrics\"",
     "expect_denied \"public source reaching Admin\"",
     "expect_allowed \"declared data-plane upstream egress\"",
@@ -1126,6 +1131,13 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
       "Kubernetes NetworkPolicy script should preserve {expected}"
     );
   }
+
+  assert!(
+    script.contains(
+      "if [[ \"${cni}\" == \"cilium\" ]]; then\n  helm_show_only+=(--show-only templates/ciliumnetworkpolicy.yaml)\nfi"
+    ),
+    "the Cilium template must only be selected for Cilium coverage"
+  );
 
   for forbidden in [
     "docker-rootful",
