@@ -47,8 +47,8 @@ oxibeltctl doctor --config source/config/oxibelt.toml
 ```
 
 `oxibeltctl doctor` emits a human-readable report by default and exits non-zero
-for `error` or `critical` findings. Use `--format json` for automation,
-`--fail-on critical|error|warning` to tune deploy gates, and repeat
+for `error` or `critical` findings. Use `--format json` or `--format sarif` for
+automation, `--fail-on critical|error|warning` to tune deploy gates, and repeat
 `--external-probe shared_state|ipm_store|remote_signer|upstream|all` to run
 explicit dependency probes. Without `--external-probe`, doctor only
 loads and validates configuration plus local files, directories, and Unix
@@ -56,6 +56,46 @@ socket permissions; it does not connect to upstreams, databases, Redis, or the
 remote signer. Local `oxibeltctl doctor` permits its explicit probes to read
 secret-backed endpoint inputs, including Redis ACL files; Admin candidate
 diagnostics keep those probes disabled unless an authorized workflow opts in.
+
+Every JSON finding has a stable short `code`, such as `ADM-001`, plus its
+long-standing dotted `id` compatibility alias. Reports include
+`schema_version = 1`; automation should key policy on `code` and retain `id`
+for operator context. SARIF 2.1.0 output uses the code as `ruleId`, preserves
+the dotted ID, target, and remediation in result properties, and does not
+pretend config-key targets are source-file locations.
+
+Doctor has three optional read-only deployment sources. `--config FILE` may be
+combined with exactly one of them, while `--candidate FILE` remains an Admin
+preflight input and cannot be combined with local sources:
+
+```sh
+# Rendered YAML directory; YAML/YML files are bounded and symlinks are rejected.
+oxibeltctl doctor --helm-rendered deploy/rendered --format sarif
+
+# Local chart only. Rendering is argv-only Helm client dry-run with no hooks,
+# no DNS enablement, no dependency updates, and a bounded timeout/output size.
+oxibeltctl doctor --helm-chart deploy/helm/oxibelt \
+  --helm-values values-production.yaml \
+  --helm-release oxibelt --helm-namespace production
+
+# Live cluster: list-only Deployments, DaemonSets, and HorizontalPodAutoscalers.
+oxibeltctl doctor --kubernetes --kube-context production \
+  --kube-namespace edge --kube-selector app.kubernetes.io/name=oxibelt
+```
+
+`--kubernetes` defaults to the selected context namespace; use
+`--all-namespaces` only when an explicit cluster-wide inventory is intended.
+It never reads Secrets or issues mutations. For safety, doctor refuses
+kubeconfigs containing `exec` or `auth-provider` credentials rather than
+running credential helper commands. In-cluster service-account configuration is
+supported when no kubeconfig is present.
+
+The deployment checks identify unpinned OxiBelt and Gateway Controller images,
+immutable Gateway Controller target wiring, and configuration-revision
+acknowledgement before multi-instance rollout. A read-only base ConfigMap mount
+is valid for the immutable controller protocol; the controller replaces it with
+its own projected revision volume during rollout. Doctor does not treat that
+safe initial mount as a writable-configuration failure.
 
 Print the merged, redacted effective configuration:
 
@@ -2166,8 +2206,10 @@ file-sync, and downstream TLS reload mutations return `409`; read-only
 validate, diff, effective-config, and status operations remain available.
 
 Admin diagnostics endpoints return the same production preflight report shape as
-`oxibeltctl doctor`: `ok`, `profile`, severity `summary`, `findings`, and
-optional `probes`. `GET /admin/v1/diagnostics/preflight` diagnoses the active runtime
+`oxibeltctl doctor`: `schema_version` (currently `1`), `ok`, `profile`,
+severity `summary`, `findings`, and optional `probes`. Each finding has a
+stable short `code` for machine policy and its dotted `id` compatibility alias,
+plus severity, category, target, message, and remediation. `GET /admin/v1/diagnostics/preflight` diagnoses the active runtime
 configuration and requires `diagnostics:ReadPreflight` on
 `oxibelt:<namespace>:diagnostics:preflight/current`. `POST
 /admin/v1/diagnostics/preflight` accepts JSON such as:

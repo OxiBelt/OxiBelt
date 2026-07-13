@@ -11,13 +11,22 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 
 mod checks;
+mod deployment;
 mod discovery_probe;
 mod probes;
+mod rules;
+mod sarif;
 mod support_bundle;
 mod system;
 mod tls_checks;
 mod upstream_probe;
 
+#[cfg(test)]
+mod doctor_contract_tests;
+
+pub use deployment::{
+  KubernetesDoctorOptions, diagnose_helm_chart, diagnose_kubernetes, diagnose_rendered_directory,
+};
 pub use support_bundle::{
   RuntimeSnapshot, SupportBundle, build_runtime_snapshot, build_support_bundle,
 };
@@ -122,6 +131,7 @@ impl FromStr for DoctorFailOn {
 pub enum DoctorOutputFormat {
   Text,
   Json,
+  Sarif,
 }
 
 impl FromStr for DoctorOutputFormat {
@@ -131,7 +141,8 @@ impl FromStr for DoctorOutputFormat {
     match value {
       "text" => Ok(Self::Text),
       "json" => Ok(Self::Json),
-      _ => bail!("unsupported doctor format {value}; expected text or json"),
+      "sarif" => Ok(Self::Sarif),
+      _ => bail!("unsupported doctor format {value}; expected text, json, or sarif"),
     }
   }
 }
@@ -146,7 +157,7 @@ pub enum DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
-  fn as_str(self) -> &'static str {
+  pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::Critical => "critical",
       Self::Error => "error",
@@ -166,6 +177,9 @@ pub struct DiagnosticSummary {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiagnosticFinding {
+  /// Stable public rule code. The dotted `id` remains a compatibility alias.
+  #[serde(default)]
+  pub code: String,
   pub id: String,
   pub severity: DiagnosticSeverity,
   pub category: String,
@@ -184,6 +198,8 @@ pub struct DiagnosticProbe {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiagnosticReport {
+  #[serde(default = "diagnostic_schema_version")]
+  pub schema_version: u32,
   pub ok: bool,
   pub profile: String,
   pub summary: DiagnosticSummary,
@@ -192,8 +208,9 @@ pub struct DiagnosticReport {
 }
 
 impl DiagnosticReport {
-  fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
+      schema_version: diagnostic_schema_version(),
       ok: true,
       profile: "production".to_string(),
       summary: DiagnosticSummary::default(),
@@ -202,7 +219,7 @@ impl DiagnosticReport {
     }
   }
 
-  pub(super) fn push(
+  pub(crate) fn push(
     &mut self,
     severity: DiagnosticSeverity,
     id: &str,
@@ -212,6 +229,7 @@ impl DiagnosticReport {
     remediation: impl Into<String>,
   ) {
     self.findings.push(DiagnosticFinding {
+      code: rules::code_for(id),
       id: id.to_string(),
       severity,
       category: category.to_string(),
@@ -221,7 +239,7 @@ impl DiagnosticReport {
     });
   }
 
-  pub(super) fn probe(
+  pub(crate) fn probe(
     &mut self,
     kind: &str,
     target: impl Into<String>,
@@ -236,7 +254,20 @@ impl DiagnosticReport {
     });
   }
 
-  fn finish(mut self) -> Self {
+  /// Normalizes a report received from a local or older remote doctor.
+  ///
+  /// Older Admin endpoints did not serialize `schema_version` or finding
+  /// codes. Filling those additive fields here keeps JSON, text, and SARIF
+  /// output usable during rolling upgrades.
+  pub fn normalize(&mut self) {
+    if self.schema_version == 0 {
+      self.schema_version = diagnostic_schema_version();
+    }
+    for finding in &mut self.findings {
+      if finding.code.is_empty() {
+        finding.code = rules::code_for(&finding.id);
+      }
+    }
     let mut summary = DiagnosticSummary::default();
     for finding in &self.findings {
       match finding.severity {
@@ -248,6 +279,10 @@ impl DiagnosticReport {
     }
     self.ok = summary.critical == 0 && summary.error == 0;
     self.summary = summary;
+  }
+
+  pub(crate) fn finish(mut self) -> Self {
+    self.normalize();
     self
   }
 
@@ -260,6 +295,26 @@ impl DiagnosticReport {
       }
     }
   }
+
+  pub(crate) fn merge(&mut self, other: Self) {
+    self.findings.extend(other.findings);
+    self.probes.extend(other.probes);
+    self.schema_version = diagnostic_schema_version();
+    self.profile = "production".to_string();
+  }
+}
+
+const fn diagnostic_schema_version() -> u32 {
+  1
+}
+
+/// Combines independently collected doctor reports into one normalized report.
+pub fn combine_reports(reports: impl IntoIterator<Item = DiagnosticReport>) -> DiagnosticReport {
+  let mut combined = DiagnosticReport::new();
+  for report in reports {
+    combined.merge(report);
+  }
+  combined.finish()
 }
 
 pub async fn diagnose_config_path(path: &Path, options: &DoctorOptions) -> DiagnosticReport {
@@ -325,8 +380,13 @@ async fn diagnose_valid_config(config: Config, options: &DoctorOptions) -> Diagn
 }
 
 pub fn format_text(report: &DiagnosticReport) -> String {
+  let mut report = report.clone();
+  report.normalize();
   let mut out = String::new();
-  out.push_str("OxiBelt production doctor\n");
+  out.push_str(&format!(
+    "OxiBelt production doctor (schema v{})\n",
+    report.schema_version
+  ));
   out.push_str(&format!(
     "status: {}\n",
     if report.ok { "ok" } else { "not ok" }
@@ -337,11 +397,12 @@ pub fn format_text(report: &DiagnosticReport) -> String {
   ));
   for finding in &report.findings {
     out.push_str(&format!(
-      "\n[{}] {} ({})\n",
-      finding.severity.as_str(),
-      finding.id,
-      finding.category
+      "\n{} {}: {}\n",
+      finding.severity.as_str().to_ascii_uppercase(),
+      finding.code,
+      finding.message
     ));
+    out.push_str(&format!("id: {} ({})\n", finding.id, finding.category));
     out.push_str(&format!("target: {}\n", finding.target));
     out.push_str(&format!("message: {}\n", finding.message));
     out.push_str(&format!("remediation: {}\n", finding.remediation));
@@ -356,6 +417,13 @@ pub fn format_text(report: &DiagnosticReport) -> String {
     }
   }
   out
+}
+
+/// Serializes the diagnostics report as a SARIF 2.1.0 document.
+pub fn format_sarif(report: &DiagnosticReport) -> serde_json::Value {
+  let mut report = report.clone();
+  report.normalize();
+  sarif::format_sarif(&report)
 }
 
 fn invalid_config_report(error: anyhow::Error) -> DiagnosticReport {

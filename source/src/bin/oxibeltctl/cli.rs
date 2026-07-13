@@ -2,19 +2,21 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
-use oxibelt::diagnostics::{DoctorFailOn, DoctorOutputFormat, ExternalProbeKind};
 use url::Url;
 
 #[path = "auth_cli.rs"]
 mod auth_cli;
 #[path = "config_compat_cli.rs"]
 mod config_compat_cli;
+#[path = "doctor_cli.rs"]
+mod doctor_cli;
 #[path = "ipm_cli.rs"]
 mod ipm_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
 pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
+pub(crate) use doctor_cli::*;
 pub(crate) use ipm_cli::*;
 pub(crate) use rulepack_cli::*;
 
@@ -105,20 +107,6 @@ pub(crate) struct AdminAuditArgs {
   pub(crate) before_id: Option<i64>,
   #[arg(long, default_value_t = 100)]
   pub(crate) limit: i64,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct DoctorArgs {
-  #[arg(long, value_name = "FILE", conflicts_with = "candidate")]
-  pub(crate) config: Option<PathBuf>,
-  #[arg(long, value_name = "FILE")]
-  pub(crate) candidate: Option<PathBuf>,
-  #[arg(long, value_name = "FORMAT", value_parser = parse_doctor_output_format, default_value = "text")]
-  pub(crate) format: DoctorOutputFormat,
-  #[arg(long = "fail-on", value_name = "SEVERITY", value_parser = parse_doctor_fail_on, default_value = "error")]
-  pub(crate) fail_on: DoctorFailOn,
-  #[arg(long = "external-probe", value_name = "KIND", value_parser = parse_external_probe)]
-  pub(crate) external_probes: Vec<ExternalProbeKind>,
 }
 
 #[derive(Debug, Args)]
@@ -665,24 +653,6 @@ pub(crate) fn selected_token_env(args: &AdminArgs) -> &str {
   } else {
     args.token_env.as_deref().unwrap_or(DEFAULT_ADMIN_TOKEN_ENV)
   }
-}
-
-fn parse_doctor_output_format(value: &str) -> Result<DoctorOutputFormat, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn parse_doctor_fail_on(value: &str) -> Result<DoctorFailOn, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
-}
-
-fn parse_external_probe(value: &str) -> Result<ExternalProbeKind, String> {
-  value
-    .parse()
-    .map_err(|error: anyhow::Error| error.to_string())
 }
 
 fn parse_ttl_seconds(value: &str) -> Result<i64, String> {

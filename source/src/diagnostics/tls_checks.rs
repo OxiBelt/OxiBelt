@@ -14,11 +14,27 @@ use crate::tls::ParsedCertificateMetadata;
 use super::{DiagnosticReport, DiagnosticSeverity};
 
 pub(super) fn diagnose_tls(config: &Config, report: &mut DiagnosticReport) {
+  diagnose_quic_host_key(config, report);
   diagnose_downstream_tls(config, report);
   diagnose_admin_tls(config, report);
   diagnose_turn_tls(config, report);
   diagnose_client_auth_roots(config, report);
   diagnose_pqc_tls_version(config, report);
+}
+
+fn diagnose_quic_host_key(config: &Config, report: &mut DiagnosticReport) {
+  if (config.listeners.http3 || (config.admin.enabled && config.admin.http3.enabled))
+    && config.quic.host_key_file.is_none()
+  {
+    report.push(
+      DiagnosticSeverity::Warning,
+      "tls.http3_host_key_missing",
+      "tls",
+      "quic.host_key_file",
+      "HTTP/3 is enabled but the QUIC host key is generated ephemerally",
+      "Set quic.host_key_file to a persistent, access-restricted path so retry and address-validation state survives restart.",
+    );
+  }
 }
 
 fn diagnose_downstream_tls(config: &Config, report: &mut DiagnosticReport) {

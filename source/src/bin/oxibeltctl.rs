@@ -12,6 +12,9 @@ mod config_compat;
 mod doctor;
 #[path = "oxibeltctl/doctor_plan.rs"]
 mod doctor_plan;
+#[cfg(test)]
+#[path = "oxibeltctl/doctor_plan_tests.rs"]
+mod doctor_plan_tests;
 #[path = "oxibeltctl/dynamic_policy_plan.rs"]
 mod dynamic_policy_plan;
 #[path = "oxibeltctl/ipm_plan.rs"]

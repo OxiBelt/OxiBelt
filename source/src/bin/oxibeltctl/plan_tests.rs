@@ -3,7 +3,6 @@ use std::time::Duration;
 use clap::Parser;
 use http::Method;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, DEFAULT_ADMIN_URL};
-use oxibelt::diagnostics::{DoctorFailOn, DoctorOutputFormat, ExternalProbeKind};
 use serde_json::json;
 use url::Url;
 
@@ -81,107 +80,6 @@ fn auth_check_accepts_context_flags() {
       },
     }))
   );
-}
-
-#[test]
-fn current_doctor_includes_external_probe_query() {
-  let command = Command::Doctor(DoctorArgs {
-    config: None,
-    candidate: None,
-    format: DoctorOutputFormat::Text,
-    fail_on: DoctorFailOn::Error,
-    external_probes: vec![ExternalProbeKind::SharedState, ExternalProbeKind::Upstream],
-  });
-  let runtime = tokio::runtime::Builder::new_current_thread()
-    .enable_all()
-    .build()
-    .expect("runtime");
-  let client = dummy_client();
-  let plan = runtime
-    .block_on(plan_command(&client, &command))
-    .expect("plan");
-
-  assert_eq!(plan.method, Method::GET);
-  assert_eq!(
-    plan.endpoint,
-    "/admin/v1/diagnostics/preflight?external_probe=shared_state&external_probe=upstream"
-  );
-  assert_eq!(plan.permission.action, "diagnostics:ReadPreflight");
-  assert_eq!(plan.permission.resources, vec!["preflight/current"]);
-}
-
-#[test]
-fn candidate_doctor_posts_toml() {
-  let candidate = tempfile::Builder::new()
-    .prefix("oxibeltctl-doctor-")
-    .suffix(".toml")
-    .tempfile()
-    .expect("candidate config file should be created");
-  std::fs::write(
-    candidate.path(),
-    "[listeners]\nhttps_bind = \"127.0.0.1:8443\"\n",
-  )
-  .expect("candidate should be written");
-  let command = Command::Doctor(DoctorArgs {
-    config: None,
-    candidate: Some(candidate.path().to_path_buf()),
-    format: DoctorOutputFormat::Json,
-    fail_on: DoctorFailOn::Warning,
-    external_probes: vec![ExternalProbeKind::RemoteSigner],
-  });
-  let runtime = tokio::runtime::Builder::new_current_thread()
-    .enable_all()
-    .build()
-    .expect("runtime");
-  let client = dummy_client();
-  let plan = runtime
-    .block_on(plan_command(&client, &command))
-    .expect("plan");
-
-  assert_eq!(plan.method, Method::POST);
-  assert_eq!(plan.endpoint, "/admin/v1/diagnostics/preflight");
-  assert_eq!(
-    plan.body,
-    Some(json!({
-      "format": "toml",
-      "config": "[listeners]\nhttps_bind = \"127.0.0.1:8443\"\n",
-      "external_probes": ["remote_signer"],
-    }))
-  );
-}
-
-#[test]
-fn local_doctor_cli_conflicts_with_candidate_and_parses_options() {
-  let parsed = Cli::try_parse_from([
-    "oxibeltctl",
-    "doctor",
-    "--config",
-    "source/config/oxibelt.toml",
-    "--format",
-    "json",
-    "--fail-on",
-    "warning",
-    "--external-probe",
-    "all",
-  ])
-  .expect("local doctor should parse");
-  let Command::Doctor(args) = parsed.command else {
-    panic!("expected doctor command");
-  };
-  assert!(args.config.is_some());
-  assert_eq!(args.format, DoctorOutputFormat::Json);
-  assert_eq!(args.fail_on, DoctorFailOn::Warning);
-  assert_eq!(args.external_probes, vec![ExternalProbeKind::All]);
-
-  let conflict = Cli::try_parse_from([
-    "oxibeltctl",
-    "doctor",
-    "--config",
-    "active.toml",
-    "--candidate",
-    "candidate.toml",
-  ]);
-  assert!(conflict.is_err(), "doctor config and candidate conflict");
 }
 
 #[test]

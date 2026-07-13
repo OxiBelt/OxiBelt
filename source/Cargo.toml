@@ -65,7 +65,7 @@ socket2 = "0.6.4"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 subtle = "2.6.1"
 tempfile = "3.27.0"
-tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "early-data", "logging", "tls12"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 toml = "1.1.2"

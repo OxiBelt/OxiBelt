@@ -64,6 +64,18 @@ cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- \
   doctor --config source/config/oxibelt.toml
 ```
 
+Doctor can also inspect rendered Kubernetes resources without applying them:
+
+```sh
+cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- \
+  doctor --helm-rendered deploy/rendered --format sarif --fail-on warning
+```
+
+Use `--helm-chart CHART` with repeatable `--helm-values FILE` for a bounded,
+client-side Helm render, or `--kubernetes` for read-only live inspection. See
+`docs/Configuration.md` for source-combination and Kubernetes credential-safety
+rules.
+
 Enable hot reload at startup:
 
 ```sh

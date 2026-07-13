@@ -8,7 +8,7 @@ use crate::cli::DoctorArgs;
 use crate::plan::{PermissionHint, RequestPlan, ResponseFilter};
 
 pub(crate) fn plan_doctor(args: &DoctorArgs) -> anyhow::Result<RequestPlan> {
-  if args.config.is_some() {
+  if args.has_local_source() {
     bail!("local doctor must be handled before building an Admin client");
   }
   match &args.candidate {

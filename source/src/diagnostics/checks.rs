@@ -5,8 +5,11 @@ use std::net::IpAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
-use crate::config::{AdminTransportMode, Config, TlsClientAuthMode};
-use crate::waf::{WafActionConfig, WafMode};
+use crate::config::{
+  AdminAuditMode, AdminAuditStoreKind, AdminTransportMode, Config, SharedStateBackendKind,
+  TlsClientAuthMode,
+};
+use crate::waf::{WafActionConfig, WafMode, route_http_body_compression_transform_enabled};
 
 use super::{DiagnosticReport, DiagnosticSeverity};
 
@@ -43,12 +46,9 @@ pub(super) fn diagnose_admin(config: &Config, report: &mut DiagnosticReport) {
       "Restrict plaintext admin access to loopback or a narrow private management CIDR.",
     );
   }
-  if public_bind
-    && config.admin.tls.enabled
-    && config.admin.tls.client_auth.mode != TlsClientAuthMode::Require
-  {
+  if public_bind && config.admin.tls.client_auth.mode != TlsClientAuthMode::Require {
     report.push(
-      DiagnosticSeverity::Warning,
+      DiagnosticSeverity::Error,
       "admin.public_without_mtls",
       "admin",
       "admin.tls.client_auth",
@@ -64,6 +64,21 @@ pub(super) fn diagnose_admin(config: &Config, report: &mut DiagnosticReport) {
       "ipm.enabled",
       "admin uses the legacy bootstrap bearer token authorization path",
       "Enable IPM and grant separate least-privilege policies for diagnostics, config, WAF, and cache operations.",
+    );
+  }
+  let audit = &config.admin.audit;
+  let audit_is_durable = audit.enabled
+    && audit.mode == AdminAuditMode::Enforcing
+    && audit.store.enabled
+    && audit.store.kind == AdminAuditStoreKind::Postgres;
+  if !audit_is_durable {
+    report.push(
+      DiagnosticSeverity::Error,
+      "admin.audit_not_durable",
+      "audit",
+      "admin.audit",
+      "Admin mutations are enabled without an enforcing durable PostgreSQL audit sink",
+      "Enable admin.audit with mode = \"enforcing\" and an enabled PostgreSQL store backed by shared state.",
     );
   }
 }
@@ -147,7 +162,7 @@ pub(super) fn diagnose_real_ip(config: &Config, report: &mut DiagnosticReport) {
   }
   if config.proxy.real_ip.trusted_proxies.is_empty() {
     report.push(
-      DiagnosticSeverity::Warning,
+      DiagnosticSeverity::Error,
       "real_ip.no_trusted_proxies",
       "identity",
       "proxy.real_ip.trusted_proxies",
@@ -246,9 +261,50 @@ pub(super) fn diagnose_waf(config: &Config, report: &mut DiagnosticReport) {
       }
     }
   }
+  let transform_reachable = config
+    .routes
+    .iter()
+    .any(|route| route_http_body_compression_transform_enabled(config, route));
+  let decoded_limit = config.waf.http_body_compression.max_decoded_body_bytes;
+  let request_limit = config.limits.max_request_body_bytes;
+  let decoded_limit_u64 = u64::try_from(decoded_limit).unwrap_or(u64::MAX);
+  if transform_reachable && decoded_limit_u64 > request_limit {
+    report.push(
+      DiagnosticSeverity::Warning,
+      "waf.decoded_body_limit_exceeds_request_limit",
+      "waf",
+      "waf.http_body_compression.max_decoded_body_bytes",
+      format!(
+        "WAF decompressed-body limit ({decoded_limit} bytes) exceeds limits.max_request_body_bytes ({request_limit} bytes)"
+      ),
+      "Keep the decoded-body limit at or below limits.max_request_body_bytes, or document the bounded decompression capacity explicitly.",
+    );
+  }
 }
 
 pub(super) fn diagnose_shared_state(config: &Config, report: &mut DiagnosticReport) {
+  for backend in &config.shared_state.backends {
+    if backend.kind != SharedStateBackendKind::Redis {
+      continue;
+    }
+    let Some(connection_url) = backend.connection_url.as_deref() else {
+      continue;
+    };
+    let Ok(url) = url::Url::parse(connection_url) else {
+      continue;
+    };
+    if url.scheme() != "redis" || redis_url_has_literal_loopback_host(&url) {
+      continue;
+    }
+    report.push(
+      DiagnosticSeverity::Error,
+      "shared_state.redis_plaintext_remote",
+      "shared_state",
+      format!("shared_state.backends.{}.connection_url", backend.name),
+      "Redis uses redis:// without a literal loopback host",
+      "Use rediss:// for remote Redis, or use a literal 127.0.0.0/8 or ::1 loopback endpoint for local-only development.",
+    );
+  }
   if config.shared_state.enabled {
     return;
   }
@@ -291,6 +347,14 @@ pub(super) fn diagnose_shared_state(config: &Config, report: &mut DiagnosticRepo
       "Person proof state is local to the instance",
       "Enable shared_state.person_proof_backend before running multiple public instances.",
     );
+  }
+}
+
+fn redis_url_has_literal_loopback_host(url: &url::Url) -> bool {
+  match url.host() {
+    Some(url::Host::Ipv4(address)) => address.is_loopback(),
+    Some(url::Host::Ipv6(address)) => address.is_loopback(),
+    Some(url::Host::Domain(_)) | None => false,
   }
 }
 

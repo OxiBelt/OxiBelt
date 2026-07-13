@@ -1917,7 +1917,7 @@
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/DiagnosticsReport"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -1941,7 +1941,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/DiagnosticsReport"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -5041,6 +5041,24 @@
       }
     },
     "responses": {
+      "DiagnosticsReport": {
+        "description": "Versioned OxiBelt production preflight report.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DiagnosticsReport"
+            }
+          }
+        }
+      },
       "JsonObject": {
         "description": "JSON object response.",
         "headers": {
@@ -5330,6 +5348,97 @@
       }
     },
     "schemas": {
+      "DiagnosticsReport": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "ok",
+          "profile",
+          "summary",
+          "findings",
+          "probes"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/DiagnosticSummary"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticFinding"
+            }
+          },
+          "probes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticProbe"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DiagnosticSummary": {
+        "type": "object",
+        "required": [
+          "critical",
+          "error",
+          "warning",
+          "info"
+        ],
+        "properties": {
+          "critical": { "type": "integer", "minimum": 0 },
+          "error": { "type": "integer", "minimum": 0 },
+          "warning": { "type": "integer", "minimum": 0 },
+          "info": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "DiagnosticFinding": {
+        "type": "object",
+        "required": [
+          "code",
+          "id",
+          "severity",
+          "category",
+          "target",
+          "message",
+          "remediation"
+        ],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "minLength": 1 },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "error", "warning", "info"]
+          },
+          "category": { "type": "string" },
+          "target": { "type": "string" },
+          "message": { "type": "string" },
+          "remediation": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "DiagnosticProbe": {
+        "type": "object",
+        "required": ["kind", "target", "status", "message"],
+        "properties": {
+          "kind": { "type": "string" },
+          "target": { "type": "string" },
+          "status": { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
       "AdminOperationId": {
         "type": "string",
         "pattern": "^op_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
