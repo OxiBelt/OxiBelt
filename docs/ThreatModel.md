@@ -1,0 +1,434 @@
+# OxiBelt Product Threat Model
+
+Status: Living product security contract  
+Applies to: The source tree or release that contains this document
+
+## Overview
+
+OxiBelt is a Linux-first reverse proxy and Web Application Firewall intended to
+sit between untrusted clients and protected upstream services. The primary
+runtime accepts HTTP/1.1, HTTP/2, HTTP/3 over QUIC, WebSocket, WebTransport,
+raw TCP/UDP streams, and WebRTC TURN traffic. It can terminate TLS, route or
+forward traffic, apply OxiRule and CRS-compatible WAF policy, cache responses,
+enforce admission controls, and use Redis-compatible or PostgreSQL shared
+state. The repository also ships an Admin API, a Kubernetes Gateway
+Controller, Helm charts, release workflows, and official container images.
+
+This document is the repository-wide security model for those product and
+deployment surfaces. Exact behavior and configuration syntax remain in the
+[technical specification](Specification.md),
+[configuration reference](Configuration.md), [Admin API reference](AdminAPI.md),
+[Admin OpenAPI document](admin-openapi.json), and
+[Gateway API reference](GatewayAPI.md). The
+[feature lifecycle matrix](FeatureStatus.md) is authoritative for whether a
+feature is supported, experimental, reserved, or removed. The
+[security policy](../SECURITY.md) remains authoritative for supported releases,
+private reporting, disclosure, and official artifact scope.
+
+The model is versioned by the Git tree or release that contains it. A commit or
+container-image digest identifies the exact version under review; this living
+document does not embed a commit that would become stale on its next update.
+
+### Security assets and objectives
+
+| Asset | Security objective |
+| --- | --- |
+| Downstream requests and upstream responses | Preserve message boundaries, authority, routing identity, policy decisions, and confidentiality while proxying. |
+| Upstream services | Prevent untrusted clients from bypassing intended routing, WAF, identity, rate, cache, and transport policy. |
+| TLS and QUIC state | Protect private keys, remote-signing authority, trust roots, resumption state, and QUIC Retry/token keys from disclosure or unauthorized use. |
+| Configuration and policy | Activate only validated TOML, certificates, routes, OxiRule/CRS policy, dynamic policy, and immutable Kubernetes revisions. |
+| Administrative authority | Authenticate and authorize every Admin request, constrain mutation scope, reject stale writes where supported, and create an attributable audit record. |
+| Shared state | Preserve the integrity, confidentiality, atomicity, expiry, and namespace separation of distributed decisions and durable control-plane records. |
+| Availability | Bound connections, streams, requests, bodies, queues, retries, cache fills, WAF work, and backend waiters so one workload cannot exhaust the edge. |
+| Release artifacts | Bind official images to reviewed source and prevent stale or malicious artifacts from being silently deployed. |
+
+Security defects should be reported through the private channel in
+[`SECURITY.md`](../SECURITY.md). This model describes vulnerability classes and
+severity context; it does not disclose or assert a finding in any current diff.
+
+## Threat Model, Trust Boundaries, and Assumptions
+
+### Actors and input ownership
+
+| Actor or component | Inputs it controls | Trust posture |
+| --- | --- | --- |
+| Untrusted Internet client | TCP/UDP timing, TLS ClientHello and SNI, QUIC packets, HTTP framing, authority, headers, paths, bodies, trailers, WebSocket/WebTransport data, TURN messages, and public cache-purge requests | Fully attacker-controlled. No client-supplied identity, forwarding metadata, priority label, or parser interpretation is trusted without explicit verification. |
+| Upstream service or discovery source | Response framing, headers, bodies, cache metadata, redirects, health results, and discovered endpoints | Operator-selected but potentially compromised. Responses remain untrusted protocol and cache input. |
+| Admin client | Bearer credential, optional client certificate, requested action/resource, precondition headers, and mutation payload | Authenticated does not imply authorized. Compromised, replayed, or over-privileged credentials are credible threats. |
+| Operator | TOML, Helm values, certificates, secrets, rulepacks, trust roots, backend endpoints, listener exposure, and failure policies | Trusted to define deployment intent, but mistakes or compromised automation can defeat product controls. Validation reduces but cannot remove this trust. |
+| Redis or PostgreSQL service | Shared values, expiry, transaction results, policy rows, audit rows, and availability | A trusted security dependency once authenticated. TLS and ACLs protect access and transit, not malicious authenticated responses or a compromised server. |
+| Gateway Controller and Kubernetes control plane | Gateway objects, desired TOML, ConfigMaps, workload patches, Pod identity, readiness, RBAC, Secrets, and admission decisions | Privileged deployment boundary. Namespace ownership, API authorization, and admission policy are external assumptions. |
+| Developer and build system | Source, dependencies, workflow definitions, build inputs, image manifests, tags, and registry writes | Trusted supply-chain boundary. A compromised maintainer, dependency, runner, action, or release credential can affect official artifacts. |
+| External integration | Person proof frontend/provider, external auth, external cache handler, discovery service, OCSP/CRLite source, telemetry collector, or signer sidecar | Operator-selected and independently compromisable. Each receives only the data and authority required by its documented protocol. |
+
+### Required trust-boundary flows
+
+```text
+Untrusted Internet Client
+    -> Public Listener
+    -> Protocol Parsing
+    -> Routing / WAF / Identity
+    -> Upstream Services
+
+Management Network
+    -> Admin Listener
+    -> Configuration and Secret Mutation
+
+OxiBelt Instances
+    <-> Redis or PostgreSQL Shared State
+
+Gateway Controller
+    -> Desired Configuration
+    -> Data-Plane Rollout
+
+Build System
+    -> Container Registry
+    -> Kubernetes Admission
+```
+
+Additional local boundaries are the OxiBelt process to
+`oxibelt-keysigner` Unix socket, the unprivileged process to the
+`oxibelt-netport-switcher` bind broker, and OxiBelt to mounted configuration,
+certificate, OxiRule, cache, and runtime-state directories.
+
+### Listener and entry-point inventory
+
+| Surface | Trust model and required controls |
+| --- | --- |
+| Public HTTP data plane | `listeners.http_binds` accepts optional plaintext HTTP over TCP. `listeners.https_binds` accepts TLS HTTP/1.1 and HTTP/2 over TCP and, when enabled, HTTP/3 over UDP. WebSocket, CONNECT, and WebTransport extend connection lifetime and state. All protocol input is hostile; strict framing, authority, header, body, timeout, connection, stream, and admission limits are required. Legacy signed cache-purge requests also arrive on a public listener and require their separate signature, timestamp, nonce, route, and cache-policy checks. |
+| SNI forwarding and raw stream proxy | `[sni_forward]` classifies visible TCP TLS or QUIC SNI before local HTTP termination. `[[stream_listeners]]` accepts raw TCP or UDP and may only perform bounded SNI classification. Forwarded payloads do not pass through the HTTP router or HTTP WAF; operators must trust and protect the selected upstream protocol separately. Missing or malformed SNI follows the configured default or fails closed when no default exists. |
+| WebRTC TURN | `[[webrtc_turn_listeners]]` can expose UDP, TCP, TLS, and dynamic relay UDP ports. TURN authentication, allocation, permission, channel, peer-address, lifetime, queue, and rate limits form the boundary. TURN media payload is protocol-forwarded and is not OxiRule/CRS-inspected; application signaling and media authorization remain external responsibilities. |
+| Admin API | The dedicated TCP listener supports HTTP/1 and optional TLS; opt-in Admin HTTP/3 adds UDP and WebTransport event subscriptions. Every request requires bearer authentication, including when mTLS is enabled. Production exposure requires a private management path, TLS 1.3, required client certificates, IPM default-deny authorization, bounded requests/operations, and enforcing durable audit. A client certificate is not currently the IPM principal identity, so mTLS and bearer/IPM checks are independent. |
+| Metrics | The Prometheus listener is plaintext and has no application authentication. It is disabled and loopback-bound by default. Only bounded aggregate/detail labels belong here; network policy or host firewall rules must restrict it to the monitoring plane. Rule-level WAF data remains on authenticated Admin endpoints. |
+| Health | Readiness and liveness are plaintext, unauthenticated operational endpoints, disabled and loopback-bound by default. They reveal bounded process state and must be reachable only by trusted local or orchestration probes. Health capacity is separate from public request capacity. |
+| Gateway Controller health | `--health-bind` exposes plaintext `/healthz` and `/readyz`; the Helm chart binds it on the Pod network for probes. It has no application authentication and must not be published as a public service. It reports only bounded reconciliation readiness. |
+| Local privileged IPC | The remote signer and netport switcher listen on Unix sockets rather than network ports. Filesystem permissions, distinct UIDs/GIDs, peer allowlists, unguessable rotating tokens, request bounds, and capability minimization are mandatory because compromise grants signing or privileged-bind authority. |
+
+### Mandatory deployment assumptions
+
+- The deployment uses a supported source tree or release and evaluates the
+  lifecycle status shipped with that version. Experimental behavior is not a
+  stable production guarantee.
+- Operators validate configuration before activation, keep strict unknown-field
+  handling where practical, and review every explicit fail-open or insecure
+  compatibility override.
+- Internet-facing deployments configure explicit SNI names, suitable TLS
+  versions and certificates, a stable protected QUIC host key, trusted proxy
+  CIDRs, finite protocol/body limits, and bounded overload/circuit-breaker
+  controls. The `edge-secure-medium` profile provides a baseline but does not
+  create external infrastructure or credentials.
+- Admin is isolated from public traffic. A production Admin listener uses a
+  dedicated management bind, TLS 1.3, required client certificates, bearer/IPM
+  authorization, least-privilege policies, credential rotation, and enforcing
+  PostgreSQL audit storage.
+- Metrics, health, controller health, Redis, PostgreSQL, signer IPC, and
+  telemetry endpoints are restricted with host, namespace, firewall, or
+  NetworkPolicy controls appropriate to their trust boundary.
+- Mutually distrustful tenants use separate OxiBelt instances, credentials,
+  configuration roots, state namespaces/backends, cache storage, and management
+  authority. Route names, host matching, cache partition keys, and shared-state
+  namespaces are logical policy mechanisms, not a process or database sandbox.
+- Clustered configuration uses the documented immutable rollout model or an
+  equivalently verified external control plane. A successful request to one
+  instance or a load-balanced Admin Service does not prove cluster convergence.
+- Host root, container runtime, Kubernetes API, DNS, upstreams, external
+  providers, and build/release identities are protected outside OxiBelt. A
+  compromise of those authorities can exceed the protections in this model.
+- Official images are selected by immutable digest. Registry tag freshness,
+  admission, signature policy, and rollback prevention are operator controls
+  until the separately planned provenance and attestation work exists.
+
+### Conditional guarantees
+
+When the mandatory assumptions and documented supported configuration hold,
+OxiBelt is designed to preserve these invariants:
+
+- Ambiguous HTTP framing, forbidden hop-by-hop forwarding, invalid authority,
+  unsafe path/file traversal, invalid configuration, and unsupported WAF/CRS
+  syntax are rejected at their enforcement boundary rather than silently
+  reinterpreted.
+- Client-supplied forwarding and priority metadata does not become trusted
+  identity or reserved capacity without configured trusted-proxy, IPM, or
+  verified client-certificate authority.
+- Connection, stream, request, body, decompression, WAF, queue, retry, cache,
+  shared-state, Admin operation, and telemetry work has configurable or fixed
+  bounds; security-sensitive exhaustion returns a safe error or closes the
+  affected flow.
+- Invalid hot reloads preserve the active validated snapshot. Kubernetes
+  immutable rollout readiness requires the assigned revision and raw content
+  digest, and the controller commits only after all owned Ready Pods converge.
+- Every Admin request is authenticated, IPM uses explicit-deny then allow with
+  default deny when enabled, and protected mutations attempt a structured audit
+  record. Enforcing durable audit reserves capacity before handler execution.
+- Shared-state mutations that require atomicity use one Redis script or one
+  PostgreSQL transaction, are deadline-bounded, and are not retried after an
+  ambiguous transport result.
+- Secret-bearing configuration is redacted from supported effective-config,
+  status, metrics, and support-bundle surfaces as documented.
+
+These are design and configuration invariants, not a claim that the
+implementation is vulnerability-free or that every deployment enables the
+strongest available policy.
+
+### Explicit non-guarantees
+
+- OxiBelt does not guarantee protection from volumetric DDoS that exhausts
+  network, host, kernel, cloud, or upstream capacity before process admission
+  controls can act.
+- WAF and parser controls do not guarantee detection of every malicious payload
+  or semantic equivalence with every upstream framework. Raw stream/TURN media
+  payloads are outside HTTP WAF inspection, and reserved stream-CRS behavior is
+  not implemented.
+- Person proof is an anti-automation control, not authentication, identity
+  proof, proof of legal personhood, or proof of benign intent.
+- OxiBelt does not provide a hard multi-tenant sandbox inside one process,
+  configuration, cache, or shared backend.
+- Failure policies describe backend unavailability or error handling; they do
+  not make data from a compromised authenticated Redis/PostgreSQL service safe.
+- General Admin mutation replay protection and idempotency are not complete.
+  ETags protect documented stateful families, and optional `Idempotency-Key`
+  storage is currently narrow to Person proof clearance revocation.
+- Best-effort audit/export does not guarantee durable, queryable, ordered, or
+  acknowledged audit-of-record delivery.
+- OxiBelt does not issue or renew certificates, rotate external secrets, secure
+  Kubernetes admission, operate Redis/PostgreSQL, or protect a compromised host,
+  cluster administrator, registry, upstream, frontend, or provider.
+- Current release workflows do not claim reproducible builds, image signatures,
+  SBOM/provenance attestations, or in-repository admission verification. Trivy
+  reporting and pinned workflow actions reduce risk but are not those controls.
+- Experimental features may be disabled, removed, or incompatibly changed and
+  have no compatibility or backport guarantee beyond `SECURITY.md`.
+
+### Failure semantics
+
+Shared-state failure policy applies after a backend snapshot activates. Startup,
+authentication, TLS, schema initialization, or required prewarm failure keeps a
+replacement snapshot from activating. A malicious backend is a compromise, not
+a normal failure-mode transition.
+
+| Feature | Default mode | Security behavior after backend failure |
+| --- | --- | --- |
+| `rate_limits` | `fail_closed` | Rejects when a distributed token decision cannot be made. Configured local fallback is bounded but process-local; fail open explicitly admits without the distributed decision. |
+| `connection_limits` | `reject_new_only` | Preserves existing leases but rejects new distributed leases. A configured local fallback has no cluster-wide count. |
+| `person_proof` | `fail_closed` | Replay prevention, clearance revocation, and the Person proof Admin mutation reject; weaker modes are invalid. |
+| `upstream_health` | `stale_snapshot` | Uses only the last published non-mutating health/active-count observation until the backend recovers. |
+| `sticky_sessions` | `local_fallback` | Retains process-local sticky state. Cross-instance affinity is not guaranteed while degraded. |
+| `cache` | `local_fallback` | Treats shared-cache failure as a local miss and continues through local/origin handling. Administrative shared purge fails rather than claiming partial success. |
+| `reload` | `fail_open` | Logs/observes the failed cross-instance heartbeat while the already-active local configuration continues. It does not prove cluster convergence. |
+| Dynamic policy | `use_last_good` by default | Keeps the last verified snapshot; configured startup or disable-on-error behavior remains authoritative. |
+| IPM | Startup policy plus last-good refresh | Startup follows `ipm.fail_closed`; later backend refresh failure retains the last good dynamic snapshot or configured static policy behavior. |
+| Admin audit | `best_effort` or `enforcing` | Best effort records delivery failure but permits work. Enforcing durable audit rejects protected Admin work when reservation cannot be made. |
+
+`local_fallback` is bounded, observable, and limited to one process. It never
+provides a cluster-wide security decision. `fail_open` must be treated as an
+explicit availability-over-enforcement choice.
+
+### Externally protected secrets
+
+| Secret or authority | External protection requirement |
+| --- | --- |
+| TLS private keys, certificate trust roots, session/ticket state, QUIC host key | Restrictive mounts and ownership, rotation/revocation, stable Secret delivery, and separation by certificate/SNI boundary. Prefer the remote signer when private-key isolation is required. |
+| Remote-signer token and socket authority | Separate signer UID/GID, restrictive socket directory/mode, peer allowlist, bounded IPC, atomic token rotation, and no private-key mount in the OxiBelt process. |
+| Admin bearer, IPM, and break-glass credentials | Secret manager or protected environment/file delivery, least privilege, short exposure, rotation/revocation, no logs or TOML literals, and management-network isolation. mTLS does not replace the bearer/IPM requirement. |
+| Cache-purge, dynamic-policy, Person proof, and provider signing/shared secrets | Independent random keys, protected environment/file delivery, rotation compatible with replay/expiry windows, and isolation between environments or tenants. |
+| Redis/PostgreSQL passwords, ACL users, client keys, URLs, and CA roots | Verified TLS for remote services, least-privilege database identities, protected projected files/environment, network isolation, backups, monitoring, and rotation. |
+| External-auth, external cache, telemetry, discovery, and third-party-provider credentials | Restrict endpoint egress and data disclosure, validate TLS, bound requests/responses, and rotate credentials in the owning service. |
+| Kubernetes ServiceAccount, registry, CI, release, and admission authority | Least-privilege RBAC/workflow permissions, protected runners and environments, immutable image selection, branch/tag protection, and independent admission policy. |
+| ACME account keys, DNS provider tokens, and renewal state | Keep outside the OxiBelt process/container. OxiBelt consumes provisioned certificate material but does not manage issuance or renewal. |
+
+### Experimental features
+
+The following list is synchronized with rows marked `experimental` in the
+[feature lifecycle matrix](FeatureStatus.md). Experimental features are valid
+security research scope, but must not be presented as stable production
+guarantees.
+
+| Feature ID | Security consequence |
+| --- | --- |
+| `crlite` | Revocation filter coverage, managed downloads, cache integrity, and degraded-allow behavior require deployment-specific review. |
+| `tls-upstream-revocation` | Outbound OCSP/CRLite reachability, freshness, and failure policy can affect upstream availability and trust. |
+| `root-netport-switcher` | The privileged bind broker expands the local capability and Unix-socket boundary. |
+| `client-identity-asn` | Operator-supplied or managed ASN data is a fallible classifier, not authenticated client identity. |
+| `sybil-rate-limit-identities` | Composite and hashed classifiers can reduce abuse but do not prove one human or one device. |
+| `gateway-controller` | The controller can create desired configuration and patch one opted-in workload; Kubernetes RBAC and admission remain external. |
+| `gateway-api-httproute` | Translation supports a bounded subset and rejects unsupported matching/filter behavior. |
+| `gateway-api-grpcroute` | Translation supports only the documented bounded gRPC route subset. |
+| `gateway-api-tlsroute` | Passthrough translation relies on visible SNI and does not terminate or WAF-inspect the tunneled protocol. |
+| `helm-data-plane` | Chart output depends on operator values and cluster controls and is not a complete security deployment attestation. |
+| `helm-gateway-controller` | Controller chart RBAC and health exposure require namespace and cluster-policy review. |
+
+## Attack Surface, Mitigations, and Attacker Stories
+
+The tables below use existing controls as evidence, not as proof that a threat
+is impossible. Exact configuration and wire behavior remain in the linked
+canonical references.
+
+### Public protocol, routing, WAF, and cache threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| HTTP request smuggling | Client → parser → upstream; request boundaries and authorization context | Conflicting `Content-Length`, `Transfer-Encoding` ambiguity, hop-by-hop tokens, later trailers, and unsafe forwarding are rejected or sanitized before upstream dispatch. | A client searches for a downstream/upstream parser differential that causes one byte stream to be split into different requests. Any reachable differential crossing route, identity, cache, or upstream connection reuse is high impact. |
+| Header ambiguity | Client/upstream headers → routing, WAF, cache, or peer parser | Header count/size limits, duplicate/framing checks, connection-token removal, reserved-header mutation rejection, and trailer validation constrain interpretation. | Duplicate or syntactically unusual fields may still expose library/protocol differences. Security-sensitive headers require end-to-end tests whenever handling changes. |
+| H2 and H3 stream abuse | Client → multiplexed connection state and admission capacity | Per-connection/per-stream limits, bounded requests, overload state, circuit breakers, timeouts, drain signaling, and dedicated control-plane capacity limit work. | A client can create/reset/stall many streams or QUIC state. Process bounds do not stop upstream bandwidth or host/kernel exhaustion before admission. |
+| Decompression bombs | Encoded body → body transform/WAF memory and CPU | Supported encodings are explicit; encoded/decoded byte caps, expansion ratio, decode timeout, concurrency, and inspection-prefix limits bound work. | Novel codec behavior, repeated requests within allowed bounds, or operator-expanded limits can still create CPU pressure. Unsupported or multiple codings fail closed on transform routes. |
+| WAF bypass and parser mismatch | Client bytes → HTTP parser → OxiRule/CRS view → upstream framework | WAF uses normalized request context, bounded body prefixes and transforms, fail-closed compilation, cost/regex limits, and explicit monitor/enforce modes. | OxiBelt does not guarantee semantic parity with every backend. Truncated inspection, monitor mode, raw tunnels, unsupported CRS stream payloads, or upstream normalization can leave bypass opportunities. |
+| Cache poisoning | Client/upstream metadata → shared cached representation | Keys include scheme/host by default, credential requests bypass by default, `Vary` is bounded, origin cache-status headers are stripped, partial fills are not committed, and purge is authorized. | Unsafe custom keys, omitted variation dimensions, hostile upstream cache metadata, or a compromised external/shared cache can serve content across users or hosts. Operators must treat partition design as security policy. |
+| Host and SNI confusion | TLS SNI/certificate policy → HTTP authority/route/upstream | Strict SNI options, certificate partitioning, normalized host routing, route-TLS policy checks, and `421` rejection constrain cross-host reuse. | Permissive fallback certificates, wildcard routes, proxy absolute-form targets, or inconsistent upstream authority can cross a virtual-host boundary. Strict public SNI and cache host keys are mandatory. |
+| Forwarded-header spoofing | Direct peer/client headers → resolved client identity and upstream metadata | Trusted proxy CIDRs gate PROXY/Real-IP input; untrusted `Forwarded` and `X-Forwarded-*` values are removed or overwritten under secure policy. | An overly broad trusted CIDR or alternate unnormalized identity header can let a client impersonate a source, bypass a limit, or poison audit data. Trust configuration is operator-owned. |
+
+### Cryptographic and transport-key threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| TLS key compromise | Files/remote signer → TLS termination authority | Restrictive file roots, optional remote signer, signer public-key match, token authentication, peer UID/GID controls, bounded IPC, and reload validation reduce exposure. | A stolen local key enables impersonation until revocation. A compromised process with live signer access may request signatures even without reading the key, so isolation and rotation remain external duties. |
+| QUIC token-key instability | QUIC host key → Retry/token validation and restart behavior | Public secure profiles require an explicit stable 64-byte host key and reject generated restart-local material. | Ephemeral or shared-across-boundary key handling can invalidate tokens, weaken operational continuity, or expand blast radius. Kubernetes Secret integrity and rotation are operator responsibilities. |
+
+### Management, configuration, and audit threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| Admin credential replay | Management client → Admin bearer/IPM authority | Dedicated listener, TLS/mTLS options, mandatory bearer authentication, IPM action/resource checks, token digests for DB credentials, rotation/revocation, and audit reduce exposure. | A stolen bearer is replayable until revoked or rotated. mTLS currently does not bind the certificate to the IPM principal, and general request nonce/idempotency protection is incomplete. |
+| Configuration rollback attack | Admin/controller/operator → active security policy | Validation, config ETags, last-good snapshots, immutable content-addressed artifacts, desired/applied digests, and controller rollback status make revision changes visible. | An authorized or compromised control plane can intentionally select an older valid but vulnerable policy. Admission, revision authorization, and rollback policy remain external or separately planned controls. |
+| Partial cluster rollout | Desired revision → multiple data-plane instances | Immutable rollout assigns revision/digest, verifies the selected workload owner chain and every Ready Pod, withholds `Programmed`, and rolls back on rejection, drift, or timeout. | Per-instance Admin reload or a load-balanced success is not cluster proof. Mis-scoped workloads, compromised Kubernetes status, or external rollout mechanisms can still create divergent enforcement. |
+| Audit sink failure | Admin mutation → audit queue/store/export | Structured Admin events, bounded queues, optional PostgreSQL query store, and enforcing pre-handler reservation are available. | Best-effort mode can lose records and exports are not an audit-of-record acknowledgment. PostgreSQL compromise can delete or forge durable history; independent database controls and export monitoring are required. |
+
+### Shared state and tenant-boundary threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| Redis compromise | OxiBelt ↔ Redis decisions, secrets, cache, and leases | Verified `rediss://`, hostname checks, optional mTLS/SPKI pins, ACL files, bounded pools, scripts, namespaces, TTLs, and no ambiguous mutation replay protect access and operations. | A compromised authenticated Redis can return or mutate plausible malicious state, bypass distributed controls, poison cache, or disclose Person proof state. TLS does not validate application truth. |
+| PostgreSQL compromise | OxiBelt ↔ PostgreSQL shared/control-plane records | Verified TLS, bounded operations, transactions, namespaces, signed dynamic-policy rows, hashed credentials, and enforcing audit admission constrain normal operation. | Database authority can alter or disclose IPM, dynamic policy, audit, mitigation, shared state, or replay data and can deny Admin mutations. Database access and recovery are external trust assumptions. |
+| Tenant isolation failure | Hosts/routes/cache/state → another logical tenant | Host-aware routing/cache keys, explicit partition keys, namespaces, typed IPM resources, and bounded per-route policy support logical separation. | One process and backend are not a hostile-tenant sandbox. A cache-key omission, broad Admin grant, shared secret, route conflict, or backend compromise can cross tenants; isolate mutually distrustful tenants operationally. |
+
+### Availability and amplification threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| Retry amplification | Client request/upstream failure → repeated upstream work | Idempotency/method rules, overall deadlines, per-attempt timeouts, jittered backoff, proportional retry budget, circuit state, and disabled hidden client retries bound attempts. | A failing or malicious upstream can still multiply work within configured budgets. Unsafe operator retry policy or many independent instances can amplify load across the cluster. |
+| Queue exhaustion | Public/backend work → memory, latency, and control-plane availability | Global and route/pool active/pending bounds, FIFO cancellation-safe queues, queue timeouts, per-priority shares, reserved authenticated capacity, and immediate rejects bound state. | Attackers can keep allowed queues full or exploit expensive admitted work. Bounds protect process state but may produce sustained `503` responses and do not create network capacity. |
+| Cache-fill stampede | Many misses → upstream, memory, disk, and shared-state work | Local collapsed forwarding, shared fill locks, follower deadlines, bounded fill concurrency/size, committed-at-EOF entries, admission policy, and overload suppression reduce duplication. | Lock/backend failure falls back to safe misses and can increase origin load. Multiple instances or deliberately varied keys can still create many independent fills. |
+
+### Extension and supply-chain threats
+
+| Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
+| --- | --- | --- | --- |
+| Plugin or custom frontend compromise | Operator rulepack/frontend/provider/handler → policy, browser, or external data | OxiRule is declarative and bounded with no general scripting/import callback sandbox; rulepack provenance can be pinned. Custom frontend URLs are same-origin routes, provider/handler exchanges are bounded, and failures follow explicit policy. | There is no native plugin security boundary. A hostile rulepack changes policy, a frontend can steal browser-visible proof/clearance data, a provider controls proof verdicts, and an external cache can observe or forge cached objects within its authority. |
+| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and image metadata are validated, build and package-write jobs are separated, and images are scanned before publish. | A compromised dependency, runner, maintainer, pinned action commit, or release credential can produce a malicious validly tagged image. Current scans report risk but are not provenance or signature verification. |
+| Malicious or stale container image | Registry/tag/deployment → running data plane | Official image scope is documented, OCI source/revision labels are checked during release, and operators can select an immutable digest. | Mutable tags and `IfNotPresent` can deploy stale content; registry or credential compromise can replace tags. Digest pinning and external admission are mandatory until signed provenance is implemented. |
+
+### Shared-state compromise impact
+
+Normal failure modes do not limit the authority of a compromised backend.
+Operators should rotate backend and feature secrets, stop affected mutation
+paths, restore verified data, invalidate replay/session state where possible,
+and roll every instance to a known revision after compromise.
+
+| Shared-state feature | Backend | Compromise impact |
+| --- | --- | --- |
+| Distributed rate limits | Redis or PostgreSQL | Modify token counts/expiry to bypass controls or deny clients; enumerate hashed/raw identity-derived keys available to the backend. |
+| Connection and upstream-pool leases | Redis or PostgreSQL | Admit beyond configured cluster limits, deny new work, corrupt active counts, or retain stale leases until expiry/reconciliation. |
+| Person proof | Redis or PostgreSQL | Expose or replace cluster HMAC state, replay markers, active clearance hashes, and revocation tombstones; enable replay/bypass or denial until secrets and state are rotated. |
+| Upstream health and active counts | Redis or PostgreSQL | Steer traffic toward failed/malicious servers or mark healthy capacity unavailable. Stale-snapshot outage behavior does not detect believable malicious values. |
+| Sticky sessions | Redis or PostgreSQL | Change shared affinity secrets/state, redirect sessions to different pool members, or force process-local fallback. Sticky affinity is not authentication. |
+| Shared cache, tags, fill locks, and purge state | Redis or PostgreSQL | Read cached objects/metadata, serve poisoned representations, suppress or multiply fills, or make purge incomplete. OxiBelt validates record shape but trusts authenticated backend content within that protocol. |
+| Reload heartbeat and instance generation | Redis or PostgreSQL | Hide drift, forge instance presence/generation, or create false degraded signals. Heartbeats are observability, not a signed cluster-consensus protocol. |
+| Dynamic policy | PostgreSQL | Deny service, replay old signed rows, or modify unsigned/database-owned metadata. HMAC verification protects active signed row content unless the signing key or authorized automation is also compromised. |
+| IPM principals, credentials, policies, and bindings | PostgreSQL | Grant or revoke Admin/data-plane authority, expose credential digests/prefixes and audit metadata, or prevent refresh. Static bootstrap collisions fail refresh but do not make the DB untrusted. |
+| Admin audit | PostgreSQL | Delete, forge, reorder, or disclose the queryable audit record and block enforcing mutations by denying reservations/writes. Independent export/backup controls are required for stronger evidence. |
+| Mitigation intents | PostgreSQL | Forge, suppress, or alter aggregate intents consumed by an external mitigation controller. Downstream ISP/cloud actions remain outside OxiBelt and require their own authorization. |
+
+### Admin mutation authorization and audit
+
+All Admin requests require bearer authentication. With IPM enabled, explicit
+deny takes precedence, an allow must match the action/resource/conditions, and
+the default is deny. Mutations emit structured audit attempts with the actor,
+principal, peer, operation, target, outcome, and safe request summary. The
+canonical endpoint and action inventory is the
+[Admin OpenAPI document](admin-openapi.json); new mutation families must define
+equivalent authorization, concurrency/replay behavior, and audit semantics.
+
+| Mutation family | Authorization and concurrency requirement | Audit and residual requirement |
+| --- | --- | --- |
+| Configuration load/rollback, file sync, downstream/upstream TLS refresh | Matching `config:*` action/resource; protected Admin/IPM configuration changes additionally require `admin:UpdateConfig` or `ipm:UpdateConfig`; documented config mutations require the active ETag. | Record validation/apply/rejection. File sync is not a cluster rollout protocol, and rollback authorization does not prove a revision is safe. |
+| Cache purge/warm and key administration | Matching cache policy and normalized host/tag resources; public signed purge uses its independent signature/nonce policy. | Record actor, policy/host scope, count/outcome, and partial-failure rejection. Shared purge must not report a partial success. |
+| Upstream and stream pool server mutations | Matching pool/server resource and action with current pool ETag. | Record old/new target context and outcome. A mutation changes only the current process unless backed by the documented shared/control-plane mechanism. |
+| Dynamic policy create/apply/import/update/delete | Authorize stored and proposed source/name/route resources; enforce quotas, signatures, TTL policy, and ETag rules where required. | Record successful and rejected policy changes. Panic-button `apply` remains intentionally repeatable and does not provide general Admin idempotency. |
+| IPM principal, credential, policy, and binding changes | Matching typed IPM resource/action with current IPM ETag; credential plaintext is returned only at creation/rotation. | Record authorization and mutation outcome without raw tokens. A bad grant can expand all Admin authority, so least privilege and enforcing audit are mandatory. |
+| OxiRule/rulepack file management and reload | Matching typed WAF file/reload actions and any underlying config/file preconditions. Development analysis endpoints are non-mutating. | Record install/delete/reload outcome and validation error. Provenance pins protect only when operators require and verify them. |
+| Lifecycle drain/undrain and runtime session drain | Matching lifecycle/runtime action and scoped resource; operation enqueue rechecks the source action, and creators have only documented ownership rights. | Record enqueue, cancellation, execution, and outcome. Process-local operation state is lost on restart and does not represent cluster consensus. |
+| Person proof clearance revocation | Matching hash-scoped WAF/Person proof resource; optional `Idempotency-Key` is stored only as a digest for the tombstone lifetime. | Record hash-only target and outcome. This narrow replay contract does not extend to other Admin mutations. |
+| Async operation cancellation and control | Creator rights or matching Admin operation action/resource; cancellation cannot undo side effects already completed. | Record creator, operation kind/id, cancellation result, and terminal outcome within bounded retention. |
+
+In `best_effort` audit mode, recording failure is observable but does not block
+the mutation. In `enforcing` mode with the PostgreSQL store required, OxiBelt
+reserves durable audit queue capacity before protected handler execution and
+returns a safe error if it cannot do so. Neither mode protects history after
+database compromise.
+
+## Severity Calibration
+
+Severity depends on attacker prerequisites, affected deployment, cross-tenant or
+cross-boundary impact, persistence, and whether safe defaults are bypassed.
+Configuration footguns that require an explicit documented insecure choice are
+normally lower than vulnerabilities reachable under recommended defaults, but
+an explicit option does not excuse behavior that contradicts its documented
+contract.
+
+### Critical
+
+Critical issues provide unauthenticated remote code execution or equivalent
+control of the public data plane, compromise broadly reusable signing/release
+authority, or bypass the whole management boundary across supported secure
+deployments. Examples include:
+
+- memory corruption or command execution reachable from a public HTTP/QUIC/TURN
+  listener;
+- extraction or unrestricted use of production TLS signing keys across many
+  hosts; or
+- a compromised official release path that silently publishes attacker code as
+  the expected image for supported releases.
+
+### High
+
+High issues cross a major trust boundary with serious confidentiality,
+integrity, authorization, or sustained availability impact but lack the breadth
+of a critical compromise. Examples include:
+
+- request smuggling, authority confusion, or cache poisoning that crosses users,
+  routes, hosts, or upstream authorization boundaries;
+- WAF/IPM bypass or replayed Admin authority that permits a protected mutation;
+  or
+- malicious shared-state influence that bypasses Person proof, distributed
+  limits, dynamic policy, or tenant separation in a realistic deployment.
+
+### Medium
+
+Medium issues require a constrained deployment prerequisite, have bounded or
+single-instance impact, expose limited sensitive data, or weaken defense in
+depth without directly crossing the principal authorization boundary. Examples
+include:
+
+- sustained but bounded queue, stream, decompression, or cache-fill exhaustion
+  that makes one instance unavailable without escaping configured resource
+  limits;
+- loss of best-effort audit records without enabling the underlying mutation;
+  or
+- consistency loss limited to documented process-local fallback during backend
+  unavailability.
+
+### Low
+
+Low issues are limited information disclosures or hardening gaps with little
+direct security impact and unrealistic or already-trusted prerequisites.
+Examples include:
+
+- exposure of aggregate health/metrics state to an adjacent network without
+  secrets, identities, or policy contents; or
+- a harmless diagnostic/status inconsistency that does not change enforcement,
+  authority, artifact integrity, or availability.
+
+Developer-only tests, examples, and local tooling are not primary product
+surfaces unless they execute with privileged CI/release credentials or produce
+artifacts consumed by production. A weakness there should be raised above Low
+only when a concrete path reaches a runtime, deployment, secret, or supply-chain
+boundary.

@@ -12,6 +12,14 @@ operated by the OxiBelt project are not separate supported products. A
 vulnerability in an upstream dependency is still in scope when OxiBelt's use of
 it is affected.
 
+## Product Threat Model
+
+The [product threat model](docs/ThreatModel.md) is the canonical description of
+OxiBelt's security assets, actors, trust boundaries, attacker-controlled inputs,
+deployment assumptions, failure semantics, and severity context. Use it with
+the feature lifecycle matrix below; this file remains authoritative for
+supported releases, private reporting, patching, and disclosure policy.
+
 ## Supported Versions and Branches
 
 | Branch or release | Security support |

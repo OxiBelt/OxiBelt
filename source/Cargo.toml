@@ -159,6 +159,10 @@ name = "feature_status_contract"
 path = "../tests/rust/feature_status_contract.rs"
 
 [[test]]
+name = "threat_model_contract"
+path = "../tests/rust/threat_model_contract.rs"
+
+[[test]]
 name = "observability_assets"
 path = "../tests/rust/observability_assets.rs"
 
