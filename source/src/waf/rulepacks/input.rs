@@ -82,12 +82,12 @@ pub(super) fn validate_rulepack_inputs(
   for variable in variables {
     super::validate_label(source, "variables.name", &variable.name)?;
     validate_variable_type(source, variable)?;
-    validate_optional_human_text(
+    validate_optional_printable_text(
       source,
       "variables.description",
       variable.description.as_deref(),
     )?;
-    validate_optional_human_text(source, "variables.prompt", variable.prompt.as_deref())?;
+    validate_optional_printable_text(source, "variables.prompt", variable.prompt.as_deref())?;
     if let Some(default) = &variable.default {
       validate_variable_value(source, variable, default)?;
     }
@@ -123,12 +123,12 @@ pub(super) fn validate_rulepack_inputs(
         binding.name,
       );
     }
-    validate_optional_human_text(
+    validate_optional_printable_text(
       source,
       "bindings.description",
       binding.description.as_deref(),
     )?;
-    validate_optional_human_text(source, "bindings.prompt", binding.prompt.as_deref())?;
+    validate_optional_printable_text(source, "bindings.prompt", binding.prompt.as_deref())?;
     validate_discovery(source, "bindings.discovery", &binding.discovery)?;
   }
 
@@ -226,18 +226,18 @@ fn validate_variable_type(source: &str, variable: &RulepackVariable) -> anyhow::
   }
 }
 
-fn validate_optional_human_text(
+fn validate_optional_printable_text(
   source: &str,
   field: &str,
   value: Option<&str>,
 ) -> anyhow::Result<()> {
   if let Some(value) = value {
-    validate_human_text(source, field, value)?;
+    validate_printable_text(source, field, value)?;
   }
   Ok(())
 }
 
-fn validate_human_text(source: &str, field: &str, value: &str) -> anyhow::Result<()> {
+fn validate_printable_text(source: &str, field: &str, value: &str) -> anyhow::Result<()> {
   super::validate_non_empty(source, field, value)?;
   if value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
     bail!("{source} {field} must be 1 to 512 printable bytes");
@@ -259,7 +259,7 @@ fn validate_discovery(
     validate_discovery_token(source, field, token)?;
   }
   for prefix in &discovery.path_prefix_any {
-    validate_human_text(source, &format!("{field}.path_prefix_any"), prefix)?;
+    validate_printable_text(source, &format!("{field}.path_prefix_any"), prefix)?;
     if !prefix.starts_with('/') {
       bail!("{source} {field}.path_prefix_any values must start with '/'");
     }
@@ -268,7 +268,7 @@ fn validate_discovery(
 }
 
 fn validate_discovery_token(source: &str, field: &str, value: &str) -> anyhow::Result<()> {
-  validate_human_text(source, &format!("{field} token"), value)?;
+  validate_printable_text(source, &format!("{field} token"), value)?;
   if value
     .bytes()
     .any(|byte| matches!(byte, b'/' | b'\\' | b'?' | b'#'))
