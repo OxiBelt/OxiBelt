@@ -32,6 +32,34 @@ const HELM_TIMEOUT: Duration = Duration::from_secs(30);
 const KUBERNETES_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const KUBERNETES_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn helm_template_command(
+  chart: &Path,
+  values: &[PathBuf],
+  release: &str,
+  namespace: &str,
+) -> Command {
+  let mut command = Command::new("helm");
+  command
+    .arg("template")
+    .arg("--namespace")
+    .arg(namespace)
+    .arg("--dry-run=client")
+    .arg("--no-hooks")
+    .arg("--disable-openapi-validation");
+  for value_file in values {
+    command.arg("--values").arg(value_file);
+  }
+  command
+    .arg("--")
+    .arg(release)
+    .arg(chart)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  command
+}
+
 /// Options for read-only live Kubernetes inspection.
 #[derive(Debug, Clone, Default)]
 pub struct KubernetesDoctorOptions {
@@ -82,23 +110,7 @@ pub async fn diagnose_helm_chart(
     manifest::ensure_regular_file(value_file, "Helm values file")?;
   }
 
-  let mut command = Command::new("helm");
-  command
-    .arg("template")
-    .arg(release)
-    .arg(chart)
-    .arg("--namespace")
-    .arg(namespace)
-    .arg("--dry-run=client")
-    .arg("--no-hooks")
-    .arg("--disable-openapi-validation")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true);
-  for value_file in values {
-    command.arg("--values").arg(value_file);
-  }
+  let mut command = helm_template_command(chart, values, release, namespace);
 
   let mut child = command
     .spawn()

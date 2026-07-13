@@ -1,12 +1,13 @@
 use std::fs;
 use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
 
 use crate::diagnostics::DiagnosticReport;
 
 use super::{
   MAX_MANIFEST_DOCUMENTS, Manifest,
   checks::{diagnose_manifests, is_digest_pinned},
-  diagnose_rendered_directory,
+  diagnose_rendered_directory, helm_template_command,
   manifest::{
     append_yaml_manifests, contains_command_credential, validate_chart_tree,
     validate_helm_identifier,
@@ -189,4 +190,42 @@ fn validates_digest_shape() {
 fn helm_identifiers_are_not_shell_arguments() {
   assert!(validate_helm_identifier("release", "oxibelt").is_ok());
   assert!(validate_helm_identifier("release", "$(unsafe)").is_err());
+}
+
+#[test]
+fn helm_template_command_terminates_options_before_positionals() {
+  let values = [
+    PathBuf::from("values-production.yaml"),
+    PathBuf::from("--post-renderer=/tmp/unsafe-values"),
+  ];
+  let command = helm_template_command(
+    Path::new("--post-renderer=/tmp/unsafe-chart"),
+    &values,
+    "oxibelt-doctor",
+    "default",
+  );
+  let args = command
+    .as_std()
+    .get_args()
+    .map(|argument| argument.to_str().expect("ASCII Helm argument"))
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    args,
+    vec![
+      "template",
+      "--namespace",
+      "default",
+      "--dry-run=client",
+      "--no-hooks",
+      "--disable-openapi-validation",
+      "--values",
+      "values-production.yaml",
+      "--values",
+      "--post-renderer=/tmp/unsafe-values",
+      "--",
+      "oxibelt-doctor",
+      "--post-renderer=/tmp/unsafe-chart",
+    ]
+  );
 }
