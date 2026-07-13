@@ -4,6 +4,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Metrics;
 
+const WORKLOAD_IDENTITY_AUTH_OUTCOMES: [(&str, &str); 11] = [
+  ("accepted", "bound_bearer"),
+  ("accepted", "certificate_only"),
+  ("accepted", "bound_signed_cache_purge"),
+  ("rejected", "missing_certificate"),
+  ("rejected", "unparseable_certificate"),
+  ("rejected", "revoked_certificate"),
+  ("rejected", "unmapped_workload_identity"),
+  ("rejected", "ambiguous_workload_identity"),
+  ("rejected", "missing_bearer"),
+  ("rejected", "invalid_bearer"),
+  ("rejected", "principal_mismatch"),
+];
+
 #[derive(Debug, Default)]
 pub(super) struct AdminAuditMetrics {
   events_applied_postgres: AtomicU64,
@@ -17,6 +31,7 @@ pub(super) struct AdminAuditMetrics {
   export_access_log_total: AtomicU64,
   dropped_store_queue_full_total: AtomicU64,
   dropped_store_writer_closed_total: AtomicU64,
+  workload_identity_authentication: [AtomicU64; WORKLOAD_IDENTITY_AUTH_OUTCOMES.len()],
 }
 
 impl Metrics {
@@ -57,6 +72,16 @@ impl Metrics {
       _ => return,
     };
     counter.fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_admin_workload_identity_authentication(&self, outcome: &str, reason: &str) {
+    let Some(index) = WORKLOAD_IDENTITY_AUTH_OUTCOMES
+      .iter()
+      .position(|candidate| *candidate == (outcome, reason))
+    else {
+      return;
+    };
+    self.admin_audit.workload_identity_authentication[index].fetch_add(1, Ordering::Relaxed);
   }
 
   pub(super) fn append_admin_audit_prometheus(&self, output: &mut String) {
@@ -153,6 +178,14 @@ impl Metrics {
         .dropped_store_writer_closed_total
         .load(Ordering::Relaxed),
     );
+    for (index, (outcome, reason)) in WORKLOAD_IDENTITY_AUTH_OUTCOMES.iter().enumerate() {
+      append_labeled_counter(
+        output,
+        "oxibelt_admin_workload_identity_authentication_total",
+        &[("outcome", outcome), ("reason", reason)],
+        self.admin_audit.workload_identity_authentication[index].load(Ordering::Relaxed),
+      );
+    }
   }
 }
 

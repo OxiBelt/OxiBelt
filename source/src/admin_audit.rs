@@ -49,6 +49,14 @@ pub struct AdminAuditEvent {
   pub principal: Option<String>,
   pub subject: Option<String>,
   pub groups: Vec<String>,
+  pub workload_identity_kind: Option<String>,
+  pub workload_identity: Option<String>,
+  pub workload_principal: Option<String>,
+  pub certificate_fingerprint_sha256: Option<String>,
+  pub credential_kind: Option<String>,
+  pub credential_identity: Option<String>,
+  pub credential_principal: Option<String>,
+  pub authentication_reason: Option<String>,
   pub peer: String,
   pub source_ip: Option<String>,
   pub scheme: &'static str,
@@ -75,6 +83,14 @@ pub struct AdminAuditRecord {
   pub principal: Option<String>,
   pub subject: Option<String>,
   pub groups: Vec<String>,
+  pub workload_identity_kind: Option<String>,
+  pub workload_identity: Option<String>,
+  pub workload_principal: Option<String>,
+  pub certificate_fingerprint_sha256: Option<String>,
+  pub credential_kind: Option<String>,
+  pub credential_identity: Option<String>,
+  pub credential_principal: Option<String>,
+  pub authentication_reason: Option<String>,
   pub peer: String,
   pub source_ip: Option<String>,
   pub scheme: String,
@@ -394,6 +410,14 @@ impl AdminAuditHandle {
       principal: None,
       subject: None,
       groups: Vec::new(),
+      workload_identity_kind: None,
+      workload_identity: None,
+      workload_principal: None,
+      certificate_fingerprint_sha256: None,
+      credential_kind: None,
+      credential_identity: None,
+      credential_principal: None,
+      authentication_reason: None,
       peer: peer_addr.to_string(),
       source_ip: Some(peer_addr.ip().to_string()),
       scheme,
@@ -425,6 +449,29 @@ impl AdminAuditHandle {
     event.principal = Some(principal.to_string());
     event.subject = Some(subject.to_string());
     event.groups = groups.to_vec();
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn set_authentication(
+    &self,
+    reason: &str,
+    workload_identity_kind: Option<&str>,
+    workload_identity: Option<&str>,
+    workload_principal: Option<&str>,
+    certificate_fingerprint_sha256: Option<&str>,
+    credential_kind: Option<&str>,
+    credential_identity: Option<&str>,
+    credential_principal: Option<&str>,
+  ) {
+    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    event.authentication_reason = Some(reason.to_string());
+    event.workload_identity_kind = workload_identity_kind.map(str::to_string);
+    event.workload_identity = workload_identity.map(str::to_string);
+    event.workload_principal = workload_principal.map(str::to_string);
+    event.certificate_fingerprint_sha256 = certificate_fingerprint_sha256.map(str::to_string);
+    event.credential_kind = credential_kind.map(str::to_string);
+    event.credential_identity = credential_identity.map(str::to_string);
+    event.credential_principal = credential_principal.map(str::to_string);
   }
 
   pub(crate) fn request_id(&self) -> String {
@@ -542,6 +589,14 @@ fn emit_tracing(event: &AdminAuditEvent) {
     actor = event.actor.as_deref(),
     principal = event.principal.as_deref(),
     groups = ?event.groups,
+    workload_identity_kind = event.workload_identity_kind.as_deref(),
+    workload_identity = event.workload_identity.as_deref(),
+    workload_principal = event.workload_principal.as_deref(),
+    certificate_fingerprint_sha256 = event.certificate_fingerprint_sha256.as_deref(),
+    credential_kind = event.credential_kind.as_deref(),
+    credential_identity = event.credential_identity.as_deref(),
+    credential_principal = event.credential_principal.as_deref(),
+    authentication_reason = event.authentication_reason.as_deref(),
     peer = %event.peer,
     source_ip = event.source_ip.as_deref(),
     scheme = event.scheme,

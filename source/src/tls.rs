@@ -39,7 +39,8 @@ mod resumption;
 mod server_policy;
 mod upstream_client;
 pub(crate) use cert_metadata::{
-  ParsedCertificateMetadata, client_certificate_metadata, parse_certificate_metadata,
+  ParsedCertificateMetadata, VerifiedClientCertificate, VerifiedClientCertificateIdentity,
+  client_certificate_metadata, parse_certificate_metadata, verified_client_certificate,
 };
 
 pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resumption;
@@ -738,3 +739,7 @@ mod tests {
     assert_eq!(selected, &certificates[1]);
   }
 }
+
+#[cfg(test)]
+#[path = "tls/admin_client_auth_tests.rs"]
+mod admin_client_auth_tests;

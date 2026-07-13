@@ -12,14 +12,19 @@ The running Admin listener serves the same contract and metadata through:
 - `GET /admin/v1/version`
 - `GET /admin/v1/audit`
 
-The three metadata endpoints require normal Admin bearer authentication and
-`admin:ReadMetadata` through IPM. The resource names are
+The three metadata endpoints require normal Admin bearer authentication by
+default and `admin:ReadMetadata` through IPM. When
+`[admin.workload_identity].enabled = true`, verified Admin mTLS certificate
+identity is mapped to one IPM principal and a supplied bearer credential must
+map to that same principal; `bearer_mode = "optional"` also permits the mapped
+certificate alone. The resource names are
 `metadata/openapi`, `metadata/capabilities`, and `metadata/version`, which map
 to resources such as `oxibelt:<namespace>:admin:metadata/openapi`.
 `GET /admin/v1/audit` requires `admin:ReadAudit` on `audit/admin`.
 
 `/admin/v1/capabilities` reports the API version, package version, compiled
-or configured Admin features, and request-size limits used by the Admin API.
+or configured Admin features, active mTLS workload-identity binding mode, and
+request-size limits used by the Admin API.
 `/admin/v1/version` reports the API version, package name, and package version.
 Admin listener responses include `X-OxiBelt-Request-Id` and
 `X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
@@ -47,7 +52,9 @@ Admin audit store as `{ "audit": [...] }`. The endpoint requires
 `[admin.audit.store]` with a PostgreSQL backend; export-only stdout or OTLP
 Admin audit configurations return `409` because exports are not query stores.
 Records include actor, peer, method, path, authorization action/resource,
-outcome, status, and a redacted request summary. Request bodies are summarized
+outcome, status, and a redacted request summary. With mTLS workload binding,
+they also include the workload identity, mapped principal, leaf fingerprint,
+credential identity, and fixed authentication reason. Request bodies are summarized
 with byte count, top-level JSON keys, and selected safe scalar fields, not
 stored as raw payloads.
 

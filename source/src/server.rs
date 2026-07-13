@@ -2,7 +2,6 @@
 //! This module binds transports together without owning protocol-specific policy.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -19,7 +18,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::LazyConfigAcceptor;
-use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 use crate::admin_audit::AdminAuditHandle;
@@ -57,6 +55,7 @@ mod admin_ipm_list;
 mod admin_ipm_simulation;
 #[cfg(test)]
 mod admin_ipm_simulation_security_tests;
+mod admin_listener;
 mod admin_metadata;
 mod admin_operations;
 #[cfg(test)]
@@ -87,7 +86,9 @@ mod process_signals;
 #[cfg(test)]
 mod reload_tests;
 mod rollout_identity;
-use admin_auth::{AdminActor, AdminAuthorization, admin_actor, admin_request_context};
+use admin_auth::{
+  AdminActor, AdminAuthentication, AdminAuthorization, admin_authentication, admin_request_context,
+};
 use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
 use admin_stream_pools::admin_stream_pools_response;
@@ -359,7 +360,7 @@ async fn handle_admin_connection(
   drop(snapshot);
   match transport {
     AdminTransportMode::Tls => {
-      handle_admin_tls_connection(
+      admin_listener::handle_admin_tls_connection(
         stream,
         peer_addr,
         listener_bind,
@@ -370,7 +371,7 @@ async fn handle_admin_connection(
       .await
     }
     AdminTransportMode::Plaintext => {
-      handle_admin_plaintext_connection(
+      admin_listener::handle_admin_plaintext_connection(
         stream,
         peer_addr,
         listener_bind,
@@ -381,7 +382,7 @@ async fn handle_admin_connection(
       .await
     }
     AdminTransportMode::PlaintextAllowlist if plaintext_allowed => {
-      handle_admin_plaintext_connection(
+      admin_listener::handle_admin_plaintext_connection(
         stream,
         peer_addr,
         listener_bind,
@@ -396,7 +397,7 @@ async fn handle_admin_connection(
     }
     AdminTransportMode::Auto => {
       if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
-        handle_admin_plaintext_connection(
+        admin_listener::handle_admin_plaintext_connection(
           stream,
           peer_addr,
           listener_bind,
@@ -406,7 +407,7 @@ async fn handle_admin_connection(
         )
         .await
       } else {
-        handle_admin_tls_connection(
+        admin_listener::handle_admin_tls_connection(
           stream,
           peer_addr,
           listener_bind,
@@ -437,111 +438,6 @@ fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> boo
     .iter()
     .filter_map(|raw| Cidr::parse(raw).ok())
     .any(|cidr| cidr.contains(peer_addr.ip()))
-}
-
-async fn handle_admin_tls_connection(
-  stream: TcpStream,
-  peer_addr: SocketAddr,
-  listener_bind: SocketAddr,
-  state: AppHandle,
-  admin_control: AdminControlHandle,
-  admin_operations: AdminOperationRuntime,
-) -> anyhow::Result<()> {
-  let snapshot = state.snapshot();
-  let config = snapshot
-    .admin_tls_server_config
-    .clone()
-    .ok_or_else(|| anyhow::anyhow!("admin TLS is not configured"))?;
-  drop(snapshot);
-  let acceptor = TlsAcceptor::from(config);
-  let tls_stream = tokio::time::timeout(
-    Duration::from_millis(state.snapshot().config.limits.tls_handshake_timeout_ms),
-    acceptor.accept(stream),
-  )
-  .await
-  .context("admin TLS handshake timed out")?
-  .context("admin TLS handshake failed")?;
-  serve_admin_http1(
-    TokioIo::new(tls_stream),
-    peer_addr,
-    listener_bind,
-    state,
-    admin_control,
-    admin_operations,
-    "https",
-  )
-  .await
-}
-
-async fn handle_admin_plaintext_connection(
-  stream: TcpStream,
-  peer_addr: SocketAddr,
-  listener_bind: SocketAddr,
-  state: AppHandle,
-  admin_control: AdminControlHandle,
-  admin_operations: AdminOperationRuntime,
-) -> anyhow::Result<()> {
-  serve_admin_http1(
-    TokioIo::new(stream),
-    peer_addr,
-    listener_bind,
-    state,
-    admin_control,
-    admin_operations,
-    "http",
-  )
-  .await
-}
-
-async fn serve_admin_http1<I>(
-  io: TokioIo<I>,
-  peer_addr: SocketAddr,
-  listener_bind: SocketAddr,
-  state: AppHandle,
-  admin_control: AdminControlHandle,
-  admin_operations: AdminOperationRuntime,
-  scheme: &'static str,
-) -> anyhow::Result<()>
-where
-  I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-  let snapshot = state.snapshot();
-  let header_timeout_ms = snapshot.config.limits.client_header_timeout_ms;
-  let max_headers = snapshot.config.limits.max_headers;
-  let max_total_header_bytes = snapshot.config.limits.max_total_header_bytes.max(8192);
-  drop(snapshot);
-
-  let service = service_fn(move |request: hyper::Request<Incoming>| {
-    let state = state.clone();
-    let admin_control = admin_control.clone();
-    let admin_operations = admin_operations.clone();
-    async move {
-      Ok::<_, Infallible>(
-        admin_response(
-          request,
-          state,
-          admin_control,
-          admin_operations,
-          peer_addr,
-          listener_bind,
-          scheme,
-        )
-        .await,
-      )
-    }
-  });
-  let mut builder = hyper::server::conn::http1::Builder::new();
-  builder
-    .timer(TokioTimer::new())
-    .header_read_timeout(Duration::from_millis(header_timeout_ms))
-    .max_headers(max_headers)
-    .max_buf_size(max_total_header_bytes)
-    .keep_alive(true);
-  builder
-    .serve_connection(io, service)
-    .with_upgrades()
-    .await
-    .map_err(|error| anyhow::anyhow!(error))
 }
 
 async fn admin_response(
@@ -609,34 +505,72 @@ async fn admin_response_inner(
   let path = uri.path().to_string();
   let admin_context = admin_request_context(&request, peer_addr);
   let audit = AdminAuditHandle::from_request(&request);
-  let actor = admin_actor(&request, &snapshot.config, &snapshot.ipm).await;
-
   if path == "/cache/purge" || path == "/cache/purge-prefix" || path == "/cache/purge-tag" {
     if method != ::http::Method::POST {
       return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     }
-    let signed_actor = if actor.is_none() {
-      match admin::signed_cache_purge_actor(&request, snapshot.as_ref(), &method) {
-        Ok(actor) => Some(actor),
+    let authentication = match admin_authentication(&request, &snapshot.config, &snapshot.ipm).await
+    {
+      Ok(authentication) => authentication,
+      Err(failure) if snapshot.config.admin.workload_identity.enabled => {
+        if !failure.supports_signed_cache_purge() {
+          snapshot
+            .metrics
+            .record_admin_workload_identity_authentication("rejected", failure.reason());
+          if let Some(audit) = &audit {
+            failure.record_audit(audit);
+          }
+          return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+        }
+        match admin::signed_cache_purge_actor(&request, snapshot.as_ref(), &method) {
+          Ok(_) => match failure.clone().into_signed_cache_purge_authentication() {
+            Some(authentication) => authentication,
+            None => {
+              snapshot
+                .metrics
+                .record_admin_workload_identity_authentication("rejected", failure.reason());
+              if let Some(audit) = &audit {
+                failure.record_audit(audit);
+              }
+              return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+            }
+          },
+          Err(error) => {
+            snapshot
+              .metrics
+              .record_admin_workload_identity_authentication("rejected", failure.reason());
+            if let Some(audit) = &audit {
+              failure.record_audit(audit);
+            }
+            warn!(error = %error, "rejected unsigned bound admin cache purge request");
+            return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+          }
+        }
+      }
+      Err(failure) => match admin::signed_cache_purge_actor(&request, snapshot.as_ref(), &method) {
+        Ok(actor) => AdminAuthentication::legacy_signed_cache_purge(actor),
         Err(error) => {
+          if let Some(audit) = &audit {
+            failure.record_audit(audit);
+          }
           warn!(error = %error, "rejected unsigned admin cache purge request");
           return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
         }
-      }
-    } else {
-      None
+      },
     };
-    let actor = match actor.or(signed_actor) {
-      Some(actor) => actor,
-      None => return text_response(StatusCode::UNAUTHORIZED, "unauthorized"),
-    };
-    if let Some(audit) = &audit {
-      audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+    if snapshot.config.admin.workload_identity.enabled {
+      snapshot
+        .metrics
+        .record_admin_workload_identity_authentication("accepted", authentication.reason());
     }
+    if let Some(audit) = &audit {
+      authentication.record_audit(audit);
+    }
+    let actor = &authentication.actor;
     let authorization = if let Some(audit) = audit.clone() {
-      AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &admin_context, audit)
+      AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &admin_context, audit)
     } else {
-      AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context)
+      AdminAuthorization::new(actor, &snapshot.ipm, &admin_context)
     };
     let response =
       admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization)
@@ -644,16 +578,33 @@ async fn admin_response_inner(
     return response;
   }
 
-  let Some(actor) = actor else {
-    return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+  let authentication = match admin_authentication(&request, &snapshot.config, &snapshot.ipm).await {
+    Ok(authentication) => authentication,
+    Err(failure) => {
+      if snapshot.config.admin.workload_identity.enabled {
+        snapshot
+          .metrics
+          .record_admin_workload_identity_authentication("rejected", failure.reason());
+      }
+      if let Some(audit) = &audit {
+        failure.record_audit(audit);
+      }
+      return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
   };
-  if let Some(audit) = &audit {
-    audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+  if snapshot.config.admin.workload_identity.enabled {
+    snapshot
+      .metrics
+      .record_admin_workload_identity_authentication("accepted", authentication.reason());
   }
+  if let Some(audit) = &audit {
+    authentication.record_audit(audit);
+  }
+  let actor = &authentication.actor;
   let authorization = if let Some(audit) = audit.clone() {
-    AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &admin_context, audit)
+    AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &admin_context, audit)
   } else {
-    AdminAuthorization::new(&actor, &snapshot.ipm, &admin_context)
+    AdminAuthorization::new(actor, &snapshot.ipm, &admin_context)
   };
 
   if path == "/admin/v1/audit" {

@@ -22,7 +22,7 @@ use crate::proxy::http::response::text_response;
 use crate::proxy::http3::{is_webtransport_request, respond_to_h3_request};
 use crate::state::{AppHandle, AppSnapshot};
 
-use super::admin_auth::{AdminAuthorization, admin_actor, admin_request_context};
+use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
 use super::admin_operations::{
   AdminOperationError, AdminOperationEvent, AdminOperationRuntime, can_access_operation,
   encode_ndjson_event, parse_operation_id,
@@ -254,6 +254,14 @@ async fn handle_admin_http3_connection(
   mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let peer_addr = connection.remote_address();
+  let client_certificate = connection
+    .peer_identity()
+    .and_then(|identity| {
+      identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()
+    })
+    .and_then(|certificates| crate::tls::verified_client_certificate(&certificates));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data);
   let mut h3_connection = h3::server::builder()
@@ -289,6 +297,9 @@ async fn handle_admin_http3_connection(
       .resolve_request()
       .await
       .context("failed to resolve admin HTTP/3 request")?;
+    if let Some(client_certificate) = &client_certificate {
+      request.extensions_mut().insert(client_certificate.clone());
+    }
     let path = request.uri().path().to_string();
     if matches_operation_event_webtransport_path(&path) && is_webtransport_request(&request) {
       let Some(_control_request) = state
@@ -390,16 +401,33 @@ async fn admin_http3_response_inner(
 
   let context = admin_request_context(request, peer_addr);
   let audit = AdminAuditHandle::from_request(request);
-  let Some(actor) = admin_actor(request, &snapshot.config, &snapshot.ipm).await else {
-    return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+  let authentication = match admin_authentication(request, &snapshot.config, &snapshot.ipm).await {
+    Ok(authentication) => authentication,
+    Err(failure) => {
+      if snapshot.config.admin.workload_identity.enabled {
+        snapshot
+          .metrics
+          .record_admin_workload_identity_authentication("rejected", failure.reason());
+      }
+      if let Some(audit) = &audit {
+        failure.record_audit(audit);
+      }
+      return text_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
   };
-  if let Some(audit) = &audit {
-    audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+  if snapshot.config.admin.workload_identity.enabled {
+    snapshot
+      .metrics
+      .record_admin_workload_identity_authentication("accepted", authentication.reason());
   }
+  if let Some(audit) = &audit {
+    authentication.record_audit(audit);
+  }
+  let actor = &authentication.actor;
   let authorization = if let Some(audit) = audit {
-    AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &context, audit)
+    AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &context, audit)
   } else {
-    AdminAuthorization::new(&actor, &snapshot.ipm, &context)
+    AdminAuthorization::new(actor, &snapshot.ipm, &context)
   };
   let operation_id = match operation_id_from_webtransport_path(path) {
     Ok(id) => id,
@@ -487,16 +515,33 @@ async fn prepare_operation_event_webtransport(
     .map_err(|error| text_response(StatusCode::BAD_REQUEST, &error.to_string()))?;
   let context = admin_request_context(request, peer_addr);
   let audit = AdminAuditHandle::from_request(request);
-  let Some(actor) = admin_actor(request, &snapshot.config, &snapshot.ipm).await else {
-    return Err(text_response(StatusCode::UNAUTHORIZED, "unauthorized"));
+  let authentication = match admin_authentication(request, &snapshot.config, &snapshot.ipm).await {
+    Ok(authentication) => authentication,
+    Err(failure) => {
+      if snapshot.config.admin.workload_identity.enabled {
+        snapshot
+          .metrics
+          .record_admin_workload_identity_authentication("rejected", failure.reason());
+      }
+      if let Some(audit) = &audit {
+        failure.record_audit(audit);
+      }
+      return Err(text_response(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
   };
-  if let Some(audit) = &audit {
-    audit.set_actor(&actor.name, &actor.principal, &actor.subject, &actor.groups);
+  if snapshot.config.admin.workload_identity.enabled {
+    snapshot
+      .metrics
+      .record_admin_workload_identity_authentication("accepted", authentication.reason());
   }
+  if let Some(audit) = &audit {
+    authentication.record_audit(audit);
+  }
+  let actor = &authentication.actor;
   let authorization = if let Some(audit) = audit {
-    AdminAuthorization::new_with_audit(&actor, &snapshot.ipm, &context, audit)
+    AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &context, audit)
   } else {
-    AdminAuthorization::new(&actor, &snapshot.ipm, &context)
+    AdminAuthorization::new(actor, &snapshot.ipm, &context)
   };
   let Some((history, receiver, operation)) = operations.subscribe(operation_id).await else {
     return Err(text_response(StatusCode::NOT_FOUND, "not found"));

@@ -3875,7 +3875,11 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Admin bearer token supplied by IPM credentials or bootstrap Admin token."
+        "description": "Admin bearer token supplied by IPM credentials or bootstrap Admin token. When Admin mTLS workload binding is enabled, it must resolve to the same principal as the verified client certificate."
+      },
+      "mutualTLS": {
+        "type": "mutualTLS",
+        "description": "Optional Admin workload identity. Runtime configuration may require a verified client certificate and bind its exact SPIFFE, URI SAN, or DNS SAN to an IPM principal; inspect /admin/v1/capabilities for the active mode."
       }
     },
     "headers": {
@@ -6551,6 +6555,7 @@
           "api_version",
           "package_version",
           "features",
+          "authentication",
           "limits"
         ],
         "properties": {
@@ -6621,6 +6626,35 @@
               },
               "admin_audit": {
                 "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "authentication": {
+            "type": "object",
+            "required": [
+              "mtls_workload_identity"
+            ],
+            "properties": {
+              "mtls_workload_identity": {
+                "type": "object",
+                "required": [
+                  "enabled",
+                  "bearer_mode"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "bearer_mode": {
+                    "type": "string",
+                    "enum": [
+                      "required",
+                      "optional"
+                    ]
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "additionalProperties": false

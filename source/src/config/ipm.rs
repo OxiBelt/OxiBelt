@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{Config, validate_optional_non_empty, validate_runtime_identifier};
+use super::{
+  AdminWorkloadIdentityBearerMode, Config, validate_optional_non_empty, validate_runtime_identifier,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct IpmConfig {
@@ -337,7 +339,12 @@ impl Config {
       }
     }
 
-    if self.admin.enabled && self.ipm.enabled && self.ipm.credentials.is_empty() {
+    if self.admin.enabled
+      && self.ipm.enabled
+      && self.ipm.credentials.is_empty()
+      && (!self.admin.workload_identity.enabled
+        || self.admin.workload_identity.bearer_mode == AdminWorkloadIdentityBearerMode::Required)
+    {
       bail!("admin.enabled with ipm.enabled requires at least one [[ipm.credentials]] entry");
     }
 

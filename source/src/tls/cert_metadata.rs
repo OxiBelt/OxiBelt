@@ -10,13 +10,62 @@ use x509_cert::der::{Decode, Tag, Tagged};
 
 use crate::waf::metadata::WafClientCertificateMetadata;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ParsedCertificateMetadata {
   pub(crate) not_before_unix_seconds: i64,
   pub(crate) not_after_unix_seconds: i64,
   pub(crate) subject_common_names: Vec<String>,
   pub(crate) san_dns_names: Vec<String>,
+  pub(crate) san_uri_names: Vec<String>,
   pub(crate) san_ip_addresses: Vec<IpAddr>,
+}
+
+/// Leaf-client-certificate evidence captured only after the TLS stack has verified it.
+///
+/// This type intentionally carries parsed SANs and a fingerprint rather than raw DER so
+/// downstream authorization and audit code cannot accidentally retain certificate material.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum VerifiedClientCertificate {
+  Parsed(VerifiedClientCertificateIdentity),
+  Unparseable { fingerprint_sha256: String },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct VerifiedClientCertificateIdentity {
+  pub(crate) fingerprint_sha256: String,
+  pub(crate) san_dns_names: Vec<String>,
+  pub(crate) san_uri_names: Vec<String>,
+  pub(crate) spiffe_ids: Vec<String>,
+}
+
+/// Extracts identity evidence from a certificate chain that rustls has already accepted.
+///
+/// A malformed leaf is represented explicitly. Binding callers must treat it as a failed
+/// identity assertion, while feature-disabled callers can preserve the existing TLS behavior.
+pub(crate) fn verified_client_certificate(
+  certificates: &[CertificateDer<'_>],
+) -> Option<VerifiedClientCertificate> {
+  let leaf = certificates.first()?;
+  let fingerprint_sha256 = sha256_hex(leaf.as_ref());
+  let metadata = match parse_certificate_metadata(leaf.as_ref()) {
+    Ok(metadata) => metadata,
+    Err(_) => return Some(VerifiedClientCertificate::Unparseable { fingerprint_sha256 }),
+  };
+  let spiffe_ids = (metadata.san_uri_names.len() == 1)
+    .then(|| metadata.san_uri_names.first())
+    .flatten()
+    .filter(|identity| is_canonical_spiffe_id(identity))
+    .cloned()
+    .into_iter()
+    .collect();
+  Some(VerifiedClientCertificate::Parsed(
+    VerifiedClientCertificateIdentity {
+      fingerprint_sha256,
+      san_dns_names: metadata.san_dns_names,
+      san_uri_names: metadata.san_uri_names,
+      spiffe_ids,
+    },
+  ))
 }
 
 pub(crate) fn client_certificate_metadata(
@@ -55,6 +104,7 @@ pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCer
     not_after_unix_seconds: unix_seconds(validity.not_after),
     subject_common_names: subject_common_names(&cert),
     san_dns_names: Vec::new(),
+    san_uri_names: Vec::new(),
     san_ip_addresses: Vec::new(),
   };
   if let Some(extensions) = cert.tbs_certificate().extensions() {
@@ -103,6 +153,11 @@ fn collect_subject_alt_names(
   while !reader.is_empty() {
     let (tag, value) = reader.read_any()?;
     match tag {
+      0x86 => {
+        if let Ok(uri) = std::str::from_utf8(value) {
+          metadata.san_uri_names.push(uri.to_string());
+        }
+      }
       0x82 => {
         if let Ok(name) = std::str::from_utf8(value) {
           metadata.san_dns_names.push(name.to_ascii_lowercase());
@@ -123,6 +178,38 @@ fn collect_subject_alt_names(
     }
   }
   Ok(())
+}
+
+fn is_canonical_spiffe_id(value: &str) -> bool {
+  const PREFIX: &str = "spiffe://";
+  if value.len() > 2048 || !value.starts_with(PREFIX) || value.contains('%') {
+    return false;
+  }
+  let rest = &value[PREFIX.len()..];
+  let Some((trust_domain, path)) = rest.split_once('/') else {
+    return false;
+  };
+  if trust_domain.is_empty()
+    || trust_domain != trust_domain.to_ascii_lowercase()
+    || !trust_domain.bytes().all(|byte| {
+      byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    })
+    || path.is_empty()
+    || path.ends_with('/')
+    || value.contains('?')
+    || value.contains('#')
+    || value.contains('@')
+    || trust_domain.contains(':')
+  {
+    return false;
+  }
+  path.split('/').all(|segment| {
+    !segment.is_empty()
+      && !matches!(segment, "." | "..")
+      && segment
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+  })
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +333,33 @@ mod tests {
     assert!(metadata.san_ip_addresses.is_empty());
   }
 
+  #[test]
+  fn verified_client_certificate_extracts_a_single_canonical_spiffe_id() {
+    let temp_dir = common::TempDir::new("verified-client-spiffe");
+    let (cert_path, _key_path) = create_self_signed_cert_with_uri_san(
+      temp_dir.path(),
+      "spiffe://example.test/ns/edge/sa/controller",
+    );
+    let cert = first_pem_certificate(&cert_path);
+
+    let VerifiedClientCertificate::Parsed(identity) =
+      verified_client_certificate(&[cert]).expect("certificate should be present")
+    else {
+      panic!("certificate should parse into workload identity evidence");
+    };
+
+    assert_eq!(identity.san_dns_names, vec!["client.example.test"]);
+    assert_eq!(
+      identity.san_uri_names,
+      vec!["spiffe://example.test/ns/edge/sa/controller"]
+    );
+    assert_eq!(
+      identity.spiffe_ids,
+      vec!["spiffe://example.test/ns/edge/sa/controller"]
+    );
+    assert_eq!(identity.fingerprint_sha256.len(), 64);
+  }
+
   fn first_pem_certificate(path: &Path) -> CertificateDer<'static> {
     let bytes = fs::read(path).expect("certificate should be readable");
     CertificateDer::pem_slice_iter(&bytes)
@@ -279,6 +393,51 @@ DNS.1 = client.example.test
 IP.1 = 127.0.0.1
 IP.2 = 2001:db8::1
 "#,
+    )
+    .expect("failed to write certificate config");
+    let status = Command::new("openssl")
+      .args([
+        "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1", "-config",
+      ])
+      .arg(&config_path)
+      .arg("-keyout")
+      .arg(&key_path)
+      .arg("-out")
+      .arg(&cert_path)
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .expect("failed to spawn openssl");
+    assert!(status.success(), "openssl failed with status {status}");
+    (cert_path, key_path)
+  }
+
+  fn create_self_signed_cert_with_uri_san(dir: &Path, uri: &str) -> (PathBuf, PathBuf) {
+    let key_path = dir.join("client-uri-san.key");
+    let cert_path = dir.join("client-uri-san.pem");
+    let config_path = dir.join("client-uri-san.cnf");
+    fs::write(
+      &config_path,
+      format!(
+        r#"[req]
+distinguished_name = req_distinguished_name
+x509_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = client.example.test
+
+[req_ext]
+subjectAltName = @alt_names
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = clientAuth
+
+[alt_names]
+DNS.1 = client.example.test
+URI.1 = {uri}
+"#
+      ),
     )
     .expect("failed to write certificate config");
     let status = Command::new("openssl")

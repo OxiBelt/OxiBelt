@@ -90,3 +90,26 @@ pub(super) const TLS_REMOTE_SIGNER_CONFIG_KEYS: &[&str] = &[
 ];
 
 pub(super) const TLS_CLIENT_AUTH_CONFIG_KEYS: &[&str] = &["ca_certs", "mode", "verify_depth"];
+
+pub(super) const ADMIN_CONFIG_KEYS: &[&str] = &[
+  "allow_insecure_plaintext",
+  "audit",
+  "bearer_token_env",
+  "bind",
+  "cache_purge_signing",
+  "enabled",
+  "http3",
+  "operations",
+  "plaintext_allowed_source_cidrs",
+  "rbac",
+  "tls",
+  "token_store",
+  "transport",
+  "workload_identity",
+];
+
+pub(super) const ADMIN_WORKLOAD_IDENTITY_CONFIG_KEYS: &[&str] = &[
+  "bearer_mode",
+  "enabled",
+  "revoked_certificate_fingerprints_sha256",
+];

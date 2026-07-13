@@ -651,6 +651,14 @@ key_env = "OXIBELT_CACHE_PURGE_HMAC_KEY"
 max_skew_seconds = 300
 nonce_ttl_seconds = 600
 
+# Opt-in binding of a verified Admin client certificate to the IPM principal
+# authorized by its bearer credential. Requires transport = "tls", required
+# admin TLS client authentication, IPM, and Admin audit.
+[admin.workload_identity]
+enabled = false
+bearer_mode = "required" # required | optional
+revoked_certificate_fingerprints_sha256 = [] # 64-character lowercase SHA-256 leaf fingerprints
+
 [ipm]
 enabled = false
 namespace = "oxibelt"
@@ -666,6 +674,16 @@ argon2id_memory_mib = 128
 # id = "admin"
 # subject = "admin@example.com"
 # groups = ["platform-admins"]
+
+## When [admin.workload_identity].enabled = true, use exact mTLS mappings to
+## an IPM principal. Supported claims are spiffe_id, san_uri, and san_dns.
+## spiffe_id requires one canonical SPIFFE URI SAN; san_dns is lowercase exact
+## matching without wildcards. Multiple identities may rotate onto one principal.
+# [[ipm.trust]]
+# source = "mtls"
+# claim = "spiffe_id"
+# value = "spiffe://example.test/ns/edge/sa/controller"
+# principal = "admin"
 
 #[[ipm.credentials]]
 # name = "admin-env-token"

@@ -53,6 +53,8 @@ fn prometheus_output_includes_admin_audit_metrics() {
   metrics.record_admin_audit_store_enqueue_failure("full");
   metrics.record_admin_audit_export_event("access_log");
   metrics.record_admin_audit_dropped("store_queue_full");
+  metrics.record_admin_workload_identity_authentication("accepted", "bound_bearer");
+  metrics.record_admin_workload_identity_authentication("rejected", "principal_mismatch");
 
   let body = metrics.prometheus(
     &MetricsConfig::default(),
@@ -67,6 +69,12 @@ fn prometheus_output_includes_admin_audit_metrics() {
   assert!(body.contains("oxibelt_admin_audit_store_enqueue_failures_total{reason=\"full\"} 1"));
   assert!(body.contains("oxibelt_admin_audit_export_events_total{sink=\"access_log\"} 1"));
   assert!(body.contains("oxibelt_admin_audit_dropped_total{reason=\"store_queue_full\"} 1"));
+  assert!(body.contains(
+    "oxibelt_admin_workload_identity_authentication_total{outcome=\"accepted\",reason=\"bound_bearer\"} 1"
+  ));
+  assert!(body.contains(
+    "oxibelt_admin_workload_identity_authentication_total{outcome=\"rejected\",reason=\"principal_mismatch\"} 1"
+  ));
 }
 
 #[test]

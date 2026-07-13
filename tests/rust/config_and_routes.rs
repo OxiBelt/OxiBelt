@@ -7263,6 +7263,164 @@ default = true
   assert_eq!(config.admin.transport, AdminTransportMode::Auto);
 }
 
+fn admin_workload_identity_config_toml(
+  cert_path: &Path,
+  key_path: &Path,
+  trust_mapping: &str,
+  workload_identity: &str,
+) -> String {
+  format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:9092"
+transport = "tls"
+
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.tls]
+enabled = true
+min_version = "tls1.3"
+max_version = "tls1.3"
+
+[admin.tls.client_auth]
+mode = "require"
+ca_certs = ["{}"]
+
+[[admin.tls.certificates]]
+server_names = ["admin.example.test"]
+cert_chain = "{}"
+private_key = "{}"
+default = true
+
+[admin.workload_identity]
+{}
+
+[ipm]
+enabled = true
+namespace = "default"
+
+[[ipm.principals]]
+id = "controller"
+subject = "spiffe://example.test/ns/edge/sa/controller"
+
+{}
+"#,
+    common::minimal_config_toml(cert_path, key_path),
+    cert_path.display(),
+    cert_path.display(),
+    key_path.display(),
+    workload_identity,
+    trust_mapping,
+  )
+}
+
+#[test]
+fn admin_workload_identity_validates_exact_mtls_principal_mappings_and_rotation_overlap() {
+  let temp_dir = common::TempDir::new("admin-workload-identity");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-workload-identity");
+  let raw = admin_workload_identity_config_toml(
+    &cert_path,
+    &key_path,
+    r#"[[ipm.trust]]
+source = "mtls"
+claim = "spiffe_id"
+value = "spiffe://example.test/ns/edge/sa/controller"
+principal = "controller"
+
+[[ipm.trust]]
+source = "mtls"
+claim = "spiffe_id"
+value = "spiffe://example.test/ns/edge/sa/controller-v2"
+principal = "controller""#,
+    "enabled = true\nbearer_mode = \"optional\"",
+  );
+
+  let config: Config = toml::from_str(&raw).expect("workload identity config should parse");
+  config
+    .validate()
+    .expect("workload identity config should validate");
+  assert!(config.admin.workload_identity.enabled);
+  assert!(config.ipm.credentials.is_empty());
+  assert_eq!(config.ipm.trust.len(), 2);
+}
+
+#[test]
+fn admin_workload_identity_rejects_incomplete_or_ambiguous_mtls_configuration() {
+  let temp_dir = common::TempDir::new("admin-workload-identity-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-workload-identity-invalid");
+  let valid_mapping = r#"[[ipm.trust]]
+source = "mtls"
+claim = "spiffe_id"
+value = "spiffe://example.test/ns/edge/sa/controller"
+principal = "controller""#;
+  let valid_workload_identity = "enabled = true\nbearer_mode = \"optional\"";
+
+  let cases = [
+    (
+      "transport must be explicitly TLS",
+      "transport = \"tls\"",
+      "transport = \"auto\"",
+      "requires admin.transport = \"tls\"",
+    ),
+    (
+      "mTLS mappings must not target groups",
+      "principal = \"controller\"",
+      "group = \"operators\"",
+      "requires each mTLS ipm.trust mapping to target a principal",
+    ),
+    (
+      "SPIFFE IDs must be canonical",
+      "spiffe://example.test/ns/edge/sa/controller",
+      "spiffe://Example.test/ns/edge/sa/controller",
+      "has an invalid trust domain",
+    ),
+  ];
+  for (name, from, to, expected) in cases {
+    let raw = admin_workload_identity_config_toml(
+      &cert_path,
+      &key_path,
+      valid_mapping,
+      valid_workload_identity,
+    )
+    .replace(from, to);
+    let config: Config = toml::from_str(&raw).expect("invalid config should parse");
+    let error = config.validate().expect_err(name);
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn admin_workload_identity_is_not_waf_reload_equivalent() {
+  let temp_dir = common::TempDir::new("admin-workload-identity-reload");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-workload-identity-reload");
+  let raw = admin_workload_identity_config_toml(
+    &cert_path,
+    &key_path,
+    r#"[[ipm.trust]]
+source = "mtls"
+claim = "san_dns"
+value = "controller.example.test"
+principal = "controller""#,
+    "enabled = true\nbearer_mode = \"optional\"",
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let mut rotated = config.clone();
+  rotated.ipm.trust[0].value = "controller-v2.example.test".to_string();
+
+  assert!(!config.non_waf_equivalent(&rotated));
+}
+
 #[test]
 fn admin_http3_and_operation_webtransport_config_validates() {
   unsafe {

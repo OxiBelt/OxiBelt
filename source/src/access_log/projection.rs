@@ -235,6 +235,20 @@ pub(super) fn admin_event_value(event: &AdminAuditEvent) -> Value {
       "subject": event.subject,
       "groups": event.groups,
     },
+    "authentication": {
+      "reason": event.authentication_reason,
+      "workload_identity": {
+        "kind": event.workload_identity_kind,
+        "value": event.workload_identity,
+        "principal": event.workload_principal,
+        "certificate_fingerprint_sha256": event.certificate_fingerprint_sha256,
+      },
+      "credential": {
+        "kind": event.credential_kind,
+        "identity": event.credential_identity,
+        "principal": event.credential_principal,
+      },
+    },
     "service": event.service,
     "operation": event.operation,
     "action": event.action,
@@ -637,6 +651,14 @@ mod tests {
       principal: Some("admin".to_string()),
       subject: Some("sub-1".to_string()),
       groups: vec!["ops".to_string()],
+      workload_identity_kind: Some("spiffe_id".to_string()),
+      workload_identity: Some("spiffe://example.test/ns/edge/sa/controller".to_string()),
+      workload_principal: Some("admin".to_string()),
+      certificate_fingerprint_sha256: Some("a".repeat(64)),
+      credential_kind: Some("bearer".to_string()),
+      credential_identity: Some("admin-token".to_string()),
+      credential_principal: Some("admin".to_string()),
+      authentication_reason: Some("bound_bearer".to_string()),
       peer: "127.0.0.1:12345".to_string(),
       source_ip: Some("127.0.0.1".to_string()),
       scheme: "https",
@@ -661,5 +683,10 @@ mod tests {
     assert_eq!(value["token"]["principal"], json!("admin"));
     assert_eq!(value["token"]["subject"], json!("sub-1"));
     assert_eq!(value["token"]["groups"], json!(["ops"]));
+    assert_eq!(value["authentication"]["reason"], json!("bound_bearer"));
+    assert_eq!(
+      value["authentication"]["workload_identity"]["kind"],
+      json!("spiffe_id")
+    );
   }
 }

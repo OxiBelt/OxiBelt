@@ -23,6 +23,7 @@ mod simulation;
 mod snapshot;
 mod store;
 mod token;
+mod workload_identity;
 pub use admin_types::*;
 pub use simulation::{
   IpmPreparedSimulation, IpmSimulationAuthorizationRequirements, IpmSimulationRequest,
@@ -34,6 +35,10 @@ pub(crate) use snapshot::{
 };
 pub use snapshot::{
   IpmSnapshotCounts, RedactedIpmBinding, RedactedIpmCredential, RedactedIpmPolicy,
+};
+pub(crate) use workload_identity::{
+  IpmAdminBearerAuthentication, IpmAdminCredentialKind, IpmPresentedWorkloadIdentity,
+  IpmWorkloadIdentity, IpmWorkloadIdentityError,
 };
 
 const BREAK_GLASS_AUTH_CONCURRENCY: usize = 1;
@@ -194,23 +199,8 @@ impl IpmRuntime {
     self.actor_from_bearer(bearer)
   }
 
-  pub async fn admin_actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
-    let bearer = headers
-      .get(http::header::AUTHORIZATION)
-      .and_then(|value| value.to_str().ok())
-      .and_then(|value| value.strip_prefix("Bearer "))?;
-    self.admin_actor_from_bearer(bearer).await
-  }
-
   pub fn actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
     self.actor_from_regular_bearer(bearer)
-  }
-
-  pub async fn admin_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
-    if let Some(actor) = self.actor_from_regular_bearer(bearer) {
-      return Some(actor);
-    }
-    self.break_glass_actor_from_bearer(bearer).await
   }
 
   fn actor_from_regular_bearer(&self, bearer: &str) -> Option<IpmActor> {

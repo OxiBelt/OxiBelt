@@ -17,6 +17,7 @@ mod access_log;
 mod admin_audit;
 mod admin_legacy;
 mod admin_runtime;
+mod admin_workload_identity;
 mod allowed_keys;
 mod cache_external;
 mod cache_sections;
@@ -64,6 +65,7 @@ mod workers;
 pub use access_log::*;
 pub use admin_audit::*;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
+pub use admin_workload_identity::*;
 pub use cache_external::{
   ExternalCacheHandlerConfig, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
 };
@@ -544,6 +546,7 @@ impl Config {
       && self.client_identity == other.client_identity
       && self.compression == other.compression
       && self.cache == other.cache
+      && self.ipm == other.ipm
       && self.admin == other.admin
       && self.metrics == other.metrics
       && self.telemetry == other.telemetry
@@ -1977,6 +1980,9 @@ impl Config {
       if self.admin.http3.enabled {
         bail!("admin.http3.enabled requires admin.enabled = true");
       }
+      if self.admin.workload_identity.enabled {
+        bail!("admin.workload_identity.enabled requires admin.enabled = true");
+      }
       return Ok(());
     }
     self.validate_admin_privileged_ports()?;
@@ -2057,7 +2063,8 @@ impl Config {
         bail!("admin.http3.enabled requires admin.tls.max_version to allow tls1.3");
       }
     }
-    self.admin.tls.validate()
+    self.admin.tls.validate()?;
+    self.validate_admin_workload_identity()
   }
 
   fn validate_metrics_and_health(&self) -> anyhow::Result<()> {
@@ -3104,21 +3111,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "statuses",
     ][..],
     "cache.policies.rules" => &["mime_types", "store"][..],
-    "admin" => &[
-      "allow_insecure_plaintext",
-      "audit",
-      "bearer_token_env",
-      "bind",
-      "cache_purge_signing",
-      "enabled",
-      "http3",
-      "operations",
-      "plaintext_allowed_source_cidrs",
-      "rbac",
-      "tls",
-      "token_store",
-      "transport",
-    ][..],
+    "admin" => allowed_keys::ADMIN_CONFIG_KEYS,
     "admin.audit" => &[
       "backend",
       "enabled",
@@ -3148,6 +3141,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "max_skew_seconds",
       "nonce_ttl_seconds",
     ][..],
+    "admin.workload_identity" => allowed_keys::ADMIN_WORKLOAD_IDENTITY_CONFIG_KEYS,
     "admin.rbac" => &["tokens"][..],
     "admin.rbac.tokens" => &[
       "bearer_token_env",
@@ -5004,6 +4998,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub cache_purge_signing: AdminCachePurgeSigningConfig,
   #[serde(default)]
+  pub workload_identity: AdminWorkloadIdentityConfig,
+  #[serde(default)]
   pub audit: AdminAuditConfig,
   #[serde(default)]
   pub operations: AdminOperationsConfig,
@@ -5027,6 +5023,7 @@ impl Default for AdminConfig {
       allow_insecure_plaintext: false,
       plaintext_allowed_source_cidrs: default_admin_plaintext_allowed_source_cidrs(),
       cache_purge_signing: AdminCachePurgeSigningConfig::default(),
+      workload_identity: AdminWorkloadIdentityConfig::default(),
       audit: AdminAuditConfig::default(),
       operations: AdminOperationsConfig::default(),
       http3: AdminHttp3Config::default(),

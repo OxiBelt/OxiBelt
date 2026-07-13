@@ -168,7 +168,7 @@ fn threat_model_states_claims_failure_modes_and_compromise_impact() {
       "`fail_open`",
       "cluster-wide security decision",
       "All Admin requests require bearer authentication",
-      "mTLS currently does not bind the certificate to the IPM principal",
+      "a verified Admin mTLS identity maps to exactly one principal",
       "best_effort",
       "enforcing",
     ],

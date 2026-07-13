@@ -68,6 +68,7 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
     "admin_audit": snapshot.config.admin.audit.enabled,
   });
   debug_assert_capability_feature_keys(&features);
+  let workload_identity = &snapshot.config.admin.workload_identity;
 
   admin::json_response(
     StatusCode::OK,
@@ -75,6 +76,15 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
       "api_version": ADMIN_API_VERSION,
       "package_version": env!("CARGO_PKG_VERSION"),
       "features": features,
+      "authentication": {
+        "mtls_workload_identity": {
+          "enabled": workload_identity.enabled,
+          "bearer_mode": match workload_identity.bearer_mode {
+            crate::config::AdminWorkloadIdentityBearerMode::Required => "required",
+            crate::config::AdminWorkloadIdentityBearerMode::Optional => "optional",
+          },
+        },
+      },
       "limits": {
         "admin_json_body_bytes": ADMIN_JSON_BODY_LIMIT,
         "config_body_bytes": ADMIN_CONFIG_BODY_LIMIT,

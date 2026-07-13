@@ -58,6 +58,14 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        principal text NULL,
        subject text NULL,
        groups text[] NOT NULL DEFAULT ARRAY[]::text[],
+       workload_identity_kind text NULL,
+       workload_identity text NULL,
+       workload_principal text NULL,
+       certificate_fingerprint_sha256 text NULL,
+       credential_kind text NULL,
+       credential_identity text NULL,
+       credential_principal text NULL,
+       authentication_reason text NULL,
        peer text NOT NULL,
        source_ip text NULL,
        scheme text NOT NULL,
@@ -75,6 +83,22 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        request_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
        created_at timestamptz NOT NULL DEFAULT now()
      )",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS workload_identity_kind text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS workload_identity text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS workload_principal text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS certificate_fingerprint_sha256 text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS credential_kind text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS credential_identity text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS credential_principal text NULL",
+    "ALTER TABLE oxibelt_admin_audit
+       ADD COLUMN IF NOT EXISTS authentication_reason text NULL",
     "CREATE INDEX IF NOT EXISTS oxibelt_admin_audit_ns_id_idx
        ON oxibelt_admin_audit (namespace, id DESC)",
     "CREATE INDEX IF NOT EXISTS oxibelt_admin_audit_request_id_idx
@@ -146,12 +170,15 @@ async fn insert_record(
   ))?;
   sqlx::query(
     "INSERT INTO oxibelt_admin_audit
-       (namespace, request_id, actor, principal, subject, groups, peer, source_ip, scheme,
+       (namespace, request_id, actor, principal, subject, groups,
+        workload_identity_kind, workload_identity, workload_principal,
+        certificate_fingerprint_sha256, credential_kind, credential_identity,
+        credential_principal, authentication_reason, peer, source_ip, scheme,
         method, path, service, operation, action, resource, target_kind, target_id,
         status, outcome, error, request_summary)
      VALUES
        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21::jsonb)",
+        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29::jsonb)",
   )
   .bind(namespace)
   .bind(&event.request_id)
@@ -159,6 +186,14 @@ async fn insert_record(
   .bind(&event.principal)
   .bind(&event.subject)
   .bind(&event.groups)
+  .bind(&event.workload_identity_kind)
+  .bind(&event.workload_identity)
+  .bind(&event.workload_principal)
+  .bind(&event.certificate_fingerprint_sha256)
+  .bind(&event.credential_kind)
+  .bind(&event.credential_identity)
+  .bind(&event.credential_principal)
+  .bind(&event.authentication_reason)
   .bind(&event.peer)
   .bind(&event.source_ip)
   .bind(event.scheme)
@@ -190,7 +225,10 @@ pub(super) async fn select_records(
   }
   let path_prefix = query.path_prefix.as_ref().map(|value| format!("{value}%"));
   let rows = sqlx::query(
-    "SELECT id, namespace, request_id, actor, principal, subject, groups, peer, source_ip, scheme,
+    "SELECT id, namespace, request_id, actor, principal, subject, groups,
+            workload_identity_kind, workload_identity, workload_principal,
+            certificate_fingerprint_sha256, credential_kind, credential_identity,
+            credential_principal, authentication_reason, peer, source_ip, scheme,
             method, path, service, operation, action, resource, target_kind, target_id,
             status, outcome, error, request_summary::text AS request_summary,
             created_at::text AS created_at
@@ -232,6 +270,14 @@ fn record_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<AdminAuditReco
     principal: row.try_get("principal")?,
     subject: row.try_get("subject")?,
     groups: row.try_get("groups")?,
+    workload_identity_kind: row.try_get("workload_identity_kind")?,
+    workload_identity: row.try_get("workload_identity")?,
+    workload_principal: row.try_get("workload_principal")?,
+    certificate_fingerprint_sha256: row.try_get("certificate_fingerprint_sha256")?,
+    credential_kind: row.try_get("credential_kind")?,
+    credential_identity: row.try_get("credential_identity")?,
+    credential_principal: row.try_get("credential_principal")?,
+    authentication_reason: row.try_get("authentication_reason")?,
     peer: row.try_get("peer")?,
     source_ip: row.try_get("source_ip")?,
     scheme: row.try_get("scheme")?,
@@ -300,6 +346,14 @@ mod tests {
       principal: None,
       subject: None,
       groups: Vec::new(),
+      workload_identity_kind: None,
+      workload_identity: None,
+      workload_principal: None,
+      certificate_fingerprint_sha256: None,
+      credential_kind: None,
+      credential_identity: None,
+      credential_principal: None,
+      authentication_reason: None,
       peer: "127.0.0.1:12345".to_string(),
       source_ip: Some("127.0.0.1".to_string()),
       scheme: "http",
