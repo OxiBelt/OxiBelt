@@ -924,6 +924,9 @@ jobs:
       - name: Validate Helm edge-secure-medium profile
         run: tests/scripts/check-helm-edge-secure-medium-profile.sh
 
+      - name: Validate Helm ServiceAccount token hardening
+        run: tests/scripts/check-helm-service-account-token.sh
+
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:

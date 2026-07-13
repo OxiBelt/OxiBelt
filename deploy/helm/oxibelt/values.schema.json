@@ -183,6 +183,15 @@
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
       }
     },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "const": false }
+      }
+    },
     "service": {
       "type": "object",
       "properties": {
@@ -191,11 +200,31 @@
     },
     "kubernetesDiscovery": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
+        "serviceAccountToken": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "expirationSeconds": { "type": "integer", "minimum": 600, "maximum": 3600 }
+          }
+        },
         "rbac": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
-            "create": { "type": "boolean" }
+            "create": { "type": "boolean" },
+            "namespaces": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 63,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+              }
+            }
           }
         }
       }

@@ -15,10 +15,29 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+\\.toml$"
     },
-    "watchNamespace": { "type": "string" },
+    "watchNamespace": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "watchAllNamespaces": { "type": "boolean" },
     "statusService": { "type": "string" },
     "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
     "dryRun": { "type": "boolean" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "automountServiceAccountToken": { "const": false },
+        "tokenProjection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "expirationSeconds": { "type": "integer", "minimum": 600, "maximum": 3600 }
+          }
+        }
+      }
+    },
     "rollout": {
       "type": "object",
       "properties": {
@@ -38,5 +57,16 @@
       },
       "required": ["target", "volumeName", "timeoutSeconds", "configMapPrefix"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["watchAllNamespaces"],
+        "properties": { "watchAllNamespaces": { "const": true } }
+      },
+      "then": {
+        "properties": { "watchNamespace": { "const": "" } }
+      }
+    }
+  ]
 }

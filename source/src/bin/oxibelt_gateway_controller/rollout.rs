@@ -83,14 +83,14 @@ pub struct RolloutTarget {
 
 impl RolloutTarget {
   pub fn from_args(args: &RunArgs) -> anyhow::Result<Self> {
-    validate_dns_label("rollout target namespace", &args.rollout_target_namespace)?;
-    validate_dns_label("rollout target name", &args.rollout_target_name)?;
-    validate_dns_label(
+    validate_kubernetes_dns_label("rollout target namespace", &args.rollout_target_namespace)?;
+    validate_kubernetes_dns_label("rollout target name", &args.rollout_target_name)?;
+    validate_kubernetes_dns_label(
       "rollout target container name",
       &args.rollout_target_container_name,
     )?;
-    validate_dns_label("rollout volume name", &args.rollout_volume_name)?;
-    validate_dns_label("rollout ConfigMap prefix", &args.rollout_config_map_prefix)?;
+    validate_kubernetes_dns_label("rollout volume name", &args.rollout_volume_name)?;
+    validate_kubernetes_dns_label("rollout ConfigMap prefix", &args.rollout_config_map_prefix)?;
     if args.rollout_timeout_seconds == 0 {
       bail!("rollout timeout must be greater than zero seconds");
     }
@@ -547,7 +547,7 @@ pub fn now_unix_seconds() -> u64 {
     .unwrap_or_default()
 }
 
-fn validate_dns_label(name: &str, value: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_kubernetes_dns_label(name: &str, value: &str) -> anyhow::Result<()> {
   let valid = !value.is_empty()
     && value.len() <= 63
     && value

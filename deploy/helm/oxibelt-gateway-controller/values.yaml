@@ -6,10 +6,20 @@ image:
 controllerName: oxibelt.dev/gateway-controller
 # A safe nested relative `.toml` path under the selected workload config root.
 managedConfigPath: conf.d/gateway-api.generated.toml
+# Empty scopes namespaced Gateway API reads to the controller release
+# namespace. Set watchAllNamespaces only for an intentionally cluster-wide
+# controller.
 watchNamespace: ""
+watchAllNamespaces: false
 statusService: ""
 backendResolution: cluster_dns
 dryRun: false
+
+serviceAccount:
+  # The controller receives only the explicit projection rendered below.
+  automountServiceAccountToken: false
+  tokenProjection:
+    expirationSeconds: 3600
 
 rollout:
   target:
@@ -25,6 +35,7 @@ rollout:
 healthBind: 0.0.0.0:9090
 resources: {}
 podSecurityContext:
+  fsGroup: 10001
   runAsNonRoot: true
   runAsUser: 10001
   runAsGroup: 10001

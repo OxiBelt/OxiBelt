@@ -1,46 +1,109 @@
+{{- include "oxibelt-gateway-controller.validateSecurity" . -}}
 {{- $targetNamespace := default .Release.Namespace .Values.rollout.target.namespace -}}
 {{- $targetName := required "rollout.target.name is required" .Values.rollout.target.name -}}
 {{- $targetKind := .Values.rollout.target.kind -}}
+{{- $watchNamespace := default .Release.Namespace .Values.watchNamespace -}}
+{{- $watchAllNamespaces := .Values.watchAllNamespaces -}}
 {{- if not (has $targetKind (list "deployment" "daemonset")) -}}
 {{- fail "rollout.target.kind must be deployment or daemonset" -}}
 {{- end -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "oxibelt-gateway-controller.name" . }}
+  name: {{ include "oxibelt-gateway-controller.name" . }}-cluster
 rules:
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants"]
-  verbs: ["get", "list", "watch"]
+  resources: ["gatewayclasses"]
+  verbs: ["list"]
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status"]
-  verbs: ["get", "patch", "update"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["tcproutes"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["tcproutes/status"]
-  verbs: ["get", "patch", "update"]
-- apiGroups: [""]
-  resources: ["services"]
-  verbs: ["get", "list", "watch"]
+  resources: ["gatewayclasses/status"]
+  verbs: ["patch"]
+{{- if $watchAllNamespaces }}
 - apiGroups: [""]
   resources: ["namespaces"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["list"]
+{{- else }}
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames:
+  - {{ $watchNamespace | quote }}
+  verbs: ["get"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "oxibelt-gateway-controller.name" . }}
+  name: {{ include "oxibelt-gateway-controller.name" . }}-cluster
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "oxibelt-gateway-controller.name" . }}
+  name: {{ include "oxibelt-gateway-controller.name" . }}-cluster
 subjects:
 - kind: ServiceAccount
   name: {{ include "oxibelt-gateway-controller.name" . }}
   namespace: {{ .Release.Namespace }}
 ---
+{{- if $watchAllNamespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+rules:
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes"]
+  verbs: ["list"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+---
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+  namespace: {{ $watchNamespace | quote }}
+rules:
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes"]
+  verbs: ["list"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+  namespace: {{ $watchNamespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "oxibelt-gateway-controller.name" . }}-watch
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

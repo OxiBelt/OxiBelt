@@ -1,11 +1,13 @@
 {{- include "oxibelt.validateConfigRollout" . -}}
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateWorkloadRollout" . -}}
+{{- include "oxibelt.validateKubernetesServiceAccount" . -}}
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
+{{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
 {{- if eq .Values.workload.kind "Deployment" }}
 apiVersion: apps/v1
 kind: Deployment
@@ -56,6 +58,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
+      automountServiceAccountToken: false
       {{- if gt (int .Values.lifecycle.terminationGracePeriodSeconds) 0 }}
       terminationGracePeriodSeconds: {{ .Values.lifecycle.terminationGracePeriodSeconds }}
       {{- end }}
@@ -156,6 +159,11 @@ spec:
         - name: config
           mountPath: {{ .Values.config.mountPath }}
           readOnly: true
+        {{- if $hasKubernetesApiAccess }}
+        - name: kube-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        {{- end }}
         {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey }}
         - name: tls
           mountPath: {{ include "oxibelt.certMountPath" . }}
@@ -234,6 +242,20 @@ spec:
       - name: oxirule
         configMap:
           name: {{ required "oxirule.existingConfigMap is required when oxirule.enabled=true" .Values.oxirule.existingConfigMap }}
+      {{- end }}
+      {{- if $hasKubernetesApiAccess }}
+      - name: kube-api-access
+        projected:
+          defaultMode: 288
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
       {{- end }}
       - name: cache
         emptyDir: {}

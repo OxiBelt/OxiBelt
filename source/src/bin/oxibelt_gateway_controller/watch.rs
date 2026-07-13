@@ -30,6 +30,7 @@ pub struct KubernetesPoller {
 
 impl KubernetesPoller {
   pub fn from_environment(args: &SharedArgs) -> anyhow::Result<Self> {
+    validate_watch_namespace(args.watch_namespace.as_deref())?;
     let host = std::env::var("KUBERNETES_SERVICE_HOST")
       .context("KUBERNETES_SERVICE_HOST is not set; run inside a Kubernetes pod")?;
     let port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
@@ -105,7 +106,11 @@ impl KubernetesPoller {
         .await
         .unwrap_or_default(),
     );
-    objects.extend(self.list_objects("/api/v1/namespaces").await?);
+    objects.extend(
+      self
+        .list_objects(&namespace_snapshot_path(self.namespace.as_deref()))
+        .await?,
+    );
     objects.extend(self.list_namespaced("/api/v1", "services").await?);
     Ok(objects)
   }
@@ -210,6 +215,20 @@ impl KubernetesPoller {
     }
     Ok(())
   }
+}
+
+fn namespace_snapshot_path(namespace: Option<&str>) -> String {
+  match namespace {
+    Some(namespace) => format!("/api/v1/namespaces/{namespace}"),
+    None => "/api/v1/namespaces".to_string(),
+  }
+}
+
+fn validate_watch_namespace(namespace: Option<&str>) -> anyhow::Result<()> {
+  if let Some(namespace) = namespace {
+    rollout::validate_kubernetes_dns_label("watch namespace", namespace)?;
+  }
+  Ok(())
 }
 
 pub async fn run_poll_loop(
@@ -326,6 +345,28 @@ fn read_bearer_token(path: &Path) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn namespace_snapshot_path_respects_a_scoped_watch_namespace() {
+    assert_eq!(
+      namespace_snapshot_path(Some("edge")),
+      "/api/v1/namespaces/edge"
+    );
+    assert_eq!(namespace_snapshot_path(None), "/api/v1/namespaces");
+  }
+
+  #[test]
+  fn watch_namespace_must_be_a_kubernetes_dns_label() {
+    assert!(validate_watch_namespace(None).is_ok());
+    assert!(validate_watch_namespace(Some("edge-a")).is_ok());
+    assert!(validate_watch_namespace(Some("outside/../namespace")).is_err());
+    assert!(
+      validate_watch_namespace(Some(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ))
+      .is_err()
+    );
+  }
 
   #[test]
   fn parse_list_accepts_typed_kubernetes_list_envelopes() {

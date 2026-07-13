@@ -75,8 +75,7 @@ select a profile. Operators still declare route-specific egress dependencies
 and validate enforcement with their cluster CNI.
 
 The profile is a configuration-security baseline, not an attestation that all
-medium-scale edge controls are complete. Default ServiceAccount-token hardening
-(P1-9), complete Kubernetes topology/drain
+medium-scale edge controls are complete. Complete Kubernetes topology/drain
 lifecycle behavior (P1-10), certificate-to-IPM identity binding (P1-12),
 general mutation idempotency (P1-13), stronger audit guarantees (P1-14), and
 build commit/provenance or release attestations (P2) remain separate work.

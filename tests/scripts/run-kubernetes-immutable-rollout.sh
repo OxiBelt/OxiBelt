@@ -20,6 +20,7 @@ rollout_timeout_seconds="${OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS:-420}"
 run_id=""
 cluster_name=""
 namespace=""
+outside_namespace=""
 work_dir=""
 
 data_release="oxibelt-data"
@@ -32,6 +33,7 @@ port_forward_pid=""
 cluster_created=0
 admin_server_name=""
 admin_service_name="${workload_name}-admin"
+controller_selector="app.kubernetes.io/name=oxibelt-gateway-controller"
 
 die() {
   echo "kubernetes immutable rollout test: $*" >&2
@@ -78,7 +80,7 @@ cleanup() {
 
   case "${work_dir}" in
     "${repo_root}"/tests/.tmp/kubernetes-immutable-rollout-*)
-      rm -rf "${work_dir}"
+      rm -rf -- "${work_dir}"
       ;;
     *)
       echo "refusing to remove unexpected test work directory: ${work_dir}" >&2
@@ -228,6 +230,20 @@ check_pod_runtime_proof() {
   port_forward_pid=""
 }
 
+assert_controller_can_i() {
+  local expected="$1"
+  shift
+  local subject="system:serviceaccount:${namespace}:${controller_release}"
+
+  if kube auth can-i --quiet --as="${subject}" "$@"; then
+    [[ "${expected}" == "yes" ]] \
+      || die "controller ServiceAccount unexpectedly has permission: $*"
+  else
+    [[ "${expected}" == "no" ]] \
+      || die "controller ServiceAccount lacks required permission: $*"
+  fi
+}
+
 for command in docker kind kubectl helm curl jq openssl sha256sum tr; do
   require_command "${command}"
 done
@@ -247,6 +263,7 @@ run_id="${run_id:0:24}"
 [[ "${run_id}" =~ ^[a-f0-9]{24}$ ]] || die "failed to derive a safe test run identifier"
 cluster_name="oxibelt-rollout-${run_id}"
 namespace="oxibelt-rollout-${run_id}"
+outside_namespace="oxibelt-outside-${run_id}"
 work_dir="${repo_root}/tests/.tmp/kubernetes-immutable-rollout-${run_id}"
 admin_server_name="${admin_service_name}.${namespace}.svc"
 
@@ -303,6 +320,7 @@ kube wait --for=condition=Established --timeout=120s \
   crd/referencegrants.gateway.networking.k8s.io
 
 kube create namespace "${namespace}" >/dev/null
+kube create namespace "${outside_namespace}" >/dev/null
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -subj '/CN=oxibelt-rollout.test' \
   -addext 'subjectAltName=DNS:oxibelt-rollout.test' \
@@ -479,6 +497,14 @@ jq -e \
 ' >/dev/null <<<"${bootstrap_deployment_json}" \
   || die "bootstrap workload must mount the direct immutable base ConfigMap and exact empty placeholder"
 
+jq -e '
+  .spec.template.spec.automountServiceAccountToken == false
+    and all(.spec.template.spec.volumes[]?; .name != "kube-api-access")
+    and all(.spec.template.spec.containers[]?;
+      all(.volumeMounts[]?; .name != "kube-api-access"))
+' >/dev/null <<<"${bootstrap_deployment_json}" \
+  || die "default data-plane Pod template must not mount a Kubernetes API credential"
+
 bootstrap_config_map_json="$(kube -n "${namespace}" get configmap "${bootstrap_revision}" -o json)"
 jq -e --arg revision "${bootstrap_revision}" '
   .metadata.name == $revision
@@ -504,6 +530,63 @@ helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt
   --set-string "rollout.configMapPrefix=oxibelt-gateway-config" \
   --wait \
   --timeout "${rollout_timeout_seconds}s"
+
+controller_deployment_json="$(kube -n "${namespace}" get deployment "${controller_release}" -o json)"
+jq -e '
+  .spec.template.spec.automountServiceAccountToken == false
+    and .spec.template.spec.securityContext.fsGroup == 10001
+    and any(.spec.template.spec.containers[]?;
+      .name == "controller"
+        and any(.volumeMounts[]?;
+          .name == "kube-api-access"
+            and .mountPath == "/var/run/secrets/kubernetes.io/serviceaccount"
+            and .readOnly == true))
+    and any(.spec.template.spec.volumes[]?;
+      .name == "kube-api-access"
+        and .projected.defaultMode == 288
+        and any(.projected.sources[]?;
+          .serviceAccountToken.expirationSeconds == 3600
+            and .serviceAccountToken.path == "token")
+        and any(.projected.sources[]?;
+          .configMap.name == "kube-root-ca.crt"
+            and .configMap.items == [{"key": "ca.crt", "path": "ca.crt"}]))
+' >/dev/null <<<"${controller_deployment_json}" \
+  || die "controller Pod template must use only the bounded explicit Kubernetes API credential projection"
+
+controller_pod="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json \
+  | jq -r '.items | map(select(.metadata.deletionTimestamp == null)) | .[0].metadata.name // empty')"
+[[ -n "${controller_pod}" ]] || die "controller Deployment did not create a live Pod"
+kube -n "${namespace}" exec "pod/${controller_pod}" -- sh -c \
+  'test -r /var/run/secrets/kubernetes.io/serviceaccount/token && test -r /var/run/secrets/kubernetes.io/serviceaccount/ca.crt' \
+  || die "controller Pod cannot read its explicit projected Kubernetes API credential"
+
+# The scoped controller identity has only the reads and status/rollout writes
+# exercised by its reconciliation loop. These checks intentionally use API
+# authorization rather than inspecting RBAC text so forbidden access cannot
+# silently reappear through a binding change.
+assert_controller_can_i yes list gatewayclasses.gateway.networking.k8s.io
+assert_controller_can_i yes patch gatewayclasses.gateway.networking.k8s.io --subresource=status
+assert_controller_can_i yes get "namespaces/${namespace}"
+assert_controller_can_i yes list gateways.gateway.networking.k8s.io --namespace "${namespace}"
+assert_controller_can_i yes list httproutes.gateway.networking.k8s.io --namespace "${namespace}"
+assert_controller_can_i yes list services --namespace "${namespace}"
+assert_controller_can_i yes get configmaps --namespace "${namespace}"
+assert_controller_can_i yes create configmaps --namespace "${namespace}"
+assert_controller_can_i yes list pods --namespace "${namespace}"
+assert_controller_can_i yes list replicasets.apps --namespace "${namespace}"
+assert_controller_can_i yes get "deployments.apps/${workload_name}" --namespace "${namespace}"
+assert_controller_can_i yes patch "deployments.apps/${workload_name}" --namespace "${namespace}"
+assert_controller_can_i no list namespaces
+assert_controller_can_i no get "namespaces/${outside_namespace}"
+assert_controller_can_i no watch gatewayclasses.gateway.networking.k8s.io
+assert_controller_can_i no update gatewayclasses.gateway.networking.k8s.io --subresource=status
+assert_controller_can_i no get secrets --namespace "${namespace}"
+assert_controller_can_i no list secrets --namespace "${namespace}"
+assert_controller_can_i no get services --namespace "${namespace}"
+assert_controller_can_i no delete configmaps --namespace "${namespace}"
+assert_controller_can_i no delete pods --namespace "${namespace}"
+assert_controller_can_i no patch deployments.apps/not-the-target --namespace "${namespace}"
+assert_controller_can_i no list gateways.gateway.networking.k8s.io --namespace "${outside_namespace}"
 
 kube -n "${namespace}" rollout status "deployment/${workload_name}" \
   --timeout "${rollout_timeout_seconds}s"
@@ -622,6 +705,9 @@ mapfile -t pods < <(jq -r '
 ' <<<"${pods_json}")
 [[ "${#pods[@]}" == "3" ]] || die "expected exactly three non-terminating data-plane Pods"
 for index in "${!pods[@]}"; do
+  kube -n "${namespace}" exec "pod/${pods[${index}]}" -- sh -c \
+    'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token' \
+    || die "default data-plane Pod unexpectedly has a Kubernetes API token"
   check_pod_runtime_proof "${pods[${index}]}" "$((21000 + RANDOM % 10000 + index))" "${revision}" "${digest}"
 done
 verify_admin_mtls "$((25000 + RANDOM % 10000))"

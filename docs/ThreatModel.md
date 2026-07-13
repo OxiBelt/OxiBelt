@@ -236,7 +236,7 @@ explicit availability-over-enforcement choice.
 | Cache-purge, dynamic-policy, Person proof, and provider signing/shared secrets | Independent random keys, protected environment/file delivery, rotation compatible with replay/expiry windows, and isolation between environments or tenants. |
 | Redis/PostgreSQL passwords, ACL users, client keys, URLs, and CA roots | Verified TLS for remote services, least-privilege database identities, protected projected files/environment, network isolation, backups, monitoring, and rotation. |
 | External-auth, external cache, telemetry, discovery, and third-party-provider credentials | Restrict endpoint egress and data disclosure, validate TLS, bound requests/responses, and rotate credentials in the owning service. |
-| Kubernetes ServiceAccount, registry, CI, release, and admission authority | Least-privilege RBAC/workflow permissions, protected runners and environments, immutable image selection, branch/tag protection, and independent admission policy. |
+| Kubernetes ServiceAccount, registry, CI, release, and admission authority | Data-plane Pods receive no ServiceAccount token by default. API-using workloads use explicit short-lived projected tokens, least-privilege namespace-scoped RBAC where possible, protected runners and environments, immutable image selection, branch/tag protection, and independent admission policy. |
 | ACME account keys, DNS provider tokens, and renewal state | Keep outside the OxiBelt process/container. OxiBelt consumes provisioned certificate material but does not manage issuance or renewal. |
 
 ### Experimental features
@@ -258,7 +258,7 @@ guarantees.
 | `gateway-api-grpcroute` | Translation supports only the documented bounded gRPC route subset. |
 | `gateway-api-tlsroute` | Passthrough translation relies on visible SNI and does not terminate or WAF-inspect the tunneled protocol. |
 | `helm-data-plane` | Chart output depends on operator values and cluster controls and is not a complete security deployment attestation. |
-| `helm-gateway-controller` | Controller chart RBAC and health exposure require namespace and cluster-policy review. |
+| `helm-gateway-controller` | The controller has a deliberately projected API token and narrowly scoped default namespace RBAC, but its Gateway/rollout authority and any explicit cluster-wide watch choice still require namespace and cluster-policy review. |
 
 ## Attack Surface, Mitigations, and Attacker Stories
 

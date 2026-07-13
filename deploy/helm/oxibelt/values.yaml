@@ -32,7 +32,9 @@ workload:
 serviceAccount:
   create: true
   name: ""
-  automountServiceAccountToken: true
+  # Kubernetes API credentials are never ambient. Use the scoped projection
+  # below only when upstream discovery needs the Pod ServiceAccount.
+  automountServiceAccountToken: false
 
 # A nonzero value is emitted on the Pod spec. The default intentionally omits
 # the field to preserve Kubernetes' existing 30-second default for unprofiled
@@ -41,8 +43,18 @@ lifecycle:
   terminationGracePeriodSeconds: 0
 
 kubernetesDiscovery:
+  serviceAccountToken:
+    # Set this for externally managed discovery RBAC. Chart-created RBAC also
+    # enables the projection so an operator cannot grant unusable access.
+    enabled: false
+    # Bound projected tokens rotate before expiry. Keep their requested
+    # lifetime at or below one hour.
+    expirationSeconds: 3600
   rbac:
     create: false
+    # Empty scopes chart-created discovery Roles to the release namespace.
+    # List every additional namespace that configured upstream discovery reads.
+    namespaces: []
 
 # NetworkPolicy is opt-in for compatibility with existing Helm deployments.
 # When enabled, each omitted peer or destination stays denied rather than

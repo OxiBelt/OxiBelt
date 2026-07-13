@@ -10,6 +10,46 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.kubernetesApiAccessEnabled" -}}
+{{- if or .Values.kubernetesDiscovery.rbac.create .Values.kubernetesDiscovery.serviceAccountToken.enabled -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateKubernetesServiceAccount" -}}
+{{- if not (kindIs "bool" .Values.serviceAccount.automountServiceAccountToken) -}}
+{{- fail "serviceAccount.automountServiceAccountToken must be a boolean" -}}
+{{- end -}}
+{{- if .Values.serviceAccount.automountServiceAccountToken -}}
+{{- fail "serviceAccount.automountServiceAccountToken must remain false; use kubernetesDiscovery.serviceAccountToken.enabled for an explicit projected credential" -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.kubernetesDiscovery.serviceAccountToken.enabled) -}}
+{{- fail "kubernetesDiscovery.serviceAccountToken.enabled must be a boolean" -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.kubernetesDiscovery.rbac.create) -}}
+{{- fail "kubernetesDiscovery.rbac.create must be a boolean" -}}
+{{- end -}}
+{{- $expirationSeconds := int .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds -}}
+{{- if or (lt $expirationSeconds 600) (gt $expirationSeconds 3600) -}}
+{{- fail "kubernetesDiscovery.serviceAccountToken.expirationSeconds must be between 600 and 3600" -}}
+{{- end -}}
+{{- $namespaces := .Values.kubernetesDiscovery.rbac.namespaces | default (list) -}}
+{{- if not (kindIs "slice" $namespaces) -}}
+{{- fail "kubernetesDiscovery.rbac.namespaces must be an array" -}}
+{{- end -}}
+{{- $seenNamespaces := dict -}}
+{{- range $namespace := $namespaces -}}
+{{- if not (kindIs "string" $namespace) -}}
+{{- fail "kubernetesDiscovery.rbac.namespaces must contain namespace strings" -}}
+{{- end -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace)) -}}
+{{- fail "kubernetesDiscovery.rbac.namespaces must contain safe Kubernetes namespace names" -}}
+{{- end -}}
+{{- if hasKey $seenNamespaces $namespace -}}
+{{- fail "kubernetesDiscovery.rbac.namespaces must not contain duplicates" -}}
+{{- end -}}
+{{- $_ := set $seenNamespaces $namespace true -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "oxibelt.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -684,8 +724,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $hasKubernetesApiDestination = true -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.kubernetesDiscovery.rbac.create (not $hasKubernetesApiDestination) -}}
-{{- fail "networkPolicy requires a kubernetes-api egress destination when kubernetesDiscovery.rbac.create=true" -}}
+{{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
+{{- if and $hasKubernetesApiAccess (not $hasKubernetesApiDestination) -}}
+{{- fail "networkPolicy requires a kubernetes-api egress destination when Kubernetes API token projection is enabled" -}}
 {{- end -}}
 {{- if $cilium.enabled -}}
 {{- if not $dns.enabled -}}

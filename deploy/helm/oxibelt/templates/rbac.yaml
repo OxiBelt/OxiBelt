@@ -1,30 +1,39 @@
+{{- include "oxibelt.validateKubernetesServiceAccount" . -}}
 {{- if .Values.kubernetesDiscovery.rbac.create }}
+{{- $root := . -}}
+{{- $name := include "oxibelt.name" . -}}
+{{- $namespaces := default (list .Release.Namespace) .Values.kubernetesDiscovery.rbac.namespaces -}}
+{{- range $namespace := $namespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: {{ include "oxibelt.name" . }}-discovery
+  name: {{ $name }}-discovery
+  namespace: {{ $namespace | quote }}
   labels:
-{{ include "oxibelt.labels" . | indent 4 }}
+{{ include "oxibelt.labels" $root | indent 4 }}
 rules:
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["list", "watch"]
 - apiGroups: [""]
-  resources: ["endpoints", "services"]
-  verbs: ["get", "list", "watch"]
+  resources: ["endpoints"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ include "oxibelt.name" . }}-discovery
+  name: {{ $name }}-discovery
+  namespace: {{ $namespace | quote }}
   labels:
-{{ include "oxibelt.labels" . | indent 4 }}
+{{ include "oxibelt.labels" $root | indent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "oxibelt.name" . }}-discovery
+  kind: Role
+  name: {{ $name }}-discovery
 subjects:
 - kind: ServiceAccount
-  name: {{ include "oxibelt.serviceAccountName" . }}
-  namespace: {{ .Release.Namespace }}
+  name: {{ include "oxibelt.serviceAccountName" $root }}
+  namespace: {{ $root.Release.Namespace }}
+---
+{{- end }}
 {{- end }}

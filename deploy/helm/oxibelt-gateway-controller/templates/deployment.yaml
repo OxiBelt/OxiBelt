@@ -1,4 +1,6 @@
 {{- include "oxibelt-gateway-controller.validateManagedConfigPath" . -}}
+{{- include "oxibelt-gateway-controller.validateSecurity" . -}}
+{{- $watchNamespace := default .Release.Namespace .Values.watchNamespace -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +20,7 @@ spec:
         app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
     spec:
       serviceAccountName: {{ include "oxibelt-gateway-controller.name" . }}
+      automountServiceAccountToken: false
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
@@ -37,8 +40,8 @@ spec:
         - "--rollout-timeout-seconds={{ .Values.rollout.timeoutSeconds }}"
         - "--rollout-config-map-prefix={{ .Values.rollout.configMapPrefix }}"
         - "--health-bind={{ .Values.healthBind }}"
-        {{- if .Values.watchNamespace }}
-        - "--watch-namespace={{ .Values.watchNamespace }}"
+        {{- if not .Values.watchAllNamespaces }}
+        - "--watch-namespace={{ $watchNamespace }}"
         {{- end }}
         {{- if .Values.statusService }}
         - "--status-service={{ .Values.statusService }}"
@@ -64,8 +67,25 @@ spec:
             port: health
         securityContext:
 {{ toYaml .Values.securityContext | indent 10 }}
+        volumeMounts:
+        - name: kube-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
         resources:
 {{ toYaml .Values.resources | indent 10 }}
+      volumes:
+      - name: kube-api-access
+        projected:
+          defaultMode: 288
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: {{ .Values.serviceAccount.tokenProjection.expirationSeconds }}
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}
       tolerations:

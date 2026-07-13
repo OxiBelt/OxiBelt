@@ -274,9 +274,15 @@ oxibelt-gateway-controller \
   run
 ```
 
-The `run` command uses the pod service account token and CA from
-`/var/run/secrets/kubernetes.io/serviceaccount`. Use `--watch-namespace` to
-limit namespaced resource polling.
+The `run` command uses a Kubernetes API token and CA from
+`/var/run/secrets/kubernetes.io/serviceaccount`. The Helm chart disables the
+automatic mount and instead projects only a short-lived token plus
+`kube-root-ca.crt` at that path. Deployments that invoke the binary directly
+must provide an equivalent explicit projection rather than relying on an
+ambient ServiceAccount token. Use `--watch-namespace` to limit namespaced
+resource polling; omitting it is cluster-wide and therefore requires the
+corresponding explicit RBAC. The chart defaults to its release namespace and
+omits the argument only when `watchAllNamespaces: true` is explicitly set.
 
 ## Helm
 
@@ -286,12 +292,14 @@ A minimal chart lives under:
 deploy/helm/oxibelt-gateway-controller
 ```
 
-It installs a single-replica `Recreate` controller `Deployment`,
-`ServiceAccount`, read-only Gateway API RBAC, a target-namespace rollout Role,
-health probes, and an example Gateway API manifest. The target Role grants no
-Secret access; it gets and creates ConfigMaps, lists Pods and, for a Deployment
-target, ReplicaSets, and may get and patch only the named Deployment or
-DaemonSet. It has no target
-namespace `watch` or `delete` permission. The controller image is the normal
-OxiBelt image; the Docker image includes
+It installs a single-replica `Recreate` controller `Deployment`, a separate
+ServiceAccount with automatic mounting disabled, an explicit bounded API
+projection, read-only-by-default Gateway API RBAC, a target-namespace rollout
+Role, health probes, and an example Gateway API manifest. The default Gateway
+API read Role is limited to the release namespace; set `watchAllNamespaces:
+true` only after reviewing the resulting cluster-wide permissions. The target
+Role grants no Secret access; it gets and creates ConfigMaps, lists Pods and,
+for a Deployment target, ReplicaSets, and may get and patch only the named
+Deployment or DaemonSet. It has no target namespace `watch` or `delete`
+permission. The controller image is the normal OxiBelt image; the Docker image includes
 `/usr/local/bin/oxibelt-gateway-controller`.

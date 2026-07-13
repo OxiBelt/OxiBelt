@@ -45,6 +45,20 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["quic"]["hostKeySecretName"], "");
   assert_eq!(values["quic"]["hostKeySecretKey"], "quic-host-key.b64");
   assert_eq!(values["lifecycle"]["terminationGracePeriodSeconds"], 0);
+  assert_eq!(
+    values["serviceAccount"]["automountServiceAccountToken"],
+    false
+  );
+  assert_eq!(
+    values["kubernetesDiscovery"]["serviceAccountToken"]["enabled"],
+    false
+  );
+  assert_eq!(
+    values["kubernetesDiscovery"]["serviceAccountToken"]["expirationSeconds"],
+    3600
+  );
+  assert_eq!(values["kubernetesDiscovery"]["rbac"]["create"], false);
+  assert!(values["kubernetesDiscovery"]["rbac"]["namespaces"].is_array());
   assert!(values["sharedState"]["redisSecretProjections"].is_array());
   assert_eq!(values["networkPolicy"]["enabled"], false);
   assert_eq!(
@@ -144,6 +158,24 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     "boolean"
   );
   assert_eq!(
+    schema["properties"]["serviceAccount"]["properties"]["automountServiceAccountToken"]["const"],
+    false
+  );
+  assert_eq!(
+    schema["properties"]["kubernetesDiscovery"]["properties"]["serviceAccountToken"]["properties"]
+      ["expirationSeconds"]["minimum"],
+    600
+  );
+  assert_eq!(
+    schema["properties"]["kubernetesDiscovery"]["properties"]["serviceAccountToken"]["properties"]
+      ["expirationSeconds"]["maximum"],
+    3600
+  );
+  assert_eq!(
+    schema["properties"]["kubernetesDiscovery"]["properties"]["rbac"]["properties"]["namespaces"]["uniqueItems"],
+    true
+  );
+  assert_eq!(
     schema["definitions"]["networkPolicyPeer"]["oneOf"]
       .as_array()
       .unwrap()
@@ -220,6 +252,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       .is_file(),
     "the NetworkPolicy Helm renderer check should be present"
   );
+  assert!(
+    repo_root()
+      .join("tests/scripts/check-helm-service-account-token.sh")
+      .is_file(),
+    "the ServiceAccount token Helm renderer check should be present"
+  );
   let expected = [
     "templates/_helpers.tpl",
     "templates/NOTES.txt",
@@ -276,6 +314,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "gateway-config-directory",
     "command: [\"/usr/local/bin/oxibelt\"]",
     "oxibelt.validateAdmin",
+    "oxibelt.validateKubernetesServiceAccount",
+    "automountServiceAccountToken: false",
+    "oxibelt.kubernetesApiAccessEnabled",
+    "name: kube-api-access",
+    "serviceAccountToken:",
+    "expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}",
+    "name: kube-root-ca.crt",
   ] {
     assert!(
       deployment.contains(needle),
@@ -325,6 +370,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "quic.hostKeySecretName",
     "path: quic-host-key.b64",
     "terminationGracePeriodSeconds",
+    "oxibelt.validateKubernetesServiceAccount",
+    "automountServiceAccountToken: false",
+    "oxibelt.kubernetesApiAccessEnabled",
+    "name: kube-api-access",
+    "serviceAccountToken:",
+    "expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}",
+    "name: kube-root-ca.crt",
   ] {
     assert!(
       daemonset.contains(needle),
@@ -392,6 +444,10 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "networkPolicy.cilium.enabled requires networkPolicy.enabled=true",
     "kubernetes-api egress destination",
     "oxibelt.ciliumSelectorLabels",
+    "oxibelt.kubernetesApiAccessEnabled",
+    "oxibelt.validateKubernetesServiceAccount",
+    "kubernetesDiscovery.serviceAccountToken.enabled",
+    "kubernetesDiscovery.rbac.namespaces",
   ] {
     assert!(
       helpers.contains(needle),
@@ -420,7 +476,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
 
   let rbac = read_repo("deploy/helm/oxibelt/templates/rbac.yaml");
   assert!(rbac.contains("endpointslices"));
-  assert!(rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
+  assert!(rbac.contains("kind: Role"));
+  assert!(rbac.contains("kind: RoleBinding"));
+  assert!(rbac.contains("verbs: [\"list\", \"watch\"]"));
+  assert!(rbac.contains("resources: [\"endpoints\"]\n  verbs: [\"get\"]"));
+  assert!(rbac.contains("kubernetesDiscovery.rbac.namespaces"));
+  assert!(!rbac.contains("kind: ClusterRole"));
+  assert!(!rbac.contains("resources: [\"endpoints\", \"services\"]"));
 
   let network_policy = read_repo("deploy/helm/oxibelt/templates/networkpolicy.yaml");
   for needle in [
@@ -473,8 +535,19 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["rollout"]["timeoutSeconds"], 300);
   assert!(values["rollout"].get("retainedRevisions").is_none());
   assert!(values.get("admin").is_none());
+  assert_eq!(values["watchNamespace"], "");
+  assert_eq!(values["watchAllNamespaces"], false);
+  assert_eq!(
+    values["serviceAccount"]["automountServiceAccountToken"],
+    false
+  );
+  assert_eq!(
+    values["serviceAccount"]["tokenProjection"]["expirationSeconds"],
+    3600
+  );
   assert_eq!(values["securityContext"]["readOnlyRootFilesystem"], true);
   assert_eq!(values["podSecurityContext"]["runAsNonRoot"], true);
+  assert_eq!(values["podSecurityContext"]["fsGroup"], 10001);
   assert!(values["resources"].is_object());
 
   let schema: Value = serde_json::from_str(&read_repo(
@@ -498,12 +571,37 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
       .get("retainedRevisions")
       .is_none()
   );
+  assert_eq!(
+    schema["properties"]["watchAllNamespaces"]["type"],
+    "boolean"
+  );
+  assert_eq!(
+    schema["properties"]["serviceAccount"]["properties"]["automountServiceAccountToken"]["const"],
+    false
+  );
+  assert_eq!(
+    schema["properties"]["serviceAccount"]["properties"]["tokenProjection"]["properties"]["expirationSeconds"]
+      ["maximum"],
+    3600
+  );
 
   let deployment = read_repo("deploy/helm/oxibelt-gateway-controller/templates/deployment.yaml");
   assert!(deployment.contains("--backend-resolution={{ .Values.backendResolution }}"));
   assert!(deployment.contains("--status-service={{ .Values.statusService }}"));
   assert!(deployment.contains("strategy:\n    type: Recreate"));
   assert!(deployment.contains("validateManagedConfigPath"));
+  assert!(deployment.contains("validateSecurity"));
+  assert!(deployment.contains("automountServiceAccountToken: false"));
+  assert!(deployment.contains("--watch-namespace={{ $watchNamespace }}"));
+  assert!(deployment.contains("if not .Values.watchAllNamespaces"));
+  assert!(deployment.contains("name: kube-api-access"));
+  assert!(deployment.contains("serviceAccountToken:"));
+  assert!(
+    deployment.contains(
+      "expirationSeconds: {{ .Values.serviceAccount.tokenProjection.expirationSeconds }}"
+    )
+  );
+  assert!(deployment.contains("name: kube-root-ca.crt"));
   let rollout_arguments = [
     "--rollout-target-namespace=",
     "--rollout-target-kind=",
@@ -539,9 +637,16 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   let rbac = read_repo("deploy/helm/oxibelt-gateway-controller/templates/rbac.yaml");
   assert!(rbac.contains("gatewayclasses"));
   assert!(rbac.contains("services"));
+  assert!(rbac.contains("watchAllNamespaces"));
+  assert!(rbac.contains("-cluster"));
+  assert!(rbac.contains("-watch"));
+  assert!(rbac.contains("resourceNames:"));
+  assert!(rbac.contains("resources: [\"namespaces\"]"));
+  assert!(rbac.contains("verbs: [\"list\"]"));
+  assert!(rbac.contains("verbs: [\"patch\"]"));
   assert!(rbac.contains("kind: Role"));
   let rollout_role = rbac
-    .split("kind: Role\n")
+    .split("name: {{ include \"oxibelt-gateway-controller.name\" . }}-rollout")
     .nth(1)
     .and_then(|section| section.split("\n---").next())
     .expect("target-namespace rollout Role should be present");
@@ -553,5 +658,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(rollout_role.contains("verbs: [\"get\", \"patch\"]"));
   assert!(!rollout_role.contains("watch"));
   assert!(!rollout_role.contains("delete"));
+  assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
+  assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
   assert!(!rbac.contains("secrets"));
 }

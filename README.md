@@ -156,8 +156,10 @@ Secret value must be the base64 text for 64 random bytes, as described in the
 configuration reference. The normal chart defaults remain unprofiled. The
 secure Helm companion enables the opt-in NetworkPolicy baseline, but operators
 must still declare every route-specific egress dependency and validate it with
-their enforcing CNI. The runtime profile itself does not provide
-ServiceAccount-token, topology/lifecycle,
+their enforcing CNI. ServiceAccount token mounting is chart-level hardening:
+data-plane Pods have no Kubernetes API token by default, while explicitly
+configured API discovery receives a bounded projected credential and scoped
+RBAC. The runtime profile itself does not provide topology/lifecycle,
 certificate-to-IPM identity, general idempotency, stronger audit, or release
 provenance work; see the configuration reference for the complete contract and
 boundaries.

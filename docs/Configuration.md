@@ -335,9 +335,11 @@ identity, permits DNS to the configured resolver peers, and deliberately leaves
 Admin peers and non-DNS egress empty. Add explicit destinations before enabling
 runtime features that need upstream, shared-state, revocation, Kubernetes API,
 or external-dependency traffic; policy enforcement also requires a compatible
-cluster CNI. The preset does not claim ServiceAccount-token hardening,
-topology/PDB lifecycle, certificate-to-IPM identity binding, general mutation
-idempotency, stronger audit guarantees, image provenance, or release
+cluster CNI. The preset inherits the chart's default data-plane behavior: it
+does not mount a Kubernetes API token or grant discovery RBAC. Token projection
+and API access remain an explicit chart-level discovery choice. The preset does
+not claim topology/PDB lifecycle, certificate-to-IPM identity binding, general
+mutation idempotency, stronger audit guarantees, image provenance, or release
 attestations. Those remain separate P1/P2 work.
 
 ## Includes

@@ -116,6 +116,62 @@ The chart defaults are compatible with the release image's non-root runtime:
 - config, TLS, and OxiRule mounts read-only
 - `/var/cache/oxibelt` backed by an `emptyDir`
 
+### ServiceAccount credentials and Kubernetes discovery
+
+The data-plane chart and every rendered data-plane Pod set
+`automountServiceAccountToken: false`. This remains true when
+`serviceAccount.create: false` selects an operator-managed ServiceAccount, so
+an existing ServiceAccount cannot restore an ambient Kubernetes credential at
+the Pod level. The default data-plane release creates neither discovery RBAC
+nor a Kubernetes API token projection.
+
+Enable Kubernetes API access only for a configured upstream discovery path.
+The chart has two deliberate modes:
+
+```yaml
+kubernetesDiscovery:
+  # Use this only when RBAC is managed outside this chart.
+  serviceAccountToken:
+    enabled: false
+    expirationSeconds: 3600
+  rbac:
+    # This also enables the explicit projection below.
+    create: true
+    # Empty means the release namespace. List every discovery namespace.
+    namespaces:
+      - application-a
+      - application-b
+```
+
+`rbac.create: true` renders one `Role` and `RoleBinding` per listed namespace;
+it is not cluster-wide. The Role permits `get` on core `Endpoints` and
+`list`/`watch` on `discovery.k8s.io` `EndpointSlice` resources—the exact
+requests used by the data-plane discovery providers. It grants no Service,
+Secret, wildcard resource, or wildcard verb access. For externally managed
+RBAC, leave `rbac.create: false` and set `serviceAccountToken.enabled: true`
+only after granting the equivalent minimum permissions elsewhere.
+
+Either opt-in mounts a read-only `kube-api-access` projected volume at the
+standard service-account path. It contains a short-lived token and the
+`kube-root-ca.crt` CA only; the token lifetime must be from 600 through 3600
+seconds and defaults to 3600. Configure the corresponding OxiBelt Kubernetes
+discovery `token_file` to use that path. When `networkPolicy.enabled: true`, a
+token projection requires an explicit `kubernetes-api` egress destination;
+the chart fails rendering instead of granting a credential that its policy
+blocks.
+
+The controller uses a separate ServiceAccount. Its automatic token mount is
+also disabled, but it always gets the same explicit 3600-second token/CA
+projection because reconciliation calls the Kubernetes API. By default the
+chart passes `--watch-namespace=<controller release namespace>` and grants
+only the namespace GET needed for that scope plus a namespaced Gateway API
+read Role. Set `watchNamespace` to another single namespace when required.
+Set `watchAllNamespaces: true` only for an intentional cluster-wide
+controller; it is mutually exclusive with `watchNamespace` and changes the
+Gateway API read Role and namespace access to cluster-wide. Existing
+cluster-wide installations must opt in explicitly during upgrade rather than
+silently retaining broad authority.
+
 ### NetworkPolicy
 
 `networkPolicy.enabled` is deliberately `false` in the ordinary chart values
@@ -138,8 +194,8 @@ Kubernetes `NetworkPolicy` baseline:
   reviewable category (`upstream`, `shared-state`, `revocation`,
   `kubernetes-api`, or `external-dependency`), concrete peers, and bounded
   TCP/UDP ports. The category documents the trust decision; it does not widen
-  the policy. Enabling chart-created Kubernetes discovery RBAC also requires a
-  `kubernetes-api` destination.
+  the policy. Enabling an explicit Kubernetes discovery token projection also
+  requires a `kubernetes-api` destination.
 
 The secure companion
 [`edge-secure-medium-v1-values.yaml`](../deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml)
@@ -214,7 +270,12 @@ The chart validates its generated default Admin TOML. If an operator replaces
 `config.inline` or uses `config.existingConfigMap`, that TOML remains
 operator-owned and must be checked with `oxibelt --config <file> --check`.
 
-Runtime Kubernetes upstream discovery uses the mounted service-account token when generated config sets `token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"`. Enable `kubernetesDiscovery.rbac.create` only when the data plane must read Kubernetes Endpoints or EndpointSlices.
+Runtime Kubernetes upstream discovery uses the explicit projected token when
+generated config sets
+`token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"`. Enable
+`kubernetesDiscovery.rbac.create` only when the data plane must read Kubernetes
+Endpoints or EndpointSlices; otherwise leave both discovery RBAC and the token
+projection disabled.
 
 ## Health and Metrics
 
@@ -265,11 +326,15 @@ rollout:
   configMapPrefix: oxibelt-gateway-config
 ```
 
-The controller chart has no Admin URL, token, CA, client certificate, or Secret
-permission. Its target-namespace Role gets and creates ConfigMaps, lists Pods
-and, for a Deployment target, ReplicaSets, and gets and patches only the named
-Deployment or DaemonSet.
-It neither watches nor deletes target-namespace resources. Generated immutable
+The controller chart has no Admin URL, Admin token, client certificate, or
+Secret permission. It uses only its projected Kubernetes API token and
+`kube-root-ca.crt` CA. Its default Gateway API read Role is scoped to the
+controller release namespace and permits list operations plus status patching;
+the cluster role is limited to GatewayClass list/status patch and an exact
+namespace GET. Its target-namespace Role gets and creates ConfigMaps, lists
+Pods and, for a Deployment target, ReplicaSets, and gets and patches only the
+named Deployment or DaemonSet. It neither watches nor deletes target-namespace
+resources. Generated immutable
 revisions are preserved for named rollback; their retention is operator
 controlled rather than controller garbage collected. ConfigMap access is still
 namespace scoped because content-addressed artifact names are known only at
