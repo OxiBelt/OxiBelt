@@ -142,7 +142,7 @@ pub async fn serve(
     .as_ref()
     .and_then(|path| Config::load_effective_toml_redacted(path).ok())
     .and_then(|value| toml::to_string_pretty(&value).ok());
-  let (admin_control, mut admin_control_rx) = AdminControlHandle::new(effective_config);
+  let (admin_control, admin_control_rx) = AdminControlHandle::new(effective_config);
   let admin_operations =
     AdminOperationRuntime::new(state.snapshot().config.admin.operations.clone());
   let mut listeners = ListenerSupervisor::start(
@@ -169,15 +169,18 @@ pub async fn serve(
   } else {
     None
   };
+  let admin_control = AdminControlContext {
+    receiver: admin_control_rx,
+    handle: admin_control,
+    runtime_overrides,
+  };
   drop(error_tx);
   if let Some(reload) = reload {
     serve_with_reload(
       state,
       &mut listeners,
       &mut error_rx,
-      &mut admin_control_rx,
       admin_control,
-      runtime_overrides,
       reload,
       &mut process_signals,
     )
@@ -187,9 +190,7 @@ pub async fn serve(
       state,
       &mut listeners,
       &mut error_rx,
-      &mut admin_control_rx,
       admin_control,
-      runtime_overrides,
       &mut process_signals,
     )
     .await
@@ -912,13 +913,17 @@ fn admin_audit(
   );
 }
 
+struct AdminControlContext {
+  receiver: mpsc::UnboundedReceiver<AdminControlCommand>,
+  handle: AdminControlHandle,
+  runtime_overrides: RuntimeOverrides,
+}
+
 async fn serve_until_shutdown(
   state: AppHandle,
   listeners: &mut ListenerSupervisor,
   error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  admin_control_rx: &mut mpsc::UnboundedReceiver<AdminControlCommand>,
-  admin_control: AdminControlHandle,
-  runtime_overrides: RuntimeOverrides,
+  mut admin_control: AdminControlContext,
   process_signals: &mut ProcessSignals,
 ) -> anyhow::Result<()> {
   let mut rollback: Option<RollbackSnapshot> = None;
@@ -931,13 +936,13 @@ async fn serve_until_shutdown(
           }
       }
       Some(error) = error_rx.recv() => return Err(error),
-      Some(command) = admin_control_rx.recv() => {
+      Some(command) = admin_control.receiver.recv() => {
         admin_control::handle_admin_control_command(
           command,
           &state,
           listeners,
-          &admin_control,
-          &runtime_overrides,
+          &admin_control.handle,
+          &admin_control.runtime_overrides,
           &mut rollback,
         ).await;
       }
@@ -949,9 +954,7 @@ async fn serve_with_reload(
   state: AppHandle,
   listeners: &mut ListenerSupervisor,
   error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  admin_control_rx: &mut mpsc::UnboundedReceiver<AdminControlCommand>,
-  admin_control: AdminControlHandle,
-  runtime_overrides: RuntimeOverrides,
+  mut admin_control: AdminControlContext,
   mut reload: ReloadManager,
   process_signals: &mut ProcessSignals,
 ) -> anyhow::Result<()> {
@@ -971,13 +974,13 @@ async fn serve_with_reload(
             }
         }
         Some(error) = error_rx.recv() => return Err(error),
-        Some(command) = admin_control_rx.recv() => {
+        Some(command) = admin_control.receiver.recv() => {
             admin_control::handle_admin_control_command(
               command,
               &state,
               listeners,
-              &admin_control,
-              &runtime_overrides,
+              &admin_control.handle,
+              &admin_control.runtime_overrides,
               &mut rollback,
             ).await;
         }
