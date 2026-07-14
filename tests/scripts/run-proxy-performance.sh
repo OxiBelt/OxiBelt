@@ -519,6 +519,11 @@ generate_static_files() {
   openssl rand 1024 >"${static_dir}/1k.bin"
   openssl rand 16384 >"${static_dir}/16k.bin"
   openssl rand 1048576 >"${static_dir}/1m.bin"
+  # Docker copies this tree into containers that run as non-root. Keep the
+  # directory traversable and files readable there while its host ancestors
+  # remain private to this run.
+  chmod 0755 "${static_dir}"
+  chmod 0644 "${static_dir}/1k.bin" "${static_dir}/16k.bin" "${static_dir}/1m.bin"
 }
 
 copy_artifacts() {
@@ -3122,6 +3127,12 @@ start_oxibelt() {
   if [[ "${remote_signer}" != "1" ]]; then
     cp "${tls_dir}/privkey.pem" "${configs_dir}/oxibelt-${scenario}/cert/privkey.pem"
   fi
+  # `docker cp` preserves source modes. A restrictive caller umask protects the
+  # host work tree, so explicitly make only the copied runtime inputs readable
+  # by OxiBelt's non-root container user. The parent configs directory remains
+  # private on the host.
+  find "${configs_dir}/oxibelt-${scenario}" -type d -exec chmod 0755 {} +
+  find "${configs_dir}/oxibelt-${scenario}" -type f -exec chmod 0644 {} +
 
   if [[ "${remote_signer}" == "1" ]]; then
     remote_signer_token="$(openssl rand -base64 32)"

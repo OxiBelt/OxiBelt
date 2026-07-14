@@ -42,7 +42,7 @@ jobs:
       - name: Enable pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@11.9.0 --activate
+          corepack prepare pnpm@11.13.0 --activate
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
@@ -208,7 +208,7 @@ jobs:
           expected_supply_chain = {
               "sourceRepository": "OxiBelt/OxiBelt",
               "oidcIssuer": "https://token.actions.githubusercontent.com",
-              "cosignVersion": "v2.6.3",
+              "cosignVersion": "v3.1.1",
               "provenancePredicateType": "https://slsa.dev/provenance/v1",
               "provenanceBuildType": "https://actions.github.io/buildtypes/workflow/v1",
               "minimumSlsaBuildLevel": 2,
@@ -721,7 +721,7 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: v2.6.3
+          cosign-release: v3.1.1
 
       - name: Login to GHCR
         env:
@@ -740,7 +740,7 @@ jobs:
             and .image == "ghcr.io/oxibelt/oxibelt"
             and .supplyChain.sourceRepository == "OxiBelt/OxiBelt"
             and .supplyChain.oidcIssuer == "https://token.actions.githubusercontent.com"
-            and .supplyChain.cosignVersion == "v2.6.3"
+            and .supplyChain.cosignVersion == "v3.1.1"
             and .supplyChain.provenancePredicateType == "https://slsa.dev/provenance/v1"
             and .supplyChain.provenanceBuildType == "https://actions.github.io/buildtypes/workflow/v1"
             and .supplyChain.minimumSlsaBuildLevel == 2
@@ -802,7 +802,7 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: v2.6.3
+          cosign-release: v3.1.1
 
       - name: Login to GHCR
         env:
@@ -938,7 +938,7 @@ jobs:
           fi
 
       - name: Set up Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.16.4
 
@@ -946,7 +946,7 @@ jobs:
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.26.0
-          kubectl_version: v1.31.4
+          kubectl_version: v1.31.14
           install_only: true
 
       - name: Install Minikube

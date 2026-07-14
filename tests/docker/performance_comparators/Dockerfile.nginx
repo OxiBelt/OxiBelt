@@ -1,9 +1,11 @@
 ARG NGINX_VERSION=1.31.1
-ARG NGINX_RUNTIME_IMAGE=alpine:3.23
+ARG NGINX_SHA256=9fcaaeb8f22544b09a19a761f3412c4112215422401634bebdd1296a403cc4bc
+ARG NGINX_RUNTIME_IMAGE=alpine:3.24
 
-FROM alpine:3.23 AS builder
+FROM alpine:3.24 AS builder
 
 ARG NGINX_VERSION
+ARG NGINX_SHA256
 ARG NGINX_TARGET_CPU=x86-64-v2
 
 RUN apk add --no-cache \
@@ -22,6 +24,7 @@ RUN case "${NGINX_TARGET_CPU}" in \
       *) echo "unsupported NGINX_TARGET_CPU=${NGINX_TARGET_CPU}" >&2; exit 1 ;; \
     esac && \
     wget -q "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" && \
+    printf '%s  %s\n' "${NGINX_SHA256}" "nginx-${NGINX_VERSION}.tar.gz" | sha256sum -c - && \
     tar -xzf "nginx-${NGINX_VERSION}.tar.gz" && \
     cd "nginx-${NGINX_VERSION}" && \
     ./configure \

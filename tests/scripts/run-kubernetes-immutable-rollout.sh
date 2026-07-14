@@ -9,12 +9,12 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-gateway_api_version="v1.3.0"
+gateway_api_version="v1.6.0"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/experimental-install.yaml"
-gateway_api_sha256="3e7a27e4456ff3d68606a6a8516306aaff354d6f0950b32bb31930669b7bf8b8"
-# `kind create --image` accepts an OCI image reference. Keep the known v1.31.4
-# tag for operator readability but pin its multi-platform manifest list.
-kind_node_image="kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30"
+gateway_api_sha256="f0d5c2b0bef2b9d80ba6ba909e5e5dbde0800638437608353f41a6ebd3afcd9f"
+# `kind create --image` accepts an OCI image reference. Keep the final v1.31
+# patch tag for operator readability but pin its multi-platform manifest list.
+kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"
 rollout_timeout_seconds="${OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS:-420}"
 
 run_id=""

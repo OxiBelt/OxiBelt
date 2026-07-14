@@ -11,7 +11,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 # Keep the Kubernetes version aligned with the chart's edge-secure-medium
 # lifecycle contract and the CI-installed kubectl version.
-kind_node_image="kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30"
+kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"
 timeout_seconds="${OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS:-600}"
 
 if [[ "${OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE:-}" != "1" ]]; then

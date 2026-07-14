@@ -6,13 +6,25 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/tests/docker/*_probe"
     schedule:
       interval: "weekly"
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+        group-by: "dependency-name"
   - package-ecosystem: "docker"
-    directory: "/"
+    directories:
+      - "/source/ops"
+      - "/tests/docker/*"
     schedule:
       interval: "weekly"
+    groups:
+      container-dependencies:
+        patterns: ["*"]
+        group-by: "dependency-name"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

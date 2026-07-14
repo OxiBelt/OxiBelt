@@ -2,10 +2,12 @@
 name = "pq-probe"
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.96"
 publish = false
 
 [workspace]
+resolver = "3"
 
 [dependencies]
 anyhow = "1.0.103"
-rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
+rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }

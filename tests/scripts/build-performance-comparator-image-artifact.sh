@@ -47,7 +47,7 @@ case "${comparator}" in
   caddy)
     dockerfile="${repo_root}/tests/docker/performance_comparators/Dockerfile.caddy"
     build_args=(
-      --build-arg "CADDY_VERSION=2.11.2"
+      --build-arg "CADDY_VERSION=2.11.4"
       --build-arg "CADDY_TARGET_CPU=${target_cpu}"
     )
     ;;

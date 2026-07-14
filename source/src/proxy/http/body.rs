@@ -354,7 +354,7 @@ impl Body for ChannelBody {
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.size_hint.clone()
+    self.size_hint
   }
 }
 
@@ -398,7 +398,7 @@ where
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.size_hint.clone()
+    self.size_hint
   }
 }
 
@@ -438,7 +438,7 @@ impl Body for PollSendTimeoutBody {
   }
 
   fn size_hint(&self) -> SizeHint {
-    self.size_hint.clone()
+    self.size_hint
   }
 }
 

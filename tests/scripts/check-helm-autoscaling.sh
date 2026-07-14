@@ -126,7 +126,7 @@ done
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-autoscaling.XXXXXX")"
 
 helm lint --strict "${chart_dir}" >"${work_dir}/lint-default.log"
-helm lint --strict "${chart_dir}" --kube-version 1.31.4 \
+helm lint --strict "${chart_dir}" --kube-version 1.31.14 \
   -f "${secure_values}" \
   -f "${autoscaling_values}" >"${work_dir}/lint-autoscaling.log"
 
@@ -140,7 +140,7 @@ assert_source_not_contains "${work_dir}/cpu_only.yaml" "templates/hpa.yaml" "oxi
 assert_source_not_contains "${work_dir}/cpu_only.yaml" "templates/hpa.yaml" "behavior:"
 
 render edge_secure_active_requests \
-  --kube-version 1.31.4 \
+  --kube-version 1.31.14 \
   -f "${secure_values}" \
   -f "${autoscaling_values}"
 assert_source_contains "${work_dir}/edge_secure_active_requests.yaml" "templates/hpa.yaml" "minReplicas: 3"

@@ -115,6 +115,11 @@ fn release_image_arch_workflow_text() -> String {
     .expect("release image architecture workflow should be readable")
 }
 
+fn dependabot_config_text() -> String {
+  fs::read_to_string(repo_root().join(".github/dependabot.yml"))
+    .expect("Dependabot configuration should be readable")
+}
+
 fn workflow_job_text(workflow: &str, job_id: &str) -> String {
   let marker = format!("  {job_id}:");
   let mut lines = Vec::new();
@@ -611,6 +616,23 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 }
 
 #[test]
+fn python_docker_helpers_track_the_supported_alpine_base() {
+  for dockerfile in [
+    "tests/docker/mock_dns/Dockerfile",
+    "tests/docker/mock_kubernetes/Dockerfile",
+    "tests/docker/mock_nomad/Dockerfile",
+    "tests/docker/mock_upstream/Dockerfile",
+  ] {
+    let contents = fs::read_to_string(repo_root().join(dockerfile))
+      .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
+    assert!(
+      contents.starts_with("FROM python:3.14-alpine3.24\n"),
+      "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
+    );
+  }
+}
+
+#[test]
 fn alpine_dockerfile_bundles_operations_binaries() {
   let dockerfile = dockerfile_text();
 
@@ -666,7 +688,8 @@ fn alpine_dockerfile_records_release_ref_name_label() {
   let script = docker_image_artifact_build_script_text();
 
   assert!(
-    dockerfile.contains("ARG OXIBELT_VERSION=0.0.0")
+    dockerfile.contains("ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24")
+      && dockerfile.contains("ARG OXIBELT_VERSION=0.0.0")
       && dockerfile.contains("ARG OXIBELT_REF_NAME=0.0.0")
       && dockerfile.contains("ARG OXIBELT_REF_NAME")
       && dockerfile.contains("org.opencontainers.image.ref.name=\"${OXIBELT_REF_NAME}\""),
@@ -713,6 +736,55 @@ fn source_structure_job_stays_independent() {
 }
 
 #[test]
+fn dependabot_covers_all_rust_and_container_manifest_directories() {
+  let config: serde_json::Value = serde_saphyr::from_str(&dependabot_config_text())
+    .expect("Dependabot configuration should parse as YAML");
+  let updates = config
+    .get("updates")
+    .and_then(serde_json::Value::as_array)
+    .expect("Dependabot configuration should define updates");
+  let update_for = |ecosystem: &str| {
+    updates
+      .iter()
+      .find(|update| {
+        update
+          .get("package-ecosystem")
+          .and_then(serde_json::Value::as_str)
+          == Some(ecosystem)
+      })
+      .unwrap_or_else(|| panic!("Dependabot should define the {ecosystem} ecosystem"))
+  };
+
+  let cargo = update_for("cargo");
+  assert_eq!(
+    cargo.get("directories"),
+    Some(&serde_json::json!(["/", "/tests/docker/*_probe"])),
+    "Dependabot Cargo updates should cover the root workspace and all standalone probe workspaces"
+  );
+  assert_eq!(
+    cargo
+      .pointer("/groups/rust-dependencies/group-by")
+      .and_then(serde_json::Value::as_str),
+    Some("dependency-name"),
+    "Dependabot should group matching Cargo updates by dependency name"
+  );
+
+  let docker = update_for("docker");
+  assert_eq!(
+    docker.get("directories"),
+    Some(&serde_json::json!(["/source/ops", "/tests/docker/*"])),
+    "Dependabot Docker updates should cover release and test Dockerfiles"
+  );
+  assert_eq!(
+    docker
+      .pointer("/groups/container-dependencies/group-by")
+      .and_then(serde_json::Value::as_str),
+    Some("dependency-name"),
+    "Dependabot should group matching container updates by dependency name"
+  );
+}
+
+#[test]
 fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
   let jobs = parse_jobs(&workflow_text());
   let mut security_relevant_jobs = vec![
@@ -729,6 +801,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "kubernetes-immutable-rollout",
     "kubernetes-pod-lifecycle",
     "kubernetes-network-policy",
+    "kubernetes-current-compatibility",
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
     "docker-image-trivy-scan",
@@ -986,7 +1059,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "actions: read",
     "contents: read",
     "timeout-minutes: 25",
-    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.16.4",
     "name: Validate Helm Admin configuration",
     "tests/scripts/check-helm-admin-config.sh",
@@ -998,7 +1071,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "tests/scripts/check-helm-service-account-token.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
     "version: v0.26.0",
-    "kubectl_version: v1.31.4",
+    "kubectl_version: v1.31.14",
     "install_only: true",
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
@@ -1012,9 +1085,9 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   }
 
   for expected in [
-    "gateway_api_version=\"v1.3.0\"",
-    "gateway_api_sha256=\"3e7a27e4456ff3d68606a6a8516306aaff354d6f0950b32bb31930669b7bf8b8\"",
-    "kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30",
+    "gateway_api_version=\"v1.6.0\"",
+    "gateway_api_sha256=\"f0d5c2b0bef2b9d80ba6ba909e5e5dbde0800638437608353f41a6ebd3afcd9f\"",
+    "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
     "sha256sum --check --status",
     "CI event values are untrusted input",
     "OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS must be a decimal value from 60 through 900",
@@ -1118,7 +1191,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "actions: read",
     "contents: read",
     "timeout-minutes: 35",
-    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.16.4",
     "name: Validate Helm Pod distribution and lifecycle",
     "tests/scripts/check-helm-pod-lifecycle.sh",
@@ -1126,7 +1199,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "tests/scripts/check-helm-autoscaling.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
     "version: v0.26.0",
-    "kubectl_version: v1.31.4",
+    "kubectl_version: v1.31.14",
     "install_only: true",
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
@@ -1142,7 +1215,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
   }
 
   for expected in [
-    "kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30",
+    "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
     "OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS must be a decimal value from 180 through 900",
     "Skipping Kubernetes Pod lifecycle test; set OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE=1 to run it.",
     "'- role: worker'",
@@ -1245,12 +1318,12 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "contents: read",
     "timeout-minutes: 35",
     "cni: [calico, cilium]",
-    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.16.4",
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
-    "kubectl_version: v1.31.4",
+    "kubectl_version: v1.31.14",
     "install_only: true",
     "MINIKUBE_VERSION: v1.38.1",
     "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
@@ -1269,7 +1342,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--driver=docker",
     "--container-runtime=containerd",
     "--cni=\"${cni}\"",
-    "--kubernetes-version=v1.31.4",
+    "--kubernetes-version=v1.31.14",
     "--output=json",
     "--wait-timeout=\"${timeout_seconds}s\"",
     "'\"name=rootless\"'",
@@ -1301,7 +1374,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--label \"oxibelt.network-policy-test=${run_id}\"",
     "registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:",
     "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
-    "registry.k8s.io/coredns/coredns:v1.14.2@sha256:",
+    "registry.k8s.io/coredns/coredns:v1.14.4@sha256:",
     "minikube delete --profile \"${profile_name}\"",
   ] {
     assert!(
@@ -1362,6 +1435,69 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     assert!(
       !script.contains(forbidden),
       "Kubernetes NetworkPolicy script must not contain unsafe or secret-disclosing operation {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-current-compatibility")
+    .expect("workflow should define current Kubernetes and Helm compatibility coverage");
+  let job_text = workflow_job_text(&workflow, "kubernetes-current-compatibility");
+
+  assert_eq!(
+    job.needs,
+    vec!["test".to_owned(), "rust-advisory-checks".to_owned()],
+    "current Kubernetes compatibility should wait for the primary native and advisory gates"
+  );
+  for expected in [
+    "name: Kubernetes v1.36.1 and Helm v4.2.3 compatibility",
+    "runs-on: ubuntu-26.04",
+    "contents: read",
+    "timeout-minutes: 15",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
+    "version: v4.2.3",
+    "tests/scripts/check-helm-admin-config.sh",
+    "tests/scripts/check-helm-base-config.sh",
+    "tests/scripts/check-helm-edge-secure-medium-profile.sh",
+    "tests/scripts/check-helm-service-account-token.sh",
+    "tests/scripts/check-helm-pod-lifecycle.sh",
+    "tests/scripts/check-helm-autoscaling.sh",
+    "tests/scripts/check-helm-network-policy.sh",
+    "tests/scripts/check-helm-image-digest.sh",
+    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    "version: v0.32.0",
+    "kubectl_version: v1.36.2",
+    "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5",
+    "kind create cluster",
+    "--wait 120s",
+    "kubectl --context \"${context}\" version",
+    "helm lint deploy/helm/oxibelt",
+    "apply --dry-run=server --filename -",
+    "kind delete cluster --name \"${cluster_name}\"",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "current Kubernetes and Helm compatibility job should include {expected}"
+    );
+  }
+
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "docker network prune",
+    "kubectl delete --all",
+    "kubectl delete namespace --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+  ] {
+    assert!(
+      !job_text.contains(forbidden),
+      "current Kubernetes compatibility must not contain unsafe or secret-disclosing operation {forbidden}"
     );
   }
 }
@@ -1455,7 +1591,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/pq-probe:ci",
     "oxibelt/protocol-probe:ci",
     "oxibelt/postgres:ci",
-    "valkey/valkey:8-alpine",
+    "valkey/valkey:9-alpine",
   ] {
     assert!(
       script.contains(image),
@@ -1496,7 +1632,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci",
     "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
     "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
-    "OXIBELT_REDIS_IMAGE: valkey/valkey:8-alpine",
+    "OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     assert_eq!(
@@ -1758,6 +1894,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
+    "version: v0.72.0",
     "scan-type: image",
     "image-ref: ${{ matrix.image_tag }}",
     "format: json",
@@ -1837,6 +1974,7 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
+    "version: v0.72.0",
     "scan-type: image",
     "image-ref: ${{ matrix.image_tag }}",
     "format: github",
@@ -2041,6 +2179,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
 
   for expected in [
     "contents: read",
+    "corepack prepare pnpm@11.13.0 --activate",
     "pnpm install --frozen-lockfile",
     "pnpm run versioning:release",
     "OXIBELT_RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}",
@@ -2205,7 +2344,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "scan-type: image",
     "image-ref: ${{ steps.trivy-image.outputs.image_ref }}",
     "format: json",
-    "version: v0.70.0",
+    "version: v0.72.0",
     "vuln-type: os,library",
     "severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
     "exit-code: \"0\"",
@@ -2282,7 +2421,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "id-token: write",
     "packages: write",
     "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
-    "cosign-release: v2.6.3",
+    "cosign-release: v3.1.1",
     "Validate immutable platform signing subject",
     ".supplyChain.minimumSlsaBuildLevel == 2",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
@@ -2423,7 +2562,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "packages: write",
     "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
-    "cosign-release: v2.6.3",
+    "cosign-release: v3.1.1",
     "Validate immutable index signing subject",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
     "subject-digest: ${{ needs.ghcr-manifest-publish.outputs.digest }}",
@@ -2471,9 +2610,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "contents: read",
     "packages: read",
     "persist-credentials: false",
-    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.16.4",
-    "kubectl_version: v1.31.4",
+    "kubectl_version: v1.31.14",
     "MINIKUBE_VERSION: v1.38.1",
     "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
     "tests/scripts/check-image-admission-policy.sh",
@@ -2818,10 +2957,16 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
   );
   assert!(
     nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.1")
+      && nginx_dockerfile.contains(
+        "ARG NGINX_SHA256=9fcaaeb8f22544b09a19a761f3412c4112215422401634bebdd1296a403cc4bc"
+      )
+      && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
+      && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
+      && nginx_dockerfile.contains("sha256sum -c -")
       && nginx_dockerfile.contains("--with-http_v3_module")
       && nginx_dockerfile
         .contains(r#"org.oxibelt.performance.amd64_target_cpu="${NGINX_TARGET_CPU}""#),
-    "nginx comparator image should pin mainline nginx, build HTTP/3, and record the target CPU metadata"
+    "nginx comparator image should pin and verify mainline nginx, build HTTP/3 on Alpine 3.24, and record the target CPU metadata"
   );
   let expected_nginx_cc_opt = r#"--with-cc-opt="-O2 -pipe \
         -fPIE -pie \
@@ -2851,7 +2996,7 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     );
   }
   assert!(
-    caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.2")
+    caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.4")
       && caddy_dockerfile.contains("FROM caddy:${CADDY_VERSION}-builder-alpine AS builder")
       && caddy_dockerfile.contains("export GOAMD64=v2")
       && caddy_dockerfile.contains("export GOAMD64=v3"),
@@ -2934,14 +3079,40 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
       && script.contains("image_tar=\"${output_dir%/}/oxibelt-external-benchmark-image.tar\""),
     "external benchmark build script should produce a deterministic tag and tar name"
   );
-  for expected in ["h2load --h3 --version", "oha --version", "wrk --version"] {
+  for expected in [
+    "h2load --version",
+    "h2load --help | grep -q -- '--h3'",
+    "ldd \"$(command -v h2load)\" | grep -q libnghttp3",
+    "ldd \"$(command -v h2load)\" | grep -q libngtcp2",
+    "oha --version",
+    "wrk --version",
+  ] {
     assert!(
       dockerfile.contains(expected),
       "external benchmark Dockerfile should self-check {expected}"
     );
   }
   assert!(
-    dockerfile.contains("cargo install oha")
+    dockerfile.contains("ARG OHA_VERSION=1.15.0")
+      && dockerfile.contains("ARG WRK_COMMIT=a211dd5a7050b1f9e8a9870b95513060e72ac4a0")
+      && dockerfile.contains(
+        "ARG WRK_SHA256=172dd2788b22b210d37a68f11c91e82fdba6583d2a544f04b398a66507031229"
+      )
+      && dockerfile.contains("ARG NGHTTP2_VERSION=1.69.0")
+      && dockerfile.contains(
+        "ARG NGHTTP2_SHA256=1fb324b6ec2c56f6bde0658f4139ffd8209fa9e77ce98fd7a5f63af8d0e508ad"
+      )
+      && dockerfile.contains("ARG NGHTTP3_VERSION=1.17.0")
+      && dockerfile.contains(
+        "ARG NGHTTP3_SHA256=e8b798272b9282045cb83577dcf7bd7fcd22bb3a43aec0eb1a24f675b4cef0b8"
+      )
+      && dockerfile.contains("ARG NGTCP2_VERSION=1.24.0")
+      && dockerfile.contains(
+        "ARG NGTCP2_SHA256=7fa5ec2be0f0cbed8bc4ec89c0787dfa9d8ce678f1ed9477c52f30eb1a591207"
+      )
+      && dockerfile.matches("sha256sum -c -").count() == 4
+      && dockerfile.contains("./configure --prefix=/opt/nghttp2 --enable-app --enable-http3")
+      && dockerfile.contains("cargo install oha")
       && dockerfile.contains("nghttp2")
       && dockerfile.contains("ngtcp2")
       && dockerfile.contains("nghttp3")

@@ -1,4 +1,4 @@
-FROM python:3.12-alpine
+FROM python:3.14-alpine3.24
 
 WORKDIR /opt/mock_kubernetes
 

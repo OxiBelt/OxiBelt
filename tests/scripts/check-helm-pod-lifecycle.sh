@@ -133,7 +133,7 @@ done
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-pod-lifecycle.XXXXXX")"
 
 helm lint --strict "${chart_dir}" >"${work_dir}/lint-default.log"
-helm lint --strict "${chart_dir}" --kube-version 1.31.4 -f "${secure_values}" >"${work_dir}/lint-secure.log"
+helm lint --strict "${chart_dir}" --kube-version 1.31.14 -f "${secure_values}" >"${work_dir}/lint-secure.log"
 
 render defaults
 assert_not_contains "${work_dir}/defaults.yaml" "topologySpreadConstraints:"
@@ -144,7 +144,7 @@ assert_source_contains "${work_dir}/defaults.yaml" "templates/pdb.yaml" "minAvai
 assert_source_not_contains "${work_dir}/defaults.yaml" "templates/pdb.yaml" "maxUnavailable:"
 
 render distributed \
-  --kube-version 1.31.4 \
+  --kube-version 1.31.14 \
   --set replicaCount=3 \
   --set podDistribution.enabled=true \
   --set lifecycle.preStop.enabled=true \
@@ -172,7 +172,7 @@ assert_source_contains "${work_dir}/distributed.yaml" "templates/pdb.yaml" "maxU
 assert_source_not_contains "${work_dir}/distributed.yaml" "templates/pdb.yaml" "minAvailable:"
 assert_source_contains "${work_dir}/distributed.yaml" "templates/pdb.yaml" "unhealthyPodEvictionPolicy: AlwaysAllow"
 
-render secure_profile --kube-version 1.31.4 -f "${secure_values}"
+render secure_profile --kube-version 1.31.14 -f "${secure_values}"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "replicas: 3"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "topologySpreadConstraints:"
 assert_occurrence_count "${work_dir}/secure_profile.yaml" "nodeTaintsPolicy: Honor" 2
@@ -184,7 +184,7 @@ assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.y
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/pdb.yaml" "maxUnavailable: 1"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/pdb.yaml" "unhealthyPodEvictionPolicy: AlwaysAllow"
 
-render secure_daemonset --kube-version 1.31.4 -f "${secure_values}" \
+render secure_daemonset --kube-version 1.31.14 -f "${secure_values}" \
   --set-string workload.kind=DaemonSet
 assert_source_contains "${work_dir}/secure_daemonset.yaml" "templates/daemonset.yaml" "kind: DaemonSet"
 assert_source_contains "${work_dir}/secure_daemonset.yaml" "templates/daemonset.yaml" "maxUnavailable: 0"
@@ -212,19 +212,19 @@ expect_failure_contains secure_profile_requires_kubernetes_131 \
 
 expect_failure_contains secure_profile_requires_deployment_zero_unavailable \
   "operationalProfile edge-secure-medium requires Deployment maxUnavailable=0 and maxSurge=1" \
-  --kube-version 1.31.4 \
+  --kube-version 1.31.14 \
   -f "${secure_values}" \
   --set workload.deployment.maxUnavailable=1
 
 expect_failure_contains secure_profile_requires_deployment_one_surge \
   "operationalProfile edge-secure-medium requires Deployment maxUnavailable=0 and maxSurge=1" \
-  --kube-version 1.31.4 \
+  --kube-version 1.31.14 \
   -f "${secure_values}" \
   --set workload.deployment.maxSurge=2
 
 expect_failure_contains secure_profile_requires_valid_hpa_bounds \
   "operationalProfile edge-secure-medium requires autoscaling.maxReplicas to be at least autoscaling.minReplicas" \
-  --kube-version 1.31.4 \
+  --kube-version 1.31.14 \
   -f "${secure_values}" \
   --set autoscaling.enabled=true \
   --set autoscaling.maxReplicas=2

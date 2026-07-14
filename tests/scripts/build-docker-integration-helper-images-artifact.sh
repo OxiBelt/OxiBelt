@@ -31,7 +31,7 @@ mock_nomad_image="oxibelt/mock-nomad:ci"
 pq_probe_image="oxibelt/pq-probe:ci"
 protocol_probe_image="oxibelt/protocol-probe:ci"
 postgres_image="oxibelt/postgres:ci"
-redis_image="valkey/valkey:8-alpine"
+redis_image="valkey/valkey:9-alpine"
 
 retry_command() {
   local attempts="$1"
@@ -68,8 +68,7 @@ build_helper_image() {
 mkdir -p "${output_dir}"
 
 for base_image in \
-  python:3.14-alpine3.23 \
-  python:3.12-alpine \
+  python:3.14-alpine3.24 \
   rust:1.96.0-trixie \
   debian:trixie-slim \
   postgres:18-alpine \

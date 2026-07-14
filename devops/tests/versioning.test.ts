@@ -284,7 +284,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
   Assert.deepEqual(Plan.supplyChain, {
     sourceRepository: 'OxiBelt/OxiBelt',
     oidcIssuer: 'https://token.actions.githubusercontent.com',
-    cosignVersion: 'v2.6.3',
+    cosignVersion: 'v3.1.1',
     provenancePredicateType: 'https://slsa.dev/provenance/v1',
     provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1',
     minimumSlsaBuildLevel: 2,

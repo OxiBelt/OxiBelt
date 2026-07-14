@@ -56,9 +56,13 @@ it is not a reproducible-build claim or a SLSA certification.
 
 ## Verify a keyless signature and provenance
 
-Install Cosign 2.6.3, a recent GitHub CLI with artifact-attestation support,
+Install Cosign 3.1.1, a recent GitHub CLI with artifact-attestation support,
 Docker Buildx, and `jq`. Resolve the immutable digest first. For example, for
 the standard `amd64` platform image from release `15.2.0`:
+
+OxiBelt keeps Cosign's legacy registry bundle format for compatibility with
+the existing release admission contract, so retain `--new-bundle-format=false`
+when verifying an official release signature.
 
 ```sh
 image=ghcr.io/oxibelt/oxibelt

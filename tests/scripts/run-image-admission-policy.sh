@@ -160,7 +160,7 @@ timeout --signal=INT --kill-after=30 "${minikube_start_timeout_seconds}s" miniku
   --profile "${profile_name}" \
   --driver=docker \
   --container-runtime=containerd \
-  --kubernetes-version=v1.31.4 \
+  --kubernetes-version=v1.31.14 \
   --output=json \
   --wait=all \
   --wait-timeout="${timeout_seconds}s" \

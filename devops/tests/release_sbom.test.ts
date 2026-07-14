@@ -74,7 +74,7 @@ function BaseImages(ArtifactValue: ArtifactFixture): Array<{ buildArgument: stri
   return [
     { buildArgument: 'RUST_BUILDER_IMAGE', stage: 'builder', reference: ArtifactValue.RustImage },
     { buildArgument: 'OXIBELT_NODE_IMAGE', stage: 'person-proof-ui', reference: 'node:24-alpine3.24' },
-    { buildArgument: 'OXIBELT_RUNTIME_IMAGE', stage: 'runtime', reference: 'alpine:3.23' }
+    { buildArgument: 'OXIBELT_RUNTIME_IMAGE', stage: 'runtime', reference: 'alpine:3.24' }
   ]
 }
 
@@ -142,7 +142,7 @@ function Trivy(ArtifactValue: ArtifactFixture): JsonObject {
     metadata: {
       timestamp: Created,
       tools: {
-        components: [{ type: 'application', name: 'trivy', version: '0.70.0' }]
+        components: [{ type: 'application', name: 'trivy', version: '0.72.0' }]
       },
       component: {
         type: 'container',
