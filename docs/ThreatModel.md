@@ -137,9 +137,10 @@ certificate, OxiRule, cache, and runtime-state directories.
 - Host root, container runtime, Kubernetes API, DNS, upstreams, external
   providers, and build/release identities are protected outside OxiBelt. A
   compromise of those authorities can exceed the protections in this model.
-- Official images are selected by immutable digest. Registry tag freshness,
-  admission, signature policy, and rollback prevention are operator controls
-  until the separately planned provenance and attestation work exists.
+- Official images are selected by immutable digest and their OCI-linked SBOM
+  attestations are verified against the expected source and workflow identity.
+  Registry tag freshness, admission, image-signature policy, and rollback
+  prevention remain operator controls.
 
 ### Conditional guarantees
 
@@ -206,9 +207,11 @@ strongest available policy.
 - OxiBelt does not issue or renew certificates, rotate external secrets, secure
   Kubernetes admission, operate Redis/PostgreSQL, or protect a compromised host,
   cluster administrator, registry, upstream, frontend, or provider.
-- Current release workflows do not claim reproducible builds, image signatures,
-  SBOM/provenance attestations, or in-repository admission verification. Trivy
-  reporting and pinned workflow actions reduce risk but are not those controls.
+- Release workflows publish OCI-linked CycloneDX SBOM attestations for platform
+  and multi-architecture image digests. They do not claim reproducible builds,
+  image signatures, SLSA build provenance, or in-repository admission
+  verification. Trivy reporting and pinned workflow actions reduce risk but
+  are not substitutes for those remaining controls.
 - Experimental features may be disabled, removed, or incompatibly changed and
   have no compatibility or backport guarantee beyond `SECURITY.md`.
 
@@ -328,8 +331,8 @@ canonical references.
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Plugin or custom frontend compromise | Operator rulepack/frontend/provider/handler → policy, browser, or external data | OxiRule is declarative and bounded with no general scripting/import callback sandbox; rulepack provenance can be pinned. Custom frontend URLs are same-origin routes, provider/handler exchanges are bounded, and failures follow explicit policy. | There is no native plugin security boundary. A hostile rulepack changes policy, a frontend can steal browser-visible proof/clearance data, a provider controls proof verdicts, and an external cache can observe or forge cached objects within its authority. |
-| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and image metadata are validated, build and package-write jobs are separated, and images are scanned before publish. | A compromised dependency, runner, maintainer, pinned action commit, or release credential can produce a malicious validly tagged image. Current scans report risk but are not provenance or signature verification. |
-| Malicious or stale container image | Registry/tag/deployment → running data plane | Official image scope is documented, OCI source/revision labels are checked during release, and operators can select an immutable digest. | Mutable tags and `IfNotPresent` can deploy stale content; registry or credential compromise can replace tags. Digest pinning and external admission are mandatory until signed provenance is implemented. |
+| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and image metadata are validated, build and package-write jobs are separated, images are scanned, and OCI-linked CycloneDX SBOMs bind recorded inputs and contents to immutable platform and index digests. | A compromised dependency, runner, maintainer, pinned action commit, release credential, or workflow can produce a malicious image and corresponding valid SBOM attestation. The SBOM is not an image signature, reproducibility proof, or SLSA provenance predicate. |
+| Malicious or stale container image | Registry/tag/deployment → running data plane | Official image scope is documented, OCI source/revision labels are checked during release, operators can select an immutable digest, and consumers can verify platform or index SBOM attestations against exact source and workflow identities. | Mutable tags and `IfNotPresent` can deploy stale content; registry or credential compromise can replace tags. Digest pinning, freshness/rollback controls, image-signature policy, and external admission remain operator responsibilities. |
 
 ### Shared-state compromise impact
 

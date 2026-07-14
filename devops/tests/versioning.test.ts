@@ -258,9 +258,33 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     throw new Error('stable image plan should include the amd64 artifact')
   }
   AssertRepresentativeManifestArchs(Plan)
-  Assert.ok(Amd64.ghcrTags.includes('ghcr.io/oxibelt/oxibelt:5-alpine-musl-amd64'))
-  Assert.ok(Plan.manifests[0].ghcrTags.includes('ghcr.io/oxibelt/oxibelt:latest'))
-  Assert.ok(Plan.manifests[1].ghcrTags.includes('ghcr.io/oxibelt/oxibelt:5-alpine-musl'))
+  Assert.equal(Amd64.canonicalGhcrTag, 'ghcr.io/oxibelt/oxibelt:5.2.0-alpine-musl-amd64')
+  Assert.deepEqual(Amd64.aliasGhcrTags, ['ghcr.io/oxibelt/oxibelt:5-alpine-musl-amd64'])
+  Assert.deepEqual(Plan.manifests[0].aliasGhcrTags, ['ghcr.io/oxibelt/oxibelt:latest'])
+  Assert.deepEqual(Plan.manifests[1].aliasGhcrTags, [
+    'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
+    'ghcr.io/oxibelt/oxibelt:alpine-musl'
+  ])
+  Assert.equal(Plan.schemaVersion, 2)
+  Assert.deepEqual(Plan.sbom, {
+    format: 'cyclonedx-json',
+    specVersion: '1.6',
+    predicateType: 'https://cyclonedx.org/bom',
+    rustToolchainVersion: '1.96.0',
+    binaries: [
+      'oxibelt',
+      'oxibelt-keysigner',
+      'oxibelt-netport-switcher',
+      'oxibeltctl',
+      'oxibelt-gateway-controller'
+    ],
+    platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
+    indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml',
+    indexArtifactName: 'oxibelt-release-sbom-index',
+    indexFile: 'oxibelt-release-index.cdx.json'
+  })
+  Assert.equal(Amd64.sbomArtifactName, 'oxibelt-release-sbom-amd64')
+  Assert.equal(Amd64.sbomFile, 'oxibelt-release-amd64.cdx.json')
 })
 
 test('beta and build image plans use amd64 representative manifests', () => {

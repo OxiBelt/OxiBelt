@@ -28,23 +28,40 @@ export type ImageArtifact = {
   platform: string
   dockerArchitecture: string
   targetCpu?: string
-  ghcrTags: string[]
+  canonicalGhcrTag: string
+  aliasGhcrTags: string[]
+  sbomArtifactName: string
+  sbomFile: string
 }
 
 export type ImageManifest = {
   name: string
   artifactArchs: ArtifactArch[]
-  ghcrTags: string[]
+  canonicalGhcrTag: string
+  aliasGhcrTags: string[]
+}
+
+export type ReleaseSbomContract = {
+  format: 'cyclonedx-json'
+  specVersion: '1.6'
+  predicateType: 'https://cyclonedx.org/bom'
+  rustToolchainVersion: '1.96.0'
+  binaries: string[]
+  platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
+  indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
+  indexArtifactName: 'oxibelt-release-sbom-index'
+  indexFile: 'oxibelt-release-index.cdx.json'
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 1
+  schemaVersion: 2
   image: string
   tag: string
   version: string
   kind: ReleaseKind
   revision: string
   source: string
+  sbom: ReleaseSbomContract
   artifacts: ImageArtifact[]
   manifests: ImageManifest[]
 }
@@ -70,7 +87,7 @@ type BuildImageReleasePlanOptions = {
 
 const BuildCommitPrefix = /^[0-9a-f]{8}$/
 
-const ArtifactSpecs: Array<Omit<ImageArtifact, 'ghcrTags'>> = [
+const ArtifactSpecs: Array<Omit<ImageArtifact, 'canonicalGhcrTag' | 'aliasGhcrTags' | 'sbomArtifactName' | 'sbomFile'>> = [
   {
     artifactArch: 'amd64v2',
     artifactName: 'oxibelt-alpine-musl-amd64v2-image',
@@ -230,45 +247,65 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   const Tag = Options.releaseTag.tag
   const Stable = Options.releaseTag.kind === 'stable'
   const Artifacts = ArtifactSpecs.map(Artifact => {
-    const GhcrTags = [
-      `${Image}:${Tag}-alpine-musl-${Artifact.artifactArch}`
-    ]
+    const AliasGhcrTags: string[] = []
 
     if (Stable) {
-      GhcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl-${Artifact.artifactArch}`)
+      AliasGhcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl-${Artifact.artifactArch}`)
     }
 
     return {
       ...Artifact,
-      ghcrTags: GhcrTags
+      canonicalGhcrTag: `${Image}:${Tag}-alpine-musl-${Artifact.artifactArch}`,
+      aliasGhcrTags: AliasGhcrTags,
+      sbomArtifactName: `oxibelt-release-sbom-${Artifact.artifactArch}`,
+      sbomFile: `oxibelt-release-${Artifact.artifactArch}.cdx.json`
     }
   })
   const Manifests: ImageManifest[] = [
     {
       name: 'release',
       artifactArchs: ['amd64', 'arm64', 'riscv64'],
-      ghcrTags: [`${Image}:${Tag}`]
+      canonicalGhcrTag: `${Image}:${Tag}`,
+      aliasGhcrTags: []
     },
     {
       name: 'alpine-musl',
       artifactArchs: ['amd64', 'arm64', 'riscv64'],
-      ghcrTags: [`${Image}:${Tag}-alpine-musl`]
+      canonicalGhcrTag: `${Image}:${Tag}-alpine-musl`,
+      aliasGhcrTags: []
     }
   ]
 
   if (Stable) {
-    Manifests[0].ghcrTags.push(`${Image}:latest`)
-    Manifests[1].ghcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl`, `${Image}:alpine-musl`)
+    Manifests[0].aliasGhcrTags.push(`${Image}:latest`)
+    Manifests[1].aliasGhcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl`, `${Image}:alpine-musl`)
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     image: Image,
     tag: Tag,
     version: Tag,
     kind: Options.releaseTag.kind,
     revision: Options.revision,
     source: Options.source,
+    sbom: {
+      format: 'cyclonedx-json',
+      specVersion: '1.6',
+      predicateType: 'https://cyclonedx.org/bom',
+      rustToolchainVersion: '1.96.0',
+      binaries: [
+        'oxibelt',
+        'oxibelt-keysigner',
+        'oxibelt-netport-switcher',
+        'oxibeltctl',
+        'oxibelt-gateway-controller'
+      ],
+      platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
+      indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml',
+      indexArtifactName: 'oxibelt-release-sbom-index',
+      indexFile: 'oxibelt-release-index.cdx.json'
+    },
     artifacts: Artifacts,
     manifests: Manifests
   }

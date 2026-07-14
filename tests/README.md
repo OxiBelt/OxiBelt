@@ -36,15 +36,28 @@ The Docker performance flow follows the same constraint. It copies generated TLS
 CI builds AMD64 Alpine musl images for `x86-64-v2`, `x86-64-v3`, and `x86-64-v4`. Docker integration, remote signer, and browser WebDriver jobs auto-select the newest supported artifact on each runner. Docker performance and aggressive long-run jobs intentionally use the `x86-64-v3` artifact so benchmark summaries compare the same binary target; unsupported performance runners upload `unsupported-cpu.json` and are excluded from aggregate calculations, while unsupported aggressive long-run runners fail and should be manually rerun.
 After the OxiBelt image artifacts are built in non-release CI, Trivy scans the `amd64v2`, `amd64`, `amd64v4`, `arm64`, and `riscv64` image artifacts. The scan job reports vulnerabilities as a Markdown table in `GITHUB_STEP_SUMMARY`, uploads the raw JSON report, and keeps findings report-only; a separate canonical-repository job submits Trivy's GitHub-format SBOM output to the Dependency Snapshot API on push, schedule, same-repository PR, or manual runs with `submit_dependency_snapshots` enabled.
 The release workflow rebuilds the same artifact matrix from a validated strict
-tag, verifies the CI-only Cargo version rewrite and Docker labels, and then
-uses a reusable per-architecture pipeline so each row builds an unprivileged
-image tar, scans that local tar as report-only pre-publish evidence, and pushes
-only that row's ISA-specific GHCR tags from an isolated package-write job. This
-preserves matrix readability without making one architecture wait for unrelated
-matrix scan rows before publishing. Multi-arch manifest tags are created only
-after the `amd64`, `arm64`, and `riscv64` image tags are available. Build tags
-matching `major.minor.patch-build.<8 hex chars>` may publish from tag push
-events; stable and `major.minor.patch-beta.N` tags publish from GitHub release
-or manual dispatch events.
+tag and verifies the CI-only Cargo version rewrite and Docker labels. Each
+reusable per-architecture row builds an unprivileged image tar, records
+BuildKit-resolved inputs, scans the local tar as report-only pre-publish
+evidence, and produces a validated CycloneDX SBOM. An isolated package-write
+job publishes the canonical platform digest without checking out or executing
+release build code. A separate OIDC-enabled job attests the SBOM, a read-only
+job verifies it from OCI, and only then can stable platform aliases be
+promoted.
+
+The top-level release workflow waits for all five reusable rows, publishes the
+canonical multi-architecture index from the verified `amd64` (x86-64-v3),
+`arm64`, and `riscv64` digests, re-verifies those platform attestations, and
+composes an architecture-preserving aggregate SBOM bound to the resulting
+index digest. It then attests and independently verifies the index before
+promoting mutable index aliases. QEMU is used only for the RISC-V image; AMD64
+and ARM64 build natively on their release runners. Build tags matching
+`major.minor.patch-build.<8 hex chars>` may publish from tag push events;
+stable and `major.minor.patch-beta.N` tags publish from GitHub release or
+manual dispatch events. Workflow integrity tests in
+`rust/ci_workflow_integrity.rs` enforce this fail-closed topology,
+platform/tag/SBOM coverage, immutable action pins, and permission separation.
+Consumer verification commands and the trust boundary are documented in
+[`docs/SupplyChain.md`](../docs/SupplyChain.md).
 
 Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.

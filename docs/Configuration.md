@@ -354,7 +354,10 @@ same-release anti-affinity, a one-Pod PDB disruption budget, and the fixed
 300-second `SIGUSR1` pre-stop drain inside a 360-second grace period. It
 requires Kubernetes 1.31 or later. It does not claim certificate-to-IPM
 identity binding, general mutation idempotency, stronger audit guarantees,
-image provenance, or release attestations. Those remain separate P1/P2 work.
+image signatures, build provenance, or admission enforcement. OCI-linked
+release SBOM attestations are an independent release-verification control, not
+a property of this runtime preset; see [Release Supply-Chain
+Verification](SupplyChain.md).
 
 ## Includes
 

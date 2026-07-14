@@ -1,0 +1,203 @@
+# Release Supply-Chain Verification
+
+OxiBelt release workflows publish CycloneDX 1.6 software bills of materials
+(SBOMs) as OCI-linked GitHub artifact attestations. Each attestation names an
+immutable `ghcr.io/oxibelt/oxibelt` digest as its subject, so consumers can
+retrieve and verify the SBOM independently of a workflow artifact or mutable
+registry tag.
+
+## Published subjects
+
+Each release publishes attestations for five platform image manifests:
+
+| Release artifact | OCI platform | CPU policy |
+| --- | --- | --- |
+| `amd64v2` | `linux/amd64` | `x86-64-v2` |
+| `amd64` | `linux/amd64` | `x86-64-v3` |
+| `amd64v4` | `linux/amd64` | `x86-64-v4` |
+| `arm64` | `linux/arm64` | architecture default |
+| `riscv64` | `linux/riscv64` | architecture default |
+
+The reusable `.github/workflows/release-image-arch.yml` workflow attests each
+platform digest. The top-level `.github/workflows/release.yml` workflow also
+attests the digest shared by the versioned `:<version>` and
+`:<version>-alpine-musl` multi-architecture indexes. The index SBOM retains the
+three included platform inventories (`amd64`, `arm64`, and `riscv64`) as
+separate components rather than flattening architecture-specific metadata.
+The `amd64v2` and `amd64v4` images remain architecture-specific variants and
+are not children of the multi-architecture index.
+
+Platform SBOMs include the source commit, the actual BuildKit start and finish
+timestamps (normalized to UTC), builder workflow identity, target platform and
+CPU policy, Rust toolchain version, resolved base-image digests, and the paths,
+versions, and SHA-256 checksums of:
+
+- `oxibelt`
+- `oxibelt-keysigner`
+- `oxibelt-netport-switcher`
+- `oxibeltctl`
+- `oxibelt-gateway-controller`
+
+They also include the operating-system and library inventory discovered by
+Trivy. The index SBOM identifies its child image digests and preserves the
+corresponding per-platform component and dependency graphs. Its build window
+records the actual canonical-index composition/validation step. CycloneDX
+`metadata.timestamp` records when each BOM was generated; the separate OCI
+`org.opencontainers.image.created` property remains the stable tagged-commit
+timestamp used for reproducible image metadata.
+
+## Verify a platform SBOM
+
+Resolve the immutable digest before verification. For example, to verify the
+standard `amd64` image for release `15.2.0`:
+
+```sh
+image=ghcr.io/oxibelt/oxibelt
+version=15.2.0
+source_commit=FULL_40_CHARACTER_RELEASE_COMMIT_SHA
+platform_digest="$(docker buildx imagetools inspect \
+  --format '{{json .Manifest}}' \
+  "${image}:${version}-alpine-musl-amd64" | jq -r '.digest')"
+
+gh attestation verify \
+  "oci://${image}@${platform_digest}" \
+  --repo OxiBelt/OxiBelt \
+  --bundle-from-oci \
+  --predicate-type https://cyclonedx.org/bom \
+  --signer-workflow OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml \
+  --source-digest "${source_commit}" \
+  --source-ref "refs/tags/${version}" \
+  --deny-self-hosted-runners
+```
+
+To inspect the SBOM only after the same verification succeeds, request JSON
+output and extract the verified predicate:
+
+```sh
+gh attestation verify \
+  "oci://${image}@${platform_digest}" \
+  --repo OxiBelt/OxiBelt \
+  --bundle-from-oci \
+  --predicate-type https://cyclonedx.org/bom \
+  --signer-workflow OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml \
+  --source-digest "${source_commit}" \
+  --source-ref "refs/tags/${version}" \
+  --deny-self-hosted-runners \
+  --format json \
+  --jq '.[].verificationResult.statement.predicate'
+```
+
+Use the architecture-specific version tag that matches the artifact being
+checked. A mutable major alias can help discover an image, but it must not
+replace the resolved digest in the verification subject.
+
+## Verify a multi-architecture index SBOM
+
+Resolve and verify the index independently. The versioned `:<version>` and
+`:<version>-alpine-musl` tags are required to resolve to the same digest:
+
+```sh
+image=ghcr.io/oxibelt/oxibelt
+version=15.2.0
+source_commit=FULL_40_CHARACTER_RELEASE_COMMIT_SHA
+index_digest="$(docker buildx imagetools inspect \
+  --format '{{json .Manifest}}' "${image}:${version}" | jq -r '.digest')"
+alpine_index_digest="$(docker buildx imagetools inspect \
+  --format '{{json .Manifest}}' \
+  "${image}:${version}-alpine-musl" | jq -r '.digest')"
+test "${index_digest}" = "${alpine_index_digest}"
+
+gh attestation verify \
+  "oci://${image}@${index_digest}" \
+  --repo OxiBelt/OxiBelt \
+  --bundle-from-oci \
+  --predicate-type https://cyclonedx.org/bom \
+  --signer-workflow OxiBelt/OxiBelt/.github/workflows/release.yml \
+  --source-digest "${source_commit}" \
+  --source-ref "refs/tags/${version}" \
+  --deny-self-hosted-runners
+```
+
+Use the JSON output and predicate selector shown in the platform example to
+extract the verified index SBOM. Consumers that deploy one platform can also
+inspect the index, select its platform manifest digest, and verify that digest
+with the platform workflow command above.
+
+Verification requires a recent GitHub CLI with artifact-attestation support,
+Docker Buildx, and `jq`. Authenticate to GHCR first if the local client cannot
+read the image and OCI attestation; a token used only for verification should
+have no more than `read:packages` access. For the GitHub CLI verification model
+and additional policy flags, see
+[`gh attestation verify`](https://cli.github.com/manual/gh_attestation_verify).
+
+For a manual release, dispatch the workflow from the release tag itself so the
+GitHub OIDC source ref and source digest match the requested subject:
+
+```sh
+gh workflow run release.yml --ref "${version}" -f "release_tag=${version}"
+```
+
+A default-branch dispatch that merely names a tag is rejected intentionally;
+checking out a tag does not change the workflow's signed `GITHUB_REF` and
+`GITHUB_SHA` identity.
+
+## Trust model and limitations
+
+Successful verification establishes that GitHub's artifact-attestation
+service accepted a CycloneDX predicate from the named OxiBelt workflow for the
+specified source repository, source commit, source tag, and immutable OCI
+subject. The trusted timestamp and workflow identity come from the signed
+attestation envelope; descriptive fields inside the SBOM remain
+workflow-produced claims.
+
+The SBOM lets consumers audit the recorded contents and build inputs, but it
+does not prove that the inventory is complete, that a component is safe, or
+that the build is reproducible. A compromised dependency, runner, maintainer,
+pinned action, or repository workflow can still produce a malicious image and
+a corresponding valid attestation.
+
+BuildKit records the base-image digests actually resolved during the build.
+The release build still begins from configured base-image references;
+recording the resolved digest does not itself pin that reference before
+resolution or guarantee that a later rebuild resolves identically. Base-image
+digest pinning is the separate P2-2 control.
+
+P2-3 does not provide an image signature, SLSA build-provenance predicate,
+reproducibility guarantee, rollback prevention, or Kubernetes admission
+policy. Keyless image signing, SLSA provenance, and admission enforcement are
+separate P2-4 controls. Operators should continue to deploy immutable digests
+and apply their own registry, admission, freshness, and rollback policies.
+
+## Failure and retry behavior
+
+The release workflow fails closed at each stage:
+
+- A platform SBOM generation or validation failure prevents that platform
+  image from being published.
+- A platform canonical version tag is pushed before its attestation can be
+  attached. If attestation or independent OCI verification fails, the workflow
+  stops before promoting mutable aliases or building the multi-architecture
+  index.
+- Canonical indexes are assembled from verified platform digests before the
+  aggregate SBOM is composed, allowing the index SBOM itself to embed the
+  immutable index digest. Index SBOM, attestation, or verification failure can
+  leave canonical version tags present, but stops mutable index-alias
+  promotion.
+- A retry accepts an existing canonical tag only when it resolves to the same
+  expected digest. It fails instead of overwriting a canonical release tag
+  that names different content.
+
+The OCI image creation time is derived from the tagged commit timestamp, so a
+fresh run for the same tag rebuilds the same image configuration instead of
+changing the digest merely because wall-clock time advanced. Actual BuildKit
+start and finish times remain recorded separately in each platform SBOM.
+Retries may legitimately attach another timestamp-varying predicate to the
+same immutable image. Verification therefore requires that OCI contain the
+exact SBOM generated by the current run; unrelated historical predicates do
+not satisfy that check and do not make the current matching predicate
+ambiguous.
+
+An interrupted release can therefore leave a version-specific platform or
+index tag in GHCR without completing alias promotion. Treat a release as
+complete only after its release workflow succeeds and its OCI-linked
+attestations pass the verification commands above.

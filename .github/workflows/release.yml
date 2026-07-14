@@ -66,8 +66,17 @@ jobs:
             echo "release tag ${release_ref} resolves to ${tag_commit}, but checkout is ${head_commit}" >&2
             exit 1
           fi
+          if [[ "${GITHUB_REF}" != "${release_ref}" || "${GITHUB_SHA}" != "${tag_commit}" ]]; then
+            echo "attested releases must run from ${release_ref}@${tag_commit}, not ${GITHUB_REF}@${GITHUB_SHA}" >&2
+            exit 1
+          fi
 
-          created="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          commit_epoch="$(git show -s --format=%ct "${head_commit}")"
+          if [[ ! "${commit_epoch}" =~ ^[0-9]+$ ]]; then
+            echo "release commit timestamp is invalid: ${commit_epoch}" >&2
+            exit 1
+          fi
+          created="$(date -u --date="@${commit_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
           {
             echo "created=${created}"
             echo "release_ref=${release_ref}"
@@ -112,7 +121,7 @@ jobs:
               raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 1:
+          if plan["schemaVersion"] != 2:
               raise SystemExit("unsupported image release plan schema")
           if plan["version"] != tag:
               raise SystemExit("image plan version does not match release tag")
@@ -132,10 +141,8 @@ jobs:
               "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64"),
           }
           def expected_artifact_tags(arch):
-              tags = [f"{image}:{tag}-alpine-musl-{arch}"]
-              if kind == "stable":
-                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
-              return tags
+              aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []
+              return f"{image}:{tag}-alpine-musl-{arch}", aliases
 
           artifacts = {}
           for artifact in plan["artifacts"]:
@@ -151,17 +158,21 @@ jobs:
                   raise SystemExit(f"unexpected artifact naming for {arch}")
               if artifact["dockerArchitecture"] != docker_arch:
                   raise SystemExit(f"unexpected docker architecture for {arch}")
-              expected_tags = expected_artifact_tags(arch)
-              if artifact["ghcrTags"] != expected_tags:
-                  raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
+              expected_tag, expected_aliases = expected_artifact_tags(arch)
+              if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
+                  raise SystemExit(f"unexpected GHCR tags for {arch}")
+              if artifact["sbomArtifactName"] != f"oxibelt-release-sbom-{arch}":
+                  raise SystemExit(f"unexpected SBOM artifact name for {arch}")
+              if artifact["sbomFile"] != f"oxibelt-release-{arch}.cdx.json":
+                  raise SystemExit(f"unexpected SBOM file for {arch}")
 
           expected_manifests = {
-              "release": (["amd64", "arm64", "riscv64"], [f"{image}:{tag}"]),
-              "alpine-musl": (["amd64", "arm64", "riscv64"], [f"{image}:{tag}-alpine-musl"]),
+              "release": (["amd64", "arm64", "riscv64"], f"{image}:{tag}", []),
+              "alpine-musl": (["amd64", "arm64", "riscv64"], f"{image}:{tag}-alpine-musl", []),
           }
           if kind == "stable":
-              expected_manifests["release"][1].append(f"{image}:latest")
-              expected_manifests["alpine-musl"][1].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
+              expected_manifests["release"][2].append(f"{image}:latest")
+              expected_manifests["alpine-musl"][2].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
           manifests = {}
           for manifest in plan["manifests"]:
               name = manifest["name"]
@@ -170,12 +181,32 @@ jobs:
               manifests[name] = manifest
           if set(manifests) != set(expected_manifests):
               raise SystemExit(f"unexpected manifest matrix: {sorted(manifests)}")
-          for name, (artifact_archs, ghcr_tags) in expected_manifests.items():
+          for name, (artifact_archs, canonical_tag, alias_tags) in expected_manifests.items():
               manifest = manifests[name]
               if manifest["artifactArchs"] != artifact_archs:
                   raise SystemExit(f"unexpected manifest architectures for {name}")
-              if manifest["ghcrTags"] != ghcr_tags:
-                  raise SystemExit(f"unexpected manifest GHCR tags for {name}: {manifest['ghcrTags']!r}")
+              if manifest["canonicalGhcrTag"] != canonical_tag or manifest["aliasGhcrTags"] != alias_tags:
+                  raise SystemExit(f"unexpected manifest GHCR tags for {name}")
+
+          expected_sbom = {
+              "format": "cyclonedx-json",
+              "specVersion": "1.6",
+              "predicateType": "https://cyclonedx.org/bom",
+              "rustToolchainVersion": "1.96.0",
+              "binaries": [
+                  "oxibelt",
+                  "oxibelt-keysigner",
+                  "oxibelt-netport-switcher",
+                  "oxibeltctl",
+                  "oxibelt-gateway-controller",
+              ],
+              "platformBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml",
+              "indexBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release.yml",
+              "indexArtifactName": "oxibelt-release-sbom-index",
+              "indexFile": "oxibelt-release-index.cdx.json",
+          }
+          if plan.get("sbom") != expected_sbom:
+              raise SystemExit("unexpected release SBOM contract")
           PY
 
           {
@@ -199,7 +230,16 @@ jobs:
       - name: Prepare release metadata artifact
         run: |
           set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/oxibelt-release-metadata/source"
+          mkdir -p "${RUNNER_TEMP}/oxibelt-release-metadata/source" "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools"
+          pnpm exec tsc devops/sources/release_sbom.ts \
+            --ignoreConfig \
+            --module NodeNext \
+            --moduleResolution NodeNext \
+            --target ES2024 \
+            --types node \
+            --skipLibCheck \
+            --outDir "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools"
+          test -f "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools/release_sbom.js"
           cp Cargo.lock "${RUNNER_TEMP}/oxibelt-release-metadata/Cargo.lock"
           cp source/Cargo.toml "${RUNNER_TEMP}/oxibelt-release-metadata/source/Cargo.toml"
           cp "${RUNNER_TEMP}/oxibelt-release/image-plan.json" "${RUNNER_TEMP}/oxibelt-release-metadata/image-plan.json"
@@ -218,7 +258,9 @@ jobs:
       - validate
     permissions:
       actions: read
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     strategy:
       fail-fast: false
@@ -265,8 +307,158 @@ jobs:
     secrets:
       ghcr_token: ${{ secrets.GITHUB_TOKEN }}
 
+  ghcr-index-sbom:
+    name: Compose verified multi-arch SBOM
+    runs-on: ubuntu-26.04
+    needs:
+      - validate
+      - release-image-arch
+      - ghcr-manifest-publish
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download expected platform SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: oxibelt-release-sbom-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/oxibelt-platform-sboms
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Verify child attestations and compose index SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          OXIBELT_RELEASE_CREATED: ${{ needs.validate.outputs.created }}
+          OXIBELT_INDEX_DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          OXIBELT_INDEX_BUILD_STARTED_ON: ${{ needs.ghcr-manifest-publish.outputs.build_started_on }}
+          OXIBELT_INDEX_BUILD_FINISHED_ON: ${{ needs.ghcr-manifest-publish.outputs.build_finished_on }}
+          OXIBELT_RELEASE_REF: ${{ needs.validate.outputs.release_ref }}
+          OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+          OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${RUNNER_TEMP}/oxibelt-index-sbom/children"
+          predicate_type="$(jq -r '.sbom.predicateType' "${IMAGE_PLAN}")"
+          platform_workflow="$(jq -r '.sbom.platformBuilderWorkflow' "${IMAGE_PLAN}")"
+          index_workflow="$(jq -r '.sbom.indexBuilderWorkflow' "${IMAGE_PLAN}")"
+          index_file="$(jq -r '.sbom.indexFile' "${IMAGE_PLAN}")"
+          child_inventory='[]'
+          platform_args=()
+          index_manifest="$(docker buildx imagetools inspect "${OXIBELT_GHCR_IMAGE}@${OXIBELT_INDEX_DIGEST}" --format '{{json .Manifest}}')"
+          resolved_index_digest="$(jq -r '.digest' <<<"${index_manifest}")"
+          jq -e '
+            [.manifests[].platform.os] == ["linux", "linux", "linux"]
+            and [.manifests[].platform.architecture] == ["amd64", "arm64", "riscv64"]
+          ' <<<"${index_manifest}" >/dev/null
+          if [[ "${resolved_index_digest}" != "${OXIBELT_INDEX_DIGEST}" ]]; then
+            echo "immutable index resolved to ${resolved_index_digest}, expected ${OXIBELT_INDEX_DIGEST}" >&2
+            exit 1
+          fi
+
+          child_index=0
+          for artifact_arch in amd64 arm64 riscv64; do
+            artifact_json="$(jq -c --arg arch "${artifact_arch}" '.artifacts[] | select(.artifactArch == $arch)' "${IMAGE_PLAN}")"
+            canonical_tag="$(jq -r '.canonicalGhcrTag' <<<"${artifact_json}")"
+            expected_architecture="$(jq -r '.dockerArchitecture' <<<"${artifact_json}")"
+            descriptor="$(jq -c --argjson index "${child_index}" '.manifests[$index]' <<<"${index_manifest}")"
+            digest="$(jq -r '.digest' <<<"${descriptor}")"
+            actual_os="$(jq -r '.platform.os' <<<"${descriptor}")"
+            actual_architecture="$(jq -r '.platform.architecture' <<<"${descriptor}")"
+            if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ || "${actual_os}" != linux || "${actual_architecture}" != "${expected_architecture}" ]]; then
+              echo "invalid immutable-index child ${artifact_arch}: ${digest}/${actual_os}/${actual_architecture}" >&2
+              exit 1
+            fi
+
+            verified="${RUNNER_TEMP}/oxibelt-index-sbom/verified-${artifact_arch}.json"
+            child_sbom="${RUNNER_TEMP}/oxibelt-index-sbom/children/${artifact_arch}.cdx.json"
+            expected_child_sbom="${RUNNER_TEMP}/oxibelt-platform-sboms/oxibelt-release-${artifact_arch}.cdx.json"
+            gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${digest}" \
+              --repo OxiBelt/OxiBelt \
+              --signer-workflow "${platform_workflow}" \
+              --source-digest "${OXIBELT_RELEASE_REVISION}" \
+              --source-ref "${OXIBELT_RELEASE_REF}" \
+              --predicate-type "${predicate_type}" \
+              --bundle-from-oci \
+              --deny-self-hosted-runners \
+              --format json >"${verified}"
+            jq -e 'length >= 1' "${verified}" >/dev/null
+            jq -e --slurpfile expected "${expected_child_sbom}" '
+              [.[] | .verificationResult.statement.predicate | select(. == $expected[0])]
+              | length >= 1
+            ' "${verified}" >/dev/null
+            jq -e . "${expected_child_sbom}" >"${child_sbom}"
+            node "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools/release_sbom.js" verify \
+              --input "${child_sbom}" \
+              --kind platform \
+              --digest "${digest}" \
+              --revision "${OXIBELT_RELEASE_REVISION}" \
+              --workflow "${platform_workflow}" \
+              --image "${OXIBELT_GHCR_IMAGE}" \
+              --version "${OXIBELT_RELEASE_VERSION}"
+            platform_args+=(--platform-sbom "${child_sbom}")
+            child_inventory="$(jq -c \
+              --arg artifactArch "${artifact_arch}" \
+              --arg architecture "${expected_architecture}" \
+              --arg digest "${digest}" \
+              --arg canonicalTag "${canonical_tag}" \
+              '. + [{artifactArch: $artifactArch, architecture: $architecture, digest: $digest, canonicalTag: $canonicalTag}]' \
+              <<<"${child_inventory}")"
+            child_index="$((child_index + 1))"
+          done
+
+          jq -n --argjson children "${child_inventory}" \
+            '{schemaVersion: 1, children: $children}' >"${RUNNER_TEMP}/oxibelt-index-sbom/index-sources.json"
+          generated="$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')"
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools/release_sbom.js" index \
+            "${platform_args[@]}" \
+            --output "${RUNNER_TEMP}/oxibelt-index-sbom/${index_file}" \
+            --image "${OXIBELT_GHCR_IMAGE}" \
+            --digest "${OXIBELT_INDEX_DIGEST}" \
+            --version "${OXIBELT_RELEASE_VERSION}" \
+            --revision "${OXIBELT_RELEASE_REVISION}" \
+            --source "${OXIBELT_SOURCE_URL}" \
+            --created "${OXIBELT_RELEASE_CREATED}" \
+            --generated "${generated}" \
+            --build-started-on "${OXIBELT_INDEX_BUILD_STARTED_ON}" \
+            --build-finished-on "${OXIBELT_INDEX_BUILD_FINISHED_ON}" \
+            --workflow "${index_workflow}"
+          sbom_size="$(stat -c '%s' "${RUNNER_TEMP}/oxibelt-index-sbom/${index_file}")"
+          if [[ "${sbom_size}" -gt 16777216 ]]; then
+            echo "index SBOM exceeds the 16 MiB attestation limit: ${sbom_size}" >&2
+            exit 1
+          fi
+
+      - name: Upload aggregate index SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-release-sbom-index
+          path: ${{ runner.temp }}/oxibelt-index-sbom
+          if-no-files-found: error
+          retention-days: 1
+
   ghcr-manifest-publish:
-    name: Publish GHCR multi-arch manifests
+    name: Publish canonical GHCR multi-arch manifests
     runs-on: ubuntu-26.04
     needs:
       - validate
@@ -276,6 +468,10 @@ jobs:
       actions: read
       contents: read
       packages: write
+    outputs:
+      build_finished_on: ${{ steps.publish.outputs.build_finished_on }}
+      build_started_on: ${{ steps.publish.outputs.build_started_on }}
+      digest: ${{ steps.publish.outputs.digest }}
 
     steps:
       - name: Download release metadata
@@ -283,6 +479,11 @@ jobs:
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
 
       - name: Validate manifest release plan
         env:
@@ -309,7 +510,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 1:
+          if plan["schemaVersion"] != 2:
               raise SystemExit("unsupported image release plan schema")
           if plan["image"] != image:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
@@ -327,10 +528,8 @@ jobs:
               "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64", None),
           }
           def expected_artifact_tags(arch):
-              tags = [f"{image}:{version}-alpine-musl-{arch}"]
-              if kind == "stable":
-                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
-              return tags
+              aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []
+              return f"{image}:{version}-alpine-musl-{arch}", aliases
 
           artifacts = {}
           for artifact in plan["artifacts"]:
@@ -351,17 +550,17 @@ jobs:
                       raise SystemExit(f"{arch} should not declare targetCpu")
               elif artifact.get("targetCpu") != target_cpu:
                   raise SystemExit(f"{arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
-              expected_tags = expected_artifact_tags(arch)
-              if artifact["ghcrTags"] != expected_tags:
-                  raise SystemExit(f"unexpected GHCR tags for {arch}: {artifact['ghcrTags']!r}")
+              expected_tag, expected_aliases = expected_artifact_tags(arch)
+              if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
+                  raise SystemExit(f"unexpected GHCR tags for {arch}")
 
           expected_manifests = {
-              "release": (["amd64", "arm64", "riscv64"], [f"{image}:{version}"]),
-              "alpine-musl": (["amd64", "arm64", "riscv64"], [f"{image}:{version}-alpine-musl"]),
+              "release": (["amd64", "arm64", "riscv64"], f"{image}:{version}", []),
+              "alpine-musl": (["amd64", "arm64", "riscv64"], f"{image}:{version}-alpine-musl", []),
           }
           if kind == "stable":
-              expected_manifests["release"][1].append(f"{image}:latest")
-              expected_manifests["alpine-musl"][1].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
+              expected_manifests["release"][2].append(f"{image}:latest")
+              expected_manifests["alpine-musl"][2].extend([f"{image}:{major}-alpine-musl", f"{image}:alpine-musl"])
           manifests = {}
           for manifest in plan["manifests"]:
               name = manifest["name"]
@@ -370,12 +569,12 @@ jobs:
               manifests[name] = manifest
           if set(manifests) != set(expected_manifests):
               raise SystemExit(f"unexpected manifest matrix: {sorted(manifests)}")
-          for name, (artifact_archs, ghcr_tags) in expected_manifests.items():
+          for name, (artifact_archs, canonical_tag, alias_tags) in expected_manifests.items():
               manifest = manifests[name]
               if manifest["artifactArchs"] != artifact_archs:
                   raise SystemExit(f"unexpected manifest architectures for {name}")
-              if manifest["ghcrTags"] != ghcr_tags:
-                  raise SystemExit(f"unexpected manifest GHCR tags for {name}: {manifest['ghcrTags']!r}")
+              if manifest["canonicalGhcrTag"] != canonical_tag or manifest["aliasGhcrTags"] != alias_tags:
+                  raise SystemExit(f"unexpected manifest GHCR tags for {name}")
           PY
 
       - name: Login to GHCR
@@ -383,37 +582,241 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Publish multi-arch manifests
+      - name: Publish canonical multi-arch manifests
+        id: publish
         env:
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
         run: |
           set -euo pipefail
 
-          jq -r '.manifests[] | @base64' "${IMAGE_PLAN}" | while read -r manifest_b64; do
-            manifest_json="$(printf '%s' "${manifest_b64}" | base64 --decode)"
-            mapfile -t manifest_tags < <(jq -r '.ghcrTags[]' <<<"${manifest_json}")
-            mapfile -t source_tags < <(
-              jq -r --argjson manifest "${manifest_json}" '
-                .artifacts as $artifacts
-                | $manifest.artifactArchs[]
-                | . as $artifact_arch
-                | $artifacts[]
-                | select(.artifactArch == $artifact_arch)
-                | .ghcrTags[0]
-              ' "${IMAGE_PLAN}"
-            )
-
-            if [[ "${#source_tags[@]}" -eq 0 ]]; then
-              echo "manifest ${manifest_json} has no source tags" >&2
+          index_build_started_on="$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')"
+          source_refs=()
+          expected_descriptors='[]'
+          for artifact_arch in amd64 arm64 riscv64; do
+            artifact_json="$(jq -c --arg arch "${artifact_arch}" '.artifacts[] | select(.artifactArch == $arch)' "${IMAGE_PLAN}")"
+            canonical_tag="$(jq -r '.canonicalGhcrTag' <<<"${artifact_json}")"
+            expected_architecture="$(jq -r '.dockerArchitecture' <<<"${artifact_json}")"
+            manifest_descriptor="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}')"
+            digest="$(jq -r '.digest' <<<"${manifest_descriptor}")"
+            image_descriptor="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Image}}')"
+            actual_os="$(jq -r '.os' <<<"${image_descriptor}")"
+            actual_architecture="$(jq -r '.architecture' <<<"${image_descriptor}")"
+            actual_variant="$(jq -r '.variant // ""' <<<"${image_descriptor}")"
+            if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ || "${actual_os}" != linux || "${actual_architecture}" != "${expected_architecture}" ]]; then
+              echo "invalid published child ${canonical_tag}: ${digest}/${actual_os}/${actual_architecture}" >&2
               exit 1
             fi
-            for source_tag in "${source_tags[@]}"; do
-              docker manifest inspect "${source_tag}" >/dev/null
-            done
-
-            for manifest_tag in "${manifest_tags[@]}"; do
-              docker manifest rm "${manifest_tag}" >/dev/null 2>&1 || true
-              docker manifest create "${manifest_tag}" "${source_tags[@]}"
-              docker manifest push "${manifest_tag}"
-            done
+            source_refs+=("${OXIBELT_GHCR_IMAGE}@${digest}")
+            expected_descriptors="$(jq -c \
+              --arg digest "${digest}" \
+              --arg os "${actual_os}" \
+              --arg architecture "${actual_architecture}" \
+              --arg variant "${actual_variant}" \
+              '. + [{digest: $digest, os: $os, architecture: $architecture, variant: (if $variant == "" then null else $variant end)}]' \
+              <<<"${expected_descriptors}")"
           done
+          mapfile -t canonical_tags < <(jq -r '.manifests[].canonicalGhcrTag' "${IMAGE_PLAN}")
+          if [[ "${#source_refs[@]}" -ne 3 || "${#canonical_tags[@]}" -ne 2 ]]; then
+            echo "release index requires three child manifests and two canonical tags" >&2
+            exit 1
+          fi
+
+          primary_tag="${canonical_tags[0]}"
+          inspect_error="${RUNNER_TEMP}/primary-index-inspect.log"
+          if docker buildx imagetools inspect "${primary_tag}" --format '{{json .Manifest}}' >/dev/null 2>"${inspect_error}"; then
+            :
+          elif grep -Eqi 'manifest unknown|404 Not Found|not found' "${inspect_error}"; then
+            docker buildx imagetools create --tag "${primary_tag}" "${source_refs[@]}"
+          else
+            cat "${inspect_error}" >&2
+            echo "failed to determine whether canonical index ${primary_tag} already exists" >&2
+            exit 1
+          fi
+
+          published_index="$(docker buildx imagetools inspect "${primary_tag}" --format '{{json .Manifest}}')"
+          actual_descriptors="$(jq -c '[.manifests[] | {digest: .digest, os: .platform.os, architecture: .platform.architecture, variant: (.platform.variant // null)}]' <<<"${published_index}")"
+          if [[ "${actual_descriptors}" != "${expected_descriptors}" ]]; then
+            echo "refusing to accept canonical index ${primary_tag} with unexpected platform descriptors" >&2
+            echo "expected: ${expected_descriptors}" >&2
+            echo "actual:   ${actual_descriptors}" >&2
+            exit 1
+          fi
+          digest="$(jq -r '.digest' <<<"${published_index}")"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "registry returned an invalid index digest for ${primary_tag}: ${digest}" >&2
+            exit 1
+          fi
+
+          for canonical_tag in "${canonical_tags[@]:1}"; do
+            inspect_error="${RUNNER_TEMP}/secondary-index-inspect.log"
+            if existing="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}' 2>"${inspect_error}")"; then
+              existing_digest="$(jq -r '.digest' <<<"${existing}")"
+              if [[ "${existing_digest}" != "${digest}" ]]; then
+                echo "refusing to replace canonical index ${canonical_tag}: ${existing_digest} != ${digest}" >&2
+                exit 1
+              fi
+            elif grep -Eqi 'manifest unknown|404 Not Found|not found' "${inspect_error}"; then
+              docker buildx imagetools create --prefer-index=true --tag "${canonical_tag}" "${OXIBELT_GHCR_IMAGE}@${digest}"
+            else
+              cat "${inspect_error}" >&2
+              echo "failed to determine whether canonical index ${canonical_tag} already exists" >&2
+              exit 1
+            fi
+            canonical_digest="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            if [[ "${canonical_digest}" != "${digest}" ]]; then
+              echo "canonical index ${canonical_tag} resolved to ${canonical_digest}, expected ${digest}" >&2
+              exit 1
+            fi
+          done
+
+          index_build_finished_on="$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')"
+          {
+            echo "build_started_on=${index_build_started_on}"
+            echo "build_finished_on=${index_build_finished_on}"
+            echo "digest=${digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+  ghcr-index-attest:
+    name: Attest multi-arch index SBOM
+    runs-on: ubuntu-26.04
+    needs:
+      - ghcr-index-sbom
+      - ghcr-manifest-publish
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Download aggregate index SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-sbom-index
+          path: ${{ runner.temp }}/oxibelt-index-sbom
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Publish index SBOM attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/oxibelt/oxibelt
+          subject-digest: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/oxibelt-index-sbom/oxibelt-release-index.cdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+  ghcr-index-verify:
+    name: Verify multi-arch index SBOM attestation
+    runs-on: ubuntu-26.04
+    needs:
+      - ghcr-index-attest
+      - ghcr-manifest-publish
+      - validate
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download expected index SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-sbom-index
+          path: ${{ runner.temp }}/oxibelt-index-sbom
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Verify index SBOM from OCI
+        env:
+          DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          EXPECTED_SBOM: ${{ runner.temp }}/oxibelt-index-sbom/oxibelt-release-index.cdx.json
+        run: |
+          set -euo pipefail
+
+          predicate_type="$(jq -r '.sbom.predicateType' "${IMAGE_PLAN}")"
+          workflow="$(jq -r '.sbom.indexBuilderWorkflow' "${IMAGE_PLAN}")"
+          gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow "${workflow}" \
+            --source-digest "${{ needs.validate.outputs.revision }}" \
+            --source-ref "${{ needs.validate.outputs.release_ref }}" \
+            --predicate-type "${predicate_type}" \
+            --bundle-from-oci \
+            --deny-self-hosted-runners \
+            --format json >"${RUNNER_TEMP}/verified-index-attestations.json"
+
+          jq -e 'length >= 1' "${RUNNER_TEMP}/verified-index-attestations.json" >/dev/null
+          jq -e --slurpfile expected "${EXPECTED_SBOM}" '
+            [.[] | .verificationResult.statement.predicate | select(. == $expected[0])]
+            | length >= 1
+          ' "${RUNNER_TEMP}/verified-index-attestations.json" >/dev/null
+          jq -e . "${EXPECTED_SBOM}" >"${RUNNER_TEMP}/verified-index-sbom.cdx.json"
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/release-tools/release_sbom.js" verify \
+            --input "${RUNNER_TEMP}/verified-index-sbom.cdx.json" \
+            --kind index \
+            --digest "${DIGEST}" \
+            --revision "${{ needs.validate.outputs.revision }}" \
+            --workflow "${workflow}" \
+            --image "${OXIBELT_GHCR_IMAGE}" \
+            --version "${{ needs.validate.outputs.version }}"
+
+  ghcr-index-promote:
+    name: Promote verified multi-arch aliases
+    runs-on: ubuntu-26.04
+    needs:
+      - ghcr-index-verify
+      - ghcr-manifest-publish
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+
+      - name: Promote digest to mutable aliases
+        env:
+          DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        run: |
+          set -euo pipefail
+
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          while read -r alias_tag; do
+            [[ -n "${alias_tag}" ]] || continue
+            docker buildx imagetools create --prefer-index=true --tag "${alias_tag}" "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
+            alias_digest="$(docker buildx imagetools inspect "${alias_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            if [[ "${alias_digest}" != "${DIGEST}" ]]; then
+              echo "alias ${alias_tag} resolved to ${alias_digest}, expected ${DIGEST}" >&2
+              exit 1
+            fi
+          done < <(jq -r '.manifests[].aliasGhcrTags[]' "${IMAGE_PLAN}")

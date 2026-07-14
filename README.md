@@ -211,7 +211,7 @@ docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
 The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
-CI scans each built OxiBelt image artifact with Trivy and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs. Release CI builds each ISA-specific image in an unprivileged reusable workflow row, scans the downloaded local image tar before publish, and then pushes that row's GHCR tags from an isolated package-write publish job.
+CI scans each built OxiBelt image artifact with Trivy and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs. Release CI builds each ISA-specific image in an unprivileged reusable workflow row, scans the downloaded local image tar, publishes the immutable platform manifest, and attaches a verified OCI-linked CycloneDX SBOM before promoting mutable aliases. The multi-architecture index receives its own aggregate SBOM after all included platform attestations have been independently verified. See [Release Supply-Chain Verification](docs/SupplyChain.md) for digest resolution, verification commands, published metadata, and trust boundaries.
 Release CI publishes validated images to GitHub Container Registry at
 `ghcr.io/oxibelt/oxibelt`. Published tags use strict OxiBelt release tags such
 as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags

@@ -88,6 +88,8 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
 
       - name: Build Docker image artifact
         env:
@@ -131,7 +133,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 1:
+          if plan["schemaVersion"] != 2:
               raise SystemExit("unsupported image release plan schema")
           if plan["image"] != image:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
@@ -149,10 +151,8 @@ jobs:
               "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64", None),
           }
           def expected_artifact_tags(arch):
-              tags = [f"{image}:{version}-alpine-musl-{arch}"]
-              if kind == "stable":
-                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
-              return tags
+              aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []
+              return f"{image}:{version}-alpine-musl-{arch}", aliases
 
           artifacts = {}
           for artifact in plan["artifacts"]:
@@ -178,9 +178,13 @@ jobs:
                   raise SystemExit(f"{artifact_arch} should not declare targetCpu")
           elif artifact.get("targetCpu") != target_cpu:
               raise SystemExit(f"{artifact_arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
-          expected_tags = expected_artifact_tags(artifact_arch)
-          if artifact["ghcrTags"] != expected_tags:
-              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}: {artifact['ghcrTags']!r}")
+          expected_tag, expected_aliases = expected_artifact_tags(artifact_arch)
+          if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
+              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}")
+          if artifact["sbomArtifactName"] != f"oxibelt-release-sbom-{artifact_arch}":
+              raise SystemExit(f"unexpected SBOM artifact name for {artifact_arch}")
+          if artifact["sbomFile"] != f"oxibelt-release-{artifact_arch}.cdx.json":
+              raise SystemExit(f"unexpected SBOM file name for {artifact_arch}")
 
           if not image_tar.is_file():
               raise SystemExit(f"missing Docker image tar: {image_tar}")
@@ -220,7 +224,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: ${{ env.OXIBELT_ARTIFACT_NAME }}
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
+          path: |
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-inputs.json
           if-no-files-found: error
           retention-days: 1
 
@@ -269,6 +276,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.70.0
           scan-type: image
           image-ref: ${{ steps.trivy-image.outputs.image_ref }}
           format: json
@@ -276,6 +284,106 @@ jobs:
           vuln-type: os,library
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           exit-code: "0"
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: image
+          image-ref: ${{ steps.trivy-image.outputs.image_ref }}
+          format: cyclonedx
+          output: ${{ runner.temp }}/oxibelt-sbom-raw-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+
+      - name: Inventory release binaries
+        env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          IMAGE_REF: ${{ steps.trivy-image.outputs.image_ref }}
+          INVENTORY_FILE: ${{ runner.temp }}/oxibelt-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
+          OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          container_id="$(docker create "${IMAGE_REF}")"
+          binary_root="$(mktemp -d "${RUNNER_TEMP}/oxibelt-binaries.XXXXXX")"
+          cleanup() {
+            docker rm -f "${container_id}" >/dev/null 2>&1 || true
+            rm -rf -- "${binary_root}"
+          }
+          trap cleanup EXIT
+
+          inventory='[]'
+          while read -r binary; do
+            install_path="/usr/local/bin/${binary}"
+            docker cp "${container_id}:${install_path}" "${binary_root}/${binary}"
+            digest="$(sha256sum "${binary_root}/${binary}" | awk '{print $1}')"
+            inventory="$(jq -c \
+              --arg name "${binary}" \
+              --arg path "${install_path}" \
+              --arg version "${OXIBELT_RELEASE_VERSION}" \
+              --arg sha256 "${digest}" \
+              '. + [{name: $name, path: $path, version: $version, sha256: $sha256}]' \
+              <<<"${inventory}")"
+          done < <(jq -r '.sbom.binaries[]' "${IMAGE_PLAN}")
+
+          jq -n --argjson binaries "${inventory}" \
+            '{schemaVersion: 1, binaries: $binaries}' >"${INVENTORY_FILE}"
+
+      - name: Enrich and validate platform SBOM
+        env:
+          BUILD_INPUTS: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-inputs.json
+          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
+          RAW_SBOM: ${{ runner.temp }}/oxibelt-sbom-raw-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+          BINARY_INVENTORY: ${{ runner.temp }}/oxibelt-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
+          OXIBELT_RELEASE_CREATED: ${{ inputs.release_created }}
+          OXIBELT_RELEASE_REVISION: ${{ inputs.release_revision }}
+          OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
+          OXIBELT_SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+
+          artifact_json="$(jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)' "${IMAGE_PLAN}")"
+          sbom_file="$(jq -r '.sbomFile' <<<"${artifact_json}")"
+          workflow="$(jq -r '.sbom.platformBuilderWorkflow' "${IMAGE_PLAN}")"
+          build_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
+          if [[ ! "${build_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx metadata contains an invalid image digest: ${build_digest}" >&2
+            exit 1
+          fi
+          if [[ "${sbom_file}" != "oxibelt-release-${OXIBELT_ARTIFACT_ARCH}.cdx.json" ]]; then
+            echo "release plan has an invalid SBOM file for ${OXIBELT_ARTIFACT_ARCH}" >&2
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/oxibelt-sbom"
+          generated="$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')"
+          node "${METADATA_ROOT}/release-tools/release_sbom.js" platform \
+            --trivy "${RAW_SBOM}" \
+            --build-metadata "${BUILD_METADATA}" \
+            --build-inputs "${BUILD_INPUTS}" \
+            --binaries "${BINARY_INVENTORY}" \
+            --output "${RUNNER_TEMP}/oxibelt-sbom/${sbom_file}" \
+            --image "${OXIBELT_GHCR_IMAGE}" \
+            --digest "${build_digest}" \
+            --version "${OXIBELT_RELEASE_VERSION}" \
+            --revision "${OXIBELT_RELEASE_REVISION}" \
+            --source "${OXIBELT_SOURCE_URL}" \
+            --created "${OXIBELT_RELEASE_CREATED}" \
+            --generated "${generated}" \
+            --workflow "${workflow}"
+          sbom_size="$(stat -c '%s' "${RUNNER_TEMP}/oxibelt-sbom/${sbom_file}")"
+          if [[ "${sbom_size}" -gt 16777216 ]]; then
+            echo "platform SBOM exceeds the 16 MiB attestation limit: ${sbom_size}" >&2
+            exit 1
+          fi
+
+      - name: Upload platform SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/oxibelt-sbom/oxibelt-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Trivy vulnerability report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
@@ -286,7 +394,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish GHCR image tags (${{ inputs.artifact_arch }})
+    name: Publish canonical GHCR image (${{ inputs.artifact_arch }})
     runs-on: ${{ inputs.runner }}
     needs:
       - scan
@@ -295,6 +403,8 @@ jobs:
       actions: read
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
     env:
       OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
       OXIBELT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
@@ -311,6 +421,11 @@ jobs:
         with:
           name: ${{ env.OXIBELT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
 
       - name: Validate Docker image artifact for publish
         env:
@@ -341,7 +456,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 1:
+          if plan["schemaVersion"] != 2:
               raise SystemExit("unsupported image release plan schema")
           if plan["image"] != image:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
@@ -359,10 +474,8 @@ jobs:
               "riscv64": ("oxibelt-alpine-musl-riscv64-image", "oxibelt-alpine-musl-riscv64.tar", "riscv64", None),
           }
           def expected_artifact_tags(arch):
-              tags = [f"{image}:{version}-alpine-musl-{arch}"]
-              if kind == "stable":
-                  tags.append(f"{image}:{major}-alpine-musl-{arch}")
-              return tags
+              aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []
+              return f"{image}:{version}-alpine-musl-{arch}", aliases
 
           artifacts = {}
           for artifact in plan["artifacts"]:
@@ -388,9 +501,9 @@ jobs:
                   raise SystemExit(f"{artifact_arch} should not declare targetCpu")
           elif artifact.get("targetCpu") != target_cpu:
               raise SystemExit(f"{artifact_arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
-          expected_tags = expected_artifact_tags(artifact_arch)
-          if artifact["ghcrTags"] != expected_tags:
-              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}: {artifact['ghcrTags']!r}")
+          expected_tag, expected_aliases = expected_artifact_tags(artifact_arch)
+          if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
+              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}")
 
           if not image_tar.is_file():
               raise SystemExit(f"missing Docker image tar: {image_tar}")
@@ -426,8 +539,10 @@ jobs:
               raise SystemExit(f"{image_tar} must expose 8443/tcp and 8443/udp")
           PY
 
-      - name: Push arch-specific GHCR tags
+      - name: Push canonical arch-specific GHCR tag
+        id: publish
         env:
+          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
           GHCR_TOKEN: ${{ secrets.ghcr_token }}
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
@@ -449,7 +564,199 @@ jobs:
           docker load --input "${IMAGE_TAR}"
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-          jq -r '.ghcrTags[]' <<<"${artifact_json}" | while read -r ghcr_tag; do
-            docker tag "${local_tag}" "${ghcr_tag}"
-            docker push "${ghcr_tag}"
-          done
+          canonical_tag="$(jq -r '.canonicalGhcrTag' <<<"${artifact_json}")"
+          if [[ -z "${canonical_tag}" || "${canonical_tag}" == "null" ]]; then
+            echo "release plan is missing the canonical tag for ${OXIBELT_ARTIFACT_ARCH}" >&2
+            exit 1
+          fi
+
+          expected_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
+          if [[ ! "${expected_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx metadata contains an invalid image digest: ${expected_digest}" >&2
+            exit 1
+          fi
+
+          inspect_error="${RUNNER_TEMP}/canonical-inspect-${OXIBELT_ARTIFACT_ARCH}.log"
+          if existing_descriptor="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}' 2>"${inspect_error}")"; then
+            existing_digest="$(jq -r '.digest' <<<"${existing_descriptor}")"
+            if [[ "${existing_digest}" != "${expected_digest}" ]]; then
+              echo "refusing to replace canonical tag ${canonical_tag}: ${existing_digest} != ${expected_digest}" >&2
+              exit 1
+            fi
+          elif grep -Eqi 'manifest unknown|404 Not Found|not found' "${inspect_error}"; then
+            docker tag "${local_tag}" "${canonical_tag}"
+            docker push "${canonical_tag}"
+          else
+            cat "${inspect_error}" >&2
+            echo "failed to determine whether canonical tag ${canonical_tag} already exists" >&2
+            exit 1
+          fi
+
+          descriptor="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}')"
+          digest="$(jq -r '.digest' <<<"${descriptor}")"
+          image_architecture="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Image}}' | jq -r '.architecture')"
+          expected_architecture="$(jq -r '.dockerArchitecture' <<<"${artifact_json}")"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "registry returned an invalid digest for ${canonical_tag}: ${digest}" >&2
+            exit 1
+          fi
+          if [[ "${digest}" != "${expected_digest}" ]]; then
+            echo "registry digest ${digest} does not match Buildx digest ${expected_digest}" >&2
+            exit 1
+          fi
+          if [[ "${image_architecture}" != "${expected_architecture}" ]]; then
+            echo "registry architecture ${image_architecture} does not match ${expected_architecture}" >&2
+            exit 1
+          fi
+
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+  attest:
+    name: Attest platform SBOM (${{ inputs.artifact_arch }})
+    runs-on: ubuntu-26.04
+    needs:
+      - publish
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
+
+    steps:
+      - name: Download platform SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/oxibelt-sbom
+
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.ghcr_token }}
+        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Publish platform SBOM attestation
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/oxibelt/oxibelt
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/oxibelt-sbom/oxibelt-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+  verify:
+    name: Verify platform SBOM attestation (${{ inputs.artifact_arch }})
+    runs-on: ubuntu-26.04
+    needs:
+      - attest
+      - publish
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    env:
+      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download expected platform SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/oxibelt-sbom
+
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.ghcr_token }}
+        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Verify platform SBOM from OCI
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          GH_TOKEN: ${{ secrets.ghcr_token }}
+          METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
+          EXPECTED_SBOM: ${{ runner.temp }}/oxibelt-sbom/oxibelt-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+        run: |
+          set -euo pipefail
+
+          predicate_type="$(jq -r '.sbom.predicateType' "${METADATA_ROOT}/image-plan.json")"
+          workflow="$(jq -r '.sbom.platformBuilderWorkflow' "${METADATA_ROOT}/image-plan.json")"
+          gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow "${workflow}" \
+            --source-digest "${{ inputs.release_revision }}" \
+            --source-ref "${{ inputs.release_ref }}" \
+            --predicate-type "${predicate_type}" \
+            --bundle-from-oci \
+            --deny-self-hosted-runners \
+            --format json >"${RUNNER_TEMP}/verified-attestations.json"
+
+          jq -e 'length >= 1' "${RUNNER_TEMP}/verified-attestations.json" >/dev/null
+          jq -e --slurpfile expected "${EXPECTED_SBOM}" '
+            [.[] | .verificationResult.statement.predicate | select(. == $expected[0])]
+            | length >= 1
+          ' "${RUNNER_TEMP}/verified-attestations.json" >/dev/null
+          jq -e . "${EXPECTED_SBOM}" >"${RUNNER_TEMP}/verified-sbom.cdx.json"
+          node "${METADATA_ROOT}/release-tools/release_sbom.js" verify \
+            --input "${RUNNER_TEMP}/verified-sbom.cdx.json" \
+            --kind platform \
+            --digest "${DIGEST}" \
+            --revision "${{ inputs.release_revision }}" \
+            --workflow "${workflow}" \
+            --image "${OXIBELT_GHCR_IMAGE}" \
+            --version "${{ inputs.release_version }}"
+
+  promote:
+    name: Promote verified GHCR aliases (${{ inputs.artifact_arch }})
+    runs-on: ubuntu-26.04
+    needs:
+      - publish
+      - verify
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    env:
+      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+
+      - name: Promote digest to mutable aliases
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          GHCR_TOKEN: ${{ secrets.ghcr_token }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        run: |
+          set -euo pipefail
+
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          artifact_json="$(jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)' "${IMAGE_PLAN}")"
+          while read -r alias_tag; do
+            [[ -n "${alias_tag}" ]] || continue
+            docker buildx imagetools create --prefer-index=false --tag "${alias_tag}" "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
+            alias_digest="$(docker buildx imagetools inspect "${alias_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            if [[ "${alias_digest}" != "${DIGEST}" ]]; then
+              echo "alias ${alias_tag} resolved to ${alias_digest}, expected ${DIGEST}" >&2
+              exit 1
+            fi
+          done < <(jq -r '.aliasGhcrTags[]' <<<"${artifact_json}")
