@@ -31,6 +31,7 @@ release_name="oxibelt-lifecycle"
 workload_name="oxibelt"
 selector="app.kubernetes.io/name=oxibelt,app.kubernetes.io/instance=${release_name}"
 service_name="${workload_name}"
+lifecycle_route_configmap="oxibelt-lifecycle-route"
 
 die() {
   echo "Kubernetes Pod lifecycle test: $*" >&2
@@ -302,8 +303,20 @@ printf '%s\n' \
   '- role: worker' \
   '- role: worker' \
   '- role: worker' >"${kind_config}"
-printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
-  "${image_repository}" "${image_tag}" >"${image_values}"
+printf '%s\n' \
+  'image:' \
+  "  repository: \"${image_repository}\"" \
+  "  tag: \"${image_tag}\"" \
+  '  pullPolicy: "IfNotPresent"' \
+  'extraVolumes:' \
+  '- name: lifecycle-route' \
+  '  configMap:' \
+  "    name: \"${lifecycle_route_configmap}\"" \
+  '    defaultMode: 288' \
+  'extraVolumeMounts:' \
+  '- name: lifecycle-route' \
+  '  mountPath: /etc/oxibelt/config/conf.d' \
+  '  readOnly: true' >"${image_values}"
 
 kind create cluster \
   --name "${cluster_name}" \
@@ -333,6 +346,23 @@ for index in "${!workers[@]}"; do
 done
 
 kube create namespace "${namespace}" >/dev/null
+kube -n "${namespace}" create -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${lifecycle_route_configmap}
+immutable: true
+data:
+  lifecycle-route.toml: |-
+    [[routes]]
+    name = "lifecycle-fixture"
+    hosts = ["oxibelt-lifecycle.test"]
+    path_prefix = "/lifecycle-fixture"
+
+    [routes.actions.redirect]
+    status = 308
+    location_template = "/lifecycle-ready"
+EOF
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -subj '/CN=oxibelt-lifecycle.test' \
   -addext 'subjectAltName=DNS:oxibelt-lifecycle.test' \

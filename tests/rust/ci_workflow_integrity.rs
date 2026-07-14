@@ -1150,6 +1150,18 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "lifecycle.terminationGracePeriodSeconds=45",
     "podDisruptionBudget.maxUnavailable=1",
     "podDisruptionBudget.unhealthyPodEvictionPolicy=AlwaysAllow",
+    "lifecycle_route_configmap=\"oxibelt-lifecycle-route\"",
+    "immutable: true",
+    "lifecycle-route.toml: |-",
+    "name = \"lifecycle-fixture\"",
+    "hosts = [\"oxibelt-lifecycle.test\"]",
+    "path_prefix = \"/lifecycle-fixture\"",
+    "[routes.actions.redirect]",
+    "status = 308",
+    "location_template = \"/lifecycle-ready\"",
+    "defaultMode: 288",
+    "mountPath: /etc/oxibelt/config/conf.d",
+    "readOnly: true",
     "--kube-context \"kind-${cluster_name}\"",
     "topologySpreadConstraints | length) == 2",
     "rolling update reduced ready capacity below two Pods",
@@ -1177,6 +1189,15 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     !script
       .contains("(.metadata.labels[\"node-role.kubernetes.io/control-plane\"] // \"\") == \"\""),
     "Kubernetes Pod lifecycle worker selection must not treat an empty control-plane label as absent"
+  );
+  assert!(
+    script
+      .find("lifecycle-route.toml: |-")
+      .expect("Kubernetes Pod lifecycle script should create its route fixture")
+      < script
+        .find("helm upgrade --install")
+        .expect("Kubernetes Pod lifecycle script should install the Helm release"),
+    "Kubernetes Pod lifecycle route fixture must exist before the Helm release starts"
   );
 
   for forbidden in [
@@ -1255,7 +1276,13 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "docker network inspect \"${network}\"",
     "wait_for_distinct_docker_network_ipv4s",
     "Cilium FQDN fixtures did not receive distinct IPv4 addresses on Minikube Docker network",
-    "expect_denied \"public source reaching metrics\"",
+    "expect_allowed \"pre-policy public source reaching metrics\"",
+    "wait_for_policy_denial \"public source reaching metrics\"",
+    "for attempt in {1..12}; do",
+    "consecutive_denials=0",
+    "consecutive_denials=\"$((consecutive_denials + 1))\"",
+    "if ((consecutive_denials == 3)); then",
+    "remained reachable after policy propagation",
     "expect_denied \"public source reaching Admin\"",
     "expect_allowed \"declared data-plane upstream egress\"",
     "expect_denied \"arbitrary cluster Service egress\"",
@@ -1281,6 +1308,27 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
       "if [[ \"${cni}\" == \"cilium\" ]]; then\n  helm_show_only+=(--show-only templates/ciliumnetworkpolicy.yaml)\nfi"
     ),
     "the Cilium template must only be selected for Cilium coverage"
+  );
+
+  let pre_policy_probe = script
+    .find("expect_allowed \"pre-policy public source reaching metrics\"")
+    .expect("NetworkPolicy harness should prove metrics reachability before applying policy");
+  let policy_apply = script
+    .find("apply -f \"${work_dir}/policies.yaml\"")
+    .expect("NetworkPolicy harness should apply the rendered policy");
+  let convergence_probe = script
+    .find("wait_for_policy_denial \"public source reaching metrics\"")
+    .expect("NetworkPolicy harness should wait for the first denial to converge");
+  assert!(
+    pre_policy_probe < policy_apply && policy_apply < convergence_probe,
+    "NetworkPolicy harness must prove reachability, apply policy, and then wait for denial convergence"
+  );
+  assert_eq!(
+    script
+      .matches("wait_for_policy_denial \"public source reaching metrics\"")
+      .count(),
+    1,
+    "only the first post-apply denial should tolerate CNI propagation"
   );
 
   let agnhost_netexec = "\"${agnhost_image}\" netexec --http-port=8080 --udp-port=-1";

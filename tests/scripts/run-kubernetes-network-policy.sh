@@ -166,6 +166,30 @@ expect_denied() {
   done
 }
 
+wait_for_policy_denial() {
+  local description="$1"
+  shift
+  local attempt
+  local consecutive_denials=0
+
+  # CNI policy application is asynchronous. Tolerate initial successful probes,
+  # but accept convergence only after three consecutive denials so a transient
+  # destination failure cannot satisfy the policy assertion.
+  for attempt in {1..12}; do
+    if "$@"; then
+      consecutive_denials=0
+    else
+      consecutive_denials="$((consecutive_denials + 1))"
+      if ((consecutive_denials == 3)); then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+
+  die "${description} remained reachable after policy propagation"
+}
+
 wait_for_pod() {
   local namespace="$1"
   local name="$2"
@@ -701,16 +725,22 @@ helm template network-policy "${chart_dir}" \
   -f "${admin_values}" \
   -f "${policy_values}" \
   "${helm_show_only[@]}" >"${work_dir}/policies.yaml"
-kubectl_cmd -n "${data_namespace}" apply -f "${work_dir}/policies.yaml"
 
 target_host="target.${data_namespace}.svc.cluster.local"
 backend_host="allowed-upstream.${backend_namespace}.svc.cluster.local"
 arbitrary_host="arbitrary-service.${arbitrary_namespace}.svc.cluster.local"
 
-# Prove a known deny before accepting allow results, then exercise every trust
-# boundary from Pod-originated traffic rather than node/hostNetwork traffic.
-expect_denied "public source reaching metrics" \
+# Prove the target is reachable before policy application so the first denial
+# cannot be mistaken for an unavailable destination. Then wait for the CNI to
+# converge before exercising strict trust-boundary assertions.
+expect_allowed "pre-policy public source reaching metrics" \
   run_client_curl "${public_namespace}" public-client "http://${target_host}:9090/"
+kubectl_cmd -n "${data_namespace}" apply -f "${work_dir}/policies.yaml"
+wait_for_policy_denial "public source reaching metrics" \
+  run_client_curl "${public_namespace}" public-client "http://${target_host}:9090/"
+
+# Exercise every trust boundary from Pod-originated traffic rather than
+# node/hostNetwork traffic. Later negative assertions remain immediately strict.
 expect_allowed "public HTTP" \
   run_client_curl "${public_namespace}" public-client "http://${target_host}:8080/"
 expect_allowed "public HTTPS listener TCP port" \
