@@ -2,7 +2,8 @@
 //! Long-running operations are tracked separately from request/response lifetimes.
 
 use ::http::{Response, StatusCode};
-use hyper::body::Incoming;
+use bytes::Bytes;
+use hyper::body::Body;
 use serde_json::json;
 use tracing::warn;
 
@@ -13,7 +14,7 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, AdminAuthorization};
 use super::{
-  admin, admin_body::collect_admin_json, admin_control, file_sync_path, rollout_identity,
+  admin, admin_body::collect_admin_json_body, admin_control, file_sync_path, rollout_identity,
 };
 
 mod oxirule_devtools;
@@ -131,14 +132,18 @@ pub(super) fn admin_lifecycle_response(
   }
 }
 
-pub(super) async fn admin_config_response(
-  request: hyper::Request<Incoming>,
+pub(super) async fn admin_config_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   admin_control: admin_control::AdminControlHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/config/status") => {
       if !authorization.is_allowed("config:GetStatus", "*") {
@@ -148,6 +153,20 @@ pub(super) async fn admin_config_response(
       let mut status = admin_control.status().await;
       append_rollout_status(&mut status, &snapshot.config.rollout);
       append_operational_profile_status(&mut status, &snapshot.config);
+      match snapshot.admin_mutations.status().await {
+        Ok(mutations) => {
+          if let Some(status) = status.as_object_mut() {
+            status.insert("mutations".to_string(), mutations);
+          }
+        }
+        Err(error) => {
+          tracing::warn!(error = %error, "failed to load Admin mutation status");
+          return text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mutation store unavailable",
+          );
+        }
+      }
       admin::json_response(StatusCode::OK, &status)
     }
     (&::http::Method::GET, "/admin/v1/config/effective") => {
@@ -171,10 +190,11 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:Validate", "*") {
         return permission_denied(authorization.actor, "config:Validate");
       }
-      let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
-        Ok(payload) => payload,
-        Err(response) => return response,
-      };
+      let payload =
+        match collect_admin_json_body::<admin_control::AdminConfigPayload, _>(request).await {
+          Ok(payload) => payload,
+          Err(response) => return response,
+        };
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
@@ -197,10 +217,11 @@ pub(super) async fn admin_config_response(
       if !authorization.is_allowed("config:Diff", "*") {
         return permission_denied(authorization.actor, "config:Diff");
       }
-      let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
-        Ok(payload) => payload,
-        Err(response) => return response,
-      };
+      let payload =
+        match collect_admin_json_body::<admin_control::AdminConfigPayload, _>(request).await {
+          Ok(payload) => payload,
+          Err(response) => return response,
+        };
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
@@ -239,10 +260,11 @@ pub(super) async fn admin_config_response(
         return rollout_identity::immutable_mutation_rejected();
       }
       let if_match = if_match_header(&request);
-      let payload = match collect_admin_json::<admin_control::AdminConfigPayload>(request).await {
-        Ok(payload) => payload,
-        Err(response) => return response,
-      };
+      let payload =
+        match collect_admin_json_body::<admin_control::AdminConfigPayload, _>(request).await {
+          Ok(payload) => payload,
+          Err(response) => return response,
+        };
       if let Some(response) = admin_control::validate_config_payload(&payload) {
         return response;
       }
@@ -297,8 +319,8 @@ fn append_operational_profile_status(status: &mut serde_json::Value, config: &Co
   }
 }
 
-pub(super) async fn admin_tls_response(
-  request: &hyper::Request<Incoming>,
+pub(super) async fn admin_tls_response<B>(
+  request: &hyper::Request<B>,
   snapshot: &AppSnapshot,
   admin_control: admin_control::AdminControlHandle,
   authorization: &AdminAuthorization<'_>,
@@ -409,14 +431,18 @@ pub(super) async fn admin_tls_response(
   }
 }
 
-pub(super) async fn admin_files_response(
-  request: hyper::Request<Incoming>,
+pub(super) async fn admin_files_response<B>(
+  request: hyper::Request<B>,
   admin_control: admin_control::AdminControlHandle,
   immutable_rollout: bool,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   if path != "/admin/v1/files/sync" {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
@@ -427,10 +453,11 @@ pub(super) async fn admin_files_response(
     return rollout_identity::immutable_mutation_rejected();
   }
   let if_match = if_match_header(&request);
-  let payload = match collect_admin_json::<admin_control::AdminFilesSyncRequest>(request).await {
-    Ok(payload) => payload,
-    Err(response) => return response,
-  };
+  let payload =
+    match collect_admin_json_body::<admin_control::AdminFilesSyncRequest, _>(request).await {
+      Ok(payload) => payload,
+      Err(response) => return response,
+    };
   if let Some(response) = admin_control::validate_file_sync_payload(&payload) {
     return response;
   }
@@ -626,7 +653,7 @@ fn validation_failed(actor: &AdminActor, operation: &'static str, error: &str) {
   );
 }
 
-fn if_match_header(request: &hyper::Request<Incoming>) -> Option<String> {
+fn if_match_header<B>(request: &hyper::Request<B>) -> Option<String> {
   request
     .headers()
     .get(::http::header::IF_MATCH)

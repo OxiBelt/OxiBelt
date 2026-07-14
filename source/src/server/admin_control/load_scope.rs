@@ -24,6 +24,18 @@ pub(crate) fn validate_control_plane_config_scope(
   active: &Config,
   candidate: &Config,
 ) -> Result<(), AdminControlResponse> {
+  if active.admin.mutations != candidate.admin.mutations
+    || (active.admin.mutations.mode.enabled()
+      && (active.admin.audit != candidate.admin.audit
+        || active.shared_state != candidate.shared_state
+        || active.ipm.backend != candidate.ipm.backend
+        || active.ipm.namespace != candidate.ipm.namespace))
+  {
+    return Err(AdminControlResponse::error(
+      StatusCode::CONFLICT,
+      "an active mutation trust root, durable audit backend, or namespace cannot be changed by an in-flight Admin mutation",
+    ));
+  }
   let mut missing = Vec::new();
   if active.admin != candidate.admin && !permissions.admin_update_config {
     missing.push("admin:UpdateConfig");

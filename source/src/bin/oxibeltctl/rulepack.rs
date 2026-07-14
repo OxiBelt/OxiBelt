@@ -152,10 +152,20 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
   }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_remote_if_requested(
   client: &AdminClient,
   command: &Command,
   output: OutputFormat,
+) -> anyhow::Result<bool> {
+  run_remote_if_requested_signed(client, command, output, None).await
+}
+
+pub(crate) async fn run_remote_if_requested_signed(
+  client: &AdminClient,
+  command: &Command,
+  output: OutputFormat,
+  mutation_signer: Option<&crate::mutation_signer::MutationSigner>,
 ) -> anyhow::Result<bool> {
   let Command::Rulepack(command) = command else {
     return Ok(false);
@@ -163,7 +173,7 @@ pub(crate) async fn run_remote_if_requested(
   match &command.command {
     RulepackSubcommand::List => {
       let plan = plan_rulepack(client, command).await?;
-      send_and_print(client, &plan, output).await?;
+      send_and_print(client, &plan, output, mutation_signer).await?;
       Ok(true)
     }
     RulepackSubcommand::Fit(args) => {
@@ -184,7 +194,7 @@ pub(crate) async fn run_remote_if_requested(
         return Ok(true);
       }
       let (plan, installed_name) = plan_rulepack_apply(client, args).await?;
-      send_and_print(client, &plan, output).await?;
+      send_and_print(client, &plan, output, mutation_signer).await?;
       verify_rulepack_active(client, &installed_name).await?;
       Ok(true)
     }
@@ -196,7 +206,7 @@ pub(crate) async fn run_remote_if_requested(
         return Ok(true);
       }
       let (plan, installed_name) = plan_rulepack_apply(client, &apply_args).await?;
-      send_and_print(client, &plan, output).await?;
+      send_and_print(client, &plan, output, mutation_signer).await?;
       verify_rulepack_active(client, &installed_name).await?;
       Ok(true)
     }
@@ -206,7 +216,7 @@ pub(crate) async fn run_remote_if_requested(
     }
     RulepackSubcommand::Remove(args) => {
       let plan = plan_rulepack_remove(client, args).await?;
-      send_and_print(client, &plan, output).await?;
+      send_and_print(client, &plan, output, mutation_signer).await?;
       Ok(true)
     }
     RulepackSubcommand::Repo(_)
@@ -365,15 +375,17 @@ async fn send_and_print(
   client: &AdminClient,
   plan: &RequestPlan,
   output: OutputFormat,
+  mutation_signer: Option<&crate::mutation_signer::MutationSigner>,
 ) -> anyhow::Result<AdminResponse> {
-  let response = client
-    .request_json(
-      plan.method.clone(),
-      &plan.endpoint,
-      plan.body.clone(),
-      plan.if_match.as_deref(),
-    )
-    .await?;
+  let response = crate::mutation_signer::request_json(
+    client,
+    mutation_signer,
+    plan.method.clone(),
+    &plan.endpoint,
+    plan.body.clone(),
+    plan.if_match.as_deref(),
+  )
+  .await?;
   print_response(&response, output, &plan.filter)?;
   if response.status == StatusCode::FORBIDDEN {
     print_permission_hint(&plan.permission);

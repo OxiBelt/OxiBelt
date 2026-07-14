@@ -25,6 +25,8 @@ to resources such as `oxibelt:<namespace>:admin:metadata/openapi`.
 `/admin/v1/capabilities` reports the API version, package version, compiled
 or configured Admin features, active mTLS workload-identity binding mode, and
 request-size limits used by the Admin API.
+`features.admin_mutation_replay` is true when `[admin.mutations]` is in
+`optional` or `required` mode.
 `/admin/v1/version` reports the API version, package name, and package version.
 Admin listener responses include `X-OxiBelt-Request-Id` and
 `X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
@@ -34,6 +36,12 @@ operation hint to expose. Permission denials may include the checked IPM
 `action` and resolved `resource`; ETag failures may include the `If-Match`
 header name and expected ETag. Generation ETags are concurrency diagnostics,
 not bearer secrets.
+
+Successful protected mutation executions and terminal replay responses include
+`X-OxiBelt-Mutation-Request-Id`, `X-OxiBelt-Mutation-Revision`, and
+`X-OxiBelt-Idempotent-Replay`. The mutation request ID is supplied by the
+caller and is distinct from the server-generated `X-OxiBelt-Request-Id` audit
+correlation ID.
 
 An opt-in `[admin.http3]` UDP listener is available for Admin WebTransport
 operation event subscriptions. It requires Admin TLS with TLS 1.3 support and
@@ -133,6 +141,14 @@ Resource-specific Admin/IPM resources include:
 - IPM: `status/current`, `principal/<id>`, `credential/<id>`,
   `policy/<name>`, `binding/<id>`, `group/<group>`, `audit/current`, and
   `simulation/current`
+- protected mutations: `admin:ReadMutations` on `mutation/<request_id>` and
+  `config:GetInstances` on `instances/current`
+- typed mutation resources: `config:RotateKey` on
+  `key/<target>/<name-or-default>` and `config:UpdateSecretReference` on
+  `secret-reference/<encoded-field>`
+- break glass: `ipm:GetBreakGlassActivation` and
+  `ipm:ActivateBreakGlass` on `break-glass/principal/<principal>`, and
+  `ipm:RevokeBreakGlass` on `break-glass/activation/<activation_id>`
 
 Cache purge, key-explain, and warm operations check the effective cache policy
 and the normalized host. Cache warm derives that policy from the same
@@ -165,6 +181,80 @@ workload, and relies on per-Pod revision/digest proof. In
 `POST /admin/v1/tls/downstream/reload` return `409` so one Pod cannot diverge
 from its assigned revision. Read-only status, effective-config, validation, and
 diff endpoints remain available to operators.
+
+`[admin.mutations.rollout] mode = "admin_cluster"` is reserved for a future
+fixed-member rollout authority. Configuration validation rejects selecting the
+mode. A defense-in-depth request-path guard also returns `503` if such a runtime
+is constructed; this release does not claim distributed validation, apply,
+acknowledgement, or rollback. `single_instance` is the supported P1-13 runtime.
+`GET /admin/v1/config/instances` exposes only the bounded configured-member and
+live-heartbeat diagnostic view; it is not convergence proof.
+
+## Protected Mutations
+
+When `[admin.mutations].mode = "required"`, each high-risk request must carry
+`X-OxiBelt-Mutation`. The header value is unpadded base64url containing a
+strict JSON object with `version`, `signer_id`, canonical UUID `request_id`,
+RFC 3339 UTC `issued_at` and `expires_at`, `expected_previous_revision`,
+`new_revision`, exact-body `content_digest`, required `target`, and
+`signature`. Single-instance mode uses its deterministic local target. The
+supported signature suites are `ed25519` and, when the
+post-quantum build feature is present, the fail-closed hybrid
+`ed25519_ml_dsa_44`. A hybrid envelope must contain valid Ed25519 and ML-DSA-44
+signatures over the same suite-bound transcript; it never downgrades to one
+signature.
+
+The signed transcript binds the signer, IPM namespace, authenticated principal,
+HTTP method, exact path and query, normalized strong `If-Match`, timestamps,
+logical revisions, target, and
+`sha256:<lowercase-hex>` digest of the exact transmitted body bytes. Unknown or
+duplicate envelope fields, an expired request, excessive validity, a signer
+not bound to the authenticated principal, an invalid signature, or a digest
+mismatch is rejected before mutation. The envelope does not replace ordinary
+bearer/mTLS authentication, IPM authorization, request limits, or `If-Match`.
+
+The protected families are configuration load and rollback, file sync,
+downstream TLS reload, downstream TLS key reload, submitted secret-reference
+update, every IPM principal/credential/policy/binding write, credential rotation
+and revocation, and break-glass activation or revocation. The single strong
+quoted `If-Match` value is normalized, required to equal the current operational
+ETag, and included in the signed transcript. The distinct signed
+`expected_previous_revision` is compared with the PostgreSQL mutation ledger's
+logical head; a successful terminal receipt advances that head to the signed
+`new_revision`. The first logical head is initialized from the active
+operational revision. Missing mutation metadata or `If-Match` returns `428`;
+invalid or expired metadata returns `400`; invalid
+signer authentication returns `401`; stale revisions, conflicting request-ID
+reuse, or an unresolved prior attempt return `409`; an unavailable replay,
+audit, or rollout store returns `503`.
+
+The PostgreSQL mutation ledger is the idempotency authority. An exact retry of
+the same request ID, fingerprint, actor, and target returns a reduced, bounded
+safe result with the retained HTTP status and
+`X-OxiBelt-Idempotent-Replay: true`, without reapplying the change. This replay
+body is intentionally not necessarily byte-for-byte equal to the first
+response. Reusing the ID for any different request returns `409`. A request
+whose commit outcome cannot be proved remains indeterminate and cannot be
+automatically retried. `GET /admin/v1/mutations/{request_id}` exposes a bounded,
+redacted receipt; it never returns raw bodies, credentials, signatures, private
+keys, or secret values.
+
+Credential creation and rotation return plaintext token material only from the
+first successful execution. An exact replay returns only the reduced safe
+result with `token_recoverable = false`; the mutation revision remains in the
+response header. It neither rotates again nor stores or re-emits the token.
+
+`POST /admin/v1/keys/rotate` supports only the configured default or SNI
+downstream TLS key path. It verifies a digest-pinned, pre-provisioned file and
+reloads downstream TLS; it does not accept private-key bytes. Admin TLS, QUIC
+host-key, and remote-signer activation are not advertised by this release.
+`POST /admin/v1/config/secret-references/update` validates its typed allowlist
+and rejects raw secret values, but no atomic runtime activation slot exists, so
+the current endpoint is fail-closed and returns `409` without changing state. In
+`[ipm.break_glass] access_mode = "two_factor_activation"`, an inactive
+break-glass credential can access only its self-status and activation route;
+activation additionally requires a signer bound to that principal and creates
+a bounded database-timed grant. Replaying an activation never extends it.
 
 ## Person Proof Administration
 
@@ -209,7 +299,9 @@ hash, not a browser, user, route, or future rotated clearance.
 `GET /admin/v1/ipm/status` returns the active IPM `generation`, `etag`,
 static/store object counts, and the last refresh result. Mutating IPM
 endpoints require `If-Match` with this ETag; missing ETags return `428`, stale
-ETags return `412`.
+ETags return `412`. When mutation protection is required, these endpoints also
+require `X-OxiBelt-Mutation`; the PostgreSQL transaction rechecks the expected
+generation after locking so two writers cannot both commit from one revision.
 
 `GET /admin/v1/dynamic-policies/status` returns the dynamic-policy PostgreSQL
 generation and ETag. Create, import, patch, and delete require matching
@@ -258,7 +350,11 @@ policies, or bindings.
 Credential create and rotate responses return a new `obt_v1_<base64url>` token
 exactly once. OxiBelt stores only a `sha256-v1` digest plus token prefix. Rotate
 keeps the previous token valid until `previous_token_overlap_until`; revoke and
-delete clear regular access subject to lockout prevention.
+delete clear regular access subject to lockout prevention. An exact mutation
+replay returns the reduced retained safe result with
+`token_recoverable = false`; it never rotates again or re-emits the plaintext
+token. The signed new logical revision remains available in the mutation
+response header and receipt.
 
 `/admin/v1/ipm/simulate` accepts `action` and `resource` for a self check, plus
 optional `target`, `context`, and `overlay` objects. `target.principal` resolves

@@ -51,6 +51,7 @@ impl AppSnapshot {
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),
       admin_audit: previous.admin_audit.clone(),
+      admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),

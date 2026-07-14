@@ -1,6 +1,7 @@
 //! Immutable runtime snapshots and shared client pools; reloads swap snapshots so in-flight work can finish against a consistent view.
 use crate::access_log::{AccessLogRuntime, AccessLogSinks, AccessLogSource, SystemAccessLog};
 use crate::admin_audit::AdminAuditRuntime;
+use crate::admin_mutation::AdminMutationRuntime;
 use crate::cache::ResponseCache;
 use crate::client_identity::ClientIdentityRuntime;
 use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig};
@@ -97,6 +98,7 @@ pub struct AppSnapshot {
   pub webtransport_admin: Arc<WebTransportAdminRegistry>,
   pub lifecycle: Arc<LifecycleState>,
   pub admin_audit: AdminAuditRuntime,
+  pub(crate) admin_mutations: AdminMutationRuntime,
   pub shared_state: Option<Arc<SharedState>>,
   pub(crate) crlite: tls::CrliteRuntime,
   pub(crate) ocsp_staple: tls::OcspStapleRuntime,
@@ -331,6 +333,9 @@ impl AppSnapshot {
     )
     .await
     .context("failed to build admin audit runtime")?;
+    let admin_mutations = AdminMutationRuntime::new(&config, &admin_audit)
+      .await
+      .context("failed to build Admin mutation runtime")?;
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
@@ -482,6 +487,7 @@ impl AppSnapshot {
       webtransport_admin,
       lifecycle,
       admin_audit,
+      admin_mutations,
       shared_state,
       crlite,
       ocsp_staple,
@@ -653,6 +659,7 @@ impl AppSnapshot {
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),
       admin_audit: previous.admin_audit.clone(),
+      admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),

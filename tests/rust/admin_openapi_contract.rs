@@ -241,6 +241,267 @@ fn ipm_mutations_declare_etag_preconditions() {
 }
 
 #[test]
+fn high_risk_mutations_declare_signed_replay_contract() {
+  let spec = openapi();
+  for (method, path) in [
+    ("post", "/admin/v1/config/load"),
+    ("post", "/admin/v1/config/rollback"),
+    ("post", "/admin/v1/config/secret-references/update"),
+    ("post", "/admin/v1/files/sync"),
+    ("post", "/admin/v1/tls/downstream/reload"),
+    ("post", "/admin/v1/keys/rotate"),
+    ("post", "/admin/v1/ipm/principals"),
+    ("patch", "/admin/v1/ipm/principals/{id}"),
+    ("delete", "/admin/v1/ipm/principals/{id}"),
+    ("post", "/admin/v1/ipm/credentials"),
+    ("patch", "/admin/v1/ipm/credentials/{id}"),
+    ("delete", "/admin/v1/ipm/credentials/{id}"),
+    ("post", "/admin/v1/ipm/credentials/{id}/rotate"),
+    ("post", "/admin/v1/ipm/credentials/{id}/revoke"),
+    ("post", "/admin/v1/ipm/policies"),
+    ("patch", "/admin/v1/ipm/policies/{id}"),
+    ("delete", "/admin/v1/ipm/policies/{id}"),
+    ("post", "/admin/v1/ipm/bindings"),
+    ("delete", "/admin/v1/ipm/bindings/{id}"),
+    ("post", "/admin/v1/break-glass/activations"),
+    ("post", "/admin/v1/break-glass/activations/{id}/revoke"),
+  ] {
+    let names = operation_parameter_names(&spec, path, method);
+    assert!(
+      names.contains("If-Match"),
+      "{method} {path} must require If-Match"
+    );
+    assert!(
+      names.contains("X-OxiBelt-Mutation"),
+      "{method} {path} must declare the mode-dependent signed mutation envelope"
+    );
+
+    let operation = &spec["paths"][path][method];
+    for status in ["409", "428", "503"] {
+      assert!(
+        operation["responses"].get(status).is_some(),
+        "{method} {path} must document protected-mutation status {status}"
+      );
+    }
+
+    if path == "/admin/v1/config/secret-references/update" {
+      assert!(
+        operation["responses"].get("200").is_none() && operation["responses"].get("201").is_none(),
+        "secret-reference activation must remain fail-closed until an atomic runtime slot exists"
+      );
+    } else {
+      let success = operation["responses"]
+        .get("200")
+        .or_else(|| operation["responses"].get("201"))
+        .unwrap_or_else(|| panic!("{method} {path} must document a terminal success"));
+      assert_eq!(
+        success["$ref"], "#/components/responses/MutationResult",
+        "{method} {path} must use the mutation result headers"
+      );
+    }
+  }
+
+  let parameter = &spec["components"]["parameters"]["MutationEnvelope"];
+  assert_eq!(parameter["name"], "X-OxiBelt-Mutation");
+  assert_eq!(parameter["in"], "header");
+  assert_eq!(parameter["required"], false);
+  let description = parameter["description"]
+    .as_str()
+    .expect("MutationEnvelope must describe mode-dependent enforcement");
+  for phrase in [
+    "required when",
+    "optional mode",
+    "normalized strong If-Match",
+  ] {
+    assert!(
+      description.contains(phrase),
+      "MutationEnvelope must mention {phrase}"
+    );
+  }
+
+  let response_headers = spec["components"]["responses"]["MutationResult"]["headers"]
+    .as_object()
+    .expect("MutationResult headers must be an object");
+  for name in [
+    "X-OxiBelt-Mutation-Request-Id",
+    "X-OxiBelt-Mutation-Revision",
+    "X-OxiBelt-Idempotent-Replay",
+  ] {
+    assert!(
+      response_headers.contains_key(name),
+      "MutationResult must declare {name}"
+    );
+  }
+}
+
+#[test]
+fn mutation_envelope_and_redacted_receipt_are_strict() {
+  let spec = openapi();
+  let envelope = &spec["components"]["schemas"]["MutationEnvelope"];
+  assert_eq!(envelope["additionalProperties"], false);
+  let required = json_string_set(&envelope["required"], "MutationEnvelope.required");
+  for field in [
+    "version",
+    "signer_id",
+    "request_id",
+    "issued_at",
+    "expires_at",
+    "expected_previous_revision",
+    "new_revision",
+    "content_digest",
+    "target",
+    "signature",
+  ] {
+    assert!(
+      required.contains(field),
+      "MutationEnvelope must require {field}"
+    );
+  }
+  assert_eq!(
+    envelope["properties"]["content_digest"]["pattern"],
+    "^sha256:[a-f0-9]{64}$"
+  );
+  let signature_pattern = envelope["properties"]["signature"]["pattern"]
+    .as_str()
+    .expect("signature pattern must be text");
+  for suite in ["ed25519", "ed25519_ml_dsa_44"] {
+    assert!(
+      signature_pattern.contains(suite),
+      "signature must document {suite}"
+    );
+  }
+
+  let receipt = serde_json::to_string(&spec["components"]["schemas"]["MutationReceipt"])
+    .expect("MutationReceipt should serialize");
+  for forbidden in [r#""token""#, r#""secret""#, r#""signature""#, r#""body""#] {
+    assert!(
+      !receipt.to_ascii_lowercase().contains(forbidden),
+      "MutationReceipt must not expose sensitive field {forbidden}"
+    );
+  }
+  assert!(receipt.contains("token_recoverable"));
+}
+
+#[test]
+fn mutation_receipts_instances_and_typed_activation_routes_are_documented() {
+  let spec = openapi();
+  assert_eq!(
+    spec["paths"]["/admin/v1/mutations/{request_id}"]["get"]["responses"]["200"]["$ref"],
+    "#/components/responses/MutationReceipt"
+  );
+  assert_eq!(
+    spec["paths"]["/admin/v1/config/instances"]["get"]["responses"]["200"]["content"]["application/json"]
+      ["schema"]["properties"]["instances"]["items"]["$ref"],
+    "#/components/schemas/ConfigInstance"
+  );
+
+  let receipt = &spec["components"]["schemas"]["MutationReceipt"];
+  let receipt_required = json_string_set(&receipt["required"], "MutationReceipt.required");
+  let receipt_properties = receipt["properties"]
+    .as_object()
+    .expect("MutationReceipt.properties must be an object")
+    .keys()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+  assert_eq!(receipt_required, receipt_properties);
+  assert_eq!(
+    json_string_set(
+      &receipt["properties"]["state"]["enum"],
+      "MutationReceipt.state.enum"
+    ),
+    [
+      "claimed",
+      "validating",
+      "applying",
+      "canary_applying",
+      "canary_healthy",
+      "expanding",
+      "fully_applied",
+      "committed",
+      "failed",
+      "rolling_back",
+      "rolled_back",
+      "rollback_failed",
+      "indeterminate",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+  );
+
+  let instances_response = &spec["paths"]["/admin/v1/config/instances"]["get"]["responses"]["200"]
+    ["content"]["application/json"]["schema"];
+  assert_eq!(
+    json_string_set(
+      &instances_response["required"],
+      "instances response required"
+    ),
+    ["configured_members", "instances"]
+      .into_iter()
+      .map(str::to_string)
+      .collect()
+  );
+  let instance = &spec["components"]["schemas"]["ConfigInstance"];
+  let instance_required = json_string_set(&instance["required"], "ConfigInstance.required");
+  let instance_properties = instance["properties"]
+    .as_object()
+    .expect("ConfigInstance.properties must be an object")
+    .keys()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+  assert_eq!(instance_required, instance_properties);
+
+  let key_request = &spec["components"]["schemas"]["KeyRotationRequest"];
+  assert!(key_request["properties"].get("reference").is_some());
+  assert!(key_request["properties"].get("private_key").is_none());
+  assert_eq!(
+    json_string_set(
+      &key_request["properties"]["target"]["enum"],
+      "KeyRotationRequest.target"
+    ),
+    ["downstream_tls_default", "downstream_tls_sni"]
+      .into_iter()
+      .map(str::to_string)
+      .collect()
+  );
+  let secret_request = &spec["components"]["schemas"]["SecretReferenceUpdateRequest"];
+  assert!(secret_request["properties"].get("reference").is_some());
+  assert!(secret_request["properties"].get("value").is_none());
+}
+
+#[test]
+fn mutation_authorization_actions_and_resources_are_documented() {
+  let admin_api = fs::read_to_string(repo_root().join("docs/AdminAPI.md"))
+    .expect("Admin API documentation should be readable");
+  let configuration = fs::read_to_string(repo_root().join("docs/Configuration.md"))
+    .expect("configuration documentation should be readable");
+  for value in [
+    "admin:ReadMutations",
+    "mutation/<request_id>",
+    "config:GetInstances",
+    "instances/current",
+    "config:RotateKey",
+    "key/<target>/<name-or-default>",
+    "config:UpdateSecretReference",
+    "secret-reference/<encoded-field>",
+    "ipm:GetBreakGlassActivation",
+    "ipm:ActivateBreakGlass",
+    "break-glass/principal/<principal>",
+    "ipm:RevokeBreakGlass",
+    "break-glass/activation/<activation_id>",
+  ] {
+    assert!(
+      admin_api.contains(value),
+      "docs/AdminAPI.md must document {value}"
+    );
+    assert!(
+      configuration.contains(value),
+      "docs/Configuration.md must document {value}"
+    );
+  }
+}
+
+#[test]
 fn ipm_simulation_documents_non_secret_claim_key_response() {
   let spec = openapi();
   let response_ref = &spec["paths"]["/admin/v1/ipm/simulate"]["post"]["responses"]["200"]["content"]
@@ -571,6 +832,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("get", "/admin/v1/capabilities"),
     ("get", "/admin/v1/version"),
     ("get", "/admin/v1/audit"),
+    ("get", "/admin/v1/mutations/{request_id}"),
     ("get", "/admin/v1/operations"),
     ("post", "/admin/v1/operations"),
     ("get", "/admin/v1/operations/{id}"),
@@ -578,13 +840,16 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("get", "/admin/v1/operations/{id}/events"),
     ("get", "/admin/v1/operations/{id}/events/ws"),
     ("get", "/admin/v1/config/status"),
+    ("get", "/admin/v1/config/instances"),
     ("get", "/admin/v1/config/effective"),
     ("post", "/admin/v1/config/validate"),
     ("post", "/admin/v1/config/diff"),
     ("post", "/admin/v1/config/load"),
     ("post", "/admin/v1/config/rollback"),
+    ("post", "/admin/v1/config/secret-references/update"),
     ("get", "/admin/v1/tls/downstream"),
     ("post", "/admin/v1/tls/downstream/reload"),
+    ("post", "/admin/v1/keys/rotate"),
     ("get", "/admin/v1/tls/upstream"),
     ("post", "/admin/v1/tls/upstream/refresh"),
     ("post", "/admin/v1/files/sync"),
@@ -640,6 +905,9 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("delete", "/admin/v1/ipm/bindings/{id}"),
     ("get", "/admin/v1/ipm/audit"),
     ("post", "/admin/v1/ipm/simulate"),
+    ("get", "/admin/v1/break-glass/activations/self"),
+    ("post", "/admin/v1/break-glass/activations"),
+    ("post", "/admin/v1/break-glass/activations/{id}/revoke"),
     ("get", "/admin/v1/dynamic-policies"),
     ("post", "/admin/v1/dynamic-policies"),
     ("get", "/admin/v1/dynamic-policies/status"),

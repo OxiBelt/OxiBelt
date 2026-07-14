@@ -18,6 +18,7 @@ pub mod access_log;
 pub mod admin_audit;
 pub mod admin_client;
 pub(crate) mod admin_list;
+pub mod admin_mutation;
 pub mod cache;
 pub mod circuit_breakers;
 pub mod client_identity;

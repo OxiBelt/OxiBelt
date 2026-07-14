@@ -17,6 +17,7 @@ pub const CONFIG_REVISION_FILE_ENV: &str = "OXIBELT_CONFIG_REVISION_FILE";
 pub const INSTANCE_ID_ENV: &str = "OXIBELT_INSTANCE_ID";
 
 const KUBERNETES_IMMUTABLE_MODE: &str = "kubernetes_immutable";
+const ADMIN_CLUSTER_MODE: &str = "admin_cluster";
 const MAX_METADATA_VALUE_LEN: usize = 253;
 const SHA256_HEX_LEN: usize = 64;
 
@@ -28,6 +29,8 @@ pub enum ConfigRolloutMode {
   Mutable,
   /// Kubernetes replaces Pods from immutable configuration artifacts.
   KubernetesImmutable,
+  /// A fixed-member OxiBelt Admin control plane coordinates mutable revisions.
+  AdminCluster,
 }
 
 impl ConfigRolloutMode {
@@ -35,6 +38,7 @@ impl ConfigRolloutMode {
     match self {
       Self::Mutable => "mutable",
       Self::KubernetesImmutable => KUBERNETES_IMMUTABLE_MODE,
+      Self::AdminCluster => ADMIN_CLUSTER_MODE,
     }
   }
 }
@@ -85,6 +89,10 @@ impl ConfigRolloutIdentity {
     self.mode == ConfigRolloutMode::KubernetesImmutable
   }
 
+  pub fn is_admin_cluster(&self) -> bool {
+    self.mode == ConfigRolloutMode::AdminCluster
+  }
+
   pub fn blocks_per_pod_mutation(&self) -> bool {
     self.is_immutable()
   }
@@ -104,6 +112,17 @@ impl ConfigRolloutIdentity {
     source_paths: &ConfigSourcePaths,
     hot_reload_mode: HotReloadMode,
   ) -> anyhow::Result<()> {
+    if self.is_admin_cluster() {
+      if hot_reload_mode != HotReloadMode::Off {
+        bail!(
+          "runtime.hot_reload.mode must be \"off\" when {CONFIG_ROLLOUT_MODE_ENV}={ADMIN_CLUSTER_MODE}"
+        );
+      }
+      if self.instance_id.is_none() {
+        bail!("{INSTANCE_ID_ENV} is required in admin_cluster rollout mode");
+      }
+      return Ok(());
+    }
     if !self.is_immutable() {
       return Ok(());
     }
@@ -189,8 +208,24 @@ impl ConfigRolloutIdentity {
         identity.validate(source_paths, HotReloadMode::Off)?;
         Ok(identity)
       }
+      Some(ADMIN_CLUSTER_MODE) => {
+        if values.revision.is_some() || values.digest.is_some() || values.revision_file.is_some() {
+          bail!("immutable rollout revision metadata must not be set in admin_cluster mode");
+        }
+        Ok(Self {
+          mode: ConfigRolloutMode::AdminCluster,
+          instance_id: Some(required_metadata_value(
+            INSTANCE_ID_ENV,
+            values.instance_id,
+          )?),
+          desired_revision: None,
+          digest: None,
+          revision_file: None,
+          apply_state: ConfigRolloutApplyState::NotConfigured,
+        })
+      }
       Some(value) => bail!(
-        "{CONFIG_ROLLOUT_MODE_ENV} must be unset or {KUBERNETES_IMMUTABLE_MODE}, got {value:?}"
+        "{CONFIG_ROLLOUT_MODE_ENV} must be unset, {KUBERNETES_IMMUTABLE_MODE}, or {ADMIN_CLUSTER_MODE}, got {value:?}"
       ),
     }
   }

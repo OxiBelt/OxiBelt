@@ -16,6 +16,7 @@ use crate::waf::WafConfig;
 mod access_log;
 mod admin_audit;
 mod admin_legacy;
+mod admin_mutations;
 mod admin_runtime;
 mod admin_workload_identity;
 mod allowed_keys;
@@ -62,8 +63,6 @@ mod turn;
 mod turn_queue;
 mod upstream_pool;
 mod workers;
-pub use access_log::*;
-pub use admin_audit::*;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use admin_workload_identity::*;
 pub use cache_external::{
@@ -126,6 +125,7 @@ use turn::RawWebRtcTurnListenerConfig;
 pub use turn::*;
 pub use upstream_pool::*;
 pub use workers::*;
+pub use {access_log::*, admin_audit::*, admin_mutations::*};
 
 /// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
 #[derive(Debug, Clone, PartialEq)]
@@ -576,6 +576,7 @@ impl Config {
     self.source_paths.config_dir = Some(path_roots.config_dir.clone());
     self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
     self.source_paths.oxirule_dir = Some(path_roots.oxirule_dir.clone());
+    self.resolve_admin_mutation_signer_paths(&path_roots.config_dir)?;
     let (tls_cert_chain, tls_cert_chain_logical) =
       resolve_existing_local_config_file_path_with_logical(
         "tls.cert_chain",
@@ -933,6 +934,7 @@ impl Config {
     self.validate_cache()?;
     self.validate_ipm()?;
     self.validate_admin()?;
+    self.validate_admin_mutations()?;
     self.validate_metrics_and_health()?;
     self.overload.validate()?;
     self.circuit_breakers.validate()?;
@@ -3134,6 +3136,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "webtransport_max_sessions",
       "websocket",
     ][..],
+    "admin.mutations" => allowed_keys::ADMIN_MUTATIONS_CONFIG_KEYS,
+    "admin.mutations.rollout" => allowed_keys::ADMIN_MUTATION_ROLLOUT_CONFIG_KEYS,
+    "admin.mutations.signers" => allowed_keys::ADMIN_MUTATION_SIGNER_CONFIG_KEYS,
     "admin.http3" => &["bind", "enabled"][..],
     "admin.cache_purge_signing" => &[
       "enabled",
@@ -3172,7 +3177,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "principals",
       "trust",
     ][..],
-    "ipm.break_glass" => &["argon2id_memory_mib"][..],
+    "ipm.break_glass" => allowed_keys::IPM_BREAK_GLASS_CONFIG_KEYS,
     "ipm.credentials" => &[
       "bearer_token_env",
       "break_glass_access_token_hash",
@@ -5004,6 +5009,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub operations: AdminOperationsConfig,
   #[serde(default)]
+  pub mutations: AdminMutationsConfig,
+  #[serde(default)]
   pub http3: AdminHttp3Config,
   #[serde(default)]
   pub tls: AdminTlsConfig,
@@ -5026,6 +5033,7 @@ impl Default for AdminConfig {
       workload_identity: AdminWorkloadIdentityConfig::default(),
       audit: AdminAuditConfig::default(),
       operations: AdminOperationsConfig::default(),
+      mutations: AdminMutationsConfig::default(),
       http3: AdminHttp3Config::default(),
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,

@@ -18,6 +18,7 @@ use crate::access_log::AccessLogSinks;
 use crate::config::{AdminAuditExportSink, AdminAuditMode, AdminAuditRequiredSink, Config};
 use crate::metrics::Metrics;
 
+mod critical;
 mod request;
 mod store;
 

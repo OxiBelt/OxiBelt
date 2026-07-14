@@ -2,7 +2,8 @@
 //! Simulation preparation avoids disclosing protected targets before authorization succeeds.
 
 use ::http::{Response, StatusCode};
-use hyper::body::Incoming;
+use bytes::Bytes;
+use hyper::body::Body;
 
 use crate::ipm::{IpmSimulationAuthorizationRequirements, IpmSimulationRequest};
 use crate::proxy::http::body::ProxyBody;
@@ -10,7 +11,7 @@ use crate::proxy::http::response::text_response;
 
 use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
-use super::admin_body::collect_admin_json;
+use super::admin_body::collect_admin_json_body;
 use super::admin_ipm::ipm_error_response;
 use super::admin_resource;
 
@@ -26,11 +27,15 @@ fn allowed_silently(
   authorization.is_allowed_silently(action, resource_name)
 }
 
-pub(super) async fn simulation_response(
-  request: hyper::Request<Incoming>,
+pub(super) async fn simulation_response<B>(
+  request: hyper::Request<B>,
   authorization: &AdminAuthorization<'_>,
-) -> Response<ProxyBody> {
-  let body = match collect_admin_json::<IpmSimulationRequest>(request).await {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
+  let body = match collect_admin_json_body::<IpmSimulationRequest, _>(request).await {
     Ok(body) => body,
     Err(response) => return response,
   };

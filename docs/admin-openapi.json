@@ -507,6 +507,37 @@
         "client_streams": false
       }
     },
+    "/admin/v1/mutations/{request_id}": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "operationId": "getMutationReceipt",
+        "summary": "Fetch a bounded redacted durable mutation receipt.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/MutationRequestId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MutationReceipt"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/admin/v1/config/status": {
       "get": {
         "tags": [
@@ -550,6 +581,66 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/instances": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "listConfigInstances",
+        "summary": "List configured members and live heartbeat diagnostics for the reserved fixed-member mode; this is not convergence proof.",
+        "responses": {
+          "200": {
+            "description": "Configured member IDs and currently live heartbeat records for diagnostics.",
+            "headers": {
+              "X-OxiBelt-Request-Id": {
+                "$ref": "#/components/headers/AdminRequestId"
+              },
+              "X-OxiBelt-API-Version": {
+                "$ref": "#/components/headers/AdminApiVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "configured_members",
+                    "instances"
+                  ],
+                  "properties": {
+                    "configured_members": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "instances": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ConfigInstance"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -642,6 +733,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -649,7 +743,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -668,6 +762,12 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -682,6 +782,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -689,7 +792,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -705,6 +808,58 @@
           },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/config/secret-references/update": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "updateSecretReference",
+        "summary": "Validate one allowlisted secret reference and fail closed because atomic runtime activation is unavailable.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SecretReferenceUpdateRequest"
+        },
+          "responses": {
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1039,6 +1194,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -1046,7 +1204,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -1062,6 +1220,61 @@
           },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/keys/rotate": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "rotateKeyReference",
+        "summary": "Verify and reload a digest-pinned default or SNI downstream TLS key path.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/KeyRotationRequest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MutationResult"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1189,12 +1402,20 @@
         ],
         "operationId": "syncAdminFiles",
         "summary": "Synchronize explicit config or OxiRule files and optionally apply changes; unavailable in Kubernetes immutable rollout mode.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
+          }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/FileSyncRequest"
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -1208,8 +1429,17 @@
           "409": {
             "$ref": "#/components/responses/ImmutableRolloutConflict"
           },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2150,6 +2380,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2157,7 +2390,7 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2179,6 +2412,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2219,6 +2455,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2226,7 +2465,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2248,6 +2487,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       },
@@ -2260,11 +2502,14 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2283,6 +2528,9 @@
           },
           "428": {
             "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2382,6 +2630,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2389,7 +2640,7 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2411,6 +2662,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2451,6 +2705,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2458,7 +2715,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2480,6 +2737,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       },
@@ -2492,11 +2752,14 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2515,6 +2778,9 @@
           },
           "428": {
             "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2534,6 +2800,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2541,7 +2810,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2563,6 +2832,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2582,6 +2854,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2589,7 +2864,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2611,6 +2886,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2692,6 +2970,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2699,7 +2980,7 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2721,6 +3002,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2761,6 +3045,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2768,7 +3055,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2790,6 +3077,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       },
@@ -2802,11 +3092,14 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2825,6 +3118,9 @@
           },
           "428": {
             "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2932,6 +3228,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "requestBody": {
@@ -2939,7 +3238,7 @@
         },
         "responses": {
           "201": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2961,6 +3260,9 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -2980,11 +3282,14 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
           }
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/MutationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3003,6 +3308,9 @@
           },
           "428": {
             "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -3073,6 +3381,133 @@
           },
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
+          }
+        }
+      }
+    },
+    "/admin/v1/break-glass/activations/self": {
+      "get": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "getBreakGlassActivationSelf",
+        "summary": "Fetch the authenticated break-glass principal's bounded activation status and current revision.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/break-glass/activations": {
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "activateBreakGlass",
+        "summary": "Create a database-timed two-factor break-glass activation for the authenticated principal.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/BreakGlassActivationRequest"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/MutationResult"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/admin/v1/break-glass/activations/{id}/revoke": {
+      "post": {
+        "tags": [
+          "ipm"
+        ],
+        "operationId": "revokeBreakGlassActivation",
+        "summary": "Revoke one active two-factor break-glass grant.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ActivationId"
+          },
+          {
+            "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/MutationEnvelope"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/EmptyJson"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MutationResult"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "$ref": "#/components/responses/PreconditionFailed"
+          },
+          "428": {
+            "$ref": "#/components/responses/PreconditionRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -3895,6 +4330,25 @@
           "type": "string",
           "const": "v1"
         }
+      },
+      "MutationRequestId": {
+        "description": "Caller-supplied canonical UUID identifying the protected mutation.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "MutationRevision": {
+        "description": "Logical revision committed or referenced by the protected mutation.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IdempotentReplay": {
+        "description": "True only when the response is the retained result of an exact request replay.",
+        "schema": {
+          "type": "boolean"
+        }
       }
     },
     "parameters": {
@@ -3915,6 +4369,36 @@
           "type": "string"
         },
         "description": "Optional ETag from the corresponding status endpoint. When supplied, it is enforced as a precondition."
+      },
+      "MutationEnvelope": {
+        "name": "X-OxiBelt-Mutation",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "description": "Mode-dependent unpadded base64url strict MutationEnvelope JSON. It is required when admin.mutations.mode is required, validated when supplied in optional mode, and ignored by the replay guard when protection is off. The signature binds the authenticated principal, IPM namespace, HTTP method, exact path/query, normalized strong If-Match operational ETag, unsigned envelope fields, and SHA-256 digest of the exact transmitted body. expected_previous_revision remains the distinct durable logical revision precondition."
+      },
+      "MutationRequestId": {
+        "name": "request_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "ActivationId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
       },
       "PersonProofRevocationIdempotencyKey": {
         "name": "Idempotency-Key",
@@ -4032,6 +4516,36 @@
       }
     },
     "requestBodies": {
+      "KeyRotationRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/KeyRotationRequest"
+            }
+          }
+        }
+      },
+      "SecretReferenceUpdateRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SecretReferenceUpdateRequest"
+            }
+          }
+        }
+      },
+      "BreakGlassActivationRequest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/BreakGlassActivationRequest"
+            }
+          }
+        }
+      },
       "EmptyJson": {
         "required": false,
         "content": {
@@ -5063,6 +5577,52 @@
           }
         }
       },
+      "MutationResult": {
+        "description": "Protected mutation terminal result. An exact replay returns a reduced retained bounded safe result with the original status, not necessarily the first response body, without reapplying the mutation.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          },
+          "X-OxiBelt-Mutation-Request-Id": {
+            "$ref": "#/components/headers/MutationRequestId"
+          },
+          "X-OxiBelt-Mutation-Revision": {
+            "$ref": "#/components/headers/MutationRevision"
+          },
+          "X-OxiBelt-Idempotent-Replay": {
+            "$ref": "#/components/headers/IdempotentReplay"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "MutationReceipt": {
+        "description": "Bounded redacted protected-mutation receipt containing the durable logical revision chain and reduced safe replay result.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MutationReceipt"
+            }
+          }
+        }
+      },
       "JsonObject": {
         "description": "JSON object response.",
         "headers": {
@@ -5153,7 +5713,7 @@
         }
       },
       "Unauthorized": {
-        "description": "Missing or invalid bearer token.",
+        "description": "Missing or invalid bearer/workload credential, or invalid mutation signer binding/signature.",
         "headers": {
           "X-OxiBelt-Request-Id": {
             "$ref": "#/components/headers/AdminRequestId"
@@ -5189,7 +5749,7 @@
         }
       },
       "Conflict": {
-        "description": "Request conflicts with the active store mode or static IPM bootstrap entries.",
+        "description": "Request conflicts with the active store mode, static IPM bootstrap entries, protected mutation request ID/revision, or unresolved prior mutation.",
         "headers": {
           "X-OxiBelt-Request-Id": {
             "$ref": "#/components/headers/AdminRequestId"
@@ -5261,7 +5821,7 @@
         }
       },
       "PreconditionRequired": {
-        "description": "A mutating request omitted the required If-Match ETag.",
+        "description": "A mutating request omitted the required If-Match ETag or X-OxiBelt-Mutation envelope.",
         "headers": {
           "X-OxiBelt-Request-Id": {
             "$ref": "#/components/headers/AdminRequestId"
@@ -5315,7 +5875,7 @@
         }
       },
       "ServiceUnavailable": {
-        "description": "Admin control plane is unavailable.",
+        "description": "Admin control plane, mutation replay ledger, or enforcing audit is unavailable; reserved admin_cluster mode also rejects protected writes with this status.",
         "headers": {
           "X-OxiBelt-Request-Id": {
             "$ref": "#/components/headers/AdminRequestId"
@@ -5352,6 +5912,342 @@
       }
     },
     "schemas": {
+      "MutationEnvelope": {
+        "type": "object",
+        "required": [
+          "version",
+          "signer_id",
+          "request_id",
+          "issued_at",
+          "expires_at",
+          "expected_previous_revision",
+          "new_revision",
+          "content_digest",
+          "target",
+          "signature"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "const": "1"
+          },
+          "signer_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expected_previous_revision": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "new_revision": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "required": [
+              "cluster_id",
+              "membership_revision"
+            ],
+            "properties": {
+              "cluster_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "membership_revision": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            },
+            "additionalProperties": false
+          },
+          "signature": {
+            "type": "string",
+            "pattern": "^(ed25519|ed25519_ml_dsa_44):[A-Za-z0-9_.-]+$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MutationReceipt": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "principal",
+          "signer_id",
+          "action",
+          "resource",
+          "expected_previous_revision",
+          "new_revision",
+          "content_digest",
+          "target",
+          "state",
+          "http_status",
+          "result",
+          "error_code",
+          "issued_at",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "principal": {
+            "type": "string"
+          },
+          "signer_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "expected_previous_revision": {
+            "type": "string"
+          },
+          "new_revision": {
+            "type": "string"
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "target": {
+            "type": "object",
+            "required": [
+              "cluster_id",
+              "membership_revision"
+            ],
+            "properties": {
+              "cluster_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "membership_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "claimed",
+              "validating",
+              "applying",
+              "canary_applying",
+              "canary_healthy",
+              "expanding",
+              "fully_applied",
+              "committed",
+              "failed",
+              "rolling_back",
+              "rolled_back",
+              "rollback_failed",
+              "indeterminate"
+            ]
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Reduced bounded safe result retained for replay. It may include token_recoverable=false and is not necessarily the first response body.",
+            "additionalProperties": true
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigInstance": {
+        "type": "object",
+        "required": [
+          "cluster_id",
+          "instance_id",
+          "boot_id",
+          "build_version",
+          "capability_version",
+          "membership_revision",
+          "assigned_revision",
+          "applied_revision",
+          "applied_digest",
+          "ready",
+          "lease_expires_at",
+          "updated_at"
+        ],
+        "properties": {
+          "cluster_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "boot_id": {
+            "type": "string"
+          },
+          "build_version": {
+            "type": "string"
+          },
+          "capability_version": {
+            "type": "string"
+          },
+          "membership_revision": {
+            "type": "string"
+          },
+          "assigned_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "applied_revision": {
+            "type": "string"
+          },
+          "applied_digest": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "KeyRotationRequest": {
+        "type": "object",
+        "required": [
+          "target",
+          "reference",
+          "sha256"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "downstream_tls_default",
+              "downstream_tls_sni"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "description": "Contained configured downstream TLS key path; raw key bytes are forbidden."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SecretReferenceUpdateRequest": {
+        "type": "object",
+        "required": [
+          "field",
+          "reference"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Allowlisted typed configuration reference; arbitrary TOML paths are forbidden."
+          },
+          "reference": {
+            "type": "string",
+            "description": "Environment-variable name or contained file path; raw secret values are forbidden."
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BreakGlassActivationRequest": {
+        "type": "object",
+        "required": [
+          "ttl_seconds"
+        ],
+        "properties": {
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 512
+          }
+        },
+        "additionalProperties": false
+      },
       "DiagnosticsReport": {
         "type": "object",
         "required": [
@@ -5708,7 +6604,7 @@
         "additionalProperties": false
       },
       "ConfigRolloutStatus": {
-        "description": "Process-local proof of the Pod-assigned configuration rollout revision. This object is additive to the existing config status response.",
+        "description": "Process rollout identity for mutable, Kubernetes immutable, or reserved fail-closed admin_cluster mode. admin_cluster does not prove convergence. This object is additive to the existing config status response.",
         "type": "object",
         "required": [
           "instance_id",
@@ -5730,7 +6626,8 @@
             "type": "string",
             "enum": [
               "mutable",
-              "kubernetes_immutable"
+              "kubernetes_immutable",
+              "admin_cluster"
             ]
           },
           "desired_revision": {
@@ -5799,6 +6696,15 @@
               "method_not_allowed",
               "conflict",
               "etag_mismatch",
+              "mutation_conflict",
+              "mutation_required",
+              "mutation_digest_mismatch",
+              "mutation_expired",
+              "mutation_not_yet_valid",
+              "mutation_indeterminate",
+              "mutation_store_unavailable",
+              "invalid_mutation_signature",
+              "invalid_mutation_envelope",
               "payload_too_large",
               "precondition_required",
               "control_plane_unavailable",
@@ -6581,8 +7487,9 @@
               "stream_pool_runtime_control",
               "admin_operations",
               "admin_http3",
-              "admin_operation_webtransport",
-              "admin_audit"
+        "admin_operation_webtransport",
+        "admin_audit",
+        "admin_mutation_replay"
             ],
             "properties": {
               "config_load": {
@@ -6624,9 +7531,12 @@
               "admin_operation_webtransport": {
                 "type": "boolean"
               },
-              "admin_audit": {
-                "type": "boolean"
-              }
+        "admin_audit": {
+          "type": "boolean"
+        },
+        "admin_mutation_replay": {
+          "type": "boolean"
+        }
             },
             "additionalProperties": false
           },

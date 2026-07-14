@@ -99,6 +99,7 @@ pub(super) const ADMIN_CONFIG_KEYS: &[&str] = &[
   "cache_purge_signing",
   "enabled",
   "http3",
+  "mutations",
   "operations",
   "plaintext_allowed_source_cidrs",
   "rbac",
@@ -112,4 +113,42 @@ pub(super) const ADMIN_WORKLOAD_IDENTITY_CONFIG_KEYS: &[&str] = &[
   "bearer_mode",
   "enabled",
   "revoked_certificate_fingerprints_sha256",
+];
+
+pub(super) const ADMIN_MUTATIONS_CONFIG_KEYS: &[&str] = &[
+  "artifact_key_env",
+  "backend",
+  "max_clock_skew_seconds",
+  "max_response_bytes",
+  "max_validity_seconds",
+  "mode",
+  "retention_seconds",
+  "rollout",
+  "signers",
+];
+
+pub(super) const ADMIN_MUTATION_ROLLOUT_CONFIG_KEYS: &[&str] = &[
+  "canary_observation_seconds",
+  "cluster_id",
+  "heartbeat_interval_seconds",
+  "instance_id_env",
+  "members",
+  "mode",
+  "phase_timeout_seconds",
+  "rollback_timeout_seconds",
+  "stale_after_seconds",
+];
+
+pub(super) const ADMIN_MUTATION_SIGNER_CONFIG_KEYS: &[&str] = &[
+  "ed25519_public_key_file",
+  "id",
+  "ml_dsa_44_public_key_file",
+  "principal",
+  "suite",
+];
+
+pub(super) const IPM_BREAK_GLASS_CONFIG_KEYS: &[&str] = &[
+  "access_mode",
+  "argon2id_memory_mib",
+  "max_activation_seconds",
 ];

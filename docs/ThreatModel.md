@@ -163,6 +163,11 @@ OxiBelt is designed to preserve these invariants:
 - Every Admin request is authenticated, IPM uses explicit-deny then allow with
   default deny when enabled, and protected mutations attempt a structured audit
   record. Enforcing durable audit reserves capacity before handler execution.
+- When required Admin mutation protection is configured, a valid signer bound
+  to the authenticated principal, an unexpired exact-body digest, the current
+  logical revision, PostgreSQL replay admission, and enforcing durable audit
+  are all required before a high-risk side effect. Exact request-ID replays do
+  not apply the side effect twice.
 - Shared-state mutations that require atomicity use one Redis script or one
   PostgreSQL transaction, are deadline-bounded, and are not retried after an
   ambiguous transport result.
@@ -188,9 +193,14 @@ strongest available policy.
   configuration, cache, or shared backend.
 - Failure policies describe backend unavailability or error handling; they do
   not make data from a compromised authenticated Redis/PostgreSQL service safe.
-- General Admin mutation replay protection and idempotency are not complete.
-  ETags protect documented stateful families, and optional `Idempotency-Key`
-  storage is currently narrow to Person proof clearance revocation.
+- Mutation replay protection is limited to the documented protected Admin
+  families and only applies when `[admin.mutations]` is enabled. Other Admin
+  writes, local process signals, externally managed Kubernetes changes, and
+  direct changes by a compromised PostgreSQL authority do not inherit this
+  guarantee.
+- Fixed-member `admin_cluster` mutation rollout is reserved. It fails closed by
+  rejecting protected writes and does not provide distributed validation,
+  canary expansion, convergence, or rollback guarantees in this release.
 - Best-effort audit/export does not guarantee durable, queryable, ordered, or
   acknowledged audit-of-record delivery.
 - OxiBelt does not issue or renew certificates, rotate external secrets, secure
@@ -221,6 +231,7 @@ a normal failure-mode transition.
 | Dynamic policy | `use_last_good` by default | Keeps the last verified snapshot; configured startup or disable-on-error behavior remains authoritative. |
 | IPM | Startup policy plus last-good refresh | Startup follows `ipm.fail_closed`; later backend refresh failure retains the last good dynamic snapshot or configured static policy behavior. |
 | Admin audit | `best_effort` or `enforcing` | Best effort records delivery failure but permits work. Enforcing durable audit rejects protected Admin work when reservation cannot be made. |
+| Admin mutation ledger | `fail_closed` | In supported `single_instance` mode, rejects a new protected mutation when PostgreSQL replay admission or critical audit cannot be proved. An indeterminate prior request remains blocked until reconciled. Reserved `admin_cluster` mode rejects every protected write with `503` rather than claiming convergence. |
 
 `local_fallback` is bounded, observable, and limited to one process. It never
 provides a cluster-wide security decision. `fail_open` must be treated as an
@@ -290,9 +301,9 @@ canonical references.
 
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
-| Admin credential replay | Management client → Admin bearer/IPM authority | Dedicated listener, TLS/mTLS options, default bearer authentication, opt-in exact mTLS workload-to-principal binding, IPM action/resource checks, token digests for DB credentials, rotation/revocation, certificate-fingerprint denylist, and audit reduce exposure. | A stolen bearer remains replayable until revoked or rotated when binding is not enabled. When binding is enabled, it cannot authorize a different mapped workload principal; general request nonce/idempotency protection is incomplete. |
-| Configuration rollback attack | Admin/controller/operator → active security policy | Validation, config ETags, last-good snapshots, immutable content-addressed artifacts, desired/applied digests, and controller rollback status make revision changes visible. | An authorized or compromised control plane can intentionally select an older valid but vulnerable policy. Admission, revision authorization, and rollback policy remain external or separately planned controls. |
-| Partial cluster rollout | Desired revision → multiple data-plane instances | Immutable rollout assigns revision/digest, verifies the selected workload owner chain and every Ready Pod, withholds `Programmed`, and rolls back on rejection, drift, or timeout. | Per-instance Admin reload or a load-balanced success is not cluster proof. Mis-scoped workloads, compromised Kubernetes status, or external rollout mechanisms can still create divergent enforcement. |
+| Admin credential replay | Management client → Admin bearer/IPM authority | Dedicated listener, TLS/mTLS options, default bearer authentication, exact mTLS workload binding, IPM checks, token digests, and rotation/revocation reduce credential exposure. Protected mutations additionally require an expiring signer/principal-bound envelope and durable request-ID ledger. | A stolen bearer remains replayable for unprotected reads and writes until revoked. A stolen mutation signing key can authorize its scoped protected actions until removed; signer custody and rotation remain external duties. |
+| Configuration rollback attack | Admin/controller/operator → active security policy | Validation, signed previous/new revisions, exact content digests, durable receipts, retained committed artifacts, immutable Kubernetes revisions, and rollout status make revision changes visible. | An authorized signer can intentionally select an older valid policy unless external approval policy forbids it. A compromised artifact key or PostgreSQL authority can corrupt rollback state. |
+| Partial cluster rollout | Desired revision → multiple data-plane instances | Kubernetes immutable rollout proves owned Ready Pods. Reserved fixed-member Admin rollout fails closed before protected writes and provides no convergence claim. | A compromised Kubernetes authority can forge readiness evidence. External rollout mechanisms can still create divergent enforcement; `admin_cluster` must not be treated as implemented mitigation. |
 | Audit sink failure | Admin mutation → audit queue/store/export | Structured Admin events, bounded queues, optional PostgreSQL query store, and enforcing pre-handler reservation are available. | Best-effort mode can lose records and exports are not an audit-of-record acknowledgment. PostgreSQL compromise can delete or forge durable history; independent database controls and export monitoring are required. |
 
 ### Shared state and tenant-boundary threats
@@ -338,6 +349,7 @@ and roll every instance to a known revision after compromise.
 | Dynamic policy | PostgreSQL | Deny service, replay old signed rows, or modify unsigned/database-owned metadata. HMAC verification protects active signed row content unless the signing key or authorized automation is also compromised. |
 | IPM principals, credentials, policies, and bindings | PostgreSQL | Grant or revoke Admin/data-plane authority, expose credential digests/prefixes and audit metadata, or prevent refresh. Static bootstrap collisions fail refresh but do not make the DB untrusted. |
 | Admin audit | PostgreSQL | Delete, forge, reorder, or disclose the queryable audit record and block enforcing mutations by denying reservations/writes. Independent export/backup controls are required for stronger evidence. |
+| Admin mutation ledger and rollout | PostgreSQL | Forge request outcomes, logical revisions, member leases, rollout ACKs, retained artifacts, or break-glass activations; suppress a valid mutation or cause divergent policy. Signatures protect request provenance but do not make a compromised coordinator database trustworthy. |
 | Mitigation intents | PostgreSQL | Forge, suppress, or alter aggregate intents consumed by an external mitigation controller. Downstream ISP/cloud actions remain outside OxiBelt and require their own authorization. |
 
 ### Admin mutation authorization and audit
@@ -354,14 +366,14 @@ equivalent authorization, concurrency/replay behavior, and audit semantics.
 
 | Mutation family | Authorization and concurrency requirement | Audit and residual requirement |
 | --- | --- | --- |
-| Configuration load/rollback, file sync, downstream/upstream TLS refresh | Matching `config:*` action/resource; protected Admin/IPM configuration changes additionally require `admin:UpdateConfig` or `ipm:UpdateConfig`; documented config mutations require the active ETag. | Record validation/apply/rejection. File sync is not a cluster rollout protocol, and rollback authorization does not prove a revision is safe. |
+| Configuration load/rollback, file sync, downstream TLS key reload, secret-reference validation, downstream/upstream TLS refresh | Matching `config:*` action/resource; protected Admin/IPM configuration changes additionally require `admin:UpdateConfig` or `ipm:UpdateConfig`; high-risk mutations require the active ETag and signed mutation envelope in required mode. | Record signer/request/revisions/digest and validation/apply/rejection without bodies or secret material. Single-instance mode is not cluster proof; reserved fixed-member Admin mode rejects protected writes, while Kubernetes immutable rollout remains the supported cluster authority. |
 | Cache purge/warm and key administration | Matching cache policy and normalized host/tag resources; public signed purge uses its independent signature/nonce policy. | Record actor, policy/host scope, count/outcome, and partial-failure rejection. Shared purge must not report a partial success. |
 | Upstream and stream pool server mutations | Matching pool/server resource and action with current pool ETag. | Record old/new target context and outcome. A mutation changes only the current process unless backed by the documented shared/control-plane mechanism. |
 | Dynamic policy create/apply/import/update/delete | Authorize stored and proposed source/name/route resources; enforce quotas, signatures, TTL policy, and ETag rules where required. | Record successful and rejected policy changes. Panic-button `apply` remains intentionally repeatable and does not provide general Admin idempotency. |
-| IPM principal, credential, policy, and binding changes | Matching typed IPM resource/action with current IPM ETag; credential plaintext is returned only at creation/rotation. | Record authorization and mutation outcome without raw tokens. A bad grant can expand all Admin authority, so least privilege and enforcing audit are mandatory. |
+| IPM principal, credential, policy, and binding changes plus break-glass activation | Matching typed IPM resource/action with current IPM ETag and signed mutation envelope; credential plaintext is returned only at first creation/rotation execution. | Commit IPM CAS, replay record, outcome, and audit transactionally without raw tokens. Exact credential replay is redacted and cannot re-emit the token. A bad grant or activation can expand Admin authority. |
 | OxiRule/rulepack file management and reload | Matching typed WAF file/reload actions and any underlying config/file preconditions. Development analysis endpoints are non-mutating. | Record install/delete/reload outcome and validation error. Provenance pins protect only when operators require and verify them. |
 | Lifecycle drain/undrain and runtime session drain | Matching lifecycle/runtime action and scoped resource; operation enqueue rechecks the source action, and creators have only documented ownership rights. | Record enqueue, cancellation, execution, and outcome. Process-local operation state is lost on restart and does not represent cluster consensus. |
-| Person proof clearance revocation | Matching hash-scoped WAF/Person proof resource; optional `Idempotency-Key` is stored only as a digest for the tombstone lifetime. | Record hash-only target and outcome. This narrow replay contract does not extend to other Admin mutations. |
+| Person proof clearance revocation | Matching hash-scoped WAF/Person proof resource; optional `Idempotency-Key` is stored only as a digest for the tombstone lifetime. | Record hash-only target and outcome. This legacy narrow contract remains separate from signed high-risk mutation envelopes. |
 | Async operation cancellation and control | Creator rights or matching Admin operation action/resource; cancellation cannot undo side effects already completed. | Record creator, operation kind/id, cancellation result, and terminal outcome within bounded retention. |
 
 In `best_effort` audit mode, recording failure is observable but does not block

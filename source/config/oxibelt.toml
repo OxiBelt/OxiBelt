@@ -659,6 +659,36 @@ enabled = false
 bearer_mode = "required" # required | optional
 revoked_certificate_fingerprints_sha256 = [] # 64-character lowercase SHA-256 leaf fingerprints
 
+# Durable replay protection for high-risk Admin mutations. `optional` validates
+# supplied envelopes; `required` rejects protected mutations without one. Both
+# modes require a PostgreSQL shared-state backend and enforcing durable audit.
+[admin.mutations]
+mode = "off" # off | optional | required
+# backend = "cluster"
+max_validity_seconds = 600
+max_clock_skew_seconds = 30
+retention_seconds = 86400
+max_response_bytes = 1048576
+artifact_key_env = "OXIBELT_ADMIN_MUTATION_ARTIFACT_KEY"
+
+# [[admin.mutations.signers]]
+# id = "gateway-controller-2026-07"
+# principal = "admin"
+# suite = "ed25519" # ed25519 | ed25519_ml_dsa_44
+# ed25519_public_key_file = "admin-mutation/controller.ed25519.pub"
+# ml_dsa_44_public_key_file = "admin-mutation/controller.ml-dsa-44.spki"
+
+[admin.mutations.rollout]
+mode = "single_instance" # admin_cluster is reserved and rejected fail-closed.
+cluster_id = ""
+members = []
+instance_id_env = "OXIBELT_INSTANCE_ID"
+heartbeat_interval_seconds = 5
+stale_after_seconds = 15
+phase_timeout_seconds = 300
+rollback_timeout_seconds = 300
+canary_observation_seconds = 30
+
 [ipm]
 enabled = false
 namespace = "oxibelt"
@@ -669,6 +699,8 @@ fail_closed = true
 # Argon2id memory limit for break-glass access token hashes.
 # The default is 128 MiB; values may be raised up to 16384 MiB.
 argon2id_memory_mib = 128
+access_mode = "direct" # direct | two_factor_activation
+max_activation_seconds = 900
 
 #[[ipm.principals]]
 # id = "admin"

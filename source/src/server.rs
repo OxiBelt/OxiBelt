@@ -21,7 +21,10 @@ use tokio_rustls::LazyConfigAcceptor;
 use tracing::{info, warn};
 
 use crate::admin_audit::AdminAuditHandle;
-use crate::config::{AdminTransportMode, Config, ConnectionLimitIdentityMode, RuntimeOverrides};
+use crate::config::{
+  AdminTransportMode, Config, ConnectionLimitIdentityMode, IpmBreakGlassAccessMode,
+  RuntimeOverrides,
+};
 use crate::identity::Cidr;
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
@@ -57,6 +60,8 @@ mod admin_ipm_simulation;
 mod admin_ipm_simulation_security_tests;
 mod admin_listener;
 mod admin_metadata;
+mod admin_mutation_resources;
+mod admin_mutations;
 mod admin_operations;
 #[cfg(test)]
 mod admin_operations_tests;
@@ -112,6 +117,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "admin_http3",
   "admin_operation_webtransport",
   "admin_audit",
+  "admin_mutation_replay",
 ];
 pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
   "cache_warm",
@@ -600,12 +606,46 @@ async fn admin_response_inner(
   if let Some(audit) = &audit {
     authentication.record_audit(audit);
   }
+  let authenticated_with_break_glass = authentication.authenticated_with_break_glass();
   let actor = &authentication.actor;
+  if authenticated_with_break_glass
+    && snapshot.config.ipm.break_glass.access_mode == IpmBreakGlassAccessMode::TwoFactorActivation
+    && !admin_mutations::break_glass_activation_bootstrap_route(&method, &path)
+  {
+    match snapshot
+      .admin_mutations
+      .active_break_glass_activation(&actor.principal)
+      .await
+    {
+      Ok(Some(activation)) if activation.scopes.iter().any(|scope| scope == "admin") => {}
+      Ok(_) => return text_response(StatusCode::FORBIDDEN, "break-glass activation is required"),
+      Err(error) => {
+        warn!(error = %error, "failed to verify break-glass activation");
+        return text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "break-glass activation store is unavailable",
+        );
+      }
+    }
+  }
   let authorization = if let Some(audit) = audit.clone() {
     AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &admin_context, audit)
   } else {
     AdminAuthorization::new(actor, &snapshot.ipm, &admin_context)
   };
+
+  if admin_mutations::handles(&snapshot.admin_mutations, &method, &path, request.headers()) {
+    return admin_mutations::response(
+      request,
+      state.clone(),
+      admin_control.clone(),
+      &authorization,
+      authenticated_with_break_glass,
+      &method,
+      &path,
+    )
+    .await;
+  }
 
   if path == "/admin/v1/audit" {
     return admin_audit_endpoint::admin_audit_response(

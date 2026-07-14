@@ -120,6 +120,14 @@ impl AdminAuthentication {
     self.details.reason
   }
 
+  pub(super) fn authenticated_with_break_glass(&self) -> bool {
+    self
+      .details
+      .credential
+      .as_ref()
+      .is_some_and(|credential| credential.kind == "break_glass")
+  }
+
   pub(super) fn record_audit(&self, audit: &AdminAuditHandle) {
     audit.set_actor(
       &self.actor.name,

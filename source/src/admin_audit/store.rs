@@ -165,10 +165,20 @@ async fn insert_record(
   namespace: &str,
   event: &AdminAuditEvent,
 ) -> anyhow::Result<()> {
+  insert_record_returning_id(pool, namespace, event)
+    .await
+    .map(|_| ())
+}
+
+pub(super) async fn insert_record_returning_id(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+  event: &AdminAuditEvent,
+) -> anyhow::Result<i64> {
   let request_summary = serde_json::to_string(&request::sanitize_summary_for_storage(
     &event.request_summary,
   ))?;
-  sqlx::query(
+  let row = sqlx::query(
     "INSERT INTO oxibelt_admin_audit
        (namespace, request_id, actor, principal, subject, groups,
         workload_identity_kind, workload_identity, workload_principal,
@@ -178,7 +188,8 @@ async fn insert_record(
         status, outcome, error, request_summary)
      VALUES
        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29::jsonb)",
+        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29::jsonb)
+     RETURNING id",
   )
   .bind(namespace)
   .bind(&event.request_id)
@@ -209,9 +220,9 @@ async fn insert_record(
   .bind(&event.outcome)
   .bind(&event.error)
   .bind(request_summary)
-  .execute(pool)
+  .fetch_one(pool)
   .await?;
-  Ok(())
+  row.try_get("id").map_err(Into::into)
 }
 
 pub(super) async fn select_records(

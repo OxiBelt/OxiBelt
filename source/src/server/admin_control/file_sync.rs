@@ -65,7 +65,12 @@ pub(super) async fn apply_file_sync(
     Ok(committed) => committed,
     Err(error) => {
       record_operation(control, "files_sync", "rejected", Some(error.to_string())).await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+      let status = if error.downcast_ref::<IndeterminateFileSyncError>().is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+      } else {
+        StatusCode::BAD_REQUEST
+      };
+      return AdminControlResponse::error(status, error.to_string());
     }
   };
   let apply_result = match request.apply {
@@ -96,6 +101,17 @@ pub(super) async fn apply_file_sync(
   if let Err(error) = apply_result {
     if let Err(restore_error) = restore_committed_files(&committed) {
       warn!(error = %restore_error, "failed to restore files after admin file sync apply failure");
+      let message = format!(
+        "file sync apply failed and rollback could not be proven: apply error: {error}; rollback error: {restore_error}"
+      );
+      record_operation(
+        control,
+        "files_sync",
+        "indeterminate",
+        Some(message.clone()),
+      )
+      .await;
+      return AdminControlResponse::error(StatusCode::SERVICE_UNAVAILABLE, message);
     }
     record_operation(control, "files_sync", "rejected", Some(error.to_string())).await;
     return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
@@ -249,7 +265,10 @@ fn commit_file_sync(
     bail!("operations must contain 1 to 128 entries");
   }
   ensure_unique_config_sync_targets(request, config)?;
-  let mut committed = Vec::new();
+
+  // Reject every predictable path, hash, and content error before changing
+  // any target. The second pass repeats the hash check immediately before the
+  // mutation to detect an external change between validation and commit.
   for (index, operation) in request.operations.iter().enumerate() {
     let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
       .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
@@ -264,13 +283,42 @@ fn commit_file_sync(
           .as_ref()
           .ok_or_else(|| anyhow!("put operation {index} requires content"))?;
         validate_sync_content(operation.root, content)?;
-        committed.push(write_sync_file(&target, content.as_bytes())?);
       }
-      AdminFileOperationKind::Delete => {
-        if operation.content.is_some() {
-          bail!("delete operation {index} must not include content");
+      AdminFileOperationKind::Delete if operation.content.is_some() => {
+        bail!("delete operation {index} must not include content");
+      }
+      AdminFileOperationKind::Delete => {}
+    }
+  }
+
+  let mut committed = Vec::new();
+  for (index, operation) in request.operations.iter().enumerate() {
+    let operation_result = (|| -> anyhow::Result<CommittedFile> {
+      let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
+        .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
+      let target = resolve_sync_target(config, operation.root, &normalized_path)?;
+      verify_expected_hash(&target, operation.expected_sha256.as_deref())?;
+      match operation.op {
+        AdminFileOperationKind::Put => {
+          let content = operation
+            .content
+            .as_ref()
+            .ok_or_else(|| anyhow!("put operation {index} requires content"))?;
+          write_sync_file(&target, content.as_bytes())
         }
-        committed.push(delete_sync_file(&target)?);
+        AdminFileOperationKind::Delete => delete_sync_file(&target),
+      }
+    })();
+    match operation_result {
+      Ok(file) => committed.push(file),
+      Err(error) => {
+        if let Err(rollback_error) = restore_committed_files(&committed) {
+          return Err(anyhow!(IndeterminateFileSyncError {
+            operation_error: error.to_string(),
+            rollback_error: rollback_error.to_string(),
+          }));
+        }
+        return Err(error);
       }
     }
   }
@@ -529,6 +577,24 @@ struct CommittedFile {
   path: PathBuf,
   previous: Option<Vec<u8>>,
 }
+
+#[derive(Debug)]
+struct IndeterminateFileSyncError {
+  operation_error: String,
+  rollback_error: String,
+}
+
+impl std::fmt::Display for IndeterminateFileSyncError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "file sync commit failed and rollback could not be proven: operation error: {}; rollback error: {}",
+      self.operation_error, self.rollback_error
+    )
+  }
+}
+
+impl std::error::Error for IndeterminateFileSyncError {}
 
 fn restore_committed_files(files: &[CommittedFile]) -> anyhow::Result<()> {
   for file in files.iter().rev() {

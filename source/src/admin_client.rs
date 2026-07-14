@@ -104,11 +104,26 @@ impl AdminClient {
     body: Option<serde_json::Value>,
     if_match: Option<&str>,
   ) -> anyhow::Result<AdminResponse> {
+    self
+      .request_json_with_extra_headers(method, endpoint, body, if_match, &HeaderMap::new())
+      .await
+  }
+
+  pub async fn request_json_with_extra_headers(
+    &self,
+    method: Method,
+    endpoint: &str,
+    body: Option<serde_json::Value>,
+    if_match: Option<&str>,
+    extra_headers: &HeaderMap,
+  ) -> anyhow::Result<AdminResponse> {
     let bytes = match body {
       Some(value) => Some(serde_json::to_vec(&value).context("failed to encode Admin JSON body")?),
       None => None,
     };
-    self.request(method, endpoint, bytes, if_match).await
+    self
+      .request_with_extra_headers(method, endpoint, bytes, if_match, extra_headers)
+      .await
   }
 
   pub async fn request(
@@ -118,6 +133,20 @@ impl AdminClient {
     body: Option<Vec<u8>>,
     if_match: Option<&str>,
   ) -> anyhow::Result<AdminResponse> {
+    self
+      .request_with_extra_headers(method, endpoint, body, if_match, &HeaderMap::new())
+      .await
+  }
+
+  pub async fn request_with_extra_headers(
+    &self,
+    method: Method,
+    endpoint: &str,
+    body: Option<Vec<u8>>,
+    if_match: Option<&str>,
+    extra_headers: &HeaderMap,
+  ) -> anyhow::Result<AdminResponse> {
+    validate_extra_headers(extra_headers)?;
     let url = admin_endpoint_url(&self.options.admin_url, endpoint)?;
     let mut builder = Request::builder()
       .method(method)
@@ -129,6 +158,9 @@ impl AdminClient {
       .header(http::header::ACCEPT, "application/json");
     if let Some(if_match) = if_match {
       builder = builder.header(http::header::IF_MATCH, if_match);
+    }
+    for (name, value) in extra_headers {
+      builder = builder.header(name, value);
     }
     let body = match body {
       Some(body) => {
@@ -267,6 +299,32 @@ fn bearer_header(token: &str) -> anyhow::Result<http::HeaderValue> {
   http::HeaderValue::from_str(&format!("Bearer {token}")).context("Admin token is not header-safe")
 }
 
+fn validate_extra_headers(headers: &HeaderMap) -> anyhow::Result<()> {
+  const RESERVED: [&str; 14] = [
+    "authorization",
+    "accept",
+    "connection",
+    "content-type",
+    "content-length",
+    "cookie",
+    "if-match",
+    "host",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ];
+  if let Some(name) = headers
+    .keys()
+    .find(|name| RESERVED.contains(&name.as_str()))
+  {
+    bail!("Admin extra header {name} is managed by AdminClient");
+  }
+  Ok(())
+}
+
 fn empty_body() -> AdminBody {
   Empty::<Bytes>::new()
     .map_err(|never: Infallible| -> BoxError { match never {} })
@@ -307,5 +365,19 @@ mod tests {
   fn rejects_relative_admin_endpoint() {
     let base = Url::parse(DEFAULT_ADMIN_URL).expect("url");
     assert!(admin_endpoint_url(&base, "admin/v1/config/status").is_err());
+  }
+
+  #[test]
+  fn rejects_extra_headers_managed_by_the_client() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      http::header::AUTHORIZATION,
+      "Bearer replacement".parse().expect("header"),
+    );
+    assert!(validate_extra_headers(&headers).is_err());
+
+    headers.clear();
+    headers.insert("x-oxibelt-mutation", "signed".parse().expect("header"));
+    assert!(validate_extra_headers(&headers).is_ok());
   }
 }

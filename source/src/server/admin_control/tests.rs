@@ -131,6 +131,51 @@ fn control_plane_scope_requires_both_permissions_when_admin_and_ipm_change() {
 }
 
 #[test]
+fn active_mutation_trust_root_cannot_replace_itself() {
+  let (_temp_dir, mut active) = load_temp_config("mutation-trust-root-scope");
+  active.admin.mutations.mode = crate::config::AdminMutationMode::Optional;
+  let mut candidate = active.clone();
+  candidate.admin.mutations.backend = Some("replacement-ledger".to_string());
+
+  let response = validate_control_plane_config_scope(
+    ControlPlaneConfigPermissions {
+      admin_update_config: true,
+      ipm_update_config: true,
+    },
+    &active,
+    &candidate,
+  )
+  .expect_err("an in-flight mutation must not replace its trust root");
+
+  assert_eq!(response.status, StatusCode::CONFLICT);
+  assert!(
+    response.body["error"]
+      .as_str()
+      .expect("error should be a string")
+      .contains("trust root")
+  );
+}
+
+#[test]
+fn disabled_mutation_runtime_cannot_be_enabled_by_hot_admin_load() {
+  let (_temp_dir, active) = load_temp_config("mutation-runtime-enable-scope");
+  let mut candidate = active.clone();
+  candidate.admin.mutations.mode = crate::config::AdminMutationMode::Optional;
+
+  let response = validate_control_plane_config_scope(
+    ControlPlaneConfigPermissions {
+      admin_update_config: true,
+      ipm_update_config: true,
+    },
+    &active,
+    &candidate,
+  )
+  .expect_err("mutation runtime activation must require a restart");
+
+  assert_eq!(response.status, StatusCode::CONFLICT);
+}
+
+#[test]
 fn rollback_scope_uses_current_to_snapshot_delta() {
   let (_temp_dir, snapshot) = load_temp_config("control-plane-rollback");
   let mut current = snapshot.clone();

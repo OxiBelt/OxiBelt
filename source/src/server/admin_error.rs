@@ -38,9 +38,27 @@ pub(super) async fn finalize_response(
   }
 
   let status = response.status();
+  let mutation_headers = [
+    crate::admin_mutation::MUTATION_REQUEST_ID_HEADER,
+    crate::admin_mutation::MUTATION_REVISION_HEADER,
+    crate::admin_mutation::IDEMPOTENT_REPLAY_HEADER,
+  ]
+  .into_iter()
+  .filter_map(|name| {
+    response
+      .headers()
+      .get(name)
+      .cloned()
+      .map(|value| (name, value))
+  })
+  .collect::<Vec<_>>();
   let (message, body_details) = error_body(response.into_body(), status).await;
   let details = merge_details(body_details, audit.error_details(status));
-  error_envelope_response(status, &message, &request_id, details)
+  let mut response = error_envelope_response(status, &message, &request_id, details);
+  for (name, value) in mutation_headers {
+    response.headers_mut().insert(name, value);
+  }
+  response
 }
 
 pub(super) fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {

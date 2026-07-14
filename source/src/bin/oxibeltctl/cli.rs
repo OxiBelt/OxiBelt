@@ -12,12 +12,15 @@ mod config_compat_cli;
 mod doctor_cli;
 #[path = "ipm_cli.rs"]
 mod ipm_cli;
+#[path = "mutation_cli.rs"]
+mod mutation_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
 pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
 pub(crate) use doctor_cli::*;
 pub(crate) use ipm_cli::*;
+pub(crate) use mutation_cli::*;
 pub(crate) use rulepack_cli::*;
 
 #[derive(Debug, Parser)]
@@ -32,6 +35,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Args)]
 pub(crate) struct AdminArgs {
+  #[command(flatten)]
+  pub(crate) mutation: MutationArgs,
   #[arg(long, default_value = DEFAULT_ADMIN_URL)]
   pub(crate) admin_url: Url,
   #[arg(long, conflicts_with = "break_glass_access")]
@@ -697,6 +702,7 @@ mod tests {
 
   fn test_admin_args(break_glass_access: bool) -> AdminArgs {
     AdminArgs {
+      mutation: MutationArgs::default(),
       admin_url: Url::parse(DEFAULT_ADMIN_URL).expect("url"),
       token_env: None,
       token_file: None,

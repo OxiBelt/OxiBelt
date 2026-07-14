@@ -2,7 +2,8 @@
 //! Handlers enforce IPM permissions before returning mutable identity state.
 
 use ::http::{Response, StatusCode};
-use hyper::body::Incoming;
+use bytes::Bytes;
+use hyper::body::Body;
 use serde_json::json;
 
 use crate::admin_list::AdminListQuery;
@@ -17,7 +18,7 @@ use crate::state::AppHandle;
 
 use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
-use super::admin_body::collect_admin_json;
+use super::admin_body::collect_admin_json_body;
 use super::admin_error;
 use super::admin_ipm_list::{
   IPM_BINDINGS_LIST, IPM_CREDENTIALS_LIST, IPM_POLICIES_LIST, IPM_PRINCIPALS_LIST,
@@ -84,13 +85,17 @@ fn authorize_ipm_binding_target(
   allowed(authorization, action, &policy_resource)
 }
 
-pub(super) async fn ipm_response(
-  request: hyper::Request<Incoming>,
+pub(super) async fn ipm_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
-) -> Option<Response<ProxyBody>> {
+) -> Option<Response<ProxyBody>>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   if !path.starts_with("/admin/v1/ipm/") {
     return None;
   }
@@ -131,7 +136,7 @@ pub(super) async fn ipm_response(
     }
     (&::http::Method::POST, "/admin/v1/ipm/principals") => {
       let if_match = request_if_match(&request);
-      let body = match collect_admin_json::<IpmPrincipalCreate>(request).await {
+      let body = match collect_admin_json_body::<IpmPrincipalCreate, _>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
       };
@@ -180,7 +185,7 @@ pub(super) async fn ipm_response(
     }
     (&::http::Method::POST, "/admin/v1/ipm/credentials") => {
       let if_match = request_if_match(&request);
-      let body = match collect_admin_json::<IpmCredentialCreate>(request).await {
+      let body = match collect_admin_json_body::<IpmCredentialCreate, _>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
       };
@@ -233,7 +238,7 @@ pub(super) async fn ipm_response(
     }
     (&::http::Method::POST, "/admin/v1/ipm/policies") => {
       let if_match = request_if_match(&request);
-      let body = match collect_admin_json::<IpmPolicyCreate>(request).await {
+      let body = match collect_admin_json_body::<IpmPolicyCreate, _>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
       };
@@ -282,7 +287,7 @@ pub(super) async fn ipm_response(
     }
     (&::http::Method::POST, "/admin/v1/ipm/bindings") => {
       let if_match = request_if_match(&request);
-      let body = match collect_admin_json::<IpmBindingCreate>(request).await {
+      let body = match collect_admin_json_body::<IpmBindingCreate, _>(request).await {
         Ok(body) => body,
         Err(response) => return Some(response),
       };
@@ -353,13 +358,17 @@ pub(super) async fn ipm_response(
   }
 }
 
-async fn principal_item_response(
-  request: hyper::Request<Incoming>,
+async fn principal_item_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   match *method {
     ::http::Method::GET => {
       let resource = admin_resource::ipm_principal(id);
@@ -382,7 +391,7 @@ async fn principal_item_response(
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
         return response;
       }
-      let body = match collect_admin_json::<IpmPrincipalPatch>(request).await {
+      let body = match collect_admin_json_body::<IpmPrincipalPatch, _>(request).await {
         Ok(body) => body,
         Err(response) => return response,
       };
@@ -419,13 +428,17 @@ async fn principal_item_response(
   }
 }
 
-async fn credential_item_response(
-  request: hyper::Request<Incoming>,
+async fn credential_item_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   match *method {
     ::http::Method::GET => {
       let resource = admin_resource::ipm_credential(id);
@@ -448,7 +461,7 @@ async fn credential_item_response(
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
         return response;
       }
-      let body = match collect_admin_json::<IpmCredentialPatch>(request).await {
+      let body = match collect_admin_json_body::<IpmCredentialPatch, _>(request).await {
         Ok(body) => body,
         Err(response) => return response,
       };
@@ -493,13 +506,17 @@ async fn credential_item_response(
   }
 }
 
-async fn credential_rotate_response(
-  request: hyper::Request<Incoming>,
+async fn credential_rotate_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   if *method != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
@@ -511,7 +528,7 @@ async fn credential_rotate_response(
   if let Some(response) = check_if_match(&state, if_match.as_deref()) {
     return response;
   }
-  let body = match collect_admin_json::<IpmCredentialRotate>(request).await {
+  let body = match collect_admin_json_body::<IpmCredentialRotate, _>(request).await {
     Ok(body) => body,
     Err(response) => return response,
   };
@@ -526,13 +543,17 @@ async fn credential_rotate_response(
   }
 }
 
-async fn credential_revoke_response(
-  request: hyper::Request<Incoming>,
+async fn credential_revoke_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   if *method != ::http::Method::POST {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
@@ -544,7 +565,7 @@ async fn credential_revoke_response(
   if let Some(response) = check_if_match(&state, if_match.as_deref()) {
     return response;
   }
-  let body = match collect_admin_json::<IpmCredentialRevoke>(request).await {
+  let body = match collect_admin_json_body::<IpmCredentialRevoke, _>(request).await {
     Ok(body) => body,
     Err(response) => return response,
   };
@@ -559,13 +580,17 @@ async fn credential_revoke_response(
   }
 }
 
-async fn policy_item_response(
-  request: hyper::Request<Incoming>,
+async fn policy_item_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   match *method {
     ::http::Method::GET => {
       let resource = admin_resource::ipm_policy(id);
@@ -588,7 +613,7 @@ async fn policy_item_response(
       if let Some(response) = check_if_match(&state, if_match.as_deref()) {
         return response;
       }
-      let body = match collect_admin_json::<IpmPolicyPatch>(request).await {
+      let body = match collect_admin_json_body::<IpmPolicyPatch, _>(request).await {
         Ok(body) => body,
         Err(response) => return response,
       };
@@ -625,13 +650,17 @@ async fn policy_item_response(
   }
 }
 
-async fn binding_item_response(
-  request: hyper::Request<Incoming>,
+async fn binding_item_response<B>(
+  request: hyper::Request<B>,
   state: AppHandle,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   id: &str,
-) -> Response<ProxyBody> {
+) -> Response<ProxyBody>
+where
+  B: Body<Data = Bytes>,
+  B::Error: std::error::Error + Send + Sync + 'static,
+{
   if *method != ::http::Method::DELETE {
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
@@ -672,7 +701,7 @@ fn check_if_match(state: &AppHandle, if_match: Option<&str>) -> Option<Response<
   }
 }
 
-fn request_if_match(request: &hyper::Request<Incoming>) -> Option<String> {
+fn request_if_match<B>(request: &hyper::Request<B>) -> Option<String> {
   request
     .headers()
     .get(::http::header::IF_MATCH)

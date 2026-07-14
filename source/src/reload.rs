@@ -182,6 +182,7 @@ impl ReloadManager {
       webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
+      admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite: active.crlite.clone(),
       ocsp_staple: active.ocsp_staple.clone(),
@@ -355,6 +356,7 @@ impl ReloadManager {
       webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
       admin_audit: active.admin_audit.clone(),
+      admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite,
       ocsp_staple,
@@ -399,6 +401,21 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
       "full hot reload rejected because runtime.worker_threads changed from {} to {}; restart OxiBelt to resize the async runtime",
       active.runtime.worker_threads,
       replacement.runtime.worker_threads
+    );
+  }
+  if replacement.admin.mutations != active.admin.mutations {
+    bail!(
+      "full hot reload rejected because admin.mutations is a restart-only control-plane trust root"
+    );
+  }
+  if active.admin.mutations.mode.enabled()
+    && (replacement.admin.audit != active.admin.audit
+      || replacement.shared_state != active.shared_state
+      || replacement.ipm.backend != active.ipm.backend
+      || replacement.ipm.namespace != active.ipm.namespace)
+  {
+    bail!(
+      "full hot reload rejected because active Admin mutation audit, storage, and namespace authority are restart-only"
     );
   }
   Ok(())
@@ -654,6 +671,17 @@ mod tests {
         .contains("runtime.worker_threads changed from 2 to 3"),
       "unexpected error: {error}"
     );
+  }
+
+  #[test]
+  fn full_reload_rejects_mutation_runtime_policy_changes() {
+    let active = parse_worker_reload_config(2);
+    let mut replacement = active.clone();
+    replacement.admin.mutations.mode = crate::config::AdminMutationMode::Optional;
+
+    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
+      .expect_err("mutation trust changes should require process restart");
+    assert!(error.to_string().contains("admin.mutations"));
   }
 
   fn parse_worker_reload_config(worker_threads: usize) -> Config {

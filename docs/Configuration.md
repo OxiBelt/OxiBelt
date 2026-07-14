@@ -1998,9 +1998,100 @@ queue_capacity = 4096
 It is treated as enforcing PostgreSQL durable audit with `[admin.audit.store]`
 enabled for `cluster` and `required_sinks = ["store"]`.
 
+`[admin.mutations]` enables durable replay protection for high-risk Admin
+changes. `mode` is `off`, `optional`, or `required`. `optional` validates and
+records supplied envelopes while preserving compatibility for callers that do
+not send one; `required` rejects a protected request without
+`X-OxiBelt-Mutation`. Both active modes require `backend` to name a PostgreSQL
+shared-state backend and require enforcing Admin audit with the durable store.
+Expiry and retention are evaluated with PostgreSQL time. The retention window
+must cover the maximum validity and clock-skew windows, and a live request or
+terminal receipt is never evicted to admit another request.
+
+```toml
+[admin.mutations]
+mode = "required" # off | optional | required
+backend = "cluster"
+max_validity_seconds = 600
+max_clock_skew_seconds = 30
+retention_seconds = 86400
+max_response_bytes = 1048576
+artifact_key_env = "OXIBELT_ADMIN_MUTATION_ARTIFACT_KEY"
+
+[[admin.mutations.signers]]
+id = "gateway-controller-2026-07"
+principal = "controller"
+suite = "ed25519" # ed25519 | ed25519_ml_dsa_44
+ed25519_public_key_file = "admin-mutation/controller.ed25519.pub"
+# ml_dsa_44_public_key_file = "admin-mutation/controller.ml-dsa-44.spki"
+
+[admin.mutations.rollout]
+mode = "single_instance" # supported; admin_cluster is reserved and rejects protected writes
+cluster_id = "edge-a"
+members = []
+instance_id_env = "OXIBELT_INSTANCE_ID"
+heartbeat_interval_seconds = 5
+stale_after_seconds = 15
+phase_timeout_seconds = 300
+rollback_timeout_seconds = 300
+canary_observation_seconds = 30
+```
+
+Signer IDs are unique and bind one signature suite and one IPM principal.
+Public-key paths resolve under the configuration root, must be regular contained
+files, and never contain private key material. The Ed25519 file contains the
+32-byte public key; the ML-DSA-44 file contains its DER public key.
+`ed25519_ml_dsa_44` is accepted
+only when the post-quantum build feature is present and requires both public
+keys and both valid signatures over the same suite-bound transcript; there is
+no automatic downgrade. `artifact_key_env` supplies a 32-byte AEAD key used
+only to retain rollback artifacts. It must not be placed directly in TOML,
+audit events, mutation receipts, or support bundles.
+
+`admin_cluster` is a reserved fixed-member rollout mode. Its configuration
+shape, encrypted artifact storage, and durable coordination primitives are
+reserved for future wiring, but configuration validation currently rejects
+selecting the mode. A defense-in-depth request-path guard returns `503` if such
+a runtime is constructed. Do not use the heartbeat view as convergence proof.
+`single_instance` is the supported P1-13 runtime.
+
+Protected requests carry unpadded base64url JSON in
+`X-OxiBelt-Mutation`. The strict envelope contains `version`, `signer_id`, a
+canonical UUID `request_id`, RFC 3339 UTC `issued_at` and `expires_at`,
+`expected_previous_revision`, `new_revision`,
+`content_digest = "sha256:<lowercase-hex>"`, required `target` containing the
+cluster and membership revision, and `signature`. Single-instance mode uses
+its deterministic local target. The signature binds the
+authenticated principal, IPM namespace, method, exact path/query, all unsigned
+envelope fields, the normalized strong `If-Match` operational ETag, and exact
+request-body bytes. The supplied ETag must equal the active operational
+revision. The distinct signed `expected_previous_revision` is compared with the
+PostgreSQL logical head, which is initialized from the operational revision and
+advances to signed `new_revision` after a successful terminal result. Exact request-ID
+retries return a reduced bounded safe result with the retained status, not
+necessarily the original response body, without reapplying; conflicting reuse
+and unresolved prior outcomes return `409`.
+
+`POST /admin/v1/keys/rotate` advertises only `downstream_tls_default` and
+`downstream_tls_sni`. It verifies the SHA-256 pin for the already configured,
+contained key path and reloads downstream TLS; raw private-key values are
+rejected. Admin TLS, QUIC host-key, and remote-signer activation are not
+supported by this endpoint. `POST /admin/v1/config/secret-references/update`
+validates its typed environment/file-reference allowlist and rejects raw secret
+values, but the running configuration has no atomic override slot. It therefore
+returns `409 secret_reference_activation_unavailable` without changing state.
+
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
 Actions use `service:Action` syntax. Initial services are `admin`, `ipm`, `config`, `cache`, `upstream-pool`, `dynamic-policy`, `waf`, `lifecycle`, `runtime`, `route`, `stream`, and `turn`; `service:*` and `*` wildcards are accepted. Admin API metadata reads require `admin:ReadMetadata` on resources such as `oxibelt:<namespace>:admin:metadata/openapi`, and the unified Admin audit log requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`. Protected control-plane configuration changes require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config` for `[admin]` changes and `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config` for `[ipm]` changes, in addition to the base config operation permission. Route inventory reads for config-aware planning require `config:ReadRouteInventory` on `oxibelt:<namespace>:config:route-inventory/current`. IPM administration uses `ipm:GetStatus`, `ipm:ListPrincipals`, `ipm:GetPrincipal`, `ipm:CreatePrincipal`, `ipm:UpdatePrincipal`, `ipm:DeletePrincipal`, `ipm:ListCredentials`, `ipm:GetCredential`, `ipm:CreateCredential`, `ipm:UpdateCredential`, `ipm:RotateCredential`, `ipm:RevokeCredential`, `ipm:DeleteCredential`, `ipm:ListPolicies`, `ipm:GetPolicy`, `ipm:CreatePolicy`, `ipm:UpdatePolicy`, `ipm:DeletePolicy`, `ipm:ListBindings`, `ipm:CreateBinding`, `ipm:DeleteBinding`, `ipm:ReadAudit`, `ipm:SimulateSelf`, `ipm:SimulatePrincipal`, and `ipm:SimulatePolicy`. Dynamic policy automation uses `dynamic-policy:GetStatus`, `dynamic-policy:List`, `dynamic-policy:Get`, `dynamic-policy:Create`, `dynamic-policy:Apply`, `dynamic-policy:Update`, `dynamic-policy:Delete`, `dynamic-policy:Export`, `dynamic-policy:Import`, and `dynamic-policy:ReadAudit`. Upstream-pool automation uses `upstream-pool:GetStatus`, `upstream-pool:List`, `upstream-pool:Get`, `upstream-pool:AddServer`, `upstream-pool:UpdateServer`, and `upstream-pool:RemoveServer`. Runtime WebTransport operations use `runtime:GetWebTransportSessions` and `runtime:DrainWebTransportSessions`. WAF actions include telemetry reads (`waf:GetRuleHits`, `waf:GetRuleCosts`, `waf:GetCrsCompatibility`), OxiRule file management (`waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, `waf:DeleteOxiRuleGroup`, `waf:PutOxiRulePack`, `waf:DeleteOxiRulePack`, `waf:ListOxiRulePacks`, `waf:PlanOxiRulePack`, `waf:ReloadOxiRule`), and OxiRule development tools (`waf:CheckOxiRule`, `waf:CheckOxiRuleGroup`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, `waf:ReplayOxiRule`, `waf:ListOxiRuleTemplates`, `waf:RenderOxiRuleTemplate`, `waf:PlanOxiRuleFalsePositive`). Resources use `oxibelt:<namespace>:<service>:<resource>`, for example `oxibelt:oxibelt:admin:config`, `oxibelt:oxibelt:admin:metadata/openapi`, `oxibelt:oxibelt:admin:audit/admin`, `oxibelt:oxibelt:ipm:config`, `oxibelt:oxibelt:config:route-inventory/current`, `oxibelt:oxibelt:dynamic-policy:status/current`, `oxibelt:oxibelt:upstream-pool:status/current`, `oxibelt:oxibelt:runtime:webtransport/session/*`, `oxibelt:oxibelt:runtime:webtransport/session/<id>`, `oxibelt:oxibelt:runtime:webtransport/route/<route>`, `oxibelt:oxibelt:runtime:webtransport/upstream/<upstream>`, `oxibelt:oxibelt:runtime:webtransport/client-ip/<ip>`, `oxibelt:oxibelt:route:app`, `oxibelt:oxibelt:cache:policy/default`, `oxibelt:oxibelt:waf:oxirule/rules/block.oxirule.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/rulepacks/admin.oxirule-rulepack.toml`, `oxibelt:oxibelt:waf:oxirule-rulepack/plan`, `oxibelt:oxibelt:waf:template/admin-path`, or `oxibelt:oxibelt:waf:replay/*`. Conditions support `StringEquals`, `StringLike`, `StringNotEquals`, `IpAddress`, `NotIpAddress`, `Bool`, `DateBefore`, and `DateAfter` over keys such as `principal.subject`, `principal.groups`, `request.source_ip`, `request.method`, `request.host`, `request.path`, `request.route`, `request.protocol`, `resource.service`, `resource.name`, `time.now`, and `claim.<name>`. Admin API request conditions use the admin listener peer IP for `request.source_ip` and the Admin HTTP request method, normalized host, path, and protocol for the corresponding `request.*` keys.
+
+Mutation-specific authorization adds `admin:ReadMutations` on
+`mutation/<request_id>`, `config:GetInstances` on `instances/current`,
+`config:RotateKey` on `key/<target>/<name-or-default>`, and
+`config:UpdateSecretReference` on `secret-reference/<encoded-field>`.
+Two-factor break glass uses `ipm:GetBreakGlassActivation` and
+`ipm:ActivateBreakGlass` on `break-glass/principal/<principal>`, plus
+`ipm:RevokeBreakGlass` on `break-glass/activation/<activation_id>`.
 
 Resource-specific Admin endpoints use typed resource names and may require
 multiple resources for one request. Cache operations use
@@ -2031,7 +2122,7 @@ Local OxiRule risk analysis uses `waf:AnalyzeOxiRuleRisk` on `oxibelt:<namespace
 
 DB-backed credentials store only `sha256-v1` token digests and token prefixes. Create and rotate generate a 32-byte random `obt_v1_<base64url>` token and return the plaintext token once. Rotation keeps the previous token digest accepted until the requested overlap expires, while revoke clears previous-token overlap and marks the credential unusable. Admin mutations require `If-Match` with the ETag from `GET /admin/v1/ipm/status`; `oxibeltctl ipm` fetches it automatically when `--etag` is omitted.
 
-`[ipm.break_glass].argon2id_memory_mib` limits the Argon2id memory parameter accepted for break-glass access token hashes. The default is `128` MiB and the maximum configurable value is `16384` MiB. This bound is checked at configuration load time before any supplied break-glass token can be verified.
+`[ipm.break_glass].argon2id_memory_mib` limits the Argon2id memory parameter accepted for break-glass access token hashes. The default is `128` MiB and the maximum configurable value is `16384` MiB. This bound is checked at configuration load time before any supplied break-glass token can be verified. `access_mode = "direct"` preserves the existing credential behavior. `two_factor_activation` allows an inactive break-glass credential to call only its self-status and activation routes until a mutation signer bound to the same principal creates a database-timed activation. `max_activation_seconds` defaults to `900`; exact activation replay never extends the original expiry.
 
 ```toml
 [ipm]
@@ -2042,6 +2133,8 @@ fail_closed = true
 
 [ipm.break_glass]
 argon2id_memory_mib = 128
+access_mode = "direct" # direct | two_factor_activation
+max_activation_seconds = 900
 
 [[ipm.principals]]
 id = "admin"
@@ -2215,11 +2308,16 @@ Metadata reads require `admin:ReadMetadata` on `metadata/openapi`,
 Admin config and downstream TLS endpoints:
 
 - `GET /admin/v1/config/status`
+- `GET /admin/v1/config/instances`
 - `GET /admin/v1/config/effective`
 - `POST /admin/v1/config/validate`
 - `POST /admin/v1/config/diff`
 - `POST /admin/v1/config/load`
 - `POST /admin/v1/config/rollback`
+- `POST /admin/v1/config/secret-references/update`
+- `POST /admin/v1/files/sync`
+- `POST /admin/v1/keys/rotate`
+- `GET /admin/v1/mutations/{request_id}`
 - `GET /admin/v1/tls/downstream`
 - `POST /admin/v1/tls/downstream/reload`
 - `GET /admin/v1/tls/upstream`
@@ -2229,6 +2327,9 @@ Admin config and downstream TLS endpoints:
 - `GET /admin/v1/ipm/policies`
 - `GET /admin/v1/ipm/bindings`
 - `POST /admin/v1/ipm/simulate`
+- `GET /admin/v1/break-glass/activations/self`
+- `POST /admin/v1/break-glass/activations`
+- `POST /admin/v1/break-glass/activations/{id}/revoke`
 - `GET /admin/v1/diagnostics/preflight`
 - `POST /admin/v1/diagnostics/preflight`
 - `GET /admin/v1/diagnostics/support-bundle`
@@ -2247,7 +2348,20 @@ parameters. Calls without these list query parameters keep returning the full
 legacy array; paginated responses add a `pagination` object with an opaque
 `next_cursor` when more rows are available.
 
-Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, downstream TLS, and upstream TLS revocation operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` swaps back to the last good runtime snapshot kept by the admin control loop. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Mutating endpoints require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime, and preserves the active TLS state if validation fails. Upstream TLS status reads require `config:ReadUpstreamTls`; `POST /admin/v1/tls/upstream/refresh` requires `config:RefreshUpstreamTls` and refreshes known upstream OCSP cache contexts without exposing certificate identifiers or responder URLs.
+Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate, diff, load, rollback, file sync, downstream TLS, and upstream TLS revocation operations use the matching `config:*` IPM actions. `POST /admin/v1/config/load` installs a validated runtime snapshot only; it does not write TOML back to disk. `POST /admin/v1/config/rollback` restores the requested retained committed revision. Load and rollback require `admin:UpdateConfig` for `[admin]` changes and `ipm:UpdateConfig` for `[ipm]` changes. Config load, rollback, file sync, downstream TLS reload, key rotation, and secret-reference update require `If-Match` with the active config ETag from `/admin/v1/config/status` or `/admin/v1/config/effective`; stale ETags are rejected before applying changes. With required mutation protection they also require the signed `X-OxiBelt-Mutation` envelope. Downstream TLS reload re-reads configured certificate, key, and static OCSP files from disk or rebuilds the live OCSP runtime, and preserves the active TLS state if validation fails. Upstream TLS status reads require `config:ReadUpstreamTls`; `POST /admin/v1/tls/upstream/refresh` requires `config:RefreshUpstreamTls` and refreshes known upstream OCSP cache contexts without exposing certificate identifiers or responder URLs.
+
+`GET /admin/v1/mutations/{request_id}` returns a redacted durable receipt for
+the authenticated actor's protected request or callers with
+`admin:ReadMutations` on `mutation/<request_id>`. `GET
+/admin/v1/config/instances` returns configured member IDs plus currently live
+heartbeat records; reserved `admin_cluster` mode does not treat this as rollout
+convergence proof. `POST /admin/v1/keys/rotate` verifies and reloads only the
+configured default or SNI downstream TLS key path. `POST
+/admin/v1/config/secret-references/update` validates the allowlisted reference
+shape but returns `409` because atomic activation is unavailable. Break-glass activation is
+exposed through `GET /admin/v1/break-glass/activations/self`,
+`POST /admin/v1/break-glass/activations`, and
+`POST /admin/v1/break-glass/activations/{id}/revoke`.
 
 Kubernetes-native immutable rollout mode is enabled by setting
 `OXIBELT_CONFIG_ROLLOUT_MODE=kubernetes_immutable` in a Pod. It requires
@@ -3424,6 +3538,12 @@ Configuration validation rejects:
 - TLS client auth without CA roots, invalid TLS version ranges, TCP TLS early data without TLS 1.3 stateful resumption, static OCSP without `response_file`, live OCSP with `response_file`, invalid OCSP fetch limits, unsafe OCSP responder URLs, CRLite enforcement without `filter_file`, invalid CRLite filter limits/digests, invalid upstream revocation limits, upstream CRLite enforcement without `filter_file`, invalid ASN identity database settings, or managed ASN sources that are not HTTPS.
 - Reserved sticky-cookie settings, and spool buffering without a writable `temp_dir` and positive temp-file quota.
 - Invalid WebRTC TURN listener binds, missing proxy pools, open `edge_relay` auth, invalid TURN upstream schemes, or invalid relay port ranges.
+- Enabled Admin mutation protection without Admin/IPM, a PostgreSQL backend,
+  same-backend enforcing audit, a valid retained-response/expiry window, or at
+  least one contained principal-bound signer key; hybrid signers without the
+  post-quantum feature or both public keys; two-factor break glass without
+  mutation protection; or selection of the reserved fixed-member
+  `admin_cluster` mutation rollout mode.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

@@ -19,6 +19,11 @@ mod doctor_plan_tests;
 mod dynamic_policy_plan;
 #[path = "oxibeltctl/ipm_plan.rs"]
 mod ipm_plan;
+#[path = "oxibeltctl/mutation_signer.rs"]
+mod mutation_signer;
+#[cfg(test)]
+#[path = "oxibeltctl/mutation_signer_tests.rs"]
+mod mutation_signer_tests;
 #[path = "oxibeltctl/output.rs"]
 mod output;
 #[path = "oxibeltctl/plan.rs"]
@@ -81,18 +86,27 @@ async fn run() -> anyhow::Result<()> {
     return Ok(());
   }
   let client = build_client(&cli.admin)?;
-  if rulepack::run_remote_if_requested(&client, &cli.command, cli.admin.output).await? {
+  let mutation_signer = mutation_signer::MutationSigner::from_args(&cli.admin.mutation)?;
+  if rulepack::run_remote_if_requested_signed(
+    &client,
+    &cli.command,
+    cli.admin.output,
+    mutation_signer.as_ref(),
+  )
+  .await?
+  {
     return Ok(());
   }
   let request = plan_command(&client, &cli.command).await?;
-  let response = client
-    .request_json(
-      request.method,
-      &request.endpoint,
-      request.body,
-      request.if_match.as_deref(),
-    )
-    .await?;
+  let response = mutation_signer::request_json(
+    &client,
+    mutation_signer.as_ref(),
+    request.method,
+    &request.endpoint,
+    request.body,
+    request.if_match.as_deref(),
+  )
+  .await?;
   if let Command::Doctor(args) = &cli.command {
     if response.status.is_success() {
       doctor::print_report_body(&response.body, args)?;

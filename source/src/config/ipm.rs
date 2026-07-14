@@ -65,14 +65,28 @@ pub struct IpmCredentialConfig {
 pub struct IpmBreakGlassConfig {
   #[serde(default = "default_break_glass_argon2id_memory_mib")]
   pub argon2id_memory_mib: u32,
+  #[serde(default)]
+  pub access_mode: IpmBreakGlassAccessMode,
+  #[serde(default = "default_break_glass_max_activation_seconds")]
+  pub max_activation_seconds: u64,
 }
 
 impl Default for IpmBreakGlassConfig {
   fn default() -> Self {
     Self {
       argon2id_memory_mib: default_break_glass_argon2id_memory_mib(),
+      access_mode: IpmBreakGlassAccessMode::Direct,
+      max_activation_seconds: default_break_glass_max_activation_seconds(),
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpmBreakGlassAccessMode {
+  #[default]
+  Direct,
+  TwoFactorActivation,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
@@ -198,6 +212,11 @@ impl Config {
     validate_runtime_identifier("ipm.namespace", &self.ipm.namespace)?;
     validate_optional_non_empty("ipm.backend", self.ipm.backend.as_deref())?;
     validate_break_glass_argon2id_memory_mib(self.ipm.break_glass.argon2id_memory_mib)?;
+    if self.ipm.break_glass.max_activation_seconds == 0
+      || self.ipm.break_glass.max_activation_seconds > 86_400
+    {
+      bail!("ipm.break_glass.max_activation_seconds must be between 1 and 86400");
+    }
     if self.ipm.enabled
       && let Some(backend_name) = self.ipm_backend_name()
     {
@@ -628,6 +647,10 @@ fn default_ipm_policy_version() -> String {
 
 fn default_break_glass_argon2id_memory_mib() -> u32 {
   128
+}
+
+const fn default_break_glass_max_activation_seconds() -> u64 {
+  900
 }
 
 fn max_break_glass_argon2id_memory_mib() -> u32 {
