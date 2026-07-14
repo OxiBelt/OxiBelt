@@ -123,7 +123,7 @@ is_test_worker() {
   [[ "${kind_cluster}" == "${cluster_name}" ]] || return 1
 
   kube get node "${node}" -o json \
-    | jq -e '(.metadata.labels["node-role.kubernetes.io/control-plane"] // "") == ""' \
+    | jq -e '(.metadata.labels // {}) | has("node-role.kubernetes.io/control-plane") | not' \
     >/dev/null
 }
 
@@ -315,7 +315,7 @@ kind load docker-image --name "${cluster_name}" "${image}"
 
 mapfile -t workers < <(kube get nodes -o json | jq -r '
   .items[]
-  | select((.metadata.labels["node-role.kubernetes.io/control-plane"] // "") == "")
+  | select((.metadata.labels // {}) | has("node-role.kubernetes.io/control-plane") | not)
   | .metadata.name
 ' | sort)
 [[ "${#workers[@]}" == "3" ]] || die "Kind lifecycle cluster must expose exactly three worker nodes"

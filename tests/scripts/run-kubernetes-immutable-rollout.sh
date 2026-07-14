@@ -70,6 +70,8 @@ cleanup() {
       --all-containers=true --prefix --tail=200 >&2 || true
     kube -n "${namespace}" logs -l "${selector}" \
       --all-containers=true --prefix --previous --tail=200 >&2 || true
+    kube -n "${namespace}" logs -l 'oxibelt.dev/test=stale-config' \
+      --all-containers=true --prefix --tail=80 >&2 || true
   fi
 
   if ((cluster_created == 1)); then
@@ -232,40 +234,30 @@ check_pod_runtime_proof() {
   port_forward_pid=""
 }
 
-stale_config_pod_is_running_and_unready() {
+stale_config_pod_failed_closed() {
   local pod="$1"
   local pod_json
   pod_json="$(kube -n "${namespace}" get pod "${pod}" -o json 2>/dev/null)" || return 1
 
   jq -e '
-    .status.phase == "Running"
+    .status.phase == "Failed"
       and all(.status.conditions[]?; .type != "Ready" or .status != "True")
+      and any(.status.containerStatuses[]?;
+        .name == "oxibelt"
+          and (.restartCount // 0) == 0
+          and .state.terminated.reason == "Error"
+          and (.state.terminated.exitCode // 0) != 0)
   ' >/dev/null <<<"${pod_json}"
 }
 
-health_endpoint_is_unready() {
-  local url="$1"
-  local status
-  status="$(curl --silent --show-error --max-time 2 --output /dev/null \
-    --write-out '%{http_code}' "${url}" 2>/dev/null)" || return 1
-  [[ "${status}" == "503" ]]
-}
-
-check_stale_config_pod() {
+stale_config_pod_reports_digest_mismatch() {
   local pod="$1"
-  local port="$2"
-  local url="http://127.0.0.1:${port}/ready"
+  local logs
 
-  kubectl --context "kind-${cluster_name}" -n "${namespace}" port-forward \
-    --address 127.0.0.1 "pod/${pod}" "${port}:9091" \
-    >"${work_dir}/port-forward-${pod}.log" 2>&1 &
-  port_forward_pid="$!"
-  wait_for "unready health response from stale config Pod ${pod}" 60 \
-    health_endpoint_is_unready "${url}"
-
-  kill "${port_forward_pid}" >/dev/null 2>&1 || true
-  wait "${port_forward_pid}" >/dev/null 2>&1 || true
-  port_forward_pid=""
+  logs="$(kube -n "${namespace}" logs "pod/${pod}" -c oxibelt 2>/dev/null)" || return 1
+  grep -Fq \
+    "OXIBELT_CONFIG_DIGEST does not match the exact bytes of OXIBELT_CONFIG_REVISION_FILE" \
+    <<<"${logs}"
 }
 
 assert_controller_can_i() {
@@ -751,9 +743,9 @@ done
 verify_admin_mtls "$((25000 + RANDOM % 10000))"
 
 # A Pod with a valid mounted immutable configuration but a different assigned
-# digest must keep its process/health listener available while never becoming
-# Ready. Keep the standalone fixture outside the workload selector so it cannot
-# affect controller convergence, Service endpoints, or the PDB.
+# digest must fail before startup. Keep the standalone fixture outside the
+# workload selector so it cannot affect controller convergence, Service
+# endpoints, or the PDB.
 stale_pod="stale-config-${run_id}"
 stale_digest="1111111111111111111111111111111111111111111111111111111111111111"
 kube -n "${namespace}" get deployment "${workload_name}" -o json \
@@ -775,8 +767,9 @@ kube -n "${namespace}" get deployment "${workload_name}" -o json \
       }
     ' \
   | kube -n "${namespace}" create -f - >/dev/null
-wait_for "a running but unready stale-config Pod" 60 \
-  stale_config_pod_is_running_and_unready "${stale_pod}"
-check_stale_config_pod "${stale_pod}" "$((23000 + RANDOM % 10000))"
+wait_for "a failed-closed stale-config Pod" 60 \
+  stale_config_pod_failed_closed "${stale_pod}"
+wait_for "the immutable digest-mismatch log from stale-config Pod" 30 \
+  stale_config_pod_reports_digest_mismatch "${stale_pod}"
 
 echo "Kubernetes immutable three-replica rollout passed"

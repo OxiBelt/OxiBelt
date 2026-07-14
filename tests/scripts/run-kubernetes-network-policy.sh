@@ -339,6 +339,9 @@ if [[ "${cni}" == "cilium" ]]; then
 
   external_allowed_container="${profile_name}-allowed"
   external_denied_container="${profile_name}-denied"
+  # agnhost has an exec-form /agnhost entrypoint, so Docker appends only the
+  # netexec subcommand here. The Kubernetes fixture below uses command because
+  # that field replaces an image entrypoint.
   docker run --detach \
     --name "${external_allowed_container}" \
     --network "${minikube_network}" \
@@ -347,7 +350,7 @@ if [[ "${cni}" == "cilium" ]]; then
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
-    "${agnhost_image}" /agnhost netexec --http-port=8080 --udp-port=-1 >/dev/null
+    "${agnhost_image}" netexec --http-port=8080 --udp-port=-1 >/dev/null
   docker run --detach \
     --name "${external_denied_container}" \
     --network "${minikube_network}" \
@@ -356,7 +359,7 @@ if [[ "${cni}" == "cilium" ]]; then
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
-    "${agnhost_image}" /agnhost netexec --http-port=8080 --udp-port=-1 >/dev/null
+    "${agnhost_image}" netexec --http-port=8080 --udp-port=-1 >/dev/null
 
   wait_for_distinct_docker_network_ipv4s \
     "${minikube_network}" \

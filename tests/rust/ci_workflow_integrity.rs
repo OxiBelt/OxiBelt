@@ -1045,17 +1045,33 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "x-oxibelt-config-revision",
     "x-oxibelt-config-digest",
     "ConfigMap raw bytes do not match the Pod-assigned digest",
-    "stale_config_pod_is_running_and_unready",
-    "a running but unready stale-config Pod",
+    "stale_config_pod_failed_closed",
+    "a failed-closed stale-config Pod",
+    ".status.phase == \"Failed\"",
+    ".state.terminated.reason == \"Error\"",
+    "stale_config_pod_reports_digest_mismatch",
+    "OXIBELT_CONFIG_DIGEST does not match the exact bytes of OXIBELT_CONFIG_REVISION_FILE",
     "stale-config-${run_id}",
-    "unready health response from stale config Pod",
     "oxibelt.dev/config-digest",
     "logs \"deployment/${controller_release}\"",
     "--all-containers=true --prefix --previous --tail=200",
+    "logs -l 'oxibelt.dev/test=stale-config'",
   ] {
     assert!(
       script.contains(expected),
       "Kubernetes immutable rollout script should preserve {expected}"
+    );
+  }
+
+  for removed in [
+    "stale_config_pod_is_running_and_unready",
+    "health_endpoint_is_unready",
+    "check_stale_config_pod",
+    "a running but unready stale-config Pod",
+  ] {
+    assert!(
+      !script.contains(removed),
+      "Kubernetes immutable rollout script must prove a stale digest fails before startup instead of preserving {removed}"
     );
   }
 
@@ -1126,6 +1142,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "'- role: worker'",
     "Kind lifecycle cluster must expose exactly three worker nodes",
     "io.x-k8s.kind.cluster",
+    "has(\"node-role.kubernetes.io/control-plane\") | not",
     "topology.kubernetes.io/zone",
     "podDistribution.enabled=true",
     "lifecycle.preStop.enabled=true",
@@ -1148,6 +1165,19 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
       "Kubernetes Pod lifecycle script should preserve {expected}"
     );
   }
+
+  assert_eq!(
+    script
+      .matches("has(\"node-role.kubernetes.io/control-plane\") | not")
+      .count(),
+    2,
+    "Kubernetes Pod lifecycle worker selection must exclude an existing control-plane label in both checks"
+  );
+  assert!(
+    !script
+      .contains("(.metadata.labels[\"node-role.kubernetes.io/control-plane\"] // \"\") == \"\""),
+    "Kubernetes Pod lifecycle worker selection must not treat an empty control-plane label as absent"
+  );
 
   for forbidden in [
     "docker-rootful",
@@ -1251,6 +1281,17 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
       "if [[ \"${cni}\" == \"cilium\" ]]; then\n  helm_show_only+=(--show-only templates/ciliumnetworkpolicy.yaml)\nfi"
     ),
     "the Cilium template must only be selected for Cilium coverage"
+  );
+
+  let agnhost_netexec = "\"${agnhost_image}\" netexec --http-port=8080 --udp-port=-1";
+  assert_eq!(
+    script.matches(agnhost_netexec).count(),
+    2,
+    "Cilium FQDN fixtures must pass netexec exactly once after the agnhost image entrypoint"
+  );
+  assert!(
+    !script.contains("\"${agnhost_image}\" /agnhost netexec"),
+    "Cilium FQDN fixtures must not duplicate the agnhost image entrypoint"
   );
 
   for forbidden in [
