@@ -369,6 +369,16 @@ fn add_forward_auth_headers(
       headers.insert(name.clone(), value.clone());
     }
   }
+  if provider.config.provider == ExternalAuthProvider::Authelia {
+    for name in [
+      http::header::ACCEPT,
+      HeaderName::from_static("x-requested-with"),
+    ] {
+      if let Some(value) = context.headers.get(&name) {
+        headers.insert(name, value.clone());
+      }
+    }
+  }
   let forwarded_uri = context
     .uri
     .path_and_query()

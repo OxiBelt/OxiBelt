@@ -72,27 +72,31 @@ fn assert_metric(output: &str, metric: &str, value: u64) {
   );
 }
 
-fn projected_forward_auth_headers(uri: &'static str) -> HeaderMap {
-  let provider = provider_with_headers(&[], &[]);
+fn projected_forward_auth_headers(
+  provider: &ExternalAuthProviderRuntime,
+  request_headers: &HeaderMap,
+  uri: &'static str,
+) -> HeaderMap {
   let method = Method::GET;
   let uri = http::Uri::from_static(uri);
-  let request_headers = HeaderMap::new();
   let context = ExternalAuthRequestContext {
     method: &method,
     uri: &uri,
-    headers: &request_headers,
+    headers: request_headers,
     client_ip: "192.0.2.10".parse().expect("valid client IP"),
     host: "vault.example.test",
     downstream_scheme: "https",
     route_name: "vault-admin",
   };
   let mut headers = HeaderMap::new();
-  add_forward_auth_headers(&mut headers, &provider, &context);
+  add_forward_auth_headers(&mut headers, provider, &context);
   headers
 }
 
 #[test]
 fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
+  let provider = provider_with_headers(&[], &[]);
+  let request_headers = HeaderMap::new();
   for (uri, expected_uri) in [
     ("/admin?view=summary", "/admin?view=summary"),
     (
@@ -101,7 +105,7 @@ fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
     ),
     ("vault.example.test:443", "/"),
   ] {
-    let headers = projected_forward_auth_headers(uri);
+    let headers = projected_forward_auth_headers(&provider, &request_headers, uri);
 
     assert_eq!(headers["x-forwarded-uri"], expected_uri);
     assert_eq!(
@@ -114,6 +118,56 @@ fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
     assert_eq!(headers["x-forwarded-for"], "192.0.2.10");
     assert_eq!(headers["x-forwarded-route"], "vault-admin");
   }
+}
+
+#[test]
+fn authelia_forward_auth_projects_browser_classification_headers() {
+  let provider = provider_with_headers(&[], &[]);
+  let mut request_headers = HeaderMap::new();
+  request_headers.insert(
+    http::header::ACCEPT,
+    HeaderValue::from_static("text/html,application/xhtml+xml"),
+  );
+  request_headers.insert(
+    "x-requested-with",
+    HeaderValue::from_static("XMLHttpRequest"),
+  );
+  request_headers.insert("x-unconfigured", HeaderValue::from_static("dropped"));
+
+  let headers = projected_forward_auth_headers(&provider, &request_headers, "/admin");
+
+  assert_eq!(
+    headers.get(http::header::ACCEPT).unwrap(),
+    "text/html,application/xhtml+xml"
+  );
+  assert_eq!(headers.get("x-requested-with").unwrap(), "XMLHttpRequest");
+  assert!(headers.get("x-unconfigured").is_none());
+}
+
+#[test]
+fn authelia_forward_auth_does_not_synthesize_or_share_classification_headers() {
+  let authelia = provider_with_headers(&[], &[]);
+  let empty_request_headers = HeaderMap::new();
+  let authelia_headers =
+    projected_forward_auth_headers(&authelia, &empty_request_headers, "/admin");
+  assert!(authelia_headers.get(http::header::ACCEPT).is_none());
+  assert!(authelia_headers.get("x-requested-with").is_none());
+
+  let gateway = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Closed,
+    &[],
+    &[],
+  );
+  let mut gateway_request_headers = HeaderMap::new();
+  gateway_request_headers.insert(http::header::ACCEPT, HeaderValue::from_static("text/html"));
+  gateway_request_headers.insert(
+    "x-requested-with",
+    HeaderValue::from_static("XMLHttpRequest"),
+  );
+  let gateway_headers = projected_forward_auth_headers(&gateway, &gateway_request_headers, "/");
+  assert!(gateway_headers.get(http::header::ACCEPT).is_none());
+  assert!(gateway_headers.get("x-requested-with").is_none());
 }
 
 #[test]
@@ -170,7 +224,7 @@ fn identity_headers_are_stripped_then_reapplied_from_trusted_values() {
 }
 
 #[test]
-fn denied_forward_auth_response_only_preserves_allowlisted_headers() {
+fn denied_forward_auth_response_preserves_unauthorized_status_and_allowlisted_headers() {
   let provider = provider_with_headers(&[], &["location", "set-cookie"]);
   let mut headers = HeaderMap::new();
   headers.insert(http::header::LOCATION, HeaderValue::from_static("/login"));
@@ -178,13 +232,14 @@ fn denied_forward_auth_response_only_preserves_allowlisted_headers() {
   headers.insert("x-internal-error", HeaderValue::from_static("secret"));
 
   let terminal = filter_terminal_response(
-    StatusCode::FOUND,
+    StatusCode::UNAUTHORIZED,
     headers,
-    Bytes::from_static(b"redirect"),
+    Bytes::from_static(b"unauthorized"),
     &provider,
   );
 
-  assert_eq!(terminal.status, StatusCode::FOUND);
+  assert_eq!(terminal.status, StatusCode::UNAUTHORIZED);
+  assert_eq!(terminal.body, Bytes::from_static(b"unauthorized"));
   assert_eq!(
     terminal.headers.get(http::header::LOCATION).unwrap(),
     "/login"

@@ -1146,6 +1146,8 @@ composite_identity_parts = ["client_ip_prefix", "user_agent", "tls_fingerprint",
 # timeout_ms = 2000
 # fail_policy = "closed" # closed | open
 # forward_headers = ["authorization", "cookie"]
+# For `provider = "authelia"`, OxiBelt also forwards downstream `accept` and
+# `x-requested-with` when present so Authelia can classify browser and XHR requests.
 # identity_headers = ["remote-user", "remote-groups", "remote-email", "remote-name"]
 # terminal_response_headers = ["location", "www-authenticate", "set-cookie"]
 # max_response_body_bytes = 65536

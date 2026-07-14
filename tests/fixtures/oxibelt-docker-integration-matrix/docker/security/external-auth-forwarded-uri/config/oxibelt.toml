@@ -44,6 +44,7 @@ provider = "authelia"
 endpoint = "http://mock-http:18080/status/418"
 timeout_ms = 1000
 fail_policy = "closed"
+forward_headers = []
 max_response_body_bytes = 8192
 
 [[upstreams]]
