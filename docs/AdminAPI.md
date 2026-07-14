@@ -59,12 +59,29 @@ and `order`; cursors are bound to the endpoint and normalized query.
 Admin audit store as `{ "audit": [...] }`. The endpoint requires
 `[admin.audit.store]` with a PostgreSQL backend; export-only stdout or OTLP
 Admin audit configurations return `409` because exports are not query stores.
-Records include actor, peer, method, path, authorization action/resource,
-outcome, status, and a redacted request summary. With mTLS workload binding,
-they also include the workload identity, mapped principal, leaf fingerprint,
-credential identity, and fixed authentication reason. Request bodies are summarized
-with byte count, top-level JSON keys, and selected safe scalar fields, not
-stored as raw payloads.
+An unavailable PostgreSQL store, query failure, or invalid stored record
+returns `503`; it never falls back to stdout/OTLP history.
+
+New rows use `schema_version = "oxibelt.admin.audit/v1"`. Each returned v1
+record contains its database `id` and namespace plus occurrence `timestamp`
+and `timestamp_unix_ms`, event and instance IDs, `intent` or `terminal` phase,
+server request ID and optional mutation request ID, actor/principal/workload and
+credential identity, peer and canonical source address, method/path/service,
+operation and durability action, authorization resource/target, optional
+previous and desired revisions and content digest, HTTP status, result/outcome,
+stable error code, redacted summary, integrity envelope, and database
+`created_at`. `result` is `accepted`, `applied`, `rejected`, or
+`indeterminate`. The integrity envelope identifies `sha256` or `hmac_sha256`,
+chain ID, sequence, previous and current event hashes, and optional HMAC key ID
+and tag.
+
+Rows created before this schema remain visible as `legacy-v0`. They retain the
+same response envelope and historical fields, while unavailable v1 fields are
+`null` and no integrity proof is invented. Request bodies are summarized with
+byte count, top-level JSON keys, and selected safe scalar fields; raw bodies,
+tokens, certificates, signatures, keys, and arbitrary internal errors are not
+stored. Query filters are `limit`, `outcome`, `actor`, `principal`, `service`,
+`operation`, `request_id`, `path_prefix`, and `before_id`.
 
 ## Long-Running Operations
 

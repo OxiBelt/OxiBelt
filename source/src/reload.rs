@@ -16,6 +16,9 @@ use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::tls;
 use crate::waf::WafEngine;
 
+#[path = "reload/audit.rs"]
+mod audit;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReloadTrigger {
   Poll,
@@ -408,9 +411,9 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
       "full hot reload rejected because admin.mutations is a restart-only control-plane trust root"
     );
   }
+  audit::validate_runtime_compatibility(active, replacement)?;
   if active.admin.mutations.mode.enabled()
-    && (replacement.admin.audit != active.admin.audit
-      || replacement.shared_state != active.shared_state
+    && (replacement.shared_state != active.shared_state
       || replacement.ipm.backend != active.ipm.backend
       || replacement.ipm.namespace != active.ipm.namespace)
   {
@@ -682,6 +685,18 @@ mod tests {
     let error = validate_full_reload_runtime_compatibility(&active, &replacement)
       .expect_err("mutation trust changes should require process restart");
     assert!(error.to_string().contains("admin.mutations"));
+  }
+
+  #[test]
+  fn full_reload_rejects_admin_audit_authority_changes() {
+    let mut active = parse_worker_reload_config(2);
+    active.admin.audit.enabled = true;
+    let mut replacement = active.clone();
+    replacement.admin.audit.mode = crate::config::AdminAuditMode::BestEffort;
+
+    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
+      .expect_err("audit authority changes should require process restart");
+    assert!(error.to_string().contains("admin.audit"));
   }
 
   fn parse_worker_reload_config(worker_threads: usize) -> Config {

@@ -8,6 +8,7 @@ use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 
 use super::{AdminMutationRuntime, MutationExecution};
 use crate::admin_mutation::ledger::{MutationRecord, MutationState, TerminalMutation};
+use crate::admin_mutation::store::finish_tx;
 
 impl AdminMutationRuntime {
   pub(crate) async fn finish(
@@ -56,24 +57,42 @@ impl AdminMutationRuntime {
     let error = (!matches!(state, MutationState::Committed))
       .then(|| status.canonical_reason().unwrap_or("mutation failed"));
     let event = audit.critical_mutation_event(&execution.request_id, status, outcome, error);
-    let terminal_audit_record_id = audit_runtime
-      .persist_critical_mutation(event)
+    let staged_audit = audit_runtime
+      .stage_critical_mutation(event)
+      .await
+      .context("failed to stage critical mutation terminal audit")?;
+    let store = self.store()?;
+    let mut tx = store.pool().begin().await?;
+    let terminal_audit_record_id = staged_audit
+      .insert(&mut tx)
       .await
       .context("failed to persist critical mutation terminal audit")?;
-    self
-      .store()?
-      .finish(
-        &execution.request_id,
-        &TerminalMutation {
-          state,
-          http_status: status.as_u16(),
-          safe_response,
-          error_code,
-          terminal_audit_record_id,
-        },
-      )
-      .await
-      .context("failed to commit Admin mutation receipt")
+    let record = match finish_tx(
+      &mut tx,
+      store.namespace(),
+      &execution.request_id,
+      &TerminalMutation {
+        state,
+        http_status: status.as_u16(),
+        safe_response,
+        error_code,
+        terminal_audit_record_id,
+      },
+    )
+    .await
+    {
+      Ok(record) => record,
+      Err(error) => {
+        audit_runtime.record_required_persistence_failure("postgres_unavailable");
+        return Err(error).context("failed to stage Admin mutation receipt");
+      }
+    };
+    if let Err(error) = tx.commit().await {
+      audit_runtime.record_required_persistence_failure("postgres_unavailable");
+      return Err(error).context("failed to commit Admin mutation receipt and terminal audit");
+    }
+    staged_audit.publish();
+    Ok(record)
   }
 }
 

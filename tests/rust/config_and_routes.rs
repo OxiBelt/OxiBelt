@@ -6,9 +6,9 @@ use std::path::Path;
 
 use base64::Engine;
 use oxibelt::config::{
-  AccessLogSchema, AccessTokenRateLimitSource, AdminAuditExportSink, AdminAuditMode,
-  AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode, BackendFailureMode,
-  BufferingMode, CacheStore, CapacitySetting, CircuitFailureCondition,
+  AccessLogSchema, AccessTokenRateLimitSource, AdminAuditAcknowledgement, AdminAuditExportSink,
+  AdminAuditMode, AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode,
+  BackendFailureMode, BufferingMode, CacheStore, CapacitySetting, CircuitFailureCondition,
   ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
   CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
   ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
@@ -5771,7 +5771,7 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert!(config.admin.audit.enabled);
-  assert_eq!(config.admin.audit.mode, AdminAuditMode::Enforcing);
+  assert_eq!(config.admin.audit.mode, AdminAuditMode::DurableRequired);
   assert_eq!(config.admin.audit.backend.as_deref(), Some("postgres-main"));
   assert!(config.admin.audit.store.enabled);
   assert_eq!(
@@ -5849,7 +5849,7 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
 
-  assert_eq!(config.admin.audit.mode, AdminAuditMode::Enforcing);
+  assert_eq!(config.admin.audit.mode, AdminAuditMode::DurableRequired);
   assert_eq!(config.admin.audit.backend, None);
   assert_eq!(config.admin.audit.queue_capacity, 2048);
   assert!(config.admin.audit.store.enabled);
@@ -5946,9 +5946,9 @@ enabled = false
     .validate()
     .expect_err("enforcing admin audit without a store should fail");
   assert!(
-    error
-      .to_string()
-      .contains("admin.audit.mode = \"enforcing\" requires admin.audit.store.enabled = true"),
+    error.to_string().contains(
+      "admin.audit.acknowledgement = \"postgres\" requires admin.audit.store.enabled = true"
+    ),
     "unexpected error: {error}"
   );
 }
@@ -6063,6 +6063,337 @@ required_sinks = ["otlp"]
     toml::from_str::<Config>(&raw).expect_err("unsupported required sink should fail parse");
   assert!(
     error.to_string().contains("unknown variant `otlp`"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn admin_audit_accepts_selective_fsynced_spool_and_hmac_config() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-selective-spool");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-selective-spool");
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+acknowledgement = "fsynced_spool"
+required_actions = ["config.load", "ipm.write"]
+
+[admin.audit.store]
+enabled = false
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+
+[admin.audit.integrity]
+hmac_key_env = "OXIBELT_ADMIN_AUDIT_HMAC_KEY"
+hmac_key_id = "audit-2026-07"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("selective spool config should parse");
+  config
+    .validate()
+    .expect("selective spool config should validate");
+
+  assert_eq!(
+    config.admin.audit.mode,
+    AdminAuditMode::DurableRequiredForActions
+  );
+  assert_eq!(
+    config.admin.audit.acknowledgement,
+    AdminAuditAcknowledgement::FsyncedSpool
+  );
+  assert_eq!(
+    config.admin.audit.required_actions,
+    vec!["config.load", "ipm.write"]
+  );
+  assert!(config.admin.audit.spool.enabled);
+  assert_eq!(config.admin.audit.spool.max_bytes, 64 * 1024 * 1024);
+  assert_eq!(config.admin.audit.spool.max_events, 16_384);
+  assert_eq!(config.admin.audit.spool.max_event_bytes, 64 * 1024);
+  assert_eq!(
+    config.admin.audit.integrity.hmac_key_env.as_deref(),
+    Some("OXIBELT_ADMIN_AUDIT_HMAC_KEY")
+  );
+}
+
+#[test]
+fn admin_audit_rejects_invalid_durable_policy_and_spool_fields() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-audit-invalid-durable-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-invalid-durable-policy");
+  let cases = [
+    (
+      "selective mode without actions",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+acknowledgement = "fsynced_spool"
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+"#,
+      "requires non-empty admin.audit.required_actions",
+    ),
+    (
+      "unknown action",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+acknowledgement = "fsynced_spool"
+required_actions = ["config.unknown"]
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+"#,
+      "contains unknown action config.unknown",
+    ),
+    (
+      "duplicate action",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+acknowledgement = "fsynced_spool"
+required_actions = ["config.load", "config.load"]
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+"#,
+      "contains duplicate action config.load",
+    ),
+    (
+      "actions outside selective mode",
+      r#"
+[admin.audit]
+enabled = true
+mode = "best_effort"
+required_actions = ["config.load"]
+"#,
+      "required_actions requires admin.audit.mode",
+    ),
+    (
+      "spool acknowledgement without spool",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+"#,
+      "requires admin.audit.spool.enabled = true",
+    ),
+    (
+      "legacy backend with spool acknowledgement",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+backend = "postgres-main"
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+"#,
+      "legacy admin.audit.backend requires admin.audit.acknowledgement = \"postgres\"",
+    ),
+    (
+      "relative spool path",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+
+[admin.audit.spool]
+enabled = true
+directory = "audit-spool"
+"#,
+      "admin.audit.spool.directory must be an absolute path",
+    ),
+    (
+      "zero event capacity",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+max_events = 0
+"#,
+      "admin.audit.spool.max_events must be greater than zero",
+    ),
+    (
+      "event larger than spool",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+max_bytes = 1024
+max_event_bytes = 2048
+"#,
+      "max_event_bytes must not exceed admin.audit.spool.max_bytes",
+    ),
+    (
+      "unpaired HMAC fields",
+      r#"
+[admin.audit]
+enabled = true
+mode = "best_effort"
+
+[admin.audit.integrity]
+hmac_key_env = "OXIBELT_ADMIN_AUDIT_HMAC_KEY"
+"#,
+      "hmac_key_env and admin.audit.integrity.hmac_key_id must be set together",
+    ),
+    (
+      "PostgreSQL acknowledgement without store",
+      r#"
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "postgres"
+"#,
+      "acknowledgement = \"postgres\" requires admin.audit.store.enabled = true",
+    ),
+  ];
+
+  for (name, audit, expected) in cases {
+    let raw = format!(
+      "{}\n[admin]\nenabled = true\nbind = \"127.0.0.1:0\"\ntransport = \"plaintext_allowlist\"\n{audit}",
+      common::minimal_config_toml(&cert_path, &key_path)
+    );
+    let config: Config = toml::from_str(&raw).unwrap_or_else(|error| panic!("{name}: {error}"));
+    let error = match config.validate() {
+      Ok(()) => panic!("{name} should fail validation"),
+      Err(error) => error,
+    };
+    assert!(
+      error.to_string().contains(expected),
+      "{name}: unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn admin_mutations_accept_selective_audit_only_when_all_protected_actions_are_covered() {
+  unsafe {
+    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  }
+  let temp_dir = common::TempDir::new("admin-mutations-selective-audit");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-mutations-selective-audit");
+  let signer_path = temp_dir.path().join("controller.ed25519.pub");
+  std::fs::write(&signer_path, b"test public key").expect("signer fixture should be writable");
+  let protected_actions = r#"[
+    "config.load",
+    "config.rollback",
+    "config.files_sync",
+    "config.downstream_tls_reload",
+    "config.key_rotate",
+    "config.secret_reference_update",
+    "ipm.write",
+    "break_glass.activate",
+    "break_glass.revoke",
+  ]"#;
+  let raw = format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+required_actions = {protected_actions}
+
+[admin.audit.store]
+enabled = true
+backend = "postgres-main"
+
+[admin.mutations]
+mode = "optional"
+backend = "postgres-main"
+
+[[admin.mutations.signers]]
+id = "gateway-controller"
+principal = "controller"
+ed25519_public_key_file = "{}"
+
+[ipm]
+enabled = true
+backend = "postgres-main"
+
+[[ipm.principals]]
+id = "controller"
+subject = "controller"
+
+[[ipm.credentials]]
+name = "controller"
+principal = "controller"
+bearer_token_env = "OXIBELT_IPM_TOKEN_TEST"
+
+[shared_state]
+enabled = true
+namespace = "matrix"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path),
+    signer_path.display()
+  );
+
+  let config: Config = toml::from_str(&raw).expect("protected action config should parse");
+  config
+    .validate()
+    .expect("all protected actions should satisfy mutation audit validation");
+
+  let missing_action = raw.replace("    \"break_glass.revoke\",\n", "");
+  let config: Config = toml::from_str(&missing_action).expect("incomplete config should parse");
+  let error = config
+    .validate()
+    .expect_err("missing protected action should fail mutation audit validation");
+  assert!(
+    error.to_string().contains(
+      "admin.mutations requires durable Admin audit coverage for every protected mutation action"
+    ),
     "unexpected error: {error}"
   );
 }

@@ -362,10 +362,11 @@ async fn admin_http3_response(
       "control capacity exhausted",
     );
   };
-  let (audit, reservation) = match begin_admin_h3_audit(request, state, peer_addr) {
-    Ok(value) => value,
-    Err(response) => return *response,
-  };
+  let (audit, reservation) =
+    match super::admin_audit_gate::reserve_or_reject(request, state, peer_addr, "https") {
+      Ok(value) => value,
+      Err(response) => return *response,
+    };
   let response =
     admin_http3_response_inner(request, state, operations, peer_addr, listener_bind, path).await;
   finalize_admin_h3_response(response, audit, reservation).await
@@ -451,13 +452,14 @@ async fn handle_operation_event_webtransport(
   state: AppHandle,
   operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
-  let (audit, reservation) = match begin_admin_h3_audit(&mut request, &state, peer_addr) {
-    Ok(value) => value,
-    Err(response) => {
-      respond_to_h3_request(stream, *response).await?;
-      return Ok(());
-    }
-  };
+  let (audit, reservation) =
+    match super::admin_audit_gate::reserve_or_reject(&mut request, &state, peer_addr, "https") {
+      Ok(value) => value,
+      Err(response) => {
+        respond_to_h3_request(stream, *response).await?;
+        return Ok(());
+      }
+    };
   let response =
     prepare_operation_event_webtransport(&request, &state, &operations, peer_addr, listener_bind)
       .await;
@@ -477,13 +479,15 @@ async fn handle_operation_event_webtransport(
         StatusCode::BAD_REQUEST,
         "failed to accept WebTransport session",
       );
-      reservation.commit(event);
+      reservation.commit(&audit, event).await?;
       return Err(anyhow::anyhow!(
         "failed to accept admin WebTransport session: {error}"
       ));
     }
   };
-  reservation.commit(audit.finish(StatusCode::OK));
+  reservation
+    .commit(&audit, audit.finish(StatusCode::OK))
+    .await?;
   write_operation_events(session, history, receiver, permit).await
 }
 
@@ -629,40 +633,24 @@ async fn write_operation_events(
   }
 }
 
-fn begin_admin_h3_audit<B>(
-  request: &mut Request<B>,
-  state: &AppHandle,
-  peer_addr: SocketAddr,
-) -> Result<(AdminAuditHandle, AdminAuditReservation), Box<Response<ProxyBody>>> {
-  let method = request.method().clone();
-  let path = request.uri().path().to_string();
-  let query = request.uri().query().map(str::to_string);
-  let audit = AdminAuditHandle::new(peer_addr, "https", &method, &path, query.as_deref());
-  let audit_runtime = state.snapshot().admin_audit.clone();
-  let reservation = audit_runtime.reserve().map_err(|error| {
-    let event = audit.finish_with_error(
-      ::http::StatusCode::SERVICE_UNAVAILABLE,
-      "admin audit unavailable",
-    );
-    audit_runtime.emit_unstored(event, &error);
-    Box::new(admin_error::error_envelope_response(
-      ::http::StatusCode::SERVICE_UNAVAILABLE,
-      "admin audit unavailable",
-      &audit.request_id(),
-      None,
-    ))
-  })?;
-  request.extensions_mut().insert(audit.clone());
-  Ok((audit, reservation))
-}
-
 async fn finalize_admin_h3_response(
   response: Response<ProxyBody>,
   audit: AdminAuditHandle,
   reservation: AdminAuditReservation,
 ) -> Response<ProxyBody> {
   let response = admin_error::finalize_response(response, &audit).await;
-  reservation.commit(audit.finish(response.status()));
+  if let Err(error) = reservation
+    .commit(&audit, audit.finish(response.status()))
+    .await
+  {
+    tracing::warn!(error = %error, "required Admin HTTP/3 audit persistence failed");
+    return admin_error::error_envelope_response(
+      StatusCode::SERVICE_UNAVAILABLE,
+      "required Admin audit persistence failed",
+      &audit.request_id(),
+      None,
+    );
+  }
   response
 }
 

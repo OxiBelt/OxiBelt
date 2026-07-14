@@ -358,7 +358,7 @@ async fn handle_admin_connection(
   admin_operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
   let snapshot = state.snapshot();
-  if !admin_listener_current(&snapshot, listener_bind) {
+  if !admin_audit_gate::listener_current(&snapshot, listener_bind) {
     bail!("admin listener is no longer current");
   }
   let plaintext_allowed = admin_plaintext_allowed(&snapshot, peer_addr);
@@ -402,7 +402,7 @@ async fn handle_admin_connection(
       bail!("admin plaintext connection from {peer_addr} is not allowlisted");
     }
     AdminTransportMode::Auto => {
-      if plaintext_allowed && !tcp_stream_starts_with_tls(&stream).await {
+      if plaintext_allowed && !admin_listener::tcp_stream_starts_with_tls(&stream).await {
         admin_listener::handle_admin_plaintext_connection(
           stream,
           peer_addr,
@@ -425,15 +425,6 @@ async fn handle_admin_connection(
       }
     }
   }
-}
-
-fn admin_listener_current(snapshot: &AppSnapshot, listener_bind: SocketAddr) -> bool {
-  snapshot.config.admin.enabled && snapshot.config.admin.bind == listener_bind
-}
-
-async fn tcp_stream_starts_with_tls(stream: &TcpStream) -> bool {
-  let mut byte = [0_u8; 1];
-  matches!(stream.peek(&mut byte).await, Ok(1..) if byte[0] == 22)
 }
 
 fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> bool {
@@ -484,11 +475,8 @@ async fn admin_response(
     &audit,
   )
   .await;
-  let event = audit.finish(response.status());
-  audit_reservation.commit(event);
-  response
+  admin_audit_gate::commit_response(audit, audit_reservation, response, &state).await
 }
-
 async fn admin_response_inner(
   request: hyper::Request<Incoming>,
   state: AppHandle,
@@ -499,7 +487,7 @@ async fn admin_response_inner(
   scheme: &'static str,
 ) -> Response<ProxyBody> {
   let snapshot = state.snapshot();
-  if !admin_listener_current(&snapshot, listener_bind) {
+  if !admin_audit_gate::listener_current(&snapshot, listener_bind) {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
   let method = request.method().clone();
@@ -578,6 +566,12 @@ async fn admin_response_inner(
     } else {
       AdminAuthorization::new(actor, &snapshot.ipm, &admin_context)
     };
+    if let Err(response) =
+      admin_audit_gate::begin_authenticated_mutation(audit.as_ref(), &state, &method, &path, false)
+        .await
+    {
+      return *response;
+    }
     let response =
       admin::cache_purge_response(&snapshot, &params, &path, scheme, peer_addr, &authorization)
         .await;
@@ -634,7 +628,21 @@ async fn admin_response_inner(
     AdminAuthorization::new(actor, &snapshot.ipm, &admin_context)
   };
 
-  if admin_mutations::handles(&snapshot.admin_mutations, &method, &path, request.headers()) {
+  let handled_by_mutation_runtime =
+    admin_mutations::handles(&snapshot.admin_mutations, &method, &path, request.headers());
+  if let Err(response) = admin_audit_gate::begin_authenticated_mutation(
+    audit.as_ref(),
+    &state,
+    &method,
+    &path,
+    handled_by_mutation_runtime,
+  )
+  .await
+  {
+    return *response;
+  }
+
+  if handled_by_mutation_runtime {
     return admin_mutations::response(
       request,
       state.clone(),

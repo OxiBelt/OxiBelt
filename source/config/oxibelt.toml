@@ -615,7 +615,9 @@ plaintext_allowed_source_cidrs = ["127.0.0.0/8", "::1/128"]
 
 [admin.audit]
 enabled = false
-mode = "enforcing" # enforcing | best_effort
+mode = "durable_required" # durable_required | durable_required_for_actions | best_effort; enforcing remains a legacy alias
+acknowledgement = "postgres" # postgres | fsynced_spool
+required_actions = [] # non-empty exact action IDs only with durable_required_for_actions
 # backend = "cluster" # legacy alias for admin.audit.store.backend
 queue_capacity = 1024
 
@@ -627,7 +629,19 @@ kind = "postgres"
 [admin.audit.export]
 enabled = true
 sinks = ["access_log"]
-required_sinks = [] # use ["store"] with mode = "enforcing" for fail-closed durable audit
+required_sinks = [] # legacy PostgreSQL requirement; prefer acknowledgement = "postgres"
+
+[admin.audit.spool]
+enabled = false
+# directory = "/var/lib/oxibelt/admin-audit" # required when enabled; use an exclusive writable volume
+max_bytes = 67108864
+max_events = 16384
+max_event_bytes = 65536
+
+[admin.audit.integrity]
+# Set both fields to add HMAC-SHA256 authentication to the audit hash chain.
+# hmac_key_env = "OXIBELT_ADMIN_AUDIT_HMAC_KEY" # exactly 32 base64-encoded bytes
+# hmac_key_id = "audit-2026-07"
 
 [admin.operations]
 enabled = true

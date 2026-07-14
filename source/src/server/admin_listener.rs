@@ -24,6 +24,11 @@ struct AdminHttp1Context {
   client_certificate: Option<crate::tls::VerifiedClientCertificate>,
 }
 
+pub(super) async fn tcp_stream_starts_with_tls(stream: &TcpStream) -> bool {
+  let mut byte = [0_u8; 1];
+  matches!(stream.peek(&mut byte).await, Ok(1..) if byte[0] == 22)
+}
+
 pub(super) async fn handle_admin_tls_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,

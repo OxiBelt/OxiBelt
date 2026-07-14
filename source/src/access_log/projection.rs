@@ -218,7 +218,14 @@ pub(super) fn admin_event_value(event: &AdminAuditEvent) -> Value {
   json!({
     "event": "oxibelt.admin.access",
     "scope": "admin",
+    "schema_version": event.schema_version,
+    "event_id": event.event_id,
+    "timestamp": event.timestamp,
+    "timestamp_unix_ms": event.timestamp_unix_ms,
+    "instance_id": event.instance_id,
+    "phase": event.phase,
     "request_id": event.request_id,
+    "mutation_request_id": event.mutation_request_id,
     "actor": event.actor,
     "principal": event.principal,
     "subject": event.subject,
@@ -247,18 +254,28 @@ pub(super) fn admin_event_value(event: &AdminAuditEvent) -> Value {
         "kind": event.credential_kind,
         "identity": event.credential_identity,
         "principal": event.credential_principal,
+        "id": event.credential_id,
       },
     },
+    "credential_id": event.credential_id,
+    "source_address": event.source_address,
     "service": event.service,
     "operation": event.operation,
+    "durability_action": event.durability_action,
     "action": event.action,
     "resource": event.resource,
     "target_kind": event.target_kind,
     "target_id": event.target_id,
+    "previous_revision": event.previous_revision,
+    "desired_revision": event.desired_revision,
+    "content_digest": event.content_digest,
     "status": event.status,
+    "result": event.result,
     "outcome": event.outcome,
+    "error_code": event.error_code,
     "error": event.error,
     "request_summary": event.request_summary,
+    "integrity": event.integrity,
   })
 }
 
@@ -645,36 +662,32 @@ mod tests {
 
   #[test]
   fn admin_event_value_includes_tls_and_token_identity() {
-    let event = AdminAuditEvent {
-      request_id: "req-1".to_string(),
-      actor: Some("alice".to_string()),
-      principal: Some("admin".to_string()),
-      subject: Some("sub-1".to_string()),
-      groups: vec!["ops".to_string()],
-      workload_identity_kind: Some("spiffe_id".to_string()),
-      workload_identity: Some("spiffe://example.test/ns/edge/sa/controller".to_string()),
-      workload_principal: Some("admin".to_string()),
-      certificate_fingerprint_sha256: Some("a".repeat(64)),
-      credential_kind: Some("bearer".to_string()),
-      credential_identity: Some("admin-token".to_string()),
-      credential_principal: Some("admin".to_string()),
-      authentication_reason: Some("bound_bearer".to_string()),
-      peer: "127.0.0.1:12345".to_string(),
-      source_ip: Some("127.0.0.1".to_string()),
-      scheme: "https",
-      method: "POST".to_string(),
-      path: "/admin/v1/tokens".to_string(),
-      service: Some("tokens".to_string()),
-      operation: "post.tokens.create".to_string(),
-      action: Some("admin:CreateToken".to_string()),
-      resource: Some("token/*".to_string()),
-      target_kind: Some("token".to_string()),
-      target_id: Some("tok-1".to_string()),
-      status: 201,
-      outcome: "applied".to_string(),
-      error: None,
-      request_summary: json!({ "body": "redacted" }),
-    };
+    let audit = crate::admin_audit::AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().unwrap(),
+      "https",
+      &http::Method::POST,
+      "/admin/v1/tokens",
+      None,
+    );
+    audit.set_actor("alice", "admin", "sub-1", &["ops".to_string()]);
+    audit.set_authentication(
+      "bound_bearer",
+      Some("spiffe_id"),
+      Some("spiffe://example.test/ns/edge/sa/controller"),
+      Some("admin"),
+      Some(&"a".repeat(64)),
+      Some("bearer"),
+      Some("admin-token"),
+      Some("admin"),
+    );
+    audit.record_authorization("admin:CreateToken", "token/*", true);
+    let mut event = audit.finish(http::StatusCode::CREATED);
+    event.request_id = "req-1".to_string();
+    event.service = Some("tokens".to_string());
+    event.operation = "post.tokens.create".to_string();
+    event.target_kind = Some("token".to_string());
+    event.target_id = Some("tok-1".to_string());
+    event.request_summary = json!({ "body": "redacted" });
 
     let value = admin_event_value(&event);
 

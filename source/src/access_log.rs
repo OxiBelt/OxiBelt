@@ -10,7 +10,7 @@ use crate::admin_audit::AdminAuditEvent;
 use crate::config::{AccessLogConfig, AccessLogSchema, CryptoConfig, LoggingAccessLogConfig};
 use crate::waf::{
   AccessLogRecord, CompiledAccessLogFields, PersonProofRequestSnapshot, WafEngine,
-  WafResponseInput, compile_access_log_fields, current_unix_ms,
+  WafResponseInput, compile_access_log_fields,
 };
 
 mod otlp;
@@ -84,7 +84,7 @@ impl AccessLogRuntime {
   fn emit_admin_event(&self, event: &AdminAuditEvent) {
     self.emit_value(
       AccessLogSource::Admin,
-      current_unix_ms(),
+      event.timestamp_unix_ms,
       admin_event_value(event),
     );
   }

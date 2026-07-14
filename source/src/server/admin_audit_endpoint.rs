@@ -33,6 +33,9 @@ pub(super) async fn admin_audit_response(
     Err(error) if error.to_string().contains("not configured") => {
       text_response(StatusCode::CONFLICT, &error.to_string())
     }
-    Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    Err(_) => text_response(
+      StatusCode::SERVICE_UNAVAILABLE,
+      "admin audit store unavailable",
+    ),
   }
 }

@@ -2,17 +2,23 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use http::{Method, StatusCode};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 
 use super::ledger::{ClaimOutcome, MutationClaim, MutationState, TerminalMutation};
 use super::store::{
-  MutationStore, create_break_glass_activation_tx, init_postgres,
+  MutationStore, create_break_glass_activation_tx, finish_tx, init_postgres,
   load_active_break_glass_for_principal,
 };
+use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 
 #[tokio::test]
 async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
+  Box::pin(postgres_atomicity_test_body()).await;
+}
+
+async fn postgres_atomicity_test_body() {
   let Ok(url) = std::env::var("OXIBELT_TEST_MUTATION_POSTGRES_URL") else {
     return;
   };
@@ -33,6 +39,9 @@ async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
       .as_nanos()
   );
   let store = MutationStore::new(pool.clone(), namespace.clone()).expect("mutation test store");
+  let audit_runtime = AdminAuditRuntime::test_with_postgres(pool.clone(), namespace.clone())
+    .await
+    .expect("audit test schema initialization");
   store
     .initialize_revision(
       "config",
@@ -58,19 +67,46 @@ async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
     "the losing concurrent caller must observe the in-progress claim"
   );
 
-  store
-    .finish(
+  Box::pin(async {
+    let staged_audit = audit_runtime
+      .stage_critical_mutation(mutation_audit_event(&claim, StatusCode::OK, "applied"))
+      .await
+      .expect("stage terminal audit");
+    let mut tx = store.pool().begin().await.expect("terminal transaction");
+    let terminal_audit_record_id = staged_audit
+      .insert(&mut tx)
+      .await
+      .expect("insert terminal audit");
+    let terminal_record = finish_tx(
+      &mut tx,
+      store.namespace(),
       &claim.request_id,
       &TerminalMutation {
         state: MutationState::Committed,
         http_status: 200,
         safe_response: Some(json!({ "ok": true, "token_recoverable": false })),
         error_code: None,
-        terminal_audit_record_id: 102,
+        terminal_audit_record_id,
       },
     )
     .await
-    .expect("terminal mutation commit");
+    .expect("stage terminal mutation commit");
+    tx.commit().await.expect("terminal transaction commit");
+    staged_audit.publish();
+    assert_eq!(
+      terminal_record.terminal_audit_record_id,
+      Some(terminal_audit_record_id)
+    );
+    let stored_audit_id: i64 =
+      sqlx::query_scalar("SELECT id FROM oxibelt_admin_audit WHERE namespace = $1 AND id = $2")
+        .bind(&namespace)
+        .bind(terminal_audit_record_id)
+        .fetch_one(&pool)
+        .await
+        .expect("transactional terminal audit row");
+    assert_eq!(stored_audit_id, terminal_audit_record_id);
+  })
+  .await;
   assert!(matches!(
     store.claim(&claim).await.expect("terminal replay"),
     ClaimOutcome::Replay(_)
@@ -83,10 +119,94 @@ async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
     ClaimOutcome::RequestConflict
   ));
 
+  Box::pin(rolled_back_terminal_audit_does_not_update_the_receipt(
+    &store,
+    &audit_runtime,
+    &pool,
+    &namespace,
+  ))
+  .await;
   committed_parent_is_required_before_break_glass_is_active(&store).await;
   indeterminate_result_keeps_the_resource_reserved(&store).await;
 
   cleanup(&pool, &namespace).await;
+}
+
+async fn rolled_back_terminal_audit_does_not_update_the_receipt(
+  store: &MutationStore,
+  audit_runtime: &AdminAuditRuntime,
+  pool: &sqlx::PgPool,
+  namespace: &str,
+) {
+  store
+    .initialize_revision(
+      "rollback",
+      "rollback-r1",
+      digest('0'),
+      Some("single"),
+      Some(digest('1')),
+    )
+    .await
+    .expect("rollback logical revision");
+  let mut claim = sample_claim();
+  claim.request_id = "018f47a2-7b2c-7b25-8f31-d13db7b4c127".to_string();
+  claim.resource = "rollback".to_string();
+  claim.expected_previous_revision = "rollback-r1".to_string();
+  claim.new_revision = "rollback-r2".to_string();
+  claim.audit_record_id = 401;
+  assert!(matches!(
+    store.claim(&claim).await.expect("rollback claim"),
+    ClaimOutcome::Claimed(_)
+  ));
+
+  let staged_audit = audit_runtime
+    .stage_critical_mutation(mutation_audit_event(
+      &claim,
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "indeterminate",
+    ))
+    .await
+    .expect("stage rollback audit");
+  let mut tx = store.pool().begin().await.expect("rollback transaction");
+  let audit_id = staged_audit
+    .insert(&mut tx)
+    .await
+    .expect("insert rollback audit");
+  let error = finish_tx(
+    &mut tx,
+    store.namespace(),
+    "missing-mutation-request",
+    &TerminalMutation {
+      state: MutationState::Indeterminate,
+      http_status: 500,
+      safe_response: None,
+      error_code: Some("mutation_indeterminate".to_string()),
+      terminal_audit_record_id: audit_id,
+    },
+  )
+  .await
+  .expect_err("missing mutation must abort the transaction");
+  assert!(error.to_string().contains("mutation record not found"));
+  tx.rollback().await.expect("rollback terminal transaction");
+  drop(staged_audit);
+
+  let audit_rows: i64 =
+    sqlx::query_scalar("SELECT count(*) FROM oxibelt_admin_audit WHERE namespace = $1 AND id = $2")
+      .bind(namespace)
+      .bind(audit_id)
+      .fetch_one(pool)
+      .await
+      .expect("rolled-back audit count");
+  assert_eq!(audit_rows, 0);
+  assert_eq!(
+    store
+      .load_mutation(&claim.request_id)
+      .await
+      .expect("rollback mutation read")
+      .expect("rollback mutation record")
+      .state,
+    MutationState::Claimed
+  );
 }
 
 async fn committed_parent_is_required_before_break_glass_is_active(store: &MutationStore) {
@@ -215,6 +335,31 @@ fn sample_claim() -> MutationClaim {
   }
 }
 
+fn mutation_audit_event(
+  claim: &MutationClaim,
+  status: StatusCode,
+  outcome: &str,
+) -> crate::admin_audit::AdminAuditEvent {
+  let audit = AdminAuditHandle::new(
+    "127.0.0.1:1234".parse().unwrap(),
+    "https",
+    &Method::POST,
+    "/admin/v1/config/load",
+    None,
+  );
+  audit.record_mutation_context(
+    &claim.signer_id,
+    &claim.action,
+    &claim.resource,
+    &claim.expected_previous_revision,
+    &claim.new_revision,
+    &claim.content_digest,
+    claim.cluster_id.as_deref().unwrap(),
+    claim.membership_revision.as_deref().unwrap(),
+  );
+  audit.critical_mutation_event(&claim.request_id, status, outcome, None)
+}
+
 fn digest(character: char) -> &'static str {
   match character {
     '0' => "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -237,4 +382,9 @@ async fn cleanup(pool: &sqlx::PgPool, namespace: &str) {
     .execute(pool)
     .await
     .expect("delete mutation revision test rows");
+  sqlx::query("DELETE FROM oxibelt_admin_audit WHERE namespace = $1")
+    .bind(namespace)
+    .execute(pool)
+    .await
+    .expect("delete audit test rows");
 }

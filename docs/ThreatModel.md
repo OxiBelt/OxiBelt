@@ -230,7 +230,7 @@ a normal failure-mode transition.
 | `reload` | `fail_open` | Logs/observes the failed cross-instance heartbeat while the already-active local configuration continues. It does not prove cluster convergence. |
 | Dynamic policy | `use_last_good` by default | Keeps the last verified snapshot; configured startup or disable-on-error behavior remains authoritative. |
 | IPM | Startup policy plus last-good refresh | Startup follows `ipm.fail_closed`; later backend refresh failure retains the last good dynamic snapshot or configured static policy behavior. |
-| Admin audit | `best_effort` or `enforcing` | Best effort records delivery failure but permits work. Enforcing durable audit rejects protected Admin work when reservation cannot be made. |
+| Admin audit | `best_effort`, `durable_required`, or `durable_required_for_actions` | Best effort records delivery failure but permits work. Durable modes reject required Admin work unless the selected synchronous PostgreSQL or bounded fsynced-spool acknowledgement completes. Legacy `enforcing` aliases `durable_required`. |
 | Admin mutation ledger | `fail_closed` | In supported `single_instance` mode, rejects a new protected mutation when PostgreSQL replay admission or critical audit cannot be proved. An indeterminate prior request remains blocked until reconciled. Reserved `admin_cluster` mode rejects every protected write with `503` rather than claiming convergence. |
 
 `local_fallback` is bounded, observable, and limited to one process. It never
@@ -304,14 +304,15 @@ canonical references.
 | Admin credential replay | Management client → Admin bearer/IPM authority | Dedicated listener, TLS/mTLS options, default bearer authentication, exact mTLS workload binding, IPM checks, token digests, and rotation/revocation reduce credential exposure. Protected mutations additionally require an expiring signer/principal-bound envelope and durable request-ID ledger. | A stolen bearer remains replayable for unprotected reads and writes until revoked. A stolen mutation signing key can authorize its scoped protected actions until removed; signer custody and rotation remain external duties. |
 | Configuration rollback attack | Admin/controller/operator → active security policy | Validation, signed previous/new revisions, exact content digests, durable receipts, retained committed artifacts, immutable Kubernetes revisions, and rollout status make revision changes visible. | An authorized signer can intentionally select an older valid policy unless external approval policy forbids it. A compromised artifact key or PostgreSQL authority can corrupt rollback state. |
 | Partial cluster rollout | Desired revision → multiple data-plane instances | Kubernetes immutable rollout proves owned Ready Pods. Reserved fixed-member Admin rollout fails closed before protected writes and provides no convergence claim. | A compromised Kubernetes authority can forge readiness evidence. External rollout mechanisms can still create divergent enforcement; `admin_cluster` must not be treated as implemented mitigation. |
-| Audit sink failure | Admin mutation → audit queue/store/export | Structured Admin events, bounded queues, optional PostgreSQL query store, and enforcing pre-handler reservation are available. | Best-effort mode can lose records and exports are not an audit-of-record acknowledgment. PostgreSQL compromise can delete or forge durable history; independent database controls and export monitoring are required. |
+| Audit sink failure | Admin mutation → audit spool/store/export | Versioned redacted events, explicit acknowledgement, bounded non-evicting spool, synchronous PostgreSQL option, pre-side-effect intent records, and fail-closed durable modes bound loss. | Best-effort mode can lose records and exports are not acknowledgements. A full/lost volume or unavailable acknowledgement denies required mutations. Pod/node/host loss can destroy an ephemeral or colocated spool. |
+| Audit history tampering | Local spool/PostgreSQL → forensic evidence | Every v1 event is domain-separated and SHA-256 chained with sequence and previous hash; optional HMAC-SHA256 authenticates the event hash with an externally supplied key. Replay verifies order and content before deletion. | Hash-only chains can be rewritten by an attacker controlling all stored state. HMAC does not protect against a compromised OxiBelt process/host or stolen key, and neither mode independently proves that an unanchored final suffix was not deleted. External retention/anchoring remains required. |
 
 ### Shared state and tenant-boundary threats
 
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Redis compromise | OxiBelt ↔ Redis decisions, secrets, cache, and leases | Verified `rediss://`, hostname checks, optional mTLS/SPKI pins, ACL files, bounded pools, scripts, namespaces, TTLs, and no ambiguous mutation replay protect access and operations. | A compromised authenticated Redis can return or mutate plausible malicious state, bypass distributed controls, poison cache, or disclose Person proof state. TLS does not validate application truth. |
-| PostgreSQL compromise | OxiBelt ↔ PostgreSQL shared/control-plane records | Verified TLS, bounded operations, transactions, namespaces, signed dynamic-policy rows, hashed credentials, and enforcing audit admission constrain normal operation. | Database authority can alter or disclose IPM, dynamic policy, audit, mitigation, shared state, or replay data and can deny Admin mutations. Database access and recovery are external trust assumptions. |
+| PostgreSQL compromise | OxiBelt ↔ PostgreSQL shared/control-plane records | Verified TLS, bounded operations, transactions, namespaces, signed dynamic-policy rows, hashed credentials, explicit durable audit acknowledgement, and optional HMAC-authenticated audit chains constrain normal operation. | Database authority can alter or disclose IPM, dynamic policy, audit, mitigation, shared state, or replay data and can deny Admin mutations. Hash-only audit can be rewritten; HMAC detects forgery only while its key and an authentic chain reference remain outside database authority. Database access, backup, anchoring, and recovery are external trust assumptions. |
 | Tenant isolation failure | Hosts/routes/cache/state → another logical tenant | Host-aware routing/cache keys, explicit partition keys, namespaces, typed IPM resources, and bounded per-route policy support logical separation. | One process and backend are not a hostile-tenant sandbox. A cache-key omission, broad Admin grant, shared secret, route conflict, or backend compromise can cross tenants; isolate mutually distrustful tenants operationally. |
 
 ### Availability and amplification threats
@@ -348,7 +349,7 @@ and roll every instance to a known revision after compromise.
 | Reload heartbeat and instance generation | Redis or PostgreSQL | Hide drift, forge instance presence/generation, or create false degraded signals. Heartbeats are observability, not a signed cluster-consensus protocol. |
 | Dynamic policy | PostgreSQL | Deny service, replay old signed rows, or modify unsigned/database-owned metadata. HMAC verification protects active signed row content unless the signing key or authorized automation is also compromised. |
 | IPM principals, credentials, policies, and bindings | PostgreSQL | Grant or revoke Admin/data-plane authority, expose credential digests/prefixes and audit metadata, or prevent refresh. Static bootstrap collisions fail refresh but do not make the DB untrusted. |
-| Admin audit | PostgreSQL | Delete, forge, reorder, or disclose the queryable audit record and block enforcing mutations by denying reservations/writes. Independent export/backup controls are required for stronger evidence. |
+| Admin audit | Local spool and PostgreSQL | Delete, forge, reorder, or disclose the queryable record, exhaust the bounded spool, or block required mutations. SHA chaining detects modification/order breaks; HMAC additionally detects forgery without the key. A database or host attacker can still delete a chain tail, and a host/process/key compromise can forge future records. Independent restricted key custody, retained volumes, export/backup, and external chain anchoring are required for stronger evidence. |
 | Admin mutation ledger and rollout | PostgreSQL | Forge request outcomes, logical revisions, member leases, rollout ACKs, retained artifacts, or break-glass activations; suppress a valid mutation or cause divergent policy. Signatures protect request provenance but do not make a compromised coordinator database trustworthy. |
 | Mitigation intents | PostgreSQL | Forge, suppress, or alter aggregate intents consumed by an external mitigation controller. Downstream ISP/cloud actions remain outside OxiBelt and require their own authorization. |
 
@@ -377,10 +378,18 @@ equivalent authorization, concurrency/replay behavior, and audit semantics.
 | Async operation cancellation and control | Creator rights or matching Admin operation action/resource; cancellation cannot undo side effects already completed. | Record creator, operation kind/id, cancellation result, and terminal outcome within bounded retention. |
 
 In `best_effort` audit mode, recording failure is observable but does not block
-the mutation. In `enforcing` mode with the PostgreSQL store required, OxiBelt
-reserves durable audit queue capacity before protected handler execution and
-returns a safe error if it cannot do so. Neither mode protects history after
-database compromise.
+the mutation. `durable_required` covers every Admin event;
+`durable_required_for_actions` covers an exact configured set of semantic
+mutation actions. Required intent is acknowledged to PostgreSQL or to the
+bounded fsynced spool before the side effect, and acknowledgement failure
+returns `503`. Spool admission reserves one record and the configured maximum
+event bytes for the terminal outcome before the handler runs, so concurrent
+events cannot consume that capacity after the side effect is admitted. P1-13
+remains stricter: its mutation ledger and critical audit
+transactions require the configured PostgreSQL authority even when ordinary
+audit acknowledgement uses the local spool. SHA chaining is tamper-evident,
+not immutable storage; optional HMAC adds forgery resistance only while the
+32-byte key and an authentic chain reference remain uncompromised.
 
 ## Severity Calibration
 

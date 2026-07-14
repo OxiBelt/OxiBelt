@@ -4,7 +4,9 @@ use crate::admin_audit::AdminAuditRuntime;
 use crate::admin_mutation::AdminMutationRuntime;
 use crate::cache::ResponseCache;
 use crate::client_identity::ClientIdentityRuntime;
-use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig};
+use crate::config::{
+  AdminAuditExportSink, Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig,
+};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -326,13 +328,32 @@ impl AppSnapshot {
     let access_log_runtime = AccessLogRuntime::new(&config.access_log, &config.crypto)
       .await
       .context("failed to build access log runtime")?;
-    let admin_audit = AdminAuditRuntime::new(
-      &config,
-      AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Admin),
-      metrics.clone(),
-    )
-    .await
-    .context("failed to build admin audit runtime")?;
+    let admin_access_logs = AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Admin);
+    let reusable_admin_audit = previous.filter(|previous| {
+      config.admin.enabled == previous.config.admin.enabled
+        && config.admin.audit == previous.config.admin.audit
+        && config.shared_state.namespace == previous.config.shared_state.namespace
+        && config.shared_state.instance_id_env == previous.config.shared_state.instance_id_env
+        && (!config.admin.audit.store.enabled
+          || config.shared_state.backends == previous.config.shared_state.backends)
+    });
+    let admin_audit = if let Some(previous) = reusable_admin_audit {
+      let export = (config.admin.enabled
+        && config.admin.audit.enabled
+        && config.admin.audit.export.enabled
+        && config
+          .admin
+          .audit
+          .export
+          .sinks
+          .contains(&AdminAuditExportSink::AccessLog))
+      .then_some(admin_access_logs);
+      previous.admin_audit.clone_with_export(export)
+    } else {
+      AdminAuditRuntime::new(&config, admin_access_logs, metrics.clone())
+        .await
+        .context("failed to build admin audit runtime")?
+    };
     let admin_mutations = AdminMutationRuntime::new(&config, &admin_audit)
       .await
       .context("failed to build Admin mutation runtime")?;

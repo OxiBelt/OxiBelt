@@ -10,9 +10,9 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  AdminAuditMode, Config, IpmBreakGlassAccessMode, SharedStateBackendKind,
-  resolve_existing_local_config_file_path_with_logical, validate_optional_non_empty,
-  validate_runtime_identifier,
+  ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS, AdminAuditMode, Config, IpmBreakGlassAccessMode,
+  SharedStateBackendKind, resolve_existing_local_config_file_path_with_logical,
+  validate_optional_non_empty, validate_runtime_identifier,
 };
 
 const MAX_VALIDITY_SECONDS: u64 = 3_600;
@@ -256,13 +256,25 @@ impl Config {
     if backend.kind != SharedStateBackendKind::Postgres {
       bail!("admin.mutations.backend {backend_name} must use kind = \"postgres\"");
     }
+    let audit_covers_protected_mutations = self.admin.audit.mode == AdminAuditMode::DurableRequired
+      || (self.admin.audit.mode == AdminAuditMode::DurableRequiredForActions
+        && ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS
+          .iter()
+          .all(|required| {
+            self
+              .admin
+              .audit
+              .required_actions
+              .iter()
+              .any(|configured| configured == required)
+          }));
     if !self.admin.audit.enabled
-      || self.admin.audit.mode != AdminAuditMode::Enforcing
+      || !audit_covers_protected_mutations
       || !self.admin.audit.store.enabled
       || self.admin.audit.store.backend.as_deref() != Some(backend_name)
     {
       bail!(
-        "admin.mutations requires enforcing Admin audit storage on the same PostgreSQL backend"
+        "admin.mutations requires durable Admin audit coverage for every protected mutation action and storage on the same PostgreSQL backend"
       );
     }
 

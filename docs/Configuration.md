@@ -1404,7 +1404,7 @@ Shared state is opt-in. If it is disabled, features keep their local in-process 
 
 `fail_closed` rejects the feature operation, `fail_open` continues without a distributed decision, `local_fallback` uses only the feature's bounded process-local state, `stale_snapshot` uses only an already-published non-mutating observation, and `reject_new_only` preserves existing work while refusing new distributed reservations. Unsupported feature/mode pairs are rejected during configuration validation rather than silently behaving like a different policy. No mode retries an ambiguous distributed mutation after timeout or cancellation. Local fallback is per process, has no cluster-wide guarantee, and is intentionally visible in health and metrics. Use `fail_closed` for security controls unless the availability trade-off has been explicitly reviewed.
 
-The existing feature-specific controls remain authoritative; the central shared-state table does not silently override them. DynamicPolicy `use_last_good` retains its last good snapshot, `disabled_on_error` disables matching, and `fail_closed_on_startup` keeps activation strict; `ipm.fail_closed = false` uses the static IPM configuration while refresh retains the last good dynamic snapshot; Admin audit `enforcing` rejects protected Admin work before handler execution when queue admission fails while `best_effort` records the failure; mitigation `failure_policy = "closed"` or `"open"` remains its direct sink policy.
+The existing feature-specific controls remain authoritative; the central shared-state table does not silently override them. DynamicPolicy `use_last_good` retains its last good snapshot, `disabled_on_error` disables matching, and `fail_closed_on_startup` keeps activation strict; `ipm.fail_closed = false` uses the static IPM configuration while refresh retains the last good dynamic snapshot; Admin audit durable modes reject required Admin work when the selected PostgreSQL or fsynced-spool acknowledgement cannot be completed, while `best_effort` records the delivery failure; mitigation `failure_policy = "closed"` or `"open"` remains its direct sink policy.
 
 `operation_timeout_ms` remains the absolute deadline for each shared-state operation. `enumeration_page_size` defaults to `128` and bounds one shared-state scan page; it must be between `1` and `1000`. `enumeration_max_items_per_operation` defaults to `4096` and bounds total work for a complete status or purge operation; it must be between `1` and `65536`. The page size cannot exceed the total limit. PostgreSQL uses its existing operation concurrency permit. Redis uses one persistent FIFO pool per configured backend: `max_connections` is its physical socket cap, and `max_waiters` bounds active-plus-waiting Redis commands at `max_connections + max_waiters`; excess commands fail immediately. `pool_wait_timeout_ms`, connection creation, health recycling, and `command_timeout_ms` are independently bounded and still cannot outlive the outer operation deadline. Defaults preserve lazy startup with zero idle connections, four waiters per allowed Redis connection, and inherited wait/command timeouts. A positive `min_idle_connections` is a startup and reload requirement: the configured backend must prewarm that many sockets before the new snapshot activates. Unchanged plaintext pools retain their existing sockets; changed endpoint credentials or pool settings create a draining replacement generation. Every `rediss://` pool is rebuilt on a full reload so changed trust roots or client-certificate material at the same path cannot be retained.
 
@@ -1924,7 +1924,91 @@ matching sessions with `503`, then closes remaining matching sessions after
 the grace period. Cancelling the drain operation removes the rule but cannot
 restore sessions that have already closed.
 
-`[admin.audit]` emits structured Admin audit events and separates standard export sinks from the optional durable query store. `[admin.audit.export]` can route events to the Access Log Admin source, which then projects OCSF or ECS JSON to stdout or OTLP according to `[access_log.stdout]`, `[access_log.otlp]`, and `[access_log.admin]`. These Access Log exports are best-effort observability/SIEM integrations, not query stores and not audit-of-record delivery acknowledgments. `[admin.audit.store]` is the durable query store for `GET /admin/v1/audit`; PostgreSQL is currently the only store kind. When the store is enabled, `backend` must name a PostgreSQL `[[shared_state.backends]]` entry and `[shared_state].enabled = true`. OxiBelt creates `oxibelt_admin_audit` and writes records through a bounded asynchronous queue. In `mode = "enforcing"` with the store enabled or required, OxiBelt reserves a durable audit queue slot before protected Admin handlers run and rejects Admin requests with `503` if the queue is full or the writer is closed. In `mode = "best_effort"`, store/export delivery failures are warned and counted but do not by themselves reject Admin requests. `GET /admin/v1/audit` requires `admin:ReadAudit` on `oxibelt:<namespace>:admin:audit/admin`; without `[admin.audit.store]` it returns `409` because stdout and OTLP exports are not queryable history. The endpoint supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`, `request_id`, `path_prefix`, and `before_id` filters. Request payloads are not stored raw; the audit summary records body byte count, top-level JSON keys, and a small allowlist of safe scalar fields. When workload binding is active, audit records and Admin access-log exports additionally contain the mapped workload identity kind/value/principal, the leaf certificate SHA-256 fingerprint, credential kind/identity/principal, and the fixed authentication result reason; raw certificate DER is never retained.
+`[admin.audit]` emits versioned structured Admin audit events and separates
+standards-oriented export from audit-of-record acknowledgement. The canonical
+modes are:
+
+- `best_effort`: persistence/export failure is observable but does not reject
+  the Admin operation.
+- `durable_required`: every Admin audit event must reach the configured
+  acknowledgement boundary.
+- `durable_required_for_actions`: events for the exact entries in
+  `required_actions` must reach that boundary; other events remain
+  best-effort. The accepted action IDs are `config.load`, `config.rollback`,
+  `config.files_sync`, `config.downstream_tls_reload`,
+  `config.upstream_tls_refresh`, `config.key_rotate`,
+  `config.secret_reference_update`, `ipm.write`, `break_glass.activate`,
+  `break_glass.revoke`, `operations.write`, `cache.warm`, `cache.purge`,
+  `person_proof.revoke`, `lifecycle.drain`, `lifecycle.undrain`,
+  `dynamic_policy.write`, `upstream_pool.write`, and `stream_pool.write`.
+  Unknown, duplicate, wildcard, or empty selections are rejected.
+
+The legacy TOML value `mode = "enforcing"` is accepted as an alias for
+`durable_required`; it is not a weaker fourth mode. `acknowledgement =
+"postgres"` synchronously inserts the required event into the configured
+PostgreSQL store. `acknowledgement = "fsynced_spool"` synchronously appends the
+event to the local spool and acknowledges it only after the record and chain
+head are fsynced; a background task replays it idempotently to PostgreSQL when
+a store is configured. Required operations return `503` before their side
+effect if their acknowledgement boundary is unavailable, full, oversized, or
+fails integrity/I/O checks. Best-effort delivery warns, counts, and may drop
+instead. Legacy `admin.audit.backend` and `required_sinks = ["store"]` retain
+their PostgreSQL-acknowledgement meaning and cannot be combined with
+`fsynced_spool` acknowledgement.
+
+`[admin.audit.spool]` is disabled by default. When enabled it requires an
+absolute, exclusive writable directory; defaults are 64 MiB
+(`max_bytes = 67108864`), 16,384 records, and 64 KiB per encoded event. All
+three bounds must be positive, and one event cannot exceed the total byte
+bound. The spool does not evict unacknowledged records to admit new ones. It
+reserves one event slot and `max_event_bytes` of byte capacity for the terminal
+record while acknowledging a required intent, so ordinary/concurrent appends
+cannot consume outcome capacity after a side effect is admitted. A required
+intent is rejected before its handler unless both the intent and worst-case
+terminal record fit; size `max_events` and `max_bytes` for these paired records.
+It
+uses restrictive directory/file permissions, atomic record publication,
+directory fsync, a single-writer lock, startup recovery, and ordered integrity
+verification. Corrupt, truncated, reordered, symlinked, or otherwise invalid
+entries stop replay rather than being silently deleted. Spool, acknowledgement,
+mode/action selection, and integrity authority are restart-only settings.
+
+On Kubernetes, mount the spool through the chart's existing `extraVolumes` and
+`extraVolumeMounts` interfaces as a per-Pod exclusive writable volume; do not
+share one spool directory between replicas. An `emptyDir` survives an OxiBelt
+container restart in the same Pod but not Pod replacement, eviction, or node
+loss. Use an appropriately retained per-Pod volume when those failures must be
+inside the durability boundary. The volume must remain writable when
+`readOnlyRootFilesystem` is enabled, and operators must size it for their
+worst-case PostgreSQL outage.
+
+Every new event uses schema `oxibelt.admin.audit/v1` and records an occurrence
+timestamp, event and instance IDs, `intent` or `terminal` phase, HTTP and
+mutation request IDs, actor/workload/credential identity, canonical source
+address and durability action, revisions and content digest, result/error code,
+redacted request context, and an integrity envelope. OxiBelt always creates a
+domain-separated SHA-256 chain over recursively key-sorted canonical JSON. Set
+both `hmac_key_env` and `hmac_key_id` to add HMAC-SHA256; the environment value
+must be standard base64 encoding of exactly 32 bytes and key material is
+held in zeroizing memory and cleared when released. Existing PostgreSQL rows remain queryable as
+`legacy-v0` with unavailable v1 occurrence/integrity fields represented as
+`null`; OxiBelt does not fabricate hashes for historical data.
+
+`[admin.audit.export]` can route events to the Access Log Admin source, which
+projects OCSF or ECS JSON to stdout or OTLP according to
+`[access_log.stdout]`, `[access_log.otlp]`, and `[access_log.admin]`. These
+exports remain best-effort observability/SIEM integrations, not query stores or
+acknowledgements. `[admin.audit.store]` is the query store for `GET
+/admin/v1/audit`; PostgreSQL is the only store kind. Its `backend` must name a
+PostgreSQL `[[shared_state.backends]]` entry and requires
+`[shared_state].enabled = true`. The endpoint requires `admin:ReadAudit` on
+`oxibelt:<namespace>:admin:audit/admin`; no configured query store returns
+`409`, while an unavailable store or unreadable stored record returns `503`.
+It supports `limit`, `outcome`, `actor`, `principal`, `service`, `operation`,
+`request_id`, `path_prefix`, and `before_id`. Bodies, bearer tokens,
+certificates, mutation signatures, keys, and arbitrary handler/database errors
+are never retained; summaries contain bounded structure and explicitly safe
+scalar context only.
 
 Export-only Admin audit for container-native logs:
 
@@ -1959,7 +2043,8 @@ enabled = true
 
 [admin.audit]
 enabled = true
-mode = "enforcing"
+mode = "durable_required"
+acknowledgement = "postgres"
 queue_capacity = 4096
 
 [admin.audit.store]
@@ -1970,7 +2055,6 @@ kind = "postgres"
 [admin.audit.export]
 enabled = true
 sinks = ["access_log"]
-required_sinks = ["store"]
 
 [access_log.admin]
 enabled = true
@@ -1986,6 +2070,42 @@ trusted_ca_certs = ["otel-collector-ca.pem"]
 schema = "ocsf"
 ```
 
+Fail-closed selected actions with a local fsynced spool:
+
+```toml
+[admin.audit]
+enabled = true
+mode = "durable_required_for_actions"
+acknowledgement = "fsynced_spool"
+required_actions = [
+  "config.load",
+  "config.rollback",
+  "config.files_sync",
+  "config.downstream_tls_reload",
+  "config.key_rotate",
+  "config.secret_reference_update",
+  "ipm.write",
+  "break_glass.activate",
+  "break_glass.revoke",
+]
+
+[admin.audit.spool]
+enabled = true
+directory = "/var/lib/oxibelt/admin-audit"
+max_bytes = 67108864
+max_events = 16384
+max_event_bytes = 65536
+
+[admin.audit.integrity]
+hmac_key_env = "OXIBELT_ADMIN_AUDIT_HMAC_KEY"
+hmac_key_id = "audit-2026-07"
+
+[admin.audit.store]
+enabled = true
+backend = "cluster"
+kind = "postgres"
+```
+
 The legacy compatibility shape remains accepted:
 
 ```toml
@@ -1995,15 +2115,20 @@ backend = "cluster"
 queue_capacity = 4096
 ```
 
-It is treated as enforcing PostgreSQL durable audit with `[admin.audit.store]`
-enabled for `cluster` and `required_sinks = ["store"]`.
+It is treated as `mode = "durable_required"`, `acknowledgement = "postgres"`,
+with `[admin.audit.store]` enabled for `cluster` and
+`required_sinks = ["store"]`.
 
 `[admin.mutations]` enables durable replay protection for high-risk Admin
 changes. `mode` is `off`, `optional`, or `required`. `optional` validates and
 records supplied envelopes while preserving compatibility for callers that do
 not send one; `required` rejects a protected request without
 `X-OxiBelt-Mutation`. Both active modes require `backend` to name a PostgreSQL
-shared-state backend and require enforcing Admin audit with the durable store.
+shared-state backend and require durable Admin audit coverage for all nine
+protected action IDs with the durable store on that same backend. A local
+fsynced audit acknowledgement does not replace the P1-13 PostgreSQL replay
+ledger or its transactional critical audit records; protected mutations still
+fail closed when that PostgreSQL authority is unavailable.
 Expiry and retention are evaluated with PostgreSQL time. The retention window
 must cover the maximum validity and clock-skew windows, and a live request or
 terminal receipt is never evicted to admit another request.

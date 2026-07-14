@@ -297,10 +297,13 @@ impl AdminMutationRuntime {
         .await
         .context("failed to claim Admin mutation")?
       {
-        ClaimOutcome::Claimed(record) => MutationAdmission::Claimed(MutationExecution {
-          request_id: record.request_id,
-          new_revision: record.new_revision,
-        }),
+        ClaimOutcome::Claimed(record) => {
+          audit.mark_critical_mutation_lifecycle_managed();
+          MutationAdmission::Claimed(MutationExecution {
+            request_id: record.request_id,
+            new_revision: record.new_revision,
+          })
+        }
         ClaimOutcome::Replay(record) => MutationAdmission::Replay(record),
         ClaimOutcome::InProgress(record) => MutationAdmission::InProgress(record),
         ClaimOutcome::RequestConflict => MutationAdmission::Conflict(MutationConflict::RequestId),

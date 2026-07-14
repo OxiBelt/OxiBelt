@@ -258,7 +258,14 @@
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Versioned Admin audit records from the PostgreSQL query store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAuditListResponse"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -271,6 +278,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -5912,6 +5922,518 @@
       }
     },
     "schemas": {
+      "AdminAuditListResponse": {
+        "type": "object",
+        "required": [
+          "audit"
+        ],
+        "properties": {
+          "audit": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminAuditEvent"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAuditEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/AdminAuditEventV1"
+          },
+          {
+            "$ref": "#/components/schemas/AdminAuditEventLegacy"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "schema_version",
+          "mapping": {
+            "oxibelt.admin.audit/v1": "#/components/schemas/AdminAuditEventV1",
+            "legacy-v0": "#/components/schemas/AdminAuditEventLegacy"
+          }
+        }
+      },
+      "AdminAuditPhase": {
+        "type": "string",
+        "enum": [
+          "intent",
+          "terminal"
+        ]
+      },
+      "AdminAuditResult": {
+        "type": "string",
+        "enum": [
+          "accepted",
+          "applied",
+          "rejected",
+          "indeterminate"
+        ]
+      },
+      "AdminAuditIntegrityEnvelope": {
+        "type": "object",
+        "required": [
+          "algorithm",
+          "chain_id",
+          "sequence",
+          "previous_hash",
+          "event_hash"
+        ],
+        "properties": {
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "sha256",
+              "hmac_sha256"
+            ]
+          },
+          "chain_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "previous_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "event_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "key_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "tag": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAuditRecordFields": {
+        "type": "object",
+        "required": [
+          "id",
+          "namespace",
+          "schema_version",
+          "event_id",
+          "timestamp",
+          "timestamp_unix_ms",
+          "instance_id",
+          "phase",
+          "request_id",
+          "mutation_request_id",
+          "actor",
+          "principal",
+          "subject",
+          "groups",
+          "workload_identity_kind",
+          "workload_identity",
+          "workload_principal",
+          "certificate_fingerprint_sha256",
+          "credential_kind",
+          "credential_identity",
+          "credential_principal",
+          "credential_id",
+          "authentication_reason",
+          "peer",
+          "source_ip",
+          "source_address",
+          "scheme",
+          "method",
+          "path",
+          "service",
+          "operation",
+          "durability_action",
+          "action",
+          "resource",
+          "target_kind",
+          "target_id",
+          "previous_revision",
+          "desired_revision",
+          "content_digest",
+          "status",
+          "result",
+          "outcome",
+          "error_code",
+          "error",
+          "request_summary",
+          "integrity",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{32}$"
+          },
+          "timestamp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp_unix_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AdminAuditPhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "mutation_request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workload_identity_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workload_identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workload_principal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "certificate_fingerprint_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "credential_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credential_identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credential_principal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "authentication_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer": {
+            "type": "string"
+          },
+          "source_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "durability_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "desired_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AdminAuditResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_summary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "integrity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AdminAuditIntegrityEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAuditEventV1": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AdminAuditRecordFields"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "type": "string",
+                "const": "oxibelt.admin.audit/v1"
+              },
+              "event_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{32}$"
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "timestamp_unix_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "instance_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "phase": {
+                "$ref": "#/components/schemas/AdminAuditPhase"
+              },
+              "result": {
+                "$ref": "#/components/schemas/AdminAuditResult"
+              },
+              "integrity": {
+                "$ref": "#/components/schemas/AdminAuditIntegrityEnvelope"
+              }
+            }
+          }
+        ]
+      },
+      "AdminAuditEventLegacy": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AdminAuditRecordFields"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "type": "string",
+                "const": "legacy-v0"
+              },
+              "event_id": {
+                "type": "null"
+              },
+              "timestamp": {
+                "type": "null"
+              },
+              "timestamp_unix_ms": {
+                "type": "null"
+              },
+              "instance_id": {
+                "type": "null"
+              },
+              "phase": {
+                "type": "null"
+              },
+              "mutation_request_id": {
+                "type": "null"
+              },
+              "credential_id": {
+                "type": "null"
+              },
+              "source_address": {
+                "type": "null"
+              },
+              "durability_action": {
+                "type": "null"
+              },
+              "previous_revision": {
+                "type": "null"
+              },
+              "desired_revision": {
+                "type": "null"
+              },
+              "content_digest": {
+                "type": "null"
+              },
+              "result": {
+                "type": "null"
+              },
+              "error_code": {
+                "type": "null"
+              },
+              "integrity": {
+                "type": "null"
+              }
+            }
+          }
+        ]
+      },
       "MutationEnvelope": {
         "type": "object",
         "required": [

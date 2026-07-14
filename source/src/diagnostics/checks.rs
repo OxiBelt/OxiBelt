@@ -6,8 +6,8 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
 use crate::config::{
-  AdminAuditMode, AdminAuditStoreKind, AdminTransportMode, Config, SharedStateBackendKind,
-  TlsClientAuthMode,
+  AdminAuditAcknowledgement, AdminAuditStoreKind, AdminTransportMode, Config,
+  SharedStateBackendKind, TlsClientAuthMode,
 };
 use crate::waf::{WafActionConfig, WafMode, route_http_body_compression_transform_enabled};
 
@@ -68,17 +68,21 @@ pub(super) fn diagnose_admin(config: &Config, report: &mut DiagnosticReport) {
   }
   let audit = &config.admin.audit;
   let audit_is_durable = audit.enabled
-    && audit.mode == AdminAuditMode::Enforcing
-    && audit.store.enabled
-    && audit.store.kind == AdminAuditStoreKind::Postgres;
+    && audit.mode.requires_durable_audit()
+    && match audit.acknowledgement {
+      AdminAuditAcknowledgement::Postgres => {
+        audit.store.enabled && audit.store.kind == AdminAuditStoreKind::Postgres
+      }
+      AdminAuditAcknowledgement::FsyncedSpool => audit.spool.enabled,
+    };
   if !audit_is_durable {
     report.push(
       DiagnosticSeverity::Error,
       "admin.audit_not_durable",
       "audit",
       "admin.audit",
-      "Admin mutations are enabled without an enforcing durable PostgreSQL audit sink",
-      "Enable admin.audit with mode = \"enforcing\" and an enabled PostgreSQL store backed by shared state.",
+      "Admin mutations are enabled without required durable audit acknowledgement",
+      "Enable durable_required or durable_required_for_actions with PostgreSQL or an fsynced bounded spool; P1-13 still requires its PostgreSQL ledger.",
     );
   }
 }

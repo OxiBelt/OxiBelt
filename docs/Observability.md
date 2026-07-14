@@ -136,7 +136,7 @@ metric blocks scale-down.
 
 ## Operator Questions
 
-The dashboard and existing endpoints are organized around seven first-response
+The dashboard and existing endpoints are organized around first-response
 questions.
 
 | Question | Primary signal | Notes |
@@ -149,6 +149,7 @@ questions.
 | Are stream listeners healthy? | `oxibelt_stream_tcp_sessions_total`, `oxibelt_stream_udp_sessions_total`, `oxibelt_stream_session_errors_total`, `oxibelt_stream_tcp_bytes_total`, `oxibelt_stream_udp_bytes_total`, `oxibelt_stream_udp_rate_limited_total`, Admin stream-pool snapshots | Public stream metrics are aggregate by transport and omit listener names, SNI values, targets, and origins. Use authenticated stream-pool APIs and runtime introspection for per-pool state and active TCP/UDP flow counts. |
 | Is shared state saturated or degraded? | `oxibelt_shared_state_queue_duration_ms`, `oxibelt_shared_state_operation_duration_ms`, `oxibelt_shared_state_queued_operations`, `oxibelt_shared_state_in_flight_operations`, `oxibelt_shared_state_operations_total`, `oxibelt_shared_state_enumeration_total`, `oxibelt_shared_state_deferred_cleanup_dropped_total`, `oxibelt_shared_state_pool_connections`, `oxibelt_shared_state_pool_waiters`, `oxibelt_shared_state_pool_max_connections`, `oxibelt_shared_state_pool_circuit_state`, `oxibelt_shared_state_pool_acquisitions_total`, `oxibelt_shared_state_pool_connection_events_total`, `oxibelt_backend_feature_degraded`, `oxibelt_backend_failure_policy_applied_total`, `oxibelt_backend_feature_recoveries_total`, `oxibelt_backend_local_fallback_entries`, `oxibelt_backend_stale_snapshot_age_seconds` | Alert on sustained queue growth, pool wait/create timeouts, a nonzero enumeration `cap_exhausted` event, a non-closed Redis reconnect circuit, or a nonzero feature-degraded gauge before security-sensitive operations fail. Failure-policy labels are fixed to configured backend/kind plus the finite feature, mode, and failure-kind vocabulary; no labels contain backend keys, request identity, tokens, URLs, or raw errors. |
 | Is security automation active? | dynamic-policy, external-auth, and mitigation counters | Public metrics expose aggregate behavior, not sensitive WAF metadata. |
+| Is durable Admin audit healthy? | `oxibelt_admin_audit_events_total`, `oxibelt_admin_audit_required_rejections_total`, `oxibelt_admin_audit_replay_total`, `oxibelt_admin_audit_integrity_failures_total`, `oxibelt_admin_audit_spool_events`, `oxibelt_admin_audit_spool_bytes` | Alert on required rejections, integrity failures, sustained replay failures, or spool use approaching its configured byte/event bounds. Outcome, store, reason, and replay labels are fixed vocabularies and never contain actors, credentials, request IDs, paths, or raw errors. |
 | Is HTTP/3 working? | detailed HTTP protocol labels and `oxibelt_quic_retries_total` | Detailed metrics must be enabled for per-protocol request panels. |
 | Are reloads and drains safe? | `/ready`, Admin lifecycle state, runtime snapshot endpoints | Use `redact=true` on runtime and support-bundle endpoints. |
 

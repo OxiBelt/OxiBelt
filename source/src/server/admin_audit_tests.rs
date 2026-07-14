@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
+use ::http::Method;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
-use crate::admin_audit::{AdminAuditEvent, AdminAuditRuntime};
+use crate::admin_audit::AdminAuditHandle;
 use crate::config::Config;
 
 mod common {
@@ -17,7 +18,7 @@ mod common {
 const ADMIN_TOKEN_ENV: &str = "PATH";
 
 #[tokio::test]
-async fn audit_queue_full_rejects_config_load_before_handler() {
+async fn full_durable_audit_spool_rejects_config_load_before_handler() {
   let temp_dir = common::TempDir::new("admin-audit-queue-full");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "admin-audit-queue-full");
@@ -27,16 +28,25 @@ async fn audit_queue_full_rejects_config_load_before_handler() {
   let addr = listener
     .local_addr()
     .expect("admin listener address should be available");
-  let config = admin_listener_config(&cert_path, &key_path, addr);
-  let mut snapshot = AppSnapshot::new(config)
+  let spool_path = temp_dir.path().join("audit-spool");
+  let config = admin_listener_config(&cert_path, &key_path, &spool_path, addr);
+  let snapshot = AppSnapshot::new(config)
     .await
     .expect("snapshot should initialize");
-  let (sender, _receiver) = tokio::sync::mpsc::channel::<AdminAuditEvent>(1);
-  let held_permit = sender
-    .clone()
-    .try_reserve_owned()
-    .expect("held permit should fill audit queue capacity");
-  snapshot.admin_audit = AdminAuditRuntime::test_with_sender(sender);
+  let filler = AdminAuditHandle::new(
+    "127.0.0.1:1234".parse().unwrap(),
+    "http",
+    &Method::POST,
+    "/admin/v1/config/load",
+    None,
+  );
+  assert!(
+    snapshot
+      .admin_audit
+      .begin_required_mutation(&filler, "config.load", "config")
+      .await
+      .expect("first durable intent should reserve the remaining terminal slot")
+  );
   let state = AppHandle::new(snapshot);
   let (shutdown, shutdown_rx) = watch::channel(false);
   let task = tokio::spawn(serve_admin_listener(
@@ -53,16 +63,20 @@ async fn audit_queue_full_rejects_config_load_before_handler() {
     response.starts_with("HTTP/1.1 503 Service Unavailable")
       && response.contains(r#""code":"control_plane_unavailable""#)
       && response.contains(r#""request_id":""#),
-    "full audit queue should reject before config load runs: {}",
+    "full audit spool should reject before config load runs: {}",
     log_safe_text(&response)
   );
 
-  drop(held_permit);
   let _ = shutdown.send(true);
   task.abort();
 }
 
-fn admin_listener_config(cert_path: &Path, key_path: &Path, admin_bind: SocketAddr) -> Config {
+fn admin_listener_config(
+  cert_path: &Path,
+  key_path: &Path,
+  spool_path: &Path,
+  admin_bind: SocketAddr,
+) -> Config {
   let mut raw = common::minimal_config_toml(cert_path, key_path)
     .replace("unprivileged_mode = true", "unprivileged_mode = false")
     .replace(
@@ -77,7 +91,20 @@ enabled = true
 bind = "{admin_bind}"
 bearer_token_env = "{ADMIN_TOKEN_ENV}"
 transport = "plaintext_allowlist"
-"#
+
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "fsynced_spool"
+
+[admin.audit.spool]
+enabled = true
+directory = "{}"
+max_events = 2
+max_bytes = 65536
+max_event_bytes = 32768
+"#,
+    spool_path.display()
   ));
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");

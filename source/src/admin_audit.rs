@@ -1,33 +1,45 @@
 //! Admin audit buffering and delivery.
 //! Authorization and mutation records stay structured so sensitive decisions remain reviewable.
 
-use std::net::SocketAddr;
+use std::collections::HashSet;
 #[cfg(test)]
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
+#[cfg(test)]
 use http::{Method, StatusCode};
-use serde::Serialize;
-use serde_json::{Value, json};
 use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::access_log::AccessLogSinks;
-use crate::config::{AdminAuditExportSink, AdminAuditMode, AdminAuditRequiredSink, Config};
+use crate::config::{AdminAuditAcknowledgement, AdminAuditExportSink, AdminAuditMode, Config};
 use crate::metrics::Metrics;
 
 mod critical;
+mod event;
+mod handle;
+mod integrity;
 mod request;
+mod required;
+mod spool;
 mod store;
+
+use event::ADMIN_AUDIT_SCHEMA_VERSION;
+pub use event::{AdminAuditEvent, AdminAuditQuery, AdminAuditRecord};
 
 #[derive(Clone)]
 pub struct AdminAuditRuntime {
   store: Option<PostgresAdminAuditStore>,
+  spool: Option<spool::AdminAuditSpool>,
   export: AdminAuditExportRuntime,
   mode: AdminAuditMode,
-  store_required: bool,
+  acknowledgement: AdminAuditAcknowledgement,
+  required_actions: Arc<HashSet<String>>,
+  instance_id: Arc<str>,
+  direct_integrity: Arc<tokio::sync::Mutex<integrity::IntegrityChain>>,
+  max_event_bytes: usize,
   metrics: Arc<Metrics>,
 }
 
@@ -43,111 +55,36 @@ struct AdminAuditExportRuntime {
   access_logs: Option<AccessLogSinks>,
 }
 
-#[derive(Debug, Clone)]
-pub struct AdminAuditEvent {
-  pub request_id: String,
-  pub actor: Option<String>,
-  pub principal: Option<String>,
-  pub subject: Option<String>,
-  pub groups: Vec<String>,
-  pub workload_identity_kind: Option<String>,
-  pub workload_identity: Option<String>,
-  pub workload_principal: Option<String>,
-  pub certificate_fingerprint_sha256: Option<String>,
-  pub credential_kind: Option<String>,
-  pub credential_identity: Option<String>,
-  pub credential_principal: Option<String>,
-  pub authentication_reason: Option<String>,
-  pub peer: String,
-  pub source_ip: Option<String>,
-  pub scheme: &'static str,
-  pub method: String,
-  pub path: String,
-  pub service: Option<String>,
-  pub operation: String,
-  pub action: Option<String>,
-  pub resource: Option<String>,
-  pub target_kind: Option<String>,
-  pub target_id: Option<String>,
-  pub status: u16,
-  pub outcome: String,
-  pub error: Option<String>,
-  pub request_summary: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AdminAuditRecord {
-  pub id: i64,
-  pub namespace: String,
-  pub request_id: String,
-  pub actor: Option<String>,
-  pub principal: Option<String>,
-  pub subject: Option<String>,
-  pub groups: Vec<String>,
-  pub workload_identity_kind: Option<String>,
-  pub workload_identity: Option<String>,
-  pub workload_principal: Option<String>,
-  pub certificate_fingerprint_sha256: Option<String>,
-  pub credential_kind: Option<String>,
-  pub credential_identity: Option<String>,
-  pub credential_principal: Option<String>,
-  pub authentication_reason: Option<String>,
-  pub peer: String,
-  pub source_ip: Option<String>,
-  pub scheme: String,
-  pub method: String,
-  pub path: String,
-  pub service: Option<String>,
-  pub operation: String,
-  pub action: Option<String>,
-  pub resource: Option<String>,
-  pub target_kind: Option<String>,
-  pub target_id: Option<String>,
-  pub status: i32,
-  pub outcome: String,
-  pub error: Option<String>,
-  pub request_summary: Value,
-  pub created_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AdminAuditQuery {
-  pub limit: i64,
-  pub outcome: Option<String>,
-  pub actor: Option<String>,
-  pub principal: Option<String>,
-  pub service: Option<String>,
-  pub operation: Option<String>,
-  pub request_id: Option<String>,
-  pub path_prefix: Option<String>,
-  pub before_id: Option<i64>,
-}
-
 #[derive(Clone)]
 pub struct AdminAuditHandle {
   inner: Arc<Mutex<AdminAuditEvent>>,
+  spool_reservation: Arc<Mutex<Option<spool::AdminAuditSpoolReservation>>>,
 }
 
 pub(crate) struct AdminAuditReservation {
   permit: Option<mpsc::OwnedPermit<AdminAuditEvent>>,
-  export: AdminAuditExportRuntime,
-  metrics: Arc<Metrics>,
+  runtime: AdminAuditRuntime,
 }
 
 impl AdminAuditRuntime {
   pub fn disabled() -> Self {
     Self {
       store: None,
+      spool: None,
       export: AdminAuditExportRuntime::default(),
       mode: AdminAuditMode::BestEffort,
-      store_required: false,
+      acknowledgement: AdminAuditAcknowledgement::Postgres,
+      required_actions: Arc::new(HashSet::new()),
+      instance_id: Arc::from("disabled"),
+      direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
   }
 
   #[cfg(test)]
   pub(crate) fn test_with_sender(sender: mpsc::Sender<AdminAuditEvent>) -> Self {
-    Self::test_with_sender_and_mode(sender, AdminAuditMode::Enforcing)
+    Self::test_with_sender_and_mode(sender, AdminAuditMode::DurableRequired)
   }
 
   #[cfg(test)]
@@ -165,9 +102,14 @@ impl AdminAuditRuntime {
         pool,
         sender,
       }),
+      spool: None,
       export: AdminAuditExportRuntime::default(),
       mode,
-      store_required: mode == AdminAuditMode::Enforcing,
+      acknowledgement: AdminAuditAcknowledgement::Postgres,
+      required_actions: Arc::new(HashSet::new()),
+      instance_id: Arc::from("test-instance"),
+      direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
   }
@@ -176,9 +118,14 @@ impl AdminAuditRuntime {
   pub(crate) fn test_export_only() -> Self {
     Self {
       store: None,
+      spool: None,
       export: AdminAuditExportRuntime::default(),
       mode: AdminAuditMode::BestEffort,
-      store_required: false,
+      acknowledgement: AdminAuditAcknowledgement::Postgres,
+      required_actions: Arc::new(HashSet::new()),
+      instance_id: Arc::from("test-instance"),
+      direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
   }
@@ -191,20 +138,34 @@ impl AdminAuditRuntime {
     if !config.admin.enabled {
       return Ok(Self {
         store: None,
+        spool: None,
         export: AdminAuditExportRuntime::default(),
         mode: AdminAuditMode::BestEffort,
-        store_required: false,
+        acknowledgement: AdminAuditAcknowledgement::Postgres,
+        required_actions: Arc::new(HashSet::new()),
+        instance_id: Arc::from("admin-disabled"),
+        direct_integrity: Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
+          None,
+        )?)),
+        max_event_bytes: config.admin.audit.spool.max_event_bytes,
         metrics,
       });
     }
     if !config.admin.audit.enabled {
       return Ok(Self {
         store: None,
+        spool: None,
         export: AdminAuditExportRuntime {
           access_logs: Some(access_logs),
         },
         mode: AdminAuditMode::BestEffort,
-        store_required: false,
+        acknowledgement: AdminAuditAcknowledgement::Postgres,
+        required_actions: Arc::new(HashSet::new()),
+        instance_id: Arc::from("audit-disabled"),
+        direct_integrity: Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
+          None,
+        )?)),
+        max_event_bytes: config.admin.audit.spool.max_event_bytes,
         metrics,
       });
     }
@@ -224,14 +185,38 @@ impl AdminAuditRuntime {
       },
     };
     let mode = config.admin.audit.mode;
-    let store_required = mode == AdminAuditMode::Enforcing
-      && (config.admin.audit.store.enabled
-        || config
-          .admin
-          .audit
-          .export
-          .required_sinks
-          .contains(&AdminAuditRequiredSink::Store));
+    let hmac_key = match (
+      config.admin.audit.integrity.hmac_key_env.as_deref(),
+      config.admin.audit.integrity.hmac_key_id.as_deref(),
+    ) {
+      (Some(environment), Some(key_id)) => Some(integrity::AuditHmacKey::from_environment(
+        environment,
+        key_id,
+      )?),
+      _ => None,
+    };
+    let direct_integrity = Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
+      hmac_key.clone(),
+    )?));
+    let instance_id = std::env::var(&config.shared_state.instance_id_env)
+      .ok()
+      .filter(|value| !value.trim().is_empty())
+      .unwrap_or_else(|| {
+        format!(
+          "{}-{}",
+          std::process::id(),
+          event::generate_chain_id().unwrap_or_else(|_| "identity-unavailable".to_string())
+        )
+      });
+    let spool = if config.admin.audit.spool.enabled {
+      Some(spool::AdminAuditSpool::new(
+        &config.admin.audit.spool,
+        hmac_key.clone(),
+        metrics.clone(),
+      )?)
+    } else {
+      None
+    };
     let store = if config.admin.audit.store.enabled {
       let backend_name = config
         .admin
@@ -258,6 +243,7 @@ impl AdminAuditRuntime {
         pool.clone(),
         namespace.clone(),
         receiver,
+        metrics.clone(),
       ));
       info!(
         backend = backend_name,
@@ -278,68 +264,137 @@ impl AdminAuditRuntime {
       );
       None
     };
-    Ok(Self {
+    let runtime = Self {
       store,
+      spool,
       export,
       mode,
-      store_required,
+      acknowledgement: config.admin.audit.acknowledgement,
+      required_actions: Arc::new(
+        config
+          .admin
+          .audit
+          .required_actions
+          .iter()
+          .cloned()
+          .collect(),
+      ),
+      instance_id: Arc::from(instance_id),
+      direct_integrity,
+      max_event_bytes: config.admin.audit.spool.max_event_bytes,
       metrics,
-    })
+    };
+    if let (Some(spool), Some(store)) = (runtime.spool.clone(), runtime.store.clone()) {
+      let metrics = runtime.metrics.clone();
+      tokio::spawn(run_spool_drainer(spool, store, metrics));
+    }
+    Ok(runtime)
   }
 
   pub(crate) fn reserve(&self) -> anyhow::Result<AdminAuditReservation> {
-    let Some(store) = &self.store else {
-      return Ok(AdminAuditReservation {
-        permit: None,
-        export: self.export.clone(),
-        metrics: self.metrics.clone(),
-      });
-    };
-    match store.sender.clone().try_reserve_owned() {
-      Ok(permit) => Ok(AdminAuditReservation {
-        permit: Some(permit),
-        export: self.export.clone(),
-        metrics: self.metrics.clone(),
-      }),
-      Err(mpsc::error::TrySendError::Full(_)) => {
-        self
-          .metrics
-          .record_admin_audit_store_enqueue_failure("full");
-        if self.store_required {
-          bail!("admin audit queue is full");
+    let permit = if self.mode == AdminAuditMode::BestEffort
+      && self.spool.is_none()
+      && let Some(store) = &self.store
+    {
+      match store.sender.clone().try_reserve_owned() {
+        Ok(permit) => Some(permit),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+          self
+            .metrics
+            .record_admin_audit_store_enqueue_failure("full");
+          self.metrics.record_admin_audit_dropped("store_queue_full");
+          warn!(
+            mode = ?self.mode,
+              "admin audit store queue is full; continuing in best-effort mode"
+          );
+          None
         }
-        self.metrics.record_admin_audit_dropped("store_queue_full");
-        warn!(
-          mode = ?self.mode,
-          "admin audit store queue is full; continuing without durable audit row"
-        );
-        Ok(AdminAuditReservation {
-          permit: None,
-          export: self.export.clone(),
-          metrics: self.metrics.clone(),
-        })
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+          self
+            .metrics
+            .record_admin_audit_store_enqueue_failure("closed");
+          self
+            .metrics
+            .record_admin_audit_dropped("store_writer_closed");
+          warn!(
+            mode = ?self.mode,
+              "admin audit store writer is closed; continuing in best-effort mode"
+          );
+          None
+        }
       }
-      Err(mpsc::error::TrySendError::Closed(_)) => {
-        self
-          .metrics
-          .record_admin_audit_store_enqueue_failure("closed");
-        if self.store_required {
-          bail!("admin audit writer is closed");
-        }
+    } else {
+      None
+    };
+    Ok(AdminAuditReservation {
+      permit,
+      runtime: self.clone(),
+    })
+  }
+
+  async fn persist_best_effort_event(
+    &self,
+    event: AdminAuditEvent,
+    permit: Option<mpsc::OwnedPermit<AdminAuditEvent>>,
+  ) {
+    let event = match self.prepare_unsealed_event(event) {
+      Ok(event) => event,
+      Err(error) => {
         self
           .metrics
           .record_admin_audit_dropped("store_writer_closed");
-        warn!(
-          mode = ?self.mode,
-          "admin audit store writer is closed; continuing without durable audit row"
-        );
-        Ok(AdminAuditReservation {
-          permit: None,
-          export: self.export.clone(),
-          metrics: self.metrics.clone(),
-        })
+        warn!(error = %error, "failed to prepare best-effort Admin audit event");
+        return;
       }
+    };
+    if let Some(spool) = &self.spool {
+      match spool.append(event.clone()).await {
+        Ok(event) => {
+          emit_tracing(&event);
+          self.export.emit_admin_event(&event, self.metrics.as_ref());
+          self
+            .metrics
+            .record_admin_audit_event(&event.outcome, "spool");
+        }
+        Err(error) => {
+          warn!(error = %error, "best-effort Admin audit spool append failed");
+          self
+            .metrics
+            .record_admin_audit_event(&event.outcome, "none");
+          emit_tracing(&event);
+          self.export.emit_admin_event(&event, self.metrics.as_ref());
+        }
+      }
+      return;
     }
+    if let Some(permit) = permit {
+      match self.enqueue_direct_event(event, permit).await {
+        Ok(event) => {
+          emit_tracing(&event);
+          self.export.emit_admin_event(&event, self.metrics.as_ref());
+        }
+        Err(error) => warn!(error = %error, "failed to seal best-effort Admin audit event"),
+      }
+    } else {
+      emit_tracing(&event);
+      self.export.emit_admin_event(&event, self.metrics.as_ref());
+      self
+        .metrics
+        .record_admin_audit_event(&event.outcome, "none");
+    }
+  }
+
+  fn prepare_unsealed_event(&self, mut event: AdminAuditEvent) -> anyhow::Result<AdminAuditEvent> {
+    event.instance_id = self.instance_id.to_string();
+    event.request_summary = request::sanitize_summary_for_storage(&event.request_summary);
+    ensure_event_metadata(&event)?;
+    Ok(event)
+  }
+
+  pub(crate) fn clone_with_export(&self, access_logs: Option<AccessLogSinks>) -> Self {
+    let mut runtime = self.clone();
+    runtime.export = AdminAuditExportRuntime { access_logs };
+    runtime
   }
 
   pub(crate) fn emit_unstored(&self, event: AdminAuditEvent, error: &anyhow::Error) {
@@ -365,22 +420,6 @@ impl AdminAuditRuntime {
   }
 }
 
-impl AdminAuditReservation {
-  pub(crate) fn commit(self, event: AdminAuditEvent) {
-    emit_tracing(&event);
-    self.export.emit_admin_event(&event, self.metrics.as_ref());
-    let store = if self.permit.is_some() {
-      "postgres"
-    } else {
-      "none"
-    };
-    self.metrics.record_admin_audit_event(&event.outcome, store);
-    if let Some(permit) = self.permit {
-      drop(permit.send(event));
-    }
-  }
-}
-
 impl AdminAuditExportRuntime {
   fn emit_admin_event(&self, event: &AdminAuditEvent, metrics: &Metrics) {
     if let Some(access_logs) = &self.access_logs {
@@ -396,190 +435,68 @@ impl Default for AdminAuditRuntime {
   }
 }
 
-impl AdminAuditHandle {
-  pub fn new(
-    peer_addr: SocketAddr,
-    scheme: &'static str,
-    method: &Method,
-    path: &str,
-    query: Option<&str>,
-  ) -> Self {
-    let descriptor = request::describe_request(method, path);
-    let event = AdminAuditEvent {
-      request_id: request::random_request_id(),
-      actor: None,
-      principal: None,
-      subject: None,
-      groups: Vec::new(),
-      workload_identity_kind: None,
-      workload_identity: None,
-      workload_principal: None,
-      certificate_fingerprint_sha256: None,
-      credential_kind: None,
-      credential_identity: None,
-      credential_principal: None,
-      authentication_reason: None,
-      peer: peer_addr.to_string(),
-      source_ip: Some(peer_addr.ip().to_string()),
-      scheme,
-      method: method.as_str().to_string(),
-      path: path.to_string(),
-      service: descriptor.service,
-      operation: descriptor.operation,
-      action: None,
-      resource: None,
-      target_kind: descriptor.target_kind,
-      target_id: descriptor.target_id,
-      status: 0,
-      outcome: "unknown".to_string(),
-      error: None,
-      request_summary: request::request_summary_from_query(query),
-    };
-    Self {
-      inner: Arc::new(Mutex::new(event)),
-    }
+fn ensure_event_metadata(event: &AdminAuditEvent) -> anyhow::Result<()> {
+  if event.schema_version != ADMIN_AUDIT_SCHEMA_VERSION {
+    bail!("unsupported Admin audit schema version");
   }
-
-  pub fn from_request<B>(request: &http::Request<B>) -> Option<Self> {
-    request.extensions().get::<Self>().cloned()
+  if event.event_id.len() != 32
+    || !event
+      .event_id
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  {
+    bail!("Admin audit event ID is unavailable or invalid");
   }
-
-  pub fn set_actor(&self, name: &str, principal: &str, subject: &str, groups: &[String]) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
-    event.actor = Some(name.to_string());
-    event.principal = Some(principal.to_string());
-    event.subject = Some(subject.to_string());
-    event.groups = groups.to_vec();
+  if event.timestamp.is_empty() || event.timestamp_unix_ms == 0 {
+    bail!("Admin audit occurrence timestamp is unavailable");
   }
-
-  #[allow(clippy::too_many_arguments)]
-  pub fn set_authentication(
-    &self,
-    reason: &str,
-    workload_identity_kind: Option<&str>,
-    workload_identity: Option<&str>,
-    workload_principal: Option<&str>,
-    certificate_fingerprint_sha256: Option<&str>,
-    credential_kind: Option<&str>,
-    credential_identity: Option<&str>,
-    credential_principal: Option<&str>,
-  ) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
-    event.authentication_reason = Some(reason.to_string());
-    event.workload_identity_kind = workload_identity_kind.map(str::to_string);
-    event.workload_identity = workload_identity.map(str::to_string);
-    event.workload_principal = workload_principal.map(str::to_string);
-    event.certificate_fingerprint_sha256 = certificate_fingerprint_sha256.map(str::to_string);
-    event.credential_kind = credential_kind.map(str::to_string);
-    event.credential_identity = credential_identity.map(str::to_string);
-    event.credential_principal = credential_principal.map(str::to_string);
-  }
-
-  pub(crate) fn request_id(&self) -> String {
-    self
-      .inner
-      .lock()
-      .expect("admin audit lock poisoned")
-      .request_id
-      .clone()
-  }
-
-  pub(crate) fn error_details(&self, status: StatusCode) -> Option<Value> {
-    if status != StatusCode::FORBIDDEN {
-      return None;
-    }
-    let event = self.inner.lock().expect("admin audit lock poisoned");
-    match (&event.action, &event.resource) {
-      (Some(action), Some(resource)) => Some(json!({
-        "action": action,
-        "resource": resource,
-      })),
-      _ => None,
-    }
-  }
-
-  pub fn record_authorization(&self, action: &str, resource: &str, allowed: bool) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
-    if event.action.is_none() || !allowed {
-      event.action = Some(action.to_string());
-      event.resource = Some(resource.to_string());
-    }
-    if event.service.is_none()
-      && let Some((service, _)) = action.split_once(':')
-    {
-      event.service = Some(service.to_string());
-    }
-    request::push_authorization_check(&mut event.request_summary, action, resource, allowed);
-  }
-
-  pub fn record_json_body(&self, bytes: &[u8]) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
-    request::merge_json_body_summary(
-      &mut event.request_summary,
-      request::json_body_summary(bytes),
-    );
-  }
-
-  pub fn finish(&self, status: StatusCode) -> AdminAuditEvent {
-    self.finish_with_error(status, request::status_reason(status))
-  }
-
-  pub fn finish_with_error(&self, status: StatusCode, error: &str) -> AdminAuditEvent {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
-    event.status = status.as_u16();
-    if status == StatusCode::SWITCHING_PROTOCOLS || status.is_success() || status.is_redirection() {
-      event.outcome = "applied".to_string();
-      event.error = None;
-    } else {
-      event.outcome = "rejected".to_string();
-      if event.error.is_none() {
-        event.error = Some(error.to_string());
-      }
-    }
-    event.clone()
-  }
+  Ok(())
 }
 
-impl AdminAuditQuery {
-  pub fn from_query(query: Option<&str>) -> anyhow::Result<Self> {
-    let mut parsed = Self {
-      limit: 100,
-      outcome: None,
-      actor: None,
-      principal: None,
-      service: None,
-      operation: None,
-      request_id: None,
-      path_prefix: None,
-      before_id: None,
-    };
-    if let Some(query) = query {
-      for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-          "limit" => {
-            parsed.limit = value
-              .parse::<i64>()
-              .map_err(|_| anyhow::anyhow!("limit must be an integer"))?;
+fn fallback_integrity_chain() -> integrity::IntegrityChain {
+  integrity::IntegrityChain::new(None).unwrap_or_else(|_| {
+    integrity::IntegrityChain::restore(
+      "00000000000000000000000000000000".to_string(),
+      0,
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      None,
+    )
+    .expect("static Admin audit fallback chain must be valid")
+  })
+}
+
+async fn run_spool_drainer(
+  spool: spool::AdminAuditSpool,
+  store: PostgresAdminAuditStore,
+  metrics: Arc<Metrics>,
+) {
+  loop {
+    match spool.next_entry().await {
+      Ok(Some(entry)) => {
+        match store::insert_record_returning_id(&store.pool, &store.namespace, &entry.event).await {
+          Ok(_) => {
+            if let Err(error) = spool.acknowledge(entry.path).await {
+              metrics.record_admin_audit_replay("failed");
+              warn!(error = %error, "failed to acknowledge replayed Admin audit spool event");
+              tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+              metrics.record_admin_audit_replay("persisted");
+            }
           }
-          "outcome" => parsed.outcome = Some(value.into_owned()),
-          "actor" => parsed.actor = Some(value.into_owned()),
-          "principal" => parsed.principal = Some(value.into_owned()),
-          "service" => parsed.service = Some(value.into_owned()),
-          "operation" => parsed.operation = Some(value.into_owned()),
-          "request_id" => parsed.request_id = Some(value.into_owned()),
-          "path_prefix" => parsed.path_prefix = Some(value.into_owned()),
-          "before_id" => {
-            parsed.before_id = Some(
-              value
-                .parse::<i64>()
-                .map_err(|_| anyhow::anyhow!("before_id must be an integer"))?,
-            );
+          Err(error) => {
+            metrics.record_admin_audit_replay("failed");
+            warn!(error = %error, "failed to replay Admin audit spool event to PostgreSQL");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
           }
-          _ => {}
         }
       }
+      Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+      Err(error) => {
+        metrics.record_admin_audit_integrity_failure();
+        warn!(error = %error, "Admin audit spool verification failed; replay is blocked");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+      }
     }
-    Ok(parsed)
   }
 }
 
@@ -650,7 +567,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn audit_reservation_fails_when_queue_capacity_is_full() {
+  async fn durable_reservation_does_not_expose_queue_capacity_before_authentication() {
     let (sender, _receiver) = mpsc::channel(1);
     let held_permit = sender
       .clone()
@@ -658,12 +575,10 @@ mod tests {
       .expect("held permit should consume the only slot");
     let runtime = AdminAuditRuntime::test_with_sender(sender);
 
-    let error = match runtime.reserve() {
-      Ok(_) => panic!("reservation should fail while the only slot is held"),
-      Err(error) => error,
-    };
-
-    assert!(error.to_string().contains("admin audit queue is full"));
+    let reservation = runtime
+      .reserve()
+      .expect("pre-authentication reservation should not consume the critical lane");
+    assert!(reservation.permit.is_none());
     drop(held_permit);
   }
 
@@ -680,17 +595,19 @@ mod tests {
       .reserve()
       .expect("best-effort reservation should not reject when the queue is full");
 
-    reservation.commit(sample_event());
+    let audit = sample_audit_handle();
+    reservation.commit(&audit, sample_event()).await.unwrap();
     drop(held_permit);
   }
 
   #[tokio::test]
   async fn audit_reservation_commits_event_through_reserved_slot() {
     let (sender, mut receiver) = mpsc::channel(1);
-    let runtime = AdminAuditRuntime::test_with_sender(sender);
+    let runtime = AdminAuditRuntime::test_with_sender_and_mode(sender, AdminAuditMode::BestEffort);
     let reservation = runtime.reserve().expect("reservation should succeed");
 
-    reservation.commit(sample_event());
+    let audit = sample_audit_handle();
+    reservation.commit(&audit, sample_event()).await.unwrap();
 
     let event = receiver
       .recv()
@@ -698,6 +615,16 @@ mod tests {
       .expect("committed event should be queued");
     assert_eq!(event.status, StatusCode::OK.as_u16());
     assert_eq!(event.outcome, "applied");
+  }
+
+  fn sample_audit_handle() -> AdminAuditHandle {
+    AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().unwrap(),
+      "https",
+      &http::Method::POST,
+      "/admin/v1/config/load",
+      None,
+    )
   }
 
   #[tokio::test]

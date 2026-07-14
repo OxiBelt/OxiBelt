@@ -109,6 +109,29 @@ pub(super) const ADMIN_CONFIG_KEYS: &[&str] = &[
   "workload_identity",
 ];
 
+pub(super) const ADMIN_AUDIT_CONFIG_KEYS: &[&str] = &[
+  "acknowledgement",
+  "backend",
+  "enabled",
+  "export",
+  "integrity",
+  "mode",
+  "queue_capacity",
+  "required_actions",
+  "spool",
+  "store",
+];
+
+pub(super) const ADMIN_AUDIT_SPOOL_CONFIG_KEYS: &[&str] = &[
+  "directory",
+  "enabled",
+  "max_bytes",
+  "max_event_bytes",
+  "max_events",
+];
+
+pub(super) const ADMIN_AUDIT_INTEGRITY_CONFIG_KEYS: &[&str] = &["hmac_key_env", "hmac_key_id"];
+
 pub(super) const ADMIN_WORKLOAD_IDENTITY_CONFIG_KEYS: &[&str] = &[
   "bearer_mode",
   "enabled",
