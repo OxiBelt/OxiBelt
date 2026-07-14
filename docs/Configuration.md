@@ -352,11 +352,10 @@ and API access remain an explicit chart-level discovery choice. The preset does
 select a three-replica minimum, managed hostname/zone distribution, preferred
 same-release anti-affinity, a one-Pod PDB disruption budget, and the fixed
 300-second `SIGUSR1` pre-stop drain inside a 360-second grace period. It
-requires Kubernetes 1.31 or later. It does not claim certificate-to-IPM
-identity binding, general mutation idempotency, stronger audit guarantees,
-image signatures, build provenance, or admission enforcement. OCI-linked
-release SBOM attestations are an independent release-verification control, not
-a property of this runtime preset; see [Release Supply-Chain
+requires Kubernetes 1.31 or later. It does not turn release supply-chain
+policy into a property of the runtime profile. OCI-linked release signatures,
+SLSA provenance, SBOM attestations, and the optional Kubernetes admission
+example are independent deployment controls; see [Release Supply-Chain
 Verification](SupplyChain.md).
 
 ## Includes

@@ -121,7 +121,7 @@ jobs:
               raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 2:
+          if plan["schemaVersion"] != 3:
               raise SystemExit("unsupported image release plan schema")
           if plan["version"] != tag:
               raise SystemExit("image plan version does not match release tag")
@@ -200,13 +200,23 @@ jobs:
                   "oxibeltctl",
                   "oxibelt-gateway-controller",
               ],
-              "platformBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml",
-              "indexBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release.yml",
               "indexArtifactName": "oxibelt-release-sbom-index",
               "indexFile": "oxibelt-release-index.cdx.json",
           }
           if plan.get("sbom") != expected_sbom:
               raise SystemExit("unexpected release SBOM contract")
+          expected_supply_chain = {
+              "sourceRepository": "OxiBelt/OxiBelt",
+              "oidcIssuer": "https://token.actions.githubusercontent.com",
+              "cosignVersion": "v2.6.3",
+              "provenancePredicateType": "https://slsa.dev/provenance/v1",
+              "provenanceBuildType": "https://actions.github.io/buildtypes/workflow/v1",
+              "minimumSlsaBuildLevel": 2,
+              "platformBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml",
+              "indexBuilderWorkflow": "OxiBelt/OxiBelt/.github/workflows/release.yml",
+          }
+          if plan.get("supplyChain") != expected_supply_chain:
+              raise SystemExit("unexpected release supply-chain contract")
           PY
 
           {
@@ -360,8 +370,8 @@ jobs:
 
           mkdir -p "${RUNNER_TEMP}/oxibelt-index-sbom/children"
           predicate_type="$(jq -r '.sbom.predicateType' "${IMAGE_PLAN}")"
-          platform_workflow="$(jq -r '.sbom.platformBuilderWorkflow' "${IMAGE_PLAN}")"
-          index_workflow="$(jq -r '.sbom.indexBuilderWorkflow' "${IMAGE_PLAN}")"
+          platform_workflow="$(jq -r '.supplyChain.platformBuilderWorkflow' "${IMAGE_PLAN}")"
+          index_workflow="$(jq -r '.supplyChain.indexBuilderWorkflow' "${IMAGE_PLAN}")"
           index_file="$(jq -r '.sbom.indexFile' "${IMAGE_PLAN}")"
           child_inventory='[]'
           platform_args=()
@@ -510,7 +520,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 2:
+          if plan["schemaVersion"] != 3:
               raise SystemExit("unsupported image release plan schema")
           if plan["image"] != image:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
@@ -677,7 +687,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   ghcr-index-attest:
-    name: Attest multi-arch index SBOM
+    name: Sign and attest multi-arch index
     runs-on: ubuntu-26.04
     needs:
       - ghcr-index-sbom
@@ -691,16 +701,55 @@ jobs:
       packages: write
 
     steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
       - name: Download aggregate index SBOM
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
           name: oxibelt-release-sbom-index
           path: ${{ runner.temp }}/oxibelt-index-sbom
 
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.3
+
       - name: Login to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Validate immutable index signing subject
+        env:
+          DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        run: |
+          set -euo pipefail
+
+          jq -e '
+            .schemaVersion == 3
+            and .image == "ghcr.io/oxibelt/oxibelt"
+            and .supplyChain.sourceRepository == "OxiBelt/OxiBelt"
+            and .supplyChain.oidcIssuer == "https://token.actions.githubusercontent.com"
+            and .supplyChain.cosignVersion == "v2.6.3"
+            and .supplyChain.provenancePredicateType == "https://slsa.dev/provenance/v1"
+            and .supplyChain.provenanceBuildType == "https://actions.github.io/buildtypes/workflow/v1"
+            and .supplyChain.minimumSlsaBuildLevel == 2
+          ' "${IMAGE_PLAN}" >/dev/null
+          resolved_digest="$(docker buildx imagetools inspect "${OXIBELT_GHCR_IMAGE}@${DIGEST}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          if [[ "${resolved_digest}" != "${DIGEST}" ]]; then
+            echo "refusing to sign index: resolved ${resolved_digest}, expected ${DIGEST}" >&2
+            exit 1
+          fi
 
       - name: Publish index SBOM attestation
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
@@ -711,8 +760,21 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
+      - name: Publish index build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ghcr.io/oxibelt/oxibelt
+          subject-digest: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Publish keyless index signature
+        env:
+          DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+        run: cosign sign --yes --new-bundle-format=false "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
+
   ghcr-index-verify:
-    name: Verify multi-arch index SBOM attestation
+    name: Verify multi-arch index signature and attestations
     runs-on: ubuntu-26.04
     needs:
       - ghcr-index-attest
@@ -737,12 +799,17 @@ jobs:
           name: oxibelt-release-sbom-index
           path: ${{ runner.temp }}/oxibelt-index-sbom
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.3
+
       - name: Login to GHCR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Verify index SBOM from OCI
+      - name: Verify index signature and attestations from OCI
         env:
           DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -752,13 +819,73 @@ jobs:
           set -euo pipefail
 
           predicate_type="$(jq -r '.sbom.predicateType' "${IMAGE_PLAN}")"
-          workflow="$(jq -r '.sbom.indexBuilderWorkflow' "${IMAGE_PLAN}")"
+          source_repository="$(jq -r '.supplyChain.sourceRepository' "${IMAGE_PLAN}")"
+          issuer="$(jq -r '.supplyChain.oidcIssuer' "${IMAGE_PLAN}")"
+          workflow="$(jq -r '.supplyChain.indexBuilderWorkflow' "${IMAGE_PLAN}")"
+          provenance_type="$(jq -r '.supplyChain.provenancePredicateType' "${IMAGE_PLAN}")"
+          provenance_build_type="$(jq -r '.supplyChain.provenanceBuildType' "${IMAGE_PLAN}")"
+          release_ref="${{ needs.validate.outputs.release_ref }}"
+          revision="${{ needs.validate.outputs.revision }}"
+          workflow_path="${workflow#"${source_repository}/"}"
+          certificate_identity="https://github.com/${workflow}@${release_ref}"
+          repository_url="https://github.com/${source_repository}"
+          digest_hex="${DIGEST#sha256:}"
+
+          cosign verify --new-bundle-format=false \
+            --certificate-identity "${certificate_identity}" \
+            --certificate-oidc-issuer "${issuer}" \
+            --certificate-github-workflow-repository "${source_repository}" \
+            --certificate-github-workflow-ref "${release_ref}" \
+            --certificate-github-workflow-sha "${revision}" \
+            "${OXIBELT_GHCR_IMAGE}@${DIGEST}" >"${RUNNER_TEMP}/verified-index-signatures.json"
+          jq -e --arg digest "${DIGEST}" '
+            length >= 1
+            and all(.[]; .critical.image["docker-manifest-digest"] == $digest)
+          ' "${RUNNER_TEMP}/verified-index-signatures.json" >/dev/null
+
           gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
-            --repo OxiBelt/OxiBelt \
+            --repo "${source_repository}" \
             --signer-workflow "${workflow}" \
-            --source-digest "${{ needs.validate.outputs.revision }}" \
-            --source-ref "${{ needs.validate.outputs.release_ref }}" \
+            --source-digest "${revision}" \
+            --source-ref "${release_ref}" \
+            --predicate-type "${provenance_type}" \
+            --cert-identity "${certificate_identity}" \
+            --cert-oidc-issuer "${issuer}" \
+            --bundle-from-oci \
+            --deny-self-hosted-runners \
+            --format json >"${RUNNER_TEMP}/verified-index-provenance.json"
+          jq -e \
+            --arg image "${OXIBELT_GHCR_IMAGE}" \
+            --arg digest "${digest_hex}" \
+            --arg build_type "${provenance_build_type}" \
+            --arg repository "${repository_url}" \
+            --arg workflow_path "${workflow_path}" \
+            --arg release_ref "${release_ref}" \
+            --arg revision "${revision}" \
+            --arg builder "${certificate_identity}" '
+            [.[] | .verificationResult.statement
+              | select(.subject | any(.name == $image and .digest.sha256 == $digest))
+              | select(.predicate.buildDefinition.buildType == $build_type)
+              | select(.predicate.buildDefinition.externalParameters.workflow.repository == $repository)
+              | select(.predicate.buildDefinition.externalParameters.workflow.path == $workflow_path)
+              | select(.predicate.buildDefinition.externalParameters.workflow.ref == $release_ref)
+              | select(.predicate.buildDefinition.internalParameters.github.runner_environment == "github-hosted")
+              | select(.predicate.buildDefinition.resolvedDependencies | any(
+                  .uri == ("git+" + $repository + "@" + $release_ref)
+                  and .digest.gitCommit == $revision
+                ))
+              | select(.predicate.runDetails.builder.id == $builder)]
+            | length >= 1
+          ' "${RUNNER_TEMP}/verified-index-provenance.json" >/dev/null
+
+          gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
+            --repo "${source_repository}" \
+            --signer-workflow "${workflow}" \
+            --source-digest "${revision}" \
+            --source-ref "${release_ref}" \
             --predicate-type "${predicate_type}" \
+            --cert-identity "${certificate_identity}" \
+            --cert-oidc-issuer "${issuer}" \
             --bundle-from-oci \
             --deny-self-hosted-runners \
             --format json >"${RUNNER_TEMP}/verified-index-attestations.json"
@@ -778,11 +905,81 @@ jobs:
             --image "${OXIBELT_GHCR_IMAGE}" \
             --version "${{ needs.validate.outputs.version }}"
 
+  ghcr-index-admission-verify:
+    name: Verify signed index with Kubernetes admission
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    needs:
+      - ghcr-index-verify
+      - ghcr-manifest-publish
+      - validate
+    if: github.repository == 'OxiBelt/OxiBelt'
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout verified release ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+        with:
+          ref: ${{ needs.validate.outputs.release_ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify admission checkout revision
+        env:
+          OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          set -euo pipefail
+          actual_revision="$(git rev-parse HEAD)"
+          if [[ "${actual_revision}" != "${OXIBELT_RELEASE_REVISION}" ]]; then
+            echo "admission checkout ${actual_revision} does not match release ${OXIBELT_RELEASE_REVISION}" >&2
+            exit 1
+          fi
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Install kubectl
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.26.0
+          kubectl_version: v1.31.4
+          install_only: true
+
+      - name: Install Minikube
+        env:
+          MINIKUBE_VERSION: v1.38.1
+          MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e
+        run: |
+          set -euo pipefail
+          minikube_dir="${RUNNER_TEMP}/minikube"
+          mkdir -p "${minikube_dir}/bin"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://github.com/kubernetes/minikube/releases/download/${MINIKUBE_VERSION}/minikube-linux-amd64" \
+            --output "${minikube_dir}/minikube"
+          printf '%s  %s\n' "${MINIKUBE_SHA256}" "${minikube_dir}/minikube" | sha256sum --check --status
+          install -m 0755 "${minikube_dir}/minikube" "${minikube_dir}/bin/minikube"
+          echo "${minikube_dir}/bin" >> "${GITHUB_PATH}"
+
+      - name: Validate image admission assets
+        run: tests/scripts/check-image-admission-policy.sh
+
+      - name: Prove signed image admission
+        env:
+          OXIBELT_INDEX_DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tests/scripts/run-image-admission-policy.sh \
+            --trusted-image "${OXIBELT_GHCR_IMAGE}@${OXIBELT_INDEX_DIGEST}"
+
   ghcr-index-promote:
     name: Promote verified multi-arch aliases
     runs-on: ubuntu-26.04
     needs:
-      - ghcr-index-verify
+      - ghcr-index-admission-verify
       - ghcr-manifest-publish
     if: github.repository == 'OxiBelt/OxiBelt'
     permissions:

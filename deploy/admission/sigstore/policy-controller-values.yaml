@@ -1,0 +1,15 @@
+webhook:
+  failurePolicy: Fail
+  configData:
+    no-match-policy: deny
+  image:
+    repository: ghcr.io/sigstore/policy-controller/policy-controller
+    version: sha256:0bcd60beb93f4427c29cf3a669743caf58490e98ded4380c33c09f092734a6ab
+
+# The upstream chart currently defaults this hook to `latest-dev`. Split the
+# digest across repository/version so the chart renders a valid `@sha256:`
+# reference while keeping every executable admission dependency immutable.
+leasescleanup:
+  image:
+    repository: cgr.dev/chainguard/kubectl@sha256
+    version: 26e2d3fb319edf7300edff25c1a64076a3bc046c9842c964d6062e9c5ee9d1d2

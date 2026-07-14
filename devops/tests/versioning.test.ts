@@ -265,7 +265,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
-  Assert.equal(Plan.schemaVersion, 2)
+  Assert.equal(Plan.schemaVersion, 3)
   Assert.deepEqual(Plan.sbom, {
     format: 'cyclonedx-json',
     specVersion: '1.6',
@@ -278,10 +278,18 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       'oxibeltctl',
       'oxibelt-gateway-controller'
     ],
-    platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
-    indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml',
     indexArtifactName: 'oxibelt-release-sbom-index',
     indexFile: 'oxibelt-release-index.cdx.json'
+  })
+  Assert.deepEqual(Plan.supplyChain, {
+    sourceRepository: 'OxiBelt/OxiBelt',
+    oidcIssuer: 'https://token.actions.githubusercontent.com',
+    cosignVersion: 'v2.6.3',
+    provenancePredicateType: 'https://slsa.dev/provenance/v1',
+    provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1',
+    minimumSlsaBuildLevel: 2,
+    platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
+    indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
   })
   Assert.equal(Amd64.sbomArtifactName, 'oxibelt-release-sbom-amd64')
   Assert.equal(Amd64.sbomFile, 'oxibelt-release-amd64.cdx.json')

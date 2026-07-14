@@ -41,22 +41,30 @@ reusable per-architecture row builds an unprivileged image tar, records
 BuildKit-resolved inputs, scans the local tar as report-only pre-publish
 evidence, and produces a validated CycloneDX SBOM. An isolated package-write
 job publishes the canonical platform digest without checking out or executing
-release build code. A separate OIDC-enabled job attests the SBOM, a read-only
-job verifies it from OCI, and only then can stable platform aliases be
-promoted.
+release build code. A separate OIDC-enabled job publishes its CycloneDX SBOM,
+SLSA provenance v1, and keyless Cosign signature. A read-only job verifies the
+exact digest, issuer, repository, release workflow, tag ref, source commit,
+GitHub-hosted builder, signature, provenance, and SBOM from OCI before stable
+platform aliases can be promoted.
 
 The top-level release workflow waits for all five reusable rows, publishes the
 canonical multi-architecture index from the verified `amd64` (x86-64-v3),
 `arm64`, and `riscv64` digests, re-verifies those platform attestations, and
 composes an architecture-preserving aggregate SBOM bound to the resulting
-index digest. It then attests and independently verifies the index before
-promoting mutable index aliases. QEMU is used only for the RISC-V image; AMD64
+index digest. It then signs, attests, and independently verifies the index. A
+read-only rootless Docker-backed Minikube gate must admit that exact signed
+digest and reject a historical unsigned OxiBelt digest before mutable index
+aliases can be promoted. QEMU is used only for the RISC-V image; AMD64
 and ARM64 build natively on their release runners. Build tags matching
 `major.minor.patch-build.<8 hex chars>` may publish from tag push events;
 stable and `major.minor.patch-beta.N` tags publish from GitHub release or
 manual dispatch events. Workflow integrity tests in
 `rust/ci_workflow_integrity.rs` enforce this fail-closed topology,
-platform/tag/SBOM coverage, immutable action pins, and permission separation.
+platform/tag/signature/provenance/SBOM coverage, immutable action pins,
+admission dependencies, and permission separation. Static Helm and policy
+checks are provided by `check-helm-image-digest.sh` and
+`check-image-admission-policy.sh`; `run-image-admission-policy.sh` is the live
+admission proof.
 Consumer verification commands and the trust boundary are documented in
 [`docs/SupplyChain.md`](../docs/SupplyChain.md).
 

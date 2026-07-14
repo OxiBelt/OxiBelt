@@ -1877,6 +1877,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let index_verify_job = jobs
     .get("ghcr-index-verify")
     .expect("release workflow should define ghcr-index-verify");
+  let index_admission_job = jobs
+    .get("ghcr-index-admission-verify")
+    .expect("release workflow should define ghcr-index-admission-verify");
   let index_promote_job = jobs
     .get("ghcr-index-promote")
     .expect("release workflow should define ghcr-index-promote");
@@ -1904,6 +1907,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let index_sbom_job_text = workflow_job_text(&workflow, "ghcr-index-sbom");
   let index_attest_job_text = workflow_job_text(&workflow, "ghcr-index-attest");
   let index_verify_job_text = workflow_job_text(&workflow, "ghcr-index-verify");
+  let index_admission_job_text = workflow_job_text(&workflow, "ghcr-index-admission-verify");
   let index_promote_job_text = workflow_job_text(&workflow, "ghcr-index-promote");
   let build_job_text = workflow_job_text(&arch_workflow, "build");
   let scan_job_text = workflow_job_text(&arch_workflow, "scan");
@@ -2001,12 +2005,21 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "index verification should wait for attestation, digest, and release identity"
   );
   assert_eq!(
-    index_promote_job.needs,
+    index_admission_job.needs,
     vec![
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
+      "validate".to_owned(),
     ],
-    "mutable index aliases should wait for OCI verification"
+    "live admission verification should wait for the verified index digest and release identity"
+  );
+  assert_eq!(
+    index_promote_job.needs,
+    vec![
+      "ghcr-index-admission-verify".to_owned(),
+      "ghcr-manifest-publish".to_owned(),
+    ],
+    "mutable index aliases should wait for OCI and live admission verification"
   );
   assert!(
     !manifest_job
@@ -2039,13 +2052,18 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "tag.startswith(\"v\")",
     "build release tag",
     "ghcr.io/oxibelt/oxibelt",
-    "if plan[\"schemaVersion\"] != 2:",
+    "if plan[\"schemaVersion\"] != 3:",
     "if plan[\"version\"] != tag:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "expected_manifests = {",
     "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
     "expected_sbom = {",
+    "expected_supply_chain = {",
+    "https://token.actions.githubusercontent.com",
+    "https://slsa.dev/provenance/v1",
+    "https://actions.github.io/buildtypes/workflow/v1",
+    "minimumSlsaBuildLevel",
     "https://cyclonedx.org/bom",
     "release_sbom.ts",
     "--ignoreConfig",
@@ -2262,9 +2280,16 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "attestations: write",
     "id-token: write",
+    "packages: write",
+    "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
+    "cosign-release: v2.6.3",
+    "Validate immutable platform signing subject",
+    ".supplyChain.minimumSlsaBuildLevel == 2",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
     "subject-name: ghcr.io/oxibelt/oxibelt",
     "subject-digest: ${{ needs.publish.outputs.digest }}",
+    "Publish platform build provenance",
+    "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
     "create-storage-record: false",
   ] {
@@ -2286,11 +2311,21 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   }
   for expected in [
     "packages: read",
+    "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
+    "cosign verify --new-bundle-format=false",
+    "--certificate-identity \"${certificate_identity}\"",
+    "--certificate-oidc-issuer \"${issuer}\"",
+    "--certificate-github-workflow-repository \"${source_repository}\"",
+    "--certificate-github-workflow-ref \"${release_ref}\"",
+    "--certificate-github-workflow-sha \"${revision}\"",
     "gh attestation verify",
     "--bundle-from-oci",
     "--signer-workflow \"${workflow}\"",
-    "--source-digest \"${{ inputs.release_revision }}\"",
-    "--source-ref \"${{ inputs.release_ref }}\"",
+    "--source-digest \"${revision}\"",
+    "--source-ref \"${release_ref}\"",
+    ".predicate.buildDefinition.internalParameters.github.runner_environment == \"github-hosted\"",
+    ".predicate.buildDefinition.resolvedDependencies",
+    ".predicate.runDetails.builder.id == $builder",
     "--deny-self-hosted-runners",
     "Download expected platform SBOM",
     "--slurpfile expected \"${EXPECTED_SBOM}\"",
@@ -2386,9 +2421,15 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "index SBOM composition should remain read-only"
   );
   for expected in [
+    "packages: write",
+    "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
+    "cosign-release: v2.6.3",
+    "Validate immutable index signing subject",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
     "subject-digest: ${{ needs.ghcr-manifest-publish.outputs.digest }}",
     "sbom-path: ${{ runner.temp }}/oxibelt-index-sbom/oxibelt-release-index.cdx.json",
+    "Publish index build provenance",
+    "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
     "create-storage-record: false",
   ] {
@@ -2399,9 +2440,16 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   }
   for expected in [
     "packages: read",
+    "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
+    "cosign verify --new-bundle-format=false",
+    "--certificate-github-workflow-repository \"${source_repository}\"",
+    "--certificate-github-workflow-ref \"${release_ref}\"",
+    "--certificate-github-workflow-sha \"${revision}\"",
     "gh attestation verify",
-    "--source-digest \"${{ needs.validate.outputs.revision }}\"",
-    "--source-ref \"${{ needs.validate.outputs.release_ref }}\"",
+    "--source-digest \"${revision}\"",
+    "--source-ref \"${release_ref}\"",
+    ".predicate.buildDefinition.internalParameters.github.runner_environment == \"github-hosted\"",
+    ".predicate.runDetails.builder.id == $builder",
     "--deny-self-hosted-runners",
     "Download expected index SBOM",
     "--slurpfile expected \"${EXPECTED_SBOM}\"",
@@ -2410,6 +2458,42 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     assert!(
       index_verify_job_text.contains(expected),
       "index verification job should include {expected}"
+    );
+  }
+  assert!(
+    !index_verify_job_text.contains("packages: write")
+      && !index_verify_job_text.contains("id-token: write")
+      && !index_verify_job_text.contains("attestations: write"),
+    "index verification should not receive write permissions"
+  );
+  for expected in [
+    "timeout-minutes: 25",
+    "contents: read",
+    "packages: read",
+    "persist-credentials: false",
+    "azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1",
+    "version: v3.16.4",
+    "kubectl_version: v1.31.4",
+    "MINIKUBE_VERSION: v1.38.1",
+    "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
+    "tests/scripts/check-image-admission-policy.sh",
+    "tests/scripts/run-image-admission-policy.sh",
+    "--trusted-image \"${OXIBELT_GHCR_IMAGE}@${OXIBELT_INDEX_DIGEST}\"",
+  ] {
+    assert!(
+      index_admission_job_text.contains(expected),
+      "index admission verification should include {expected}"
+    );
+  }
+  for removed in [
+    "packages: write",
+    "id-token: write",
+    "attestations: write",
+    "docker-rootful",
+  ] {
+    assert!(
+      !index_admission_job_text.contains(removed),
+      "index admission verification must not include {removed}"
     );
   }
   for expected in [
@@ -2505,11 +2589,14 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Publish canonical GHCR image",
     "Push canonical arch-specific GHCR tag",
     "Publish platform SBOM attestation",
-    "Verify platform SBOM from OCI",
+    "Publish platform build provenance",
+    "Publish keyless platform signature",
+    "Verify platform signature and attestations from OCI",
     "Promote verified GHCR aliases",
     "ghcr-manifest-publish",
     "ghcr-index-attest",
     "ghcr-index-verify",
+    "ghcr-index-admission-verify",
     ":latest",
     r#"aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []"#,
   ] {

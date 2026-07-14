@@ -47,14 +47,23 @@ export type ReleaseSbomContract = {
   predicateType: 'https://cyclonedx.org/bom'
   rustToolchainVersion: '1.96.0'
   binaries: string[]
-  platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
-  indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
   indexArtifactName: 'oxibelt-release-sbom-index'
   indexFile: 'oxibelt-release-index.cdx.json'
 }
 
+export type ReleaseSupplyChainContract = {
+  sourceRepository: 'OxiBelt/OxiBelt'
+  oidcIssuer: 'https://token.actions.githubusercontent.com'
+  cosignVersion: 'v2.6.3'
+  provenancePredicateType: 'https://slsa.dev/provenance/v1'
+  provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1'
+  minimumSlsaBuildLevel: 2
+  platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
+  indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
+}
+
 export type ImageReleasePlan = {
-  schemaVersion: 2
+  schemaVersion: 3
   image: string
   tag: string
   version: string
@@ -62,6 +71,7 @@ export type ImageReleasePlan = {
   revision: string
   source: string
   sbom: ReleaseSbomContract
+  supplyChain: ReleaseSupplyChainContract
   artifacts: ImageArtifact[]
   manifests: ImageManifest[]
 }
@@ -282,7 +292,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     image: Image,
     tag: Tag,
     version: Tag,
@@ -301,10 +311,18 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
         'oxibeltctl',
         'oxibelt-gateway-controller'
       ],
-      platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
-      indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml',
       indexArtifactName: 'oxibelt-release-sbom-index',
       indexFile: 'oxibelt-release-index.cdx.json'
+    },
+    supplyChain: {
+      sourceRepository: 'OxiBelt/OxiBelt',
+      oidcIssuer: 'https://token.actions.githubusercontent.com',
+      cosignVersion: 'v2.6.3',
+      provenancePredicateType: 'https://slsa.dev/provenance/v1',
+      provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1',
+      minimumSlsaBuildLevel: 2,
+      platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
+      indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
     },
     artifacts: Artifacts,
     manifests: Manifests

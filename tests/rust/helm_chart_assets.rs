@@ -31,6 +31,7 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(chart["appVersion"], "0.0.0");
 
   let values = read_yaml("deploy/helm/oxibelt/values.yaml");
+  assert_eq!(values["image"]["digest"], "");
   assert_eq!(values["workload"]["kind"], "Deployment");
   assert_eq!(values["workload"]["deployment"]["maxUnavailable"], 0);
   assert_eq!(values["workload"]["deployment"]["maxSurge"], 1);
@@ -127,6 +128,10 @@ fn data_plane_chart_metadata_and_values_are_valid() {
 
   let schema: Value = serde_json::from_str(&read_repo("deploy/helm/oxibelt/values.schema.json"))
     .expect("values.schema.json should parse as JSON");
+  assert_eq!(
+    schema["properties"]["image"]["properties"]["digest"]["pattern"],
+    "^$|^sha256:[0-9a-f]{64}$"
+  );
   assert_eq!(
     schema["properties"]["workload"]["properties"]["kind"]["enum"][0],
     "Deployment"
@@ -388,6 +393,12 @@ fn data_plane_chart_metadata_and_values_are_valid() {
 fn data_plane_chart_templates_cover_production_runtime_contracts() {
   assert!(
     repo_root()
+      .join("tests/scripts/check-helm-image-digest.sh")
+      .is_file(),
+    "the Helm image digest renderer check should be present"
+  );
+  assert!(
+    repo_root()
       .join("tests/scripts/check-helm-edge-secure-medium-profile.sh")
       .is_file(),
     "the edge-secure-medium Helm renderer check should be present"
@@ -483,6 +494,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "serviceAccountToken:",
     "expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}",
     "name: kube-root-ca.crt",
+    "image: {{ include \"oxibelt.image\" . | quote }}",
   ] {
     assert!(
       deployment.contains(needle),
@@ -542,6 +554,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "serviceAccountToken:",
     "expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}",
     "name: kube-root-ca.crt",
+    "image: {{ include \"oxibelt.image\" . | quote }}",
   ] {
     assert!(
       daemonset.contains(needle),
@@ -583,6 +596,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
 
   let helpers = read_repo("deploy/helm/oxibelt/templates/_helpers.tpl");
   for needle in [
+    "oxibelt.image",
+    "image.digest must be an empty string or a lower-case sha256 digest",
     "oxibelt.generatedConfigDigest",
     "oxibelt-helm-config-v1",
     "sha256sum",
@@ -711,6 +726,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(chart["appVersion"], "0.0.0");
 
   let values = read_yaml("deploy/helm/oxibelt-gateway-controller/values.yaml");
+  assert_eq!(values["image"]["digest"], "");
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
   assert_eq!(values["backendResolution"], "cluster_dns");
   assert_eq!(values["rollout"]["target"]["kind"], "deployment");
@@ -738,6 +754,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
     "deploy/helm/oxibelt-gateway-controller/values.schema.json",
   ))
   .expect("gateway controller values schema should parse");
+  assert_eq!(
+    schema["properties"]["image"]["properties"]["digest"]["pattern"],
+    "^$|^sha256:[0-9a-f]{64}$"
+  );
   assert_eq!(
     schema["properties"]["backendResolution"]["enum"][1],
     "endpoint_slice_watch"
@@ -770,6 +790,12 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   );
 
   let deployment = read_repo("deploy/helm/oxibelt-gateway-controller/templates/deployment.yaml");
+  assert!(
+    deployment.contains("image: {{ include \"oxibelt-gateway-controller.image\" . | quote }}")
+  );
+  let helpers = read_repo("deploy/helm/oxibelt-gateway-controller/templates/_helpers.tpl");
+  assert!(helpers.contains("oxibelt-gateway-controller.image"));
+  assert!(helpers.contains("image.digest must be an empty string or a lower-case sha256 digest"));
   assert!(deployment.contains("--backend-resolution={{ .Values.backendResolution }}"));
   assert!(deployment.contains("--status-service={{ .Values.statusService }}"));
   assert!(deployment.contains("strategy:\n    type: Recreate"));
@@ -845,4 +871,67 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
   assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
   assert!(!rbac.contains("secrets"));
+}
+
+#[test]
+fn sigstore_admission_assets_enforce_signature_and_provenance_identity() {
+  let controller_values = read_yaml("deploy/admission/sigstore/policy-controller-values.yaml");
+  assert_eq!(controller_values["webhook"]["failurePolicy"], "Fail");
+  assert_eq!(
+    controller_values["webhook"]["configData"]["no-match-policy"],
+    "deny"
+  );
+  assert!(
+    controller_values["webhook"]["image"]["version"]
+      .as_str()
+      .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71)
+  );
+
+  let signature = read_yaml("deploy/admission/sigstore/oxibelt-signature-policy.yaml");
+  assert_eq!(signature["apiVersion"], "policy.sigstore.dev/v1beta1");
+  assert_eq!(signature["spec"]["mode"], "enforce");
+  assert_eq!(
+    signature["spec"]["images"][0]["glob"],
+    "ghcr.io/oxibelt/oxibelt@sha256:*"
+  );
+  assert_eq!(
+    signature["spec"]["authorities"][0]["keyless"]["identities"][0]["issuer"],
+    "https://token.actions.githubusercontent.com"
+  );
+
+  let provenance = read_yaml("deploy/admission/sigstore/oxibelt-provenance-policy.yaml");
+  assert_eq!(provenance["apiVersion"], "policy.sigstore.dev/v1beta1");
+  assert_eq!(provenance["spec"]["mode"], "enforce");
+  assert_eq!(
+    provenance["spec"]["authorities"][0]["signatureFormat"],
+    "bundle"
+  );
+  assert_eq!(
+    provenance["spec"]["authorities"][0]["attestations"][0]["predicateType"],
+    "https://slsa.dev/provenance/v1"
+  );
+  let cue = provenance["spec"]["authorities"][0]["attestations"][0]["policy"]["data"]
+    .as_str()
+    .expect("provenance policy should define inline CUE");
+  for expected in [
+    "https://actions.github.io/buildtypes/workflow/v1",
+    "https://github.com/OxiBelt/OxiBelt",
+    ".github/workflows/release.yml",
+    ".github/workflows/release-image-arch.yml",
+    "runner_environment: \"github-hosted\"",
+    "gitCommit: =~\"^[0-9a-f]{40}$\"",
+  ] {
+    assert!(
+      cue.contains(expected),
+      "provenance admission CUE should contain {expected}"
+    );
+  }
+
+  for path in [
+    "deploy/admission/sigstore/README.md",
+    "tests/scripts/check-image-admission-policy.sh",
+    "tests/scripts/run-image-admission-policy.sh",
+  ] {
+    assert!(repo_root().join(path).is_file(), "{path} should be present");
+  }
 }

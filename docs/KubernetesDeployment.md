@@ -9,6 +9,26 @@ OxiBelt provides two Helm charts:
 
 The Gateway controller remains a Gateway API controller. It is not an Ingress controller.
 
+Both charts accept either `image.tag` or an immutable `image.digest`. When a
+digest is set it takes precedence and renders `repository@sha256:...`; the
+schema rejects malformed or uppercase digests. Production deployments of
+official images should use the digest that passed release signature,
+provenance, SBOM, and admission verification:
+
+```yaml
+image:
+  repository: ghcr.io/oxibelt/oxibelt
+  digest: sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
+```
+
+The fail-closed Sigstore admission example under
+`deploy/admission/sigstore` verifies official OxiBelt image signatures and
+minimum SLSA Build Level 2 provenance against the expected repository, release
+workflows, issuer, tag, source commit, and deployed digest. Installation,
+namespace opt-in, and rootless Minikube proof instructions are in its
+[`README.md`](../deploy/admission/sigstore/README.md). The admission policy is
+a cluster control and is not installed by either OxiBelt chart.
+
 ## Data-Plane Chart
 
 The data-plane chart can run OxiBelt as either a `Deployment` or a `DaemonSet`:

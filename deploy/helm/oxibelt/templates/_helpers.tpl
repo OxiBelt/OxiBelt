@@ -2,6 +2,19 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "oxibelt.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- $digest := .Values.image.digest | default "" -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "image.digest must be an empty string or a lower-case sha256 digest" -}}
+{{- end -}}
+{{- printf "%s@%s" $repository $digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repository (required "image.tag is required when image.digest is empty" .Values.image.tag) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "oxibelt.name" .) .Values.serviceAccount.name -}}

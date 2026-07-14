@@ -25,7 +25,7 @@ spec:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
       - name: controller
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: {{ include "oxibelt-gateway-controller.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         command: ["/usr/local/bin/oxibelt-gateway-controller"]
         args:

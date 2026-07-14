@@ -1,0 +1,41 @@
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: oxibelt-slsa-provenance
+spec:
+  images:
+    - glob: 'ghcr.io/oxibelt/oxibelt@sha256:*'
+  authorities:
+    - name: oxibelt-github-release-provenance
+      keyless:
+        url: https://fulcio.sigstore.dev
+        identities:
+          - issuer: https://token.actions.githubusercontent.com
+            subjectRegExp: '^https://github[.]com/OxiBelt/OxiBelt/[.]github/workflows/(release|release-image-arch)[.]yml@refs/tags/(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-beta[.](0|[1-9][0-9]*)|-build[.][0-9a-f]{8})?$'
+      ctlog:
+        url: https://rekor.sigstore.dev
+      signatureFormat: bundle
+      attestations:
+        - name: minimum-slsa-build-level-2
+          predicateType: https://slsa.dev/provenance/v1
+          policy:
+            type: cue
+            data: |
+              predicateType: "https://slsa.dev/provenance/v1"
+              predicate: {
+                buildDefinition: {
+                  buildType: "https://actions.github.io/buildtypes/workflow/v1"
+                  externalParameters: workflow: {
+                    repository: "https://github.com/OxiBelt/OxiBelt"
+                    path: ".github/workflows/release.yml" | ".github/workflows/release-image-arch.yml"
+                    ref: =~"^refs/tags/(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-beta[.](0|[1-9][0-9]*)|-build[.][0-9a-f]{8})?$"
+                  }
+                  internalParameters: github: runner_environment: "github-hosted"
+                  resolvedDependencies: [{
+                    uri: =~"^git[+]https://github[.]com/OxiBelt/OxiBelt@refs/tags/(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-beta[.](0|[1-9][0-9]*)|-build[.][0-9a-f]{8})?$"
+                    digest: gitCommit: =~"^[0-9a-f]{40}$"
+                  }, ...]
+                }
+                runDetails: builder: id: =~"^https://github[.]com/OxiBelt/OxiBelt/[.]github/workflows/(release|release-image-arch)[.]yml@refs/tags/(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-beta[.](0|[1-9][0-9]*)|-build[.][0-9a-f]{8})?$"
+              }
+  mode: enforce

@@ -1,6 +1,9 @@
 image:
   repository: oxibelt
   tag: latest
+  # Set an immutable `sha256:...` digest for verified production rollouts.
+  # A non-empty digest takes precedence over `tag`.
+  digest: ""
   pullPolicy: IfNotPresent
 
 controllerName: oxibelt.dev/gateway-controller

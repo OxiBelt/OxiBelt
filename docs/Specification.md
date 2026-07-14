@@ -80,11 +80,13 @@ topology and drain lifecycle contract on Kubernetes 1.31 or later. OxiBelt now
 also implements certificate-to-IPM identity binding (P1-12), single-instance
 general mutation idempotency (P1-13), and bounded, versioned, tamper-evident
 audit acknowledgements (P1-14). Release workflows publish OCI-linked
-CycloneDX SBOM attestations for immutable platform and multi-architecture image
-digests (P2-3), including source/build identity, architecture, toolchain,
-resolved base-image digests, and binary inventory. Base-image digest pinning
-(P2-2), image signatures, SLSA build provenance, and admission enforcement
-(P2-4) remain separate work.
+CycloneDX SBOM attestations, keyless Cosign signatures, and SLSA provenance for
+immutable platform and multi-architecture image digests (P2-3/P2-4), including
+source/build identity, architecture, toolchain, resolved base-image digests,
+and binary inventory. Release CI verifies the same digest through a fail-closed
+Kubernetes admission example before promoting mutable index aliases. Base-image
+digest pinning (P2-2), vulnerability admission thresholds, freshness, rollback
+prevention, and reproducible-build proof remain separate work.
 
 ## Request Pipeline
 

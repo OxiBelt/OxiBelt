@@ -129,12 +129,15 @@ artifact is unambiguous. Unqualified `oxibelt:latest`, forks, mirrors, local
 builds, test helper images, and third-party base images are not official OxiBelt
 images.
 
-Release workflows publish OCI-linked CycloneDX SBOM attestations for each
-platform image digest and the multi-architecture index digest. Follow
-[Release Supply-Chain Verification](docs/SupplyChain.md) to resolve a digest,
-verify the expected source and workflow identities, and inspect the verified
-SBOM. An SBOM attestation is not an image signature, reproducibility proof, or
-admission policy; deployments should continue to select immutable digests.
+Release workflows publish a keyless Cosign signature, SLSA provenance v1, and
+an OCI-linked CycloneDX SBOM attestation for each platform image digest and the
+multi-architecture index digest. Follow [Release Supply-Chain
+Verification](docs/SupplyChain.md) to resolve a digest and verify its expected
+issuer, source, workflow, tag, commit, hosted builder, signature, provenance,
+and SBOM. The checked-in Kubernetes admission example can enforce the signature
+and minimum provenance policy in opted-in namespaces. These controls are not a
+reproducible-build, freshness, rollback-prevention, or vulnerability-policy
+claim; deployments should continue to select approved immutable digests.
 
 ## Experimental Features
 
