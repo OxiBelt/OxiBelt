@@ -1164,6 +1164,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "readOnly: true",
     "--kube-context \"kind-${cluster_name}\"",
     "topologySpreadConstraints | length) == 2",
+    ".nodeTaintsPolicy == \"Honor\"",
     "rolling update reduced ready capacity below two Pods",
     "terminating Pod endpoint withdrawal before exit",
     "kubernetes.io/service-name=${service_name}",

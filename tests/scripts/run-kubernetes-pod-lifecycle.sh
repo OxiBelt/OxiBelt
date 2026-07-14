@@ -404,6 +404,8 @@ jq -e '
     and .spec.strategy.rollingUpdate.maxUnavailable == 0
     and .spec.strategy.rollingUpdate.maxSurge == 1
     and .spec.template.spec.terminationGracePeriodSeconds == 45
+    and ([.spec.template.spec.topologySpreadConstraints[]?
+      | select(.nodeTaintsPolicy == "Honor")] | length) == 2
     and any(.spec.template.spec.containers[]?;
       .name == "oxibelt"
         and .lifecycle.preStop.exec.command == ["/bin/sh", "-ec", "kill -USR1 1; exec sleep 10"])

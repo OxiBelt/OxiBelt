@@ -82,6 +82,17 @@ assert_not_contains() {
   fi
 }
 
+assert_occurrence_count() {
+  local file="$1"
+  local expected="$2"
+  local expected_count="$3"
+  local actual_count
+
+  actual_count="$(grep -F -c -- "${expected}" "${file}" || true)"
+  [[ "${actual_count}" == "${expected_count}" ]] \
+    || die "$(basename "${file}") expected ${expected_count} occurrences of ${expected}, found ${actual_count}"
+}
+
 assert_source_contains() {
   local file="$1"
   local source="$2"
@@ -143,6 +154,7 @@ render distributed \
   --set podDisruptionBudget.maxUnavailable=1 \
   --set-string podDisruptionBudget.unhealthyPodEvictionPolicy=AlwaysAllow
 assert_source_contains "${work_dir}/distributed.yaml" "templates/deployment.yaml" "topologySpreadConstraints:"
+assert_occurrence_count "${work_dir}/distributed.yaml" "nodeTaintsPolicy: Honor" 2
 assert_source_contains "${work_dir}/distributed.yaml" "templates/deployment.yaml" "topologyKey: kubernetes.io/hostname"
 assert_source_contains "${work_dir}/distributed.yaml" "templates/deployment.yaml" "minDomains: 2"
 assert_source_contains "${work_dir}/distributed.yaml" "templates/deployment.yaml" "whenUnsatisfiable: DoNotSchedule"
@@ -163,6 +175,7 @@ assert_source_contains "${work_dir}/distributed.yaml" "templates/pdb.yaml" "unhe
 render secure_profile --kube-version 1.31.4 -f "${secure_values}"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "replicas: 3"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "topologySpreadConstraints:"
+assert_occurrence_count "${work_dir}/secure_profile.yaml" "nodeTaintsPolicy: Honor" 2
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "topologyKey: kubernetes.io/hostname"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "topologyKey: topology.kubernetes.io/zone"
 assert_source_contains "${work_dir}/secure_profile.yaml" "templates/deployment.yaml" "podAntiAffinity:"

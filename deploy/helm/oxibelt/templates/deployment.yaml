@@ -67,6 +67,7 @@ spec:
       {{- if .Values.podDistribution.nodeSpread.enabled }}
       - maxSkew: {{ int .Values.podDistribution.nodeSpread.maxSkew }}
         minDomains: {{ int .Values.podDistribution.nodeSpread.minDomains }}
+        nodeTaintsPolicy: Honor
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: {{ .Values.podDistribution.nodeSpread.whenUnsatisfiable }}
         labelSelector:
@@ -75,6 +76,7 @@ spec:
       {{- end }}
       {{- if .Values.podDistribution.zoneSpread.enabled }}
       - maxSkew: {{ int .Values.podDistribution.zoneSpread.maxSkew }}
+        nodeTaintsPolicy: Honor
         topologyKey: topology.kubernetes.io/zone
         whenUnsatisfiable: {{ .Values.podDistribution.zoneSpread.whenUnsatisfiable }}
         labelSelector:
