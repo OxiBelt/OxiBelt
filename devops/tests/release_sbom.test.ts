@@ -47,10 +47,10 @@ type ArtifactFixture = {
 }
 
 const Artifacts = new Map<string, ArtifactFixture>([
-  ['amd64v2', { ArtifactArch: 'amd64v2', Platform: 'linux/amd64', TargetCpu: 'x86-64-v2', RustImage: 'rust:1.96.0-alpine3.24' }],
-  ['amd64', { ArtifactArch: 'amd64', Platform: 'linux/amd64', TargetCpu: 'x86-64-v3', RustImage: 'rust:1.96.0-alpine3.24' }],
-  ['amd64v4', { ArtifactArch: 'amd64v4', Platform: 'linux/amd64', TargetCpu: 'x86-64-v4', RustImage: 'rust:1.96.0-alpine3.24' }],
-  ['arm64', { ArtifactArch: 'arm64', Platform: 'linux/arm64', RustImage: 'rust:1.96.0-alpine3.24' }],
+  ['amd64v2', { ArtifactArch: 'amd64v2', Platform: 'linux/amd64', TargetCpu: 'x86-64-v2', RustImage: 'rust:1.96.0-trixie' }],
+  ['amd64', { ArtifactArch: 'amd64', Platform: 'linux/amd64', TargetCpu: 'x86-64-v3', RustImage: 'rust:1.96.0-trixie' }],
+  ['amd64v4', { ArtifactArch: 'amd64v4', Platform: 'linux/amd64', TargetCpu: 'x86-64-v4', RustImage: 'rust:1.96.0-trixie' }],
+  ['arm64', { ArtifactArch: 'arm64', Platform: 'linux/arm64', RustImage: 'rust:1.96.0-trixie' }],
   ['riscv64', { ArtifactArch: 'riscv64', Platform: 'linux/riscv64', RustImage: 'rust:1.96.0-trixie' }]
 ])
 
@@ -86,7 +86,9 @@ function BuildInputs(ArtifactValue: ArtifactFixture): JsonObject {
     rustToolchainVersion: '1.96.0',
     rustTarget: ArtifactValue.ArtifactArch === 'riscv64'
       ? 'riscv64gc-unknown-linux-musl'
-      : ArtifactValue.Platform === 'linux/amd64' ? 'x86_64-unknown-linux-musl' : '',
+      : ArtifactValue.ArtifactArch === 'arm64'
+        ? 'aarch64-unknown-linux-musl'
+        : 'x86_64-unknown-linux-musl',
     targetCpu: ArtifactValue.TargetCpu ?? null,
     baseImages: BaseImages(ArtifactValue)
   }

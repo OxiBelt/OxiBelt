@@ -616,6 +616,53 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 }
 
 #[test]
+fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
+  let dockerfile = dockerfile_text();
+  let script = docker_image_artifact_build_script_text();
+  let manifest = fs::read_to_string(repo_root().join("source/Cargo.toml"))
+    .expect("source/Cargo.toml should be readable");
+
+  for expected in [
+    "ARG RUST_BUILDER_IMAGE=rust:1.96.0-trixie",
+    "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
+    "ARG TARGETARCH",
+    "amd64) rust_target=x86_64-unknown-linux-musl",
+    "arm64) rust_target=aarch64-unknown-linux-musl",
+    "riscv64) rust_target=riscv64gc-unknown-linux-musl",
+    "CC_x86_64_unknown_linux_musl=musl-gcc",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
+    "CC_aarch64_unknown_linux_musl=musl-gcc",
+    "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
+    "cargo build --locked --release",
+    "--target \"${rust_target}\"",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "Alpine runtime image should preserve its glibc-hosted musl build contract: {expected}"
+    );
+  }
+
+  for expected in [
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie\"",
+    "rust_target=\"x86_64-unknown-linux-musl\"",
+    "rust_target=\"aarch64-unknown-linux-musl\"",
+    "rust_target=\"riscv64gc-unknown-linux-musl\"",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Docker artifact builder should record the explicit musl build input: {expected}"
+    );
+  }
+
+  assert!(
+    manifest.contains(
+      "cfg(all(target_arch = \"aarch64\", target_os = \"linux\", target_env = \"musl\"))"
+    ) && manifest.contains("openssl-sys = { version = \"0.9.117\", features = [\"vendored\"] }"),
+    "ARM64 musl should build a target-compatible vendored OpenSSL"
+  );
+}
+
+#[test]
 fn python_docker_helpers_track_the_supported_alpine_base() {
   for dockerfile in [
     "tests/docker/mock_dns/Dockerfile",
@@ -645,17 +692,15 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     "source/ops/Dockerfile.alpine should build the privileged netport switcher"
   );
   assert!(
-    dockerfile.contains("cp \"target/${OXIBELT_RUST_TARGET}/release/oxibeltctl\" /tmp/oxibeltctl")
-      && dockerfile.contains("cp target/release/oxibeltctl /tmp/oxibeltctl"),
-    "source/ops/Dockerfile.alpine should stage oxibeltctl for target and host builds"
+    dockerfile.contains("cp \"target/${rust_target}/release/oxibeltctl\" /tmp/oxibeltctl"),
+    "source/ops/Dockerfile.alpine should stage the musl oxibeltctl build"
   );
   assert!(
-        dockerfile.contains(
-            "cp \"target/${OXIBELT_RUST_TARGET}/release/oxibelt-netport-switcher\" /tmp/oxibelt-netport-switcher"
-        ) && dockerfile
-            .contains("cp target/release/oxibelt-netport-switcher /tmp/oxibelt-netport-switcher"),
-        "source/ops/Dockerfile.alpine should stage oxibelt-netport-switcher for target and host builds"
-    );
+    dockerfile.contains(
+      "cp \"target/${rust_target}/release/oxibelt-netport-switcher\" /tmp/oxibelt-netport-switcher"
+    ),
+    "source/ops/Dockerfile.alpine should stage the musl oxibelt-netport-switcher build"
+  );
   assert!(
     dockerfile.contains("COPY --from=builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl"),
     "source/ops/Dockerfile.alpine should copy oxibeltctl into the runtime image"

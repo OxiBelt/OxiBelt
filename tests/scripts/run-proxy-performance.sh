@@ -558,7 +558,7 @@ build_perf_probe_image() {
   fi
 
   remove_perf_probe_image=1
-  for base_image in rust:1.96.0-trixie debian:trixie-slim; do
+  for base_image in rust:1.97.0-trixie debian:trixie-slim; do
     retry_command 3 docker pull "${base_image}" \
       || fail_with_diagnostics "failed to pull performance probe base image ${base_image}"
   done
@@ -579,7 +579,7 @@ build_external_benchmark_image() {
 
   remove_external_benchmark_image=1
   local base_image
-  for base_image in rust:1.96.0-trixie debian:trixie debian:trixie-slim; do
+  for base_image in rust:1.97.0-trixie debian:trixie debian:trixie-slim; do
     retry_command 3 docker pull "${base_image}" >/dev/null \
       || fail_with_diagnostics "failed to pull external benchmark base image ${base_image}"
   done

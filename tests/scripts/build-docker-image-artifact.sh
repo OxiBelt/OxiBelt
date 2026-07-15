@@ -49,7 +49,7 @@ build_inputs="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}-build-inputs.
 build_metadata_tmp=""
 build_inputs_tmp=""
 rust_toolchain_version="1.96.0"
-rust_builder_image="rust:${rust_toolchain_version}-alpine3.24"
+rust_builder_image="rust:${rust_toolchain_version}-trixie"
 node_builder_image="node:24-alpine3.24"
 runtime_image="alpine:3.24"
 rust_target=""
@@ -85,7 +85,20 @@ case "${artifact_arch}" in
     rust_target="x86_64-unknown-linux-musl"
     rust_target_cpu="x86-64-v4"
     ;;
-  arm64|riscv64) ;;
+  arm64)
+    if [[ "${platform}" != "linux/arm64" ]]; then
+      usage
+      exit 2
+    fi
+    rust_target="aarch64-unknown-linux-musl"
+    ;;
+  riscv64)
+    if [[ "${platform}" != "linux/riscv64" ]]; then
+      usage
+      exit 2
+    fi
+    rust_target="riscv64gc-unknown-linux-musl"
+    ;;
   *)
     usage
     exit 2
@@ -102,11 +115,6 @@ fi
 
 if [[ -z "${oxibelt_source}" ]]; then
   oxibelt_source="${default_oxibelt_source}"
-fi
-
-if [[ "${artifact_arch}" == "riscv64" ]]; then
-  rust_builder_image="rust:1.96.0-trixie"
-  rust_target="riscv64gc-unknown-linux-musl"
 fi
 
 mkdir -p "${output_dir}"

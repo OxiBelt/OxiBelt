@@ -119,7 +119,7 @@ const ArtifactPlatforms = new Map<string, { Platform: string; RustTarget: string
   ['amd64v2', { Platform: 'linux/amd64', RustTarget: 'x86_64-unknown-linux-musl', TargetCpu: 'x86-64-v2' }],
   ['amd64', { Platform: 'linux/amd64', RustTarget: 'x86_64-unknown-linux-musl', TargetCpu: 'x86-64-v3' }],
   ['amd64v4', { Platform: 'linux/amd64', RustTarget: 'x86_64-unknown-linux-musl', TargetCpu: 'x86-64-v4' }],
-  ['arm64', { Platform: 'linux/arm64', RustTarget: '' }],
+  ['arm64', { Platform: 'linux/arm64', RustTarget: 'aarch64-unknown-linux-musl' }],
   ['riscv64', { Platform: 'linux/riscv64', RustTarget: 'riscv64gc-unknown-linux-musl' }]
 ])
 

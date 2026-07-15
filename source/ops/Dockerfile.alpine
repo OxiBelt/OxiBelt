@@ -1,4 +1,4 @@
-ARG RUST_BUILDER_IMAGE=rust:1.96.0-alpine3.24
+ARG RUST_BUILDER_IMAGE=rust:1.96.0-trixie
 ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24
 ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24
 ARG OXIBELT_VERSION=0.0.0
@@ -18,26 +18,21 @@ RUN npm run --prefix ui/person-proof build
 
 FROM ${RUST_BUILDER_IMAGE} AS builder
 
+ARG TARGETARCH
 ARG OXIBELT_RUST_TARGET=
 ARG OXIBELT_RUST_TARGET_CPU=
 
-RUN if command -v apk >/dev/null 2>&1; then \
-      apk --no-cache upgrade && \
-      apk add --no-cache build-base clang clang-dev cmake musl-dev ninja openssl-dev openssl-libs-static perl pkgconf && \
-      rm -rf /var/cache/apk/*; \
-    else \
-      apt-get update && \
-      apt-get install -y --no-install-recommends \
-        build-essential \
-        clang \
-        cmake \
-        libclang-dev \
-        musl-tools \
-        ninja-build \
-        perl \
-        pkg-config && \
-      rm -rf /var/lib/apt/lists/*; \
-    fi
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      clang \
+      cmake \
+      libclang-dev \
+      musl-tools \
+      ninja-build \
+      perl \
+      pkg-config && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
@@ -45,20 +40,40 @@ COPY source ./source
 COPY docs/admin-openapi.json ./docs/admin-openapi.json
 COPY fuzz ./fuzz
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
-RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
-      if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
+RUN rust_target="${OXIBELT_RUST_TARGET}" && \
+    if [ -z "${rust_target}" ]; then \
+      case "${TARGETARCH}" in \
+        amd64) rust_target=x86_64-unknown-linux-musl ;; \
+        arm64) rust_target=aarch64-unknown-linux-musl ;; \
+        riscv64) rust_target=riscv64gc-unknown-linux-musl ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+      esac; \
+    fi && \
+    case "${rust_target}" in \
+      x86_64-unknown-linux-musl) \
         case "${OXIBELT_RUST_TARGET_CPU}" in \
-          x86-64-v2|x86-64-v3|x86-64-v4) ;; \
+          ""|x86-64-v2|x86-64-v3|x86-64-v4) ;; \
           *) echo "unsupported OXIBELT_RUST_TARGET_CPU=${OXIBELT_RUST_TARGET_CPU}" >&2; exit 1 ;; \
         esac; \
-        if [ "${OXIBELT_RUST_TARGET}" != "x86_64-unknown-linux-musl" ]; then \
+        export CC_x86_64_unknown_linux_musl=musl-gcc; \
+        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
+        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-cpu=${OXIBELT_RUST_TARGET_CPU}"; \
+        fi \
+        ;; \
+      aarch64-unknown-linux-musl) \
+        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
           echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
           exit 1; \
         fi; \
-        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-cpu=${OXIBELT_RUST_TARGET_CPU}"; \
-      fi && \
-      rustup target add "${OXIBELT_RUST_TARGET}" && \
-      if [ "${OXIBELT_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" ]; then \
+        export CC_aarch64_unknown_linux_musl=musl-gcc; \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+        ;; \
+      riscv64gc-unknown-linux-musl) \
+        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
+          echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
+          exit 1; \
+        fi; \
         export CC_riscv64gc_unknown_linux_musl=musl-gcc; \
         export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
         libgcc_s_path="$(find /lib /usr/lib -name libgcc_s.so.1 -print -quit)"; \
@@ -68,22 +83,17 @@ RUN if [ -n "${OXIBELT_RUST_TARGET}" ]; then \
         fi; \
         mkdir -p /tmp/oxibelt-libgcc && \
         ln -sf "${libgcc_s_path}" /tmp/oxibelt-libgcc/libgcc_s.so && \
-        export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}"; \
-      fi && \
-      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibelt-netport-switcher --bin oxibeltctl --bin oxibelt-gateway-controller --target "${OXIBELT_RUST_TARGET}" && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt" /tmp/oxibelt && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-netport-switcher" /tmp/oxibelt-netport-switcher && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibeltctl" /tmp/oxibeltctl && \
-      cp "target/${OXIBELT_RUST_TARGET}/release/oxibelt-gateway-controller" /tmp/oxibelt-gateway-controller; \
-    else \
-      cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibelt-netport-switcher --bin oxibeltctl --bin oxibelt-gateway-controller && \
-      cp target/release/oxibelt /tmp/oxibelt && \
-      cp target/release/oxibelt-keysigner /tmp/oxibelt-keysigner && \
-      cp target/release/oxibelt-netport-switcher /tmp/oxibelt-netport-switcher && \
-      cp target/release/oxibeltctl /tmp/oxibeltctl && \
-      cp target/release/oxibelt-gateway-controller /tmp/oxibelt-gateway-controller; \
-    fi
+        export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}" \
+        ;; \
+      *) echo "unsupported OXIBELT_RUST_TARGET=${rust_target}" >&2; exit 1 ;; \
+    esac && \
+    rustup target add "${rust_target}" && \
+    cargo build --locked --release -p oxibelt --bin oxibelt --bin oxibelt-keysigner --bin oxibelt-netport-switcher --bin oxibeltctl --bin oxibelt-gateway-controller --target "${rust_target}" && \
+    cp "target/${rust_target}/release/oxibelt" /tmp/oxibelt && \
+    cp "target/${rust_target}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner && \
+    cp "target/${rust_target}/release/oxibelt-netport-switcher" /tmp/oxibelt-netport-switcher && \
+    cp "target/${rust_target}/release/oxibeltctl" /tmp/oxibeltctl && \
+    cp "target/${rust_target}/release/oxibelt-gateway-controller" /tmp/oxibelt-gateway-controller
 
 FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime
 

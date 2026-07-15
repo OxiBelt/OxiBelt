@@ -69,7 +69,7 @@ mkdir -p "${output_dir}"
 
 for base_image in \
   python:3.14-alpine3.24 \
-  rust:1.96.0-trixie \
+  rust:1.97.0-trixie \
   debian:trixie-slim \
   postgres:18-alpine \
   "${redis_image}"; do

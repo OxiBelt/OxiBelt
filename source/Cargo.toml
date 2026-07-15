@@ -55,7 +55,7 @@ regex = "1.13.0"
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
 rustix = { version = "1.1.4", features = ["net", "std"] }
-sequoia-openpgp = { version = "=2.3.0", default-features = false, features = ["crypto-openssl"] }
+sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
 webpki = { package = "rustls-webpki", version = "0.103.13" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -93,6 +93,9 @@ online-dsl-forge = "0.2.0"
 aws-lc-rs = { version = "1.17.1", default-features = false, features = ["bindgen"] }
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))'.dependencies]
+openssl-sys = { version = "0.9.117", features = ["vendored"] }
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))'.dependencies]
 openssl-sys = { version = "0.9.117", features = ["vendored"] }
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
