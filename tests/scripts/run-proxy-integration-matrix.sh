@@ -1086,6 +1086,9 @@ start_holding_upgrade_client_request_with_headers() {
   shift 6
   local header_args=()
   local header=""
+  local upgrade_ready_path="/tmp/oxibelt-upgrade-ready"
+  local client_state=""
+  local _attempt=""
   for header in "$@"; do
     header_args+=(--header "${header}")
   done
@@ -1107,6 +1110,7 @@ start_holding_upgrade_client_request_with_headers() {
     --body "${body}" \
     --ca-file /tmp/proxy-ca.pem \
     --upgrade-token "${token}" \
+    --signal-upgrade-ready \
     --dump-response-json \
     --expect-status "${expect_status}" \
     --hold-after-headers-ms "${hold_ms}" \
@@ -1116,7 +1120,33 @@ start_holding_upgrade_client_request_with_headers() {
 
   docker start -a "${HOLDING_CLIENT_CONTAINER}" >"${HOLDING_CLIENT_LOG}" 2>&1 &
   HOLDING_CLIENT_PID=$!
-  sleep 1
+
+  for _attempt in $(seq 1 150); do
+    if docker exec "${HOLDING_CLIENT_CONTAINER}" test -f "${upgrade_ready_path}" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    client_state="$(docker inspect -f '{{.State.Status}}' "${HOLDING_CLIENT_CONTAINER}" 2>/dev/null || true)"
+    case "${client_state}" in
+      created | running)
+        ;;
+      exited | dead)
+        wait "${HOLDING_CLIENT_PID}" || true
+        cat "${HOLDING_CLIENT_LOG}" >&2 || true
+        fail_with_diagnostics "holding upgrade client exited before receiving a 101 response"
+        ;;
+      *)
+        cat "${HOLDING_CLIENT_LOG}" >&2 || true
+        fail_with_diagnostics "holding upgrade client entered unexpected state: ${client_state:-unknown}"
+        ;;
+    esac
+    sleep 0.1
+  done
+
+  docker rm -f "${HOLDING_CLIENT_CONTAINER}" >/dev/null 2>&1 || true
+  wait "${HOLDING_CLIENT_PID}" || true
+  cat "${HOLDING_CLIENT_LOG}" >&2 || true
+  fail_with_diagnostics "timed out waiting for holding upgrade client to receive a 101 response"
 }
 
 start_holding_connect_tunnel_request_with_headers() {

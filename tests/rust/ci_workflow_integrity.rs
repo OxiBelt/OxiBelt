@@ -1131,7 +1131,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   for expected in [
     "gateway_api_version=\"v1.6.0\"",
-    "gateway_api_sha256=\"f0d5c2b0bef2b9d80ba6ba909e5e5dbde0800638437608353f41a6ebd3afcd9f\"",
+    "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
+    "gateway_api_sha256=\"a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d\"",
     "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
     "sha256sum --check --status",
     "CI event values are untrusted input",
@@ -1184,6 +1185,24 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     assert!(
       script.contains(expected),
       "Kubernetes immutable rollout script should preserve {expected}"
+    );
+  }
+  assert!(
+    !script.contains("experimental-install.yaml"),
+    "the Kubernetes v1.31 rollout must not install experimental CRDs that require newer CEL libraries"
+  );
+  for expected in [
+    r#"select(.value.name == "v1alpha2")"#,
+    "expected exactly one TCPRoute v1alpha2 CRD version",
+    "TCPRoute v1alpha2 CRD version index is not numeric",
+    r#"--patch "[{\"op\":\"test\""#,
+    r#"\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/name\",\"value\":\"v1alpha2\""#,
+    r#"{\"op\":\"replace\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/served\",\"value\":true}"#,
+    "crd/tcproutes.gateway.networking.k8s.io",
+  ] {
+    assert!(
+      script.contains(expected),
+      "the Kubernetes rollout must preserve TCPRoute status-only compatibility invariant {expected}"
     );
   }
 
@@ -1745,6 +1764,71 @@ fn docker_integration_matrix_cargo_invocations_are_retry_hardened() {
         ),
         "Docker integration matrix materialization should not bypass the retry helper"
     );
+}
+
+#[test]
+fn holding_upgrade_client_waits_for_confirmed_protocol_switch() {
+  let script = docker_integration_matrix_script_text();
+  let client = source_file_text("tests/docker/mock_upstream/client.py");
+  let perform_upgrade = client
+    .split_once("def perform_upgrade(")
+    .expect("mock client should define perform_upgrade")
+    .1
+    .split_once("\n\ndef main()")
+    .expect("perform_upgrade should precede main")
+    .0;
+  let upgrade_helper = script
+    .split_once("start_holding_upgrade_client_request_with_headers() {")
+    .expect("Docker integration script should define the holding upgrade helper")
+    .1
+    .split_once("start_holding_connect_tunnel_request_with_headers() {")
+    .expect("holding upgrade helper should precede the holding CONNECT helper")
+    .0;
+  let status_check = perform_upgrade
+    .find("if response.status != 101:")
+    .expect("mock client should reject non-101 upgrade responses");
+  let ready_signal = perform_upgrade
+    .find("if args.signal_upgrade_ready:")
+    .expect("mock client should support signaling an established upgrade");
+  let hold = perform_upgrade
+    .find("if args.hold_after_headers_ms > 0:")
+    .expect("mock client should hold an established upgrade when requested");
+
+  assert!(
+    status_check < ready_signal && ready_signal < hold,
+    "the mock client must signal readiness after confirming status 101 and before holding the connection"
+  );
+  for expected in [
+    "UPGRADE_READY_PATH = \"/tmp/oxibelt-upgrade-ready\"",
+    "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+    "0o600",
+    "--signal-upgrade-ready requires --upgrade-token",
+    "--signal-upgrade-ready cannot be combined with --connect-tunnel",
+  ] {
+    assert!(
+      client.contains(expected),
+      "the mock client should include upgrade readiness invariant {expected}"
+    );
+  }
+  for expected in [
+    "--signal-upgrade-ready",
+    "seq 1 150",
+    "docker exec \"${HOLDING_CLIENT_CONTAINER}\" test -f \"${upgrade_ready_path}\"",
+    "docker inspect -f '{{.State.Status}}'",
+    "created | running",
+    "exited | dead",
+    "sleep 0.1",
+    "timed out waiting for holding upgrade client to receive a 101 response",
+  ] {
+    assert!(
+      upgrade_helper.contains(expected),
+      "holding upgrade helper should include readiness invariant {expected}"
+    );
+  }
+  assert!(
+    !upgrade_helper.contains("sleep 1"),
+    "holding upgrade readiness must not rely on a fixed one-second delay"
+  );
 }
 
 #[test]

@@ -2,6 +2,7 @@ import argparse
 import base64
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
@@ -17,6 +18,7 @@ TARGET_PATHS = {
   "waf-blocked": "/app/blocked",
 }
 HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+UPGRADE_READY_PATH = "/tmp/oxibelt-upgrade-ready"
 
 
 def validate_header_name(raw_name: str) -> str:
@@ -288,6 +290,13 @@ def perform_upgrade(args, host_header, target_path, headers, body):
     response.begin()
     if response.status != 101:
       return response, response.read()
+    if args.signal_upgrade_ready:
+      ready_fd = os.open(
+        UPGRADE_READY_PATH,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+      )
+      os.close(ready_fd)
     if args.hold_after_headers_ms > 0:
       time.sleep(args.hold_after_headers_ms / 1000.0)
     sock.sendall(body)
@@ -315,6 +324,7 @@ def main() -> int:
   parser.add_argument("--proxy-protocol-line")
   parser.add_argument("--connect-tunnel", action="store_true")
   parser.add_argument("--upgrade-token")
+  parser.add_argument("--signal-upgrade-ready", action="store_true")
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
   parser.add_argument("--timeout", type=float, default=5.0)
@@ -328,6 +338,10 @@ def main() -> int:
 
   try:
     args.method = validate_http_token(args.method, "HTTP method")
+    if args.signal_upgrade_ready and not args.upgrade_token:
+      raise ValueError("--signal-upgrade-ready requires --upgrade-token")
+    if args.signal_upgrade_ready and args.connect_tunnel:
+      raise ValueError("--signal-upgrade-ready cannot be combined with --connect-tunnel")
     if args.upgrade_token:
       args.upgrade_token = validate_http_token(args.upgrade_token, "Upgrade token")
     if args.proxy_protocol_line:

@@ -10,8 +10,10 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 gateway_api_version="v1.6.0"
-gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/experimental-install.yaml"
-gateway_api_sha256="f0d5c2b0bef2b9d80ba6ba909e5e5dbde0800638437608353f41a6ebd3afcd9f"
+# Kubernetes v1.31 lacks the CEL format library used by the experimental
+# XBackend CRD. The standard bundle still includes every CRD OxiBelt watches.
+gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
+gateway_api_sha256="a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d"
 # `kind create --image` accepts an OCI image reference. Keep the final v1.31
 # patch tag for operator readability but pin its multi-platform manifest list.
 kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"
@@ -341,13 +343,32 @@ curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
   "${gateway_api_url}"
 printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
 kube apply --server-side --force-conflicts -f "${gateway_api_manifest}" >/dev/null
+
+# OxiBelt still watches TCPRoute v1alpha2 to publish the documented
+# unsupported/status-only diagnostic. Gateway API v1.6 retains that schema in
+# the standard bundle but disables serving it, so enable only that pinned
+# compatibility version in this isolated test cluster.
+tcp_route_v1alpha2_index="$(
+  kube get crd tcproutes.gateway.networking.k8s.io -o json \
+    | jq -er '
+        [.spec.versions | to_entries[] | select(.value.name == "v1alpha2")] as $matches
+        | if ($matches | length) == 1 then $matches[0].key
+          else error("expected exactly one TCPRoute v1alpha2 CRD version")
+          end
+      '
+)"
+[[ "${tcp_route_v1alpha2_index}" =~ ^[0-9]+$ ]] \
+  || die "TCPRoute v1alpha2 CRD version index is not numeric"
+kube patch crd tcproutes.gateway.networking.k8s.io --type=json \
+  --patch "[{\"op\":\"test\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/name\",\"value\":\"v1alpha2\"},{\"op\":\"replace\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/served\",\"value\":true}]" >/dev/null
 kube wait --for=condition=Established --timeout=120s \
   crd/gatewayclasses.gateway.networking.k8s.io \
   crd/gateways.gateway.networking.k8s.io \
   crd/httproutes.gateway.networking.k8s.io \
   crd/grpcroutes.gateway.networking.k8s.io \
   crd/tlsroutes.gateway.networking.k8s.io \
-  crd/referencegrants.gateway.networking.k8s.io
+  crd/referencegrants.gateway.networking.k8s.io \
+  crd/tcproutes.gateway.networking.k8s.io
 
 kube create namespace "${namespace}" >/dev/null
 kube create namespace "${outside_namespace}" >/dev/null
