@@ -7,7 +7,8 @@ This document is the canonical lifecycle matrix for major OxiBelt runtime,
 configuration, Admin API, and controller features. Configuration syntax is
 covered in [Configuration.md](Configuration.md), behavior details are covered in
 [Specification.md](Specification.md), and Admin API wire shapes are covered in
-[AdminAPI.md](AdminAPI.md) plus [admin-openapi.json](admin-openapi.json).
+[AdminAPI.md](AdminAPI.md) plus the canonical
+[admin-openapi.json](../source/assets/admin-openapi.json).
 
 Lifecycle states are intentionally limited:
 
@@ -43,6 +44,7 @@ Lifecycle states are intentionally limited:
 | `oxirule-request-response` | `supported` | WAF/data plane/Admin API | OxiRule request, response, and native stream-phase policy are implemented with bounded evaluation. |
 | `crs-request-response` | `supported` | WAF/data plane/Admin API | CRS-compatible request/response phases 1 through 4 are implemented for bounded body-prefix inspection. |
 | `person-proof` | `supported` | WAF/data plane | Built-in PoW, OpenAPI custom frontend mode, third-party provider adapters, and custom JSON provider mode are implemented. |
+| `role-specific-oci-artifacts` | `supported` | Build/deploy | One source revision publishes standalone, minimal data-plane, Gateway Controller, tools, and keysigner images with exact executable inventories, role labels, per-role SBOM/signature/provenance, and separate multi-architecture indexes. The standalone and data-plane images use the same integrated Admin and Person Proof runtime; the minimal image removes operator and orchestration executables rather than runtime security capabilities. |
 | `client-identity-asn` | `experimental` | Config/runtime/WAF | Optional prefix-to-ASN lookup supports operator-supplied local or managed HTTPS `prefix_asn_csv` databases. IANA AS Numbers CSV is metadata only, not the origin-ASN lookup source. |
 | `sybil-rate-limit-identities` | `experimental` | Config/WAF/data plane/Admin API | Rate-limit buckets and DynamicPolicy subjects support client IP prefixes, TLS fingerprints, ASN, composite client identities, WAF token-binding hashes, and verified Person proof clearance hashes. |
 | `cache` | `supported` | Config/data plane/Admin API | Response caching, purge, key explain, warming, Vary guard, stale behavior, and disk streaming fills are implemented. |

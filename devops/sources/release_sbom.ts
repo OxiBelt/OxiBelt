@@ -2,6 +2,11 @@ import * as Crypto from 'node:crypto'
 import * as Fs from 'node:fs'
 import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
+import {
+  BuildImageRoleContracts,
+  type ImageRole,
+  type ImageRoleContract
+} from './docker_image_release.js'
 
 export type JsonPrimitive = boolean | null | number | string
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -14,6 +19,7 @@ export type PlatformSbomOptions = {
   BuildMetadata: JsonObject
   BuildInputs: JsonObject
   BinaryInventory: JsonObject
+  Role: ImageRole
   Image: string
   Digest?: string
   Version: string
@@ -26,6 +32,7 @@ export type PlatformSbomOptions = {
 
 export type IndexSbomOptions = {
   PlatformSboms: JsonObject[]
+  Role: ImageRole
   Image: string
   Digest?: string
   Version: string
@@ -40,6 +47,7 @@ export type IndexSbomOptions = {
 
 export type VerifySbomOptions = {
   Kind: ReleaseSbomKind
+  Role?: ImageRole
   Digest?: string
   Revision?: string
   Workflow?: string
@@ -53,6 +61,7 @@ type CliParameters = {
 }
 
 type ReleaseIdentity = {
+  Role: ImageRole
   Image: string
   Digest?: string
   Version: string
@@ -63,6 +72,7 @@ type ReleaseIdentity = {
 }
 
 type BuildInputDetails = {
+  Role: ImageRole
   ArtifactArch: string
   Platform: string
   RustTarget: string
@@ -87,7 +97,6 @@ type BuildTimestamps = {
 
 const CycloneDxSpecVersion = '1.6'
 const CycloneDxPredicateType = 'https://cyclonedx.org/bom'
-const OfficialImage = 'ghcr.io/oxibelt/oxibelt'
 const OfficialSource = 'https://github.com/OxiBelt/OxiBelt'
 const PlatformBuilderWorkflow = 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
 const IndexBuilderWorkflow = 'OxiBelt/OxiBelt/.github/workflows/release.yml'
@@ -101,7 +110,7 @@ const ImageName = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)
 const ReleaseValue = /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/
 const WorkflowIdentity = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml$/
 
-const RequiredBinaries = new Map<string, string>([
+const KnownBinaries = new Map<string, string>([
   ['oxibelt', '/usr/local/bin/oxibelt'],
   ['oxibelt-keysigner', '/usr/local/bin/oxibelt-keysigner'],
   ['oxibelt-netport-switcher', '/usr/local/bin/oxibelt-netport-switcher'],
@@ -109,11 +118,15 @@ const RequiredBinaries = new Map<string, string>([
   ['oxibelt-gateway-controller', '/usr/local/bin/oxibelt-gateway-controller']
 ])
 
-const RequiredBaseStages = new Map<string, string>([
+const KnownBaseStages = new Map<string, string>([
   ['builder', 'RUST_BUILDER_IMAGE'],
   ['person-proof-ui', 'OXIBELT_NODE_IMAGE'],
   ['runtime', 'OXIBELT_RUNTIME_IMAGE']
 ])
+
+const OfficialRoles = new Map<ImageRole, ImageRoleContract>(
+  BuildImageRoleContracts().map(Contract => [Contract.role, Contract])
+)
 
 const ArtifactPlatforms = new Map<string, { Platform: string; RustTarget: string; TargetCpu?: string }>([
   ['amd64v2', { Platform: 'linux/amd64', RustTarget: 'x86_64-unknown-linux-musl', TargetCpu: 'x86-64-v2' }],
@@ -179,6 +192,32 @@ function AsInteger(Value: JsonValue | undefined, Context: string): number {
   }
 
   return Value
+}
+
+function AsImageRole(Value: JsonValue | undefined, Context: string): ImageRole {
+  const Role = AsString(Value, Context)
+  if (!OfficialRoles.has(Role as ImageRole)) {
+    throw new Error(`${Context} must be standalone, dataplane, controller, tools, or keysigner`)
+  }
+
+  return Role as ImageRole
+}
+
+function RoleContract(Role: ImageRole): ImageRoleContract {
+  const Contract = OfficialRoles.get(Role)
+  if (Contract === undefined) {
+    throw new Error(`unsupported release image role ${Role}`)
+  }
+
+  return Contract
+}
+
+function StringArray(Value: JsonValue | undefined, Context: string): string[] {
+  return AsArray(Value, Context).map((Item, Index) => AsString(Item, `${Context}[${Index}]`))
+}
+
+function SameStrings(Actual: string[], Expected: string[]): boolean {
+  return Actual.length === Expected.length && Actual.every((Value, Index) => Value === Expected[Index])
 }
 
 function ReadJson(Path: string): JsonObject {
@@ -281,11 +320,12 @@ function HashForDigest(Digest: string): JsonObject {
 }
 
 function ValidateIdentity(Identity: ReleaseIdentity, Kind: ReleaseSbomKind): void {
+  const Contract = RoleContract(Identity.Role)
   if (!ImageName.test(Identity.Image) || Identity.Image.includes(':') || Identity.Image.includes('@')) {
     throw new Error('image must be a lowercase tagless and digestless OCI image name')
   }
-  if (Identity.Image !== OfficialImage) {
-    throw new Error(`image must be the official release image ${OfficialImage}`)
+  if (Identity.Image !== Contract.image) {
+    throw new Error(`image for role ${Identity.Role} must be ${Contract.image}`)
   }
   if (!ReleaseValue.test(Identity.Version)) {
     throw new Error('version must be a non-empty release identifier')
@@ -339,6 +379,7 @@ function ValidateGeneratedTimestamp(Generated: string, NotBefore: string): void 
 function IdentitySeed(Identity: ReleaseIdentity, Kind: ReleaseSbomKind, Suffix: string): string {
   return [
     Kind,
+    Identity.Role,
     Identity.Image,
     Identity.Digest ?? '',
     Identity.Version,
@@ -362,6 +403,7 @@ function DeterministicUuid(Seed: string): string {
 function RootProperties(Identity: ReleaseIdentity, Kind: ReleaseSbomKind): JsonObject[] {
   const Result = [
     Property('com.oxibelt.release.kind', Kind),
+    Property('com.oxibelt.release.role', Identity.Role),
     Property('com.oxibelt.release.image', Identity.Image),
     Property('com.oxibelt.release.version', Identity.Version),
     Property('org.opencontainers.image.revision', Identity.Revision),
@@ -421,10 +463,30 @@ function HelperTools(Trivy: JsonObject | undefined): JsonObject {
 }
 
 function ParseBuildInputs(BuildInputs: JsonObject): BuildInputDetails {
-  if (AsInteger(BuildInputs.schemaVersion, 'build inputs schemaVersion') !== 1) {
-    throw new Error('build inputs schemaVersion must be 1')
+  if (AsInteger(BuildInputs.schemaVersion, 'build inputs schemaVersion') !== 2) {
+    throw new Error('build inputs schemaVersion must be 2')
   }
 
+  const Role = AsImageRole(BuildInputs.role, 'build inputs role')
+  const Contract = RoleContract(Role)
+  const Image = AsString(BuildInputs.image, 'build inputs image')
+  const DockerTarget = AsString(BuildInputs.dockerTarget, 'build inputs dockerTarget')
+  const Binaries = StringArray(BuildInputs.binaries, 'build inputs binaries')
+  const Entrypoint = StringArray(BuildInputs.entrypoint, 'build inputs entrypoint')
+  const User = AsString(BuildInputs.user, 'build inputs user')
+  const Ports = StringArray(BuildInputs.ports, 'build inputs ports')
+  const EmbeddedAssets = BuildInputs.embeddedAssets
+  if (
+    Image !== Contract.image ||
+    DockerTarget !== Contract.dockerTarget ||
+    !SameStrings(Binaries, Contract.binaries) ||
+    !SameStrings(Entrypoint, Contract.entrypoint) ||
+    User !== Contract.user ||
+    !SameStrings(Ports, Contract.ports) ||
+    EmbeddedAssets !== Contract.embeddedAssets
+  ) {
+    throw new Error(`build inputs do not match the ${Role} role contract`)
+  }
   const ArtifactArch = AsString(BuildInputs.artifactArch, 'build inputs artifactArch')
   const Platform = AsString(BuildInputs.platform, 'build inputs platform')
   if (typeof BuildInputs.rustTarget !== 'string') {
@@ -450,8 +512,11 @@ function ParseBuildInputs(BuildInputs: JsonObject): BuildInputDetails {
   }
 
   const BaseImageValues = AsArray(BuildInputs.baseImages, 'build inputs baseImages')
-  if (BaseImageValues.length !== RequiredBaseStages.size) {
-    throw new Error(`build inputs must contain exactly ${RequiredBaseStages.size} base images`)
+  const RequiredStages = Role === 'standalone' || Role === 'dataplane'
+    ? new Set(['builder', 'person-proof-ui', 'runtime'])
+    : new Set(['builder', 'runtime'])
+  if (BaseImageValues.length !== RequiredStages.size) {
+    throw new Error(`build inputs for role ${Role} must contain exactly ${RequiredStages.size} base images`)
   }
 
   const SeenStages = new Set<string>()
@@ -460,9 +525,9 @@ function ParseBuildInputs(BuildInputs: JsonObject): BuildInputDetails {
     const BuildArgument = AsString(Base.buildArgument, `build inputs baseImages[${Index}].buildArgument`)
     const Stage = AsString(Base.stage, `build inputs baseImages[${Index}].stage`)
     const Reference = AsString(Base.reference, `build inputs baseImages[${Index}].reference`)
-    const ExpectedBuildArgument = RequiredBaseStages.get(Stage)
+    const ExpectedBuildArgument = KnownBaseStages.get(Stage)
 
-    if (ExpectedBuildArgument === undefined || BuildArgument !== ExpectedBuildArgument) {
+    if (!RequiredStages.has(Stage) || ExpectedBuildArgument === undefined || BuildArgument !== ExpectedBuildArgument) {
       throw new Error(`unexpected base-image stage or build argument ${Stage}/${BuildArgument}`)
     }
     if (SeenStages.has(Stage)) {
@@ -476,7 +541,11 @@ function ParseBuildInputs(BuildInputs: JsonObject): BuildInputDetails {
     return { BuildArgument, Stage, Reference }
   })
 
-  return { ArtifactArch, Platform, RustTarget, TargetCpu, RustToolchainVersion, BaseImages }
+  if (SeenStages.size !== RequiredStages.size) {
+    throw new Error(`build inputs for role ${Role} are missing a required base-image stage`)
+  }
+
+  return { Role, ArtifactArch, Platform, RustTarget, TargetCpu, RustToolchainVersion, BaseImages }
 }
 
 function ProvenanceObject(BuildMetadata: JsonObject): JsonObject {
@@ -720,14 +789,14 @@ function ResolveBaseMaterials(Inputs: BuildInputDetails, BuildMetadata: JsonObje
   })
 }
 
-function BinaryComponents(Inventory: JsonObject, Version: string): JsonObject[] {
+function BinaryComponents(Inventory: JsonObject, Version: string, Contract: ImageRoleContract): JsonObject[] {
   if (AsInteger(Inventory.schemaVersion, 'binary inventory schemaVersion') !== 1) {
     throw new Error('binary inventory schemaVersion must be 1')
   }
 
   const BinaryValues = AsArray(Inventory.binaries, 'binary inventory binaries')
-  if (BinaryValues.length !== RequiredBinaries.size) {
-    throw new Error(`binary inventory must contain exactly ${RequiredBinaries.size} binaries`)
+  if (BinaryValues.length !== Contract.binaries.length) {
+    throw new Error(`binary inventory for role ${Contract.role} must contain exactly ${Contract.binaries.length} binaries`)
   }
 
   const Seen = new Set<string>()
@@ -737,9 +806,9 @@ function BinaryComponents(Inventory: JsonObject, Version: string): JsonObject[] 
     const Path = AsString(Binary.path, `binary inventory binaries[${Index}].path`)
     const BinaryVersion = AsString(Binary.version, `binary inventory binaries[${Index}].version`)
     const Hash = AsString(Binary.sha256, `binary inventory binaries[${Index}].sha256`)
-    const ExpectedPath = RequiredBinaries.get(Name)
+    const ExpectedPath = KnownBinaries.get(Name)
 
-    if (ExpectedPath === undefined || Path !== ExpectedPath) {
+    if (ExpectedPath === undefined || Path !== ExpectedPath || !Contract.binaries.includes(Name)) {
       throw new Error(`unexpected release binary or path ${Name}/${Path}`)
     }
     if (Seen.has(Name)) {
@@ -765,6 +834,10 @@ function BinaryComponents(Inventory: JsonObject, Version: string): JsonObject[] 
       ]
     }
   })
+
+  if (!SameStrings([...Seen].sort(), [...Contract.binaries].sort())) {
+    throw new Error(`binary inventory does not match the ${Contract.role} role contract`)
+  }
 
   return Result.sort((Left, Right) => AsString(Left.name, 'binary name').localeCompare(AsString(Right.name, 'binary name')))
 }
@@ -893,6 +966,10 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonObject {
   const Identity: ReleaseIdentity = Options
   ValidateIdentity(Identity, 'platform')
   const Inputs = ParseBuildInputs(Options.BuildInputs)
+  if (Inputs.Role !== Options.Role) {
+    throw new Error(`build input role ${Inputs.Role} does not match requested role ${Options.Role}`)
+  }
+  const Contract = RoleContract(Options.Role)
   ValidateBuildDescriptor(Options.BuildMetadata, Inputs, Options.Digest)
   const BuildTimes = ProvenanceBuildTimestamps(Options.BuildMetadata)
   ValidateGeneratedTimestamp(Options.Generated, BuildTimes.FinishedOn)
@@ -902,7 +979,7 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonObject {
   const RootRef = AsString(Root['bom-ref'], 'root bom-ref')
   const Inventory = TrivyInventory(Options.Trivy, RootRef)
   const Bases = BaseComponents(Materials)
-  const Binaries = BinaryComponents(Options.BinaryInventory, Options.Version)
+  const Binaries = BinaryComponents(Options.BinaryInventory, Options.Version, Contract)
   const RustComponent: JsonObject = {
     type: 'application',
     name: 'rustc',
@@ -948,7 +1025,13 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonObject {
   }
 
   const Result = SortBom(Document)
-  ValidateReleaseSbom(Result, { Kind: 'platform', Digest: Options.Digest, Revision: Options.Revision, Workflow: Options.Workflow })
+  ValidateReleaseSbom(Result, {
+    Kind: 'platform',
+    Role: Options.Role,
+    Digest: Options.Digest,
+    Revision: Options.Revision,
+    Workflow: Options.Workflow
+  })
   return Result
 }
 
@@ -1036,7 +1119,11 @@ function ValidateBuildTimestampProperties(PropertiesValue: Map<string, string>, 
   return { StartedOn, FinishedOn }
 }
 
-function ValidateRequiredPlatformComponents(Document: JsonObject, Version: string): void {
+function ValidateRequiredPlatformComponents(Document: JsonObject, Version: string, Role: ImageRole): void {
+  const Contract = RoleContract(Role)
+  const RequiredBaseStages = Role === 'standalone' || Role === 'dataplane'
+    ? new Set(['builder', 'person-proof-ui', 'runtime'])
+    : new Set(['builder', 'runtime'])
   const Components = AllComponents(Document)
   const BinaryNames = new Set<string>()
   const BaseStages = new Set<string>()
@@ -1049,9 +1136,10 @@ function ValidateRequiredPlatformComponents(Document: JsonObject, Version: strin
     const ComponentProperties = Properties(Component, `component ${String(Component['bom-ref'])}`)
     const BinaryName = ComponentProperties.get('com.oxibelt.release.binary.name')
     if (BinaryName !== undefined) {
-      const ExpectedPath = RequiredBinaries.get(BinaryName)
+      const ExpectedPath = KnownBinaries.get(BinaryName)
       if (
         ExpectedPath === undefined ||
+        !Contract.binaries.includes(BinaryName) ||
         ComponentProperties.get('com.oxibelt.release.binary.path') !== ExpectedPath ||
         Component.type !== 'application' ||
         Component.name !== BinaryName
@@ -1080,10 +1168,11 @@ function ValidateRequiredPlatformComponents(Document: JsonObject, Version: strin
 
     const BaseStage = ComponentProperties.get('com.oxibelt.release.base.stage')
     if (BaseStage !== undefined) {
-      const ExpectedBuildArgument = RequiredBaseStages.get(BaseStage)
+      const ExpectedBuildArgument = KnownBaseStages.get(BaseStage)
       const BuildArgument = ComponentProperties.get('com.oxibelt.release.base.build_argument')
       const Reference = ComponentProperties.get('com.oxibelt.release.base.reference')
       if (
+        !RequiredBaseStages.has(BaseStage) ||
         ExpectedBuildArgument === undefined ||
         BuildArgument !== ExpectedBuildArgument ||
         Reference === undefined ||
@@ -1108,7 +1197,11 @@ function ValidateRequiredPlatformComponents(Document: JsonObject, Version: strin
     }
   }
 
-  if (BinaryNames.size !== RequiredBinaries.size || BaseStages.size !== RequiredBaseStages.size || RustToolchains !== 1) {
+  if (
+    BinaryNames.size !== Contract.binaries.length ||
+    BaseStages.size !== RequiredBaseStages.size ||
+    RustToolchains !== 1
+  ) {
     throw new Error('platform SBOM is missing required binaries, base images, or Rust toolchain')
   }
 }
@@ -1142,8 +1235,13 @@ function ValidateRoot(
   if (RootPropertyMap.get('com.oxibelt.attestation.predicate_type') !== CycloneDxPredicateType) {
     throw new Error(`release SBOM predicate type must be ${CycloneDxPredicateType}`)
   }
-  if (RootPropertyMap.get('com.oxibelt.release.image') !== OfficialImage || Root.name !== OfficialImage) {
-    throw new Error(`release SBOM image must be ${OfficialImage}`)
+  const Role = AsImageRole(RootPropertyMap.get('com.oxibelt.release.role'), 'release SBOM role')
+  const Contract = RoleContract(Role)
+  if (Options.Role !== undefined && Options.Role !== Role) {
+    throw new Error(`release SBOM role must be ${Options.Role}`)
+  }
+  if (RootPropertyMap.get('com.oxibelt.release.image') !== Contract.image || Root.name !== Contract.image) {
+    throw new Error(`release SBOM image for role ${Role} must be ${Contract.image}`)
   }
   if (RootPropertyMap.get('org.opencontainers.image.source') !== OfficialSource) {
     throw new Error(`release SBOM source must be ${OfficialSource}`)
@@ -1168,8 +1266,8 @@ function ValidateRoot(
   if (!ReleaseValue.test(Version) || Root.version !== Version || (Options.Version !== undefined && Version !== Options.Version)) {
     throw new Error('release SBOM version is invalid or unexpected')
   }
-  if (Options.Image !== undefined && Options.Image !== OfficialImage) {
-    throw new Error('expected image does not match the official image')
+  if (Options.Image !== undefined && Options.Image !== Contract.image) {
+    throw new Error(`expected image does not match the official ${Role} image`)
   }
   const SubjectDigest = RootPropertyMap.get('com.oxibelt.oci.subject_digest')
   if (SubjectDigest !== undefined) {
@@ -1188,6 +1286,7 @@ function ValidateRoot(
 
 export function ValidateReleaseSbom(Document: JsonObject, Options: VerifySbomOptions): void {
   const Validated = ValidateRoot(Document, Options)
+  const Role = AsImageRole(Validated.Properties.get('com.oxibelt.release.role'), 'release SBOM role')
 
   if (Options.Kind === 'platform') {
     const ArtifactArch = Validated.Properties.get('com.oxibelt.release.artifact_arch') ?? ''
@@ -1204,7 +1303,11 @@ export function ValidateReleaseSbom(Document: JsonObject, Options: VerifySbomOpt
     if (Date.parse(Validated.Timestamp) < Date.parse(BuildTimes.FinishedOn)) {
       throw new Error('platform SBOM generation timestamp predates the image build')
     }
-    ValidateRequiredPlatformComponents(Document, Validated.Properties.get('com.oxibelt.release.version') ?? '')
+    ValidateRequiredPlatformComponents(
+      Document,
+      Validated.Properties.get('com.oxibelt.release.version') ?? '',
+      Role
+    )
     return
   }
 
@@ -1283,7 +1386,7 @@ export function ValidateReleaseSbom(Document: JsonObject, Options: VerifySbomOpt
     const PlatformComponents = Components.filter(Component =>
       AsString(Component['bom-ref'], 'index component bom-ref').startsWith(Prefix) && Component !== Child.Component
     )
-    ValidateRequiredPlatformComponents({ components: PlatformComponents }, IndexVersion)
+    ValidateRequiredPlatformComponents({ components: PlatformComponents }, IndexVersion, Role)
   }
 }
 
@@ -1327,6 +1430,7 @@ export function BuildIndexSbom(Options: IndexSbomOptions): JsonObject {
   for (const PlatformSbom of Options.PlatformSboms) {
     ValidateReleaseSbom(PlatformSbom, {
       Kind: 'platform',
+      Role: Options.Role,
       Revision: Options.Revision,
       Version: Options.Version,
       Image: Options.Image,
@@ -1402,7 +1506,13 @@ export function BuildIndexSbom(Options: IndexSbomOptions): JsonObject {
     dependencies: [{ ref: RootRef, dependsOn: ChildRootRefs }, ...Dependencies]
   })
 
-  ValidateReleaseSbom(Document, { Kind: 'index', Digest: Options.Digest, Revision: Options.Revision, Workflow: Options.Workflow })
+  ValidateReleaseSbom(Document, {
+    Kind: 'index',
+    Role: Options.Role,
+    Digest: Options.Digest,
+    Revision: Options.Revision,
+    Workflow: Options.Workflow
+  })
   return Document
 }
 
@@ -1456,6 +1566,7 @@ function AssertKnownOptions(Parameters: CliParameters, Known: Set<string>): void
 
 function CliIdentity(Parameters: CliParameters): ReleaseIdentity {
   return {
+    Role: AsImageRole(RequiredCliValue(Parameters, '--role'), '--role'),
     Image: RequiredCliValue(Parameters, '--image'),
     Digest: OptionalCliValue(Parameters, '--digest'),
     Version: RequiredCliValue(Parameters, '--version'),
@@ -1469,7 +1580,7 @@ function CliIdentity(Parameters: CliParameters): ReleaseIdentity {
 export function RunReleaseSbomCli(Argv: string[]): void {
   const Parameters = ParseCli(Argv)
   const Common = new Set([
-    '--image', '--digest', '--version', '--revision', '--source', '--created', '--generated', '--workflow'
+    '--role', '--image', '--digest', '--version', '--revision', '--source', '--created', '--generated', '--workflow'
   ])
 
   if (Parameters.Mode === 'platform') {
@@ -1503,7 +1614,7 @@ export function RunReleaseSbomCli(Argv: string[]): void {
     return
   }
 
-  const Known = new Set(['--input', '--kind', '--digest', '--revision', '--workflow', '--image', '--version'])
+  const Known = new Set(['--input', '--kind', '--role', '--digest', '--revision', '--workflow', '--image', '--version'])
   AssertKnownOptions(Parameters, Known)
   const Kind = RequiredCliValue(Parameters, '--kind')
   if (Kind !== 'platform' && Kind !== 'index') {
@@ -1511,6 +1622,9 @@ export function RunReleaseSbomCli(Argv: string[]): void {
   }
   ValidateReleaseSbom(ReadJson(RequiredCliValue(Parameters, '--input')), {
     Kind,
+    Role: OptionalCliValue(Parameters, '--role') === undefined
+      ? undefined
+      : AsImageRole(OptionalCliValue(Parameters, '--role'), '--role'),
     Digest: OptionalCliValue(Parameters, '--digest'),
     Revision: OptionalCliValue(Parameters, '--revision'),
     Workflow: OptionalCliValue(Parameters, '--workflow'),

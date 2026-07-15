@@ -21,11 +21,11 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use super::DiagnosticReport;
+use oxibelt::diagnostics::DiagnosticReport;
 
-pub(super) const MAX_MANIFEST_FILES: usize = 1_024;
-pub(super) const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const MAX_MANIFEST_DOCUMENTS: usize = 4_096;
+pub(crate) const MAX_MANIFEST_FILES: usize = 1_024;
+pub(crate) const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST_DOCUMENTS: usize = 4_096;
 const MAX_HELM_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HELM_STDERR_BYTES: usize = 64 * 1024;
 const HELM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -70,11 +70,11 @@ pub struct KubernetesDoctorOptions {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Manifest {
-  pub(super) source: String,
-  pub(super) document: usize,
-  pub(super) default_namespace: String,
-  pub(super) value: Value,
+pub(crate) struct Manifest {
+  pub(crate) source: String,
+  pub(crate) document: usize,
+  pub(crate) default_namespace: String,
+  pub(crate) value: Value,
 }
 
 /// Inspect a directory of rendered Kubernetes YAML. The directory may contain

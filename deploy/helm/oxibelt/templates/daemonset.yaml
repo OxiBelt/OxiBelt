@@ -75,9 +75,10 @@ spec:
           preStop:
             exec:
               command:
-              - /bin/sh
-              - -ec
-              - {{ printf "kill -USR1 1; exec sleep %d" (int .Values.lifecycle.preStop.drainSeconds) | quote }}
+              - /usr/local/bin/oxibelt
+              - __lifecycle-prestop
+              - --wait-seconds
+              - {{ int .Values.lifecycle.preStop.drainSeconds | quote }}
         {{- end }}
         {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") }}
         env:

@@ -10,7 +10,8 @@ data_chart="${repo_root}/deploy/helm/oxibelt"
 controller_chart="${repo_root}/deploy/helm/oxibelt-gateway-controller"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
-image_repository="ghcr.io/oxibelt/oxibelt"
+data_image_repository="ghcr.io/oxibelt/oxibelt-dataplane"
+controller_image_repository="ghcr.io/oxibelt/oxibelt-gateway-controller"
 image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 die() {
@@ -43,27 +44,31 @@ helm lint --strict "${controller_chart}" >"${work_dir}/controller-lint.log"
 
 helm template oxibelt "${data_chart}" >"${work_dir}/data-default.yaml"
 helm template oxibelt "${data_chart}" \
-  --set-string image.repository="${image_repository}" \
+  --set-string image.repository="${data_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
   >"${work_dir}/data-deployment.yaml"
 helm template oxibelt "${data_chart}" \
   --set-string workload.kind=DaemonSet \
-  --set-string image.repository="${image_repository}" \
+  --set-string image.repository="${data_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
   >"${work_dir}/data-daemonset.yaml"
 helm template oxibelt-controller "${controller_chart}" \
-  --set-string image.repository="${image_repository}" \
+  --set-string image.repository="${controller_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
   >"${work_dir}/controller.yaml"
 
-grep -F -- 'image: "oxibelt:latest"' "${work_dir}/data-default.yaml" >/dev/null \
+grep -F -- 'image: "ghcr.io/oxibelt/oxibelt-dataplane:latest"' "${work_dir}/data-default.yaml" >/dev/null \
   || die "default data-plane image tag changed"
+grep -F -- "image: \"${data_image_repository}@${image_digest}\"" "${work_dir}/data-deployment.yaml" >/dev/null \
+  || die "data Deployment did not render the immutable image digest"
+grep -F -- "image: \"${data_image_repository}@${image_digest}\"" "${work_dir}/data-daemonset.yaml" >/dev/null \
+  || die "data DaemonSet did not render the immutable image digest"
+grep -F -- "image: \"${controller_image_repository}@${image_digest}\"" "${work_dir}/controller.yaml" >/dev/null \
+  || die "controller did not render the immutable image digest"
 for rendered in data-deployment data-daemonset controller; do
-  grep -F -- "image: \"${image_repository}@${image_digest}\"" "${work_dir}/${rendered}.yaml" >/dev/null \
-    || die "${rendered} did not render the immutable image digest"
   if grep -F -- ':ignored' "${work_dir}/${rendered}.yaml" >/dev/null; then
     die "${rendered} retained the tag when a digest was set"
   fi

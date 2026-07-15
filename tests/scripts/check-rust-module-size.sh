@@ -3,7 +3,11 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-source_root="${repo_root}/source/src"
+source_roots=(
+  "${repo_root}/source/src"
+  "${repo_root}/source/apps"
+  "${repo_root}/source/crates"
+)
 max_lines="${OXIBELT_RUST_SOURCE_LINE_LIMIT:-750}"
 
 grandfathered_limit() {
@@ -53,7 +57,7 @@ while IFS= read -r file; do
   fi
 
   violations=$((violations + 1))
-done < <(find "${source_root}" -type f -name '*.rs' | sort)
+done < <(find "${source_roots[@]}" -type f -name '*.rs' | sort)
 
 if (( violations > 0 )); then
   cat >&2 <<EOF

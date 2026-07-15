@@ -12,7 +12,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn openapi() -> Value {
-  let raw = fs::read_to_string(repo_root().join("docs/admin-openapi.json"))
+  let raw = fs::read_to_string(repo_root().join("source/assets/admin-openapi.json"))
     .expect("Admin OpenAPI document should be readable");
   serde_json::from_str(&raw).expect("Admin OpenAPI document should parse as JSON")
 }
@@ -26,8 +26,39 @@ fn admin_openapi_is_31_and_covers_current_v1_paths() {
   let documented = documented_operations(&spec);
   assert_eq!(
     documented, expected,
-    "docs/admin-openapi.json must cover every current /admin/v1 operation exactly"
+    "source/assets/admin-openapi.json must cover every current /admin/v1 operation exactly"
   );
+}
+
+#[test]
+fn admin_version_documents_embedded_asset_identity() {
+  let spec = openapi();
+  let schema = &spec["components"]["schemas"]["AdminVersion"];
+  let required = json_string_set(&schema["required"], "AdminVersion.required");
+  for field in [
+    "api_version",
+    "package_name",
+    "package_version",
+    "source_revision",
+    "person_proof_api_version",
+    "person_proof_asset_sha256",
+    "admin_openapi_sha256",
+  ] {
+    assert!(
+      required.contains(field),
+      "AdminVersion must require {field}"
+    );
+  }
+  assert_eq!(
+    schema["properties"]["person_proof_api_version"]["const"],
+    oxibelt::waf::PERSON_PROOF_API_VERSION
+  );
+  for field in ["person_proof_asset_sha256", "admin_openapi_sha256"] {
+    assert_eq!(
+      schema["properties"][field]["pattern"], "^[a-f0-9]{64}$",
+      "AdminVersion.{field} must be a lowercase SHA-256 digest"
+    );
+  }
 }
 
 #[test]

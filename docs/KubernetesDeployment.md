@@ -17,9 +17,18 @@ provenance, SBOM, and admission verification:
 
 ```yaml
 image:
-  repository: ghcr.io/oxibelt/oxibelt
+  repository: ghcr.io/oxibelt/oxibelt-dataplane
   digest: sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
 ```
+
+The data-plane chart defaults to the role-specific minimal image. It contains
+only `/usr/local/bin/oxibelt`; Admin remains available through the same process
+when securely enabled, and Person Proof APIs plus the built-in frontend remain
+embedded. It does not contain a shell, operator CLI, Gateway Controller,
+keysigner, Node.js, package manager, or compiler. Use the standalone
+`ghcr.io/oxibelt/oxibelt` image only when in-container `oxibeltctl` convenience
+or compatibility helpers are intentionally required. Enabling Admin or Person
+Proof does not require the Gateway Controller or an image change.
 
 The fail-closed Sigstore admission example under
 `deploy/admission/sigstore` verifies official OxiBelt image signatures and
@@ -180,7 +189,9 @@ token projection requires an explicit `kubernetes-api` egress destination;
 the chart fails rendering instead of granting a credential that its policy
 blocks.
 
-The controller uses a separate ServiceAccount. Its automatic token mount is
+The controller runs from the separate
+`ghcr.io/oxibelt/oxibelt-gateway-controller` image and uses a separate
+ServiceAccount. Its automatic token mount is
 also disabled, but it always gets the same explicit 3600-second token/CA
 projection because reconciliation calls the Kubernetes API. By default the
 chart passes `--watch-namespace=<controller release namespace>` and grants

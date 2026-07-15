@@ -32,6 +32,7 @@ protocol_probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${r
 postgres_image="${OXIBELT_POSTGRES_IMAGE:-oxibelt/postgres:${run_id}}"
 redis_image="${OXIBELT_REDIS_IMAGE:-valkey/valkey:9-alpine}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
+keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${proxy_image}}"
 require_preloaded_helper_images="${OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES:-0}"
 remove_mock_image=0
 remove_mock_dns_image=0
@@ -177,7 +178,7 @@ seed_hardened_fixture_volume() {
     --user 0:0 \
     --mount "type=volume,src=${volume},dst=/fixture" \
     --entrypoint sh \
-    "${proxy_image}" \
+    "${mock_image}" \
     -c 'chown -R 10001:10001 /fixture' >/dev/null
   docker cp "${source_dir}/." "${seed_container}:/fixture"
   docker start -a "${seed_container}" >/dev/null
@@ -2067,7 +2068,7 @@ fi
 
 docker network create "${network_name}" >/dev/null
 
-if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
+if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" || "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
   ensure_helper_image \
     "${mock_image}" \
     remove_mock_image \
@@ -2166,7 +2167,7 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     --user 0:0 \
     --mount "type=volume,src=${remote_signer_cert_volume},dst=/cert" \
     --entrypoint sh \
-    "${proxy_image}" \
+    "${mock_image}" \
     -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
   docker cp "${cert_dir}/privkey.pem" "${remote_signer_cert_seed_container}:/cert/privkey.pem"
   docker cp "${cert_dir}/keysigner-token.b64" "${remote_signer_cert_seed_container}:/cert/keysigner-token.b64"
@@ -2177,7 +2178,7 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     --user 0:0 \
     --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
     --entrypoint sh \
-    "${proxy_image}" \
+    "${mock_image}" \
     -c 'chown 10002:10002 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
 
   docker create \
@@ -2191,7 +2192,7 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
     --mount "type=volume,src=${remote_signer_cert_volume},dst=/etc/oxibelt/cert,readonly" \
     --entrypoint /usr/local/bin/oxibelt-keysigner \
-    "${proxy_image}" \
+    "${keysigner_image}" \
     --socket /run/oxibelt-keysigner/sign.sock \
     --key edge-default=/etc/oxibelt/cert/privkey.pem \
     --token-file /etc/oxibelt/cert/keysigner-token.b64 \
@@ -2202,7 +2203,10 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     --io-timeout-ms 5000 >/dev/null
   docker start "${remote_signer_container}" >/dev/null
   for _attempt in $(seq 1 100); do
-    if docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+    if docker run --rm \
+      --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
+      --entrypoint sh \
+      "${mock_image}" -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
       break
     fi
     if [[ "$(docker inspect -f '{{.State.Running}}' "${remote_signer_container}" 2>/dev/null || echo false)" != "true" ]]; then
@@ -2210,7 +2214,10 @@ if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
     fi
     sleep 0.05
   done
-  if ! docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+  if ! docker run --rm \
+    --mount "type=volume,src=${remote_signer_socket_volume},dst=/run/oxibelt-keysigner" \
+    --entrypoint sh \
+    "${mock_image}" -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
     fail_with_diagnostics "remote signer socket was not created"
   fi
   remote_signer_docker_args+=(

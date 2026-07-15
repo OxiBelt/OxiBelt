@@ -741,7 +741,7 @@ fn challenge_html(
   let verify_path_html = html_escape(&policy.provider.verify_path);
   let clearance_html = html_escape(&clearance_label);
   let csp_nonce_html = html_escape(csp_nonce);
-  include_str!("../../assets/person-proof-challenge.html")
+  include_str!(concat!(env!("OUT_DIR"), "/person-proof-challenge.html"))
     .replace("__SESSION_HTML__", &session_html)
     .replace("__SESSION_JS__", &session_js)
     .replace("__SESSION_PATH_HTML__", &session_path_html)
@@ -752,7 +752,6 @@ fn challenge_html(
     .replace("__CLEARANCE_STORAGE_HTML__", &clearance_html)
     .replace("__MODE__", &mode)
     .replace("__DIFFICULTY__", &policy.difficulty.to_string())
-    .replace("__TTL_SECONDS__", &policy.ttl_seconds.to_string())
     .replace("__EXPIRES_UNIX_MS__", &expires.to_string())
     .replace("__CSP_NONCE__", &csp_nonce_html)
 }
@@ -763,7 +762,7 @@ fn challenge_security_headers(
 ) -> anyhow::Result<Vec<HeaderMutation>> {
   let protected_origin = format!("https://{}", input.downstream_host);
   let csp = format!(
-    "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'none'; connect-src 'self'; worker-src blob:; script-src 'nonce-{csp_nonce}'; style-src 'nonce-{csp_nonce}' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; upgrade-insecure-requests"
+    "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'none'; connect-src 'self'; worker-src blob:; script-src 'nonce-{csp_nonce}'; style-src 'nonce-{csp_nonce}'; font-src 'none'; upgrade-insecure-requests"
   );
 
   Ok(vec![

@@ -21,11 +21,13 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
     reports.push(oxibelt::diagnostics::diagnose_config_path(config_path, &options).await);
   }
   if let Some(path) = &args.helm_rendered {
-    reports.push(oxibelt::diagnostics::diagnose_rendered_directory(path)?);
+    reports.push(oxibelt_deployment_diagnostics::diagnose_rendered_directory(
+      path,
+    )?);
   }
   if let Some(chart) = &args.helm_chart {
     reports.push(
-      oxibelt::diagnostics::diagnose_helm_chart(
+      oxibelt_deployment_diagnostics::diagnose_helm_chart(
         chart,
         &args.helm_values,
         &args.helm_release,
@@ -36,12 +38,14 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
   }
   if args.kubernetes {
     reports.push(
-      oxibelt::diagnostics::diagnose_kubernetes(&oxibelt::diagnostics::KubernetesDoctorOptions {
-        context: args.kube_context.clone(),
-        namespace: args.kube_namespace.clone(),
-        all_namespaces: args.all_namespaces,
-        selector: args.kube_selector.clone(),
-      })
+      oxibelt_deployment_diagnostics::diagnose_kubernetes(
+        &oxibelt_deployment_diagnostics::KubernetesDoctorOptions {
+          context: args.kube_context.clone(),
+          namespace: args.kube_namespace.clone(),
+          all_namespaces: args.all_namespaces,
+          selector: args.kube_selector.clone(),
+        },
+      )
       .await?,
     );
   }

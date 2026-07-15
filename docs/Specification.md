@@ -322,9 +322,9 @@ Poison handling follows subsystem ownership. Disposable request caches and regis
 
 Lifecycle endpoints are:
 
-- `GET /admin/v1/openapi.json`: requires `admin:ReadMetadata` on `metadata/openapi`, returns the canonical OpenAPI 3.1 Admin API contract from `docs/admin-openapi.json`.
+- `GET /admin/v1/openapi.json`: requires `admin:ReadMetadata` on `metadata/openapi`, returns the canonical OpenAPI 3.1 Admin API contract embedded from `source/assets/admin-openapi.json`.
 - `GET /admin/v1/capabilities`: requires `admin:ReadMetadata` on `metadata/capabilities`, returns API version, package version, feature flags, active mTLS workload-identity mode, and Admin request-size limits.
-- `GET /admin/v1/version`: requires `admin:ReadMetadata` on `metadata/version`, returns API version, package name, and package version.
+- `GET /admin/v1/version`: requires `admin:ReadMetadata` on `metadata/version`, returns API version, package name/version, source revision, Person Proof API version, and SHA-256 identities for the embedded Person Proof and Admin OpenAPI assets.
 - `GET /admin/v1/config/status`: requires `config:GetStatus`, returns active config revision, resolved operational-profile name/version when selected, ETag, rollback availability, and last admin operation status; immutable-rollout Pods additionally report their instance ID, rollout mode, desired/applied revision, raw digest, and apply state.
 - `GET /admin/v1/config/instances`: returns configured member IDs and bounded live-heartbeat diagnostics for the reserved fixed-member mode; it is not convergence proof.
 - `GET /admin/v1/mutations/{request_id}`: returns the caller-authorized redacted durable mutation receipt.

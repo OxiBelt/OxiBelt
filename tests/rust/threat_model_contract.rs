@@ -42,7 +42,7 @@ fn threat_model_is_published_and_cross_linked() {
       "[technical specification](Specification.md)",
       "[configuration reference](Configuration.md)",
       "[Admin API reference](AdminAPI.md)",
-      "[Admin OpenAPI document](admin-openapi.json)",
+      "[Admin OpenAPI document](../source/assets/admin-openapi.json)",
       "[Gateway API reference](GatewayAPI.md)",
     ],
   );

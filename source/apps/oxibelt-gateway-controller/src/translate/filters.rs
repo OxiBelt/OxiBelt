@@ -232,7 +232,7 @@ fn normalized_identity_headers(headers: &[String]) -> anyhow::Result<HashSet<Str
   headers
     .iter()
     .map(|name| {
-      oxibelt::config::normalize_route_action_header_name(name)
+      oxibelt_control_protocol::normalize_route_action_header_name(name)
         .with_context(|| format!("ExternalAuth headersToBackend contains invalid header {name}"))
     })
     .collect()
@@ -243,11 +243,11 @@ fn validate_request_header_modifier_name(
   name: &str,
   identity_headers: &HashSet<String>,
 ) -> anyhow::Result<()> {
-  let normalized =
-    oxibelt::config::normalize_route_action_header_name(name).with_context(|| {
+  let normalized = oxibelt_control_protocol::normalize_route_action_header_name(name)
+    .with_context(|| {
       format!("RequestHeaderModifier {field_name} contains invalid header {name}")
     })?;
-  if oxibelt::config::is_reserved_route_request_header(&normalized) {
+  if oxibelt_control_protocol::is_reserved_route_request_header(&normalized) {
     bail!("RequestHeaderModifier {field_name} cannot mutate header {normalized}");
   }
   if identity_headers.contains(&normalized) {

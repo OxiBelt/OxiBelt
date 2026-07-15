@@ -9,7 +9,7 @@ use oxibelt::config::Config;
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../tests/rust/common/mod.rs"
+    "/../../../tests/rust/common/mod.rs"
   ));
 }
 

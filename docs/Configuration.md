@@ -2421,7 +2421,7 @@ after use.
 
 Full hot reload starts, stops, or rebinds the dedicated admin listener when `admin.enabled` or `admin.bind` changes.
 
-The Admin API OpenAPI 3.1 contract is stored at `docs/admin-openapi.json` and
+The Admin API OpenAPI 3.1 contract is stored at `source/assets/admin-openapi.json` and
 served by authenticated runtimes at `GET /admin/v1/openapi.json`.
 `docs/AdminAPI.md` summarizes the discovery surface. Metadata endpoints:
 

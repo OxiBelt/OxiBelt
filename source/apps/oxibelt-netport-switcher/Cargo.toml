@@ -1,0 +1,30 @@
+[package]
+name = "oxibelt-netport-switcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+[features]
+default = []
+crypto-ring = ["oxibelt/crypto-ring"]
+mutation-pqc = ["oxibelt/mutation-pqc"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+nix.workspace = true
+oxibelt.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "oxibelt-netport-switcher"
+path = "src/main.rs"

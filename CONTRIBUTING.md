@@ -18,7 +18,11 @@ be committed.
 
 | Path | Purpose | Change here when |
 | --- | --- | --- |
-| `source/` | Main Rust reverse proxy crate. | You are changing runtime, proxy, TLS, WAF, routing, config, admin, or binary behavior. |
+| `Cargo.toml` | Rust workspace, release version, shared dependency policy, and default members. | Package ownership, shared dependency, or release metadata changes. |
+| `source/` | Integrated data-plane and Admin runtime crate. | You are changing runtime, proxy, TLS, WAF, routing, config, Admin, or Person Proof behavior. |
+| `source/apps/` | Independently packaged controller, CLI, keysigner, and netport binaries. | External orchestration, operator tooling, or role-specific helper behavior changes. |
+| `source/crates/` | Shared external-control protocol and HTTP client crates. | Stable cross-package models or controller transport behavior changes. |
+| `source/assets/` | Canonical build-validated assets embedded in the runtime. | Person Proof or Admin OpenAPI embedding contracts change. |
 | `source/src/proxy/` | HTTP, HTTP/3, streaming, WebSocket, WebTransport, and forwarding behavior. | You are changing request or response proxy semantics. |
 | `source/src/waf/` | OxiRule, CRS compatibility, body scanning, Person proof, and WAF evaluation. | You are changing request, response, or stream filtering behavior. |
 | `source/src/config/` and `source/src/config.rs` | Configuration loading, validation, and typed config modules. | You are adding or changing TOML syntax, defaults, validation, or compatibility. |

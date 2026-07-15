@@ -2,8 +2,9 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <docker-platform> <artifact-arch> <output-dir>" >&2
+  echo "usage: $0 <docker-platform> <artifact-arch> <output-dir> [role]" >&2
   echo "artifact-arch: amd64v2, amd64, amd64v4, arm64, or riscv64" >&2
+  echo "role: standalone (default), dataplane, controller, tools, or keysigner" >&2
 }
 
 default_oxibelt_source="https://github.com/OxiBelt/OxiBelt"
@@ -34,18 +35,77 @@ detect_oxibelt_source() {
 platform="${1:-}"
 artifact_arch="${2:-}"
 output_dir="${3:-}"
+role="${4:-standalone}"
 
-if [[ -z "${platform}" || -z "${artifact_arch}" || -z "${output_dir}" ]]; then
+if [[ -z "${platform}" || -z "${artifact_arch}" || -z "${output_dir}" || "$#" -gt 4 ]]; then
   usage
   exit 2
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-image_tag="oxibelt:alpine-musl-${artifact_arch}"
-image_tar="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}.tar"
-build_metadata="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}-build-metadata.json"
-build_inputs="${output_dir%/}/oxibelt-alpine-musl-${artifact_arch}-build-inputs.json"
+artifact_prefix=""
+image_repository=""
+binaries_json=""
+entrypoint_json=""
+user=""
+ports_json=""
+embedded_assets=""
+case "${role}" in
+  standalone)
+    artifact_prefix="oxibelt"
+    image_repository="ghcr.io/oxibelt/oxibelt"
+    binaries_json='["oxibelt","oxibeltctl","oxibelt-keysigner","oxibelt-netport-switcher"]'
+    entrypoint_json='["/usr/local/bin/oxibelt","--config","/etc/oxibelt/config/oxibelt.toml"]'
+    user="10001:10001"
+    ports_json='["8443/tcp","8443/udp"]'
+    embedded_assets=true
+    ;;
+  dataplane)
+    artifact_prefix="oxibelt-dataplane"
+    image_repository="ghcr.io/oxibelt/oxibelt-dataplane"
+    binaries_json='["oxibelt"]'
+    entrypoint_json='["/usr/local/bin/oxibelt","--config","/etc/oxibelt/config/oxibelt.toml"]'
+    user="10001:10001"
+    ports_json='["8443/tcp","8443/udp"]'
+    embedded_assets=true
+    ;;
+  controller)
+    artifact_prefix="oxibelt-gateway-controller"
+    image_repository="ghcr.io/oxibelt/oxibelt-gateway-controller"
+    binaries_json='["oxibelt-gateway-controller"]'
+    entrypoint_json='["/usr/local/bin/oxibelt-gateway-controller"]'
+    user="10001:10001"
+    ports_json='[]'
+    embedded_assets=false
+    ;;
+  tools)
+    artifact_prefix="oxibelt-tools"
+    image_repository="ghcr.io/oxibelt/oxibelt-tools"
+    binaries_json='["oxibeltctl"]'
+    entrypoint_json='["/usr/local/bin/oxibeltctl"]'
+    user="10001:10001"
+    ports_json='[]'
+    embedded_assets=false
+    ;;
+  keysigner)
+    artifact_prefix="oxibelt-keysigner"
+    image_repository="ghcr.io/oxibelt/oxibelt-keysigner"
+    binaries_json='["oxibelt-keysigner"]'
+    entrypoint_json='["/usr/local/bin/oxibelt-keysigner"]'
+    user="10002:10002"
+    ports_json='[]'
+    embedded_assets=false
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+image_tag="${artifact_prefix}:alpine-musl-${artifact_arch}"
+image_tar="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}.tar"
+build_metadata="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-build-metadata.json"
+build_inputs="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-build-inputs.json"
 build_metadata_tmp=""
 build_inputs_tmp=""
 rust_toolchain_version="1.96.0"
@@ -54,7 +114,7 @@ node_builder_image="node:24-alpine3.24"
 runtime_image="alpine:3.24"
 rust_target=""
 rust_target_cpu=""
-oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/source/Cargo.toml" | head -n 1)}"
+oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/Cargo.toml" | head -n 1)}"
 oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)}"
 oxibelt_created="${OXIBELT_DOCKER_IMAGE_CREATED:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 oxibelt_source="${OXIBELT_DOCKER_IMAGE_SOURCE:-$(detect_oxibelt_source)}"
@@ -134,6 +194,14 @@ build_inputs_tmp="$(mktemp "${build_inputs}.tmp.XXXXXX")"
 rm -f -- "${build_metadata_tmp}"
 
 jq -n \
+  --arg role "${role}" \
+  --arg image "${image_repository}" \
+  --arg docker_target "${role}" \
+  --argjson binaries "${binaries_json}" \
+  --argjson entrypoint "${entrypoint_json}" \
+  --arg user "${user}" \
+  --argjson ports "${ports_json}" \
+  --argjson embedded_assets "${embedded_assets}" \
   --arg artifact_arch "${artifact_arch}" \
   --arg platform "${platform}" \
   --arg rust_toolchain_version "${rust_toolchain_version}" \
@@ -143,29 +211,39 @@ jq -n \
   --arg node_builder_image "${node_builder_image}" \
   --arg runtime_image "${runtime_image}" \
   '{
-    schemaVersion: 1,
+    schemaVersion: 2,
+    role: $role,
+    image: $image,
+    dockerTarget: $docker_target,
+    binaries: $binaries,
+    entrypoint: $entrypoint,
+    user: $user,
+    ports: $ports,
+    embeddedAssets: $embedded_assets,
     artifactArch: $artifact_arch,
     platform: $platform,
     rustToolchainVersion: $rust_toolchain_version,
     rustTarget: $rust_target,
     targetCpu: (if $target_cpu == "" then null else $target_cpu end),
-    baseImages: [
+    baseImages: ([
       {
         buildArgument: "RUST_BUILDER_IMAGE",
         stage: "builder",
         reference: $rust_builder_image
-      },
+      }
+    ] + (if $embedded_assets then [
       {
         buildArgument: "OXIBELT_NODE_IMAGE",
         stage: "person-proof-ui",
         reference: $node_builder_image
-      },
+      }
+    ] else [] end) + [
       {
         buildArgument: "OXIBELT_RUNTIME_IMAGE",
         stage: "runtime",
         reference: $runtime_image
       }
-    ]
+    ])
   }' >"${build_inputs_tmp}"
 
 BUILDX_METADATA_PROVENANCE=max docker buildx build \
@@ -181,6 +259,7 @@ BUILDX_METADATA_PROVENANCE=max docker buildx build \
   --build-arg "OXIBELT_CREATED=${oxibelt_created}" \
   --build-arg "OXIBELT_SOURCE=${oxibelt_source}" \
   --build-arg "OXIBELT_REF_NAME=${oxibelt_ref_name}" \
+  --target "${role}" \
   --tag "${image_tag}" \
   --metadata-file "${build_metadata_tmp}" \
   --output "type=docker,dest=${image_tar}" \

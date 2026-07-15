@@ -1,0 +1,26 @@
+[package]
+name = "oxibelt-keysigner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+[features]
+default = []
+crypto-ring = ["oxibelt/crypto-ring"]
+mutation-pqc = ["oxibelt/mutation-pqc"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+oxibelt.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "oxibelt-keysigner"
+path = "src/main.rs"

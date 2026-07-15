@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use http::Request;
-use oxibelt::control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
+use oxibelt_control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 use url::Url;

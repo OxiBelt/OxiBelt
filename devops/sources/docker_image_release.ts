@@ -6,6 +6,7 @@ import * as Semver from 'semver'
 export const GhcrImage = 'ghcr.io/oxibelt/oxibelt'
 
 export type ReleaseKind = 'stable' | 'beta' | 'build'
+export type ImageRole = 'standalone' | 'dataplane' | 'controller' | 'tools' | 'keysigner'
 
 /* eslint-disable @typescript-eslint/naming-convention -- Release metadata JSON uses stable lower-camel-case keys. */
 export type ReleaseTagInfo = {
@@ -21,6 +22,14 @@ export type ReleaseTagInfo = {
 export type ArtifactArch = 'amd64v2' | 'amd64' | 'amd64v4' | 'arm64' | 'riscv64'
 
 export type ImageArtifact = {
+  role: ImageRole
+  image: string
+  dockerTarget: string
+  binaries: string[]
+  entrypoint: string[]
+  user: string
+  ports: string[]
+  embeddedAssets: boolean
   artifactArch: ArtifactArch
   artifactName: string
   imageTar: string
@@ -35,6 +44,8 @@ export type ImageArtifact = {
 }
 
 export type ImageManifest = {
+  role: ImageRole
+  image: string
   name: string
   artifactArchs: ArtifactArch[]
   canonicalGhcrTag: string
@@ -46,9 +57,20 @@ export type ReleaseSbomContract = {
   specVersion: '1.6'
   predicateType: 'https://cyclonedx.org/bom'
   rustToolchainVersion: '1.96.0'
+  roleScoped: true
+}
+
+export type ImageRoleContract = {
+  role: ImageRole
+  image: string
+  dockerTarget: string
   binaries: string[]
-  indexArtifactName: 'oxibelt-release-sbom-index'
-  indexFile: 'oxibelt-release-index.cdx.json'
+  entrypoint: string[]
+  user: string
+  ports: string[]
+  embeddedAssets: boolean
+  indexArtifactName: string
+  indexFile: string
 }
 
 export type ReleaseSupplyChainContract = {
@@ -63,13 +85,14 @@ export type ReleaseSupplyChainContract = {
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 3
+  schemaVersion: 4
   image: string
   tag: string
   version: string
   kind: ReleaseKind
   revision: string
   source: string
+  roles: ImageRoleContract[]
   sbom: ReleaseSbomContract
   supplyChain: ReleaseSupplyChainContract
   artifacts: ImageArtifact[]
@@ -97,7 +120,78 @@ type BuildImageReleasePlanOptions = {
 
 const BuildCommitPrefix = /^[0-9a-f]{8}$/
 
-const ArtifactSpecs: Array<Omit<ImageArtifact, 'canonicalGhcrTag' | 'aliasGhcrTags' | 'sbomArtifactName' | 'sbomFile'>> = [
+type RoleTemplate = Omit<ImageRoleContract, 'image' | 'indexArtifactName' | 'indexFile'> & {
+  ImageSuffix: string
+}
+
+const RoleTemplates: RoleTemplate[] = [
+  {
+    role: 'standalone',
+    ImageSuffix: '',
+    dockerTarget: 'standalone',
+    binaries: ['oxibelt', 'oxibeltctl', 'oxibelt-keysigner', 'oxibelt-netport-switcher'],
+    entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    user: '10001:10001',
+    ports: ['8443/tcp', '8443/udp'],
+    embeddedAssets: true
+  },
+  {
+    role: 'dataplane',
+    ImageSuffix: '-dataplane',
+    dockerTarget: 'dataplane',
+    binaries: ['oxibelt'],
+    entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    user: '10001:10001',
+    ports: ['8443/tcp', '8443/udp'],
+    embeddedAssets: true
+  },
+  {
+    role: 'controller',
+    ImageSuffix: '-gateway-controller',
+    dockerTarget: 'controller',
+    binaries: ['oxibelt-gateway-controller'],
+    entrypoint: ['/usr/local/bin/oxibelt-gateway-controller'],
+    user: '10001:10001',
+    ports: [],
+    embeddedAssets: false
+  },
+  {
+    role: 'tools',
+    ImageSuffix: '-tools',
+    dockerTarget: 'tools',
+    binaries: ['oxibeltctl'],
+    entrypoint: ['/usr/local/bin/oxibeltctl'],
+    user: '10001:10001',
+    ports: [],
+    embeddedAssets: false
+  },
+  {
+    role: 'keysigner',
+    ImageSuffix: '-keysigner',
+    dockerTarget: 'keysigner',
+    binaries: ['oxibelt-keysigner'],
+    entrypoint: ['/usr/local/bin/oxibelt-keysigner'],
+    user: '10002:10002',
+    ports: [],
+    embeddedAssets: false
+  }
+]
+
+const ArtifactSpecs: Array<Omit<
+ImageArtifact,
+| 'role'
+| 'image'
+| 'dockerTarget'
+| 'binaries'
+| 'entrypoint'
+| 'user'
+| 'ports'
+| 'embeddedAssets'
+| 'canonicalGhcrTag'
+| 'aliasGhcrTags'
+| 'sbomArtifactName'
+| 'sbomFile'
+>> = [
   {
     artifactArch: 'amd64v2',
     artifactName: 'oxibelt-alpine-musl-amd64v2-image',
@@ -142,6 +236,29 @@ const ArtifactSpecs: Array<Omit<ImageArtifact, 'canonicalGhcrTag' | 'aliasGhcrTa
     dockerArchitecture: 'riscv64'
   }
 ]
+
+export function BuildImageRoleContracts(Image = GhcrImage): ImageRoleContract[] {
+  return RoleTemplates.map(Template => {
+    const RoleImage = `${Image}${Template.ImageSuffix}`
+    const ArtifactPrefix = Template.role === 'standalone'
+      ? 'oxibelt'
+      : `oxibelt-${Template.role === 'controller' ? 'gateway-controller' : Template.role}`
+    const SbomPrefix = `${ArtifactPrefix}-release`
+
+    return {
+      role: Template.role,
+      image: RoleImage,
+      dockerTarget: Template.dockerTarget,
+      binaries: [...Template.binaries],
+      entrypoint: [...Template.entrypoint],
+      user: Template.user,
+      ports: [...Template.ports],
+      embeddedAssets: Template.embeddedAssets,
+      indexArtifactName: `${SbomPrefix}-sbom-index`,
+      indexFile: `${SbomPrefix}-index.cdx.json`
+    }
+  })
+}
 
 export function ParseReleaseTag(Tag: string): ReleaseTagInfo {
   if (Tag.startsWith('v')) {
@@ -256,63 +373,82 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   const Image = Options.image ?? GhcrImage
   const Tag = Options.releaseTag.tag
   const Stable = Options.releaseTag.kind === 'stable'
-  const Artifacts = ArtifactSpecs.map(Artifact => {
-    const AliasGhcrTags: string[] = []
+  const Roles = BuildImageRoleContracts(Image)
+  const Artifacts: ImageArtifact[] = Roles.flatMap(Role => {
+    const ArtifactPrefix = Role.role === 'standalone' ? 'oxibelt' : `oxibelt-${Role.role === 'controller' ? 'gateway-controller' : Role.role}`
+    const SbomPrefix = Role.role === 'standalone' ? 'oxibelt-release' : `${ArtifactPrefix}-release`
 
-    if (Stable) {
-      AliasGhcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl-${Artifact.artifactArch}`)
-    }
+    return ArtifactSpecs.map(Artifact => {
+      const AliasGhcrTags: string[] = []
 
-    return {
-      ...Artifact,
-      canonicalGhcrTag: `${Image}:${Tag}-alpine-musl-${Artifact.artifactArch}`,
-      aliasGhcrTags: AliasGhcrTags,
-      sbomArtifactName: `oxibelt-release-sbom-${Artifact.artifactArch}`,
-      sbomFile: `oxibelt-release-${Artifact.artifactArch}.cdx.json`
-    }
+      if (Stable) {
+        AliasGhcrTags.push(`${Role.image}:${Options.releaseTag.major}-alpine-musl-${Artifact.artifactArch}`)
+      }
+
+      return {
+        ...Artifact,
+        role: Role.role,
+        image: Role.image,
+        dockerTarget: Role.dockerTarget,
+        binaries: [...Role.binaries],
+        entrypoint: [...Role.entrypoint],
+        user: Role.user,
+        ports: [...Role.ports],
+        embeddedAssets: Role.embeddedAssets,
+        artifactName: `${ArtifactPrefix}-alpine-musl-${Artifact.artifactArch}-image`,
+        imageTar: `${ArtifactPrefix}-alpine-musl-${Artifact.artifactArch}.tar`,
+        localTag: `${ArtifactPrefix}:alpine-musl-${Artifact.artifactArch}`,
+        canonicalGhcrTag: `${Role.image}:${Tag}-alpine-musl-${Artifact.artifactArch}`,
+        aliasGhcrTags: AliasGhcrTags,
+        sbomArtifactName: `${SbomPrefix}-sbom-${Artifact.artifactArch}`,
+        sbomFile: `${SbomPrefix}-${Artifact.artifactArch}.cdx.json`
+      }
+    })
   })
-  const Manifests: ImageManifest[] = [
-    {
+  const Manifests: ImageManifest[] = Roles.flatMap(Role => {
+    const ReleaseManifest: ImageManifest = {
+      role: Role.role,
+      image: Role.image,
       name: 'release',
       artifactArchs: ['amd64', 'arm64', 'riscv64'],
-      canonicalGhcrTag: `${Image}:${Tag}`,
-      aliasGhcrTags: []
-    },
-    {
-      name: 'alpine-musl',
-      artifactArchs: ['amd64', 'arm64', 'riscv64'],
-      canonicalGhcrTag: `${Image}:${Tag}-alpine-musl`,
+      canonicalGhcrTag: `${Role.image}:${Tag}`,
       aliasGhcrTags: []
     }
-  ]
+    const AlpineMuslManifest: ImageManifest = {
+      role: Role.role,
+      image: Role.image,
+      name: 'alpine-musl',
+      artifactArchs: ['amd64', 'arm64', 'riscv64'],
+      canonicalGhcrTag: `${Role.image}:${Tag}-alpine-musl`,
+      aliasGhcrTags: []
+    }
 
-  if (Stable) {
-    Manifests[0].aliasGhcrTags.push(`${Image}:latest`)
-    Manifests[1].aliasGhcrTags.push(`${Image}:${Options.releaseTag.major}-alpine-musl`, `${Image}:alpine-musl`)
-  }
+    if (Stable) {
+      ReleaseManifest.aliasGhcrTags.push(`${Role.image}:latest`)
+      AlpineMuslManifest.aliasGhcrTags.push(
+        `${Role.image}:${Options.releaseTag.major}-alpine-musl`,
+        `${Role.image}:alpine-musl`
+      )
+    }
+
+    return [ReleaseManifest, AlpineMuslManifest]
+  })
 
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     image: Image,
     tag: Tag,
     version: Tag,
     kind: Options.releaseTag.kind,
     revision: Options.revision,
     source: Options.source,
+    roles: Roles,
     sbom: {
       format: 'cyclonedx-json',
       specVersion: '1.6',
       predicateType: 'https://cyclonedx.org/bom',
       rustToolchainVersion: '1.96.0',
-      binaries: [
-        'oxibelt',
-        'oxibelt-keysigner',
-        'oxibelt-netport-switcher',
-        'oxibeltctl',
-        'oxibelt-gateway-controller'
-      ],
-      indexArtifactName: 'oxibelt-release-sbom-index',
-      indexFile: 'oxibelt-release-index.cdx.json'
+      roleScoped: true
     },
     supplyChain: {
       sourceRepository: 'OxiBelt/OxiBelt',

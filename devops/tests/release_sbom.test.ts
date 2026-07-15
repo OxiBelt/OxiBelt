@@ -16,6 +16,7 @@ import {
 /* eslint-disable @typescript-eslint/naming-convention -- Fixtures and assertions mirror CycloneDX and release JSON keys. */
 
 const Image = 'ghcr.io/oxibelt/oxibelt'
+const Role = 'standalone' as const
 const Source = 'https://github.com/OxiBelt/OxiBelt'
 const Version = '1.2.3-build.01234567'
 const Revision = '0123456789abcdef0123456789abcdef01234567'
@@ -33,9 +34,79 @@ const IndexWorkflow = 'OxiBelt/OxiBelt/.github/workflows/release.yml'
 
 const BinaryPaths = new Map([
   ['oxibelt', '/usr/local/bin/oxibelt'],
-  ['oxibelt-keysigner', '/usr/local/bin/oxibelt-keysigner'],
-  ['oxibelt-netport-switcher', '/usr/local/bin/oxibelt-netport-switcher'],
   ['oxibeltctl', '/usr/local/bin/oxibeltctl'],
+  ['oxibelt-keysigner', '/usr/local/bin/oxibelt-keysigner'],
+  ['oxibelt-netport-switcher', '/usr/local/bin/oxibelt-netport-switcher']
+])
+
+type ImageRole = 'standalone' | 'dataplane' | 'controller' | 'tools' | 'keysigner'
+
+type RoleFixture = {
+  Role: ImageRole
+  Image: string
+  DockerTarget: string
+  Binaries: string[]
+  Entrypoint: string[]
+  User: string
+  Ports: string[]
+  EmbeddedAssets: boolean
+}
+
+const RoleFixtures: RoleFixture[] = [
+  {
+    Role: 'standalone',
+    Image,
+    DockerTarget: 'standalone',
+    Binaries: ['oxibelt', 'oxibeltctl', 'oxibelt-keysigner', 'oxibelt-netport-switcher'],
+    Entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    User: '10001:10001',
+    Ports: ['8443/tcp', '8443/udp'],
+    EmbeddedAssets: true
+  },
+  {
+    Role: 'dataplane',
+    Image: 'ghcr.io/oxibelt/oxibelt-dataplane',
+    DockerTarget: 'dataplane',
+    Binaries: ['oxibelt'],
+    Entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    User: '10001:10001',
+    Ports: ['8443/tcp', '8443/udp'],
+    EmbeddedAssets: true
+  },
+  {
+    Role: 'controller',
+    Image: 'ghcr.io/oxibelt/oxibelt-gateway-controller',
+    DockerTarget: 'controller',
+    Binaries: ['oxibelt-gateway-controller'],
+    Entrypoint: ['/usr/local/bin/oxibelt-gateway-controller'],
+    User: '10001:10001',
+    Ports: [],
+    EmbeddedAssets: false
+  },
+  {
+    Role: 'tools',
+    Image: 'ghcr.io/oxibelt/oxibelt-tools',
+    DockerTarget: 'tools',
+    Binaries: ['oxibeltctl'],
+    Entrypoint: ['/usr/local/bin/oxibeltctl'],
+    User: '10001:10001',
+    Ports: [],
+    EmbeddedAssets: false
+  },
+  {
+    Role: 'keysigner',
+    Image: 'ghcr.io/oxibelt/oxibelt-keysigner',
+    DockerTarget: 'keysigner',
+    Binaries: ['oxibelt-keysigner'],
+    Entrypoint: ['/usr/local/bin/oxibelt-keysigner'],
+    User: '10002:10002',
+    Ports: [],
+    EmbeddedAssets: false
+  }
+]
+
+const AllBinaryPaths = new Map([
+  ...BinaryPaths,
   ['oxibelt-gateway-controller', '/usr/local/bin/oxibelt-gateway-controller']
 ])
 
@@ -80,7 +151,15 @@ function BaseImages(ArtifactValue: ArtifactFixture): Array<{ buildArgument: stri
 
 function BuildInputs(ArtifactValue: ArtifactFixture): JsonObject {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    role: Role,
+    image: Image,
+    dockerTarget: 'standalone',
+    binaries: [...BinaryPaths.keys()],
+    entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    user: '10001:10001',
+    ports: ['8443/tcp', '8443/udp'],
+    embeddedAssets: true,
     artifactArch: ArtifactValue.ArtifactArch,
     platform: ArtifactValue.Platform,
     rustToolchainVersion: '1.96.0',
@@ -92,6 +171,23 @@ function BuildInputs(ArtifactValue: ArtifactFixture): JsonObject {
     targetCpu: ArtifactValue.TargetCpu ?? null,
     baseImages: BaseImages(ArtifactValue)
   }
+}
+
+function RoleBuildInputs(ArtifactValue: ArtifactFixture, Fixture: RoleFixture): JsonObject {
+  const Inputs = BuildInputs(ArtifactValue)
+  Inputs.role = Fixture.Role
+  Inputs.image = Fixture.Image
+  Inputs.dockerTarget = Fixture.DockerTarget
+  Inputs.binaries = Fixture.Binaries
+  Inputs.entrypoint = Fixture.Entrypoint
+  Inputs.user = Fixture.User
+  Inputs.ports = Fixture.Ports
+  Inputs.embeddedAssets = Fixture.EmbeddedAssets
+  if (!Fixture.EmbeddedAssets) {
+    Inputs.baseImages = BaseImages(ArtifactValue).filter(Base => Base.stage !== 'person-proof-ui')
+  }
+
+  return Inputs
 }
 
 function BuildMetadata(ArtifactValue: ArtifactFixture): JsonObject {
@@ -134,6 +230,25 @@ function BinaryInventory(): JsonObject {
   }
 }
 
+function RoleBinaryInventory(Fixture: RoleFixture): JsonObject {
+  return {
+    schemaVersion: 1,
+    binaries: Fixture.Binaries.map(Name => {
+      const PathValue = AllBinaryPaths.get(Name)
+      if (PathValue === undefined) {
+        throw new Error(`missing test binary path for ${Name}`)
+      }
+
+      return {
+        name: Name,
+        path: PathValue,
+        version: Version,
+        sha256: Hash(`${Name}-${Version}`)
+      }
+    })
+  }
+}
+
 function Trivy(ArtifactValue: ArtifactFixture): JsonObject {
   const PackageRef = `pkg:apk/alpine/libssl3@3.5.4?arch=${ArtifactValue.ArtifactArch}`
   return {
@@ -171,6 +286,7 @@ function PlatformOptions(ArtifactValue: ArtifactFixture, Digest?: string) {
     BuildMetadata: BuildMetadata(ArtifactValue),
     BuildInputs: BuildInputs(ArtifactValue),
     BinaryInventory: BinaryInventory(),
+    Role,
     Image,
     Digest: Digest ?? DigestFor(ArtifactValue),
     Version,
@@ -213,6 +329,44 @@ test('platform SBOM deterministically enriches Trivy inventory with release evid
   }
 })
 
+test('platform SBOM enforces every role-specific image and executable allowlist', () => {
+  const ArtifactValue = Artifact('amd64')
+  for (const Fixture of RoleFixtures) {
+    const Document = BuildPlatformSbom({
+      ...PlatformOptions(ArtifactValue),
+      Role: Fixture.Role,
+      Image: Fixture.Image,
+      BuildInputs: RoleBuildInputs(ArtifactValue, Fixture),
+      BinaryInventory: RoleBinaryInventory(Fixture)
+    })
+    const Properties = RootProperties(Document)
+
+    Assert.equal(Properties.get('com.oxibelt.release.role'), Fixture.Role)
+    Assert.equal(Properties.get('com.oxibelt.release.image'), Fixture.Image)
+    ValidateReleaseSbom(Document, {
+      Kind: 'platform',
+      Role: Fixture.Role,
+      Image: Fixture.Image,
+      Digest: DigestFor(ArtifactValue)
+    })
+  }
+
+  const Dataplane = RoleFixtures.find(Fixture => Fixture.Role === 'dataplane')
+  if (Dataplane === undefined) {
+    throw new Error('missing dataplane fixture')
+  }
+  Assert.throws(
+    () => BuildPlatformSbom({
+      ...PlatformOptions(ArtifactValue),
+      Role: Dataplane.Role,
+      Image: Dataplane.Image,
+      BuildInputs: RoleBuildInputs(ArtifactValue, Dataplane),
+      BinaryInventory: BinaryInventory()
+    }),
+    /dataplane.*exactly 1 binaries/
+  )
+})
+
 test('platform subject digest must match BuildKit and is embedded consistently', () => {
   const ImageDigest = DigestFor(Artifact('amd64'))
   const Document = BuildPlatformSbom(PlatformOptions(Artifact('amd64'), ImageDigest))
@@ -235,7 +389,7 @@ test('platform generation fails closed on incomplete or conflicting release evid
   MutableMissingBinary.binaries.pop()
   Assert.throws(
     () => BuildPlatformSbom({ ...PlatformOptions(Artifact('amd64')), BinaryInventory: MissingBinary }),
-    /exactly 5 binaries/
+    /exactly 4 binaries/
   )
 
   const WrongPath = structuredClone(BinaryInventory())
@@ -376,6 +530,7 @@ test('index SBOM aggregates and namespaces exactly the representative platform d
   const Platforms = ['riscv64', 'amd64', 'arm64'].map(Name => BuildPlatformSbom(PlatformOptions(Artifact(Name))))
   const Options = {
     PlatformSboms: Platforms,
+    Role,
     Image,
     Digest: DigestFor(Artifact('amd64v4')),
     Version,
@@ -409,6 +564,7 @@ test('index generation rejects duplicate, nonrepresentative, and mismatched chil
   const Arm64 = BuildPlatformSbom(PlatformOptions(Artifact('arm64')))
   const Riscv64 = BuildPlatformSbom(PlatformOptions(Artifact('riscv64')))
   const BaseOptions = {
+    Role,
     Image,
     Digest: DigestFor(Artifact('amd64v4')),
     Version,
@@ -496,6 +652,7 @@ test('CLI writes a platform BOM and verify mode checks expected release identity
     '--build-inputs', Path.join(Root, 'inputs.json'),
     '--binaries', Path.join(Root, 'binaries.json'),
     '--output', Output,
+    '--role', Role,
     '--image', Image,
     '--digest', DigestFor(Artifact('amd64')),
     '--version', Version,
@@ -510,6 +667,7 @@ test('CLI writes a platform BOM and verify mode checks expected release identity
     'node', 'release_sbom.ts', 'verify',
     '--input', Output,
     '--kind', 'platform',
+    '--role', Role,
     '--digest', DigestFor(Artifact('amd64')),
     '--revision', Revision,
     '--workflow', PlatformWorkflow,

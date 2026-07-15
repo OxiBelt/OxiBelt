@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 
 mod checks;
-mod deployment;
 mod discovery_probe;
 mod probes;
 mod rules;
@@ -24,9 +23,6 @@ mod upstream_probe;
 #[cfg(test)]
 mod doctor_contract_tests;
 
-pub use deployment::{
-  KubernetesDoctorOptions, diagnose_helm_chart, diagnose_kubernetes, diagnose_rendered_directory,
-};
 pub use support_bundle::{
   RuntimeSnapshot, SupportBundle, build_runtime_snapshot, build_support_bundle,
 };
@@ -208,7 +204,8 @@ pub struct DiagnosticReport {
 }
 
 impl DiagnosticReport {
-  pub(crate) fn new() -> Self {
+  #[doc(hidden)]
+  pub fn new() -> Self {
     Self {
       schema_version: diagnostic_schema_version(),
       ok: true,
@@ -219,7 +216,8 @@ impl DiagnosticReport {
     }
   }
 
-  pub(crate) fn push(
+  #[doc(hidden)]
+  pub fn push(
     &mut self,
     severity: DiagnosticSeverity,
     id: &str,
@@ -281,7 +279,8 @@ impl DiagnosticReport {
     self.summary = summary;
   }
 
-  pub(crate) fn finish(mut self) -> Self {
+  #[doc(hidden)]
+  pub fn finish(mut self) -> Self {
     self.normalize();
     self
   }

@@ -2698,14 +2698,12 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "k8s-openapi",
- "kube",
  "libc",
  "loom",
  "md-5",
  "nix",
  "online-dsl-forge",
- "openssl-sys",
+ "oxibelt-control-protocol",
  "pretty_assertions",
  "proc-macro2",
  "quic-parser",
@@ -2714,7 +2712,6 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-webpki",
- "sequoia-openpgp",
  "serde",
  "serde-saphyr 0.0.29",
  "serde_json",
@@ -2744,6 +2741,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibelt-control-http"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+ "tokio",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
+name = "oxibelt-control-protocol"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "http",
+]
+
+[[package]]
+name = "oxibelt-deployment-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "k8s-openapi",
+ "kube",
+ "oxibelt",
+ "serde",
+ "serde-saphyr 0.0.29",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "oxibelt-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -2752,11 +2790,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibelt-gateway-controller"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "glob",
+ "http",
+ "oxibelt",
+ "oxibelt-control-http",
+ "oxibelt-control-protocol",
+ "pretty_assertions",
+ "serde",
+ "serde-saphyr 0.0.29",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "oxibelt-keysigner"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxibelt",
+ "tokio",
+]
+
+[[package]]
+name = "oxibelt-netport-switcher"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "nix",
+ "oxibelt",
+ "rustix",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "oxibelt-unsafe-harness"
 version = "0.0.0"
 dependencies = [
  "libc",
  "nix",
+]
+
+[[package]]
+name = "oxibeltctl"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "bytes",
+ "clap",
+ "getrandom 0.4.3",
+ "http",
+ "libc",
+ "openssl-sys",
+ "oxibelt",
+ "oxibelt-deployment-diagnostics",
+ "rustls",
+ "sequoia-openpgp",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "toml",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

@@ -5,6 +5,10 @@ metadata:
 spec:
   images:
     - glob: 'ghcr.io/oxibelt/oxibelt@sha256:*'
+    - glob: 'ghcr.io/oxibelt/oxibelt-dataplane@sha256:*'
+    - glob: 'ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:*'
+    - glob: 'ghcr.io/oxibelt/oxibelt-tools@sha256:*'
+    - glob: 'ghcr.io/oxibelt/oxibelt-keysigner@sha256:*'
   authorities:
     - name: oxibelt-github-release-signature
       keyless:

@@ -84,7 +84,20 @@ jobs:
       - name: Rust module size
         run: tests/scripts/check-rust-module-size.sh
 
-      - name: Person proof UI asset uses pinned npm dependencies
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Data-plane Cargo package boundary
+        run: bash tests/scripts/check-cargo-package-boundaries.sh
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.13.0 --activate
+
+      - name: Person proof UI asset uses pinned dependencies
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
@@ -115,13 +128,13 @@ jobs:
           }
 
           if (invalid.length > 0) {
-            console.error(`npm dependencies must use exact versions:\n${invalid.join('\n')}`);
+            console.error(`Person proof UI dependencies must use exact versions:\n${invalid.join('\n')}`);
             process.exit(1);
           }
           NODE
-          npm install --prefix ui/person-proof --ignore-scripts --no-audit --no-fund --package-lock=false
-          npm run --prefix ui/person-proof build
-          npm run --prefix ui/person-proof check:openapi
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @oxibelt/person-proof-ui build
+          pnpm --filter @oxibelt/person-proof-ui check:openapi
           git diff --exit-code source/assets/person-proof-challenge.html
 
   test:
@@ -506,6 +519,51 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+          retention-days: 0
+
+  docker-alpine-musl-kubernetes-role-image-amd64:
+    name: Docker Kubernetes role image (Alpine musl, amd64, ${{ matrix.role }})
+    runs-on: ubuntu-26.04
+    needs:
+      - test
+      - rust-advisory-checks
+      - test-riscv64-qemu
+      - fuzz-smoke
+      - unsafe-validation
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: dataplane
+            artifact_prefix: oxibelt-dataplane
+          - role: controller
+            artifact_prefix: oxibelt-gateway-controller
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+
+      - name: Build role-specific Docker image artifact
+        run: |
+          tests/scripts/build-docker-image-artifact.sh \
+            "linux/amd64" \
+            "amd64" \
+            "${RUNNER_TEMP}/oxibelt-image" \
+            "${{ matrix.role }}"
+
+      - name: Upload role-specific Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ matrix.artifact_prefix }}-alpine-musl-amd64-image
+          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_prefix }}-alpine-musl-amd64.tar
           retention-days: 0
 
   docker-alpine-comparator-musl-image-amd64:
@@ -960,7 +1018,7 @@ jobs:
     name: Kubernetes immutable Gateway rollout
     runs-on: ubuntu-26.04
     needs:
-      - docker-alpine-musl-image-amd64
+      - docker-alpine-musl-kubernetes-role-image-amd64
     permissions:
       actions: read
       contents: read
@@ -994,24 +1052,27 @@ jobs:
           kubectl_version: v1.31.14
           install_only: true
 
-      - name: Select AMD64 Docker image artifact
-        id: select-amd64-image
-        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
-
-      - name: Download AMD64 Docker image artifact
+      - name: Download AMD64 data-plane Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image
+          name: oxibelt-dataplane-alpine-musl-amd64-image
+          path: ${{ runner.temp }}/oxibelt-dataplane-image
 
-      - name: Load OxiBelt Docker image
-        env:
-          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+      - name: Download AMD64 Gateway Controller Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-gateway-controller-alpine-musl-amd64-image
+          path: ${{ runner.temp }}/oxibelt-gateway-controller-image
+
+      - name: Load role-specific OxiBelt Docker images
+        run: |
+          docker load --input "${RUNNER_TEMP}/oxibelt-dataplane-image/oxibelt-dataplane-alpine-musl-amd64.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-gateway-controller-image/oxibelt-gateway-controller-alpine-musl-amd64.tar"
 
       - name: Run Kubernetes immutable rollout
         env:
-          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_DATAPLANE_DOCKER_IMAGE: oxibelt-dataplane:alpine-musl-amd64
+          OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE: oxibelt-gateway-controller:alpine-musl-amd64
           OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS: "420"
         run: tests/scripts/run-kubernetes-immutable-rollout.sh
 

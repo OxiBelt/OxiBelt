@@ -20,9 +20,9 @@ The current implementation is a production-oriented foundation: configuration is
 - Request-wide structured system access logs with OCSF or ECS JSON stdout and OTLP Logs delivery.
 - Prometheus metrics with aggregate or detailed route/upstream/protocol labels, plus optional W3C tracecontext propagation and OTLP trace export.
 - Runtime reload modes for OxiRule-only policy, downstream TLS renewal, or full configuration reload, with graceful listener drain for in-flight requests and long-lived tunnels.
-- Kubernetes Gateway API controller binary that can translate `HTTPRoute` and
-  passthrough `TLSRoute` resources into a controller-owned OxiBelt TOML include
-  and apply it through the Admin API.
+- Optional Kubernetes Gateway API controller that translates `HTTPRoute` and
+  passthrough `TLSRoute` resources into a controller-owned immutable OxiBelt
+  TOML include and rolls the selected workload independently of the runtime.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
 
@@ -31,20 +31,20 @@ See [docs/Specification.md](docs/Specification.md) for the compact behavior spec
 From the repository root:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml -- --config source/config/oxibelt.toml
+cargo run -p oxibelt --bin oxibelt -- --config source/config/oxibelt.toml
 ```
 
 Or from `source/`:
 
 ```sh
 cd source
-cargo run -- --config config/oxibelt.toml
+cargo run --bin oxibelt -- --config config/oxibelt.toml
 ```
 
 Validate a configuration without starting listeners:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml -- \
+cargo run -p oxibelt --bin oxibelt -- \
   --config source/config/oxibelt.toml \
   --check
 ```
@@ -52,7 +52,7 @@ cargo run --manifest-path source/Cargo.toml -- \
 Print the merged, redacted effective configuration:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml -- \
+cargo run -p oxibelt --bin oxibelt -- \
   --config source/config/oxibelt.toml \
   --dump-effective-config
 ```
@@ -60,14 +60,14 @@ cargo run --manifest-path source/Cargo.toml -- \
 Run the production preflight doctor without starting listeners:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- \
+cargo run -p oxibeltctl -- \
   doctor --config source/config/oxibelt.toml
 ```
 
 Doctor can also inspect rendered Kubernetes resources without applying them:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- \
+cargo run -p oxibeltctl -- \
   doctor --helm-rendered deploy/rendered --format sarif --fail-on warning
 ```
 
@@ -79,7 +79,7 @@ rules.
 Enable hot reload at startup:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml -- \
+cargo run -p oxibelt --bin oxibelt -- \
   --config source/config/oxibelt.toml \
   --hot-reload-mode full \
   --hot-reload-poll-interval-ms 1000
@@ -110,9 +110,9 @@ The `oxibeltctl` operations CLI wraps the Admin API without bypassing IPM
 authorization:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- status
-cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- support-bundle --redact
-cargo run --manifest-path source/Cargo.toml --bin oxibeltctl -- auth check --action config:GetStatus --resource '*'
+cargo run -p oxibeltctl -- status
+cargo run -p oxibeltctl -- support-bundle --redact
+cargo run -p oxibeltctl -- auth check --action config:GetStatus --resource '*'
 ```
 
 For break-glass recovery, `oxibeltctl --break-glass-access ...` reads the
@@ -143,7 +143,7 @@ remain deliberate operator inputs. The expanded, redacted effective output
 always materializes `profile_version = 1`:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml -- \
+cargo run -p oxibelt --bin oxibelt -- \
   --config source/config/oxibelt.toml \
   --dump-effective-config
 ```
@@ -187,7 +187,11 @@ The default example configuration is [source/config/oxibelt.toml](source/config/
 ## Project Layout
 
 ```text
-source/                         Rust reverse proxy crate
+Cargo.toml                      Rust workspace and shared dependency policy
+source/                         Integrated data-plane and Admin runtime crate
+source/apps/                    Controller, CLI, keysigner, and netport binaries
+source/crates/                  Shared external-control protocol and HTTP crates
+source/assets/                  Build-validated embedded runtime assets
 source/src/proxy/http.rs         HTTP reverse proxy behavior
 source/src/tls.rs                TLS configuration and client/server setup
 source/src/config.rs             Configuration loading and validation
@@ -204,16 +208,43 @@ Root-level documentation uses root-relative paths. If a command must run from `s
 
 ## Docker Image
 
-Build the release image from the repository root:
+Build the standalone compatibility image from the repository root:
 
 ```sh
 docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
-The Docker build rebuilds `ui/person-proof` and embeds the generated challenge page in the release binary.
-CI scans each built OxiBelt image artifact with Trivy and submits Dependency Snapshot data on canonical-repository push, scheduled, same-repository PR, and manually opted-in workflow runs. Release CI builds each ISA-specific image in an unprivileged reusable workflow row, scans the downloaded local image tar, publishes the immutable platform manifest, and attaches a verified keyless signature, SLSA provenance, and OCI-linked CycloneDX SBOM before promoting mutable aliases. The multi-architecture index receives the same controls plus a fail-closed Kubernetes admission proof against its exact digest. See [Release Supply-Chain Verification](docs/SupplyChain.md) for digest resolution, verification commands, admission policy, published metadata, and trust boundaries.
-Release CI publishes validated images to GitHub Container Registry at
-`ghcr.io/oxibelt/oxibelt`. Published tags use strict OxiBelt release tags such
+The same Dockerfile exposes `dataplane`, `controller`, `tools`, and `keysigner`
+targets. For example:
+
+```sh
+docker build --pull --target dataplane -t oxibelt-dataplane -f source/ops/Dockerfile.alpine .
+docker build --pull --target controller -t oxibelt-gateway-controller -f source/ops/Dockerfile.alpine .
+```
+
+The build regenerates `ui/person-proof`, validates the Person Proof and Admin
+OpenAPI inputs, and embeds both into the `oxibelt` binary. Node.js, pnpm, Cargo,
+and the Rust compiler are build-stage inputs only.
+
+Official releases publish these role-specific repositories from the same
+version and source revision:
+
+| Repository | Docker target | Executable inventory | Purpose |
+| --- | --- | --- | --- |
+| `ghcr.io/oxibelt/oxibelt` | `standalone` | `oxibelt`, `oxibeltctl`, `oxibelt-keysigner`, `oxibelt-netport-switcher` | Backward-compatible single-container distribution. |
+| `ghcr.io/oxibelt/oxibelt-dataplane` | `dataplane` | `oxibelt` | Hardened public runtime with co-located Admin and Person Proof, but no operator or Kubernetes binaries. |
+| `ghcr.io/oxibelt/oxibelt-gateway-controller` | `controller` | `oxibelt-gateway-controller` | External Kubernetes orchestration. |
+| `ghcr.io/oxibelt/oxibelt-tools` | `tools` | `oxibeltctl` | Offline and Admin operator workflows. |
+| `ghcr.io/oxibelt/oxibelt-keysigner` | `keysigner` | `oxibelt-keysigner` | Optional isolated private-key operations. |
+
+CI scans every role/architecture artifact separately. Release CI publishes a
+per-role platform manifest and multi-architecture index, then attaches a
+role-specific keyless signature, SLSA provenance statement, and OCI-linked
+CycloneDX SBOM before promoting aliases. See [Release Supply-Chain
+Verification](docs/SupplyChain.md) for verification commands and trust
+boundaries.
+
+Published tags use strict OxiBelt release tags such
 as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags
 are rejected. Stable releases also update major Alpine musl aliases such as
 `5-alpine-musl-amd64`, plus the multi-arch `latest` and `alpine-musl` aliases after all required arch-specific tags have been published.
@@ -238,16 +269,19 @@ The standard container layout is:
 /etc/oxibelt/oxirule  External .oxirule.toml rule files
 ```
 
-The image also bundles `/usr/local/bin/oxibeltctl` for Admin API operations,
-`/usr/local/bin/oxibelt-netport-switcher` for opt-in privileged data-plane
-port brokerage, and `/usr/local/bin/oxibelt-gateway-controller` for Kubernetes
-Gateway API automation while keeping the container entrypoint on `oxibelt`.
-For example:
+The standalone image also bundles `/usr/local/bin/oxibeltctl` for Admin API
+operations, `/usr/local/bin/oxibelt-netport-switcher` for opt-in privileged
+data-plane port brokerage, and `/usr/local/bin/oxibelt-keysigner` for backward
+compatibility while keeping the entrypoint on `oxibelt`. The Gateway Controller
+is intentionally available only in its role-specific image. For example:
 
 ```sh
 docker exec -it oxibelt oxibeltctl status
 docker exec -it oxibelt oxibeltctl lifecycle drain
-docker exec -it oxibelt oxibelt-gateway-controller render --input /manifests --output -
+docker run --rm --entrypoint /usr/local/bin/oxibelt-gateway-controller \
+  --mount type=bind,src=/path/to/manifests,dst=/manifests,readonly \
+  ghcr.io/oxibelt/oxibelt-gateway-controller:15.2.0-alpine-musl \
+  render --input /manifests --output -
 ```
 
 Run a mounted configuration through local preflight by overriding the entrypoint:

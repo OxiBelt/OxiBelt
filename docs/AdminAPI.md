@@ -2,7 +2,7 @@
 
 OxiBelt exposes its authenticated control-plane API on the configured
 `[admin]` listener. The canonical machine-readable contract is
-`docs/admin-openapi.json`, an OpenAPI 3.1 document for the current
+`source/assets/admin-openapi.json`, an OpenAPI 3.1 document for the current
 `/admin/v1/*` surface.
 
 The running Admin listener serves the same contract and metadata through:

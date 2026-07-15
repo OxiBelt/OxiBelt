@@ -111,11 +111,21 @@ assert_contains "${work_dir}/policy-controller.yaml" 'cgr.dev/chainguard/kubectl
 assert_not_contains "${work_dir}/policy-controller.yaml" ':latest'
 assert_not_contains "${work_dir}/policy-controller.yaml" ':latest-dev'
 
+official_images=(
+  'ghcr.io/oxibelt/oxibelt@sha256:*'
+  'ghcr.io/oxibelt/oxibelt-dataplane@sha256:*'
+  'ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:*'
+  'ghcr.io/oxibelt/oxibelt-tools@sha256:*'
+  'ghcr.io/oxibelt/oxibelt-keysigner@sha256:*'
+)
 for file in \
   "${work_dir}/trust-policies.yaml" \
   "${admission_dir}/oxibelt-signature-policy.yaml" \
   "${admission_dir}/oxibelt-provenance-policy.yaml"; do
-  assert_contains "${file}" 'ghcr.io/oxibelt/oxibelt@sha256:*'
+  for image in "${official_images[@]}"; do
+    assert_contains "${file}" "${image}"
+  done
+  assert_not_contains "${file}" 'ghcr.io/oxibelt/*@sha256:*'
   assert_contains "${file}" 'https://token.actions.githubusercontent.com'
   assert_contains "${file}" "${subject_regexp}"
 done

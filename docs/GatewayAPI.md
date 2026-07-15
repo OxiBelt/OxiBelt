@@ -253,8 +253,7 @@ than allowing a Pod to diverge from the assigned Kubernetes revision.
 Render local manifests without contacting Kubernetes:
 
 ```sh
-cargo run --manifest-path source/Cargo.toml \
-  --bin oxibelt-gateway-controller -- \
+cargo run -p oxibelt-gateway-controller -- \
   render --input deploy/helm/oxibelt-gateway-controller/examples --output -
 ```
 
@@ -301,5 +300,9 @@ true` only after reviewing the resulting cluster-wide permissions. The target
 Role grants no Secret access; it gets and creates ConfigMaps, lists Pods and,
 for a Deployment target, ReplicaSets, and may get and patch only the named
 Deployment or DaemonSet. It has no target namespace `watch` or `delete`
-permission. The controller image is the normal OxiBelt image; the Docker image includes
-`/usr/local/bin/oxibelt-gateway-controller`.
+permission. The controller chart defaults to the role-specific
+`ghcr.io/oxibelt/oxibelt-gateway-controller` image. It contains
+`/usr/local/bin/oxibelt-gateway-controller` and intentionally excludes
+`oxibelt`, `oxibeltctl`, and the public runtime filesystem. The data-plane
+chart independently defaults to `ghcr.io/oxibelt/oxibelt-dataplane`; the two
+images must use the same release version and source revision.

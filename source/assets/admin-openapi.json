@@ -146,7 +146,7 @@
           "metadata"
         ],
         "operationId": "getAdminVersion",
-        "summary": "Fetch Admin API and package version metadata.",
+        "summary": "Fetch Admin API, package, source revision, and embedded asset metadata.",
         "security": [
           {
             "bearerAuth": []
@@ -8123,7 +8123,11 @@
         "required": [
           "api_version",
           "package_name",
-          "package_version"
+          "package_version",
+          "source_revision",
+          "person_proof_api_version",
+          "person_proof_asset_sha256",
+          "admin_openapi_sha256"
         ],
         "properties": {
           "api_version": {
@@ -8135,6 +8139,32 @@
           },
           "package_version": {
             "type": "string"
+          },
+          "source_revision": {
+            "description": "Exact Git commit embedded by release builds, or unknown for an unversioned local build.",
+            "oneOf": [
+              {
+                "const": "unknown"
+              },
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              }
+            ]
+          },
+          "person_proof_api_version": {
+            "type": "string",
+            "const": "1.0.0"
+          },
+          "person_proof_asset_sha256": {
+            "description": "SHA-256 digest of the exact built-in Person Proof challenge asset embedded in this binary.",
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "admin_openapi_sha256": {
+            "description": "SHA-256 digest of the exact Admin OpenAPI document embedded in this binary.",
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
           }
         },
         "additionalProperties": false

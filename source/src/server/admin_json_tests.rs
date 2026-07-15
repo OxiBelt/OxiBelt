@@ -303,6 +303,7 @@ async fn admin_metadata_endpoints_return_openapi_capabilities_and_version() {
   assert_eq!(version_body["api_version"], "v1");
   assert_eq!(version_body["package_name"], env!("CARGO_PKG_NAME"));
   assert_eq!(version_body["package_version"], env!("CARGO_PKG_VERSION"));
+  super::admin_metadata_assertions::assert_embedded_build_metadata(&version_body);
 
   let _ = shutdown.send(true);
   task.abort();

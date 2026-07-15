@@ -136,7 +136,8 @@ assert_contains "${work_dir}/profile_enforcing.yaml" "topologyKey: topology.kube
 assert_contains "${work_dir}/profile_enforcing.yaml" "podAntiAffinity:"
 assert_contains "${work_dir}/profile_enforcing.yaml" "maxUnavailable: 1"
 assert_contains "${work_dir}/profile_enforcing.yaml" "unhealthyPodEvictionPolicy: AlwaysAllow"
-assert_contains "${work_dir}/profile_enforcing.yaml" "kill -USR1 1; exec sleep 300"
+assert_contains "${work_dir}/profile_enforcing.yaml" "- __lifecycle-prestop"
+assert_contains "${work_dir}/profile_enforcing.yaml" "- \"300\""
 assert_not_contains "${work_dir}/profile_enforcing.yaml" "# Source: oxibelt/templates/admin-service.yaml"
 [[ "$(grep -F -c -- "kind: NetworkPolicy" "${work_dir}/profile_enforcing.yaml")" == "3" ]] \
   || die "secure profile must render public, metrics, and egress NetworkPolicies"

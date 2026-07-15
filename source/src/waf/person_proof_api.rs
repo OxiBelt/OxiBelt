@@ -8,6 +8,8 @@ use super::person_proof::{
 use super::person_proof_v2::{PersonProofProviderChallenge, ProviderChallengeState};
 use super::{PersonProofMode, PersonProofThirdPartyProvider, WafRequestInput};
 
+pub const PERSON_PROOF_API_VERSION: &str = "1.0.0";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PersonProofApiPathRole {
   Session,
@@ -205,7 +207,7 @@ pub(super) fn openapi_document(engine: &PersonProofEngine, openapi_path: &str) -
     "openapi": "3.1.0",
     "info": {
       "title": "OxiBelt Person-Proof API",
-      "version": "1.0.0"
+      "version": PERSON_PROOF_API_VERSION
     },
     "paths": {
       policy.provider.session_path.clone(): {

@@ -100,7 +100,9 @@ use person_proof::{
 pub use person_proof_admin::{
   PersonProofAdminClearancePage, PersonProofAdminRevokeResult, PersonProofAdminStatus,
 };
-pub use person_proof_api::{PersonProofApiPathRole, PersonProofSessionDocument};
+pub use person_proof_api::{
+  PERSON_PROOF_API_VERSION, PersonProofApiPathRole, PersonProofSessionDocument,
+};
 pub use person_proof_config::{
   PersonProofClearanceConfig, PersonProofClearanceCookieConfig, PersonProofClearanceIssueTarget,
   PersonProofClearanceLocalStorageConfig, PersonProofClearanceSameSite,

@@ -350,6 +350,7 @@ fn repository_files(root: &Path, pathspecs: &[&str]) -> Vec<String> {
     .split(|byte| *byte == 0)
     .filter(|path| !path.is_empty())
     .map(|path| String::from_utf8(path.to_vec()).expect("Rust path should be UTF-8"))
+    .filter(|path| root.join(path).is_file())
     .collect::<Vec<_>>();
   files.sort();
   files.dedup();

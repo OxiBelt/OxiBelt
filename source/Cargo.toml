@@ -1,10 +1,11 @@
 [package]
 name = "oxibelt"
-version = "0.0.0"
-edition = "2024"
-rust-version = "1.96"
-license = "Apache-2.0"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
 
 [features]
 default = []
@@ -46,8 +47,6 @@ httparse = "1.10.1"
 hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
-k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
-kube = { version = "4.0.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.186"
 md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
@@ -55,7 +54,6 @@ regex = "1.13.0"
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
 rustix = { version = "1.1.4", features = ["net", "process", "std"] }
-sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
 webpki = { package = "rustls-webpki", version = "0.103.13" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -88,18 +86,10 @@ zeroize = "1.9.0"
 compio = { version = "0.19.1", default-features = false, features = ["io-uring", "polling", "runtime"] }
 compio-driver = { version = "0.12.4", default-features = false, features = ["io-uring", "polling"] }
 online-dsl-forge = "0.2.0"
+oxibelt-control-protocol.workspace = true
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1.17.1", default-features = false, features = ["bindgen"] }
-
-[target.'cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))'.dependencies]
-openssl-sys = { version = "0.9.117", features = ["vendored"] }
-
-[target.'cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))'.dependencies]
-openssl-sys = { version = "0.9.117", features = ["vendored"] }
-
-[target.'cfg(target_arch = "riscv64")'.dependencies]
-openssl-sys = { version = "0.9.117", features = ["vendored"] }
 
 [dev-dependencies]
 clubcard = { version = "0.3.3", features = ["builder"] }
@@ -109,8 +99,16 @@ proc-macro2 = "1.0.106"
 syn = { version = "2.0.119", features = ["full", "visit"] }
 tokio = { version = "1.52.3", features = ["test-util"] }
 
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true
+
 [lints]
 workspace = true
+
+[[bin]]
+name = "oxibelt"
+path = "src/main.rs"
 
 [[bin]]
 name = "oxibelt-docker-integration-matrix"
@@ -167,6 +165,10 @@ path = "../tests/rust/performance_aggregate.rs"
 [[test]]
 name = "admin_openapi_contract"
 path = "../tests/rust/admin_openapi_contract.rs"
+
+[[test]]
+name = "package_boundaries"
+path = "../tests/rust/package_boundaries.rs"
 
 [[test]]
 name = "feature_status_contract"

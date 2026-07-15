@@ -12,20 +12,20 @@ signer_container="oxibelt-keysigner-${run_id}"
 cert_seed_container="oxibelt-keysigner-cert-seed-${run_id}"
 probe_container="oxibelt-keysigner-probe-${run_id}"
 probe_image="oxibelt/keysigner-probe:${run_id}"
-own_oxibelt_image=0
-oxibelt_image="${OXIBELT_DOCKER_IMAGE:-}"
+own_keysigner_image=0
+keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${OXIBELT_DOCKER_IMAGE:-}}"
 
-if [[ -z "${oxibelt_image}" ]]; then
-  oxibelt_image="oxibelt/keysigner-it:${run_id}"
-  own_oxibelt_image=1
+if [[ -z "${keysigner_image}" ]]; then
+  keysigner_image="oxibelt/keysigner-it:${run_id}"
+  own_keysigner_image=1
 fi
 
 cleanup() {
   docker rm -f "${probe_container}" "${signer_container}" "${cert_seed_container}" >/dev/null 2>&1 || true
   docker volume rm "${socket_volume}" "${cert_volume}" >/dev/null 2>&1 || true
   docker rmi -f "${probe_image}" >/dev/null 2>&1 || true
-  if [[ "${own_oxibelt_image}" == "1" ]]; then
-    docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
+  if [[ "${own_keysigner_image}" == "1" ]]; then
+    docker rmi -f "${keysigner_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${KEEP_TEST_ARTIFACTS:-0}" != "1" ]]; then
     rm -rf "${work_dir}"
@@ -143,10 +143,11 @@ print(f"post-attack describe_key schemes={len(post_attack['schemes'])}")
 PY
 chmod 0644 "${probe_path}"
 
-if [[ "${own_oxibelt_image}" == "1" ]]; then
-  echo "Building OxiBelt runtime image"
+if [[ "${own_keysigner_image}" == "1" ]]; then
+  echo "Building OxiBelt keysigner image"
   docker build \
-    -t "${oxibelt_image}" \
+    --target keysigner \
+    -t "${keysigner_image}" \
     -f "${repo_root}/source/ops/Dockerfile.alpine" \
     "${repo_root}" >/dev/null
 fi
@@ -165,7 +166,7 @@ docker create \
   --user 0:0 \
   --mount "type=volume,src=${cert_volume},dst=/cert" \
   --entrypoint sh \
-  "${oxibelt_image}" \
+  "${probe_image}" \
   -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
 docker cp "${key_path}" "${cert_seed_container}:/cert/privkey.pem"
 docker cp "${token_path}" "${cert_seed_container}:/cert/keysigner-token.b64"
@@ -176,7 +177,7 @@ docker run --rm \
   --user 0:0 \
   --mount "type=volume,src=${socket_volume},dst=/sock" \
   --entrypoint sh \
-  "${oxibelt_image}" \
+  "${probe_image}" \
   -c 'chown 10002:10002 /sock && chmod 0770 /sock'
 
 docker create \
@@ -190,7 +191,7 @@ docker create \
   --mount "type=volume,src=${socket_volume},dst=/sock" \
   --mount "type=volume,src=${cert_volume},dst=/etc/oxibelt/cert,readonly" \
   --entrypoint /usr/local/bin/oxibelt-keysigner \
-  "${oxibelt_image}" \
+  "${keysigner_image}" \
   --socket /sock/sign.sock \
   --key edge-default=/etc/oxibelt/cert/privkey.pem \
   --token-file /etc/oxibelt/cert/keysigner-token.b64 \
@@ -203,7 +204,10 @@ docker create \
 docker start "${signer_container}" >/dev/null
 
 for _ in $(seq 1 100); do
-  if docker exec "${signer_container}" sh -c 'test -S /sock/sign.sock' >/dev/null 2>&1; then
+  if docker run --rm \
+    --mount "type=volume,src=${socket_volume},dst=/sock" \
+    --entrypoint sh \
+    "${probe_image}" -c 'test -S /sock/sign.sock' >/dev/null 2>&1; then
     break
   fi
   if [[ "$(docker inspect -f '{{.State.Running}}' "${signer_container}" 2>/dev/null || echo false)" != "true" ]]; then
@@ -214,7 +218,10 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 
-if ! docker exec "${signer_container}" sh -c 'test -S /sock/sign.sock' >/dev/null 2>&1; then
+if ! docker run --rm \
+  --mount "type=volume,src=${socket_volume},dst=/sock" \
+  --entrypoint sh \
+  "${probe_image}" -c 'test -S /sock/sign.sock' >/dev/null 2>&1; then
   docker logs "${signer_container}" >&2 || true
   echo "remote signer socket was not created" >&2
   exit 1

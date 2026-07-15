@@ -4,6 +4,10 @@ policy:
   predicateType: https://slsa.dev/provenance/v1
   images:
     - 'ghcr.io/oxibelt/oxibelt@sha256:*'
+    - 'ghcr.io/oxibelt/oxibelt-dataplane@sha256:*'
+    - 'ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:*'
+    - 'ghcr.io/oxibelt/oxibelt-tools@sha256:*'
+    - 'ghcr.io/oxibelt/oxibelt-keysigner@sha256:*'
   exemptImages: []
   trust:
     # OxiBelt is public, so `actions/attest` uses the Sigstore public-good

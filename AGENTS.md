@@ -15,8 +15,16 @@ environments.
 
 ## Repository Structure
 
+- `Cargo.toml`
+  - Rust workspace, shared package metadata, and dependency policy.
 - `source/`
-  - Main Rust reverse proxy crate.
+  - Integrated data-plane, Admin, WAF, and Person Proof runtime crate.
+- `source/apps/`
+  - Independently packaged Gateway Controller, CLI, keysigner, and netport binaries.
+- `source/crates/`
+  - Shared external-control protocol, HTTP, and deployment-diagnostics crates.
+- `source/assets/`
+  - Canonical build-validated assets embedded in the runtime.
 - `source/src/`
   - Core application source code.
 - `source/src/proxy/`

@@ -299,20 +299,33 @@ outside_namespace="oxibelt-outside-${run_id}"
 work_dir="${repo_root}/tests/.tmp/kubernetes-immutable-rollout-${run_id}"
 admin_server_name="${admin_service_name}.${namespace}.svc"
 
-[[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]] \
-  || die "OXIBELT_DOCKER_IMAGE must name the locally loaded OxiBelt image"
-image="${OXIBELT_DOCKER_IMAGE}"
-[[ "${image}" =~ ^[a-z0-9][a-z0-9._-]*(:[0-9]{1,5})?(/[a-z0-9][a-z0-9._-]*)*:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
-  || die "OXIBELT_DOCKER_IMAGE must be a lower-case local repository:tag without Helm metacharacters"
-image_repository="${image%:*}"
-image_tag="${image##*:}"
-[[ -n "${image_repository}" && -n "${image_tag}" ]] \
-  || die "OXIBELT_DOCKER_IMAGE must include non-empty repository and tag"
+[[ -n "${OXIBELT_DATAPLANE_DOCKER_IMAGE:-}" ]] \
+  || die "OXIBELT_DATAPLANE_DOCKER_IMAGE must name the locally loaded data-plane image"
+dataplane_image="${OXIBELT_DATAPLANE_DOCKER_IMAGE}"
+[[ "${dataplane_image}" =~ ^[a-z0-9][a-z0-9._-]*(:[0-9]{1,5})?(/[a-z0-9][a-z0-9._-]*)*:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || die "OXIBELT_DATAPLANE_DOCKER_IMAGE must be a lower-case local repository:tag without Helm metacharacters"
+dataplane_image_repository="${dataplane_image%:*}"
+dataplane_image_tag="${dataplane_image##*:}"
+[[ -n "${dataplane_image_repository}" && -n "${dataplane_image_tag}" ]] \
+  || die "OXIBELT_DATAPLANE_DOCKER_IMAGE must include non-empty repository and tag"
+
+[[ -n "${OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE:-}" ]] \
+  || die "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE must name the locally loaded controller image"
+controller_image="${OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE}"
+[[ "${controller_image}" =~ ^[a-z0-9][a-z0-9._-]*(:[0-9]{1,5})?(/[a-z0-9][a-z0-9._-]*)*:[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || die "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE must be a lower-case local repository:tag without Helm metacharacters"
+controller_image_repository="${controller_image%:*}"
+controller_image_tag="${controller_image##*:}"
+[[ -n "${controller_image_repository}" && -n "${controller_image_tag}" ]] \
+  || die "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE must include non-empty repository and tag"
+[[ "${dataplane_image}" != "${controller_image}" ]] \
+  || die "data-plane and controller tests require distinct role image references"
 
 # This verifies the configured Docker endpoint before Kind delegates image and
 # cluster lifecycle operations to the normal `docker` command.
 docker version --format '{{.Server.Version}}' >/dev/null
-docker image inspect "${image}" >/dev/null
+docker image inspect "${dataplane_image}" >/dev/null
+docker image inspect "${controller_image}" >/dev/null
 
 if kind get clusters | grep -Fqx "${cluster_name}"; then
   die "refusing to reuse an existing Kind cluster named ${cluster_name}"
@@ -320,9 +333,12 @@ fi
 
 mkdir -p "${work_dir}"
 gateway_api_manifest="${work_dir}/gateway-api-${gateway_api_version}.yaml"
-image_values="${work_dir}/image-values.yaml"
+dataplane_image_values="${work_dir}/dataplane-image-values.yaml"
+controller_image_values="${work_dir}/controller-image-values.yaml"
 printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
-  "${image_repository}" "${image_tag}" >"${image_values}"
+  "${dataplane_image_repository}" "${dataplane_image_tag}" >"${dataplane_image_values}"
+printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
+  "${controller_image_repository}" "${controller_image_tag}" >"${controller_image_values}"
 
 external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
   || die "external ConfigMap Deployment bootstrap must remain unassigned until controller reconciliation"
@@ -335,7 +351,7 @@ kind create cluster \
   --wait 120s
 cluster_created=1
 
-kind load docker-image --name "${cluster_name}" "${image}"
+kind load docker-image --name "${cluster_name}" "${dataplane_image}" "${controller_image}"
 
 curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
   --silent --show-error \
@@ -502,7 +518,7 @@ EOF
 
 helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --namespace "${namespace}" \
-  -f "${image_values}" \
+  -f "${dataplane_image_values}" \
   -f "${repo_root}/deploy/helm/oxibelt/examples/admin-mtls-values.yaml" \
   --set "replicaCount=3" \
   --set "service.type=ClusterIP" \
@@ -569,7 +585,7 @@ wait_for "three bootstrap Pods with the base revision and empty digest" 60 \
 
 helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
-  -f "${image_values}" \
+  -f "${controller_image_values}" \
   --set-string "managedConfigPath=${managed_config_path}" \
   --set-string "watchNamespace=${namespace}" \
   --set-string "rollout.target.namespace=${namespace}" \
@@ -607,9 +623,6 @@ jq -e '
 controller_pod="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json \
   | jq -r '.items | map(select(.metadata.deletionTimestamp == null)) | .[0].metadata.name // empty')"
 [[ -n "${controller_pod}" ]] || die "controller Deployment did not create a live Pod"
-kube -n "${namespace}" exec "pod/${controller_pod}" -- sh -c \
-  'test -r /var/run/secrets/kubernetes.io/serviceaccount/token && test -r /var/run/secrets/kubernetes.io/serviceaccount/ca.crt' \
-  || die "controller Pod cannot read its explicit projected Kubernetes API credential"
 
 # The scoped controller identity has only the reads and status/rollout writes
 # exercised by its reconciliation loop. These checks intentionally use API
@@ -756,9 +769,6 @@ mapfile -t pods < <(jq -r '
 ' <<<"${pods_json}")
 [[ "${#pods[@]}" == "3" ]] || die "expected exactly three non-terminating data-plane Pods"
 for index in "${!pods[@]}"; do
-  kube -n "${namespace}" exec "pod/${pods[${index}]}" -- sh -c \
-    'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token' \
-    || die "default data-plane Pod unexpectedly has a Kubernetes API token"
   check_pod_runtime_proof "${pods[${index}]}" "$((21000 + RANDOM % 10000 + index))" "${revision}" "${digest}"
 done
 verify_admin_mtls "$((25000 + RANDOM % 10000))"

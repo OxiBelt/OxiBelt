@@ -2466,6 +2466,9 @@ mod admin_diagnostics_probe_tests;
 mod admin_json_tests;
 
 #[cfg(test)]
+mod admin_metadata_assertions;
+
+#[cfg(test)]
 mod admin_runtime_introspection_tests;
 
 #[cfg(test)]

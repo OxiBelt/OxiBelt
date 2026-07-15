@@ -408,7 +408,8 @@ jq -e '
       | select(.nodeTaintsPolicy == "Honor")] | length) == 2
     and any(.spec.template.spec.containers[]?;
       .name == "oxibelt"
-        and .lifecycle.preStop.exec.command == ["/bin/sh", "-ec", "kill -USR1 1; exec sleep 10"])
+        and .lifecycle.preStop.exec.command
+          == ["/usr/local/bin/oxibelt", "__lifecycle-prestop", "--wait-seconds", "10"])
     and (.spec.template.spec.topologySpreadConstraints | length) == 2
 ' >/dev/null <<<"${deployment_json}" \
   || die "lifecycle Deployment does not render the expected rolling, distribution, and fixed pre-stop contract"

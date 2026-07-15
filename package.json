@@ -12,8 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
     "lint": "eslint \"devops/**/*.ts\" \"ui/*/source/**/*.ts\"",
     "test": "node --import tsx --test devops/tests/*.test.ts",
-    "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock",
-    "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock --ref \"$OXIBELT_RELEASE_REF\" --revision \"$OXIBELT_RELEASE_REVISION\" --event-name \"$GITHUB_EVENT_NAME\" --release-prerelease \"$OXIBELT_RELEASE_IS_PRERELEASE\" --image-plan-output \"$OXIBELT_IMAGE_PLAN_OUTPUT\" --release-publish",
+    "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock",
+    "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock --ref \"$OXIBELT_RELEASE_REF\" --revision \"$OXIBELT_RELEASE_REVISION\" --event-name \"$GITHUB_EVENT_NAME\" --release-prerelease \"$OXIBELT_RELEASE_IS_PRERELEASE\" --image-plan-output \"$OXIBELT_IMAGE_PLAN_OUTPUT\" --release-publish",
     "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"
   },
   "devDependencies": {

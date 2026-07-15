@@ -6573,9 +6573,28 @@ success_tag = "PersonProof"
     .expect("missing person proof challenge");
   assert_eq!(challenge.status, StatusCode::FORBIDDEN);
   assert!(challenge.body.contains("Person proof required"));
-  assert!(challenge.body.contains("cdn.jsdelivr.net"));
-  assert!(challenge.body.contains("Pretendard"));
   assert!(challenge.body.contains("nonce=\""));
+  for placeholder in [
+    "__CLEARANCE_STORAGE_HTML__",
+    "__CSP_NONCE__",
+    "__DIFFICULTY__",
+    "__EXPIRES_UNIX_MS__",
+    "__MODE__",
+    "__RETURN_PATH_JS__",
+    "__SESSION_HTML__",
+    "__SESSION_JS__",
+    "__SESSION_PATH_HTML__",
+    "__SESSION_PATH_JS__",
+    "__VERIFY_PATH_HTML__",
+    "__VERIFY_PATH_JS__",
+  ] {
+    assert!(
+      !challenge.body.contains(placeholder),
+      "rendered challenge retained placeholder {placeholder}"
+    );
+  }
+  assert!(!challenge.body.contains("http://"));
+  assert!(!challenge.body.contains("https://"));
 
   let csp = extract_response_header(
     &challenge.headers,
@@ -6586,8 +6605,8 @@ success_tag = "PersonProof"
   assert!(csp.contains("worker-src blob:"));
   assert!(csp.contains("script-src 'nonce-"));
   assert!(csp.contains("style-src 'nonce-"));
-  assert!(csp.contains("https://cdn.jsdelivr.net"));
-  assert!(csp.contains("font-src https://cdn.jsdelivr.net"));
+  assert!(csp.contains("font-src 'none'"));
+  assert!(!csp.contains("cdn.jsdelivr.net"));
 
   assert_eq!(
     extract_response_header(

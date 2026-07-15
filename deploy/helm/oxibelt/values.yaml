@@ -1,5 +1,5 @@
 image:
-  repository: oxibelt
+  repository: ghcr.io/oxibelt/oxibelt-dataplane
   tag: latest
   # Set an immutable `sha256:...` digest for verified production rollouts.
   # A non-empty digest takes precedence over `tag`.
@@ -47,10 +47,10 @@ serviceAccount:
 # chart users. The edge-secure-medium v1 preset uses 360 seconds.
 lifecycle:
   terminationGracePeriodSeconds: 0
-  # When enabled, the chart sends the OxiBelt drain-only signal to PID 1 and
-  # waits for this bounded period before Kubernetes sends its termination
-  # signal. The command is chart-owned rather than operator-provided so values
-  # cannot inject an arbitrary lifecycle hook.
+  # When enabled, the chart invokes OxiBelt's bounded internal lifecycle mode.
+  # It sends the drain-only signal to PID 1 and waits before Kubernetes sends
+  # its termination signal. The argv is chart-owned rather than
+  # operator-provided so values cannot inject an arbitrary lifecycle hook.
   preStop:
     enabled: false
     drainSeconds: 300

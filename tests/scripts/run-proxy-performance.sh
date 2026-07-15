@@ -161,6 +161,7 @@ test_label="oxibelt.test.run=${run_id}"
 perf_probe_image="${OXIBELT_PERF_PROBE_IMAGE:-oxibelt/perf-probe:${run_id}}"
 external_benchmark_image="${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-oxibelt/external-benchmarks:${run_id}}"
 oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
+keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${oxibelt_image}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
 openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-1-alpine}"
@@ -3146,7 +3147,7 @@ start_oxibelt() {
       --user 0:0 \
       --mount "type=volume,src=${remote_signer_cert_volume},dst=/cert" \
       --entrypoint sh \
-      "${oxibelt_image}" \
+      "${perf_probe_image}" \
       -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
     docker cp "${tls_dir}/privkey.pem" "${remote_signer_cert_seed_container}:/cert/privkey.pem"
     docker cp "${configs_dir}/oxibelt-${scenario}/cert/keysigner-token.b64" "${remote_signer_cert_seed_container}:/cert/keysigner-token.b64"
@@ -3157,7 +3158,7 @@ start_oxibelt() {
       --user 0:0 \
       --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
       --entrypoint sh \
-      "${oxibelt_image}" \
+      "${perf_probe_image}" \
       -c 'chown 10002:10002 /run/oxibelt-keysigner && chmod 0770 /run/oxibelt-keysigner' >/dev/null
     docker create \
       --name "${remote_signer_container}" \
@@ -3170,7 +3171,7 @@ start_oxibelt() {
       --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
       --mount "type=volume,src=${remote_signer_cert_volume},dst=/etc/oxibelt/cert,readonly" \
       --entrypoint /usr/local/bin/oxibelt-keysigner \
-      "${oxibelt_image}" \
+      "${keysigner_image}" \
       --socket /run/oxibelt-keysigner/sign.sock \
       --key edge-default=/etc/oxibelt/cert/privkey.pem \
       --token-file /etc/oxibelt/cert/keysigner-token.b64 \
@@ -3184,7 +3185,10 @@ start_oxibelt() {
     active_remote_signer_volume="${remote_signer_volume}"
     active_remote_signer_cert_volume="${remote_signer_cert_volume}"
     for _attempt in $(seq 1 100); do
-      if docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+      if docker run --rm \
+        --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
+        --entrypoint sh \
+        "${perf_probe_image}" -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
         break
       fi
       if [[ "$(docker inspect -f '{{.State.Running}}' "${remote_signer_container}" 2>/dev/null || echo false)" != "true" ]]; then
@@ -3192,7 +3196,10 @@ start_oxibelt() {
       fi
       sleep 0.05
     done
-    if ! docker exec "${remote_signer_container}" sh -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
+    if ! docker run --rm \
+      --mount "type=volume,src=${remote_signer_volume},dst=/run/oxibelt-keysigner" \
+      --entrypoint sh \
+      "${perf_probe_image}" -c 'test -S /run/oxibelt-keysigner/sign.sock' >/dev/null 2>&1; then
       fail_with_diagnostics "OxiBelt remote signer socket was not created for ${scenario}"
     fi
     remote_signer_args+=(

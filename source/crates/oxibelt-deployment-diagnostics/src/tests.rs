@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use crate::diagnostics::DiagnosticReport;
+use oxibelt::diagnostics::DiagnosticReport;
 
 use super::{
   MAX_MANIFEST_DOCUMENTS, Manifest,

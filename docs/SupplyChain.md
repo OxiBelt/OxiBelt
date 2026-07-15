@@ -2,15 +2,27 @@
 
 OxiBelt release workflows publish a keyless Cosign signature, SLSA provenance
 v1, and a CycloneDX 1.6 software bill of materials (SBOM) for every official
-platform image and multi-architecture index. Each artifact names the same
-immutable `ghcr.io/oxibelt/oxibelt` digest as its subject. Consumers can verify
+role/platform image and role-specific multi-architecture index. Each artifact
+names the immutable digest of its exact OCI repository and role as its subject.
+Consumers can verify
 the GitHub Actions OIDC issuer, repository, workflow, release tag, source
 commit, hosted builder, and digest independently of a workflow artifact or
 mutable registry tag.
 
 ## Published subjects
 
-Each release publishes attestations for five platform image manifests:
+Each release publishes the following independently attributable image roles:
+
+| Role | OCI repository | Expected executable inventory |
+| --- | --- | --- |
+| `standalone` | `ghcr.io/oxibelt/oxibelt` | `oxibelt`, `oxibeltctl`, `oxibelt-keysigner`, `oxibelt-netport-switcher` |
+| `dataplane` | `ghcr.io/oxibelt/oxibelt-dataplane` | `oxibelt` |
+| `controller` | `ghcr.io/oxibelt/oxibelt-gateway-controller` | `oxibelt-gateway-controller` |
+| `tools` | `ghcr.io/oxibelt/oxibelt-tools` | `oxibeltctl` |
+| `keysigner` | `ghcr.io/oxibelt/oxibelt-keysigner` | `oxibelt-keysigner` |
+
+Every role is built for five platform/CPU-policy variants from the same
+release version and source commit:
 
 | Release artifact | OCI platform | CPU policy |
 | --- | --- | --- |
@@ -21,24 +33,23 @@ Each release publishes attestations for five platform image manifests:
 | `riscv64` | `linux/riscv64` | architecture default |
 
 The reusable `.github/workflows/release-image-arch.yml` workflow signs and
-attests each platform digest. The top-level `.github/workflows/release.yml`
-workflow also signs and attests the digest shared by the versioned `:<version>` and
-`:<version>-alpine-musl` multi-architecture indexes. The index SBOM retains the
+attests each role/platform digest. The top-level `.github/workflows/release.yml`
+workflow also signs and attests each role's digest shared by the versioned
+`:<version>` and `:<version>-alpine-musl` multi-architecture indexes. Each index
+SBOM retains the
 three included platform inventories (`amd64`, `arm64`, and `riscv64`) as
 separate components rather than flattening architecture-specific metadata.
 The `amd64v2` and `amd64v4` images remain architecture-specific variants and
 are not children of the multi-architecture index.
 
-Platform SBOMs include the source commit, the actual BuildKit start and finish
+Role/platform SBOMs include the image role, source commit, the actual BuildKit start and finish
 timestamps (normalized to UTC), builder workflow identity, target platform and
 CPU policy, Rust toolchain version, resolved base-image digests, and the paths,
-versions, and SHA-256 checksums of:
-
-- `oxibelt`
-- `oxibelt-keysigner`
-- `oxibelt-netport-switcher`
-- `oxibeltctl`
-- `oxibelt-gateway-controller`
+versions, and SHA-256 checksums of exactly the executables declared for that
+role in the table above. Build metadata also records the Docker target,
+entrypoint, runtime UID, exposed ports, embedded-asset digests when applicable,
+and the `io.oxibelt.image.role` label. Validation rejects an extra or missing
+binary rather than merging all role inventories.
 
 They also include the operating-system and library inventory discovered by
 Trivy. The index SBOM identifies its child image digests and preserves the
@@ -65,7 +76,7 @@ the existing release admission contract, so retain `--new-bundle-format=false`
 when verifying an official release signature.
 
 ```sh
-image=ghcr.io/oxibelt/oxibelt
+image=ghcr.io/oxibelt/oxibelt-dataplane
 version=15.2.0
 source_commit=FULL_40_CHARACTER_RELEASE_COMMIT_SHA
 release_ref="refs/tags/${version}"
@@ -101,6 +112,7 @@ GitHub Actions workflow build type, `OxiBelt/OxiBelt` source URL, exact
 workflow path and tag ref, a resolved Git dependency with the exact commit,
 the `github-hosted` runner environment, and the exact builder identity.
 
+For another role, change `image` to its exact repository from the role table.
 For a multi-architecture index, resolve `:${version}`, set `workflow` to
 `OxiBelt/OxiBelt/.github/workflows/release.yml`, rebuild `identity`, and run
 the same two verification commands against the index digest.
@@ -111,7 +123,7 @@ Resolve the immutable digest before verification. For example, to verify the
 standard `amd64` image for release `15.2.0`:
 
 ```sh
-image=ghcr.io/oxibelt/oxibelt
+image=ghcr.io/oxibelt/oxibelt-dataplane
 version=15.2.0
 source_commit=FULL_40_CHARACTER_RELEASE_COMMIT_SHA
 platform_digest="$(docker buildx imagetools inspect \
@@ -156,7 +168,7 @@ Resolve and verify the index independently. The versioned `:<version>` and
 `:<version>-alpine-musl` tags are required to resolve to the same digest:
 
 ```sh
-image=ghcr.io/oxibelt/oxibelt
+image=ghcr.io/oxibelt/oxibelt-dataplane
 version=15.2.0
 source_commit=FULL_40_CHARACTER_RELEASE_COMMIT_SHA
 index_digest="$(docker buildx imagetools inspect \
@@ -220,8 +232,10 @@ recording the resolved digest does not itself pin that reference before
 resolution or guarantee that a later rebuild resolves identically. Base-image
 digest pinning is the separate P2-2 control.
 
-The checked-in Sigstore Policy Controller example requires an immutable
-OxiBelt digest, a valid release-workflow keyless signature, and provenance
+The checked-in Sigstore Policy Controller example allowlists the five exact
+official repositories above; it does not use a broad `ghcr.io/oxibelt/*`
+pattern. It requires an immutable OxiBelt digest, a valid release-workflow
+keyless signature, and provenance
 that satisfies the minimum build policy. See
 [`deploy/admission/sigstore/README.md`](../deploy/admission/sigstore/README.md)
 for installation and test instructions. The example does not enforce image
@@ -233,8 +247,8 @@ vulnerability policies.
 
 The release workflow fails closed at each stage:
 
-- A platform SBOM generation or validation failure prevents that platform
-  image from being published.
+- A role/platform SBOM generation or validation failure prevents that exact
+  role image and its multi-architecture index from being published.
 - A platform canonical version tag is pushed before its signature and
   attestations can be attached. If signing, attestation, or independent OCI
   verification fails, the workflow stops before promoting mutable aliases or

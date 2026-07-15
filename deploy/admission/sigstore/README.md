@@ -9,7 +9,9 @@ image only when its immutable digest has both:
   repository, release workflow, tag ref, and 40-character source commit satisfy
   the minimum SLSA Build Level 2 policy.
 
-The policy matches only `ghcr.io/oxibelt/oxibelt@sha256:*`. The controller is
+The policy matches only the exact standalone, data-plane, Gateway Controller,
+tools, and keysigner repositories under `ghcr.io/oxibelt/`. It deliberately
+does not trust the broader `ghcr.io/oxibelt/*` namespace. The controller is
 configured with `failurePolicy: Fail` and `no-match-policy: deny`, and policy
 enforcement is enabled only in namespaces labeled
 `policy.sigstore.dev/include=true`. A labeled namespace therefore needs a
@@ -61,7 +63,7 @@ OxiBelt Helm charts:
 
 ```yaml
 image:
-  repository: ghcr.io/oxibelt/oxibelt
+  repository: ghcr.io/oxibelt/oxibelt-dataplane
   digest: sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
 ```
 
@@ -81,7 +83,8 @@ To reproduce it with an already signed release:
 
 ```sh
 tests/scripts/run-image-admission-policy.sh \
-  --trusted-image ghcr.io/oxibelt/oxibelt@sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
+  --trusted-image ghcr.io/oxibelt/oxibelt-dataplane@sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST \
+  --trusted-image ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
 ```
 
 Before the first P2-4 release exists, the rejection half can be exercised on

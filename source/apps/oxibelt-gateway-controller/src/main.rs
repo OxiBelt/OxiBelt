@@ -1,31 +1,31 @@
 use anyhow::{Context, bail};
 use clap::Parser;
 
-#[path = "oxibelt_gateway_controller/cli.rs"]
+#[path = "cli.rs"]
 mod cli;
-#[path = "oxibelt_gateway_controller/gateway_policy.rs"]
+#[path = "gateway_policy.rs"]
 mod gateway_policy;
-#[path = "oxibelt_gateway_controller/health.rs"]
+#[path = "health.rs"]
 mod health;
-#[path = "oxibelt_gateway_controller/model.rs"]
+#[path = "model.rs"]
 mod model;
-#[path = "oxibelt_gateway_controller/render.rs"]
+#[path = "render.rs"]
 mod render;
-#[path = "oxibelt_gateway_controller/rollout.rs"]
+#[path = "rollout.rs"]
 mod rollout;
-#[path = "oxibelt_gateway_controller/rollout_client.rs"]
+#[path = "rollout_client.rs"]
 mod rollout_client;
-#[path = "oxibelt_gateway_controller/rollout_decision.rs"]
+#[path = "rollout_decision.rs"]
 mod rollout_decision;
-#[path = "oxibelt_gateway_controller/rollout_patch.rs"]
+#[path = "rollout_patch.rs"]
 mod rollout_patch;
-#[path = "oxibelt_gateway_controller/rollout_status.rs"]
+#[path = "rollout_status.rs"]
 mod rollout_status;
-#[path = "oxibelt_gateway_controller/status.rs"]
+#[path = "status.rs"]
 mod status;
-#[path = "oxibelt_gateway_controller/translate.rs"]
+#[path = "translate.rs"]
 mod translate;
-#[path = "oxibelt_gateway_controller/watch.rs"]
+#[path = "watch.rs"]
 mod watch;
 
 use cli::{Cli, Command};

@@ -469,7 +469,9 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "terminationGracePeriodSeconds",
     "topologySpreadConstraints:",
     "lifecycle:",
-    "kill -USR1 1; exec sleep %d",
+    "- /usr/local/bin/oxibelt",
+    "- __lifecycle-prestop",
+    "- --wait-seconds",
     "oxibelt.deploymentAffinity",
     "emptyDir: {}",
     "OXIBELT_ADMIN_TOKEN",
@@ -546,7 +548,9 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "path: quic-host-key.b64",
     "terminationGracePeriodSeconds",
     "lifecycle:",
-    "kill -USR1 1; exec sleep %d",
+    "- /usr/local/bin/oxibelt",
+    "- __lifecycle-prestop",
+    "- --wait-seconds",
     "oxibelt.validateKubernetesServiceAccount",
     "automountServiceAccountToken: false",
     "oxibelt.kubernetesApiAccessEnabled",
@@ -890,9 +894,24 @@ fn sigstore_admission_assets_enforce_signature_and_provenance_identity() {
   let signature = read_yaml("deploy/admission/sigstore/oxibelt-signature-policy.yaml");
   assert_eq!(signature["apiVersion"], "policy.sigstore.dev/v1beta1");
   assert_eq!(signature["spec"]["mode"], "enforce");
-  assert_eq!(
-    signature["spec"]["images"][0]["glob"],
-    "ghcr.io/oxibelt/oxibelt@sha256:*"
+  let expected_images = [
+    "ghcr.io/oxibelt/oxibelt@sha256:*",
+    "ghcr.io/oxibelt/oxibelt-dataplane@sha256:*",
+    "ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:*",
+    "ghcr.io/oxibelt/oxibelt-tools@sha256:*",
+    "ghcr.io/oxibelt/oxibelt-keysigner@sha256:*",
+  ];
+  let signature_images = signature["spec"]["images"]
+    .as_array()
+    .expect("signature policy images should be a list");
+  assert_eq!(signature_images.len(), expected_images.len());
+  for (actual, expected) in signature_images.iter().zip(expected_images) {
+    assert_eq!(actual["glob"], expected);
+  }
+  assert!(
+    !signature_images
+      .iter()
+      .any(|image| image["glob"] == "ghcr.io/oxibelt/*@sha256:*")
   );
   assert_eq!(
     signature["spec"]["authorities"][0]["keyless"]["identities"][0]["issuer"],
@@ -902,6 +921,13 @@ fn sigstore_admission_assets_enforce_signature_and_provenance_identity() {
   let provenance = read_yaml("deploy/admission/sigstore/oxibelt-provenance-policy.yaml");
   assert_eq!(provenance["apiVersion"], "policy.sigstore.dev/v1beta1");
   assert_eq!(provenance["spec"]["mode"], "enforce");
+  let provenance_images = provenance["spec"]["images"]
+    .as_array()
+    .expect("provenance policy images should be a list");
+  assert_eq!(provenance_images.len(), expected_images.len());
+  for (actual, expected) in provenance_images.iter().zip(expected_images) {
+    assert_eq!(actual["glob"], expected);
+  }
   assert_eq!(
     provenance["spec"]["authorities"][0]["signatureFormat"],
     "bundle"

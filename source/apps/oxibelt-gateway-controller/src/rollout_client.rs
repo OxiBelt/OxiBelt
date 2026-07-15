@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use http::{Method, Request, StatusCode};
-use oxibelt::control_http::{full_body, uri_from_url};
+use oxibelt_control_http::{full_body, uri_from_url};
 use serde_json::Value;
 use tracing::{info, warn};
 

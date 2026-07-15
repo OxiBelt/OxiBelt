@@ -17,7 +17,10 @@ use super::admin_control::ADMIN_CONFIG_BODY_LIMIT;
 use super::admin_ops::OXIRULE_REPLAY_BODY_LIMIT;
 
 const ADMIN_API_VERSION: &str = "v1";
-const OPENAPI_JSON: &str = include_str!("../../../docs/admin-openapi.json");
+const OPENAPI_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/admin-openapi.json"));
+const SOURCE_REVISION: &str = env!("OXIBELT_SOURCE_REVISION");
+const PERSON_PROOF_ASSET_SHA256: &str = env!("OXIBELT_PERSON_PROOF_ASSET_SHA256");
+const ADMIN_OPENAPI_SHA256: &str = env!("OXIBELT_ADMIN_OPENAPI_SHA256");
 
 pub(super) fn admin_metadata_response(
   snapshot: &AppSnapshot,
@@ -115,6 +118,10 @@ fn version_response() -> Response<ProxyBody> {
       "api_version": ADMIN_API_VERSION,
       "package_name": env!("CARGO_PKG_NAME"),
       "package_version": env!("CARGO_PKG_VERSION"),
+      "source_revision": SOURCE_REVISION,
+      "person_proof_api_version": crate::waf::PERSON_PROOF_API_VERSION,
+      "person_proof_asset_sha256": PERSON_PROOF_ASSET_SHA256,
+      "admin_openapi_sha256": ADMIN_OPENAPI_SHA256,
     }),
   )
 }

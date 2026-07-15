@@ -28,7 +28,7 @@ fn read_repo_file(path: &str) -> String {
 }
 
 fn openapi() -> Value {
-  serde_json::from_str(&read_repo_file("docs/admin-openapi.json"))
+  serde_json::from_str(&read_repo_file("source/assets/admin-openapi.json"))
     .expect("Admin OpenAPI document should parse as JSON")
 }
 

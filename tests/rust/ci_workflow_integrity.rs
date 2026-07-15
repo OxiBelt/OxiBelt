@@ -340,6 +340,14 @@ fn dockerfile_text() -> String {
     .expect("Alpine Dockerfile should be readable")
 }
 
+fn dockerfile_stage<'a>(dockerfile: &'a str, name: &str) -> &'a str {
+  let marker = format!(" AS {name}\n");
+  let (_, body) = dockerfile
+    .split_once(&marker)
+    .unwrap_or_else(|| panic!("Dockerfile should define stage {name}"));
+  body.split("\nFROM ").next().unwrap_or(body)
+}
+
 fn comparator_dockerfile_text(comparator: &str) -> String {
   fs::read_to_string(repo_root().join(format!(
     "tests/docker/performance_comparators/Dockerfile.{comparator}"
@@ -620,8 +628,10 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
   let dockerfile = dockerfile_text();
   let script = docker_image_artifact_build_script_text();
-  let manifest = fs::read_to_string(repo_root().join("source/Cargo.toml"))
-    .expect("source/Cargo.toml should be readable");
+  let workspace_manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
+    .expect("workspace Cargo.toml should be readable");
+  let cli_manifest = fs::read_to_string(repo_root().join("source/apps/oxibeltctl/Cargo.toml"))
+    .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
     "ARG RUST_BUILDER_IMAGE=rust:1.96.0-trixie",
@@ -635,7 +645,7 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     "CC_aarch64_unknown_linux_musl=musl-gcc",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
     "cargo build --locked --release",
-    "--target \"${rust_target}\"",
+    "--target \"${OXIBELT_BUILD_RUST_TARGET}\"",
   ] {
     assert!(
       dockerfile.contains(expected),
@@ -656,9 +666,11 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
   }
 
   assert!(
-    manifest.contains(
+    cli_manifest.contains(
       "cfg(all(target_arch = \"aarch64\", target_os = \"linux\", target_env = \"musl\"))"
-    ) && manifest.contains("openssl-sys = { version = \"0.9.117\", features = [\"vendored\"] }"),
+    ) && cli_manifest.contains("openssl-sys.workspace = true")
+      && workspace_manifest
+        .contains("openssl-sys = { version = \"0.9.117\", features = [\"vendored\"] }"),
     "ARM64 musl should build a target-compatible vendored OpenSSL"
   );
 }
@@ -684,42 +696,97 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
 fn alpine_dockerfile_bundles_operations_binaries() {
   let dockerfile = dockerfile_text();
 
-  assert!(
-    dockerfile.contains("--bin oxibeltctl"),
-    "source/ops/Dockerfile.alpine should build the oxibeltctl operations CLI"
-  );
-  assert!(
-    dockerfile.contains("--bin oxibelt-netport-switcher"),
-    "source/ops/Dockerfile.alpine should build the privileged netport switcher"
-  );
-  assert!(
-    dockerfile.contains("cp \"target/${rust_target}/release/oxibeltctl\" /tmp/oxibeltctl"),
-    "source/ops/Dockerfile.alpine should stage the musl oxibeltctl build"
-  );
-  assert!(
-    dockerfile.contains(
-      "cp \"target/${rust_target}/release/oxibelt-netport-switcher\" /tmp/oxibelt-netport-switcher"
+  for (package, binary, builder) in [
+    (
+      "oxibelt-gateway-controller",
+      "oxibelt-gateway-controller",
+      "controller-builder",
     ),
-    "source/ops/Dockerfile.alpine should stage the musl oxibelt-netport-switcher build"
-  );
-  assert!(
-    dockerfile.contains("COPY --from=builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl"),
-    "source/ops/Dockerfile.alpine should copy oxibeltctl into the runtime image"
-  );
-  assert!(
-    dockerfile.contains(
-      "COPY --from=builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher"
+    (
+      "oxibelt-keysigner",
+      "oxibelt-keysigner",
+      "keysigner-builder",
     ),
-    "source/ops/Dockerfile.alpine should copy oxibelt-netport-switcher into the runtime image"
-  );
-  assert!(
-    dockerfile.contains("chmod 0755 /usr/local/bin/oxibeltctl"),
-    "source/ops/Dockerfile.alpine should make oxibeltctl executable"
-  );
-  assert!(
-    dockerfile.contains("chmod 0755 /usr/local/bin/oxibelt-netport-switcher"),
-    "source/ops/Dockerfile.alpine should make oxibelt-netport-switcher executable"
-  );
+    (
+      "oxibelt-netport-switcher",
+      "oxibelt-netport-switcher",
+      "netport-builder",
+    ),
+    ("oxibeltctl", "oxibeltctl", "tools-builder"),
+  ] {
+    assert!(
+      dockerfile.contains(&format!(
+        "cargo build --locked --release -p {package} --bin {binary}"
+      )),
+      "source/ops/Dockerfile.alpine should explicitly build {package}/{binary}"
+    );
+    assert!(
+      dockerfile.contains(&format!("FROM builder AS {builder}")),
+      "source/ops/Dockerfile.alpine should isolate the {binary} build stage"
+    );
+  }
+
+  for expected in [
+    "FROM scratch AS role-metadata",
+    "FROM role-metadata AS dataplane",
+    "FROM role-metadata AS controller",
+    "FROM role-metadata AS tools",
+    "FROM role-metadata AS keysigner",
+    "FROM runtime AS standalone",
+    "io.oxibelt.image.role=\"dataplane\"",
+    "io.oxibelt.image.role=\"controller\"",
+    "io.oxibelt.image.role=\"tools\"",
+    "io.oxibelt.image.role=\"keysigner\"",
+    "io.oxibelt.image.role=\"standalone\"",
+    "COPY --from=controller-builder /tmp/oxibelt-gateway-controller /usr/local/bin/oxibelt-gateway-controller",
+    "COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl",
+    "COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner",
+    "COPY --from=netport-builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "source/ops/Dockerfile.alpine should preserve role contract {expected}"
+    );
+  }
+
+  for (role, expected_binaries) in [
+    (
+      "dataplane",
+      vec!["COPY --from=runtime-builder /tmp/oxibelt /usr/local/bin/oxibelt"],
+    ),
+    (
+      "controller",
+      vec![
+        "COPY --from=controller-builder /tmp/oxibelt-gateway-controller /usr/local/bin/oxibelt-gateway-controller",
+      ],
+    ),
+    (
+      "tools",
+      vec!["COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl"],
+    ),
+    (
+      "keysigner",
+      vec!["COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner"],
+    ),
+    (
+      "standalone",
+      vec![
+        "COPY --from=runtime-builder /tmp/oxibelt /usr/local/bin/oxibelt",
+        "COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner",
+        "COPY --from=netport-builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher",
+        "COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl",
+      ],
+    ),
+  ] {
+    let actual_binaries = dockerfile_stage(&dockerfile, role)
+      .lines()
+      .filter(|line| line.starts_with("COPY ") && line.contains(" /usr/local/bin/"))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      actual_binaries, expected_binaries,
+      "Dockerfile stage {role} should contain exactly its declared executable inventory"
+    );
+  }
   assert!(
     dockerfile.contains(
       "ENTRYPOINT [\"/usr/local/bin/oxibelt\", \"--config\", \"/etc/oxibelt/config/oxibelt.toml\"]"
@@ -778,6 +845,31 @@ fn source_structure_job_stays_independent() {
   assert!(
     workflow.contains("tests/scripts/check-rust-module-size.sh"),
     "source-structure should keep running Rust module size checks"
+  );
+  assert!(
+    workflow.contains("bash tests/scripts/check-cargo-package-boundaries.sh"),
+    "source-structure should enforce the data-plane Cargo package boundary"
+  );
+}
+
+#[test]
+fn person_proof_asset_regeneration_uses_the_frozen_workspace_lockfile() {
+  let source_structure = workflow_job_text(&workflow_text(), "source-structure");
+  for expected in [
+    "corepack prepare pnpm@11.13.0 --activate",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "pnpm --filter @oxibelt/person-proof-ui build",
+    "pnpm --filter @oxibelt/person-proof-ui check:openapi",
+    "git diff --exit-code source/assets/person-proof-challenge.html",
+  ] {
+    assert!(
+      source_structure.contains(expected),
+      "source-structure must retain deterministic Person Proof asset check {expected}"
+    );
+  }
+  assert!(
+    !source_structure.contains("npm install --prefix ui/person-proof"),
+    "Person Proof regeneration must not bypass the root pnpm lockfile"
   );
 }
 
@@ -841,6 +933,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "generate-test-matrices",
     "linux-target-builds",
     "docker-alpine-musl-image-amd64",
+    "docker-alpine-musl-kubernetes-role-image-amd64",
     "docker-alpine-comparator-musl-image-amd64",
     "docker-performance-probe-image",
     "docker-external-benchmark-image",
@@ -1139,6 +1232,7 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
     "generate-test-matrices",
     "linux-target-builds",
     "docker-alpine-musl-image-amd64",
+    "docker-alpine-musl-kubernetes-role-image-amd64",
     "docker-alpine-comparator-musl-image-amd64",
     "docker-performance-probe-image",
     "docker-external-benchmark-image",
@@ -1162,6 +1256,8 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
 fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
+  let role_image_job =
+    workflow_job_text(&workflow, "docker-alpine-musl-kubernetes-role-image-amd64");
   let job = jobs
     .get("kubernetes-immutable-rollout")
     .expect("workflow should define the Kubernetes immutable rollout job");
@@ -1170,9 +1266,24 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   assert_eq!(
     job.needs,
-    vec!["docker-alpine-musl-image-amd64".to_owned()],
-    "the Kubernetes rollout job should consume the already-scanned AMD64 OxiBelt image artifact"
+    vec!["docker-alpine-musl-kubernetes-role-image-amd64".to_owned()],
+    "the Kubernetes rollout job should consume distinct AMD64 data-plane and controller artifacts"
   );
+  for expected in [
+    "name: Docker Kubernetes role image (Alpine musl, amd64, ${{ matrix.role }})",
+    "role: dataplane",
+    "artifact_prefix: oxibelt-dataplane",
+    "role: controller",
+    "artifact_prefix: oxibelt-gateway-controller",
+    "tests/scripts/build-docker-image-artifact.sh",
+    "\"${{ matrix.role }}\"",
+    "name: ${{ matrix.artifact_prefix }}-alpine-musl-amd64-image",
+  ] {
+    assert!(
+      role_image_job.contains(expected),
+      "Kubernetes role-image CI job should include {expected}"
+    );
+  }
   for expected in [
     "name: Kubernetes immutable Gateway rollout",
     "runs-on: ubuntu-26.04",
@@ -1193,9 +1304,12 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "version: v0.31.0",
     "kubectl_version: v1.31.14",
     "install_only: true",
-    "tests/scripts/select-amd64-docker-image-artifact.sh auto",
-    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
-    "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
+    "name: oxibelt-dataplane-alpine-musl-amd64-image",
+    "name: oxibelt-gateway-controller-alpine-musl-amd64-image",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-dataplane-image/oxibelt-dataplane-alpine-musl-amd64.tar\"",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-gateway-controller-image/oxibelt-gateway-controller-alpine-musl-amd64.tar\"",
+    "OXIBELT_DATAPLANE_DOCKER_IMAGE: oxibelt-dataplane:alpine-musl-amd64",
+    "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE: oxibelt-gateway-controller:alpine-musl-amd64",
     "tests/scripts/run-kubernetes-immutable-rollout.sh",
   ] {
     assert!(
@@ -1212,12 +1326,17 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "sha256sum --check --status",
     "CI event values are untrusted input",
     "OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS must be a decimal value from 60 through 900",
-    "image-values.yaml",
+    "dataplane-image-values.yaml",
+    "controller-image-values.yaml",
     "kind create cluster",
     "kind load docker-image",
     "kind delete cluster --name \"${cluster_name}\"",
     "docker version --format '{{.Server.Version}}'",
-    "docker image inspect \"${image}\"",
+    "docker image inspect \"${dataplane_image}\"",
+    "docker image inspect \"${controller_image}\"",
+    "OXIBELT_DATAPLANE_DOCKER_IMAGE",
+    "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE",
+    "data-plane and controller tests require distinct role image references",
     "--set \"replicaCount=3\"",
     "admin-mtls-values.yaml",
     "oxibelt-admin-server",
@@ -1231,7 +1350,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "automountServiceAccountToken == false",
     "kube-api-access",
     "serviceAccountToken.expirationSeconds == 3600",
-    "test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token",
+    "default data-plane Pod template must not mount a Kubernetes API credential",
     "assert_controller_can_i",
     "auth can-i --quiet",
     "controller ServiceAccount unexpectedly has permission",
@@ -2301,7 +2420,7 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
 fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions() {
   let workflow = release_workflow_text();
   let arch_workflow = release_image_arch_workflow_text();
-  let _: serde_json::Value =
+  let parsed_workflow: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
   let _: serde_json::Value = serde_saphyr::from_str(&arch_workflow)
     .expect("release image architecture workflow should parse as YAML");
@@ -2363,6 +2482,116 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let attest_job_text = workflow_job_text(&arch_workflow, "attest");
   let verify_job_text = workflow_job_text(&arch_workflow, "verify");
   let promote_job_text = workflow_job_text(&arch_workflow, "promote");
+  let expected_role_rows = BTreeSet::from([
+    (
+      "standalone".to_owned(),
+      "ghcr.io/oxibelt/oxibelt".to_owned(),
+      "oxibelt".to_owned(),
+    ),
+    (
+      "dataplane".to_owned(),
+      "ghcr.io/oxibelt/oxibelt-dataplane".to_owned(),
+      "oxibelt-dataplane".to_owned(),
+    ),
+    (
+      "controller".to_owned(),
+      "ghcr.io/oxibelt/oxibelt-gateway-controller".to_owned(),
+      "oxibelt-gateway-controller".to_owned(),
+    ),
+    (
+      "tools".to_owned(),
+      "ghcr.io/oxibelt/oxibelt-tools".to_owned(),
+      "oxibelt-tools".to_owned(),
+    ),
+    (
+      "keysigner".to_owned(),
+      "ghcr.io/oxibelt/oxibelt-keysigner".to_owned(),
+      "oxibelt-keysigner".to_owned(),
+    ),
+  ]);
+  let caller_matrix = &parsed_workflow["jobs"]["release-image-arch"]["strategy"]["matrix"];
+  let caller_roles = caller_matrix["image_role"]
+    .as_array()
+    .expect("release caller should define an image_role axis")
+    .iter()
+    .map(|role| role.as_str().expect("image roles should be strings"))
+    .collect::<BTreeSet<_>>();
+  let caller_arches = caller_matrix["artifact_arch"]
+    .as_array()
+    .expect("release caller should define an artifact_arch axis")
+    .iter()
+    .map(|arch| arch.as_str().expect("artifact arches should be strings"))
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    caller_roles,
+    BTreeSet::from([
+      "controller",
+      "dataplane",
+      "keysigner",
+      "standalone",
+      "tools"
+    ]),
+    "release caller should define exactly the five image roles"
+  );
+  assert_eq!(
+    caller_arches,
+    BTreeSet::from(["amd64", "amd64v2", "amd64v4", "arm64", "riscv64"]),
+    "release caller should define exactly the five architecture rows"
+  );
+
+  for job_id in [
+    "release-image-arch",
+    "ghcr-manifest-publish",
+    "ghcr-index-sbom",
+    "ghcr-index-attest",
+    "ghcr-index-verify",
+    "ghcr-index-promote",
+  ] {
+    let includes = parsed_workflow["jobs"][job_id]["strategy"]["matrix"]["include"]
+      .as_array()
+      .unwrap_or_else(|| panic!("{job_id} should define a matrix include list"));
+    let actual_role_rows = includes
+      .iter()
+      .filter(|row| row.get("image_role").is_some())
+      .map(|row| {
+        (
+          row["image_role"]
+            .as_str()
+            .expect("role row should define image_role")
+            .to_owned(),
+          row["image"]
+            .as_str()
+            .expect("role row should define image")
+            .to_owned(),
+          row["artifact_prefix"]
+            .as_str()
+            .expect("role row should define artifact_prefix")
+            .to_owned(),
+        )
+      })
+      .collect::<BTreeSet<_>>();
+    assert_eq!(
+      actual_role_rows, expected_role_rows,
+      "{job_id} should cover exactly the five release image roles"
+    );
+  }
+
+  let admission_role_rows =
+    parsed_workflow["jobs"]["ghcr-index-admission-verify"]["strategy"]["matrix"]["include"]
+      .as_array()
+      .expect("admission verification should define a matrix include list")
+      .iter()
+      .map(|row| {
+        row["image_role"]
+          .as_str()
+          .expect("admission row should define image_role")
+      })
+      .collect::<BTreeSet<_>>();
+  assert_eq!(
+    admission_role_rows,
+    BTreeSet::from(["controller", "dataplane"]),
+    "live admission should cover exactly the deployable split images"
+  );
 
   assert!(
     workflow.contains("release:")
@@ -2497,16 +2726,19 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "git show -s --format=%ct \"${head_commit}\"",
     "date -u --date=\"@${commit_epoch}\" '+%Y-%m-%dT%H:%M:%SZ'",
     "echo \"release_ref=${release_ref}\"",
-    "git diff --name-only HEAD -- . ':(exclude)Cargo.lock' ':(exclude)source/Cargo.toml'",
+    "Cargo.lock|Cargo.toml|source/Cargo.toml|source/apps/*/Cargo.toml|source/crates/*/Cargo.toml",
     "tag.startswith(\"v\")",
     "build release tag",
     "ghcr.io/oxibelt/oxibelt",
-    "if plan[\"schemaVersion\"] != 3:",
+    "if plan[\"schemaVersion\"] != 4:",
+    "expected_roles = {",
+    "release plan must contain exactly 25 unique role/architecture artifacts",
+    "release plan must contain exactly 10 unique role manifests",
+    "\"roleScoped\": True",
     "if plan[\"version\"] != tag:",
-    "def expected_artifact_tags(arch):",
-    "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
+    "if artifact != expected_artifact:",
     "expected_manifests = {",
-    "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
+    "if manifests[(role, name)] != expected_manifest:",
     "expected_sbom = {",
     "expected_supply_chain = {",
     "https://token.actions.githubusercontent.com",
@@ -2518,6 +2750,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "--ignoreConfig",
     "attested releases must run from ${release_ref}@${tag_commit}",
     "image-plan.json",
+    "install -D -m 0644 Cargo.toml \"${workspace_root}/Cargo.toml\"",
+    "install -D -m 0644 Cargo.lock \"${workspace_root}/Cargo.lock\"",
+    "cargo metadata --locked --no-deps --format-version 1",
   ] {
     assert!(
       validate_job_text.contains(expected),
@@ -2526,11 +2761,16 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   }
 
   for expected in [
-    "name: Release image (${{ matrix.artifact_arch }})",
+    "name: Release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})",
     "uses: ./.github/workflows/release-image-arch.yml",
     "fail-fast: false",
     "artifact_arch: ${{ matrix.artifact_arch }}",
-    "artifact_name: ${{ matrix.artifact_name }}",
+    "artifact_name: ${{ format('{0}-alpine-musl-{1}-image', matrix.artifact_prefix, matrix.artifact_arch) }}",
+    "artifact_prefix: ${{ matrix.artifact_prefix }}",
+    "image_role: ${{ matrix.image_role }}",
+    "image: ${{ matrix.image }}",
+    "sbom_artifact_name: ${{ format('{0}-release-sbom-{1}', matrix.artifact_prefix, matrix.artifact_arch) }}",
+    "sbom_file: ${{ format('{0}-release-{1}.cdx.json', matrix.artifact_prefix, matrix.artifact_arch) }}",
     "platform: ${{ matrix.platform }}",
     "runner: ${{ matrix.runner }}",
     "qemu_platforms: ${{ matrix.qemu_platforms }}",
@@ -2547,7 +2787,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     );
   }
 
-  for (artifact_arch, artifact_name, image_tar, _) in OXIBELT_IMAGE_ARTIFACTS {
+  for (artifact_arch, _, _, _) in OXIBELT_IMAGE_ARTIFACTS {
     let (platform, runner, qemu_platforms) = match *artifact_arch {
       "amd64v2" | "amd64" | "amd64v4" => ("linux/amd64", "ubuntu-26.04", "\"\""),
       "arm64" => ("linux/arm64", "ubuntu-26.04-arm", "\"\""),
@@ -2556,7 +2796,6 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     };
     for expected in [
       format!("artifact_arch: {artifact_arch}"),
-      format!("artifact_name: {artifact_name}"),
       format!("platform: {platform}"),
       format!("runner: {runner}"),
       format!("qemu_platforms: {qemu_platforms}"),
@@ -2566,16 +2805,48 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
         "release image matrix caller should include {expected}"
       );
     }
-    assert!(
-      arch_workflow.contains(image_tar),
-      "reusable release image workflow should validate {image_tar}"
-    );
+  }
+
+  for (image_role, image, artifact_prefix) in [
+    ("standalone", "ghcr.io/oxibelt/oxibelt", "oxibelt"),
+    (
+      "dataplane",
+      "ghcr.io/oxibelt/oxibelt-dataplane",
+      "oxibelt-dataplane",
+    ),
+    (
+      "controller",
+      "ghcr.io/oxibelt/oxibelt-gateway-controller",
+      "oxibelt-gateway-controller",
+    ),
+    ("tools", "ghcr.io/oxibelt/oxibelt-tools", "oxibelt-tools"),
+    (
+      "keysigner",
+      "ghcr.io/oxibelt/oxibelt-keysigner",
+      "oxibelt-keysigner",
+    ),
+  ] {
+    for expected in [
+      format!("image_role: {image_role}"),
+      format!("image: {image}"),
+      format!("artifact_prefix: {artifact_prefix}"),
+    ] {
+      assert!(
+        arch_caller_job_text.contains(&expected),
+        "release image matrix caller should include {expected}"
+      );
+    }
   }
 
   for expected in [
     "workflow_call:",
     "artifact_arch:",
     "artifact_name:",
+    "artifact_prefix:",
+    "image_role:",
+    "image:",
+    "sbom_artifact_name:",
+    "sbom_file:",
     "platform:",
     "runner:",
     "qemu_platforms:",
@@ -2603,6 +2874,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Checkout release ref",
     "ref: ${{ inputs.release_ref }}",
     "Apply release metadata",
+    "cp -R \"${RUNNER_TEMP}/oxibelt-release-metadata/workspace/.\" .",
     "if: inputs.qemu_platforms != ''",
     "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8",
     "Pre-pull Docker BuildKit image",
@@ -2610,6 +2882,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "version: v0.35.0",
     "tests/scripts/build-docker-image-artifact.sh",
+    "\"${OXIBELT_IMAGE_ROLE}\"",
     "Validate Docker image artifact",
     "Upload Docker image artifact",
     "-build-metadata.json",
@@ -2624,6 +2897,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "org.opencontainers.image.revision",
     "org.opencontainers.image.source",
     "targetCpu",
+    "io.oxibelt.image.role",
+    "if plan[\"schemaVersion\"] != 4:",
   ] {
     assert!(
       build_job_text.contains(expected),
@@ -2665,11 +2940,15 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "docker cp",
     "Enrich and validate platform SBOM",
     "release-tools/release_sbom.js\" platform",
+    "--role \"${OXIBELT_IMAGE_ROLE}\"",
     "--digest \"${build_digest}\"",
     "--generated \"${generated}\"",
     "Upload platform SBOM",
     "if-no-files-found: error",
     "16777216",
+    "name: ${{ inputs.sbom_artifact_name }}",
+    "path: ${{ runner.temp }}/oxibelt-sbom/${{ inputs.sbom_file }}",
+    "select(.role == $role) | .binaries[]",
   ] {
     assert!(
       scan_job_text.contains(expected),
@@ -2699,11 +2978,11 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "OXIBELT_RELEASE_KIND: ${{ inputs.release_kind }}",
     "\"${OXIBELT_RELEASE_VERSION}\" \"${OXIBELT_RELEASE_KIND}\" \"${OXIBELT_RELEASE_REVISION}\"",
     "if plan[\"tag\"] != version or plan[\"version\"] != version or plan[\"kind\"] != kind or plan[\"revision\"] != revision:",
-    "def expected_artifact_tags(arch):",
+    "if plan[\"schemaVersion\"] != 4:",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "GHCR_TOKEN: ${{ secrets.ghcr_token }}",
     "printf '%s' \"${GHCR_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
-    r#"jq -c --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.artifactArch == $arch)'"#,
+    r#"jq -c --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch)'"#,
     "canonical_tag=\"$(jq -r '.canonicalGhcrTag' <<<\"${artifact_json}\")\"",
     "refusing to replace canonical tag",
     "docker push \"${canonical_tag}\"",
@@ -2735,12 +3014,13 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Validate immutable platform signing subject",
     ".supplyChain.minimumSlsaBuildLevel == 2",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
-    "subject-name: ghcr.io/oxibelt/oxibelt",
+    "subject-name: ${{ inputs.image }}",
     "subject-digest: ${{ needs.publish.outputs.digest }}",
     "Publish platform build provenance",
     "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
     "create-storage-record: false",
+    "sbom-path: ${{ runner.temp }}/oxibelt-sbom/${{ inputs.sbom_file }}",
   ] {
     assert!(
       attest_job_text.contains(expected),
@@ -2779,6 +3059,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Download expected platform SBOM",
     "--slurpfile expected \"${EXPECTED_SBOM}\"",
     "release_sbom.js\" verify",
+    "--role \"${OXIBELT_IMAGE_ROLE}\"",
   ] {
     assert!(
       verify_job_text.contains(expected),
@@ -2812,11 +3093,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}",
     "\"${OXIBELT_RELEASE_VERSION}\" \"${OXIBELT_RELEASE_KIND}\" \"${OXIBELT_RELEASE_REVISION}\"",
     "if plan[\"tag\"] != version or plan[\"version\"] != version or plan[\"kind\"] != kind or plan[\"revision\"] != revision:",
+    "if plan[\"schemaVersion\"] != 4:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
     "printf '%s' \"${GITHUB_TOKEN}\" | docker login ghcr.io -u \"${GITHUB_ACTOR}\" --password-stdin",
-    ".manifests[].canonicalGhcrTag",
+    ".manifests[] | select(.role == $role) | .canonicalGhcrTag",
     "docker buildx imagetools create --prefer-index=true --tag",
     "refusing to replace canonical index",
     "actual_descriptors=",
@@ -2828,6 +3110,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "build_finished_on=${index_build_finished_on}",
     "echo \"digest=${digest}\"",
     "} >> \"${GITHUB_OUTPUT}\"",
+    "name: ${{ matrix.artifact_prefix }}-release-index-metadata",
+    "{schemaVersion: 1, role: $role, image: $image, digest: $digest",
   ] {
     assert!(
       manifest_job_text.contains(expected),
@@ -2848,8 +3132,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "--signer-workflow \"${platform_workflow}\"",
     "--bundle-from-oci",
     "release_sbom.js\" index",
-    "OXIBELT_INDEX_DIGEST: ${{ needs.ghcr-manifest-publish.outputs.digest }}",
+    "name: ${{ matrix.artifact_prefix }}-release-index-metadata",
+    ".schemaVersion == 1",
+    ".role == $role",
+    ".image == $image",
     "--digest \"${OXIBELT_INDEX_DIGEST}\"",
+    "--role \"${OXIBELT_IMAGE_ROLE}\"",
     "--generated \"${generated}\"",
     "--build-started-on \"${OXIBELT_INDEX_BUILD_STARTED_ON}\"",
     "--build-finished-on \"${OXIBELT_INDEX_BUILD_FINISHED_ON}\"",
@@ -2857,6 +3145,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Upload aggregate index SBOM",
     "if-no-files-found: error",
     "16777216",
+    "pattern: ${{ matrix.artifact_prefix }}-release-sbom-*",
+    "name: ${{ matrix.artifact_prefix }}-release-sbom-index",
   ] {
     assert!(
       index_sbom_job_text.contains(expected),
@@ -2875,8 +3165,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "cosign-release: v3.1.1",
     "Validate immutable index signing subject",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
-    "subject-digest: ${{ needs.ghcr-manifest-publish.outputs.digest }}",
-    "sbom-path: ${{ runner.temp }}/oxibelt-index-sbom/oxibelt-release-index.cdx.json",
+    "subject-name: ${{ matrix.image }}",
+    "subject-digest: ${{ steps.identity.outputs.digest }}",
+    "sbom-path: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json",
     "Publish index build provenance",
     "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
@@ -2903,6 +3194,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Download expected index SBOM",
     "--slurpfile expected \"${EXPECTED_SBOM}\"",
     "release_sbom.js\" verify",
+    "--role \"${OXIBELT_IMAGE_ROLE}\"",
+    "name: ${{ matrix.artifact_prefix }}-release-sbom-index",
   ] {
     assert!(
       index_verify_job_text.contains(expected),
@@ -2928,6 +3221,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "tests/scripts/check-image-admission-policy.sh",
     "tests/scripts/run-image-admission-policy.sh",
     "--trusted-image \"${OXIBELT_GHCR_IMAGE}@${OXIBELT_INDEX_DIGEST}\"",
+    "OXIBELT_IMAGE_ROLE: ${{ matrix.image_role }}",
+    "image_role: dataplane",
+    "image_role: controller",
+    ".schemaVersion == 1",
+    ".role == $role",
+    ".image == $image",
   ] {
     assert!(
       index_admission_job_text.contains(expected),
@@ -2949,7 +3248,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "packages: write",
     "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "version: v0.35.0",
-    ".manifests[].aliasGhcrTags[]",
+    "select(.role == $role) | .aliasGhcrTags[]",
     "docker buildx imagetools create --prefer-index=true --tag",
   ] {
     assert!(
@@ -3014,15 +3313,24 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
   let arch_workflow = release_image_arch_workflow_text();
   let caller_job_text = workflow_job_text(&workflow, "release-image-arch");
 
-  for (artifact_arch, artifact_name, image_tar, _image_tag) in OXIBELT_IMAGE_ARTIFACTS {
+  for (artifact_arch, _, _, _) in OXIBELT_IMAGE_ARTIFACTS {
     assert!(
-      caller_job_text.contains(&format!("artifact_arch: {artifact_arch}"))
-        && caller_job_text.contains(&format!("artifact_name: {artifact_name}")),
+      caller_job_text.contains(&format!("artifact_arch: {artifact_arch}")),
       "release-image-arch matrix should declare {artifact_arch}"
     );
+  }
+
+  for (image_role, artifact_prefix) in [
+    ("standalone", "oxibelt"),
+    ("dataplane", "oxibelt-dataplane"),
+    ("controller", "oxibelt-gateway-controller"),
+    ("tools", "oxibelt-tools"),
+    ("keysigner", "oxibelt-keysigner"),
+  ] {
     assert!(
-      workflow.contains(image_tar) || arch_workflow.contains(image_tar),
-      "release workflows should know {image_tar}"
+      caller_job_text.contains(&format!("image_role: {image_role}"))
+        && caller_job_text.contains(&format!("artifact_prefix: {artifact_prefix}")),
+      "release-image-arch matrix should declare {image_role}"
     );
   }
 
@@ -3046,6 +3354,10 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "ghcr-index-attest",
     "ghcr-index-verify",
     "ghcr-index-admission-verify",
+    "ghcr-index-promote",
+    "schemaVersion == 4",
+    "--role \"${OXIBELT_IMAGE_ROLE}\"",
+    "${{ matrix.artifact_prefix }}-release-sbom-index",
     ":latest",
     r#"aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []"#,
   ] {
@@ -3070,7 +3382,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
-    setup_count, 7,
+    setup_count, 8,
     "workflow should keep pre-pull coverage aligned with every Buildx setup"
   );
   assert_eq!(

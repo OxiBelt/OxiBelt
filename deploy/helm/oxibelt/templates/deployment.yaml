@@ -99,9 +99,10 @@ spec:
           preStop:
             exec:
               command:
-              - /bin/sh
-              - -ec
-              - {{ printf "kill -USR1 1; exec sleep %d" (int .Values.lifecycle.preStop.drainSeconds) | quote }}
+              - /usr/local/bin/oxibelt
+              - __lifecycle-prestop
+              - --wait-seconds
+              - {{ int .Values.lifecycle.preStop.drainSeconds | quote }}
         {{- end }}
         env:
         # Requests are only used when the container has no cgroup hard cap;

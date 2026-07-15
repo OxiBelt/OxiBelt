@@ -48,6 +48,17 @@ export type VersioningResult = {
 
 type TomlRecord = Record<string, unknown>
 
+const ProductionPackageNames = [
+  'oxibelt',
+  'oxibelt-control-http',
+  'oxibelt-control-protocol',
+  'oxibelt-deployment-diagnostics',
+  'oxibelt-gateway-controller',
+  'oxibelt-keysigner',
+  'oxibelt-netport-switcher',
+  'oxibeltctl'
+]
+
 function IsRecord(Value: unknown): Value is TomlRecord {
   return typeof Value === 'object' && Value !== null && !Array.isArray(Value)
 }
@@ -102,21 +113,25 @@ function ParseToml(Content: string, FilePath: string): TomlRecord {
   }
 }
 
-function PackageTable(Manifest: TomlRecord, ManifestPath: string): TomlRecord {
-  const PackageData = Manifest.package
+function WorkspacePackageTable(Manifest: TomlRecord, ManifestPath: string): TomlRecord {
+  const Workspace = Manifest.workspace
+  if (!IsRecord(Workspace)) {
+    throw new Error(`${ManifestPath} must contain a [workspace] table`)
+  }
+  const PackageData = Workspace.package
 
   if (!IsRecord(PackageData)) {
-    throw new Error(`${ManifestPath} must contain a [package] table`)
+    throw new Error(`${ManifestPath} must contain a [workspace.package] table`)
   }
 
   return PackageData
 }
 
-function PackageSectionRange(Content: string, ManifestPath: string): [number, number] {
-  const PackageMatch = /^\[package\]\s*$/m.exec(Content)
+function WorkspacePackageSectionRange(Content: string, ManifestPath: string): [number, number] {
+  const PackageMatch = /^\[workspace[.]package\]\s*$/m.exec(Content)
 
   if (PackageMatch === null || PackageMatch.index === undefined) {
-    throw new Error(`${ManifestPath} must contain a [package] table`)
+    throw new Error(`${ManifestPath} must contain a [workspace.package] table`)
   }
 
   const Start = PackageMatch.index
@@ -127,23 +142,23 @@ function PackageSectionRange(Content: string, ManifestPath: string): [number, nu
   return [Start, End]
 }
 
-function PackageStringField(PackageData: TomlRecord, ManifestPath: string, FieldName: string): string {
+function WorkspacePackageStringField(PackageData: TomlRecord, ManifestPath: string, FieldName: string): string {
   const Value = PackageData[FieldName]
 
   if (typeof Value !== 'string') {
-    throw new Error(`${ManifestPath} [package] table must contain string ${FieldName}`)
+    throw new Error(`${ManifestPath} [workspace.package] table must contain string ${FieldName}`)
   }
 
   return Value
 }
 
-function ReplacePackageVersion(Content: string, ManifestPath: string, Version: string): string {
-  const [Start, End] = PackageSectionRange(Content, ManifestPath)
+function ReplaceWorkspacePackageVersion(Content: string, ManifestPath: string, Version: string): string {
+  const [Start, End] = WorkspacePackageSectionRange(Content, ManifestPath)
   const Section = Content.slice(Start, End)
-  const NextSection = Section.replace(/^\s*version\s*=\s*"[^"]*"\s*$/m, `version = "${Version}"`)
+  const NextSection = Section.replace(/^[ \t]*version[ \t]*=[ \t]*"[^"]*"[ \t]*$/m, `version = "${Version}"`)
 
   if (NextSection === Section) {
-    throw new Error(`${ManifestPath} [package] table must contain a version field`)
+    throw new Error(`${ManifestPath} [workspace.package] table must contain a version field`)
   }
 
   return `${Content.slice(0, Start)}${NextSection}${Content.slice(End)}`
@@ -221,13 +236,20 @@ function UpdateLockPackageVersion(
 ): string {
   const [Start, End] = LockPackageBlockRange(Content, LockfilePath, PackageName)
   const Block = Content.slice(Start, End)
-  const NextBlock = Block.replace(/^\s*version\s*=\s*"[^"]*"\s*$/m, `version = "${Version}"`)
+  const NextBlock = Block.replace(/^[ \t]*version[ \t]*=[ \t]*"[^"]*"[ \t]*$/m, `version = "${Version}"`)
 
   if (NextBlock === Block) {
     throw new Error(`${LockfilePath} ${PackageName} package block must contain a version field`)
   }
 
   return `${Content.slice(0, Start)}${NextBlock}${Content.slice(End)}`
+}
+
+function UpdateProductionLockVersions(Content: string, LockfilePath: string, Version: string): string {
+  return ProductionPackageNames.reduce(
+    (Current, PackageName) => UpdateLockPackageVersion(Current, LockfilePath, PackageName, Version),
+    Content
+  )
 }
 
 function IsStrictStableSemver(Version: string): boolean {
@@ -246,21 +268,22 @@ function AssertCommittedState(
 ): string {
   const Manifest = ParseToml(Fs.readFileSync(ManifestPath, 'utf8'), ManifestPath)
   const Lockfile = ParseToml(Fs.readFileSync(LockfilePath, 'utf8'), LockfilePath)
-  const ManifestPackage = PackageTable(Manifest, ManifestPath)
-  const ManifestName = PackageStringField(ManifestPackage, ManifestPath, 'name')
-  const ManifestVersion = PackageStringField(ManifestPackage, ManifestPath, 'version')
-  const LockVersion = LockPackageVersion(Lockfile, LockfilePath, PackageName)
+  const ManifestPackage = WorkspacePackageTable(Manifest, ManifestPath)
+  const ManifestVersion = WorkspacePackageStringField(ManifestPackage, ManifestPath, 'version')
 
-  if (ManifestName !== PackageName) {
-    throw new Error(`${ManifestPath} package name must be ${PackageName}`)
+  if (PackageName !== 'oxibelt') {
+    throw new Error('release package name must be oxibelt')
   }
 
   if (!IsStrictStableSemver(ManifestVersion)) {
     throw new Error(`${ManifestPath} committed package version must use strict stable SemVer`)
   }
 
-  if (LockVersion !== ManifestVersion) {
-    throw new Error(`${LockfilePath} ${PackageName} version must match ${ManifestPath}`)
+  for (const ProductionPackageName of ProductionPackageNames) {
+    const LockVersion = LockPackageVersion(Lockfile, LockfilePath, ProductionPackageName)
+    if (LockVersion !== ManifestVersion) {
+      throw new Error(`${LockfilePath} ${ProductionPackageName} version must match ${ManifestPath}`)
+    }
   }
 
   return ManifestVersion
@@ -293,15 +316,14 @@ export function RunVersioning(Options: VersioningOptions): VersioningResult {
   AssertReleaseEventAllowed(ReleaseTag, Options.eventName, Options.releasePrerelease)
 
   const Version = ReleaseTag.tag
-  const NextManifest = ReplacePackageVersion(
+  const NextManifest = ReplaceWorkspacePackageVersion(
     Fs.readFileSync(ManifestPath, 'utf8'),
     ManifestPath,
     Version
   )
-  const NextLockfile = UpdateLockPackageVersion(
+  const NextLockfile = UpdateProductionLockVersions(
     Fs.readFileSync(LockfilePath, 'utf8'),
     LockfilePath,
-    Options.packageName,
     Version
   )
 

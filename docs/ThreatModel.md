@@ -18,7 +18,7 @@ This document is the repository-wide security model for those product and
 deployment surfaces. Exact behavior and configuration syntax remain in the
 [technical specification](Specification.md),
 [configuration reference](Configuration.md), [Admin API reference](AdminAPI.md),
-[Admin OpenAPI document](admin-openapi.json), and
+[Admin OpenAPI document](../source/assets/admin-openapi.json), and
 [Gateway API reference](GatewayAPI.md). The
 [feature lifecycle matrix](FeatureStatus.md) is authoritative for whether a
 feature is supported, experimental, reserved, or removed. The
@@ -82,7 +82,8 @@ Gateway Controller
     -> Data-Plane Rollout
 
 Build System
-    -> Container Registry
+    -> Standalone / Data-Plane / Controller / Tools / Keysigner Images
+    -> Container Registry (exact role repositories)
     -> Kubernetes Admission
 ```
 
@@ -90,6 +91,14 @@ Additional local boundaries are the OxiBelt process to
 `oxibelt-keysigner` Unix socket, the unprivileged process to the
 `oxibelt-netport-switcher` bind broker, and OxiBelt to mounted configuration,
 certificate, OxiRule, cache, and runtime-state directories.
+
+The standalone and minimal data-plane artifacts use the same `oxibelt`
+runtime binary, including co-located Admin and Person Proof. The minimal image
+removes operator, Kubernetes, and helper executables; it is not a reduced
+security-feature variant. Controller, tools, and keysigner images have exact
+single-binary inventories. Release validation, role labels, per-role SBOMs,
+signatures, and provenance make cross-role leakage or substitution observable,
+but operators must still select the intended immutable repository digest.
 
 ### Listener and entry-point inventory
 
@@ -334,8 +343,8 @@ canonical references.
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Plugin or custom frontend compromise | Operator rulepack/frontend/provider/handler → policy, browser, or external data | OxiRule is declarative and bounded with no general scripting/import callback sandbox; rulepack provenance can be pinned. Custom frontend URLs are same-origin routes, provider/handler exchanges are bounded, and failures follow explicit policy. | There is no native plugin security boundary. A hostile rulepack changes policy, a frontend can steal browser-visible proof/clearance data, a provider controls proof verdicts, and an external cache can observe or forge cached objects within its authority. |
-| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and image metadata are validated, build and package-write jobs are separated, images are scanned, and keyless signatures, SLSA provenance, and CycloneDX SBOMs bind workflow/source claims and inventory to immutable platform and index digests. | A compromised dependency, runner, maintainer, pinned action commit, release credential, or workflow can produce a malicious image and matching valid evidence. Signing and provenance do not prove source review, dependency safety, or reproducibility. |
-| Malicious or stale container image | Registry/tag/deployment → running data plane | Official image scope is documented, OCI source/revision labels are checked during release, both Helm charts support digest references, consumers can verify exact release identities, and an opt-in fail-closed admission example requires the signature and minimum provenance policy. | Mutable tags can still select stale content before digest resolution, and a correctly signed old release can pass identity policy. Digest selection, freshness, rollback controls, registry access, and optional vulnerability policy remain operator responsibilities. |
+| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and role metadata are validated, build and package-write jobs are separated, images are scanned, and per-role keyless signatures, SLSA provenance, and CycloneDX SBOMs bind exact executable inventories and workflow/source claims to immutable platform and index digests. | A compromised dependency, runner, maintainer, pinned action commit, release credential, or workflow can produce a malicious image and matching valid evidence. Signing and provenance do not prove source review, dependency safety, or reproducibility. |
+| Malicious or stale container image, including role confusion | Registry/tag/deployment → running data plane or control plane | Official image scope is an exact five-repository allowlist, OCI role/source/revision labels and executable inventories are checked during release, both Helm charts select separate role repositories and support digests, and an opt-in fail-closed admission example requires signature and minimum provenance policy. | Mutable tags can still select stale content before digest resolution, and a correctly signed old or wrong-role release can pass identity policy if an operator permits that exact repository. Digest and role selection, freshness, rollback controls, registry access, and optional vulnerability policy remain operator responsibilities. |
 
 ### Shared-state compromise impact
 
@@ -368,8 +377,9 @@ the mapped certificate alone. With IPM enabled, explicit deny takes precedence, 
 the default is deny. Mutations emit structured audit attempts with the actor,
 principal, peer, operation, target, outcome, and safe request summary. The
 canonical endpoint and action inventory is the
-[Admin OpenAPI document](admin-openapi.json); new mutation families must define
-equivalent authorization, concurrency/replay behavior, and audit semantics.
+[Admin OpenAPI document](../source/assets/admin-openapi.json); new mutation
+families must define equivalent authorization, concurrency/replay behavior, and
+audit semantics.
 
 | Mutation family | Authorization and concurrency requirement | Audit and residual requirement |
 | --- | --- | --- |

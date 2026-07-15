@@ -12,7 +12,7 @@ admission_dir="${repo_root}/deploy/admission/sigstore"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 profile_name=""
-trusted_image=""
+trusted_images=()
 reject_only=0
 untrusted_image="ghcr.io/oxibelt/oxibelt@sha256:2d8e02725a33880ec416bd24b55d43e01ce32797a945d14e45e8e04fd09b546b"
 timeout_seconds="${OXIBELT_IMAGE_ADMISSION_TIMEOUT_SECONDS:-420}"
@@ -86,14 +86,14 @@ pull_chart() {
 }
 
 usage() {
-  echo "Usage: $0 (--trusted-image ghcr.io/oxibelt/oxibelt@sha256:<64-lowercase-hex> | --reject-only) [--untrusted-image IMAGE@DIGEST]" >&2
+  echo "Usage: $0 (--trusted-image OFFICIAL_IMAGE@sha256:<64-lowercase-hex> [...] | --reject-only) [--untrusted-image IMAGE@DIGEST]" >&2
 }
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --trusted-image)
       [[ "$#" -ge 2 ]] || { usage; exit 2; }
-      trusted_image="$2"
+      trusted_images+=("$2")
       shift 2
       ;;
     --untrusted-image)
@@ -117,16 +117,20 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [[ "${reject_only}" -eq 1 ]]; then
-  [[ -z "${trusted_image}" ]] || die "--reject-only cannot be combined with --trusted-image"
+  [[ "${#trusted_images[@]}" -eq 0 ]] || die "--reject-only cannot be combined with --trusted-image"
 else
-  [[ "${trusted_image}" =~ ^ghcr[.]io/oxibelt/oxibelt@sha256:[0-9a-f]{64}$ ]] \
-    || die "trusted image must be the official OxiBelt repository at an immutable digest"
+  [[ "${#trusted_images[@]}" -gt 0 ]] || die "at least one --trusted-image is required"
 fi
 [[ "${untrusted_image}" =~ ^ghcr[.]io/oxibelt/oxibelt@sha256:[0-9a-f]{64}$ ]] \
   || die "untrusted fixture must be the official OxiBelt repository at an immutable digest"
-if [[ -n "${trusted_image}" ]]; then
+declare -A seen_trusted_images=()
+for trusted_image in "${trusted_images[@]}"; do
+  [[ "${trusted_image}" =~ ^ghcr[.]io/oxibelt/oxibelt(-dataplane|-gateway-controller|-tools|-keysigner)?@sha256:[0-9a-f]{64}$ ]] \
+    || die "trusted image must use an exact official OxiBelt role repository and immutable digest"
   [[ "${trusted_image}" != "${untrusted_image}" ]] || die "trusted and untrusted fixtures must differ"
-fi
+  [[ -z "${seen_trusted_images[${trusted_image}]:-}" ]] || die "duplicate trusted image: ${trusted_image}"
+  seen_trusted_images["${trusted_image}"]=1
+done
 if ! [[ "${timeout_seconds}" =~ ^[0-9]+$ ]] || (( timeout_seconds < 120 || timeout_seconds > 900 )); then
   die "OXIBELT_IMAGE_ADMISSION_TIMEOUT_SECONDS must be from 120 through 900"
 fi
@@ -188,13 +192,15 @@ kubectl_cmd apply -f "${admission_dir}/oxibelt-provenance-policy.yaml"
 
 kubectl_cmd create namespace "${test_namespace}"
 kubectl_cmd label namespace "${test_namespace}" policy.sigstore.dev/include=true
-if [[ -n "${trusted_image}" ]]; then
-  kubectl_cmd -n "${test_namespace}" create deployment oxibelt-trusted \
+trusted_index=0
+for trusted_image in "${trusted_images[@]}"; do
+  kubectl_cmd -n "${test_namespace}" create deployment "oxibelt-trusted-${trusted_index}" \
     --image="${trusted_image}" \
     --dry-run=server \
-    -o yaml >"${work_dir}/trusted.yaml" \
-    || die "current signed OxiBelt digest was rejected"
-fi
+    -o yaml >"${work_dir}/trusted-${trusted_index}.yaml" \
+    || die "current signed OxiBelt role digest was rejected: ${trusted_image}"
+  trusted_index="$((trusted_index + 1))"
+done
 
 if kubectl_cmd -n "${test_namespace}" create deployment oxibelt-untrusted \
   --image="${untrusted_image}" \
@@ -205,8 +211,8 @@ fi
 grep -E 'denied the request|validation failed|failed policy' "${work_dir}/untrusted.log" >/dev/null \
   || { cat "${work_dir}/untrusted.log" >&2; die "untrusted fixture failed without a policy denial"; }
 
-if [[ -n "${trusted_image}" ]]; then
-  echo "Kubernetes image admission accepted ${trusted_image} and rejected ${untrusted_image}."
+if [[ "${#trusted_images[@]}" -gt 0 ]]; then
+  echo "Kubernetes image admission accepted ${#trusted_images[@]} signed role image(s) and rejected ${untrusted_image}."
 else
   echo "Kubernetes image admission rejected ${untrusted_image}."
 fi

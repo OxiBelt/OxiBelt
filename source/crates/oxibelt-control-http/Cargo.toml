@@ -1,0 +1,24 @@
+[package]
+name = "oxibelt-control-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+aws-lc-rs.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+url.workspace = true
+webpki-roots.workspace = true
+
+[lints]
+workspace = true

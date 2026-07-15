@@ -1,0 +1,37 @@
+[package]
+name = "oxibelt-gateway-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+autobins = false
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+glob.workspace = true
+http.workspace = true
+oxibelt-control-http.workspace = true
+oxibelt-control-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+oxibelt.workspace = true
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "oxibelt-gateway-controller"
+path = "src/main.rs"

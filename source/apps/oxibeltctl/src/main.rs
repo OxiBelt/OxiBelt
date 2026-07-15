@@ -4,64 +4,64 @@ use anyhow::bail;
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, read_token};
 
-#[path = "oxibeltctl/cli.rs"]
+#[path = "cli.rs"]
 mod cli;
-#[path = "oxibeltctl/config_compat.rs"]
+#[path = "config_compat.rs"]
 mod config_compat;
-#[path = "oxibeltctl/doctor.rs"]
+#[path = "doctor.rs"]
 mod doctor;
-#[path = "oxibeltctl/doctor_plan.rs"]
+#[path = "doctor_plan.rs"]
 mod doctor_plan;
 #[cfg(test)]
-#[path = "oxibeltctl/doctor_plan_tests.rs"]
+#[path = "doctor_plan_tests.rs"]
 mod doctor_plan_tests;
-#[path = "oxibeltctl/dynamic_policy_plan.rs"]
+#[path = "dynamic_policy_plan.rs"]
 mod dynamic_policy_plan;
-#[path = "oxibeltctl/ipm_plan.rs"]
+#[path = "ipm_plan.rs"]
 mod ipm_plan;
-#[path = "oxibeltctl/mutation_signer.rs"]
+#[path = "mutation_signer.rs"]
 mod mutation_signer;
 #[cfg(test)]
-#[path = "oxibeltctl/mutation_signer_tests.rs"]
+#[path = "mutation_signer_tests.rs"]
 mod mutation_signer_tests;
-#[path = "oxibeltctl/output.rs"]
+#[path = "output.rs"]
 mod output;
-#[path = "oxibeltctl/plan.rs"]
+#[path = "plan.rs"]
 mod plan;
-#[path = "oxibeltctl/pool_plan.rs"]
+#[path = "pool_plan.rs"]
 mod pool_plan;
-#[path = "oxibeltctl/profile_catalog.rs"]
+#[path = "profile_catalog.rs"]
 mod profile_catalog;
-#[path = "oxibeltctl/resource_hint.rs"]
+#[path = "resource_hint.rs"]
 mod resource_hint;
-#[path = "oxibeltctl/rulepack.rs"]
+#[path = "rulepack.rs"]
 mod rulepack;
-#[path = "oxibeltctl/rulepack_adapt.rs"]
+#[path = "rulepack_adapt.rs"]
 mod rulepack_adapt;
-#[path = "oxibeltctl/rulepack_catalog.rs"]
+#[path = "rulepack_catalog.rs"]
 mod rulepack_catalog;
-#[path = "oxibeltctl/rulepack_catalog_index.rs"]
+#[path = "rulepack_catalog_index.rs"]
 mod rulepack_catalog_index;
-#[path = "oxibeltctl/rulepack_catalog_registry.rs"]
+#[path = "rulepack_catalog_registry.rs"]
 mod rulepack_catalog_registry;
-#[path = "oxibeltctl/rulepack_fit.rs"]
+#[path = "rulepack_fit.rs"]
 mod rulepack_fit;
-#[path = "oxibeltctl/rulepack_install.rs"]
+#[path = "rulepack_install.rs"]
 mod rulepack_install;
-#[path = "oxibeltctl/rulepack_openpgp.rs"]
+#[path = "rulepack_openpgp.rs"]
 mod rulepack_openpgp;
-#[path = "oxibeltctl/rulepack_plan.rs"]
+#[path = "rulepack_plan.rs"]
 mod rulepack_plan;
-#[path = "oxibeltctl/rulepack_prompt.rs"]
+#[path = "rulepack_prompt.rs"]
 mod rulepack_prompt;
-#[path = "oxibeltctl/rulepack_render.rs"]
+#[path = "rulepack_render.rs"]
 mod rulepack_render;
-#[path = "oxibeltctl/rulepack_url.rs"]
+#[path = "rulepack_url.rs"]
 mod rulepack_url;
-#[path = "oxibeltctl/rulepack_values.rs"]
+#[path = "rulepack_values.rs"]
 mod rulepack_values;
 #[cfg(test)]
-#[path = "oxibeltctl/test_support.rs"]
+#[path = "test_support.rs"]
 mod test_support;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};

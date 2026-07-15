@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::bail;
 use serde_json::Value;
 
-use crate::diagnostics::{DiagnosticReport, DiagnosticSeverity};
+use oxibelt::diagnostics::{DiagnosticReport, DiagnosticSeverity};
 
 use super::Manifest;
 

@@ -118,11 +118,19 @@ certification.
 ## Official Container Images
 
 The only official OxiBelt container images are artifacts published by OxiBelt
-release workflows under `ghcr.io/oxibelt/oxibelt`, including versioned,
-architecture-specific, and multi-architecture variants. Security support follows
-the underlying release, not a mutable tag alias. `latest`, major, Alpine musl,
-beta, and build tags are official artifacts but do not create additional
-supported release lines.
+release workflows in these exact repositories:
+
+- `ghcr.io/oxibelt/oxibelt`
+- `ghcr.io/oxibelt/oxibelt-dataplane`
+- `ghcr.io/oxibelt/oxibelt-gateway-controller`
+- `ghcr.io/oxibelt/oxibelt-tools`
+- `ghcr.io/oxibelt/oxibelt-keysigner`
+
+This scope does not trust the broader `ghcr.io/oxibelt/*` namespace. It includes
+versioned, architecture-specific, and multi-architecture variants. Security
+support follows the underlying release, not a mutable tag alias. `latest`,
+major, Alpine musl, beta, and build tags are official artifacts but do not
+create additional supported release lines.
 
 Use an image digest when deploying or reporting an image vulnerability so the
 artifact is unambiguous. Unqualified `oxibelt:latest`, forks, mirrors, local
@@ -130,8 +138,8 @@ builds, test helper images, and third-party base images are not official OxiBelt
 images.
 
 Release workflows publish a keyless Cosign signature, SLSA provenance v1, and
-an OCI-linked CycloneDX SBOM attestation for each platform image digest and the
-multi-architecture index digest. Follow [Release Supply-Chain
+an OCI-linked CycloneDX SBOM attestation for each role/platform image digest
+and each role-specific multi-architecture index digest. Follow [Release Supply-Chain
 Verification](docs/SupplyChain.md) to resolve a digest and verify its expected
 issuer, source, workflow, tag, commit, hosted builder, signature, provenance,
 and SBOM. The checked-in Kubernetes admission example can enforce the signature

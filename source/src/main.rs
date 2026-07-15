@@ -1,7 +1,8 @@
 //! Binary entrypoint for loading configuration and starting the OxiBelt runtime.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
@@ -17,6 +18,9 @@ use runtime_diagnostics::{
 
 const COMPAT_RUNTIME_HINT: &str =
   "set runtime.main_runtime = \"tokio_hyper\" or \"auto\" to avoid Compio in this environment";
+const LIFECYCLE_PRESTOP_COMMAND: &str = "__lifecycle-prestop";
+const LIFECYCLE_PRESTOP_MIN_WAIT_SECONDS: u64 = 1;
+const LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt")]
@@ -123,12 +127,49 @@ struct OxiRuleFalsePositiveArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+  let args = std::env::args_os().collect::<Vec<_>>();
+  if let Some(wait_seconds) = parse_lifecycle_prestop_args(&args)? {
+    return run_lifecycle_prestop(wait_seconds);
+  }
   let cli = Cli::parse();
   if let Some(command) = &cli.command {
     return handle_command(command, cli.config.as_ref());
   }
 
   run_server(cli)
+}
+
+fn parse_lifecycle_prestop_args(args: &[OsString]) -> anyhow::Result<Option<u64>> {
+  if args.get(1).and_then(|value| value.to_str()) != Some(LIFECYCLE_PRESTOP_COMMAND) {
+    return Ok(None);
+  }
+  if args.len() != 4 || args.get(2).and_then(|value| value.to_str()) != Some("--wait-seconds") {
+    bail!("{LIFECYCLE_PRESTOP_COMMAND} requires exactly --wait-seconds <SECONDS>");
+  }
+  let raw = args[3]
+    .to_str()
+    .ok_or_else(|| anyhow::anyhow!("lifecycle pre-stop wait must be valid UTF-8"))?;
+  let wait_seconds = raw
+    .parse::<u64>()
+    .with_context(|| format!("invalid lifecycle pre-stop wait {raw}"))?;
+  if !(LIFECYCLE_PRESTOP_MIN_WAIT_SECONDS..=LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS)
+    .contains(&wait_seconds)
+  {
+    bail!(
+      "lifecycle pre-stop wait must be between {LIFECYCLE_PRESTOP_MIN_WAIT_SECONDS} and {LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS} seconds"
+    );
+  }
+  Ok(Some(wait_seconds))
+}
+
+fn run_lifecycle_prestop(wait_seconds: u64) -> anyhow::Result<()> {
+  nix::sys::signal::kill(
+    nix::unistd::Pid::from_raw(1),
+    nix::sys::signal::Signal::SIGUSR1,
+  )
+  .context("failed to signal OxiBelt PID 1 for pre-drain")?;
+  std::thread::sleep(Duration::from_secs(wait_seconds));
+  Ok(())
 }
 
 fn run_server(cli: Cli) -> anyhow::Result<()> {
@@ -592,6 +633,56 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn lifecycle_args(values: &[&str]) -> Vec<OsString> {
+    std::iter::once(OsString::from("oxibelt"))
+      .chain(values.iter().map(OsString::from))
+      .collect()
+  }
+
+  #[test]
+  fn lifecycle_prestop_parser_accepts_bounded_waits() {
+    assert_eq!(
+      parse_lifecycle_prestop_args(&lifecycle_args(&[
+        LIFECYCLE_PRESTOP_COMMAND,
+        "--wait-seconds",
+        "1",
+      ]))
+      .expect("minimum wait should parse"),
+      Some(1)
+    );
+    assert_eq!(
+      parse_lifecycle_prestop_args(&lifecycle_args(&[
+        LIFECYCLE_PRESTOP_COMMAND,
+        "--wait-seconds",
+        "86400",
+      ]))
+      .expect("maximum wait should parse"),
+      Some(86_400)
+    );
+  }
+
+  #[test]
+  fn lifecycle_prestop_parser_rejects_unsafe_or_ambiguous_arguments() {
+    for values in [
+      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "0"],
+      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "86401"],
+      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "invalid"],
+      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "1", "extra"],
+      vec![LIFECYCLE_PRESTOP_COMMAND, "--other", "1"],
+    ] {
+      assert!(parse_lifecycle_prestop_args(&lifecycle_args(&values)).is_err());
+    }
+  }
+
+  #[test]
+  fn lifecycle_prestop_parser_leaves_public_cli_unchanged() {
+    assert_eq!(
+      parse_lifecycle_prestop_args(&lifecycle_args(&["--config", "oxibelt.toml"]))
+        .expect("public CLI should not be intercepted"),
+      None
+    );
+  }
 
   #[test]
   fn auto_main_runtime_treats_polling_compio_driver_as_unsafe() {
