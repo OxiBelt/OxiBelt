@@ -39,6 +39,15 @@ pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Resp
         snapshot,
       ));
     }
+    if !snapshot.runtime_health.is_ready() {
+      return Some(with_rollout_identity_headers(
+        text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "runtime subsystem unavailable",
+        ),
+        snapshot,
+      ));
+    }
     return Some(with_rollout_identity_headers(
       text_response(StatusCode::OK, "ready"),
       snapshot,

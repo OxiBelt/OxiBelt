@@ -315,14 +315,18 @@ async fn read_framed_lookup(
         if prefix.len() < FRAME_PREFIX_BYTES {
           continue;
         }
-        let len = u64::from_be_bytes(prefix[..].try_into().expect("prefix length checked"));
+        let prefix: [u8; FRAME_PREFIX_BYTES] = prefix[..]
+          .try_into()
+          .map_err(|_| anyhow!("external cache frame prefix is incomplete"))?;
+        let len = u64::from_be_bytes(prefix);
         let len = usize::try_from(len).context("external cache metadata length overflows usize")?;
         if len == 0 || len > max_metadata_bytes {
           bail!("external cache metadata length exceeds configured limit");
         }
         metadata_len = Some(len);
       }
-      let len = metadata_len.expect("metadata length set after prefix");
+      let len =
+        metadata_len.ok_or_else(|| anyhow!("external cache frame omitted its metadata length"))?;
       if metadata_bytes.len() < len {
         let take = (len - metadata_bytes.len()).min(chunk.len());
         metadata_bytes.extend_from_slice(&chunk.split_to(take));
@@ -384,7 +388,8 @@ async fn read_framed_lookup(
       .await
       .context("failed to flush external cache temporary body")?;
     drop(file);
-    let file = temp_file.expect("temporary file is retained with file body");
+    let file =
+      temp_file.ok_or_else(|| anyhow!("external cache temporary body file is unavailable"))?;
     return Ok(ExternalCacheLookupHit {
       metadata,
       body: ExternalCacheBody::TemporaryFile(file),

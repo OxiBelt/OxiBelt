@@ -4,10 +4,11 @@
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
+use arc_swap::ArcSwap;
 use http::header::ACCEPT;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -39,7 +40,7 @@ pub struct AsnRuntime {
 
 struct AsnRuntimeInner {
   config: ClientIdentityAsnConfig,
-  database: Arc<RwLock<Arc<AsnDatabase>>>,
+  database: Arc<ArcSwap<AsnDatabase>>,
   status: Arc<Mutex<AsnRuntimeStatus>>,
   control_http: ControlHttpClient,
   worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -117,11 +118,7 @@ impl AsnRuntime {
 
   pub fn lookup(&self, ip: IpAddr) -> Option<u32> {
     let inner = self.inner.as_ref()?;
-    inner
-      .database
-      .read()
-      .expect("ASN database lock poisoned")
-      .lookup(ip)
+    inner.database.load().lookup(ip)
   }
 
   pub fn status(&self) -> AsnRuntimeStatus {
@@ -241,7 +238,7 @@ impl AsnRuntime {
     Self {
       inner: Some(Arc::new(AsnRuntimeInner {
         config,
-        database: Arc::new(RwLock::new(Arc::new(database))),
+        database: Arc::new(ArcSwap::from_pointee(database)),
         status: Arc::new(Mutex::new(status)),
         control_http,
         worker: Mutex::new(None),
@@ -523,9 +520,7 @@ async fn refresh_loop(inner: Weak<AsnRuntimeInner>, interval: Duration) {
     {
       Ok(loaded) => {
         let entries = loaded.database.entries;
-        if let Ok(mut database) = inner.database.write() {
-          *database = Arc::new(loaded.database);
-        }
+        inner.database.store(Arc::new(loaded.database));
         if let Ok(mut status) = inner.status.lock() {
           *status = AsnRuntimeStatus {
             status: if loaded.database_stale {

@@ -158,7 +158,7 @@ impl Config {
           false,
         )?;
         let normalized = http::HeaderName::from_bytes(mapping.header.as_bytes())
-          .expect("validated header name")
+          .with_context(|| format!("invalid external_auth claim header {}", mapping.header))?
           .as_str()
           .to_ascii_lowercase();
         if !claim_headers.insert(normalized.clone()) {

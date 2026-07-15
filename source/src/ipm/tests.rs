@@ -26,7 +26,7 @@ fn runtime_from_snapshot(
     inner: Arc::new(IpmRuntimeInner {
       namespace: "oxibelt".to_string(),
       static_snapshot: Arc::new(snapshot.clone()),
-      snapshot: RwLock::new(Arc::new(snapshot)),
+      snapshot: arc_swap::ArcSwap::from_pointee(snapshot),
       store: None,
       last_refresh: RwLock::new(IpmRefreshState::ok(0)),
       legacy_admin_env: legacy_admin_env.to_string(),

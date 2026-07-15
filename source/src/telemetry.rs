@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -17,6 +18,7 @@ use crate::config::TelemetryTracingConfig;
 const TRACEPARENT: &str = "traceparent";
 const EXPORT_BATCH_SIZE: usize = 64;
 const EXPORT_QUEUE_SIZE: usize = 1024;
+static TRACE_ENTROPY_FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct TelemetryRuntime {
@@ -591,29 +593,34 @@ fn sample_trace(sample_ratio: f64) -> bool {
     return false;
   }
   let mut bytes = [0u8; 8];
-  crate::crypto::random_fill(&mut bytes).expect("system random should be available");
+  fill_trace_entropy(&mut bytes);
   let value = u64::from_be_bytes(bytes) as f64 / u64::MAX as f64;
   value < sample_ratio
 }
 
 fn random_trace_id() -> [u8; 16] {
-  loop {
-    let mut bytes = [0u8; 16];
-    crate::crypto::random_fill(&mut bytes).expect("system random should be available");
-    if bytes.iter().any(|byte| *byte != 0) {
-      return bytes;
-    }
-  }
+  let mut bytes = [0u8; 16];
+  fill_trace_entropy(&mut bytes);
+  bytes
 }
 
 fn random_span_id() -> [u8; 8] {
-  loop {
-    let mut bytes = [0u8; 8];
-    crate::crypto::random_fill(&mut bytes).expect("system random should be available");
-    if bytes.iter().any(|byte| *byte != 0) {
-      return bytes;
-    }
+  let mut bytes = [0u8; 8];
+  fill_trace_entropy(&mut bytes);
+  bytes
+}
+
+fn fill_trace_entropy(bytes: &mut [u8]) {
+  if crate::crypto::random_fill(bytes).is_ok() && bytes.iter().any(|byte| *byte != 0) {
+    return;
   }
+  let counter = TRACE_ENTROPY_FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+  let mut seed = [0u8; 16];
+  seed[..8].copy_from_slice(&unix_nanos_now().to_be_bytes());
+  seed[8..].copy_from_slice(&counter.to_be_bytes());
+  let digest = crate::crypto::sha256(&seed);
+  bytes.copy_from_slice(&digest[..bytes.len()]);
+  tracing::warn!("system entropy unavailable; generated a best-effort telemetry identifier");
 }
 
 fn unix_nanos_now() -> u64 {

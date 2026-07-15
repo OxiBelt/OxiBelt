@@ -3,10 +3,11 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
+use arc_swap::ArcSwap;
 use http::{HeaderMap, Method, StatusCode};
 use sqlx::{Pool, Postgres, Row};
 use tracing::{info, warn};
@@ -51,7 +52,7 @@ struct DynamicPolicyInner {
   namespace: Arc<str>,
   route_names: Arc<HashSet<String>>,
   pool: Pool<Postgres>,
-  snapshot: RwLock<Arc<DynamicPolicySnapshot>>,
+  snapshot: ArcSwap<DynamicPolicySnapshot>,
   metrics: Arc<Metrics>,
   signature_key: Option<[u8; 32]>,
 }
@@ -237,7 +238,7 @@ impl DynamicPolicyRuntime {
       namespace,
       route_names,
       pool,
-      snapshot: RwLock::new(Arc::new(snapshot)),
+      snapshot: ArcSwap::from_pointee(snapshot),
       metrics,
       signature_key,
     });
@@ -271,21 +272,14 @@ impl DynamicPolicyRuntime {
 
 impl DynamicPolicyInner {
   fn snapshot(&self) -> Arc<DynamicPolicySnapshot> {
-    self
-      .snapshot
-      .read()
-      .expect("dynamic policy snapshot lock poisoned")
-      .clone()
+    self.snapshot.load_full()
   }
 
   fn replace_snapshot(&self, snapshot: DynamicPolicySnapshot) {
     self
       .metrics
       .set_dynamic_policy_active_policies(snapshot.policies.len() as u64);
-    *self
-      .snapshot
-      .write()
-      .expect("dynamic policy snapshot lock poisoned") = Arc::new(snapshot);
+    self.snapshot.store(Arc::new(snapshot));
   }
 }
 
@@ -732,17 +726,16 @@ fn validate_policy_row(
     })
     .transpose()?;
   let status_provided = status.is_some();
-  let status = status
+  let status = match status
     .map(validate_status)
     .transpose()
     .with_context(|| format!("dynamic policy {id} has invalid status"))?
-    .unwrap_or_else(|| {
-      if action == DynamicPolicyAction::Challenge {
-        StatusCode::FORBIDDEN
-      } else {
-        StatusCode::from_u16(config.default_status).expect("validated default status")
-      }
-    });
+  {
+    Some(status) => status,
+    None if action == DynamicPolicyAction::Challenge => StatusCode::FORBIDDEN,
+    None => StatusCode::from_u16(config.default_status)
+      .context("dynamic_policy.default_status is not a valid HTTP status")?,
+  };
   if action == DynamicPolicyAction::SilentClose {
     if status_provided || body.is_some() {
       bail!("dynamic policy {id} silent_close action does not support status or body");

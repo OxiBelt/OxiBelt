@@ -6,7 +6,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AdminAuditSpoolConfig;
@@ -206,7 +206,10 @@ impl SpoolInner {
     mut event: AdminAuditEvent,
     capacity: AppendCapacity,
   ) -> anyhow::Result<AdminAuditEvent> {
-    let mut state = self.state.lock().expect("Admin audit spool lock poisoned");
+    let mut state = self
+      .state
+      .lock()
+      .map_err(|_| anyhow!("Admin audit spool state is unavailable"))?;
     ensure!(!state.poisoned, "Admin audit spool requires recovery");
     ensure!(
       !event.event_id.is_empty() && !event.timestamp.is_empty(),
@@ -320,14 +323,20 @@ impl SpoolInner {
   }
 
   fn release_terminal_reservation_sync(&self) {
-    let mut state = self.state.lock().expect("Admin audit spool lock poisoned");
+    let Ok(mut state) = self.state.lock() else {
+      tracing::error!("Admin audit spool state is unavailable while releasing reservation");
+      return;
+    };
     let max_event_bytes = u64::try_from(self.max_event_bytes).unwrap_or(u64::MAX);
     state.reserved_events = state.reserved_events.saturating_sub(1);
     state.reserved_bytes = state.reserved_bytes.saturating_sub(max_event_bytes);
   }
 
   fn next_entry_sync(&self) -> anyhow::Result<Option<SpoolEntry>> {
-    let state = self.state.lock().expect("Admin audit spool lock poisoned");
+    let state = self
+      .state
+      .lock()
+      .map_err(|_| anyhow!("Admin audit spool state is unavailable"))?;
     let paths = record_paths(&self.directory)?;
     ensure!(
       paths.len() == state.events,
@@ -342,7 +351,10 @@ impl SpoolInner {
   }
 
   fn acknowledge_sync(&self, path: &Path) -> anyhow::Result<()> {
-    let mut state = self.state.lock().expect("Admin audit spool lock poisoned");
+    let mut state = self
+      .state
+      .lock()
+      .map_err(|_| anyhow!("Admin audit spool state is unavailable"))?;
     ensure!(
       path.parent() == Some(self.directory.as_path()),
       "Admin audit spool acknowledgement escaped its directory"

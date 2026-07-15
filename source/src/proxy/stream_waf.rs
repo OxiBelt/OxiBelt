@@ -53,13 +53,6 @@ impl StreamWafBlocked {
     }
   }
 
-  pub(crate) fn close(&self) -> &WafStreamClose {
-    self
-      .close
-      .as_ref()
-      .expect("stream WAF blocked without close payload")
-  }
-
   pub(crate) fn close_option(&self) -> Option<&WafStreamClose> {
     self.close.as_ref()
   }
@@ -219,8 +212,9 @@ where
             if blocked.is_silent_close() {
               return Ok(());
             }
-            close_websocket_pair(&mut downstream_writer, &mut upstream_writer, blocked.close())
-              .await;
+            if let Some(close) = blocked.close_option() {
+              close_websocket_pair(&mut downstream_writer, &mut upstream_writer, close).await;
+            }
             return Ok(());
           }
         };
@@ -247,8 +241,9 @@ where
             if blocked.is_silent_close() {
               return Ok(());
             }
-            close_websocket_pair(&mut downstream_writer, &mut upstream_writer, blocked.close())
-              .await;
+            if let Some(close) = blocked.close_option() {
+              close_websocket_pair(&mut downstream_writer, &mut upstream_writer, close).await;
+            }
             return Ok(());
           }
         };

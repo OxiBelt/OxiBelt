@@ -1,13 +1,22 @@
 //! TURN listener tasks for UDP and TCP transports.
 //! Listener admission is separated from relay forwarding so auth and limits run first.
 
+use crate::config::{
+  CryptoConfig, TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig,
+  WebRtcTurnListenerConfig, WebRtcTurnListenerMode,
+};
+use crate::lifecycle::{ConnectionDrain, TaskRegistry};
+use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
+use crate::runtime_health::RuntimeTaskKind;
+use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::state::{AppHandle, AppSnapshot};
+use crate::tls;
+use anyhow::{Context, bail};
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, bail};
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
@@ -16,15 +25,7 @@ use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 use tracing::{info, warn};
 use url::Url;
 
-use crate::config::{
-  CryptoConfig, TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig,
-  WebRtcTurnListenerConfig, WebRtcTurnListenerMode,
-};
-use crate::lifecycle::{ConnectionDrain, TaskRegistry};
-use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
-use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
-use crate::state::{AppHandle, AppSnapshot};
-use crate::tls;
+mod udp_task;
 use crate::tls::TlsResumptionState;
 
 use super::auth::{self, AuthDecision};
@@ -124,26 +125,24 @@ impl BoundTurnListener {
     let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
+    let runtime_health = snapshot.runtime_health.clone();
     drop(snapshot);
     let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let edge = EdgeState::default();
     let key = self.key();
-    let connections = TaskRegistry::default();
+    let connections = TaskRegistry::new(RuntimeTaskKind::TurnConnection, runtime_health);
     let mut tasks = Vec::new();
     if let Some(udp) = self.udp {
-      let udp = Arc::new(UdpSocket::from_std(udp).expect("validated nonblocking UDP socket"));
-      let config = self.config.clone();
-      let task_state = state.clone();
-      let task_shutdown = shutdown_rx.clone();
-      let task_edge = edge.clone();
-      let task_error = error_tx.clone();
-      tasks.push(tokio::spawn(async move {
-        if let Err(error) = serve_turn_udp(udp, config, task_state, task_shutdown, task_edge).await
-        {
-          let _ = task_error.send(error.context("WebRTC TURN UDP listener failed"));
-        }
-      }));
+      udp_task::spawn(
+        &mut tasks,
+        udp,
+        self.config.clone(),
+        state.clone(),
+        shutdown_rx.clone(),
+        edge.clone(),
+        error_tx.clone(),
+      );
     }
     for (index, listener) in self.tcp.into_iter().enumerate() {
       spawn_tcp_acceptor(
@@ -423,7 +422,10 @@ async fn proxy_udp_packet(
   }
   expire_udp_sessions(sessions, Duration::from_millis(config.idle_timeout_ms));
   if let std::collections::hash_map::Entry::Vacant(entry) = sessions.entry(client_addr) {
-    let pool = config.udp_pool.as_deref().expect("validated udp_pool");
+    let pool = config
+      .udp_pool
+      .as_deref()
+      .context("TURN UDP proxy pool is unavailable")?;
     let selection =
       state
         .snapshot()
@@ -497,7 +499,9 @@ async fn serve_proxy_stream(
   if !proxy_auth_allows(&config, &first)? {
     return Ok(());
   }
-  let pool = stream_pool.as_deref().expect("validated stream pool");
+  let pool = stream_pool
+    .as_deref()
+    .context("TURN stream proxy pool is unavailable")?;
   let selection =
     state
       .snapshot()
@@ -604,8 +608,8 @@ fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
 
 fn client_bind_addr(remote: SocketAddr) -> SocketAddr {
   match remote {
-    SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("static IPv4 bind"),
-    SocketAddr::V6(_) => "[::]:0".parse().expect("static IPv6 bind"),
+    SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+    SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
   }
 }
 

@@ -14,6 +14,9 @@ use crate::config::{
   AccessTokenRateLimitSource, ConnectionLimitConfig, LimitMode, LimitsConfig, RateLimitConfig,
   RateLimitIdentityPart, RateLimitKey,
 };
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemError, RuntimeSubsystemState,
+};
 use crate::shared_state::{SharedCounterLease, SharedState};
 use crate::waf::PersonProofTokenBinding;
 
@@ -186,6 +189,7 @@ pub struct LimitState {
   connections: Mutex<ConnectionCounts>,
   rates: Mutex<HashMap<(String, String), TokenBucket>>,
   shared_state: Option<Arc<SharedState>>,
+  runtime_health: Arc<RuntimeHealth>,
 }
 
 #[derive(Debug, Default)]
@@ -228,11 +232,30 @@ struct TokenBucket {
 
 impl LimitState {
   pub fn new(shared_state: Option<Arc<SharedState>>) -> Arc<Self> {
+    Self::new_with_health(shared_state, Arc::new(RuntimeHealth::default()))
+  }
+
+  pub(crate) fn new_with_health(
+    shared_state: Option<Arc<SharedState>>,
+    runtime_health: Arc<RuntimeHealth>,
+  ) -> Arc<Self> {
     Arc::new(Self {
       connections: Mutex::new(ConnectionCounts::default()),
       rates: Mutex::new(HashMap::new()),
       shared_state,
+      runtime_health,
     })
+  }
+
+  fn mark_unavailable(&self) {
+    let error = RuntimeSubsystemError::CriticalStateUnavailable(RuntimeSubsystem::Limits);
+    tracing::error!(error = %error, "failing request closed");
+    self.runtime_health.set_subsystem_state(
+      PROCESS_GENERATION,
+      RuntimeSubsystem::Limits,
+      RuntimeSubsystemState::Failed,
+      true,
+    );
   }
   pub async fn acquire_global_connection_async(
     self: &Arc<Self>,
@@ -269,10 +292,13 @@ impl LimitState {
     self: &Arc<Self>,
     specs: Vec<ConnectionAcquireSpec>,
   ) -> Result<ConnectionPermit, StatusCode> {
-    let mut counts = self
-      .connections
-      .lock()
-      .expect("connection limit lock poisoned");
+    let mut counts = match self.connections.lock() {
+      Ok(counts) => counts,
+      Err(_) => {
+        self.mark_unavailable();
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+      }
+    };
     for spec in &specs {
       match &spec.kind {
         ConnectionAcquireKind::Total => {
@@ -622,7 +648,13 @@ impl LimitState {
   fn check_rate_limit_bucket_local(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
     let burst = f64::from(spec.burst.max(1));
     let now = Instant::now();
-    let mut buckets = self.rates.lock().expect("rate limit lock poisoned");
+    let mut buckets = match self.rates.lock() {
+      Ok(buckets) => buckets,
+      Err(_) => {
+        self.mark_unavailable();
+        return Some(StatusCode::SERVICE_UNAVAILABLE);
+      }
+    };
     let bucket_key = (spec.name.to_string(), spec.key.to_string());
     if let Some(bucket) = buckets.get_mut(&bucket_key) {
       return take_local_rate_token(bucket, now, spec.rate, burst, spec.mode, spec.status);
@@ -644,10 +676,10 @@ impl LimitState {
   }
 
   fn release_connection(&self, release: &LocalConnectionRelease) {
-    let mut counts = self
-      .connections
-      .lock()
-      .expect("connection limit lock poisoned");
+    let Ok(mut counts) = self.connections.lock() else {
+      self.mark_unavailable();
+      return;
+    };
     if release.total {
       counts.total = counts.total.saturating_sub(1);
     }
@@ -916,6 +948,9 @@ where
   }
 }
 
+#[cfg(test)]
+#[path = "limits/poison_tests.rs"]
+mod poison_tests;
 #[cfg(test)]
 #[path = "limits/sybil_tests.rs"]
 mod sybil_tests;

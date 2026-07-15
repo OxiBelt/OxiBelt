@@ -343,7 +343,7 @@ fn apply_override_to_content(
   let action = override_item
     .action
     .as_ref()
-    .expect("action selector was checked by caller");
+    .ok_or_else(|| anyhow::anyhow!("{source} action override is missing its selector"))?;
   let mut value: toml::Value =
     toml::from_str(content).with_context(|| format!("failed to parse {source} rule content"))?;
   let actions = value
@@ -366,9 +366,9 @@ fn apply_override_to_content(
       matches.len()
     );
   }
-  let table = actions[matches[0]]
-    .as_table_mut()
-    .expect("action table was checked above");
+  let Some(table) = actions[matches[0]].as_table_mut() else {
+    bail!("{source} matching action must be a table");
+  };
   if let Some(rate) = &override_item.rate {
     table.insert("rate".to_string(), toml::Value::String(rate.clone()));
   }

@@ -8,7 +8,7 @@ use super::resources::ResolvedAutoScope;
 use crate::config::CircuitBreakerScopeConfig;
 
 pub(super) const RESOURCE_KIND_COUNT: usize = 7;
-pub(super) const REJECTION_REASON_COUNT: usize = 5;
+pub(super) const REJECTION_REASON_COUNT: usize = 6;
 pub(super) const CIRCUIT_STATE_COUNT: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -175,6 +175,7 @@ pub enum AdmissionRejectionReason {
   QueueTimeout,
   CircuitOpen,
   RetryBudget,
+  InternalStateUnavailable,
 }
 
 impl AdmissionRejectionReason {
@@ -184,6 +185,7 @@ impl AdmissionRejectionReason {
     Self::QueueTimeout,
     Self::CircuitOpen,
     Self::RetryBudget,
+    Self::InternalStateUnavailable,
   ];
 
   pub const fn as_str(self) -> &'static str {
@@ -193,6 +195,7 @@ impl AdmissionRejectionReason {
       Self::QueueTimeout => "queue_timeout",
       Self::CircuitOpen => "circuit_open",
       Self::RetryBudget => "retry_budget",
+      Self::InternalStateUnavailable => "internal_state_unavailable",
     }
   }
 }

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
@@ -96,6 +96,21 @@ struct DrainRule {
   reason: String,
 }
 
+impl RegistryInner {
+  fn state_guard(&self) -> MutexGuard<'_, RegistryState> {
+    match self.state.lock() {
+      Ok(state) => state,
+      Err(poisoned) => {
+        let mut state = poisoned.into_inner();
+        *state = RegistryState::default();
+        self.state.clear_poison();
+        tracing::warn!("rebuilt poisoned WebTransport Admin registry");
+        state
+      }
+    }
+  }
+}
+
 pub struct WebTransportSessionGuard {
   id: String,
   registry: Weak<RegistryInner>,
@@ -119,13 +134,7 @@ impl WebTransportAdminRegistry {
       last_activity_unix_ms: now,
       commands,
     };
-    self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned")
-      .sessions
-      .insert(id.clone(), record);
+    self.inner.state_guard().sessions.insert(id.clone(), record);
     Ok(WebTransportSessionGuard {
       id,
       registry: Arc::downgrade(&self.inner),
@@ -133,11 +142,7 @@ impl WebTransportAdminRegistry {
   }
 
   pub fn is_draining(&self, metadata: &WebTransportSessionRegistration) -> bool {
-    let state = self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned");
+    let state = self.inner.state_guard();
     state
       .drain_rules
       .values()
@@ -145,22 +150,14 @@ impl WebTransportAdminRegistry {
   }
 
   pub fn record_activity(&self, id: &str) {
-    let mut state = self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned");
+    let mut state = self.inner.state_guard();
     if let Some(record) = state.sessions.get_mut(id) {
       record.last_activity_unix_ms = now_unix_ms();
     }
   }
 
   pub fn list(&self, scope: Option<&WebTransportSessionScope>) -> Vec<WebTransportSessionSnapshot> {
-    let state = self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned");
+    let state = self.inner.state_guard();
     state
       .sessions
       .iter()
@@ -176,11 +173,7 @@ impl WebTransportAdminRegistry {
     close_code: u32,
     reason: String,
   ) -> WebTransportDrainInstallResult {
-    let mut state = self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned");
+    let mut state = self.inner.state_guard();
     let matched_sessions = state
       .sessions
       .iter()
@@ -201,11 +194,7 @@ impl WebTransportAdminRegistry {
   }
 
   pub fn close_matching_drain_rule(&self, drain_id: &str) -> anyhow::Result<usize> {
-    let state = self
-      .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned");
+    let state = self.inner.state_guard();
     let Some(rule) = state.drain_rules.get(drain_id) else {
       bail!("webtransport drain rule not found");
     };
@@ -231,9 +220,7 @@ impl WebTransportAdminRegistry {
   pub fn remove_drain_rule(&self, drain_id: &str) -> bool {
     self
       .inner
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned")
+      .state_guard()
       .drain_rules
       .remove(drain_id)
       .is_some()
@@ -251,12 +238,7 @@ impl Drop for WebTransportSessionGuard {
     let Some(registry) = self.registry.upgrade() else {
       return;
     };
-    registry
-      .state
-      .lock()
-      .expect("webtransport registry lock poisoned")
-      .sessions
-      .remove(&self.id);
+    registry.state_guard().sessions.remove(&self.id);
   }
 }
 

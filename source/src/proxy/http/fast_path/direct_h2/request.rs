@@ -49,6 +49,10 @@ impl PreparedDirectH2Request {
 }
 
 impl RetryDirectH2Request {
+  #[allow(
+    clippy::expect_used,
+    reason = "retry method, URI, version, and headers were captured from a valid request"
+  )]
   pub(super) fn into_request(self) -> Request<ProxyBody> {
     let mut request = Request::builder()
       .method(self.method)
@@ -60,6 +64,10 @@ impl RetryDirectH2Request {
     request
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "fallback method, URI, version, and headers were captured from a valid request"
+  )]
   pub(super) fn into_fallback_request(self) -> Request<ProxyBody> {
     let mut request = Request::builder()
       .method(self.method)

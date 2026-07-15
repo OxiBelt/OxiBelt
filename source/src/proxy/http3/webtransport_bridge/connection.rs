@@ -1,7 +1,7 @@
 //! Connection adapter for HTTP/3 WebTransport bridging.
 //! The adapter keeps QUIC connection state separate from per-session accounting.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::task::Poll;
 
 use anyhow::Context;
@@ -27,6 +27,20 @@ pub(super) struct DownstreamWebTransportConnection {
 }
 
 impl DownstreamWebTransportConnection {
+  fn connection_guard(&self) -> anyhow::Result<MutexGuard<'_, H3ServerConnection>> {
+    self
+      .conn
+      .lock()
+      .map_err(|_| anyhow::anyhow!("downstream HTTP/3 connection state is unavailable"))
+  }
+
+  fn opener_guard(&self) -> anyhow::Result<MutexGuard<'_, H3OpenStreams>> {
+    self
+      .opener
+      .lock()
+      .map_err(|_| anyhow::anyhow!("downstream HTTP/3 opener state is unavailable"))
+  }
+
   pub(super) fn new(conn: H3ServerConnection) -> Self {
     let opener =
       <crate::quic::h3::Connection as h3::quic::Connection<Bytes>>::opener(&conn.inner.conn);
@@ -41,14 +55,16 @@ impl DownstreamWebTransportConnection {
     session_id: SessionId,
   ) -> anyhow::Result<DownstreamBidiStream> {
     let stream = poll_fn(|cx| {
-      self
-        .opener
-        .lock()
-        .expect("downstream HTTP/3 opener lock poisoned")
-        .poll_open_bidi(cx)
+      let mut opener = match self.opener_guard() {
+        Ok(opener) => opener,
+        Err(error) => return Poll::Ready(Err(error)),
+      };
+      match opener.poll_open_bidi(cx) {
+        Poll::Ready(result) => Poll::Ready(result.map_err(downstream_stream_error)),
+        Poll::Pending => Poll::Pending,
+      }
     })
-    .await
-    .map_err(downstream_stream_error)?;
+    .await?;
     let mut stream = BufRecvStream::new(stream);
     send_webtransport_header(&mut stream, BidiStreamHeader::WebTransportBidi(session_id)).await?;
     Ok(stream)
@@ -59,33 +75,27 @@ impl DownstreamWebTransportConnection {
     session_id: SessionId,
   ) -> anyhow::Result<DownstreamUniSendStream> {
     let stream = poll_fn(|cx| {
-      self
-        .opener
-        .lock()
-        .expect("downstream HTTP/3 opener lock poisoned")
-        .poll_open_send(cx)
+      let mut opener = match self.opener_guard() {
+        Ok(opener) => opener,
+        Err(error) => return Poll::Ready(Err(error)),
+      };
+      match opener.poll_open_send(cx) {
+        Poll::Ready(result) => Poll::Ready(result.map_err(downstream_stream_error)),
+        Poll::Pending => Poll::Pending,
+      }
     })
-    .await
-    .map_err(downstream_stream_error)?;
+    .await?;
     let mut stream = BufRecvStream::new(stream);
     send_webtransport_header(&mut stream, UniStreamHeader::WebTransportUni(session_id)).await?;
     Ok(stream)
   }
 
-  pub(super) fn datagram_reader(&self) -> H3DatagramReader {
-    self
-      .conn
-      .lock()
-      .expect("downstream HTTP/3 connection lock poisoned")
-      .get_datagram_reader()
+  pub(super) fn datagram_reader(&self) -> anyhow::Result<H3DatagramReader> {
+    Ok(self.connection_guard()?.get_datagram_reader())
   }
 
-  pub(super) fn datagram_sender(&self, stream_id: StreamId) -> H3DatagramSender {
-    self
-      .conn
-      .lock()
-      .expect("downstream HTTP/3 connection lock poisoned")
-      .get_datagram_sender(stream_id)
+  pub(super) fn datagram_sender(&self, stream_id: StreamId) -> anyhow::Result<H3DatagramSender> {
+    Ok(self.connection_guard()?.get_datagram_sender(stream_id))
   }
 }
 
@@ -144,26 +154,24 @@ async fn accept_downstream_bidi(
   downstream: &DownstreamWebTransportConnection,
 ) -> anyhow::Result<Option<DownstreamBidiEvent>> {
   let stream = poll_fn(|cx| {
-    downstream
-      .conn
-      .lock()
-      .expect("downstream HTTP/3 connection lock poisoned")
-      .poll_accept_request_stream(cx)
+    let mut connection = match downstream.connection_guard() {
+      Ok(connection) => connection,
+      Err(error) => return Poll::Ready(Err(error)),
+    };
+    match connection.poll_accept_request_stream(cx) {
+      Poll::Ready(result) => {
+        Poll::Ready(result.context("failed to accept downstream HTTP/3 bidirectional stream"))
+      }
+      Poll::Pending => Poll::Pending,
+    }
   })
-  .await
-  .context("failed to accept downstream HTTP/3 bidirectional stream")?;
+  .await?;
 
   let Some(stream) = stream else {
     return Ok(None);
   };
   let stream = FrameStream::new(BufRecvStream::new(stream));
-  let mut resolver = {
-    downstream
-      .conn
-      .lock()
-      .expect("downstream HTTP/3 connection lock poisoned")
-      .create_resolver(stream)
-  };
+  let mut resolver = { downstream.connection_guard()?.create_resolver(stream) };
   let frame = poll_fn(|cx| resolver.frame_stream.poll_next(cx)).await;
 
   match frame {
@@ -214,16 +222,13 @@ async fn accept_downstream_uni(
   downstream: &DownstreamWebTransportConnection,
 ) -> anyhow::Result<(SessionId, DownstreamUniRecvStream)> {
   poll_fn(|cx| {
-    let mut conn = downstream
-      .conn
-      .lock()
-      .expect("downstream HTTP/3 connection lock poisoned");
+    let mut conn = match downstream.connection_guard() {
+      Ok(conn) => conn,
+      Err(error) => return Poll::Ready(Err(error)),
+    };
     conn.inner.poll_accept_recv(cx)?;
     if let Some((session_id, stream)) = conn.inner.accepted_streams_mut().wt_uni_streams.pop() {
-      return Poll::Ready(Ok::<
-        (SessionId, DownstreamUniRecvStream),
-        h3::error::ConnectionError,
-      >((session_id, stream)));
+      return Poll::Ready(Ok((session_id, stream)));
     }
     Poll::Pending
   })
@@ -235,7 +240,13 @@ async fn read_downstream_datagrams_task(
   downstream: Arc<DownstreamWebTransportConnection>,
   events: mpsc::Sender<DispatcherEvent>,
 ) {
-  let mut reader = downstream.datagram_reader();
+  let mut reader = match downstream.datagram_reader() {
+    Ok(reader) => reader,
+    Err(error) => {
+      let _ = events.send(DispatcherEvent::Fatal(error)).await;
+      return;
+    }
+  };
   loop {
     match reader.read_datagram().await {
       Ok(datagram) => {

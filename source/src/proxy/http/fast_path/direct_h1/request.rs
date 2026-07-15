@@ -101,6 +101,10 @@ impl PreparedDirectH1Request {
 }
 
 impl RetryDirectH1Request {
+  #[allow(
+    clippy::expect_used,
+    reason = "retry method, URI, and headers were captured from a valid request"
+  )]
   pub(super) fn into_request(self) -> Request<ProxyBody> {
     let mut request = Request::builder()
       .method(self.method)

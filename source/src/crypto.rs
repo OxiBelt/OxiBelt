@@ -89,6 +89,10 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; SHA256_LEN] {
   }
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the HMAC construction accepts keys of every byte length"
+)]
 pub(crate) fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; SHA1_LEN] {
   let mut mac = HmacSha1::new_from_slice(key).expect("HMAC-SHA1 accepts keys of any length");
   mac.update(value);
@@ -98,6 +102,10 @@ pub(crate) fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; SHA1_LEN] {
   out
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the HMAC construction accepts keys of every byte length"
+)]
 pub(crate) fn verify_hmac_sha1(key: &[u8], value: &[u8], tag: &[u8]) -> bool {
   let mut mac = HmacSha1::new_from_slice(key).expect("HMAC-SHA1 accepts keys of any length");
   mac.update(value);
@@ -319,6 +327,10 @@ fn rustcrypto_sha256(bytes: &[u8]) -> [u8; SHA256_LEN] {
   out
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the HMAC construction accepts keys of every byte length"
+)]
 fn rustcrypto_hmac_sha256(key: &[u8], value: &[u8]) -> [u8; SHA256_LEN] {
   let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
   mac.update(value);
@@ -328,6 +340,10 @@ fn rustcrypto_hmac_sha256(key: &[u8], value: &[u8]) -> [u8; SHA256_LEN] {
   out
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the HMAC construction accepts keys of every byte length"
+)]
 fn rustcrypto_verify_hmac_sha256(key: &[u8], value: &[u8], tag: &[u8]) -> bool {
   let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
   mac.update(value);

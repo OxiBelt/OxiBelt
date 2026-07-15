@@ -1,12 +1,4 @@
 //! Response finalization for the plain-proxy fast path.
-
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-
-use http::response::Parts;
-use http::{HeaderMap, HeaderValue, Method, Response, Uri};
-
 use crate::config::UpstreamConfig;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::pools::PoolSelection;
@@ -14,7 +6,8 @@ use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::proxy::http::headers::strip_hop_by_hop_headers;
 use crate::proxy::http::response::{
-  apply_route_security_headers, apply_sticky_cookie, waf_http_terminal_response_with_route_security,
+  apply_route_security_headers, apply_sticky_cookie, text_response,
+  waf_http_terminal_response_with_route_security, with_route_security_headers,
 };
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
@@ -22,6 +15,11 @@ use crate::waf::{
   RequestWafDecision, WafProtocol, WafRequestInput, WafTlsMetadata, WafTransportMetadataInput,
   WafTransportNetwork, apply_header_mutations,
 };
+use http::response::Parts;
+use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use super::super::apply_alt_svc_header;
 use super::super::flow_helpers::tags_ref;
@@ -128,12 +126,21 @@ pub(super) fn finalize_response(
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
   }
   if response_waf_enabled {
-    let (request_method, request_uri) = request_context
-      .as_ref()
-      .expect("response WAF context should be captured when response WAF is enabled");
-    let request_headers = request_headers
-      .as_ref()
-      .expect("request headers should be captured when response WAF is enabled");
+    let (Some((request_method, request_uri)), Some(request_headers), Some(_)) = (
+      request_context.as_ref(),
+      request_headers.as_ref(),
+      access_log.person_proof_snapshot(),
+    ) else {
+      tracing::error!(route = %resolved.route.name, "fast-path response WAF context is unavailable");
+      return with_route_security_headers(
+        text_response(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          "response security context is unavailable",
+        ),
+        &state.config.security,
+        resolved.route,
+      );
+    };
     access_log.ensure_response_ids();
     access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
     let request_input = WafRequestInput {

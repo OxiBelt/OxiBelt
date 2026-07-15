@@ -12,6 +12,8 @@ impl AppSnapshot {
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let circuit_breakers = previous.circuit_breakers.clone();
     circuit_breakers.configure(&config);
+    let runtime_health = previous.runtime_health.clone();
+    let runtime_generation = runtime_health.allocate_generation();
 
     Ok(Self {
       config,
@@ -64,6 +66,8 @@ impl AppSnapshot {
       mitigation: previous.mitigation.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
+      runtime_health,
+      runtime_generation,
       request_path_features: previous.request_path_features,
       alt_svc_header_values: previous.alt_svc_header_values.clone(),
       http1_upgrades_possible: previous.http1_upgrades_possible,

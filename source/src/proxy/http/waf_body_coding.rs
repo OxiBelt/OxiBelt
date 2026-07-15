@@ -91,13 +91,13 @@ impl WafBodyCodingState {
     Ok(Some((inspection, decompression)))
   }
 
-  async fn acquire(&self) -> OwnedSemaphorePermit {
-    self
-      .semaphore
-      .clone()
-      .acquire_owned()
-      .await
-      .expect("WAF body coding semaphore is never closed")
+  async fn acquire(&self) -> Result<OwnedSemaphorePermit, WafBodyCodingError> {
+    self.semaphore.clone().acquire_owned().await.map_err(|_| {
+      WafBodyCodingError::new(
+        WafBodyCodingErrorKind::Overloaded,
+        "WAF body coding capacity is unavailable",
+      )
+    })
   }
 }
 
@@ -156,7 +156,7 @@ pub(crate) async fn transform_request_body_for_waf(
   };
 
   let _overload_leases = state.overload_leases()?;
-  let permit = state.acquire().await;
+  let permit = state.acquire().await?;
   let (mut parts, body) = request.into_parts();
   let collected = collect_limited_body(
     body,
@@ -193,7 +193,7 @@ pub(crate) async fn transform_response_body_for_waf(
   ensure_response_transform_safe(headers)?;
 
   let _overload_leases = state.overload_leases()?;
-  let permit = state.acquire().await;
+  let permit = state.acquire().await?;
   let collected = collect_limited_body(
     body,
     config.max_decoded_body_bytes,

@@ -173,13 +173,19 @@ async fn send_prepared_request(
       metric_record::pool_event(metrics, hot_path_metrics, "reconnect");
       pool.clear_connection(&lease.connection).await;
       drop(lease);
+      let Some(retry) = retry.take() else {
+        return direct_h2_send_error(
+          metrics,
+          protocol,
+          anyhow::anyhow!("direct H2 retry request state is unavailable"),
+          hot_path_metrics,
+        );
+      };
       retry_reused_request(
         pool,
         metrics,
         protocol,
-        retry
-          .take()
-          .expect("reused direct H2 sends should retain one retry request"),
+        retry,
         timeouts,
         hot_path_metrics,
         timing_enabled,

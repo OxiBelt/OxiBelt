@@ -431,9 +431,12 @@ async fn apply_config_rollback(
     .await;
     return response;
   }
-  let previous = rollback
-    .take()
-    .expect("rollback snapshot should exist after permission check");
+  let Some(previous) = rollback.take() else {
+    return AdminControlResponse::error(
+      StatusCode::CONFLICT,
+      "rollback snapshot became unavailable",
+    );
+  };
   let current_effective = control.state.lock().await.effective_config.clone();
   let pending = match listeners.prepare(&previous.snapshot).await {
     Ok(pending) => pending,

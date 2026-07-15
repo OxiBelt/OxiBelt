@@ -351,11 +351,11 @@ impl PersonProofClearanceSource {
     }
   }
 }
-
 fn header_name(value: &str) -> HeaderName {
-  HeaderName::from_bytes(value.as_bytes()).expect("person proof header name should be validated")
+  HeaderName::from_bytes(value.as_bytes()).unwrap_or(HeaderName::from_static(
+    "x-oxibelt-invalid-person-proof-header",
+  ))
 }
-
 fn bearer_token(value: &str) -> Option<&str> {
   let (scheme, token) = value.trim().split_once(' ')?;
   if scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty() {

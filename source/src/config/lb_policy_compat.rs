@@ -299,7 +299,9 @@ fn normalize_table_string(
   match compatibility_decision(raw) {
     Some(CompatibilityDecision::Convert(replacement)) => {
       let original = raw.to_string();
-      *value.get_mut(field).expect("field exists") = toml::Value::String(replacement.to_string());
+      if let Some(value) = value.get_mut(field) {
+        *value = toml::Value::String(replacement.to_string());
+      }
       diagnostics.push(LbPolicyCompatDiagnostic {
         kind: LbPolicyCompatDiagnosticKind::Converted,
         path,

@@ -184,24 +184,15 @@ impl<'a> SystemAccessLogContext<'a> {
   }
 
   pub(super) fn request_id(&self) -> &str {
-    self
-      .request_id
-      .as_deref()
-      .expect("request id should be generated before use")
+    self.request_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn response_id(&self) -> &str {
-    self
-      .response_id
-      .as_deref()
-      .expect("response id should be generated before use")
+    self.response_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn transaction_id(&self) -> &str {
-    self
-      .transaction_id
-      .as_deref()
-      .expect("transaction id should be generated before use")
+    self.transaction_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn response_input<'b>(

@@ -388,8 +388,8 @@ fn oldest_flow(flows: &HashMap<SocketAddr, UdpFlowSession>) -> Option<SocketAddr
 
 fn client_bind_addr(remote: SocketAddr) -> SocketAddr {
   match remote {
-    SocketAddr::V4(_) => "0.0.0.0:0".parse().expect("static IPv4 bind"),
-    SocketAddr::V6(_) => "[::]:0".parse().expect("static IPv6 bind"),
+    SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+    SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
   }
 }
 

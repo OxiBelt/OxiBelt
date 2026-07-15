@@ -124,6 +124,11 @@ pub struct HealthRuntimeSnapshot {
   pub bind: String,
   pub ready_path: String,
   pub live_path: String,
+  pub runtime_status: &'static str,
+  pub degraded_subsystems: Vec<&'static str>,
+  pub failed_subsystems: Vec<&'static str>,
+  pub degraded_tasks: Vec<&'static str>,
+  pub failed_tasks: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,6 +315,7 @@ pub async fn build_support_bundle(
 }
 
 pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
+  let runtime_health = snapshot.runtime_health.snapshot();
   RuntimeSnapshot {
     runtime_backend: crate::runtime::backend::runtime_backend_snapshot(),
     lifecycle: LifecycleSnapshot {
@@ -362,6 +368,11 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
       bind: snapshot.config.health.bind.to_string(),
       ready_path: snapshot.config.health.ready_path.clone(),
       live_path: snapshot.config.health.live_path.clone(),
+      runtime_status: runtime_health.status.as_str(),
+      degraded_subsystems: runtime_health.degraded_subsystems,
+      failed_subsystems: runtime_health.failed_subsystems,
+      degraded_tasks: runtime_health.degraded_tasks,
+      failed_tasks: runtime_health.failed_tasks,
     },
     tls: TlsRuntimeSnapshot {
       downstream_cert_chain_configured: snapshot

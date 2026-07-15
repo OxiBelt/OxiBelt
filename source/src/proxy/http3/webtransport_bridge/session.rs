@@ -433,8 +433,10 @@ pub(super) fn handle_downstream_datagram(
       ) {
         if blocked.is_silent_close() {
           silent_close = true;
+        } else if let Some(blocked_close) = blocked.close_option() {
+          close = Some(blocked_close.clone());
         } else {
-          close = Some(blocked.close().clone());
+          silent_close = true;
         }
       }
     }
@@ -543,7 +545,7 @@ async fn bridge_upstream_datagrams(
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
 ) -> anyhow::Result<()> {
-  let mut sender = downstream.datagram_sender(connect_stream_id);
+  let mut sender = downstream.datagram_sender(connect_stream_id)?;
   loop {
     let datagram = upstream.read_datagram().await?;
     report_activity(&activity, session_id);

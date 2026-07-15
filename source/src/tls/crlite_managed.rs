@@ -237,14 +237,14 @@ async fn fetch_filter(
   remote_client: &ManagedCrliteRemoteClient,
 ) -> anyhow::Result<RemoteFilter> {
   let timeout = Duration::from_millis(config.managed.request_timeout_ms);
-  let root_url = Url::parse(REMOTE_SETTINGS_ROOT).expect("Remote Settings root URL is valid");
+  let root_url = Url::parse(REMOTE_SETTINGS_ROOT).context("invalid Remote Settings root URL")?;
   let root: RootResponse = fetch_json(remote_client, root_url.clone(), timeout)
     .await
     .with_context(|| "crlite_managed_root_fetch")?;
   let base_url = attachment_base_url(root)?;
   let records_url = root_url
     .join(CERT_REVOCATIONS_RECORDS_PATH)
-    .expect("Remote Settings records path is valid");
+    .context("invalid Remote Settings records path")?;
   let records: RecordsResponse = fetch_json(remote_client, records_url, timeout)
     .await
     .with_context(|| "crlite_managed_records_fetch")?;

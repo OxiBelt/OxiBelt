@@ -1245,11 +1245,16 @@ impl Config {
       if let Some(route_version) = route.upstream_http_version {
         match (&route.upstream, &route.upstream_pool) {
           (Some(upstream_name), None) => {
-            let upstream = self
+            let Some(upstream) = self
               .upstreams
               .iter()
               .find(|item| item.name == *upstream_name)
-              .expect("validated route upstream");
+            else {
+              bail!(
+                "route {} references unknown upstream {upstream_name}",
+                route.name
+              );
+            };
             if route_version > upstream.max_http_version {
               bail!(
                 "route {} upstream_http_version cannot exceed upstream {} max_http_version",
@@ -5690,7 +5695,7 @@ pub(crate) fn default_cache_tmpfs_dir() -> PathBuf {
 }
 
 fn default_admin_bind() -> SocketAddr {
-  "127.0.0.1:9092".parse().expect("valid admin bind default")
+  SocketAddr::from(([127, 0, 0, 1], 9092))
 }
 
 fn default_admin_bearer_token_env() -> String {
@@ -5714,9 +5719,7 @@ fn default_admin_plaintext_allowed_source_cidrs() -> Vec<String> {
 }
 
 fn default_metrics_bind() -> SocketAddr {
-  "127.0.0.1:9090"
-    .parse()
-    .expect("valid metrics bind default")
+  SocketAddr::from(([127, 0, 0, 1], 9090))
 }
 
 fn default_metrics_histogram_buckets_ms() -> Vec<u64> {
@@ -5724,7 +5727,7 @@ fn default_metrics_histogram_buckets_ms() -> Vec<u64> {
 }
 
 fn default_health_bind() -> SocketAddr {
-  "127.0.0.1:9091".parse().expect("valid health bind default")
+  SocketAddr::from(([127, 0, 0, 1], 9091))
 }
 
 fn default_ready_path() -> String {

@@ -30,16 +30,11 @@ async fn refresh_loop(inner: Weak<IpmRuntimeInner>) {
       Ok(true) => info!("IPM store snapshot refreshed"),
       Ok(false) => {}
       Err(error) => {
-        let current_generation = inner
-          .snapshot
-          .read()
-          .expect("IPM snapshot lock poisoned")
-          .generation;
-        *inner
-          .last_refresh
-          .write()
-          .expect("IPM refresh state lock poisoned") =
-          IpmRefreshState::failed(current_generation, error.to_string());
+        let current_generation = inner.snapshot.load().generation;
+        inner.set_refresh_state(IpmRefreshState::failed(
+          current_generation,
+          error.to_string(),
+        ));
         warn!(error = %error, "failed to refresh IPM store snapshot; keeping last-good snapshot");
       }
     }
@@ -51,15 +46,16 @@ pub(super) async fn refresh_store_inner(inner: &Arc<IpmRuntimeInner>) -> anyhow:
     return Ok(false);
   };
   let next = store.load_snapshot(&inner.static_snapshot).await?;
-  let mut current = inner.snapshot.write().expect("IPM snapshot lock poisoned");
+  let current = inner.snapshot.load_full();
   let changed = current.generation != next.generation || current.fingerprint != next.fingerprint;
   if changed {
-    *current = Arc::new(next);
+    inner.snapshot.store(Arc::new(next));
   }
-  let generation = current.generation;
-  *inner
-    .last_refresh
-    .write()
-    .expect("IPM refresh state lock poisoned") = IpmRefreshState::ok(generation);
+  let generation = if changed {
+    inner.snapshot.load().generation
+  } else {
+    current.generation
+  };
+  inner.set_refresh_state(IpmRefreshState::ok(generation));
   Ok(changed)
 }

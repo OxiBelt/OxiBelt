@@ -39,6 +39,10 @@ pub(super) fn record(
   metrics.selection_counters[index].increment();
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the nested loops enumerate the same fixed label sets used by counter_index"
+)]
 pub(super) fn append_prometheus(metrics: &FastPathMetrics, output: &mut String) {
   for path in PATHS {
     for protocol in PROTOCOLS {

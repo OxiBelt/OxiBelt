@@ -55,7 +55,7 @@ pub(crate) fn bind_server_endpoints(
   let (first_endpoints, first_demux) = bind_server_endpoint(bind, &server_config, snapshot)?;
   let assigned = first_endpoints
     .first()
-    .expect("downstream QUIC bind must create at least one endpoint")
+    .ok_or_else(|| anyhow::anyhow!("downstream QUIC bind created no endpoints"))?
     .local_addr()
     .context("failed to read downstream HTTP/3 listener address")?;
   endpoints.extend(first_endpoints);

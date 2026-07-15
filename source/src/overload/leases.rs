@@ -114,10 +114,7 @@ impl OverloadRuntime {
     if !self.enabled.load(Ordering::Relaxed) {
       return Some(WorkLease::disabled(kind));
     }
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     if self.state() == OverloadState::Hard && config.actions.hard.reject_expensive_waf_bodies {
       return None;
     }
@@ -149,10 +146,7 @@ impl OverloadRuntime {
   }
 
   pub fn try_admit_connection(self: &Arc<Self>) -> Result<WorkLease, OverloadRejection> {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     if self.state() == OverloadState::Hard && config.actions.hard.reject_new_connections {
       self.rejections[OverloadBoundary::Connection as usize].fetch_add(1, Ordering::Relaxed);
       return Err(OverloadRejection {
@@ -167,10 +161,7 @@ impl OverloadRuntime {
     self: &Arc<Self>,
     version: Version,
   ) -> Result<RequestLease, OverloadRejection> {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     if self.state() == OverloadState::Hard {
       let boundary = match version {
         Version::HTTP_2 | Version::HTTP_3 if config.actions.hard.reject_new_streams => {
@@ -212,10 +203,7 @@ impl OverloadRuntime {
     plane: ControlPlane,
     slot: ControlSlot,
   ) -> Option<ControlLease> {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     let capacity = match (plane, slot) {
       (ControlPlane::Admin, ControlSlot::Connection) => config.reserved_capacity.admin_connections,
       (ControlPlane::Admin, ControlSlot::Request) => config.reserved_capacity.admin_requests,

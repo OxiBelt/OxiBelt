@@ -55,6 +55,7 @@ pub(in crate::server) enum AdminOperationError {
   StoreFull,
   NotFound,
   AlreadyTerminal,
+  Internal,
 }
 
 #[derive(Clone)]
@@ -115,7 +116,7 @@ impl AdminOperationRuntime {
       return Err(AdminOperationError::Disabled);
     }
 
-    let id = new_operation_id();
+    let id = new_operation_id().map_err(|_| AdminOperationError::Internal)?;
     let cancel = Arc::new(AtomicBool::new(false));
     let (events, _) = broadcast::channel(self.inner.config.event_buffer);
     let snapshot = AdminOperationSnapshot {
@@ -476,6 +477,7 @@ impl std::fmt::Display for AdminOperationError {
       Self::StoreFull => formatter.write_str("admin operation store is full"),
       Self::NotFound => formatter.write_str("operation not found"),
       Self::AlreadyTerminal => formatter.write_str("operation already finished"),
+      Self::Internal => formatter.write_str("admin operation state is unavailable"),
     }
   }
 }

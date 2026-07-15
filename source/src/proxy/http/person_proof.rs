@@ -533,6 +533,10 @@ fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<
 }
 
 fn json_bytes_response(status: StatusCode, body: bytes::Bytes) -> Response<ProxyBody> {
+  #[allow(
+    clippy::expect_used,
+    reason = "static response headers and a validated status cannot make the HTTP builder fail"
+  )]
   Response::builder()
     .status(status)
     .header(http::header::CONTENT_TYPE, "application/json")

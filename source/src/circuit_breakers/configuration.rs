@@ -116,8 +116,8 @@ pub(super) fn queue_timeout(
   allocations: &[Allocation],
   deadline: Option<Instant>,
   queued_at: Instant,
-) -> Duration {
-  let state = state.lock().expect("circuit-breaker state lock poisoned");
+) -> Option<Duration> {
+  let state = state.lock().ok()?;
   let configured = allocations
     .iter()
     .filter_map(|allocation| {
@@ -131,9 +131,11 @@ pub(super) fn queue_timeout(
   let now = Instant::now();
   let elapsed = now.saturating_duration_since(queued_at);
   let remaining = configured.saturating_sub(elapsed);
-  deadline
-    .map(|deadline| remaining.min(deadline.saturating_duration_since(now)))
-    .unwrap_or(remaining)
+  Some(
+    deadline
+      .map(|deadline| remaining.min(deadline.saturating_duration_since(now)))
+      .unwrap_or(remaining),
+  )
 }
 
 pub(super) fn elapsed_ms(started: Instant) -> u64 {

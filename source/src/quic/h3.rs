@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{self, Poll, ready};
 
 use bytes::{Buf, Bytes};
@@ -46,14 +46,23 @@ struct EarlyDataTrackerInner {
 }
 
 impl EarlyDataTracker {
+  fn stream_ids_guard(&self) -> MutexGuard<'_, HashSet<StreamId>> {
+    match self.inner.stream_ids.lock() {
+      Ok(stream_ids) => stream_ids,
+      Err(poisoned) => {
+        let mut stream_ids = poisoned.into_inner();
+        stream_ids.clear();
+        self.inner.stream_ids.clear_poison();
+        self.inner.has_early_streams.store(false, Ordering::Release);
+        tracing::warn!("rebuilt poisoned HTTP/3 early-data tracker");
+        stream_ids
+      }
+    }
+  }
+
   fn note(&self, stream_id: StreamId, is_0rtt: bool) {
     if is_0rtt {
-      self
-        .inner
-        .stream_ids
-        .lock()
-        .expect("HTTP/3 early-data tracker lock poisoned")
-        .insert(stream_id);
+      self.stream_ids_guard().insert(stream_id);
       self.inner.has_early_streams.store(true, Ordering::Release);
     }
   }
@@ -63,11 +72,7 @@ impl EarlyDataTracker {
       return false;
     }
 
-    let mut stream_ids = self
-      .inner
-      .stream_ids
-      .lock()
-      .expect("HTTP/3 early-data tracker lock poisoned");
+    let mut stream_ids = self.stream_ids_guard();
     let removed = stream_ids.remove(&stream_id);
     if stream_ids.is_empty() {
       self.inner.has_early_streams.store(false, Ordering::Release);
@@ -191,7 +196,7 @@ where
 
   fn close(&mut self, code: Code, reason: &[u8]) {
     self.conn.close(
-      VarInt::from_u64(code.value()).expect("HTTP/3 error code fits QUIC varint"),
+      VarInt::from_u64(code.value()).unwrap_or(VarInt::MAX),
       reason,
     );
   }
@@ -249,7 +254,7 @@ where
 
   fn close(&mut self, code: Code, reason: &[u8]) {
     self.conn.close(
-      VarInt::from_u64(code.value()).expect("HTTP/3 error code fits QUIC varint"),
+      VarInt::from_u64(code.value()).unwrap_or(VarInt::MAX),
       reason,
     );
   }
@@ -347,6 +352,7 @@ where
 
 pub(crate) struct RecvStream {
   stream: Option<quinn::RecvStream>,
+  stream_id: StreamId,
   read_chunk_fut: ReadChunkFuture,
 }
 
@@ -360,8 +366,10 @@ type ReadChunkFuture = ReusableBoxFuture<
 
 impl RecvStream {
   fn new(stream: quinn::RecvStream) -> Self {
+    let stream_id = h3_stream_id(stream.id());
     Self {
       stream: Some(stream),
+      stream_id,
       read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
     }
   }
@@ -392,18 +400,12 @@ impl quic::RecvStream for RecvStream {
 
   fn stop_sending(&mut self, error_code: u64) {
     if let Some(stream) = self.stream.as_mut() {
-      let _ = stream.stop(VarInt::from_u64(error_code).expect("invalid HTTP/3 error code"));
+      let _ = stream.stop(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX));
     }
   }
 
   fn recv_id(&self) -> StreamId {
-    h3_stream_id(
-      self
-        .stream
-        .as_ref()
-        .expect("receive stream exists while polling HTTP/3")
-        .id(),
-    )
+    self.stream_id
   }
 }
 
@@ -578,6 +580,10 @@ async fn read_datagram(
 
 fn h3_stream_id(id: quinn::StreamId) -> StreamId {
   let id: u64 = id.into();
+  #[allow(
+    clippy::expect_used,
+    reason = "QUIC stream IDs and HTTP/3 stream IDs share the same varint bound"
+  )]
   id.try_into().expect("QUIC stream ID fits HTTP/3 stream ID")
 }
 

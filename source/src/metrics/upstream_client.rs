@@ -58,6 +58,10 @@ impl UpstreamClientMetrics {
     }
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "the loops enumerate the same fixed version, scheme, and pool label sets"
+  )]
   pub(super) fn append_prometheus(&self, output: &mut String) {
     for version in VERSIONS {
       for scheme in SCHEMES {

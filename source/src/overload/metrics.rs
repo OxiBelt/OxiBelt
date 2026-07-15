@@ -40,10 +40,7 @@ impl OverloadRuntime {
         self.work[kind as usize].load(Ordering::Relaxed)
       );
     }
-    let latest = self
-      .latest
-      .lock()
-      .expect("overload latest sample lock poisoned");
+    let latest = self.latest_guard();
     output.push_str("# TYPE oxibelt_overload_memory_bytes gauge\n");
     for (kind, value) in [
       ("rss", latest.rss_bytes),
@@ -90,10 +87,7 @@ impl OverloadRuntime {
       0,
     );
     output.push_str("# TYPE oxibelt_overload_action_active gauge\n");
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     let state = self.state();
     for (level, action, active) in [
       (

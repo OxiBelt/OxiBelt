@@ -461,7 +461,9 @@ fn collapse_json_map(
     .into_iter()
     .map(|(name, mut values)| {
       let value = if values.len() == 1 {
-        values.pop().expect("single value is present")
+        values
+          .pop()
+          .unwrap_or_else(|| AccessLogJsonValue::Array(Vec::new()))
       } else {
         AccessLogJsonValue::Array(values)
       };

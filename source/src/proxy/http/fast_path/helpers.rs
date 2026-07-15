@@ -1,4 +1,4 @@
-use http::{Extensions, HeaderMap, Request, Response};
+use http::{Extensions, HeaderMap, Request, Response, StatusCode};
 use hyper::body::Body;
 
 use crate::config::{HttpVersion, PriorityMode, ProxyProtocolEgressMode, TrailerMode};
@@ -7,6 +7,7 @@ use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
 use crate::proxy::http::request_framing::{
   VerifiedContentLengthZeroBody, VerifiedEmptyRequestBody,
 };
+use crate::proxy::http::response::{text_response, with_route_security_headers};
 use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics;
 use crate::proxy::http::uri::{self, UpstreamUriParts};
@@ -18,6 +19,31 @@ use crate::waf::WafTransportNetwork;
 use super::super::with_downstream_response_timeout;
 use super::request_body::fast_path_request_body_is_definitely_empty;
 use super::response_body::fast_path_filter_trailers;
+
+pub(super) fn fast_path_unavailable_response(
+  state: &AppSnapshot,
+  resolved: &ResolvedRoute<'_>,
+  status: StatusCode,
+  message: &'static str,
+) -> Response<ProxyBody> {
+  with_route_security_headers(
+    text_response(status, message),
+    &state.config.security,
+    resolved.route,
+  )
+}
+
+pub(super) fn fast_path_request_state_unavailable(
+  state: &AppSnapshot,
+  resolved: &ResolvedRoute<'_>,
+) -> Response<ProxyBody> {
+  fast_path_unavailable_response(
+    state,
+    resolved,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    "request forwarding state is unavailable",
+  )
+}
 
 pub(super) fn apply_fast_path_priority_policy(headers: &mut HeaderMap, mode: PriorityMode) {
   if mode != PriorityMode::Pass {

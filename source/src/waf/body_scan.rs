@@ -6,6 +6,8 @@ use std::sync::Arc;
 use regex::Regex;
 use tokio::runtime::{Handle, RuntimeFlavor};
 
+use crate::runtime_health::{RuntimeSubsystem, RuntimeSubsystemError};
+
 use super::CompiledPatternSet;
 
 const BLOCKING_TEXT_SCAN_MIN_BYTES: usize = 64 * 1024;
@@ -38,7 +40,10 @@ pub(crate) fn body_text(bytes: &[u8]) -> String {
 pub(crate) fn contains_text_maybe_offloaded(text: Arc<str>, needle: &str) -> bool {
   if let Some(handle) = blocking_scan_handle(text.len()) {
     let needle = needle.to_string();
-    return run_on_blocking_pool(handle, move || text.contains(&needle));
+    return run_on_blocking_pool(handle, move || text.contains(&needle)).unwrap_or_else(|error| {
+      tracing::error!(error = %error, "failing WAF text match closed");
+      true
+    });
   }
   text.contains(needle)
 }
@@ -50,7 +55,8 @@ pub(crate) fn matches_text(text: &str, pattern: &str) -> anyhow::Result<bool> {
 pub(crate) fn matches_text_maybe_offloaded(text: Arc<str>, pattern: &str) -> anyhow::Result<bool> {
   if let Some(handle) = blocking_scan_handle(text.len()) {
     let pattern = pattern.to_string();
-    return run_on_blocking_pool(handle, move || matches_text(&text, &pattern));
+    return run_on_blocking_pool(handle, move || matches_text(&text, &pattern))
+      .map_err(anyhow::Error::new)?;
   }
   matches_text(&text, pattern)
 }
@@ -58,7 +64,10 @@ pub(crate) fn matches_text_maybe_offloaded(text: Arc<str>, pattern: &str) -> any
 pub(crate) fn matches_regex_text_maybe_offloaded(text: Arc<str>, regex: &Regex) -> bool {
   if let Some(handle) = blocking_scan_handle(text.len()) {
     let regex = regex.clone();
-    return run_on_blocking_pool(handle, move || regex.is_match(&text));
+    return run_on_blocking_pool(handle, move || regex.is_match(&text)).unwrap_or_else(|error| {
+      tracing::error!(error = %error, "failing WAF regex match closed");
+      true
+    });
   }
   regex.is_match(&text)
 }
@@ -83,6 +92,16 @@ pub(crate) fn scan_pattern_set_text_maybe_offloaded(
     let pattern_set = pattern_set.clone();
     return run_on_blocking_pool(handle, move || {
       scan_pattern_set_text(&text, is_truncated, &pattern_set)
+    })
+    .unwrap_or_else(|error| {
+      tracing::error!(error = %error, "failing WAF pattern-set scan closed");
+      BodyScanResult {
+        matched: true,
+        pattern: Some("runtime-subsystem-unavailable".to_string()),
+        offset: None,
+        matched_text: None,
+        is_truncated,
+      }
     });
   }
   scan_pattern_set_text(&text, is_truncated, pattern_set)
@@ -96,16 +115,13 @@ fn blocking_scan_handle(text_len: usize) -> Option<Handle> {
   (handle.runtime_flavor() == RuntimeFlavor::MultiThread).then_some(handle)
 }
 
-fn run_on_blocking_pool<T, F>(handle: Handle, work: F) -> T
+fn run_on_blocking_pool<T, F>(handle: Handle, work: F) -> Result<T, RuntimeSubsystemError>
 where
   T: Send + 'static,
   F: FnOnce() -> T + Send + 'static,
 {
-  tokio::task::block_in_place(|| {
-    handle
-      .block_on(tokio::task::spawn_blocking(work))
-      .expect("WAF body scan blocking task panicked")
-  })
+  tokio::task::block_in_place(|| handle.block_on(tokio::task::spawn_blocking(work)))
+    .map_err(|_| RuntimeSubsystemError::CriticalStateUnavailable(RuntimeSubsystem::Waf))
 }
 
 #[cfg(test)]

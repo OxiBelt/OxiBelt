@@ -80,13 +80,10 @@ impl WafEngine {
     if evaluated.is_none() {
       *evaluated = Some(self.evaluate_person_proof_request_async(input).await);
     }
-    self.evaluate_dynamic_person_proof_challenge_with_evaluated(
-      input,
-      status,
-      evaluated
-        .as_ref()
-        .expect("person proof status was initialized"),
-    )
+    let evaluated = evaluated
+      .as_ref()
+      .ok_or_else(|| anyhow::anyhow!("person proof status is unavailable"))?;
+    self.evaluate_dynamic_person_proof_challenge_with_evaluated(input, status, evaluated)
   }
 
   pub fn evaluate_dynamic_person_proof_challenge_with_status(
@@ -98,13 +95,10 @@ impl WafEngine {
     if evaluated.is_none() {
       *evaluated = Some(self.evaluate_person_proof_request(input));
     }
-    self.evaluate_dynamic_person_proof_challenge_with_evaluated(
-      input,
-      status,
-      evaluated
-        .as_ref()
-        .expect("person proof status was initialized"),
-    )
+    let evaluated = evaluated
+      .as_ref()
+      .ok_or_else(|| anyhow::anyhow!("person proof status is unavailable"))?;
+    self.evaluate_dynamic_person_proof_challenge_with_evaluated(input, status, evaluated)
   }
 
   fn evaluate_dynamic_person_proof_challenge_with_evaluated(

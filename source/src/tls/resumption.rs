@@ -4,7 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
@@ -119,6 +119,21 @@ struct QueuedServerSessionKey {
   generation: u64,
 }
 
+impl TtlServerSessionCacheShard {
+  fn inner_guard(&self) -> MutexGuard<'_, TtlServerSessionCacheInner> {
+    match self.inner.lock() {
+      Ok(inner) => inner,
+      Err(poisoned) => {
+        let mut inner = poisoned.into_inner();
+        *inner = TtlServerSessionCacheInner::default();
+        self.inner.clear_poison();
+        tracing::warn!("rebuilt poisoned TLS session cache shard");
+        inner
+      }
+    }
+  }
+}
+
 impl TtlServerSessionCache {
   fn new(capacity: usize, ttl: Duration) -> Self {
     let shard_count = if capacity >= SERVER_SESSION_CACHE_SHARDS {
@@ -153,8 +168,9 @@ impl TtlServerSessionCache {
       if now.duration_since(stored.inserted_at) <= self.ttl {
         break;
       }
-      let queued = inner.order.pop_front().expect("front key should exist");
-      inner.entries.remove(&queued.key);
+      if let Some(queued) = inner.order.pop_front() {
+        inner.entries.remove(&queued.key);
+      }
     }
   }
 
@@ -223,11 +239,7 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     }
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self
-      .shard(&key)
-      .inner
-      .lock()
-      .expect("TLS session cache lock poisoned");
+    let mut inner = self.shard(&key).inner_guard();
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     if inner.entries.contains_key(&key) {
@@ -256,11 +268,7 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     self.stats.get_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self
-      .shard(key)
-      .inner
-      .lock()
-      .expect("TLS session cache lock poisoned");
+    let mut inner = self.shard(key).inner_guard();
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     inner.entries.get(key).map(|stored| stored.value.clone())
@@ -270,11 +278,7 @@ impl rustls::server::StoresServerSessions for TtlServerSessionCache {
     self.stats.take_count.fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
     let lock_started = Instant::now();
-    let mut inner = self
-      .shard(key)
-      .inner
-      .lock()
-      .expect("TLS session cache lock poisoned");
+    let mut inner = self.shard(key).inner_guard();
     self.record_lock_wait(lock_started.elapsed());
     self.remove_expired_at(&mut inner, now);
     inner.entries.remove(key).map(|stored| {
@@ -336,15 +340,40 @@ pub(super) fn configure_server_resumption(
 }
 
 impl TlsResumptionState {
+  fn server_guard(
+    &self,
+  ) -> MutexGuard<'_, HashMap<TlsServerResumptionKey, TlsServerResumptionRuntime>> {
+    match self.server.lock() {
+      Ok(server) => server,
+      Err(poisoned) => {
+        let mut server = poisoned.into_inner();
+        server.clear();
+        self.server.clear_poison();
+        tracing::warn!("rebuilt poisoned TLS server resumption registry");
+        server
+      }
+    }
+  }
+
+  fn upstream_clients_guard(&self) -> MutexGuard<'_, HashMap<TlsClientConfigKey, ClientConfig>> {
+    match self.upstream_clients.lock() {
+      Ok(clients) => clients,
+      Err(poisoned) => {
+        let mut clients = poisoned.into_inner();
+        clients.clear();
+        self.upstream_clients.clear_poison();
+        tracing::warn!("rebuilt poisoned TLS upstream client config cache");
+        clients
+      }
+    }
+  }
+
   fn server_resumption_runtime(
     &self,
     key: TlsServerResumptionKey,
     resumption: &TlsServerResumptionConfig,
   ) -> anyhow::Result<TlsServerResumptionRuntime> {
-    let mut server = self
-      .server
-      .lock()
-      .expect("TLS resumption state lock poisoned");
+    let mut server = self.server_guard();
     if let Some(runtime) = server.get(&key) {
       return Ok(runtime.clone());
     }
@@ -371,10 +400,7 @@ impl TlsResumptionState {
     key: TlsClientConfigKey,
     build: impl FnOnce() -> anyhow::Result<ClientConfig>,
   ) -> anyhow::Result<ClientConfig> {
-    let mut clients = self
-      .upstream_clients
-      .lock()
-      .expect("TLS upstream client config cache lock poisoned");
+    let mut clients = self.upstream_clients_guard();
     if let Some(config) = clients.get(&key) {
       return Ok(config.clone());
     }
@@ -384,10 +410,7 @@ impl TlsResumptionState {
   }
 
   pub(crate) fn server_session_storage_stats(&self) -> TlsServerSessionStorageStats {
-    let server = self
-      .server
-      .lock()
-      .expect("TLS resumption state lock poisoned");
+    let server = self.server_guard();
     let mut stats = TlsServerSessionStorageStats::default();
     for runtime in server.values() {
       if let TlsServerResumptionRuntime::Stateful(cache) = runtime {

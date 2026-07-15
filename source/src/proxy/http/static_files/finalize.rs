@@ -107,9 +107,17 @@ pub(in crate::proxy::http) async fn finalize_response(
       tags,
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let person_proof = access_log
-      .person_proof_snapshot()
-      .expect("static response WAF should have a request-scoped Person proof snapshot");
+    let Some(person_proof) = access_log.person_proof_snapshot() else {
+      tracing::error!(route = %route.name, "static response WAF request context is unavailable");
+      return with_route_security_headers(
+        text_response(
+          http::StatusCode::INTERNAL_SERVER_ERROR,
+          "response security context is unavailable",
+        ),
+        &state.config.security,
+        route,
+      );
+    };
     let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
       WafResponseInput {
         request: request_input,

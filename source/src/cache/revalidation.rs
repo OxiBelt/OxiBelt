@@ -52,7 +52,7 @@ fn update_prepared_not_modified(
     _ => return,
   };
   let (shared_entry, external_metadata) = {
-    let mut inner = cache.inner.lock().expect("cache lock poisoned");
+    let mut inner = cache.inner_guard();
     let Some(mut stored) = detach_entry(&mut inner, &prepared.variant_key) else {
       return;
     };

@@ -28,6 +28,10 @@ impl HttpIoMetrics {
     }
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "the loops enumerate the same fixed protocol and transport label sets"
+  )]
   pub(super) fn append_prometheus(&self, output: &mut String) {
     for protocol in PROTOCOLS {
       for transport in TRANSPORTS {

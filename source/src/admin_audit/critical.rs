@@ -155,7 +155,7 @@ impl AdminAuditHandle {
     cluster_id: &str,
     membership_revision: &str,
   ) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     event.service = Some("admin-mutation".to_string());
     event.operation = action.to_string();
     event.durability_action = Some(action.to_string());
@@ -181,11 +181,7 @@ impl AdminAuditHandle {
   }
 
   pub(crate) fn mark_critical_mutation_lifecycle_managed(&self) {
-    self
-      .inner
-      .lock()
-      .expect("admin audit lock poisoned")
-      .lifecycle_managed = true;
+    self.event_guard().lifecycle_managed = true;
   }
 
   pub(crate) fn critical_mutation_event(
@@ -195,11 +191,7 @@ impl AdminAuditHandle {
     outcome: &str,
     error: Option<&str>,
   ) -> AdminAuditEvent {
-    let mut event = self
-      .inner
-      .lock()
-      .expect("admin audit lock poisoned")
-      .clone();
+    let mut event = self.event_guard().clone();
     event.event_id = super::event::generate_event_id().unwrap_or_default();
     if let Ok(occurrence) = super::event::occurrence_timestamp() {
       event.timestamp = occurrence.rfc3339;

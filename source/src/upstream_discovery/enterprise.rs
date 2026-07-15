@@ -318,14 +318,17 @@ fn add_bearer_env_header(
   if token.trim().is_empty() {
     bail!("discovery token_env {token_env} resolved to an empty value");
   }
+  let headers = builder
+    .headers_mut()
+    .ok_or_else(|| anyhow::anyhow!("discovery request builder rejected headers"))?;
   if header_name == http::header::AUTHORIZATION {
-    builder.headers_mut().expect("headers available").insert(
+    headers.insert(
       header_name,
       http::HeaderValue::from_str(&format!("Bearer {}", token.trim()))
         .context("discovery bearer token is not a valid header value")?,
     );
   } else {
-    builder.headers_mut().expect("headers available").insert(
+    headers.insert(
       header_name,
       http::HeaderValue::from_str(token.trim())
         .context("discovery token is not a valid header value")?,

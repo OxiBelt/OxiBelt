@@ -173,6 +173,10 @@ impl CrsPhraseMatcher {
   }
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the built-in SQLi compatibility expression is a fixed, compile-reviewed regex"
+)]
 static DETECT_SQLI_REGEX: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new(
     "(?i)(union\\s+select|sleep\\s*\\(|information_schema|or\\s+1\\s*=\\s*1|drop\\s+table)",
@@ -180,6 +184,10 @@ static DETECT_SQLI_REGEX: LazyLock<Regex> = LazyLock::new(|| {
   .expect("valid CRS SQLi compatibility regex")
 });
 
+#[allow(
+  clippy::expect_used,
+  reason = "the built-in XSS compatibility expression is a fixed, compile-reviewed regex"
+)]
 static DETECT_XSS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new("(?i)(<\\s*script|javascript:|onerror\\s*=|onload\\s*=)")
     .expect("valid CRS XSS compatibility regex")

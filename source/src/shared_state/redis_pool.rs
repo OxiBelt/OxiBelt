@@ -165,8 +165,8 @@ impl RedisPool {
     let mut lease = RedisCommandLease::new(object, admission, self.inner.clone());
     lease.mark_command_started();
     let result = tokio::time::timeout(self.inner.settings.command_timeout, async {
-      write_resp_command(&mut lease.connection_mut().writer, args).await?;
-      read_resp(&mut lease.connection_mut().reader)
+      write_resp_command(&mut lease.connection_mut()?.writer, args).await?;
+      read_resp(&mut lease.connection_mut()?.reader)
         .await
         .context("failed to read Redis response")
     })
@@ -222,11 +222,11 @@ impl RedisPool {
     lease.mark_command_started();
     let command_refs = commands.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let result = tokio::time::timeout(self.inner.settings.command_timeout, async {
-      write_resp_commands(&mut lease.connection_mut().writer, &command_refs).await?;
+      write_resp_commands(&mut lease.connection_mut()?.writer, &command_refs).await?;
       let mut responses = Vec::with_capacity(command_refs.len());
       for _ in &command_refs {
         responses.push(
-          read_resp(&mut lease.connection_mut().reader)
+          read_resp(&mut lease.connection_mut()?.reader)
             .await
             .context("failed to read Redis pipeline response")?,
         );
@@ -470,11 +470,11 @@ impl RedisCommandLease {
     }
   }
 
-  fn connection_mut(&mut self) -> &mut RedisConnection {
+  fn connection_mut(&mut self) -> anyhow::Result<&mut RedisConnection> {
     self
       .object
-      .as_mut()
-      .expect("Redis command lease must hold an object")
+      .as_deref_mut()
+      .ok_or_else(|| anyhow::anyhow!("Redis command lease lost its pooled connection"))
   }
 
   fn mark_command_started(&mut self) {

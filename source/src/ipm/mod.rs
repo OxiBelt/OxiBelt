@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, bail};
+use arc_swap::ArcSwap;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use http::HeaderMap;
 use tokio::sync::Semaphore;
@@ -21,6 +22,7 @@ mod admin_types;
 mod refresh;
 mod simulation;
 mod snapshot;
+mod state_access;
 mod store;
 mod token;
 mod workload_identity;
@@ -83,7 +85,7 @@ pub struct IpmRuntime {
 struct IpmRuntimeInner {
   namespace: String,
   static_snapshot: Arc<IpmSnapshot>,
-  snapshot: RwLock<Arc<IpmSnapshot>>,
+  snapshot: ArcSwap<IpmSnapshot>,
   store: Option<store::IpmStore>,
   last_refresh: RwLock<IpmRefreshState>,
   legacy_admin_env: String,
@@ -166,7 +168,7 @@ impl IpmRuntime {
       inner: Arc::new(IpmRuntimeInner {
         namespace: config.ipm.namespace.clone(),
         static_snapshot: Arc::new(static_snapshot),
-        snapshot: RwLock::new(Arc::new(active_snapshot)),
+        snapshot: ArcSwap::from_pointee(active_snapshot),
         store: store_runtime,
         last_refresh: RwLock::new(refresh_state),
         legacy_admin_env: config.admin.bearer_token_env.clone(),
@@ -183,12 +185,7 @@ impl IpmRuntime {
   }
 
   pub(crate) fn snapshot(&self) -> Arc<IpmSnapshot> {
-    self
-      .inner
-      .snapshot
-      .read()
-      .expect("IPM snapshot lock poisoned")
-      .clone()
+    self.inner.snapshot.load_full()
   }
 
   pub fn actor_from_headers(&self, headers: &HeaderMap) -> Option<IpmActor> {
@@ -421,7 +418,7 @@ impl IpmRuntime {
       inner: Arc::new(IpmRuntimeInner {
         namespace: namespace.to_string(),
         static_snapshot: Arc::new(snapshot.clone()),
-        snapshot: RwLock::new(Arc::new(snapshot)),
+        snapshot: ArcSwap::from_pointee(snapshot),
         store: None,
         last_refresh: RwLock::new(IpmRefreshState::ok(0)),
         legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),

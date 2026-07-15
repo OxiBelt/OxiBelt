@@ -352,6 +352,10 @@ impl RetryTokenKey {
 }
 
 impl HandshakeTokenKey for RetryTokenKey {
+  #[allow(
+    clippy::expect_used,
+    reason = "HKDF output and AES key buffers are fixed at the required 32-byte length"
+  )]
   fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn AeadKey> {
     let mut key_buffer = [0u8; 32];
     crate::crypto::hkdf_sha256(

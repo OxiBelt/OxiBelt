@@ -16,6 +16,7 @@ use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
+use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
 use crate::state::AppHandle;
@@ -138,8 +139,9 @@ impl BoundStreamListener {
     let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
+    let runtime_health = snapshot.runtime_health.clone();
     drop(snapshot);
-    let connections = TaskRegistry::default();
+    let connections = TaskRegistry::new(RuntimeTaskKind::StreamConnection, runtime_health);
     let tasks = match transport {
       BoundStreamTransport::Tcp(listeners) => listeners
         .into_iter()

@@ -656,6 +656,10 @@ fn normalized_members(members: &[String]) -> anyhow::Result<Vec<String>> {
   Ok(unique.into_iter().collect())
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "rollout settings validation rejects empty fixed membership before selection"
+)]
 fn deterministic_canary(request_id: &str, members: &[String]) -> String {
   members
     .iter()

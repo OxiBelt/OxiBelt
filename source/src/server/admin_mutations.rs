@@ -89,8 +89,13 @@ pub(super) async fn response(
     Err(response) => return response,
   };
 
-  let audit = AdminAuditHandle::from_request(&request)
-    .expect("Admin mutation admission follows the Admin audit gate");
+  let Some(audit) = AdminAuditHandle::from_request(&request) else {
+    warn!("Admin mutation audit context is unavailable");
+    return text_response(
+      StatusCode::INTERNAL_SERVER_ERROR,
+      "Admin audit context is unavailable",
+    );
+  };
   let (parts, bytes) =
     match collect_admin_request_bytes(request, admin_control::ADMIN_CONFIG_BODY_LIMIT).await {
       Ok(collected) => collected,

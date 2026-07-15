@@ -219,6 +219,10 @@ async fn background_refresh(
   Ok(())
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "all request builder inputs are cloned from an existing valid request"
+)]
 fn empty_request_from<B>(request: &Request<B>) -> Request<ProxyBody> {
   let mut builder = Request::builder()
     .method(request.method().clone())

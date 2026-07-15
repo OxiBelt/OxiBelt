@@ -5,13 +5,13 @@ use anyhow::bail;
 
 const OPERATION_ID_PREFIX: &str = "op_";
 
-pub(super) fn new_operation_id() -> String {
+pub(super) fn new_operation_id() -> anyhow::Result<String> {
   let mut bytes = [0_u8; 16];
   crate::crypto::random_fill(&mut bytes)
-    .expect("system random generator should produce admin operation IDs");
+    .map_err(|_| anyhow::anyhow!("system entropy is unavailable for Admin operation ID"))?;
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  format!(
+  Ok(format!(
     "op_{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
     bytes[0],
     bytes[1],
@@ -29,7 +29,7 @@ pub(super) fn new_operation_id() -> String {
     bytes[13],
     bytes[14],
     bytes[15]
-  )
+  ))
 }
 
 pub(in crate::server) fn parse_operation_id(raw: &str) -> anyhow::Result<&str> {
@@ -67,7 +67,7 @@ mod tests {
   #[test]
   fn generated_operation_ids_are_prefixed_uuid_v4() {
     for _ in 0..16 {
-      let id = new_operation_id();
+      let id = new_operation_id().expect("generated ID should be available");
       parse_operation_id(&id).expect("generated ID should parse");
       assert!(id.starts_with("op_"));
       assert_eq!(id.len(), 39);

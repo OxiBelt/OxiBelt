@@ -509,11 +509,19 @@ pub(crate) async fn prepare_webtransport(
       Ok(selection) => {
         let name = selection.upstream_name.clone();
         pool_selection = Some(selection);
-        state
+        let Some(upstream) = state
           .upstreams
           .iter()
           .find(|upstream| upstream.name == name)
-          .expect("pool selected synthetic upstream")
+        else {
+          tracing::error!(upstream = %name, "pool selected an unavailable synthetic upstream");
+          return Err(Box::new(with_route_security_headers(
+            text_response(StatusCode::BAD_GATEWAY, "selected upstream is unavailable"),
+            &state.config.security,
+            resolved.route,
+          )));
+        };
+        upstream
       }
       Err(error) => {
         warn!(error = %error, pool = %pool_name, "failed to select upstream pool server");
@@ -524,8 +532,15 @@ pub(crate) async fn prepare_webtransport(
         )));
       }
     }
+  } else if let Some(upstream) = resolved.upstream {
+    upstream
   } else {
-    resolved.upstream.expect("validated route upstream")
+    tracing::error!(route = %resolved.route.name, "validated route has no upstream");
+    return Err(Box::new(with_route_security_headers(
+      text_response(StatusCode::BAD_GATEWAY, "route upstream is unavailable"),
+      &state.config.security,
+      resolved.route,
+    )));
   };
 
   if !upstream.webtransport {

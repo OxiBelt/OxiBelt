@@ -350,9 +350,10 @@ impl PlainProxyFastPath {
         if !request_body_definitely_empty && request_body_proven_empty {
           let direct_h1_build_started = timing::start(timing_enabled);
           if let Some(compiled) = compiled_proxy.as_ref() {
-            let current_parts = parts
-              .take()
-              .expect("generic request parts should be available before direct-H1 retry");
+            let Some(current_parts) = parts.take() else {
+              tracing::error!(route = %resolved.route.name, "direct-H1 request parts are unavailable");
+              return fast_path_request_state_unavailable(state.as_ref(), resolved);
+            };
             match try_build_downstream_direct_h1_request(
               current_parts,
               DownstreamDirectH1RequestOptions {
@@ -408,8 +409,10 @@ impl PlainProxyFastPath {
           record_upstream_rebuild(true);
           (outbound, FastPathRequestBodyMode::Empty)
         } else {
-          let mut parts =
-            parts.expect("generic request parts should remain after direct-H1 fallback");
+          let Some(mut parts) = parts else {
+            tracing::error!(route = %resolved.route.name, "direct-H1 fallback request parts are unavailable");
+            return fast_path_request_state_unavailable(state.as_ref(), resolved);
+          };
           let rebuild = RebuildRequestOptions {
             target_uri,
             compression: &state.config.compression,
@@ -525,9 +528,15 @@ impl PlainProxyFastPath {
           );
         };
         let result = if let Some(selection) = pool_selection.take() {
-          let (original_uri, pool_retry_cookie) = pool_retry_context
-            .as_ref()
-            .expect("pool retry context should exist for pool selections");
+          let Some((original_uri, pool_retry_cookie)) = pool_retry_context.as_ref() else {
+            tracing::error!(route = %resolved.route.name, "pool retry context is unavailable");
+            return fast_path_unavailable_response(
+              state.as_ref(),
+              resolved,
+              StatusCode::BAD_GATEWAY,
+              "upstream retry state is unavailable",
+            );
+          };
           send_pool_with_retry(
             state.as_ref(),
             outbound,

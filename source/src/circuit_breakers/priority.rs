@@ -501,10 +501,7 @@ impl CircuitBreakerRuntime {
       let notified = self.notify.notified();
       let mut fallback = false;
       let admission = {
-        let mut state = self
-          .state
-          .lock()
-          .expect("circuit-breaker state lock poisoned");
+        let mut state = self.state_guard()?;
         if !self.enabled.load(std::sync::atomic::Ordering::Acquire) {
           if let Some(ticket) = waiter.take() {
             state.remove_priority_waiter(ticket);
@@ -518,10 +515,9 @@ impl CircuitBreakerRuntime {
           fallback = true;
           None
         } else {
-          let global = state
-            .scopes
-            .get(&ScopeKey::Global)
-            .expect("global circuit-breaker scope is present");
+          let Some(global) = state.scopes.get(&ScopeKey::Global) else {
+            return Err(self.unavailable_rejection());
+          };
           let global_limit = global.limits.resource(ResourceKind::Request);
           let global_active = global.active[ResourceKind::Request as usize];
           let selected = state
@@ -576,10 +572,7 @@ impl CircuitBreakerRuntime {
       }
 
       let fallback_after_queue_lock = if waiter.ticket().is_none() {
-        let mut state = self
-          .state
-          .lock()
-          .expect("circuit-breaker state lock poisoned");
+        let mut state = self.state_guard()?;
         if !state.priority.enabled() {
           true
         } else if let Some(reason) = state.priority.queue_rejection_reason(class) {
@@ -601,10 +594,9 @@ impl CircuitBreakerRuntime {
           });
         } else {
           let ticket = state.priority.enqueue(class, reservation_eligible);
-          let global = state
-            .scopes
-            .get_mut(&ScopeKey::Global)
-            .expect("global circuit-breaker scope is present");
+          let Some(global) = state.scopes.get_mut(&ScopeKey::Global) else {
+            return Err(self.unavailable_rejection());
+          };
           global.queued[ResourceKind::Request as usize] =
             global.queued[ResourceKind::Request as usize].saturating_add(1);
           waiter.set(ticket);
@@ -617,21 +609,15 @@ impl CircuitBreakerRuntime {
         return self.admit_global_request_unprioritized(deadline).await;
       }
 
-      let ticket = waiter
-        .ticket()
-        .expect("queued priority waiter has a ticket");
+      let Some(ticket) = waiter.ticket() else {
+        return Err(self.unavailable_rejection());
+      };
       let timeout = {
-        let state = self
-          .state
-          .lock()
-          .expect("circuit-breaker state lock poisoned");
-        let global = state
-          .scopes
-          .get(&ScopeKey::Global)
-          .expect("global circuit-breaker scope is present")
-          .limits
-          .resource(ResourceKind::Request)
-          .timeout;
+        let state = self.state_guard()?;
+        let Some(global_scope) = state.scopes.get(&ScopeKey::Global) else {
+          return Err(self.unavailable_rejection());
+        };
+        let global = global_scope.limits.resource(ResourceKind::Request).timeout;
         let configured = global.min(state.priority.queue_timeout(class));
         let remaining = configured.saturating_sub(ticket.queued_at().elapsed());
         deadline
@@ -651,10 +637,9 @@ impl CircuitBreakerRuntime {
 
   pub(super) fn remove_priority_waiter(&self, ticket: Option<PriorityTicket>) {
     if let Some(ticket) = ticket {
-      let mut state = self
-        .state
-        .lock()
-        .expect("circuit-breaker state lock poisoned");
+      let Ok(mut state) = self.state_guard() else {
+        return;
+      };
       if state.remove_priority_waiter(ticket).is_some() {
         drop(state);
         self.notify.notify_waiters();
@@ -663,10 +648,9 @@ impl CircuitBreakerRuntime {
   }
 
   fn priority_timeout_rejection(&self, class: PriorityClass) -> AdmissionRejection {
-    let mut state = self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned");
+    let Ok(mut state) = self.state_guard() else {
+      return self.unavailable_rejection();
+    };
     state
       .priority
       .record_rejection(class, PriorityRejectionReason::QueueTimeout);

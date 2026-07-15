@@ -13,12 +13,7 @@ use super::{IpmActor, IpmRuntime, RedactedIpmCredential, RedactedIpmPolicy, toke
 impl IpmRuntime {
   pub fn admin_status(&self) -> IpmAdminStatus {
     let snapshot = self.snapshot();
-    let refresh = self
-      .inner
-      .last_refresh
-      .read()
-      .expect("IPM refresh state lock poisoned")
-      .clone();
+    let refresh = self.inner.refresh_state();
     IpmAdminStatus {
       enabled: true,
       store_enabled: self.inner.store.is_some(),

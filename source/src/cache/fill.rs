@@ -4,12 +4,15 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::Notify;
 
 use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemState,
+};
 use crate::shared_state::SharedCacheLock;
 
 use super::{CacheLookupContext, ResponseCache, request_no_store};
@@ -112,6 +115,7 @@ impl Drop for CacheFillGuard {
 #[derive(Debug)]
 pub(crate) struct CacheFillCoordinator {
   shards: [Mutex<CacheFillShard>; FILL_SHARDS],
+  runtime_health: Arc<RuntimeHealth>,
 }
 
 #[derive(Debug, Default)]
@@ -128,10 +132,35 @@ struct SuppressedFill {
 }
 
 impl CacheFillCoordinator {
-  pub(crate) fn new() -> Arc<Self> {
+  pub(crate) fn new(runtime_health: Arc<RuntimeHealth>) -> Arc<Self> {
     Arc::new(Self {
       shards: std::array::from_fn(|_| Mutex::new(CacheFillShard::default())),
+      runtime_health,
     })
+  }
+
+  fn shard_guard(&self, shard_index: usize) -> MutexGuard<'_, CacheFillShard> {
+    match self.shards[shard_index].lock() {
+      Ok(shard) => shard,
+      Err(poisoned) => {
+        let mut shard = poisoned.into_inner();
+        for notify in shard.inflight.values() {
+          notify.notify_waiters();
+        }
+        *shard = CacheFillShard::default();
+        self.shards[shard_index].clear_poison();
+        self
+          .runtime_health
+          .record_lock_recovery(RuntimeSubsystem::CacheFill);
+        self.runtime_health.set_subsystem_state(
+          PROCESS_GENERATION,
+          RuntimeSubsystem::CacheFill,
+          RuntimeSubsystemState::Healthy,
+          false,
+        );
+        shard
+      }
+    }
   }
 
   pub(crate) fn begin(
@@ -141,9 +170,7 @@ impl CacheFillCoordinator {
   ) -> CacheFillDecision {
     let shard_index = shard_index(&key);
     let now = SystemTime::now();
-    let mut shard = self.shards[shard_index]
-      .lock()
-      .expect("cache fill shard lock poisoned");
+    let mut shard = self.shard_guard(shard_index);
     prune_suppressions(&mut shard, now);
     if let Some(suppressed) = shard.suppressed_until.get(&key)
       && suppressed.until > now
@@ -169,9 +196,7 @@ impl CacheFillCoordinator {
   pub(crate) fn suppress(&self, key: String, reason: CacheFillSuppressionReason) {
     let shard_index = shard_index(&key);
     let now = SystemTime::now();
-    let mut shard = self.shards[shard_index]
-      .lock()
-      .expect("cache fill shard lock poisoned");
+    let mut shard = self.shard_guard(shard_index);
     prune_suppressions(&mut shard, now);
     if !shard.suppressed_until.contains_key(&key) {
       shard.suppressed_order.push_back(key.clone());
@@ -193,9 +218,7 @@ impl CacheFillCoordinator {
 
   fn finish(&self, key: &str, fallback: &Arc<Notify>) -> Arc<Notify> {
     let shard_index = shard_index(key);
-    let mut shard = self.shards[shard_index]
-      .lock()
-      .expect("cache fill shard lock poisoned");
+    let mut shard = self.shard_guard(shard_index);
     shard
       .inflight
       .remove(key)
@@ -214,11 +237,7 @@ impl ResponseCache {
     if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
       return None;
     }
-    let overload = self
-      .overload
-      .read()
-      .expect("cache overload lock poisoned")
-      .clone();
+    let overload = self.overload.load().clone();
     if overload
       .as_ref()
       .is_some_and(|runtime| runtime.cache_fill_disabled() || runtime.prefer_cached_or_stale())

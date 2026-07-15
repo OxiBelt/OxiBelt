@@ -210,6 +210,10 @@ fn insert_header_bytes(headers: &mut HeaderMap, name: HeaderName, value: &[u8]) 
   }
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the fuzz-only runtime cannot continue if its local executor cannot initialize"
+)]
 fn websocket_runtime() -> &'static tokio::runtime::Runtime {
   static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
   RUNTIME.get_or_init(|| {
@@ -343,6 +347,10 @@ impl<'a> FuzzInput<'a> {
     }
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "the fuzz harness selects only fixed syntactically valid URL literals"
+  )]
   fn upstream_origin(&mut self) -> Url {
     Url::parse(match self.byte() % 4 {
       0 => "https://upstream.internal/base",

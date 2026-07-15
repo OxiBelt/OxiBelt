@@ -304,9 +304,9 @@ async fn lookup_dns(name: &str, query_type: DnsQueryType) -> anyhow::Result<(Vec
 
 async fn query_nameserver(server: SocketAddr, query: &[u8]) -> anyhow::Result<Vec<u8>> {
   let bind_addr: SocketAddr = if server.is_ipv4() {
-    "0.0.0.0:0".parse().expect("valid IPv4 bind")
+    SocketAddr::from(([0, 0, 0, 0], 0))
   } else {
-    "[::]:0".parse().expect("valid IPv6 bind")
+    SocketAddr::from(([0u16; 8], 0))
   };
   let socket = UdpSocket::bind(bind_addr).await?;
   socket.connect(server).await?;
@@ -445,9 +445,8 @@ fn parse_dns_response(response: &[u8], query: &DnsQuery) -> anyhow::Result<(Vec<
         response[rdata + 3],
       ))),
       (DNS_TYPE_AAAA, 16) => {
-        let octets: [u8; 16] = response[rdata..rdata + 16]
-          .try_into()
-          .expect("slice length checked");
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(&response[rdata..rdata + 16]);
         ParsedDnsRecordData::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
       }
       (DNS_TYPE_CNAME, len) if len > 0 => {
@@ -600,16 +599,12 @@ fn read_u16(input: &[u8], offset: usize) -> anyhow::Result<u16> {
   let bytes = input
     .get(offset..offset + 2)
     .ok_or_else(|| anyhow!("DNS response is truncated"))?;
-  Ok(u16::from_be_bytes(
-    bytes.try_into().expect("slice length checked"),
-  ))
+  Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 fn read_u32(input: &[u8], offset: usize) -> anyhow::Result<u32> {
   let bytes = input
     .get(offset..offset + 4)
     .ok_or_else(|| anyhow!("DNS response is truncated"))?;
-  Ok(u32::from_be_bytes(
-    bytes.try_into().expect("slice length checked"),
-  ))
+  Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }

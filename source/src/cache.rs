@@ -1,13 +1,15 @@
 //! Response cache coordination and cache-key enforcement for proxy traffic.
 //! Cache admission remains separate from HTTP forwarding so policy decisions stay auditable.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use http::header::{
   CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, ETAG, EXPIRES, HeaderName, HeaderValue,
@@ -23,6 +25,9 @@ use crate::config::{
   default_cache_tmpfs_dir,
 };
 use crate::overload::OverloadRuntime;
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemError, RuntimeSubsystemState,
+};
 use crate::shared_state::SharedState;
 
 mod entry;
@@ -33,6 +38,7 @@ mod fill;
 mod index;
 mod metadata;
 mod range;
+mod recovery;
 mod revalidation;
 mod shared;
 mod shared_async;
@@ -299,9 +305,12 @@ pub struct ResponseCache {
   disk_dir: Option<PathBuf>,
   fills: Arc<fill::CacheFillCoordinator>,
   inner: Mutex<CacheInner>,
+  disk_recovery: Mutex<Option<recovery::DiskRecoveryState>>,
+  disk_rebuild_requested: AtomicBool,
+  runtime_health: Arc<RuntimeHealth>,
   shared_state: Option<Arc<SharedState>>,
   external_cache: ExternalCacheRuntime,
-  overload: RwLock<Option<Arc<OverloadRuntime>>>,
+  overload: ArcSwapOption<OverloadRuntime>,
 }
 
 impl ResponseCache {
@@ -309,17 +318,19 @@ impl ResponseCache {
     config: &CacheConfig,
     shared_state: Option<Arc<SharedState>>,
   ) -> anyhow::Result<Arc<Self>> {
-    Self::new_with_external(
+    Self::new_with_external_and_health(
       config,
       shared_state,
       ExternalCacheRuntime::disabled(crate::metrics::Metrics::new()),
+      Arc::new(RuntimeHealth::default()),
     )
   }
 
-  pub(crate) fn new_with_external(
+  pub(crate) fn new_with_external_and_health(
     config: &CacheConfig,
     shared_state: Option<Arc<SharedState>>,
     external_cache: ExternalCacheRuntime,
+    runtime_health: Arc<RuntimeHealth>,
   ) -> anyhow::Result<Arc<Self>> {
     let tmpfs_dir = if config.enabled && config.store == CacheStore::Tmpfs {
       let dir = config
@@ -389,13 +400,16 @@ impl ResponseCache {
       refresh_limiters,
       tmpfs_dir,
       disk_dir,
-      fills: fill::CacheFillCoordinator::new(),
+      fills: fill::CacheFillCoordinator::new(runtime_health.clone()),
       inner: Mutex::new(CacheInner::default()),
+      disk_recovery: Mutex::new(None),
+      disk_rebuild_requested: AtomicBool::new(false),
+      runtime_health,
       shared_state,
       external_cache,
-      overload: RwLock::new(None),
+      overload: ArcSwapOption::empty(),
     });
-    cache.load_disk_entries();
+    cache.rebuild_disk_entries_at_startup();
     Ok(cache)
   }
 
@@ -404,7 +418,34 @@ impl ResponseCache {
   }
 
   pub(crate) fn set_overload_runtime(&self, overload: Arc<OverloadRuntime>) {
-    *self.overload.write().expect("cache overload lock poisoned") = Some(overload);
+    self.overload.store(Some(overload));
+  }
+
+  pub(in crate::cache) fn inner_guard(&self) -> MutexGuard<'_, CacheInner> {
+    let mut inner = match self.inner.lock() {
+      Ok(inner) => inner,
+      Err(poisoned) => {
+        let error =
+          RuntimeSubsystemError::RecoverableStatePoisoned(RuntimeSubsystem::ResponseCache);
+        warn!(error = %error, "resetting disposable runtime state");
+        let mut inner = poisoned.into_inner();
+        *inner = CacheInner::default();
+        self.inner.clear_poison();
+        self
+          .runtime_health
+          .record_lock_recovery(RuntimeSubsystem::ResponseCache);
+        self.runtime_health.set_subsystem_state(
+          PROCESS_GENERATION,
+          RuntimeSubsystem::ResponseCache,
+          RuntimeSubsystemState::Degraded,
+          false,
+        );
+        self.disk_rebuild_requested.store(true, Ordering::Release);
+        inner
+      }
+    };
+    self.advance_disk_rebuild(&mut inner);
+    inner
   }
 
   pub(crate) fn shared_cache_enabled(&self) -> bool {
@@ -490,7 +531,7 @@ impl ResponseCache {
     )?;
     let now = SystemTime::now();
     let (key, entry) = {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let mut inner = self.inner_guard();
       let key = inner
         .index
         .candidates(&operation.lookup_key)
@@ -525,7 +566,7 @@ impl ResponseCache {
       (key, entry)
     };
     let Some(cache_entry) = entry.to_cache_entry() else {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let mut inner = self.inner_guard();
       remove_entry(&mut inner, &key);
       return None;
     };
@@ -814,7 +855,7 @@ impl ResponseCache {
       _ => return CacheInsertOutcome::Rejected,
     };
     let external_entry = {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let mut inner = self.inner_guard();
       if variant_count_exceeded(
         &inner,
         &prepared.policy,
@@ -932,7 +973,7 @@ impl ResponseCache {
       return;
     };
     let shared_entry = {
-      let inner = self.inner.lock().expect("cache lock poisoned");
+      let inner = self.inner_guard();
       inner.entries.get(variant_key).and_then(shared_cache_entry)
     };
     if let Some(shared_entry) = shared_entry {
@@ -1060,7 +1101,7 @@ impl ResponseCache {
     uri: &str,
     partition: Option<&str>,
   ) -> usize {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     let keys = inner
       .entries
       .iter()
@@ -1116,7 +1157,7 @@ impl ResponseCache {
     path_prefix: &str,
     partition: Option<&str>,
   ) -> usize {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     let keys = inner
       .entries
       .iter()
@@ -1182,7 +1223,7 @@ impl ResponseCache {
     host: Option<&str>,
     partition: Option<&str>,
   ) -> usize {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     let keys = inner
       .entries
       .iter()
@@ -1227,7 +1268,7 @@ impl ResponseCache {
   }
 
   pub fn stats(&self) -> CacheStats {
-    let inner = self.inner.lock().expect("cache lock poisoned");
+    let inner = self.inner_guard();
     let mut stats = CacheStats {
       memory_bytes: inner.memory_size,
       disk_bytes: inner.disk_size,
@@ -1340,7 +1381,7 @@ impl ResponseCache {
   pub fn remember_purge_nonce(&self, nonce: &str, ttl: Duration) -> bool {
     let now = SystemTime::now();
     let expires_at = now + ttl;
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     while let Some(oldest) = inner.purge_nonce_order.front() {
       let expired = inner
         .purge_nonces
@@ -1387,8 +1428,7 @@ impl ResponseCache {
     }
     if self
       .overload
-      .read()
-      .expect("cache overload lock poisoned")
+      .load()
       .as_ref()
       .is_some_and(|runtime| runtime.cache_fill_disabled() || runtime.prefer_cached_or_stale())
     {
@@ -1512,96 +1552,11 @@ impl ResponseCache {
       .with_context(|| format!("failed to commit cache metadata {}", path.display()))?;
     Ok(())
   }
-
-  fn load_disk_entries(&self) {
-    if !self.config.enabled {
-      return;
-    }
-    let Some(dir) = &self.disk_dir else {
-      return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-      return;
-    };
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
-    let mut referenced_bodies = HashSet::new();
-    for entry in entries.flatten() {
-      let path = entry.path();
-      if path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.ends_with("tmp"))
-      {
-        if std::fs::remove_file(&path).is_ok() {
-          inner.disk_recovery_removed_files_total += 1;
-        }
-        continue;
-      }
-      if path.extension().and_then(|value| value.to_str()) != Some("meta") {
-        continue;
-      }
-      match decode_metadata(&path, dir) {
-        Ok(stored) => {
-          if !stored.security_headers_neutral {
-            remove_metadata(&stored);
-            stored.remove_body();
-            inner.disk_recovery_removed_files_total += 2;
-            continue;
-          }
-          let now = SystemTime::now();
-          if stored
-            .stale_if_error_until
-            .unwrap_or(stored.expires_at)
-            .duration_since(now)
-            .is_err()
-          {
-            remove_metadata(&stored);
-            stored.remove_body();
-            inner.disk_recovery_removed_files_total += 2;
-            continue;
-          }
-          let StoredBody::Disk(body_path) = &stored.body else {
-            continue;
-          };
-          if !body_path.is_file() {
-            remove_metadata(&stored);
-            inner.disk_recovery_errors_total += 1;
-            inner.disk_recovery_removed_files_total += 1;
-            continue;
-          }
-          referenced_bodies.insert(body_path.clone());
-          add_size(&mut inner, &stored);
-          inner.order.push_back(stored.variant_key.clone());
-          index_entry(&mut inner, &stored);
-          inner.entries.insert(stored.variant_key.clone(), stored);
-          inner.disk_recovered_entries_total += 1;
-        }
-        Err(error) => {
-          warn!(error = %error, path = %path.display(), "failed to load disk cache metadata");
-          inner.disk_recovery_errors_total += 1;
-          if std::fs::remove_file(path).is_ok() {
-            inner.disk_recovery_removed_files_total += 1;
-          }
-        }
-      }
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-      for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("body")
-          && !referenced_bodies.contains(&path)
-          && std::fs::remove_file(&path).is_ok()
-        {
-          inner.disk_recovery_removed_files_total += 1;
-        }
-      }
-    }
-  }
 }
 
 impl Drop for ResponseCache {
   fn drop(&mut self) {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     for (_, entry) in inner.entries.drain() {
       if !matches!(entry.body, StoredBody::Disk(_)) {
         entry.remove_body();

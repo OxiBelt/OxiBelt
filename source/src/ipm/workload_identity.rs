@@ -209,7 +209,7 @@ impl IpmRuntime {
       inner: Arc::new(super::IpmRuntimeInner {
         namespace: "oxibelt".to_string(),
         static_snapshot: Arc::new(snapshot.clone()),
-        snapshot: RwLock::new(Arc::new(snapshot)),
+        snapshot: arc_swap::ArcSwap::from_pointee(snapshot),
         store: None,
         last_refresh: RwLock::new(super::IpmRefreshState::ok(0)),
         legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),

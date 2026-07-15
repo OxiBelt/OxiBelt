@@ -82,6 +82,10 @@ pub(super) fn parse_setvar(raw: &str) -> anyhow::Result<Option<CrsAction>> {
   }))
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the built-in TX macro expression is a fixed, compile-reviewed regex"
+)]
 pub(super) fn expand_macros<'a>(value: &'a str, tx: &CrsTransaction<'_>) -> Cow<'a, str> {
   static TX_MACRO_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"%\{tx\.([A-Za-z0-9_.-]+)\}").expect("valid TX macro regex"));

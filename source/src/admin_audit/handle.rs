@@ -1,7 +1,7 @@
 //! Admin audit request lifecycle and query parsing.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use http::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -44,6 +44,32 @@ impl AdminAuditReservation {
 }
 
 impl AdminAuditHandle {
+  pub(super) fn event_guard(&self) -> MutexGuard<'_, AdminAuditEvent> {
+    match self.inner.lock() {
+      Ok(event) => event,
+      Err(poisoned) => {
+        let event = poisoned.into_inner();
+        self.inner.clear_poison();
+        tracing::error!("recovered poisoned request-local Admin audit event");
+        event
+      }
+    }
+  }
+
+  fn spool_reservation_guard(
+    &self,
+  ) -> MutexGuard<'_, Option<super::spool::AdminAuditSpoolReservation>> {
+    match self.spool_reservation.lock() {
+      Ok(reservation) => reservation,
+      Err(poisoned) => {
+        let reservation = poisoned.into_inner();
+        self.spool_reservation.clear_poison();
+        tracing::error!("recovered poisoned request-local Admin audit spool reservation");
+        reservation
+      }
+    }
+  }
+
   pub fn new(
     peer_addr: SocketAddr,
     scheme: &'static str,
@@ -116,7 +142,7 @@ impl AdminAuditHandle {
   }
 
   pub fn set_actor(&self, name: &str, principal: &str, subject: &str, groups: &[String]) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     event.actor = Some(name.to_string());
     event.principal = Some(principal.to_string());
     event.subject = Some(subject.to_string());
@@ -135,7 +161,7 @@ impl AdminAuditHandle {
     credential_identity: Option<&str>,
     credential_principal: Option<&str>,
   ) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     event.authentication_reason = Some(reason.to_string());
     event.workload_identity_kind = workload_identity_kind.map(str::to_string);
     event.workload_identity = workload_identity.map(str::to_string);
@@ -153,22 +179,14 @@ impl AdminAuditHandle {
   }
 
   pub(crate) fn request_id(&self) -> String {
-    self
-      .inner
-      .lock()
-      .expect("admin audit lock poisoned")
-      .request_id
-      .clone()
+    self.event_guard().request_id.clone()
   }
 
   pub(super) fn install_spool_reservation(
     &self,
     reservation: super::spool::AdminAuditSpoolReservation,
   ) -> anyhow::Result<()> {
-    let mut current = self
-      .spool_reservation
-      .lock()
-      .expect("admin audit spool reservation lock poisoned");
+    let mut current = self.spool_reservation_guard();
     if current.is_some() {
       anyhow::bail!("Admin audit request already owns a terminal spool reservation");
     }
@@ -177,18 +195,14 @@ impl AdminAuditHandle {
   }
 
   fn take_spool_reservation(&self) -> Option<super::spool::AdminAuditSpoolReservation> {
-    self
-      .spool_reservation
-      .lock()
-      .expect("admin audit spool reservation lock poisoned")
-      .take()
+    self.spool_reservation_guard().take()
   }
 
   pub(crate) fn error_details(&self, status: StatusCode) -> Option<Value> {
     if status != StatusCode::FORBIDDEN {
       return None;
     }
-    let event = self.inner.lock().expect("admin audit lock poisoned");
+    let event = self.event_guard();
     match (&event.action, &event.resource) {
       (Some(action), Some(resource)) => Some(json!({
         "action": action,
@@ -199,7 +213,7 @@ impl AdminAuditHandle {
   }
 
   pub fn record_authorization(&self, action: &str, resource: &str, allowed: bool) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     if event.action.is_none() || !allowed {
       event.action = Some(action.to_string());
       event.resource = Some(resource.to_string());
@@ -213,7 +227,7 @@ impl AdminAuditHandle {
   }
 
   pub fn record_json_body(&self, bytes: &[u8]) {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     request::merge_json_body_summary(
       &mut event.request_summary,
       request::json_body_summary(bytes),
@@ -225,7 +239,7 @@ impl AdminAuditHandle {
     durability_action: &str,
     resource: &str,
   ) -> AdminAuditEvent {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     event.durability_action = Some(durability_action.to_string());
     event.durable_required = true;
     let mut intent = event.clone();
@@ -252,7 +266,7 @@ impl AdminAuditHandle {
   }
 
   pub fn finish_with_error(&self, status: StatusCode, error: &str) -> AdminAuditEvent {
-    let mut event = self.inner.lock().expect("admin audit lock poisoned");
+    let mut event = self.event_guard();
     if let Ok(event_id) = super::event::generate_event_id() {
       event.event_id = event_id;
     }

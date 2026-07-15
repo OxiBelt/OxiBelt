@@ -282,11 +282,10 @@ fn ip_header_value(ip: IpAddr) -> HeaderValue {
         }
         len += write_u8_decimal(octet, &mut buf[len..]);
       }
-      HeaderValue::from_bytes(&buf[..len]).expect("IPv4 text is a valid header value")
+      HeaderValue::from_bytes(&buf[..len]).unwrap_or_else(|_| HeaderValue::from_static("unknown"))
     }
-    IpAddr::V6(addr) => {
-      HeaderValue::from_str(&addr.to_string()).expect("IPv6 text is a valid header value")
-    }
+    IpAddr::V6(addr) => HeaderValue::from_str(&addr.to_string())
+      .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
   }
 }
 
@@ -334,7 +333,7 @@ fn port_header_value(port: u16) -> HeaderValue {
       break;
     }
   }
-  HeaderValue::from_bytes(&buf[index..]).expect("u16 decimal port is a valid header value")
+  HeaderValue::from_bytes(&buf[index..]).unwrap_or_else(|_| HeaderValue::from_static("0"))
 }
 
 pub(crate) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {

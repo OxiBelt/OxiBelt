@@ -9,6 +9,8 @@ mod external;
 mod fill;
 #[path = "tests_index.rs"]
 mod index;
+#[path = "tests_recovery.rs"]
+mod recovery;
 #[path = "tests_revalidation.rs"]
 mod revalidation;
 #[path = "tests_security.rs"]

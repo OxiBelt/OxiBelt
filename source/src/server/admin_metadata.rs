@@ -97,12 +97,11 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
 }
 
 fn debug_assert_capability_feature_keys(features: &Value) {
-  let mut actual = features
-    .as_object()
-    .expect("Admin capabilities features must be an object")
-    .keys()
-    .map(String::as_str)
-    .collect::<Vec<_>>();
+  let Some(features) = features.as_object() else {
+    debug_assert!(false, "Admin capabilities features must be an object");
+    return;
+  };
+  let mut actual = features.keys().map(String::as_str).collect::<Vec<_>>();
   let mut expected = super::ADMIN_CAPABILITY_FEATURE_KEYS.to_vec();
   actual.sort_unstable();
   expected.sort_unstable();

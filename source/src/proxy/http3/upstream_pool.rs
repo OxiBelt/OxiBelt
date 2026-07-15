@@ -156,6 +156,19 @@ struct PooledH3Lease {
 }
 
 impl PooledH3Connection {
+  fn last_used_guard(&self) -> std::sync::MutexGuard<'_, Instant> {
+    match self.last_used.lock() {
+      Ok(last_used) => last_used,
+      Err(poisoned) => {
+        let mut last_used = poisoned.into_inner();
+        *last_used = Instant::now();
+        self.last_used.clear_poison();
+        tracing::warn!("recovered poisoned HTTP/3 pool timestamp");
+        last_used
+      }
+    }
+  }
+
   fn usable(&self, upstream: &UpstreamConfig, quic_config: &crate::config::QuicConfig) -> bool {
     if self.connection.close_reason().is_some() {
       return false;
@@ -164,19 +177,11 @@ impl PooledH3Connection {
       return true;
     }
     self.created_at.elapsed() < Duration::from_millis(quic_config.upstream_pool.max_lifetime_ms)
-      && self
-        .last_used
-        .lock()
-        .expect("pooled H3 connection last_used lock poisoned")
-        .elapsed()
-        < Duration::from_millis(upstream.idle_timeout_ms)
+      && self.last_used_guard().elapsed() < Duration::from_millis(upstream.idle_timeout_ms)
   }
 
   fn mark_used(&self) {
-    *self
-      .last_used
-      .lock()
-      .expect("pooled H3 connection last_used lock poisoned") = Instant::now();
+    *self.last_used_guard() = Instant::now();
   }
 
   fn reserve(connection: &Arc<Self>) -> PooledH3Lease {
@@ -192,10 +197,7 @@ impl PooledH3Connection {
   }
 
   fn last_used(&self) -> Instant {
-    *self
-      .last_used
-      .lock()
-      .expect("pooled H3 connection last_used lock poisoned")
+    *self.last_used_guard()
   }
 }
 

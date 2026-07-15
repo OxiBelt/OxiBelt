@@ -540,6 +540,18 @@ async fn eligible_static_plan(
     });
   }
   clear_cached_static_response_heads(&mut plan);
+  let Some(access_log) = access_log else {
+    tracing::error!(route = %resolved.route.name, "static WAF access-log context is unavailable");
+    return Some(TimedStaticResponsePlan {
+      response: static_files::text_plan(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "request security context is unavailable",
+      ),
+      response_send_timeout,
+      access_log: None,
+      silent_close: false,
+    });
+  };
   Some(
     static_waf::apply_static_waf(
       request,
@@ -547,7 +559,7 @@ async fn eligible_static_plan(
       resolved.execution_plan.waf,
       client_addr,
       transport_metadata,
-      access_log.expect("static WAF should create fast-path access-log context"),
+      access_log,
       response_send_timeout,
       plan,
     )

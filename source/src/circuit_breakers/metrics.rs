@@ -8,16 +8,19 @@ use super::types::{AdmissionRejectionReason, CircuitState, ResourceKind};
 
 impl CircuitBreakerRuntime {
   pub fn append_prometheus(&self, output: &mut String) {
-    let state = self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned");
     output.push_str("# TYPE oxibelt_circuit_breaker_enabled gauge\n");
     let _ = writeln!(
       output,
       "oxibelt_circuit_breaker_enabled {}",
       u8::from(self.enabled.load(Ordering::Acquire))
     );
+    let Ok(state) = self.state_guard() else {
+      output.push_str("# TYPE oxibelt_circuit_breaker_state_unavailable gauge\n");
+      output.push_str("oxibelt_circuit_breaker_state_unavailable 1\n");
+      return;
+    };
+    output.push_str("# TYPE oxibelt_circuit_breaker_state_unavailable gauge\n");
+    output.push_str("oxibelt_circuit_breaker_state_unavailable 0\n");
     output.push_str("# TYPE oxibelt_circuit_breaker_active gauge\n");
     output.push_str("# TYPE oxibelt_circuit_breaker_queued gauge\n");
     output.push_str("# TYPE oxibelt_circuit_breaker_state gauge\n");

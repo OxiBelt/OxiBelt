@@ -125,11 +125,9 @@ impl AdmissionQueues {
 impl RuntimeState {
   pub(super) fn enqueue(&mut self, ticket: &WaiterTicket, waiter: Waiter) {
     for allocation in &waiter.allocations {
-      let scope = self
-        .scopes
-        .get_mut(&allocation.scope)
-        .expect("configured circuit-breaker scope is present");
-      scope.queued[allocation.resource as usize] += 1;
+      if let Some(scope) = self.scopes.get_mut(&allocation.scope) {
+        scope.queued[allocation.resource as usize] += 1;
+      }
     }
     self.waiters.push(ticket, waiter);
   }

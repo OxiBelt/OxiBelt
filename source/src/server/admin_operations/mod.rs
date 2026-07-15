@@ -49,6 +49,7 @@ pub(super) fn enqueue_error_response(error: AdminOperationError) -> Response<Pro
     }
     AdminOperationError::NotFound => StatusCode::NOT_FOUND,
     AdminOperationError::AlreadyTerminal => StatusCode::CONFLICT,
+    AdminOperationError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
   };
   text_response(status, &error.to_string())
 }

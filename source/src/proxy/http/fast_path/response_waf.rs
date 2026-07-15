@@ -16,6 +16,10 @@ pub(super) fn evaluate_response_waf(
   upstream: &UpstreamConfig,
   pool_selection: Option<&PoolSelection>,
 ) -> ResponseWafDecision {
+  #[allow(
+    clippy::expect_used,
+    reason = "the caller validates the request-scoped Person proof snapshot before evaluation"
+  )]
   let person_proof = access_log
     .person_proof_snapshot()
     .expect("fast-path response WAF should have a request-scoped Person proof snapshot");

@@ -30,12 +30,12 @@ use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::overload::ControlPlane;
-use crate::pool_health;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::{SilentClose, is_silent_close_response, text_response};
 use crate::proxy::{http, http3};
 use crate::proxy_protocol;
 use crate::reload::{ReloadManager, ReloadTrigger};
+use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::{BoundStreamListener, StreamListenerTask};
@@ -98,7 +98,7 @@ use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
 use admin_operations::AdminOperationRuntime;
 use admin_stream_pools::admin_stream_pools_response;
 use admin_upstream_pools::admin_upstream_pools_response;
-use ops::{OpsKind, serve_ops_listener};
+use ops::OpsTasks;
 use process_signals::{
   ProcessSignal, ProcessSignals, begin_process_predrain, graceful_process_shutdown,
 };
@@ -204,90 +204,6 @@ pub async fn serve(
   }
 }
 
-struct OpsTasks {
-  shutdown: Vec<watch::Sender<bool>>,
-  tasks: Vec<JoinHandle<()>>,
-}
-
-impl OpsTasks {
-  async fn start(
-    state: AppHandle,
-    error_tx: mpsc::UnboundedSender<anyhow::Error>,
-  ) -> anyhow::Result<Self> {
-    let snapshot = state.snapshot();
-    let mut shutdown = Vec::new();
-    let mut tasks = Vec::new();
-    if snapshot.config.metrics.enabled {
-      let listener = TcpListener::bind(snapshot.config.metrics.bind)
-        .await
-        .with_context(|| {
-          format!(
-            "failed to bind metrics listener to {}",
-            snapshot.config.metrics.bind
-          )
-        })?;
-      let (tx, rx) = watch::channel(false);
-      shutdown.push(tx);
-      let task_state = state.clone();
-      let task_error = error_tx.clone();
-      tasks.push(tokio::spawn(async move {
-        if let Err(error) = serve_ops_listener(listener, task_state, rx, OpsKind::Metrics).await {
-          let _ = task_error.send(error.context("metrics listener failed"));
-        }
-      }));
-    }
-    if snapshot.config.health.enabled {
-      let listener = TcpListener::bind(snapshot.config.health.bind)
-        .await
-        .with_context(|| {
-          format!(
-            "failed to bind health listener to {}",
-            snapshot.config.health.bind
-          )
-        })?;
-      let (tx, rx) = watch::channel(false);
-      shutdown.push(tx);
-      let task_state = state.clone();
-      let task_error = error_tx.clone();
-      tasks.push(tokio::spawn(async move {
-        if let Err(error) = serve_ops_listener(listener, task_state, rx, OpsKind::Health).await {
-          let _ = task_error.send(error.context("health listener failed"));
-        }
-      }));
-    }
-    let (tx, rx) = watch::channel(false);
-    shutdown.push(tx);
-    let task_state = state.clone();
-    tasks.push(tokio::spawn(async move {
-      pool_health::run_pool_health_checks(task_state, rx).await;
-    }));
-    let (tx, rx) = watch::channel(false);
-    shutdown.push(tx);
-    let task_state = state.clone();
-    tasks.push(tokio::spawn(async move {
-      crate::overload::run_sampler(task_state, rx).await;
-    }));
-    let (tx, rx) = watch::channel(false);
-    shutdown.push(tx);
-    let task_state = state;
-    tasks.push(tokio::spawn(async move {
-      crate::upstream_discovery::run_dynamic_upstream_discovery(task_state, rx).await;
-    }));
-    Ok(Self { shutdown, tasks })
-  }
-}
-
-impl Drop for OpsTasks {
-  fn drop(&mut self) {
-    for tx in &self.shutdown {
-      let _ = tx.send(true);
-    }
-    for task in &self.tasks {
-      task.abort();
-    }
-  }
-}
-
 async fn serve_admin_listener(
   listener: TcpListener,
   configured_bind: SocketAddr,
@@ -300,6 +216,10 @@ async fn serve_admin_listener(
     .local_addr()
     .context("failed to read admin listener address")?;
   info!(bind = %bind, "admin listener started");
+  let connections = TaskRegistry::new(
+    RuntimeTaskKind::AdminConnection,
+    state.snapshot().runtime_health.clone(),
+  );
   loop {
     tokio::select! {
       biased;
@@ -328,7 +248,7 @@ async fn serve_admin_listener(
         };
         let admin_control = admin_control.clone();
         let admin_operations = admin_operations.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
           let _control_connection = control_connection;
           if let Err(error) =
             handle_admin_connection(
@@ -1499,7 +1419,10 @@ impl BoundTcpListener {
     let options = self.options;
     let kind = self.kind;
     let accept_error_backoff = self.accept_error_backoff;
-    let connections = TaskRegistry::default();
+    let connections = TaskRegistry::new(
+      RuntimeTaskKind::HttpConnection,
+      state.snapshot().runtime_health.clone(),
+    );
     let tasks = self
       .listeners
       .into_iter()
@@ -1598,7 +1521,10 @@ impl BoundHttp3Listener {
     let bind = self.bind;
     let socket = self.socket;
     let transport = self.transport;
-    let connections = TaskRegistry::default();
+    let connections = TaskRegistry::new(
+      RuntimeTaskKind::HttpConnection,
+      state.snapshot().runtime_health.clone(),
+    );
     let mut tasks = crate::sni_forward::quic::spawn_demux_tasks(
       self.sni_forward_quic,
       quiesce_rx.clone(),

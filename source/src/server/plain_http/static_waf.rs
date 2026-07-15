@@ -149,9 +149,18 @@ pub(super) async fn apply_static_waf(
       tags: access_log.tags(),
       dynamic_policy: &dynamic_policy,
     };
-    let person_proof = access_log
-      .person_proof_snapshot()
-      .expect("static response WAF should have a request-scoped Person proof snapshot");
+    let Some(person_proof) = access_log.person_proof_snapshot() else {
+      tracing::error!(route = %access_log.route_name, "static response WAF context is unavailable");
+      return TimedStaticResponsePlan {
+        response: static_files::text_plan(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          "response security context is unavailable",
+        ),
+        response_send_timeout,
+        access_log: Some(access_log),
+        silent_close: false,
+      };
+    };
     let response_waf = snapshot.waf.evaluate_response_with_person_proof_snapshot(
       WafResponseInput {
         request: request_input,

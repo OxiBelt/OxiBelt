@@ -2,15 +2,19 @@
 //! The manager owns no client-derived labels and is shared across snapshot reloads.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
+use arc_swap::ArcSwap;
 use http::StatusCode;
 use tracing::info;
 
 use crate::config::{OverloadConfig, PriorityClass};
 use crate::lifecycle::LifecycleState;
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemState,
+};
 mod leases;
 mod metrics;
 mod pressure;
@@ -230,7 +234,7 @@ struct LatestSample {
 
 /// Shared manager retained across immutable application snapshots.
 pub struct OverloadRuntime {
-  config: RwLock<OverloadConfig>,
+  config: ArcSwap<OverloadConfig>,
   state: AtomicU8,
   enabled: AtomicBool,
   work: [AtomicU64; WORK_KIND_COUNT],
@@ -241,6 +245,7 @@ pub struct OverloadRuntime {
   control_requests: [AtomicU64; CONTROL_PLANE_COUNT],
   latest: Mutex<LatestSample>,
   sampling: Mutex<SamplingState>,
+  runtime_health: Arc<RuntimeHealth>,
 }
 
 impl std::fmt::Debug for OverloadRuntime {
@@ -255,8 +260,15 @@ impl std::fmt::Debug for OverloadRuntime {
 
 impl OverloadRuntime {
   pub fn new(config: &OverloadConfig) -> Arc<Self> {
+    Self::new_with_health(config, Arc::new(RuntimeHealth::default()))
+  }
+
+  pub(crate) fn new_with_health(
+    config: &OverloadConfig,
+    runtime_health: Arc<RuntimeHealth>,
+  ) -> Arc<Self> {
     Arc::new(Self {
-      config: RwLock::new(config.clone()),
+      config: ArcSwap::from_pointee(config.clone()),
       state: AtomicU8::new(OverloadState::Normal as u8),
       enabled: AtomicBool::new(config.enabled),
       work: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -267,14 +279,50 @@ impl OverloadRuntime {
       control_requests: std::array::from_fn(|_| AtomicU64::new(0)),
       latest: Mutex::new(LatestSample::default()),
       sampling: Mutex::new(SamplingState::default()),
+      runtime_health,
     })
   }
 
+  fn mark_lock_recovery(&self) {
+    self
+      .runtime_health
+      .record_lock_recovery(RuntimeSubsystem::Overload);
+    self.runtime_health.set_subsystem_state(
+      PROCESS_GENERATION,
+      RuntimeSubsystem::Overload,
+      RuntimeSubsystemState::Degraded,
+      self.enabled.load(Ordering::Acquire),
+    );
+  }
+
+  fn sampling_guard(&self) -> MutexGuard<'_, SamplingState> {
+    match self.sampling.lock() {
+      Ok(sampling) => sampling,
+      Err(poisoned) => {
+        let mut sampling = poisoned.into_inner();
+        *sampling = SamplingState::default();
+        self.sampling.clear_poison();
+        self.mark_lock_recovery();
+        sampling
+      }
+    }
+  }
+
+  fn latest_guard(&self) -> MutexGuard<'_, LatestSample> {
+    match self.latest.lock() {
+      Ok(latest) => latest,
+      Err(poisoned) => {
+        let mut latest = poisoned.into_inner();
+        *latest = LatestSample::default();
+        self.latest.clear_poison();
+        self.mark_lock_recovery();
+        latest
+      }
+    }
+  }
+
   pub fn configure(&self, config: &OverloadConfig, lifecycle: &LifecycleState) {
-    *self
-      .config
-      .write()
-      .expect("overload configuration lock poisoned") = config.clone();
+    self.config.store(Arc::new(config.clone()));
     self.enabled.store(config.enabled, Ordering::Relaxed);
     if !config.enabled {
       self.transition(OverloadState::Normal, Signal::Unavailable, lifecycle);
@@ -305,31 +353,16 @@ impl OverloadRuntime {
   }
 
   pub fn response_status(&self) -> StatusCode {
-    let code = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned")
-      .actions
-      .hard
-      .response_status;
+    let code = self.config.load().actions.hard.response_status;
     StatusCode::from_u16(code).unwrap_or(StatusCode::SERVICE_UNAVAILABLE)
   }
 
   pub fn retry_after_seconds(&self) -> u64 {
-    self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned")
-      .actions
-      .hard
-      .retry_after_seconds
+    self.config.load().actions.hard.retry_after_seconds
   }
 
   pub fn reject_large_request_body(&self, content_length: Option<u64>) -> bool {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     self.state() == OverloadState::Hard
       && config.actions.hard.stop_large_request_bodies
       && content_length
@@ -338,10 +371,7 @@ impl OverloadRuntime {
   }
 
   pub fn reject_priority(&self, priority: PriorityClass) -> bool {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     let reject = self.state() != OverloadState::Normal
       && config
         .actions
@@ -355,10 +385,7 @@ impl OverloadRuntime {
   }
 
   pub fn cache_fill_disabled(&self) -> bool {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     match self.state() {
       OverloadState::Normal => false,
       OverloadState::Soft => config.actions.soft.disable_cache_fill,
@@ -369,21 +396,11 @@ impl OverloadRuntime {
   }
 
   pub fn prefer_cached_or_stale(&self) -> bool {
-    self.state() != OverloadState::Normal
-      && self
-        .config
-        .read()
-        .expect("overload configuration lock poisoned")
-        .actions
-        .soft
-        .prefer_cached_or_stale
+    self.state() != OverloadState::Normal && self.config.load().actions.soft.prefer_cached_or_stale
   }
 
   pub fn compression_level_cap(&self) -> Option<u8> {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     match self.state() {
       OverloadState::Normal => None,
       OverloadState::Soft => config
@@ -401,38 +418,18 @@ impl OverloadRuntime {
   }
 
   pub fn retries_disabled(&self) -> bool {
-    self.state() == OverloadState::Hard
-      && self
-        .config
-        .read()
-        .expect("overload configuration lock poisoned")
-        .actions
-        .hard
-        .disable_retries
+    self.state() == OverloadState::Hard && self.config.load().actions.hard.disable_retries
   }
 
   pub fn request_mirroring_disabled(&self) -> bool {
-    self.state() == OverloadState::Hard
-      && self
-        .config
-        .read()
-        .expect("overload configuration lock poisoned")
-        .actions
-        .hard
-        .disable_request_mirroring
+    self.state() == OverloadState::Hard && self.config.load().actions.hard.disable_request_mirroring
   }
 
   pub fn retry_budget_multiplier(&self) -> f64 {
     if self.state() == OverloadState::Normal {
       1.0
     } else {
-      self
-        .config
-        .read()
-        .expect("overload configuration lock poisoned")
-        .actions
-        .soft
-        .retry_budget_multiplier
+      self.config.load().actions.soft.retry_budget_multiplier
     }
   }
 
@@ -464,10 +461,7 @@ impl OverloadRuntime {
     let now = Instant::now();
     self.work[WorkKind::SharedStateWaiters as usize].store(shared_state_waiters, Ordering::Relaxed);
     let cpu_ratio = {
-      let mut sampling = self
-        .sampling
-        .lock()
-        .expect("overload sampling lock poisoned");
+      let mut sampling = self.sampling_guard();
       let ratio = sampling.cpu.and_then(|previous| {
         let elapsed_usec = now.duration_since(previous.at).as_micros() as u64;
         let consumed_usec = sample.cpu_usage_usec.saturating_sub(previous.usage_usec);
@@ -485,20 +479,12 @@ impl OverloadRuntime {
     let memory_ratio = sample.memory_limit_bytes.and_then(|limit| {
       (limit > 0).then(|| sample.memory_current_bytes.max(sample.rss_bytes) as f64 / limit as f64)
     });
-    let reserved_file_descriptors = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned")
-      .reserved_capacity
-      .file_descriptors;
+    let reserved_file_descriptors = self.config.load().reserved_capacity.file_descriptors;
     let fd_ratio = (sample.fd_limit > 0).then(|| {
       sample.fd_used.saturating_add(reserved_file_descriptors) as f64 / sample.fd_limit as f64
     });
     {
-      let mut latest = self
-        .latest
-        .lock()
-        .expect("overload latest sample lock poisoned");
+      let mut latest = self.latest_guard();
       latest.rss_bytes = sample.rss_bytes;
       latest.memory_current_bytes = sample.memory_current_bytes;
       latest.memory_limit_bytes = sample.memory_limit_bytes.unwrap_or(0);
@@ -538,6 +524,12 @@ impl OverloadRuntime {
       },
       lifecycle,
     );
+    self.runtime_health.set_subsystem_state(
+      PROCESS_GENERATION,
+      RuntimeSubsystem::Overload,
+      RuntimeSubsystemState::Healthy,
+      self.enabled.load(Ordering::Acquire),
+    );
   }
 
   fn record_probe_failure(&self, lifecycle: &LifecycleState) {
@@ -545,15 +537,8 @@ impl OverloadRuntime {
       self.signal_available[signal as usize].store(false, Ordering::Relaxed);
     }
     let stale = {
-      let mut sampling = self
-        .sampling
-        .lock()
-        .expect("overload sampling lock poisoned");
-      let timeout = self
-        .config
-        .read()
-        .expect("overload configuration lock poisoned")
-        .signal_stale_timeout_ms;
+      let mut sampling = self.sampling_guard();
+      let timeout = self.config.load().signal_stale_timeout_ms;
       let first_failure = sampling
         .probe_failure_since
         .get_or_insert_with(Instant::now);
@@ -565,25 +550,14 @@ impl OverloadRuntime {
   }
 
   fn apply_pressure_sample(&self, sample: PressureSample, lifecycle: &LifecycleState) {
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned")
-      .clone();
+    let config = self.config.load_full();
     if let Some(signal) = threshold_signal(&sample, &config, true) {
-      self
-        .sampling
-        .lock()
-        .expect("overload sampling lock poisoned")
-        .soft_samples = 0;
+      self.sampling_guard().soft_samples = 0;
       self.transition(OverloadState::Hard, signal, lifecycle);
       return;
     }
     let soft = threshold_signal(&sample, &config, false);
-    let mut sampling = self
-      .sampling
-      .lock()
-      .expect("overload sampling lock poisoned");
+    let mut sampling = self.sampling_guard();
     match (self.state(), soft) {
       (OverloadState::Normal, Some(signal)) => {
         sampling.soft_samples = sampling.soft_samples.saturating_add(1);
@@ -622,10 +596,7 @@ impl OverloadRuntime {
       return;
     }
     self.transitions[transition_index(previous, next, signal)].fetch_add(1, Ordering::Relaxed);
-    let config = self
-      .config
-      .read()
-      .expect("overload configuration lock poisoned");
+    let config = self.config.load();
     if next == OverloadState::Hard && config.actions.hard.enter_recoverable_drain {
       lifecycle.set_overload_draining();
     } else if next != OverloadState::Hard {

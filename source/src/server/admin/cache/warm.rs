@@ -302,6 +302,7 @@ fn operation_enqueue_error_response(
     | admin_operations::AdminOperationError::StoreFull => StatusCode::SERVICE_UNAVAILABLE,
     admin_operations::AdminOperationError::NotFound => StatusCode::NOT_FOUND,
     admin_operations::AdminOperationError::AlreadyTerminal => StatusCode::CONFLICT,
+    admin_operations::AdminOperationError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
   };
   text_response(status, &error.to_string())
 }

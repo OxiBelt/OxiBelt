@@ -36,6 +36,10 @@ impl DownstreamCertificatePartitions {
     }
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "TLS construction always installs the validated default certificate partition"
+  )]
   pub(in crate::tls) fn default_identity(&self) -> &str {
     &self
       .partitions

@@ -1,13 +1,17 @@
 //! Lifecycle state shared by listeners, connections, and admin drain operations.
 //! Drain signals are explicit so shutdown does not race active proxy sessions.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use crate::runtime_health::{RuntimeHealth, RuntimePanicScope, RuntimeSubsystem, RuntimeTaskKind};
 
 #[derive(Debug)]
 pub struct LifecycleState {
@@ -262,9 +266,11 @@ impl ConnectionDrain {
   }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TaskRegistry {
   inner: Arc<TaskRegistryInner>,
+  health: Arc<RuntimeHealth>,
+  kind: RuntimeTaskKind,
 }
 
 #[derive(Default)]
@@ -275,6 +281,14 @@ struct TaskRegistryInner {
 }
 
 impl TaskRegistry {
+  pub(crate) fn new(kind: RuntimeTaskKind, health: Arc<RuntimeHealth>) -> Self {
+    Self {
+      inner: Arc::new(TaskRegistryInner::default()),
+      health,
+      kind,
+    }
+  }
+
   pub(crate) fn spawn<F>(&self, future: F)
   where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -282,17 +296,17 @@ impl TaskRegistry {
     self.reap_finished();
     self.inner.active.fetch_add(1, Ordering::Relaxed);
     let inner = self.inner.clone();
+    let health = self.health.clone();
+    let kind = self.kind;
     let completion = TaskCompletion { inner };
     let task = tokio::spawn(async move {
       let _completion = completion;
-      future.await;
+      if AssertUnwindSafe(future).catch_unwind().await.is_err() {
+        health.record_panic(RuntimePanicScope::Connection, kind);
+        tracing::error!(task = kind.as_str(), "contained connection task panicked");
+      }
     });
-    self
-      .inner
-      .tasks
-      .lock()
-      .expect("task registry lock poisoned")
-      .push(task);
+    self.tasks_guard().push(task);
   }
 
   pub(crate) async fn wait_idle(&self) {
@@ -308,11 +322,7 @@ impl TaskRegistry {
   }
 
   pub(crate) fn abort_all(&self) {
-    let mut tasks = self
-      .inner
-      .tasks
-      .lock()
-      .expect("task registry lock poisoned");
+    let mut tasks = self.tasks_guard();
     tasks.retain(|task| !task.is_finished());
     for task in tasks.iter() {
       task.abort();
@@ -320,12 +330,21 @@ impl TaskRegistry {
   }
 
   fn reap_finished(&self) {
-    self
-      .inner
-      .tasks
-      .lock()
-      .expect("task registry lock poisoned")
-      .retain(|task| !task.is_finished());
+    self.tasks_guard().retain(|task| !task.is_finished());
+  }
+
+  fn tasks_guard(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
+    match self.inner.tasks.lock() {
+      Ok(tasks) => tasks,
+      Err(poisoned) => {
+        let tasks = poisoned.into_inner();
+        self.inner.tasks.clear_poison();
+        self
+          .health
+          .record_lock_recovery(RuntimeSubsystem::TaskRegistry);
+        tasks
+      }
+    }
   }
 
   #[cfg(test)]
@@ -341,6 +360,15 @@ impl TaskRegistry {
       .lock()
       .expect("task registry lock poisoned")
       .len()
+  }
+}
+
+impl Default for TaskRegistry {
+  fn default() -> Self {
+    Self::new(
+      RuntimeTaskKind::HttpConnection,
+      Arc::new(RuntimeHealth::default()),
+    )
   }
 }
 
@@ -564,6 +592,33 @@ mod tests {
 
     registry.abort_all();
     wait_for_active_tasks(&registry, 0).await;
+  }
+
+  #[tokio::test]
+  async fn connection_panic_is_counted_and_does_not_disable_registry() {
+    let health = Arc::new(RuntimeHealth::default());
+    let registry = TaskRegistry::new(RuntimeTaskKind::HttpConnection, health.clone());
+
+    registry.spawn(async {
+      panic!("injected connection panic");
+    });
+    wait_for_active_tasks(&registry, 0).await;
+
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    registry.spawn(async move {
+      let _ = completed_tx.send(());
+    });
+    completed_rx
+      .await
+      .expect("registry should continue accepting connection tasks");
+    registry.wait_idle().await;
+
+    let mut metrics = String::new();
+    health.append_prometheus(&mut metrics);
+    assert!(
+      metrics
+        .contains("oxibelt_runtime_panics_total{scope=\"connection\",task=\"http_connection\"} 1")
+    );
   }
 
   async fn wait_for_active_tasks(registry: &TaskRegistry, expected: usize) {

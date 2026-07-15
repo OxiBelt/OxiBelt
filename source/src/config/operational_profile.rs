@@ -254,13 +254,13 @@ pub(super) fn apply_to_toml(value: &mut toml::Value) -> anyhow::Result<Option<Op
     )
   })?;
   fill_missing_values(value, &defaults)?;
-  value
-    .as_table_mut()
-    .expect("configuration root was checked as a table")
-    .insert(
-      "profile_version".to_string(),
-      toml::Value::Integer(i64::from(definition.version)),
-    );
+  let Some(root) = value.as_table_mut() else {
+    bail!("configuration root must be a table after profile expansion");
+  };
+  root.insert(
+    "profile_version".to_string(),
+    toml::Value::Integer(i64::from(definition.version)),
+  );
 
   Ok(Some(OperationalProfile {
     name: definition.name,

@@ -219,6 +219,10 @@ impl FastPathMetrics {
       .record_duration_ns(path, protocol, stage, outcome, duration_ns);
   }
 
+  #[allow(
+    clippy::expect_used,
+    reason = "the loops enumerate the same fixed label sets used by each counter index"
+  )]
   pub(super) fn append_prometheus(&self, output: &mut String) {
     for transport in TRANSPORTS {
       for protocol in PROTOCOLS {

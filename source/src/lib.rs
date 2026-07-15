@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+#![cfg_attr(not(test), deny(clippy::expect_used, clippy::unwrap_used))]
 #![recursion_limit = "256"]
 
 //! Application entrypoints and module wiring for the OxiBelt proxy runtime.
@@ -51,6 +52,7 @@ pub mod reload;
 pub mod remote_signer;
 pub mod routes;
 pub mod runtime;
+pub(crate) mod runtime_health;
 pub mod runtime_introspection;
 pub mod server;
 pub mod shared_state;

@@ -57,7 +57,7 @@ pub struct ChannelData<'a> {
 pub fn is_stun_message(bytes: &[u8]) -> bool {
   bytes.len() >= HEADER_LEN
     && bytes[0] & 0b1100_0000 == 0
-    && u32::from_be_bytes(bytes[4..8].try_into().expect("length checked")) == MAGIC_COOKIE
+    && u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) == MAGIC_COOKIE
 }
 
 pub fn parse_stun(bytes: &[u8]) -> anyhow::Result<StunMessage<'_>> {
@@ -128,7 +128,7 @@ pub fn attr_u32(message: &StunMessage<'_>, kind: u16) -> Option<u32> {
     .attrs
     .iter()
     .find(|attr| attr.kind == kind && attr.value.len() == 4)
-    .map(|attr| u32::from_be_bytes(attr.value.try_into().expect("length checked")))
+    .map(|attr| u32::from_be_bytes([attr.value[0], attr.value[1], attr.value[2], attr.value[3]]))
 }
 
 pub fn attr_bytes<'a>(message: &'a StunMessage<'_>, kind: u16) -> Option<&'a [u8]> {
@@ -285,7 +285,7 @@ pub fn decode_xor_address(value: &[u8], transaction_id: &[u8; 12]) -> anyhow::Re
   let port = u16::from_be_bytes([value[2], value[3]]) ^ ((MAGIC_COOKIE >> 16) as u16);
   match value[1] {
     0x01 if value.len() >= 8 => {
-      let raw = u32::from_be_bytes(value[4..8].try_into().expect("length checked")) ^ MAGIC_COOKIE;
+      let raw = u32::from_be_bytes([value[4], value[5], value[6], value[7]]) ^ MAGIC_COOKIE;
       Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(raw)), port))
     }
     0x02 if value.len() >= 20 => {
@@ -334,7 +334,7 @@ pub fn verify_fingerprint(message: &StunMessage<'_>) -> anyhow::Result<bool> {
   let len = (attr.offset + 8 - HEADER_LEN) as u16;
   bytes[2..4].copy_from_slice(&len.to_be_bytes());
   let expected = crc32(&bytes) ^ 0x5354_554e;
-  Ok(expected == u32::from_be_bytes(attr.value.try_into().expect("length checked")))
+  Ok(expected == u32::from_be_bytes([attr.value[0], attr.value[1], attr.value[2], attr.value[3]]))
 }
 
 pub fn hmac_sha1(key: &[u8], value: &[u8]) -> [u8; 20] {

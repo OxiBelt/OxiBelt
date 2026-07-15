@@ -145,7 +145,7 @@ impl ResponseCache {
       return CacheStreamingInsertDecision::Rejected(CacheInsertOutcome::StoreFailed);
     };
     {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let mut inner = self.inner_guard();
       if variant_count_exceeded(
         &inner,
         &prepared.policy,
@@ -194,7 +194,7 @@ impl ResponseCache {
   }
 
   fn reserve_streaming_disk_size(&self, policy: &super::CachePolicyRuntime, size: usize) -> bool {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     while !self.streaming_disk_reservation_fits(&inner, policy, size) {
       let Some(oldest) = inner.order.pop_front() else {
         break;
@@ -241,7 +241,7 @@ impl ResponseCache {
   }
 
   fn release_streaming_disk_size(&self, size: usize) {
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     inner.disk_inflight_size = inner.disk_inflight_size.saturating_sub(size);
   }
 
@@ -356,7 +356,7 @@ impl ResponseCache {
       size,
     };
     let (shared_entry, external_entry) = {
-      let mut inner = self.inner.lock().expect("cache lock poisoned");
+      let mut inner = self.inner_guard();
       if variant_count_exceeded(
         &inner,
         &prepared.policy,

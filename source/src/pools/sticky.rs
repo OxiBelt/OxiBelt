@@ -50,7 +50,9 @@ pub(super) fn sticky_secret_for_pool(
   {
     match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
       Ok(bytes) if bytes.len() == 32 => {
-        return bytes.try_into().expect("checked sticky secret length");
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        return secret;
       }
       _ => {
         tracing::warn!(

@@ -100,24 +100,15 @@ impl StaticFastPathContext {
   }
 
   pub(super) fn request_id(&self) -> &str {
-    self
-      .request_id
-      .as_deref()
-      .expect("static fast-path request id should be generated before use")
+    self.request_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn response_id(&self) -> &str {
-    self
-      .response_id
-      .as_deref()
-      .expect("static fast-path response id should be generated before use")
+    self.response_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn transaction_id(&self) -> &str {
-    self
-      .transaction_id
-      .as_deref()
-      .expect("static fast-path transaction id should be generated before use")
+    self.transaction_id.as_deref().unwrap_or("unavailable")
   }
 
   pub(super) fn tags(&self) -> &HashMap<String, String> {

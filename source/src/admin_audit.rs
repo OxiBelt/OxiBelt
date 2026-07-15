@@ -455,6 +455,10 @@ fn ensure_event_metadata(event: &AdminAuditEvent) -> anyhow::Result<()> {
   Ok(())
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "the fixed fallback identifier and digest are valid by construction"
+)]
 fn fallback_integrity_chain() -> integrity::IntegrityChain {
   integrity::IntegrityChain::new(None).unwrap_or_else(|_| {
     integrity::IntegrityChain::restore(

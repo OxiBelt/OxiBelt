@@ -165,11 +165,10 @@ impl ExternalAuthInner {
     let mut builder = Request::builder()
       .method(Method::GET)
       .uri(uri_from_url(&provider.config.endpoint)?);
-    add_forward_auth_headers(
-      builder.headers_mut().expect("headers available"),
-      provider,
-      &context,
-    );
+    let headers = builder
+      .headers_mut()
+      .ok_or_else(|| anyhow::anyhow!("external auth request builder rejected headers"))?;
+    add_forward_auth_headers(headers, provider, &context);
     let request = builder
       .body(empty_body())
       .context("failed to build external auth request")?;

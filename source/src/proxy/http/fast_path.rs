@@ -72,8 +72,8 @@ use self::finalize::{compiled_known_small_noop_static_candidate, finalize_respon
 use self::helpers::fast_path_downstream_response_timeout;
 use self::helpers::{
   apply_fast_path_priority_policy, fast_path_metric_protocol, fast_path_outbound_request_body,
-  fast_path_target_uri, fast_path_upstream_timing_required, record_empty_request_body,
-  request_body_definitely_empty,
+  fast_path_request_state_unavailable, fast_path_target_uri, fast_path_unavailable_response,
+  fast_path_upstream_timing_required, record_empty_request_body, request_body_definitely_empty,
 };
 #[cfg(test)]
 use self::request_body::fast_path_empty_request_body;

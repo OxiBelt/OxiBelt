@@ -1915,9 +1915,13 @@ where
       tags: tags_ref(&tags),
       dynamic_policy: &access_log.dynamic_policy,
     };
-    let person_proof = access_log
-      .person_proof_snapshot()
-      .expect("response WAF evaluation should have a request-scoped Person proof snapshot");
+    let Some(person_proof) = access_log.person_proof_snapshot() else {
+      tracing::error!(route = %resolved.route.name, "response WAF request context is unavailable");
+      return route_security.text(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "response security context is unavailable",
+      );
+    };
     let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
       WafResponseInput {
         request: request_input,
@@ -2093,10 +2097,8 @@ async fn handle_connect_request(
       }
       drop(pool_selection);
     });
-    let mut response = Response::builder()
-      .status(StatusCode::OK)
-      .body(full_body(bytes::Bytes::new()))
-      .expect("CONNECT response should build");
+    let mut response = Response::new(full_body(bytes::Bytes::new()));
+    *response.status_mut() = StatusCode::OK;
     apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
     return response;
   }
@@ -2105,10 +2107,8 @@ async fn handle_connect_request(
     Ok(upstream_stream) => {
       let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts, drain);
       drop(pool_selection);
-      let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(body)
-        .expect("CONNECT response should build");
+      let mut response = Response::new(body);
+      *response.status_mut() = StatusCode::OK;
       apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
       response
     }
@@ -2736,6 +2736,10 @@ async fn resolve_upstream_tcp_addr(origin: &url::Url) -> anyhow::Result<std::net
     .ok_or_else(|| anyhow::anyhow!("upstream host resolved no addresses: {host}:{port}"))
 }
 
+#[allow(
+  clippy::expect_used,
+  reason = "method, URI, version, and headers come from an existing valid request"
+)]
 fn parts_clone(parts: &http::request::Parts) -> http::request::Parts {
   let mut builder = Request::builder()
     .method(parts.method.clone())

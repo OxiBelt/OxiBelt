@@ -157,7 +157,7 @@ async fn process_frame(
           .relay_families
           .first()
           .map(|family| SocketAddr::new(family.public_ip, 0))
-          .unwrap_or_else(|| "0.0.0.0:0".parse().expect("static socket addr")),
+          .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0))),
       };
       send(
         &sender,

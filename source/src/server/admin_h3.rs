@@ -20,6 +20,7 @@ use crate::overload::ControlPlane;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::proxy::http3::{is_webtransport_request, respond_to_h3_request};
+use crate::runtime_health::RuntimeTaskKind;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
@@ -139,7 +140,10 @@ impl BoundAdminHttp3Listener {
     let bind = self.bind;
     let socket = self.socket;
     let transport = self.transport;
-    let connections = TaskRegistry::default();
+    let connections = TaskRegistry::new(
+      RuntimeTaskKind::AdminConnection,
+      state.snapshot().runtime_health.clone(),
+    );
     let tasks = self
       .endpoints
       .iter()
@@ -666,7 +670,8 @@ fn operation_webtransport_error_response(error: AdminOperationError) -> Response
     ),
     AdminOperationError::StoreFull
     | AdminOperationError::NotFound
-    | AdminOperationError::AlreadyTerminal => {
+    | AdminOperationError::AlreadyTerminal
+    | AdminOperationError::Internal => {
       text_response(StatusCode::SERVICE_UNAVAILABLE, &error.to_string())
     }
   }

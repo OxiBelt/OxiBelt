@@ -74,9 +74,7 @@ impl HostSnapshot {
   fn raw_host(&self) -> &str {
     match &self.source {
       HostSnapshotSource::Authority(authority) => authority.host(),
-      HostSnapshotSource::Header(value) => value
-        .to_str()
-        .expect("host snapshot headers are validated before storage"),
+      HostSnapshotSource::Header(value) => value.to_str().unwrap_or(""),
       HostSnapshotSource::Empty => "",
     }
   }

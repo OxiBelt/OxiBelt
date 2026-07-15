@@ -154,7 +154,7 @@ impl ResponseCache {
     if !matches!(stored.body, StoredBody::Memory(_)) || stored.size > policy.memory_max_size_bytes {
       return;
     }
-    let mut inner = self.inner.lock().expect("cache lock poisoned");
+    let mut inner = self.inner_guard();
     if variant_count_exceeded(
       &inner,
       policy,

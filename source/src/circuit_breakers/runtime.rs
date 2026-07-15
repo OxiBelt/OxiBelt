@@ -2,12 +2,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
-
 use crate::config::{CircuitBreakerFailureConfig, Config, PriorityClass};
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemState,
+};
+use http::StatusCode;
+use tokio::sync::Notify;
 
 use super::configuration::{
   deduplicate_allocations, elapsed_ms, queue_timeout, resolve_scopes, scoped_allocations,
@@ -48,9 +51,12 @@ impl RuntimeState {
     let breaker = &config.circuit_breakers;
     let global_request_limit = scopes
       .get(&ScopeKey::Global)
-      .expect("global circuit-breaker scope is present")
-      .limits
-      .resource(ResourceKind::Request);
+      .map(|scope| scope.limits.resource(ResourceKind::Request))
+      .unwrap_or(ResourceLimit {
+        active: 0,
+        queue: 0,
+        timeout: Duration::ZERO,
+      });
     Self {
       scopes,
       waiters: AdmissionQueues::default(),
@@ -90,9 +96,12 @@ impl RuntimeState {
     let global_request_limit = self
       .scopes
       .get(&ScopeKey::Global)
-      .expect("global circuit-breaker scope is present")
-      .limits
-      .resource(ResourceKind::Request);
+      .map(|scope| scope.limits.resource(ResourceKind::Request))
+      .unwrap_or(ResourceLimit {
+        active: 0,
+        queue: 0,
+        timeout: Duration::ZERO,
+      });
     self
       .priority
       .configure(&breaker.priority, global_request_limit);
@@ -139,11 +148,9 @@ impl RuntimeState {
 
   pub(super) fn increment_active(&mut self, allocations: &[Allocation]) {
     for allocation in allocations {
-      let scope = self
-        .scopes
-        .get_mut(&allocation.scope)
-        .expect("configured circuit-breaker scope is present");
-      scope.active[allocation.resource as usize] += 1;
+      if let Some(scope) = self.scopes.get_mut(&allocation.scope) {
+        scope.active[allocation.resource as usize] += 1;
+      }
     }
   }
 
@@ -192,10 +199,9 @@ impl RuntimeState {
     });
     scopes.dedup();
     for key in &scopes {
-      let scope = self
-        .scopes
-        .get(key)
-        .expect("configured circuit-breaker scope is present");
+      let Some(scope) = self.scopes.get(key) else {
+        return Err(Duration::ZERO);
+      };
       if !scope.failure_enabled {
         continue;
       }
@@ -203,10 +209,9 @@ impl RuntimeState {
     }
     let mut probes = Vec::new();
     for key in scopes {
-      let scope = self
-        .scopes
-        .get_mut(&key)
-        .expect("configured circuit-breaker scope is present");
+      let Some(scope) = self.scopes.get_mut(&key) else {
+        return Err(Duration::ZERO);
+      };
       if !scope.failure_enabled {
         continue;
       }
@@ -237,10 +242,9 @@ impl RuntimeState {
     });
     scopes.dedup();
     for key in scopes {
-      let scope = self
-        .scopes
-        .get(&key)
-        .expect("configured circuit-breaker scope is present");
+      let Some(scope) = self.scopes.get(&key) else {
+        return Err(Duration::ZERO);
+      };
       if scope.failure_enabled {
         scope.circuit.available(now, &self.failure)?;
       }
@@ -305,6 +309,7 @@ pub struct CircuitBreakerRuntime {
   pub(super) enabled: AtomicBool,
   pub(super) state: Mutex<RuntimeState>,
   pub(super) notify: Notify,
+  pub(super) runtime_health: Arc<RuntimeHealth>,
 }
 
 impl std::fmt::Debug for CircuitBreakerRuntime {
@@ -318,21 +323,43 @@ impl std::fmt::Debug for CircuitBreakerRuntime {
 
 impl CircuitBreakerRuntime {
   pub fn new(config: &Config) -> Arc<Self> {
+    Self::new_with_health(config, Arc::new(RuntimeHealth::default()))
+  }
+
+  pub(crate) fn new_with_health(config: &Config, runtime_health: Arc<RuntimeHealth>) -> Arc<Self> {
     Arc::new(Self {
       enabled: AtomicBool::new(config.circuit_breakers.enabled),
       state: Mutex::new(RuntimeState::from_config(config)),
       notify: Notify::new(),
+      runtime_health,
     })
+  }
+
+  pub(super) fn unavailable_rejection(&self) -> AdmissionRejection {
+    self.runtime_health.set_subsystem_state(
+      PROCESS_GENERATION,
+      RuntimeSubsystem::CircuitBreakers,
+      RuntimeSubsystemState::Failed,
+      true,
+    );
+    AdmissionRejection {
+      reason: AdmissionRejectionReason::InternalStateUnavailable,
+      retry_after: Duration::ZERO,
+    }
+  }
+
+  pub(super) fn state_guard(&self) -> Result<MutexGuard<'_, RuntimeState>, AdmissionRejection> {
+    self.state.lock().map_err(|_| self.unavailable_rejection())
   }
 
   pub fn configure(&self, config: &Config) {
     self
       .enabled
       .store(config.circuit_breakers.enabled, Ordering::Release);
-    let mut state = self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned");
+    let Ok(mut state) = self.state_guard() else {
+      self.notify.notify_waiters();
+      return;
+    };
     state.configure(config);
     drop(state);
     self.notify.notify_waiters();
@@ -344,18 +371,16 @@ impl CircuitBreakerRuntime {
 
   pub fn response_status(&self) -> u16 {
     self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned")
-      .response_status
+      .state_guard()
+      .map(|state| state.response_status)
+      .unwrap_or(StatusCode::SERVICE_UNAVAILABLE.as_u16())
   }
 
   pub fn capacity_retry_after(&self) -> Duration {
     self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned")
-      .capacity_retry_after
+      .state_guard()
+      .map(|state| state.capacity_retry_after)
+      .unwrap_or(Duration::ZERO)
   }
 
   pub async fn admit_route_request(
@@ -442,10 +467,7 @@ impl CircuitBreakerRuntime {
       return Ok(AdmissionLease::disabled());
     }
     let retry_limit = {
-      let state = self
-        .state
-        .lock()
-        .expect("circuit-breaker state lock poisoned");
+      let state = self.state_guard()?;
       let originals = state
         .scopes
         .get(&ScopeKey::Global)
@@ -548,10 +570,7 @@ impl CircuitBreakerRuntime {
       let notified = self.notify.notified();
       let mut wake_waiters = false;
       let admission = {
-        let mut state = self
-          .state
-          .lock()
-          .expect("circuit-breaker state lock poisoned");
+        let mut state = self.state_guard()?;
         if !self.enabled() {
           if let Some(ticket) = waiter.take() {
             state.remove_waiter(ticket);
@@ -636,10 +655,7 @@ impl CircuitBreakerRuntime {
       }
 
       if waiter.ticket().is_none() {
-        let mut state = self
-          .state
-          .lock()
-          .expect("circuit-breaker state lock poisoned");
+        let mut state = self.state_guard()?;
         if !state.can_queue(&allocations) {
           let reason =
             exhausted_reason.unwrap_or_else(|| state.queue_rejection_reason(&allocations));
@@ -664,15 +680,13 @@ impl CircuitBreakerRuntime {
         waiter.set(ticket);
       }
 
-      let timeout = queue_timeout(
-        &self.state,
-        &allocations,
-        deadline,
-        waiter
-          .ticket()
-          .expect("queued waiter has an enqueue time")
-          .queued_at(),
-      );
+      let Some(ticket) = waiter.ticket() else {
+        return Err(self.unavailable_rejection());
+      };
+      let Some(timeout) = queue_timeout(&self.state, &allocations, deadline, ticket.queued_at())
+      else {
+        return Err(self.unavailable_rejection());
+      };
       if timeout.is_zero() {
         waiter.remove();
         return Err(self.timeout_rejection(exhausted_reason));
@@ -688,10 +702,9 @@ impl CircuitBreakerRuntime {
     &self,
     exhausted_reason: Option<AdmissionRejectionReason>,
   ) -> AdmissionRejection {
-    let mut state = self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned");
+    let Ok(mut state) = self.state_guard() else {
+      return self.unavailable_rejection();
+    };
     let reason = exhausted_reason.unwrap_or(AdmissionRejectionReason::QueueTimeout);
     state.reject(reason);
     AdmissionRejection {
@@ -702,10 +715,9 @@ impl CircuitBreakerRuntime {
 
   pub(super) fn remove_waiter(&self, ticket: Option<WaiterTicket>) {
     if let Some(ticket) = ticket {
-      let mut state = self
-        .state
-        .lock()
-        .expect("circuit-breaker state lock poisoned");
+      let Ok(mut state) = self.state_guard() else {
+        return;
+      };
       if state.remove_waiter(ticket).is_some() {
         drop(state);
         self.notify.notify_waiters();
@@ -720,10 +732,9 @@ impl CircuitBreakerRuntime {
     priority: Option<PriorityLease>,
     outcome: CircuitOutcome,
   ) {
-    let mut state = self
-      .state
-      .lock()
-      .expect("circuit-breaker state lock poisoned");
+    let Ok(mut state) = self.state_guard() else {
+      return;
+    };
     state.decrement_active(allocations);
     if let Some(priority) = priority {
       state.priority.release(priority);

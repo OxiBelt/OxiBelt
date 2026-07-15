@@ -26,6 +26,10 @@ pub struct DownstreamTlsServerConfig {
 }
 
 impl DownstreamTlsServerConfig {
+  #[allow(
+    clippy::expect_used,
+    reason = "TLS construction always installs the validated default configuration key"
+  )]
   pub(crate) fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
     let sni = client_hello.server_name();
     let policy = self.selected_negotiation_policy(sni).clone();
@@ -80,6 +84,10 @@ pub struct DownstreamQuicServerConfig {
 }
 
 impl DownstreamQuicServerConfig {
+  #[allow(
+    clippy::expect_used,
+    reason = "QUIC construction rejects an empty server configuration set"
+  )]
   pub(crate) fn default_config(&self) -> QuinnServerConfig {
     self
       .configs
@@ -136,6 +144,10 @@ struct TlsServerConfigSet {
 }
 
 impl TlsServerConfigSet {
+  #[allow(
+    clippy::expect_used,
+    reason = "TLS construction rejects configuration sets without TLS 1.2 or TLS 1.3"
+  )]
   fn select(&self, client_hello: &rustls::server::ClientHello<'_>) -> Arc<ServerConfig> {
     if let Some(tls13) = &self.tls13
       && client_offers_any_cipher(client_hello, &tls13.cipher_suites)

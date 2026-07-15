@@ -30,6 +30,7 @@ use crate::routes::RouteTable;
 use crate::runtime::backend::{
   RuntimeBackendSnapshot, TOKIO_HYPER_RUNTIME_NAME, runtime_backend_snapshot,
 };
+use crate::runtime_health::RuntimeHealth;
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
 };
@@ -44,14 +45,13 @@ use anyhow::Context;
 use http::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
-
 mod alt_svc;
 pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
+mod runtime_services;
 mod stream_pool_update;
 mod upstream_clients;
-
 pub(crate) use alt_svc::{AltSvcHeaderValues, build_alt_svc_header_values};
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
@@ -59,7 +59,6 @@ use stream_pool_update::next_stream_pool_generation;
 pub use upstream_clients::UpstreamBody;
 use upstream_clients::build_clients;
 pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
-
 /// Immutable snapshot of runtime configuration and derived state.
 #[derive(Clone)]
 pub struct AppSnapshot {
@@ -89,6 +88,8 @@ pub struct AppSnapshot {
   pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub metrics: Arc<Metrics>,
+  pub(crate) runtime_health: Arc<RuntimeHealth>,
+  pub(crate) runtime_generation: u64,
   pub overload: Arc<OverloadRuntime>,
   pub circuit_breakers: Arc<crate::circuit_breakers::CircuitBreakerRuntime>,
   pub telemetry: TelemetryRuntime,
@@ -117,7 +118,6 @@ pub struct AppSnapshot {
   pub(crate) alt_svc_header_values: AltSvcHeaderValues,
   pub(crate) http1_upgrades_possible: bool,
 }
-
 impl AppSnapshot {
   #[inline]
   pub(crate) fn record_hot_path_request(&self) {
@@ -190,19 +190,11 @@ impl AppSnapshot {
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let (runtime_health, runtime_generation, overload, circuit_breakers) =
+      runtime_services::build(&config, previous)?;
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
-    let overload = previous
-      .map(|snapshot| snapshot.overload.clone())
-      .unwrap_or_else(|| OverloadRuntime::new(&config.overload));
-    if config.overload.enabled {
-      overload.bootstrap_validate()?;
-    }
-    let circuit_breakers = previous
-      .map(|snapshot| snapshot.circuit_breakers.clone())
-      .unwrap_or_else(|| crate::circuit_breakers::CircuitBreakerRuntime::new(&config));
-    circuit_breakers.configure(&config);
     let outbound_revocation = tls::OutboundRevocationRuntime::new(&config, metrics.clone())
       .await
       .context("failed to build outbound TLS revocation runtime")?;
@@ -273,7 +265,7 @@ impl AppSnapshot {
     {
       buffering::cleanup_stale_temp_files(temp_dir);
     }
-    let limits = LimitState::new(shared_state.clone());
+    let limits = LimitState::new_with_health(shared_state.clone(), runtime_health.clone());
     let pools = PoolState::new_with_previous_and_metrics_async(
       &config.upstream_pools,
       shared_state.clone(),
@@ -286,9 +278,13 @@ impl AppSnapshot {
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let external_cache = crate::cache::ExternalCacheRuntime::new(&config, metrics.clone())
       .context("failed to build external cache handlers")?;
-    let cache =
-      ResponseCache::new_with_external(&config.cache, shared_state.clone(), external_cache)
-        .context("failed to build response cache")?;
+    let cache = ResponseCache::new_with_external_and_health(
+      &config.cache,
+      shared_state.clone(),
+      external_cache,
+      runtime_health.clone(),
+    )
+    .context("failed to build response cache")?;
     cache.set_overload_runtime(overload.clone());
     let telemetry = match previous {
       Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)
@@ -302,8 +298,8 @@ impl AppSnapshot {
     let compression = CompressionState::new_with_runtime(&config.compression, overload.clone());
     let waf_body_coding =
       WafBodyCodingState::new_with_runtime(&config.waf.http_body_compression, overload.clone());
-    let static_files =
-      StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let static_files = StaticFilesRuntime::new_with_health(&config, runtime_health.clone())
+      .context("failed to build static files runtime")?;
     let ipm = IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
@@ -497,6 +493,8 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
+      runtime_health,
+      runtime_generation,
       overload,
       circuit_breakers,
       telemetry,
@@ -593,6 +591,8 @@ impl AppSnapshot {
     )
     .context("failed to build control-plane HTTP client")?;
     let metrics = previous.metrics.clone();
+    let runtime_health = previous.runtime_health.clone();
+    let runtime_generation = runtime_health.allocate_generation();
     previous
       .runtime_introspection
       .set_enabled(config.admin.enabled);
@@ -608,8 +608,8 @@ impl AppSnapshot {
     let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
     let alt_svc_header_values = build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
-    let static_files =
-      StaticFilesRuntime::new(&config).context("failed to build static files runtime")?;
+    let static_files = StaticFilesRuntime::new_with_health(&config, runtime_health.clone())
+      .context("failed to build static files runtime")?;
     let waf_body_coding = WafBodyCodingState::new_with_runtime(
       &config.waf.http_body_compression,
       previous.overload.clone(),
@@ -669,6 +669,8 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       metrics,
+      runtime_health,
+      runtime_generation,
       overload: previous.overload.clone(),
       circuit_breakers,
       telemetry: previous.telemetry.clone(),
@@ -699,7 +701,6 @@ impl AppSnapshot {
     })
   }
 }
-
 fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
   let Some(previous) = previous else {
     return 0;

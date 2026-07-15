@@ -7,7 +7,7 @@ use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
@@ -19,6 +19,9 @@ use http::header::{
 };
 
 use crate::config::{Config, ProxyStaticFilesConfig};
+use crate::runtime_health::{
+  PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemState,
+};
 
 use super::StaticResponseHeadBytes;
 use super::response_plan::StaticResponseMetadata;
@@ -30,7 +33,10 @@ pub(crate) struct StaticFilesRuntime {
 }
 
 impl StaticFilesRuntime {
-  pub(crate) fn new(config: &Config) -> anyhow::Result<Self> {
+  pub(crate) fn new_with_health(
+    config: &Config,
+    runtime_health: Arc<RuntimeHealth>,
+  ) -> anyhow::Result<Self> {
     let mut roots = HashMap::new();
     for route in &config.routes {
       let Some(root) = route.static_root.as_ref() else {
@@ -43,7 +49,10 @@ impl StaticFilesRuntime {
 
     Ok(Self {
       roots: Arc::new(roots),
-      hot_objects: Arc::new(StaticHotObjectCache::new(config.proxy.static_files)),
+      hot_objects: Arc::new(StaticHotObjectCache::new(
+        config.proxy.static_files,
+        runtime_health,
+      )),
     })
   }
 
@@ -58,7 +67,10 @@ impl StaticFilesRuntime {
     }
     Ok(Self {
       roots: Arc::new(handles),
-      hot_objects: Arc::new(StaticHotObjectCache::new(config)),
+      hot_objects: Arc::new(StaticHotObjectCache::new(
+        config,
+        Arc::new(RuntimeHealth::default()),
+      )),
     })
   }
 
@@ -250,7 +262,8 @@ struct StaticHotObjectCache {
   max_entries: usize,
   max_bytes: usize,
   max_file_bytes: usize,
-  inner: RwLock<StaticHotObjectCacheInner>,
+  inner: Mutex<StaticHotObjectCacheInner>,
+  runtime_health: Arc<RuntimeHealth>,
 }
 
 #[derive(Debug, Default)]
@@ -274,13 +287,35 @@ struct StaticHotObjectCacheEntry {
 }
 
 impl StaticHotObjectCache {
-  fn new(config: ProxyStaticFilesConfig) -> Self {
+  fn new(config: ProxyStaticFilesConfig, runtime_health: Arc<RuntimeHealth>) -> Self {
     Self {
       ttl: Duration::from_millis(config.open_file_cache_ttl_ms),
       max_entries: config.open_file_cache_max_entries,
       max_bytes: config.hot_object_cache_max_bytes,
       max_file_bytes: config.hot_object_cache_max_file_bytes,
-      inner: RwLock::new(StaticHotObjectCacheInner::default()),
+      inner: Mutex::new(StaticHotObjectCacheInner::default()),
+      runtime_health,
+    }
+  }
+
+  fn inner_guard(&self) -> MutexGuard<'_, StaticHotObjectCacheInner> {
+    match self.inner.lock() {
+      Ok(inner) => inner,
+      Err(poisoned) => {
+        let mut inner = poisoned.into_inner();
+        *inner = StaticHotObjectCacheInner::default();
+        self.inner.clear_poison();
+        self
+          .runtime_health
+          .record_lock_recovery(RuntimeSubsystem::StaticObjectCache);
+        self.runtime_health.set_subsystem_state(
+          PROCESS_GENERATION,
+          RuntimeSubsystem::StaticObjectCache,
+          RuntimeSubsystemState::Healthy,
+          false,
+        );
+        inner
+      }
     }
   }
 
@@ -323,7 +358,7 @@ impl StaticHotObjectCache {
       response_metadata: response_metadata.clone(),
     };
     let now = Instant::now();
-    let inner = self.inner.read().expect("static file cache lock poisoned");
+    let inner = self.inner_guard();
     let entry = inner.entries.get(&key)?;
     let object = Arc::clone(&entry.object);
     if entry.expires_at > now {
@@ -349,16 +384,11 @@ impl StaticHotObjectCache {
       path: path.to_path_buf(),
       response_metadata: response_metadata.clone(),
     };
-    let mut inner = self.inner.write().expect("static file cache lock poisoned");
-    if inner
-      .entries
-      .get(&key)
-      .is_some_and(|entry| entry.object.etag == etag && entry.object.modified == modified)
+    let mut inner = self.inner_guard();
+    if let Some(entry) = inner.entries.get_mut(&key)
+      && entry.object.etag == etag
+      && entry.object.modified == modified
     {
-      let entry = inner
-        .entries
-        .get_mut(&key)
-        .expect("cache entry should exist after metadata match");
       entry.expires_at = Instant::now() + self.ttl;
       return Some(Arc::clone(&entry.object));
     }
@@ -393,7 +423,7 @@ impl StaticHotObjectCache {
       )),
       expires_at: Instant::now() + self.ttl,
     };
-    let mut inner = self.inner.write().expect("static file cache lock poisoned");
+    let mut inner = self.inner_guard();
     remove_entry(&mut inner, &key);
     inner.total_bytes = inner.total_bytes.saturating_add(entry.object.body.len());
     inner.entries.insert(key.clone(), entry);
