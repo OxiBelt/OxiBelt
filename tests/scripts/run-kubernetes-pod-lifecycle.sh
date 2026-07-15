@@ -221,7 +221,7 @@ terminating_pod_is_withdrawn() {
     && jq -e --arg pod "${pod_name}" '
       [.items[].endpoints[]?
         | select(.targetRef.kind == "Pod" and .targetRef.name == $pod)
-        | select((.conditions.ready // true) == true)]
+        | select(.conditions.ready != false)]
       | length == 0
     ' >/dev/null <<<"${endpoints}"
 }

@@ -1070,7 +1070,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "name: Validate Helm ServiceAccount token hardening",
     "tests/scripts/check-helm-service-account-token.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
-    "version: v0.26.0",
+    "version: v0.31.0",
     "kubectl_version: v1.31.14",
     "install_only: true",
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
@@ -1198,7 +1198,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "name: Validate Helm autoscaling configuration",
     "tests/scripts/check-helm-autoscaling.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
-    "version: v0.26.0",
+    "version: v0.31.0",
     "kubectl_version: v1.31.14",
     "install_only: true",
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
@@ -1247,6 +1247,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "rolling update reduced ready capacity below two Pods",
     "terminating Pod endpoint withdrawal before exit",
     "kubernetes.io/service-name=${service_name}",
+    ".conditions.ready != false",
     "docker stop \"${worker_to_stop}\"",
     "two surviving Ready Pods after a verified worker loss",
     "docker container inspect --format '{{.State.Running}}'",
@@ -1269,6 +1270,10 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     !script
       .contains("(.metadata.labels[\"node-role.kubernetes.io/control-plane\"] // \"\") == \"\""),
     "Kubernetes Pod lifecycle worker selection must not treat an empty control-plane label as absent"
+  );
+  assert!(
+    !script.contains("(.conditions.ready // true) == true"),
+    "Kubernetes Pod lifecycle endpoint withdrawal must not treat explicit false readiness as true"
   );
   assert!(
     script
