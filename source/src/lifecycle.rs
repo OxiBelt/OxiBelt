@@ -2,7 +2,7 @@
 //! Drain signals are explicit so shutdown does not race active proxy sessions.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -13,11 +13,14 @@ use tokio::task::JoinHandle;
 
 use crate::runtime_health::{RuntimeHealth, RuntimePanicScope, RuntimeSubsystem, RuntimeTaskKind};
 
+#[path = "lifecycle/drain_state.rs"]
+mod drain_state;
+
+use drain_state::DrainState;
+
 #[derive(Debug)]
 pub struct LifecycleState {
-  admin_draining: AtomicBool,
-  overload_draining: AtomicBool,
-  shutdown_draining: AtomicBool,
+  drain_state: DrainState,
   drain_tx: watch::Sender<bool>,
 }
 
@@ -25,9 +28,7 @@ impl Default for LifecycleState {
   fn default() -> Self {
     let (drain_tx, _) = watch::channel(false);
     Self {
-      admin_draining: AtomicBool::new(false),
-      overload_draining: AtomicBool::new(false),
-      shutdown_draining: AtomicBool::new(false),
+      drain_state: DrainState::new(),
       drain_tx,
     }
   }
@@ -35,49 +36,39 @@ impl Default for LifecycleState {
 
 impl LifecycleState {
   pub fn is_draining(&self) -> bool {
-    self.admin_draining.load(Ordering::Relaxed)
-      || self.overload_draining.load(Ordering::Relaxed)
-      || self.shutdown_draining.load(Ordering::Relaxed)
+    self.drain_state.is_draining()
   }
 
   pub fn is_shutdown_draining(&self) -> bool {
-    self.shutdown_draining.load(Ordering::Acquire)
+    self.drain_state.is_shutdown_draining()
   }
 
   pub fn reason(&self) -> &'static str {
-    if self.shutdown_draining.load(Ordering::Relaxed) {
-      "shutdown"
-    } else if self.admin_draining.load(Ordering::Relaxed) {
-      "admin"
-    } else if self.overload_draining.load(Ordering::Relaxed) {
-      "overload"
-    } else {
-      "ready"
-    }
+    self.drain_state.reason()
   }
 
   pub fn set_admin_draining(&self) {
-    self.admin_draining.store(true, Ordering::Relaxed);
+    self.drain_state.set_admin_draining();
     self.publish();
   }
 
   pub fn clear_admin_draining(&self) {
-    self.admin_draining.store(false, Ordering::Relaxed);
+    self.drain_state.clear_admin_draining();
     self.publish();
   }
 
   pub fn set_overload_draining(&self) {
-    self.overload_draining.store(true, Ordering::Relaxed);
+    self.drain_state.set_overload_draining();
     self.publish();
   }
 
   pub fn clear_overload_draining(&self) {
-    self.overload_draining.store(false, Ordering::Relaxed);
+    self.drain_state.clear_overload_draining();
     self.publish();
   }
 
   pub fn start_shutdown(&self) -> bool {
-    if self.shutdown_draining.swap(true, Ordering::AcqRel) {
+    if !self.drain_state.start_shutdown() {
       return false;
     }
     self.publish();
@@ -618,6 +609,37 @@ mod tests {
     assert!(
       metrics
         .contains("oxibelt_runtime_panics_total{scope=\"connection\",task=\"http_connection\"} 1")
+    );
+  }
+
+  #[tokio::test]
+  async fn task_registry_recovers_poisoned_tracking_lock_and_accepts_new_tasks() {
+    let health = Arc::new(RuntimeHealth::default());
+    let registry = TaskRegistry::new(RuntimeTaskKind::HttpConnection, health.clone());
+    let inner = registry.inner.clone();
+    let poison = std::thread::spawn(move || {
+      let _tasks = inner
+        .tasks
+        .lock()
+        .expect("task registry lock should start healthy");
+      panic!("injected task registry lock poison");
+    });
+    assert!(poison.join().is_err(), "poisoning thread should panic");
+
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    registry.spawn(async move {
+      let _ = completed_tx.send(());
+    });
+    completed_rx
+      .await
+      .expect("registry should accept work after lock recovery");
+    registry.wait_idle().await;
+    assert_eq!(registry.tracked_task_count(), 0);
+
+    let mut metrics = String::new();
+    health.append_prometheus(&mut metrics);
+    assert!(
+      metrics.contains("oxibelt_runtime_lock_recoveries_total{subsystem=\"task_registry\"} 1")
     );
   }
 

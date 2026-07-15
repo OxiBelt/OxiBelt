@@ -70,3 +70,35 @@ Consumer verification commands and the trust boundary are documented in
 [`docs/SupplyChain.md`](../docs/SupplyChain.md).
 
 Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.
+
+## Concurrency and Fault-Injection Invariants
+
+Race-sensitive tests use model exploration, explicit barriers, observed metrics, or bounded polling. Sleeps and timeouts are safety ceilings, not the condition that decides whether an invariant passed. Every injected runtime fault must prove recovery with a later successful operation and must leave bounded task, queue, pool, or fill gauges at zero.
+
+| Test type | Deterministic trigger | Preserved invariant and recovery assertion | CI cadence |
+| --- | --- | --- | --- |
+| Lifecycle Loom model | Bounded interleavings of admin drain, overload drain, and shutdown bit transitions | Drain sources cannot clear each other, shutdown is monotonic with one first caller, and no snapshot reports ready while any drain source remains active | Dedicated AMD64 Loom step on push, pull request, daily schedule, and manual dispatch |
+| Shared-state Loom model | Bounded failure, success, and status-snapshot interleavings | Healthy state has no degraded epoch, degraded state has one coherent nonzero epoch, and one success transition clears it without a stale timestamp | Dedicated AMD64 Loom step on every workflow event |
+| Redis latency | `shared-state/redis-delay-isolation` uses `CLIENT PAUSE` | Requests fail closed within configured bounds while health and metrics remain responsive; resuming Redis drains gauges and a fresh request succeeds | `state-data` Docker matrix on every workflow event |
+| PostgreSQL latency | `shared-state/postgres-delay-isolation` holds a targeted `PGAPPNAME` lock session and releases it with `pg_cancel_backend` | Backend work stays bounded and observable; cancellation releases the lock, cleanup drains, and a fresh request succeeds | `state-data` Docker matrix on every workflow event |
+| Redis disconnect and reconnect | `shared-state/redis-disconnect-reconnect` stops and restarts the exact labeled Redis container | Ambiguous sockets are discarded, reconnect work is bounded by the pool circuit, and restart produces a new healthy connection with zero active/waiter gauges | `state-data` Docker matrix on every workflow event |
+| Partial configuration rollout | Controller observations model committed A, partially converged B, rejection or timeout, rollback to A, and a distinct C | Partial B never commits, rollback restores the last committed revision/digest, unchanged failed B stays blocked, and a later distinct candidate may proceed; local invalid reload input never publishes a torn generation | Rust tests on AMD64 and ARM64; existing Kind rollout wiring on every workflow event |
+| Lock poisoning | Unit tests poison task-registry, cache-fill, response-cache, and critical connection-limit locks | Recoverable locks emit one bounded recovery event and accept later work; critical capacity corruption stays failed closed and unready | Rust tests on AMD64 and ARM64 |
+| Background task termination | Paused Tokio time plus explicit task-factory barriers inject return, error, panic, and shutdown during backoff | Critical failure removes readiness until a stable replacement, optional failure remains ready but degraded, fatal failure does not restart, and normal shutdown creates no replacement | Rust tests on AMD64 and ARM64 |
+| Backend cancellation | Abort after a fake Redis server observes a command but before it returns a reply | The ambiguous connection is never reused or replayed, permits and gauges drain, and the next command opens a fresh connection and succeeds | Rust tests on AMD64 and ARM64 |
+| Retry storm | `upstream-pools/retry-storm-budget` releases a synchronized burst into a one-active, zero-queued retry budget | Original and retry metrics reconcile with upstream attempts, retry concurrency never exceeds one, budget rejection prevents amplification, gauges drain, and the same route succeeds after fault removal | `proxy` Docker matrix on every workflow event |
+| Cache-fill stampede | `cache/collapsed-forwarding-metrics` gates one leader while synchronized followers join the fill | One origin response fills the cache, all followers receive the same generation, waiter metrics reconcile, no lock timeout/error occurs, and a later cache hit succeeds | `cache` Docker matrix on every workflow event |
+| Active H2/H3 shutdown | `lifecycle/process-signal-h2-h3-drain` gates active H2 and H3 requests before pre-drain and `SIGTERM` | Readiness fails while liveness remains healthy, in-flight requests finish before the single graceful deadline, the process exits successfully, and a restarted process serves fresh H2/H3 requests | `config-runtime` Docker matrix on every workflow event |
+
+The Docker fault cases use only rootless `docker`, unique run labels, isolated networks, exact container names, bounded control inputs, and label-scoped cleanup. They do not use privileged containers, host networking, `netem`, `iptables`, broad prune operations, or `docker-rootful`. Failed matrix jobs retain the existing case materialization, proxy/upstream/probe logs, and container diagnostics through `OXIBELT_TEST_ARTIFACT_DIR`.
+
+Run the focused cases locally with:
+
+```sh
+tests/scripts/run-proxy-integration-matrix.sh shared-state redis-delay-isolation
+tests/scripts/run-proxy-integration-matrix.sh shared-state postgres-delay-isolation
+tests/scripts/run-proxy-integration-matrix.sh shared-state redis-disconnect-reconnect
+tests/scripts/run-proxy-integration-matrix.sh upstream-pools retry-storm-budget
+tests/scripts/run-proxy-integration-matrix.sh cache collapsed-forwarding-metrics
+tests/scripts/run-proxy-integration-matrix.sh lifecycle process-signal-h2-h3-drain
+```

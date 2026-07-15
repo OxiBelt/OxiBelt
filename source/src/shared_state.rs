@@ -28,6 +28,7 @@ mod atomic_updates;
 mod cache_lock;
 mod cache_store;
 mod enumeration;
+mod failure_epoch;
 mod failure_policy;
 mod feature_flags;
 mod person_proof;

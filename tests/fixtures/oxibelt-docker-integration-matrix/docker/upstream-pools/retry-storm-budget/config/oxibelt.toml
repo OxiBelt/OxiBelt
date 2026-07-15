@@ -1,0 +1,80 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 2
+
+[runtime.accept]
+workers = 1
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.retry]
+enabled = true
+tries = 4
+total_budget_ms = 5000
+per_attempt_timeout_ms = 2500
+on = ["503"]
+reselect_pool_on_retry = false
+exclude_failed_pool_upstreams = false
+report_passive_health = false
+
+[circuit_breakers]
+enabled = true
+response_status = 503
+capacity_retry_after_ms = 100
+
+[circuit_breakers.retry_budget]
+percent = 1.0
+min_concurrency = 1
+max_concurrency = 1
+max_queue = 0
+queue_timeout_ms = 25
+
+[circuit_breakers.failure]
+enabled = false
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9090"
+
+[health]
+enabled = true
+bind = "0.0.0.0:9091"
+ready_path = "/ready"
+live_path = "/live"
+
+[[upstream_pools]]
+name = "storm-pool"
+algorithm = "weighted_least_conn"
+
+[[upstream_pools.servers]]
+id = "storm"
+origin = "http://mock-http:18080"
+
+[[routes]]
+name = "storm-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream_pool = "storm-pool"

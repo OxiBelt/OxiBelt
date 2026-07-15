@@ -161,6 +161,10 @@ jobs:
       - name: Cargo test
         run: cargo test --all-features --locked
 
+      - name: Loom concurrency models
+        if: matrix.runner == 'ubuntu-26.04'
+        run: cargo test --all-features --locked loom_ -- --ignored --test-threads=1
+
   rust-advisory-checks:
     name: Rust advisory checks
     runs-on: ubuntu-26.04

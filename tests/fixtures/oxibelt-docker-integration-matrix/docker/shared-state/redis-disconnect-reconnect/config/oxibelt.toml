@@ -1,0 +1,99 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[metrics]
+enabled = true
+bind = "0.0.0.0:9090"
+
+[health]
+enabled = true
+bind = "0.0.0.0:9091"
+ready_path = "/ready"
+live_path = "/live"
+
+[shared_state]
+enabled = true
+namespace = "disconnect-reconnect"
+operation_timeout_ms = 750
+rate_limits_backend = "cluster"
+
+[shared_state.failure_policies]
+rate_limits = "fail_closed"
+# Isolate this fixture to the rate-limit decision boundary. Omitted feature
+# mappings select the first backend, so connection admission must remain open
+# long enough for the HTTP request to exercise the configured fail-closed path.
+connection_limits = "fail_open"
+
+[[shared_state.backends]]
+name = "cluster"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+max_connections = 1
+connect_timeout_ms = 500
+
+[shared_state.backends.redis_pool]
+min_idle_connections = 1
+max_waiters = 8
+pool_wait_timeout_ms = 750
+command_timeout_ms = 750
+idle_timeout_ms = 60000
+health_check_interval_ms = 15000
+reconnect_min_backoff_ms = 50
+reconnect_max_backoff_ms = 250
+circuit_breaker_failure_threshold = 2
+circuit_breaker_open_timeout_ms = 500
+
+[[rate_limits]]
+name = "disconnect-rate"
+key = "client_ip"
+routes = ["disconnect-route"]
+rate = "100r/s"
+burst = 100
+max_buckets = 64
+status = 429
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+first_byte_timeout_ms = 2000
+preserve_host = false
+
+[[routes]]
+name = "disconnect-route"
+hosts = ["example.test"]
+path_prefix = "/app/disconnect"
+upstream = "http-upstream"

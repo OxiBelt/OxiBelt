@@ -219,10 +219,13 @@ impl CacheFillCoordinator {
   fn finish(&self, key: &str, fallback: &Arc<Notify>) -> Arc<Notify> {
     let shard_index = shard_index(key);
     let mut shard = self.shard_guard(shard_index);
-    shard
-      .inflight
-      .remove(key)
-      .unwrap_or_else(|| fallback.clone())
+    match shard.inflight.get(key) {
+      Some(current) if Arc::ptr_eq(current, fallback) => shard
+        .inflight
+        .remove(key)
+        .unwrap_or_else(|| fallback.clone()),
+      Some(_) | None => fallback.clone(),
+    }
   }
 }
 
@@ -282,4 +285,75 @@ fn shard_index(key: &str) -> usize {
   let mut hasher = DefaultHasher::new();
   key.hash(&mut hasher);
   (hasher.finish() as usize) % FILL_SHARDS
+}
+
+#[cfg(test)]
+mod tests {
+  use std::panic::AssertUnwindSafe;
+  use std::time::Duration;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn poisoned_fill_shard_wakes_waiters_without_evicting_replacement_leader() {
+    let health = Arc::new(RuntimeHealth::default());
+    let coordinator = CacheFillCoordinator::new(health.clone());
+    let key = "https://example.test/stampede".to_string();
+    let old_leader = match coordinator.begin(key.clone(), None) {
+      CacheFillDecision::Leader(leader) => leader,
+      other => panic!("first fill should lead, got {other:?}"),
+    };
+    let mut notifications = Vec::new();
+    for _ in 0..16 {
+      let waiter = match coordinator.begin(key.clone(), None) {
+        CacheFillDecision::Follower(waiter) => waiter,
+        other => panic!("concurrent fill should wait, got {other:?}"),
+      };
+      let mut notification = Box::pin(waiter.notify.clone().notified_owned());
+      assert!(
+        !notification.as_mut().enable(),
+        "waiter should not observe a notification before recovery"
+      );
+      notifications.push(notification);
+    }
+
+    let shard_index = shard_index(&key);
+    let poisoned = std::panic::catch_unwind(AssertUnwindSafe(|| {
+      let _shard = coordinator.shards[shard_index]
+        .lock()
+        .expect("cache fill shard should start healthy");
+      panic!("injected cache fill shard poison");
+    }));
+    assert!(poisoned.is_err(), "injected poison should panic");
+
+    let replacement_leader = match coordinator.begin(key.clone(), None) {
+      CacheFillDecision::Leader(leader) => leader,
+      other => panic!("recovery should elect a replacement leader, got {other:?}"),
+    };
+    for notification in notifications {
+      tokio::time::timeout(Duration::from_secs(1), notification)
+        .await
+        .expect("poison recovery should wake every registered waiter");
+    }
+
+    drop(old_leader);
+    let replacement_waiter = match coordinator.begin(key.clone(), None) {
+      CacheFillDecision::Follower(waiter) => waiter,
+      other => panic!("stale leader drop must not evict replacement, got {other:?}"),
+    };
+    let mut replacement_notification = Box::pin(replacement_waiter.notify.notified_owned());
+    assert!(!replacement_notification.as_mut().enable());
+    drop(replacement_leader);
+    tokio::time::timeout(Duration::from_secs(1), replacement_notification)
+      .await
+      .expect("replacement leader drop should wake its waiter");
+    assert!(matches!(
+      coordinator.begin(key, None),
+      CacheFillDecision::Leader(_)
+    ));
+
+    let mut metrics = String::new();
+    health.append_prometheus(&mut metrics);
+    assert!(metrics.contains("oxibelt_runtime_lock_recoveries_total{subsystem=\"cache_fill\"} 1"));
+  }
 }

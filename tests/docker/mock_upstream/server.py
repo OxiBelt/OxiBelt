@@ -21,6 +21,11 @@ CAPTURE_REQUESTS = os.environ.get("CAPTURE_REQUESTS", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 REQUEST_COUNTS = {}
 REQUEST_COUNTS_LOCK = threading.Lock()
+FAULT_GATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+FAULT_GATE_LIMIT = 256
+FAULT_GATE_MAX_TIMEOUT_MS = 30_000
+FAULT_GATES = {}
+FAULT_GATES_CONDITION = threading.Condition()
 
 
 class EchoHandler(BaseHTTPRequestHandler):
@@ -81,8 +86,16 @@ class EchoHandler(BaseHTTPRequestHandler):
     body = self.rfile.read(body_length).decode("utf-8", "replace") if body_length else ""
     parsed = urlsplit(self.path)
     query = parse_qs(parsed.query)
+    if self._handle_fault_gate_control(parsed.path):
+      return
+    if not self._wait_on_fault_gate(query):
+      return
     sequence_index = _sequence_index(parsed.path, query)
-    header_delay_ms = _query_int(query, "header_delay_ms", 0)
+    try:
+      header_delay_ms = _sequence_delay_ms(query, sequence_index)
+    except ValueError as error:
+      self.send_error(400, str(error))
+      return
     body_delay_ms = _query_int(query, "body_delay_ms", 0)
     body_split_at = _query_int(query, "body_split_at", -1)
     body_split_delay_ms = _query_int(query, "body_split_delay_ms", 0)
@@ -179,7 +192,10 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.send_header("x-upstream-marker", UPSTREAM_MARKER)
     if content_encoding:
       self.send_header("content-encoding", content_encoding)
-    if any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
+    if any(
+      key in query
+      for key in ("sequence_key", "body_sequence", "status_sequence", "header_delay_sequence")
+    ):
       self.send_header("x-sequence-index", str(sequence_index))
     if query.get("set_cookie"):
       self.send_header("set-cookie", "upstream_session=present; Path=/")
@@ -217,6 +233,88 @@ class EchoHandler(BaseHTTPRequestHandler):
         time.sleep(body_split_delay_ms / 1000.0)
       self.wfile.write(encoded[body_split_at:])
     else:
+      self.wfile.write(encoded)
+
+  def _handle_fault_gate_control(self, path):
+    prefix = "/__fault/gates/"
+    if not path.startswith(prefix):
+      return False
+
+    suffix = path[len(prefix):]
+    release = suffix.endswith("/release")
+    gate_id = suffix[:-len("/release")] if release else suffix
+    if not FAULT_GATE_ID_RE.fullmatch(gate_id):
+      self._send_json(400, {"error": "invalid fault gate id"})
+      return True
+    if release and self.command != "POST":
+      self._send_json(405, {"error": "fault gate release requires POST"})
+      return True
+    if not release and self.command != "GET":
+      self._send_json(405, {"error": "fault gate status requires GET"})
+      return True
+
+    with FAULT_GATES_CONDITION:
+      gate = FAULT_GATES.get(gate_id)
+      if release:
+        if gate is None:
+          if len(FAULT_GATES) >= FAULT_GATE_LIMIT:
+            self._send_json(429, {"error": "fault gate limit reached"})
+            return True
+          gate = {"waiting": 0, "released": False}
+          FAULT_GATES[gate_id] = gate
+        gate["released"] = True
+        FAULT_GATES_CONDITION.notify_all()
+      snapshot = {
+        "id": gate_id,
+        "waiting": gate["waiting"] if gate else 0,
+        "released": gate["released"] if gate else False,
+      }
+    self._send_json(200, snapshot)
+    return True
+
+  def _wait_on_fault_gate(self, query):
+    gate_id = query.get("gate", [""])[0]
+    if not gate_id:
+      return True
+    if not FAULT_GATE_ID_RE.fullmatch(gate_id):
+      self._send_json(400, {"error": "invalid fault gate id"})
+      return False
+    try:
+      timeout_ms = int(query.get("gate_timeout_ms", [str(FAULT_GATE_MAX_TIMEOUT_MS)])[0])
+    except (TypeError, ValueError):
+      timeout_ms = 0
+    if timeout_ms <= 0 or timeout_ms > FAULT_GATE_MAX_TIMEOUT_MS:
+      self._send_json(400, {"error": "gate_timeout_ms must be between 1 and 30000"})
+      return False
+
+    with FAULT_GATES_CONDITION:
+      gate = FAULT_GATES.get(gate_id)
+      if gate is None:
+        if len(FAULT_GATES) >= FAULT_GATE_LIMIT:
+          self._send_json(429, {"error": "fault gate limit reached"})
+          return False
+        gate = {"waiting": 0, "released": False}
+        FAULT_GATES[gate_id] = gate
+      gate["waiting"] += 1
+      deadline = time.monotonic() + (timeout_ms / 1000.0)
+      try:
+        while not gate["released"]:
+          remaining = deadline - time.monotonic()
+          if remaining <= 0:
+            self._send_json(504, {"error": "fault gate wait timed out", "id": gate_id})
+            return False
+          FAULT_GATES_CONDITION.wait(remaining)
+      finally:
+        gate["waiting"] -= 1
+    return True
+
+  def _send_json(self, status, payload):
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    self.send_response(status)
+    self.send_header("content-type", "application/json")
+    self.send_header("content-length", str(len(encoded)))
+    self.end_headers()
+    if self.command != "HEAD":
       self.wfile.write(encoded)
 
   def _handle_health_options(self, body):
@@ -285,7 +383,10 @@ def _query_int(query, key, default):
 
 
 def _sequence_index(path, query):
-  if not any(key in query for key in ("sequence_key", "body_sequence", "status_sequence")):
+  if not any(
+    key in query
+    for key in ("sequence_key", "body_sequence", "status_sequence", "header_delay_sequence")
+  ):
     return 0
   key = query.get("sequence_key", [path])[0]
   with REQUEST_COUNTS_LOCK:
@@ -300,6 +401,22 @@ def _sequence_value(query, key, index, default):
     return default
   values = raw.split("|")
   return values[min(index, len(values) - 1)]
+
+
+def _sequence_delay_ms(query, sequence_index):
+  raw = _sequence_value(
+    query,
+    "header_delay_sequence",
+    sequence_index,
+    query.get("header_delay_ms", ["0"])[0],
+  )
+  try:
+    delay_ms = int(raw)
+  except (TypeError, ValueError) as error:
+    raise ValueError("header delay must be an integer") from error
+  if delay_ms < 0 or delay_ms > FAULT_GATE_MAX_TIMEOUT_MS:
+    raise ValueError("header delay must be between 0 and 30000 milliseconds")
+  return delay_ms
 
 
 def _query_header(query, key, default=""):

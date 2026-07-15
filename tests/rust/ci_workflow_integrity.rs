@@ -990,6 +990,37 @@ fn test_job_runs_independent_format_checks_in_parallel() {
 }
 
 #[test]
+fn test_job_runs_bounded_loom_models_on_amd64() {
+  let workflow = workflow_text();
+  let test_job = workflow_job_text(&workflow, "test");
+  let cargo_test = test_job
+    .find("name: Cargo test")
+    .expect("test job should run the ordinary Cargo suite");
+  let loom_models = test_job
+    .find("name: Loom concurrency models")
+    .expect("test job should run the dedicated Loom models");
+
+  assert!(
+    cargo_test < loom_models,
+    "Loom models should run after the ordinary Cargo suite"
+  );
+  for expected in [
+    "if: matrix.runner == 'ubuntu-26.04'",
+    "cargo test --all-features --locked loom_ -- --ignored --test-threads=1",
+  ] {
+    assert!(
+      test_job.contains(expected),
+      "test job should preserve bounded AMD64 Loom invocation {expected}"
+    );
+  }
+  assert_eq!(
+    test_job.matches("name: Loom concurrency models").count(),
+    1,
+    "Loom models should run once instead of being duplicated across the runner matrix"
+  );
+}
+
+#[test]
 fn rust_advisory_checks_run_as_independent_primary_gate() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
@@ -1628,6 +1659,107 @@ fn docker_integration_jobs_are_split_by_logical_group() {
         "matrix: ${{{{ fromJson(needs.generate-test-matrices.outputs.{output_name}) }}}}"
       )),
       "{job_id} should consume {output_name}"
+    );
+  }
+}
+
+#[test]
+fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
+  let root = repo_root();
+  let read = |path: &str| {
+    fs::read_to_string(root.join(path))
+      .unwrap_or_else(|error| panic!("{path} should be readable: {error}"))
+  };
+  let order = read("tests/rust/oxibelt_docker_integration_matrix/mod.rs");
+  let config_runtime = read("tests/rust/oxibelt_docker_integration_matrix/config_runtime.rs");
+  let proxy = read("tests/rust/oxibelt_docker_integration_matrix/proxy.rs");
+  let state_data = read("tests/rust/oxibelt_docker_integration_matrix/state_data.rs");
+  let docs = read("tests/README.md");
+  let mock_upstream = read("tests/docker/mock_upstream/server.py");
+  let scripts = [
+    read("tests/scripts/run-bounded-http-burst.sh"),
+    read(
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/shared-state/redis-disconnect-reconnect/checks.sh",
+    ),
+    read(
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/upstream-pools/retry-storm-budget/checks.sh",
+    ),
+    read(
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/cache/collapsed-forwarding-metrics/checks.sh",
+    ),
+    read(
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/lifecycle/process-signal-h2-h3-drain/checks.sh",
+    ),
+  ];
+
+  for (catalog, category, name) in [
+    (&state_data, "shared-state", "redis-disconnect-reconnect"),
+    (&proxy, "upstream-pools", "retry-storm-budget"),
+    (&config_runtime, "lifecycle", "process-signal-h2-h3-drain"),
+  ] {
+    assert!(
+      catalog.contains(&format!("\"{category}\"")) && catalog.contains(&format!("\"{name}\"")),
+      "{category}/{name} should remain in its logical Docker matrix group"
+    );
+    assert!(
+      order.contains(&format!("(\"{category}\", \"{name}\")")),
+      "{category}/{name} should remain in deterministic case order"
+    );
+    assert!(
+      docs.contains(&format!("`{category}/{name}`")),
+      "the concurrency invariant table should document {category}/{name}"
+    );
+  }
+  assert!(
+    docs.contains("`cache/collapsed-forwarding-metrics`")
+      && docs.contains("`shared-state/redis-delay-isolation`")
+      && docs.contains("`shared-state/postgres-delay-isolation`"),
+    "the invariant table should retain cache stampede and backend latency coverage"
+  );
+
+  for expected in [
+    "FAULT_GATE_ID_RE",
+    "FAULT_GATE_LIMIT = 256",
+    "FAULT_GATE_MAX_TIMEOUT_MS = 30_000",
+    "header_delay_sequence",
+    "prefix = \"/__fault/gates/\"",
+    "release requires POST",
+    "status requires GET",
+  ] {
+    assert!(
+      mock_upstream.contains(expected),
+      "the bounded mock fault gate should preserve {expected}"
+    );
+  }
+
+  for script in &scripts {
+    for forbidden in [
+      "docker-rootful",
+      "--privileged",
+      "--network host",
+      "docker system prune",
+      "docker container prune",
+      "docker network prune",
+      "iptables",
+      "tc qdisc",
+      "eval ",
+    ] {
+      assert!(
+        !script.contains(forbidden),
+        "P2-6 fault scripts must not contain unsafe operation {forbidden}"
+      );
+    }
+  }
+  let burst = &scripts[0];
+  for expected in [
+    "concurrency < 1 || concurrency > 64",
+    "timeout_seconds < 1 || timeout_seconds > 30",
+    "docker rm -f \"${container}\"",
+    "--label \"${test_label}\"",
+  ] {
+    assert!(
+      burst.contains(expected),
+      "bounded burst helper should preserve {expected}"
     );
   }
 }

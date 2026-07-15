@@ -6,11 +6,11 @@
 //! bundle, and Prometheus output.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::config::{BackendFailureMode, SharedStateFailurePolicies};
 use crate::metrics::Metrics;
 
+use super::failure_epoch::FailureEpoch;
 use super::{Backend, now_unix_ms};
 
 const FEATURE_COUNT: usize = 7;
@@ -78,8 +78,7 @@ struct BackendFeatureRuntime {
   mode: BackendFailureMode,
   backend: Option<Arc<str>>,
   kind: Option<&'static str>,
-  degraded: AtomicBool,
-  degraded_since_ms: AtomicU64,
+  failure_epoch: FailureEpoch,
   metrics: Arc<Metrics>,
 }
 
@@ -136,8 +135,7 @@ impl BackendFailureRegistry {
         mode,
         backend: binding.backend.clone(),
         kind: binding.kind,
-        degraded: AtomicBool::new(false),
-        degraded_since_ms: AtomicU64::new(0),
+        failure_epoch: FailureEpoch::new(),
         metrics: metrics.clone(),
       }
     });
@@ -164,11 +162,9 @@ impl BackendFailureRegistry {
       entry.mode.as_str(),
       "operation_error",
     );
-    if !entry.degraded.swap(true, Ordering::AcqRel) {
-      entry
-        .degraded_since_ms
-        .store(now_unix_ms().max(0) as u64, Ordering::Release);
-    }
+    entry
+      .failure_epoch
+      .record_failure(now_unix_ms().max(0) as u64);
     entry.mode
   }
 
@@ -177,8 +173,7 @@ impl BackendFailureRegistry {
     let Some((backend, kind)) = entry.identity() else {
       return;
     };
-    if entry.degraded.swap(false, Ordering::AcqRel) {
-      entry.degraded_since_ms.store(0, Ordering::Release);
+    if entry.failure_epoch.record_success() {
       entry.metrics.record_backend_feature_recovery(
         backend,
         kind,
@@ -220,7 +215,7 @@ impl BackendFailureRegistry {
     self
       .entries
       .iter()
-      .any(|entry| entry.backend.is_some() && entry.degraded.load(Ordering::Acquire))
+      .any(|entry| entry.backend.is_some() && entry.failure_epoch.is_degraded())
   }
 
   pub(super) fn statuses(&self) -> Vec<BackendFeatureFailureStatus> {
@@ -228,7 +223,7 @@ impl BackendFailureRegistry {
       .entries
       .iter()
       .map(|entry| {
-        let degraded = entry.degraded.load(Ordering::Acquire);
+        let degraded = entry.failure_epoch.is_degraded();
         BackendFeatureFailureStatus {
           feature: entry.feature.as_str(),
           mode: entry.mode,
@@ -253,7 +248,7 @@ impl BackendFeatureRuntime {
   }
 
   fn stale_snapshot_age_seconds(&self) -> u64 {
-    let since_ms = self.degraded_since_ms.load(Ordering::Acquire);
+    let since_ms = self.failure_epoch.degraded_since_ms();
     if since_ms == 0 {
       return 0;
     }

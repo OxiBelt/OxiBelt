@@ -15,6 +15,8 @@ mod render;
 mod rollout;
 #[path = "oxibelt_gateway_controller/rollout_client.rs"]
 mod rollout_client;
+#[path = "oxibelt_gateway_controller/rollout_decision.rs"]
+mod rollout_decision;
 #[path = "oxibelt_gateway_controller/rollout_patch.rs"]
 mod rollout_patch;
 #[path = "oxibelt_gateway_controller/rollout_status.rs"]

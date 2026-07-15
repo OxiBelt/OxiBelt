@@ -353,6 +353,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       None,
     ),
     docker_case(
+      "lifecycle",
+      "process-signal-h2-h3-drain",
+      "process pre-drain and termination preserve active HTTP/2 and HTTP/3 requests",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
       "config-invalid",
       "no-http-versions",
       "listener validation rejects all downstream HTTP versions and SNI forwarding protocols disabled",

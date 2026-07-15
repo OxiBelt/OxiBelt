@@ -396,6 +396,106 @@ async fn timed_out_command_discards_its_connection_before_reuse() {
 }
 
 #[tokio::test]
+async fn aborted_command_discards_ambiguous_connection_before_reuse() {
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("test listener should bind");
+  let address = listener
+    .local_addr()
+    .expect("test listener should have an address");
+  let accepted = Arc::new(AtomicUsize::new(0));
+  let server_accepted = accepted.clone();
+  let (first_command_tx, first_command_rx) = oneshot::channel();
+  let server = tokio::spawn(async move {
+    let (first, _) = listener
+      .accept()
+      .await
+      .expect("first client should connect");
+    server_accepted.fetch_add(1, Ordering::Relaxed);
+    let (first_reader, _first_writer) = first.into_split();
+    let mut first_reader = BufReader::new(first_reader);
+    let first_command = read_command(&mut first_reader)
+      .await
+      .expect("first command should use RESP framing");
+    assert_eq!(first_command, vec![b"GET".to_vec(), b"ambiguous".to_vec()]);
+    let _ = first_command_tx.send(());
+    let (second, _) = listener
+      .accept()
+      .await
+      .expect("replacement client should connect");
+    server_accepted.fetch_add(1, Ordering::Relaxed);
+    let (second_reader, mut second_writer) = second.into_split();
+    let mut second_reader = BufReader::new(second_reader);
+    let second_command = read_command(&mut second_reader)
+      .await
+      .expect("replacement command should use RESP framing");
+    assert_eq!(
+      second_command,
+      vec![b"GET".to_vec(), b"replacement".to_vec()]
+    );
+    second_writer
+      .write_all(b"$1\r\nv\r\n")
+      .await
+      .expect("replacement response should write");
+  });
+  let config = pool_config(format!("redis://{address}"), 5_000);
+  let metrics = Metrics::new();
+  let pool = RedisPool::new(
+    &config,
+    Duration::from_millis(5_000),
+    &CryptoConfig::default(),
+    RedisPlaintextPolicy::Allow,
+    metrics.clone(),
+  )
+  .expect("pool should build");
+  let first_pool = pool.clone();
+  let first = tokio::spawn(async move {
+    first_pool
+      .command(&[b"GET".to_vec(), b"ambiguous".to_vec()])
+      .await
+  });
+  first_command_rx
+    .await
+    .expect("server should observe the ambiguous command before cancellation");
+  first.abort();
+  assert!(
+    first
+      .await
+      .expect_err("aborted command should be cancelled")
+      .is_cancelled(),
+    "command task should report cancellation"
+  );
+  // Cancellation records a transport failure and deliberately applies the configured
+  // reconnect backoff before another socket may be created.
+  tokio::time::sleep(Duration::from_millis(5)).await;
+  let response = tokio::time::timeout(
+    Duration::from_secs(1),
+    pool.command(&[b"GET".to_vec(), b"replacement".to_vec()]),
+  )
+  .await
+  .expect("replacement command should not wait for the ambiguous socket")
+  .expect("replacement command should use a new connection");
+  assert!(matches!(response, super::Resp::Bulk(Some(value)) if value == b"v"));
+  server.await.expect("test server should not panic");
+  assert_eq!(accepted.load(Ordering::Relaxed), 2);
+  let prometheus = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+  assert!(prometheus.contains(
+    "oxibelt_shared_state_pool_connection_events_total{backend=\"redis-test\",kind=\"redis\",event=\"discarded\"} 1"
+  ));
+  assert!(prometheus.contains(
+    "oxibelt_shared_state_pool_connections{backend=\"redis-test\",kind=\"redis\",state=\"active\"} 0"
+  ));
+  assert!(
+    prometheus
+      .contains("oxibelt_shared_state_pool_waiters{backend=\"redis-test\",kind=\"redis\"} 0")
+  );
+}
+
+#[tokio::test]
 async fn pipeline_flushes_all_commands_before_reading_and_reuses_connection() {
   let listener = TcpListener::bind("127.0.0.1:0")
     .await

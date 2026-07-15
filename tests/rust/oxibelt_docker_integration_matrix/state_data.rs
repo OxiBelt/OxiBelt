@@ -68,6 +68,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "shared-state",
+      "redis-disconnect-reconnect",
+      "Redis disconnects fail closed and reconnect through a fresh bounded pool connection",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        redis: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "shared-state",
       "postgres-delay-isolation",
       "PostgreSQL backend delay times out bounded work without blocking health or metrics",
       ExpectStart::Success,

@@ -2701,6 +2701,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "libc",
+ "loom",
  "md-5",
  "nix",
  "online-dsl-forge",

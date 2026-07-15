@@ -179,6 +179,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "upstream-pools",
+      "retry-storm-budget",
+      "concurrent upstream failures stay inside the bounded retry budget and recover",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "upstream-pools",
       "retry-connect-error-on-policy",
       "retry.on excludes connect errors from pool retry",
       ExpectStart::Success,

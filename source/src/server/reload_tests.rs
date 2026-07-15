@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::*;
@@ -16,6 +17,126 @@ mod common {
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/rust/common/mod.rs"
   ));
+}
+
+#[tokio::test]
+async fn torn_full_reload_keeps_active_generation_then_complete_candidate_recovers() {
+  let temp_dir = common::TempDir::new("torn-full-reload");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("reload config directory should be created");
+  std::fs::create_dir_all(&cert_dir).expect("reload certificate directory should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "torn-full-reload");
+  let config_path = config_dir.join("oxibelt.toml");
+  let http_bind = unused_loopback_port().await;
+  let https_bind = unused_loopback_port().await;
+  let (old_upstream_addr, old_request_seen, release_old_request, old_upstream_task) =
+    start_gated_path_echo_http_upstream().await;
+  let (new_upstream_addr, new_upstream_task) = start_path_echo_http_upstream(1).await;
+  let initial_raw = full_reload_config(
+    &cert_path,
+    &key_path,
+    https_bind,
+    http_bind,
+    old_upstream_addr,
+  );
+  std::fs::write(&config_path, &initial_raw).expect("initial reload config should write");
+  let initial_config = Config::load(&config_path).expect("initial reload config should load");
+  initial_config
+    .validate()
+    .expect("initial reload config should validate");
+  let state = AppHandle::new(
+    AppSnapshot::new(initial_config)
+      .await
+      .expect("initial snapshot should initialize"),
+  );
+  let (error_tx, _error_rx) = mpsc::unbounded_channel();
+  let mut supervisor = ListenerSupervisor::start(
+    state.clone(),
+    error_tx,
+    test_admin_control(),
+    test_admin_operations(),
+  )
+  .await
+  .expect("listener supervisor should start");
+  let mut reload = ReloadManager::new(
+    config_path.clone(),
+    RuntimeOverrides::default(),
+    state.snapshot().as_ref(),
+  )
+  .expect("reload manager should initialize");
+
+  let held_client = tokio::spawn(raw_http_response(http_bind, "/held"));
+  tokio::time::timeout(Duration::from_secs(3), old_request_seen)
+    .await
+    .expect("old upstream request observation should not time out")
+    .expect("old upstream should observe the held request");
+
+  let original = state.snapshot();
+  std::fs::write(&config_path, "[runtime\nhot_reload = ")
+    .expect("torn reload candidate should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Signal, &state, &mut supervisor)
+    .await;
+  let after_torn = state.snapshot();
+  assert!(
+    Arc::ptr_eq(&original, &after_torn),
+    "an invalid candidate must not publish a new generation"
+  );
+
+  let replacement_raw = full_reload_config(
+    &cert_path,
+    &key_path,
+    https_bind,
+    http_bind,
+    new_upstream_addr,
+  );
+  std::fs::write(&config_path, replacement_raw).expect("complete reload candidate should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Signal, &state, &mut supervisor)
+    .await;
+  let replacement = state.snapshot();
+  assert!(
+    !Arc::ptr_eq(&original, &replacement),
+    "a complete candidate should publish a new generation"
+  );
+  assert_eq!(
+    replacement.config.upstreams[0].origin.host_str(),
+    Some("127.0.0.1")
+  );
+  assert_eq!(
+    replacement.config.upstreams[0].origin.port(),
+    Some(new_upstream_addr.port())
+  );
+
+  release_old_request
+    .send(())
+    .expect("held old-generation request should still be waiting");
+  let old_response = held_client
+    .await
+    .expect("held client task should not panic")
+    .expect("held old-generation response should complete");
+  assert!(
+    old_response.contains("path=/origin/held"),
+    "held request should finish on the captured old generation: {}",
+    log_safe_test_text(&old_response)
+  );
+  let new_response = raw_http_response(http_bind, "/fresh")
+    .await
+    .expect("fresh request should use the recovered generation");
+  assert!(
+    new_response.contains("path=/origin/fresh"),
+    "fresh request should finish on the recovered generation: {}",
+    log_safe_test_text(&new_response)
+  );
+
+  supervisor.shutdown(state.snapshot().as_ref()).await;
+  old_upstream_task
+    .await
+    .expect("old gated upstream task should not panic");
+  new_upstream_task
+    .await
+    .expect("new path echo upstream task should not panic");
 }
 
 #[tokio::test]
@@ -254,6 +375,95 @@ shutdown_delay_ms = 0
 "#,
   );
   parse_test_config(&raw)
+}
+
+fn full_reload_config(
+  cert_path: &Path,
+  key_path: &Path,
+  https_bind: SocketAddr,
+  http_bind: SocketAddr,
+  upstream_addr: SocketAddr,
+) -> String {
+  let cert_name = cert_path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .expect("test certificate filename should be UTF-8");
+  let key_name = key_path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .expect("test private-key filename should be UTF-8");
+  let mut raw = common::minimal_config_toml_with_paths(cert_name, key_name)
+    .replace("unprivileged_mode = true", "unprivileged_mode = false")
+    .replace(
+      "https_bind = \"127.0.0.1:8443\"",
+      &format!("https_bind = \"{https_bind}\"\nhttp_bind = \"{http_bind}\"\nhttp_mode = \"proxy\""),
+    )
+    .replace(
+      "origin = \"https://app.internal.example\"",
+      &format!("origin = \"http://{upstream_addr}/origin\""),
+    )
+    .replace("max_http_version = \"h2\"", "max_http_version = \"h1\"");
+  raw.push_str(
+    r#"
+
+[runtime.hot_reload]
+mode = "full"
+poll_interval_ms = 60000
+
+[runtime.drain]
+graceful_timeout_ms = 1000
+long_connection_close_delay_ms = 1000
+shutdown_delay_ms = 0
+"#,
+  );
+  raw
+}
+
+async fn start_gated_path_echo_http_upstream() -> (
+  SocketAddr,
+  oneshot::Receiver<()>,
+  oneshot::Sender<()>,
+  JoinHandle<()>,
+) {
+  let listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("gated path echo upstream should bind");
+  let addr = listener
+    .local_addr()
+    .expect("gated path echo upstream address should be available");
+  let (seen_tx, seen_rx) = oneshot::channel();
+  let (release_tx, release_rx) = oneshot::channel();
+  let task = tokio::spawn(async move {
+    let (mut stream, _) = listener
+      .accept()
+      .await
+      .expect("gated path echo upstream should accept connection");
+    let request_head = read_http_request_head(&mut stream)
+      .await
+      .expect("gated path echo upstream should read request headers");
+    let path = request_head.split_whitespace().nth(1).unwrap_or("/");
+    seen_tx
+      .send(())
+      .expect("reload test should wait for upstream observation");
+    release_rx
+      .await
+      .expect("reload test should release gated upstream response");
+    let body = format!("path={path}");
+    let response = format!(
+      "HTTP/1.1 200 OK\r\n\
+       Content-Type: text/plain\r\n\
+       Content-Length: {}\r\n\
+       Connection: close\r\n\
+       \r\n\
+       {body}",
+      body.len()
+    );
+    stream
+      .write_all(response.as_bytes())
+      .await
+      .expect("gated path echo upstream should write response");
+  });
+  (addr, seen_rx, release_tx, task)
 }
 
 async fn start_path_echo_http_upstream(request_count: usize) -> (SocketAddr, JoinHandle<()>) {

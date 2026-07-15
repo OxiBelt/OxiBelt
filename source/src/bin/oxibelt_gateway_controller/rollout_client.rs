@@ -13,6 +13,10 @@ use super::rollout::{
   RolloutTarget, WorkloadKind, WorkloadPodOwnership, annotation, build_workload_patch,
   evaluate_convergence, now_unix_seconds, pod_is_selected,
 };
+use super::rollout_decision::{
+  ObservationDecision, decide_observation, mark_failed_attempt, prepare_rollback_state,
+  requires_rollback,
+};
 use super::rollout_patch::{
   base_config_reference, validate_immutable_base_config, validate_rollout_opt_in,
 };
@@ -116,44 +120,38 @@ impl KubernetesPoller {
       &active.name,
       &active.content_digest,
     );
-    if let Some(reason) = rejected_pod_reason(
+    let rejected_reason = rejected_pod_reason(
       workload,
       &ownership,
       &pods,
       &active.name,
       &active.content_digest,
+    );
+    match decide_observation(
+      &state,
+      &convergence,
+      rejected_reason,
+      rollout_timed_out(&state, target),
     ) {
-      return self
-        .fail_or_rollback(target, workload, state, &active, reason)
-        .await;
-    }
-    if convergence.all_replicas_converged() {
-      return self
-        .advance_converged_state(target, workload, state, &active, rolling_back)
-        .await;
-    }
-    if state.phase == RolloutPhase::Committed {
-      return Ok(convergence_lost_status(&state));
-    }
-    if rollout_timed_out(&state, target) {
-      return self
-        .fail_or_rollback(target, workload, state, &active, "RolloutTimeout")
-        .await;
-    }
-    let next_phase = match state.phase {
-      RolloutPhase::CanaryApplying if convergence.pods.desired_ready > 0 => {
-        Some(RolloutPhase::CanaryHealthy)
+      ObservationDecision::Reject(reason) => {
+        self
+          .fail_or_rollback(target, workload, state, &active, reason)
+          .await
       }
-      RolloutPhase::CanaryHealthy => Some(RolloutPhase::Expanding),
-      _ => None,
-    };
-    if let Some(phase) = next_phase {
-      let mut next = state;
-      next.phase = phase;
-      self.apply_state(target, workload, &active, &next).await?;
-      return Ok(RolloutStatus::from(&next));
+      ObservationDecision::Converged => {
+        self
+          .advance_converged_state(target, workload, state, &active, rolling_back)
+          .await
+      }
+      ObservationDecision::ConvergenceLost => Ok(convergence_lost_status(&state)),
+      ObservationDecision::Advance(phase) => {
+        let mut next = state;
+        next.phase = phase;
+        self.apply_state(target, workload, &active, &next).await?;
+        Ok(RolloutStatus::from(&next))
+      }
+      ObservationDecision::Wait => Ok(RolloutStatus::from(&state)),
     }
-    Ok(RolloutStatus::from(&state))
   }
 
   async fn advance_converged_state(
@@ -195,13 +193,8 @@ impl KubernetesPoller {
     active: &ConfigArtifact,
     reason: &str,
   ) -> anyhow::Result<RolloutStatus> {
-    let mut failed = state;
-    failed.failed_revision = Some(active.name.clone());
-    if failed
-      .committed_revision
-      .as_deref()
-      .is_some_and(|revision| revision != active.name)
-    {
+    let mut failed = mark_failed_attempt(state, &active.name);
+    if requires_rollback(&failed, &active.name) {
       return self
         .request_rollback(target, workload, failed, reason)
         .await;
@@ -220,12 +213,7 @@ impl KubernetesPoller {
     reason: &str,
   ) -> anyhow::Result<RolloutStatus> {
     let rollback = self.load_committed_artifact(target, &state).await?;
-    let mut next = state;
-    next.phase = RolloutPhase::RollbackRequested;
-    next.desired_revision = Some(rollback.name.clone());
-    next.desired_artifact_digest = Some(rollback.artifact_digest.clone());
-    next.desired_content_digest = Some(rollback.content_digest.clone());
-    next.failure = Some(reason.to_string());
+    let next = prepare_rollback_state(state, &rollback, reason);
     self.apply_state(target, workload, &rollback, &next).await?;
     warn!(revision = %rollback.name, reason, "requested immutable Gateway configuration rollback");
     Ok(RolloutStatus::from(&next))
@@ -458,7 +446,7 @@ fn rollout_timed_out(state: &RolloutState, target: &RolloutTarget) -> bool {
     .is_some_and(|started| now_unix_seconds().saturating_sub(started) >= target.timeout.as_secs())
 }
 
-fn convergence_transition(phase: RolloutPhase, rolling_back: bool) -> RolloutPhase {
+pub(super) fn convergence_transition(phase: RolloutPhase, rolling_back: bool) -> RolloutPhase {
   if rolling_back {
     RolloutPhase::RolledBack
   } else {
@@ -470,7 +458,10 @@ fn convergence_transition(phase: RolloutPhase, rolling_back: bool) -> RolloutPha
   }
 }
 
-fn candidate_is_blocked_after_failure(state: &RolloutState, candidate_revision: &str) -> bool {
+pub(super) fn candidate_is_blocked_after_failure(
+  state: &RolloutState,
+  candidate_revision: &str,
+) -> bool {
   state.phase == RolloutPhase::Failed
     && state.failed_revision.as_deref() == Some(candidate_revision)
 }
