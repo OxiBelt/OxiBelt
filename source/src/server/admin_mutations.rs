@@ -98,15 +98,6 @@ pub(super) async fn response(
     };
   let (action, resource) = mutation_scope(method, path);
   let active_revision = current_revision(&state, &admin_control, path).await;
-  if if_match != active_revision {
-    return json_response(
-      StatusCode::PRECONDITION_FAILED,
-      &json!({
-        "error": "If-Match does not match the active revision",
-        "details": { "expected": active_revision },
-      }),
-    );
-  }
   let admission = runtime
     .admit(
       &parts.headers,
@@ -126,6 +117,9 @@ pub(super) async fn response(
     Ok(MutationAdmission::Claimed(execution)) => execution,
     Ok(MutationAdmission::Replay(record)) => return replay_response(record),
     Ok(MutationAdmission::InProgress(record)) => return in_progress_response(&record),
+    Ok(MutationAdmission::PreconditionFailed { active_revision }) => {
+      return precondition_failed_response(&active_revision);
+    }
     Ok(MutationAdmission::Conflict(conflict)) => return conflict_response(&conflict),
     Ok(MutationAdmission::Bypass) => {
       return text_response(
@@ -399,6 +393,16 @@ fn in_progress_response(record: &MutationRecord) -> Response<ProxyBody> {
   )
 }
 
+fn precondition_failed_response(active_revision: &str) -> Response<ProxyBody> {
+  json_response(
+    StatusCode::PRECONDITION_FAILED,
+    &json!({
+      "error": "If-Match does not match the active revision",
+      "details": { "expected": active_revision },
+    }),
+  )
+}
+
 fn conflict_response(conflict: &MutationConflict) -> Response<ProxyBody> {
   json_response(
     conflict.status(),
@@ -515,6 +519,7 @@ async fn instances_response(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use http_body_util::BodyExt;
 
   #[test]
   fn inactive_break_glass_credentials_are_limited_to_activation_bootstrap_routes() {
@@ -581,6 +586,37 @@ mod tests {
         .expect_err("duplicate If-Match")
         .status(),
       StatusCode::BAD_REQUEST
+    );
+  }
+
+  #[tokio::test]
+  async fn operational_precondition_failure_preserves_legacy_response() {
+    let response = precondition_failed_response("r-2042");
+    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(
+      !response
+        .headers()
+        .contains_key(crate::admin_mutation::IDEMPOTENT_REPLAY_HEADER)
+    );
+    assert!(
+      !response
+        .headers()
+        .contains_key(crate::admin_mutation::MUTATION_REQUEST_ID_HEADER)
+    );
+    let body = response
+      .into_body()
+      .collect()
+      .await
+      .expect("collect precondition response")
+      .to_bytes();
+    let payload: serde_json::Value =
+      serde_json::from_slice(&body).expect("precondition response JSON");
+    assert_eq!(
+      payload,
+      json!({
+        "error": "If-Match does not match the active revision",
+        "details": { "expected": "r-2042" },
+      })
     );
   }
 }

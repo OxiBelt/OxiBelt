@@ -211,14 +211,7 @@ pub(crate) async fn claim_tx(
   claim.validate()?;
   if let Some(row) = select_mutation(&mut **tx, namespace, &claim.request_id, true).await? {
     let record = mutation_from_row(&row)?;
-    if record.fingerprint != claim.fingerprint || record.principal != claim.principal {
-      return Ok(ClaimOutcome::RequestConflict);
-    }
-    return Ok(if record.state.is_terminal() {
-      ClaimOutcome::Replay(record)
-    } else {
-      ClaimOutcome::InProgress(record)
-    });
+    return Ok(record.classify_existing_claim(claim));
   }
 
   let unexpired: bool = sqlx::query_scalar(
@@ -256,14 +249,7 @@ pub(crate) async fn claim_tx(
   // as an unrelated busy resource.
   if let Some(row) = select_mutation(&mut **tx, namespace, &claim.request_id, true).await? {
     let record = mutation_from_row(&row)?;
-    if record.fingerprint != claim.fingerprint || record.principal != claim.principal {
-      return Ok(ClaimOutcome::RequestConflict);
-    }
-    return Ok(if record.state.is_terminal() {
-      ClaimOutcome::Replay(record)
-    } else {
-      ClaimOutcome::InProgress(record)
-    });
+    return Ok(record.classify_existing_claim(claim));
   }
   let actual_revision: String = revision.try_get("committed_revision")?;
   if actual_revision != claim.expected_previous_revision {
@@ -315,14 +301,7 @@ pub(crate) async fn claim_tx(
       .await?
       .context("conflicting mutation disappeared during claim")?;
     let record = mutation_from_row(&row)?;
-    if record.fingerprint != claim.fingerprint || record.principal != claim.principal {
-      return Ok(ClaimOutcome::RequestConflict);
-    }
-    return Ok(if record.state.is_terminal() {
-      ClaimOutcome::Replay(record)
-    } else {
-      ClaimOutcome::InProgress(record)
-    });
+    return Ok(record.classify_existing_claim(claim));
   }
 
   let reserved = sqlx::query(

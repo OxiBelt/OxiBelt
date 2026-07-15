@@ -63,6 +63,7 @@ pub(crate) enum MutationAdmission {
   Claimed(MutationExecution),
   Replay(MutationRecord),
   InProgress(MutationRecord),
+  PreconditionFailed { active_revision: String },
   Conflict(MutationConflict),
 }
 
@@ -245,33 +246,6 @@ impl AdminMutationRuntime {
     if let Err(error) = store.delete_expired_terminal_records(128).await {
       tracing::warn!(error = %error, "failed to prune expired Admin mutation receipts");
     }
-    if store
-      .load_revision(resource)
-      .await
-      .context("failed to load Admin mutation logical revision")?
-      .is_none()
-    {
-      store
-        .initialize_revision(
-          resource,
-          current_revision,
-          EMPTY_DIGEST,
-          Some(&self.inner.target.cluster_id),
-          Some(&self.inner.target.membership_revision),
-        )
-        .await
-        .context("failed to initialize Admin mutation logical revision")?;
-    }
-    let logical_revision = store
-      .load_revision(resource)
-      .await
-      .context("failed to reload Admin mutation logical revision")?
-      .context("Admin mutation logical revision disappeared")?;
-    if unsigned.expected_previous_revision != logical_revision.committed_revision {
-      return Ok(MutationAdmission::Conflict(MutationConflict::Revision {
-        actual_revision: Some(logical_revision.committed_revision),
-      }));
-    }
     let claim = MutationClaim {
       request_id: unsigned.request_id.clone(),
       fingerprint: verified.fingerprint,
@@ -291,32 +265,43 @@ impl AdminMutationRuntime {
       retention_seconds: self.inner.retention_seconds,
       audit_record_id,
     };
-    Ok(
-      match store
-        .claim(&claim)
+    if let Some(record) = store
+      .load_mutation(&claim.request_id)
+      .await
+      .context("failed to look up existing Admin mutation")?
+    {
+      return Ok(claim_outcome_admission(
+        record.classify_existing_claim(&claim),
+        audit,
+      ));
+    }
+    if precondition_revision != current_revision {
+      return Ok(MutationAdmission::PreconditionFailed {
+        active_revision: current_revision.to_string(),
+      });
+    }
+    if store
+      .load_revision(resource)
+      .await
+      .context("failed to load Admin mutation logical revision")?
+      .is_none()
+    {
+      store
+        .initialize_revision(
+          resource,
+          current_revision,
+          EMPTY_DIGEST,
+          Some(&self.inner.target.cluster_id),
+          Some(&self.inner.target.membership_revision),
+        )
         .await
-        .context("failed to claim Admin mutation")?
-      {
-        ClaimOutcome::Claimed(record) => {
-          audit.mark_critical_mutation_lifecycle_managed();
-          MutationAdmission::Claimed(MutationExecution {
-            request_id: record.request_id,
-            new_revision: record.new_revision,
-          })
-        }
-        ClaimOutcome::Replay(record) => MutationAdmission::Replay(record),
-        ClaimOutcome::InProgress(record) => MutationAdmission::InProgress(record),
-        ClaimOutcome::RequestConflict => MutationAdmission::Conflict(MutationConflict::RequestId),
-        ClaimOutcome::Expired => MutationAdmission::Conflict(MutationConflict::Expired),
-        ClaimOutcome::RevisionConflict { actual_revision } => {
-          MutationAdmission::Conflict(MutationConflict::Revision { actual_revision })
-        }
-        ClaimOutcome::RevisionBusy { request_id } => {
-          MutationAdmission::Conflict(MutationConflict::Busy { request_id })
-        }
-        ClaimOutcome::TargetConflict => MutationAdmission::Conflict(MutationConflict::Target),
-      },
-    )
+        .context("failed to initialize Admin mutation logical revision")?;
+    }
+    let outcome = store
+      .claim(&claim)
+      .await
+      .context("failed to claim Admin mutation")?;
+    Ok(claim_outcome_admission(outcome, audit))
   }
 
   pub(crate) async fn load_mutation(
@@ -564,6 +549,29 @@ impl AdminMutationRuntime {
       .store
       .as_ref()
       .context("Admin mutation ledger is disabled")
+  }
+}
+
+fn claim_outcome_admission(outcome: ClaimOutcome, audit: &AdminAuditHandle) -> MutationAdmission {
+  match outcome {
+    ClaimOutcome::Claimed(record) => {
+      audit.mark_critical_mutation_lifecycle_managed();
+      MutationAdmission::Claimed(MutationExecution {
+        request_id: record.request_id,
+        new_revision: record.new_revision,
+      })
+    }
+    ClaimOutcome::Replay(record) => MutationAdmission::Replay(record),
+    ClaimOutcome::InProgress(record) => MutationAdmission::InProgress(record),
+    ClaimOutcome::RequestConflict => MutationAdmission::Conflict(MutationConflict::RequestId),
+    ClaimOutcome::Expired => MutationAdmission::Conflict(MutationConflict::Expired),
+    ClaimOutcome::RevisionConflict { actual_revision } => {
+      MutationAdmission::Conflict(MutationConflict::Revision { actual_revision })
+    }
+    ClaimOutcome::RevisionBusy { request_id } => {
+      MutationAdmission::Conflict(MutationConflict::Busy { request_id })
+    }
+    ClaimOutcome::TargetConflict => MutationAdmission::Conflict(MutationConflict::Target),
   }
 }
 

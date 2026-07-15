@@ -228,6 +228,18 @@ pub(crate) struct MutationRecord {
   pub(crate) updated_at: String,
 }
 
+impl MutationRecord {
+  pub(crate) fn classify_existing_claim(self, claim: &MutationClaim) -> ClaimOutcome {
+    if self.fingerprint != claim.fingerprint || self.principal != claim.principal {
+      ClaimOutcome::RequestConflict
+    } else if self.state.is_terminal() {
+      ClaimOutcome::Replay(self)
+    } else {
+      ClaimOutcome::InProgress(self)
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ClaimOutcome {
   Claimed(MutationRecord),
