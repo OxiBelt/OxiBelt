@@ -35,6 +35,10 @@ private to the main crate.
   WAF prefix inspection behavior.
 - `webrtc_turn`: TURN/STUN auth validation, nonce handling, and
   ChannelData/STUN edge cases for the WebRTC TURN listener surface.
+- `syscall_boundaries`: bounded UDP socket-address conversion, batched-message
+  planning, Landlock access-mask selection, minimum-hop option selection, and
+  file-offset conversion. It exercises safe marshalling and validation without
+  repeatedly applying irreversible process-wide syscalls.
 
 Run a target locally:
 
@@ -51,7 +55,8 @@ for target in \
   http_semantics \
   http3_webtransport \
   websocket_frame \
-  webrtc_turn
+  webrtc_turn \
+  syscall_boundaries
 do
   cargo +nightly fuzz run "${target}" -- -runs=256
 done

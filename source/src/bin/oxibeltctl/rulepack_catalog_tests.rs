@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use clap::Parser;
 use sha2::{Digest, Sha256};
@@ -15,6 +15,7 @@ use crate::rulepack_catalog_index::{compare_versions, load_repo_catalog, parse_c
 use crate::rulepack_catalog_registry::{
   RulepackRepoRegistry, load_registry_from_path, save_registry_to_path,
 };
+use crate::test_support;
 
 #[test]
 fn catalog_parses_toml_and_compares_versions() {
@@ -389,6 +390,13 @@ type = "log"
 
 #[test]
 fn catalog_cross_origin_source_does_not_receive_repo_token() {
+  const TOKEN_ENV: &str = "OXIBELT_TEST_RULEPACK_REPO_TOKEN";
+  if test_support::run_test_in_subprocess_with_env(
+    "rulepack_catalog::tests::catalog_cross_origin_source_does_not_receive_repo_token",
+    &[(TOKEN_ENV, "repo-secret-token")],
+  ) {
+    return;
+  }
   let signed = crate::rulepack_openpgp::test_signed_rulepack_fixture(
     br#"[rulepack]
 schema_version = 2
@@ -418,13 +426,10 @@ type = "log"
   else {
     return;
   };
-  let token_env = unique_env_name("OXIBELT_TEST_RULEPACK_REPO_TOKEN");
-  set_env(&token_env, "repo-secret-token");
-
   let repo = RulepackRepoConfig {
     url: catalog_url,
     ca_certs: Vec::new(),
-    token_env: Some(token_env.clone()),
+    token_env: Some(TOKEN_ENV.to_string()),
     allow_insecure_rulepack_url: true,
     require_openpgp_signature: false,
     openpgp_key_files: vec![signed.key_file.clone()],
@@ -446,7 +451,6 @@ type = "log"
     crate::rulepack::load_rulepack_source(&source, Duration::from_secs(2), true).await?;
     Ok::<(), anyhow::Error>(())
   });
-  remove_env(&token_env);
   load_result.expect("catalog source should verify");
 
   let catalog_requests = catalog_handle.join().expect("catalog server thread");
@@ -720,24 +724,4 @@ fn sha256_hex(bytes: &[u8]) -> String {
     write!(&mut out, "{byte:02x}").expect("hex write");
   }
   out
-}
-
-fn unique_env_name(prefix: &str) -> String {
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("clock should be after Unix epoch")
-    .as_nanos();
-  format!("{prefix}_{}_{}", std::process::id(), nanos)
-}
-
-fn set_env(key: &str, value: &str) {
-  unsafe {
-    std::env::set_var(key, value);
-  }
-}
-
-fn remove_env(key: &str) {
-  unsafe {
-    std::env::remove_var(key);
-  }
 }

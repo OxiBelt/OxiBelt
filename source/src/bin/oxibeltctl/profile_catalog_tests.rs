@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, DEFAULT_ADMIN_URL};
@@ -10,9 +10,17 @@ use tokio::sync::oneshot;
 use url::Url;
 
 use super::*;
+use crate::test_support;
 
 #[test]
 fn mitigate_profile_url_renders_apply_policy_and_uses_profile_token_env() {
+  const TOKEN_ENV: &str = "OXIBELT_TEST_PROFILE_TOKEN";
+  if test_support::run_test_in_subprocess_with_env(
+    "plan::profile_catalog_tests::mitigate_profile_url_renders_apply_policy_and_uses_profile_token_env",
+    &[(TOKEN_ENV, "profile-token")],
+  ) {
+    return;
+  }
   let catalog = r#"{
     "profiles": {
       "login-bruteforce": {
@@ -30,8 +38,6 @@ fn mitigate_profile_url_renders_apply_policy_and_uses_profile_token_env() {
     .build()
     .expect("runtime");
   let (profile_url, request_rx) = runtime.block_on(spawn_profile_server(catalog.to_string()));
-  let token_env = unique_env_name("OXIBELT_TEST_PROFILE_TOKEN");
-  set_env(&token_env, "profile-token");
   let parsed = Cli::try_parse_from([
     "oxibeltctl",
     "mitigate",
@@ -40,7 +46,7 @@ fn mitigate_profile_url_renders_apply_policy_and_uses_profile_token_env() {
     &profile_url,
     "--allow-insecure-profile-url",
     "--profile-token-env",
-    &token_env,
+    TOKEN_ENV,
     "--profile-sha256",
     &sha256_hex(catalog.as_bytes()),
     "--source",
@@ -51,7 +57,6 @@ fn mitigate_profile_url_renders_apply_policy_and_uses_profile_token_env() {
   let plan = runtime
     .block_on(plan_command(&client, &parsed.command))
     .expect("plan");
-  remove_env(&token_env);
   let request = runtime
     .block_on(request_rx)
     .expect("profile server should receive request");
@@ -276,26 +281,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     write!(&mut out, "{byte:02x}").expect("hex write should succeed");
   }
   out
-}
-
-fn unique_env_name(prefix: &str) -> String {
-  let nanos = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("clock should be after Unix epoch")
-    .as_nanos();
-  format!("{prefix}_{}_{}", std::process::id(), nanos)
-}
-
-fn set_env(key: &str, value: &str) {
-  unsafe {
-    std::env::set_var(key, value);
-  }
-}
-
-fn remove_env(key: &str) {
-  unsafe {
-    std::env::remove_var(key);
-  }
 }
 
 fn dummy_client() -> AdminClient {

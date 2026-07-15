@@ -1,7 +1,7 @@
 //! Root wrapper that brokers privileged data-plane binds for an unprivileged OxiBelt child.
 
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
@@ -155,7 +155,8 @@ impl ChildSignalTarget {
     #[cfg(target_os = "linux")]
     if let Some(pidfd) = &self.pidfd {
       match pidfd_send_signal(pidfd, signal) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => return Ok(()),
+        Ok(()) => return Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
         Err(error) => {
           tracing::warn!(
             error = %error,
@@ -175,33 +176,30 @@ impl ChildSignalTarget {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
 fn pidfd_open(pid: u32) -> std::io::Result<OwnedFd> {
-  let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
-  if fd < 0 {
-    Err(std::io::Error::last_os_error())
-  } else {
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
-  }
+  let pid = i32::try_from(pid)
+    .ok()
+    .and_then(rustix::process::Pid::from_raw)
+    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid child PID"))?;
+  rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+    .map_err(std::io::Error::from)
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn pidfd_send_signal(pidfd: &OwnedFd, signal: Signal) -> Result<(), nix::errno::Errno> {
-  let result = unsafe {
-    libc::syscall(
-      libc::SYS_pidfd_send_signal,
-      pidfd.as_raw_fd(),
-      signal as libc::c_int,
-      std::ptr::null::<libc::siginfo_t>(),
-      0_u32,
-    )
+fn pidfd_send_signal(pidfd: &OwnedFd, signal: Signal) -> std::io::Result<()> {
+  let signal = match signal {
+    Signal::SIGHUP => rustix::process::Signal::HUP,
+    Signal::SIGINT => rustix::process::Signal::INT,
+    Signal::SIGTERM => rustix::process::Signal::TERM,
+    Signal::SIGUSR1 => rustix::process::Signal::USR1,
+    _ => {
+      return Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "pidfd forwarding does not support this signal",
+      ));
+    }
   };
-  if result == 0 {
-    Ok(())
-  } else {
-    Err(nix::errno::Errno::last())
-  }
+  rustix::process::pidfd_send_signal(pidfd, signal).map_err(std::io::Error::from)
 }
 
 fn exit_code_for_status(status: ExitStatus) -> i32 {

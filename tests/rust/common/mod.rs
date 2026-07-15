@@ -41,6 +41,65 @@ impl Drop for TempDir {
   }
 }
 
+#[allow(dead_code)]
+const TEST_ENV_CHILD: &str = "OXIBELT_TEST_ENV_CHILD";
+#[allow(dead_code)]
+const TEST_ENV_SENTINEL: &str = "OXIBELT_TEST_ENV_SENTINEL";
+
+/// Re-runs one exact test in a child process whose environment is configured before startup.
+///
+/// Returns `true` in the parent after the child succeeds, so the parent test should return
+/// immediately. Returns `false` in the child so the test body continues with the requested
+/// environment without mutating a multi-threaded test process.
+#[allow(dead_code)]
+pub fn run_test_in_subprocess_with_env<K, V>(test_name: &str, variables: &[(K, V)]) -> bool
+where
+  K: AsRef<OsStr>,
+  V: AsRef<OsStr>,
+{
+  if std::env::var_os(TEST_ENV_CHILD).as_deref() == Some(OsStr::new(test_name)) {
+    let sentinel = std::env::var_os(TEST_ENV_SENTINEL)
+      .map(PathBuf::from)
+      .expect("environment-test child should receive a sentinel path");
+    fs::write(&sentinel, b"entered")
+      .unwrap_or_else(|error| panic!("failed to write {}: {error}", sentinel.display()));
+    return false;
+  }
+
+  let marker_dir = TempDir::new("environment-test-child");
+  let sentinel = marker_dir.path().join("entered");
+  let mut command = Command::new(
+    std::env::current_exe().expect("environment-test parent should locate its test executable"),
+  );
+  command
+    .arg("--exact")
+    .arg(test_name)
+    .arg("--nocapture")
+    .arg("--test-threads=1")
+    .env(TEST_ENV_CHILD, test_name)
+    .env(TEST_ENV_SENTINEL, &sentinel);
+  for (key, value) in variables {
+    command.env(key, value);
+  }
+  let output = command
+    .output()
+    .expect("environment-test parent should start its child test process");
+  assert!(
+    sentinel.is_file(),
+    "environment-test child did not enter exact test {test_name}; stdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    output.status.success(),
+    "environment-test child {test_name} failed with {}; stdout:\n{}\nstderr:\n{}",
+    output.status,
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  true
+}
+
 pub fn create_self_signed_cert(dir: &Path, common_name: &str) -> (PathBuf, PathBuf) {
   let common_name = safe_test_path_component(common_name, "certificate common name");
   let dir = safe_existing_test_dir(dir);

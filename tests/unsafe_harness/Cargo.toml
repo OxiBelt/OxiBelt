@@ -1,0 +1,13 @@
+[package]
+name = "oxibelt-unsafe-harness"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+libc = "0.2.186"
+nix = { version = "0.31.3", default-features = false, features = ["process"] }
+
+[lints]
+workspace = true

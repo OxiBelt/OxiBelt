@@ -39,6 +39,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY source ./source
 COPY docs/admin-openapi.json ./docs/admin-openapi.json
 COPY fuzz ./fuzz
+COPY tests/unsafe_harness ./tests/unsafe_harness
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN rust_target="${OXIBELT_RUST_TARGET}" && \
     if [ -z "${rust_target}" ]; then \

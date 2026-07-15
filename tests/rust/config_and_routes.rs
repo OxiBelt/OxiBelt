@@ -3948,11 +3948,12 @@ zero_rtt = "safe_methods"
 #[test]
 fn remote_tls_signer_config_accepts_no_private_key_and_rejects_unsafe_combinations() {
   let token_env = "OXIBELT_KEYSIGNER_TOKEN_CONFIG_TEST";
-  unsafe {
-    std::env::set_var(
-      token_env,
-      base64::engine::general_purpose::STANDARD.encode([11u8; 32]),
-    );
+  let token = base64::engine::general_purpose::STANDARD.encode([11u8; 32]);
+  if common::run_test_in_subprocess_with_env(
+    "remote_tls_signer_config_accepts_no_private_key_and_rejects_unsafe_combinations",
+    &[(token_env, token.as_str())],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("remote-tls-signer-config");
   let (cert_path, key_path) =
@@ -4243,8 +4244,11 @@ remote_signer_key_id = "turn-key"
 
 #[test]
 fn admin_tls_validation_rejects_invalid_versions_and_missing_client_auth_roots() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_tls_validation_rejects_invalid_versions_and_missing_client_auth_roots",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-tls-validation");
   let (cert_path, key_path) =
@@ -5676,8 +5680,14 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn ipm_config_parses_postgres_backend_mapping_without_bootstrap_env_token() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_parses_postgres_backend_mapping_without_bootstrap_env_token",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-store-config");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-store-config");
@@ -5737,8 +5747,11 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn admin_audit_requires_postgres_shared_state_backend() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_requires_postgres_shared_state_backend",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-config");
   let (cert_path, key_path) =
@@ -5804,8 +5817,11 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn admin_audit_accepts_explicit_postgres_store_config() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_accepts_explicit_postgres_store_config",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-explicit-store");
   let (cert_path, key_path) =
@@ -5865,8 +5881,11 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn admin_audit_allows_best_effort_export_without_store() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_allows_best_effort_export_without_store",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-export-only");
   let (cert_path, key_path) =
@@ -5916,8 +5935,11 @@ schema = "ocsf"
 
 #[test]
 fn admin_audit_rejects_enforcing_mode_without_store() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_rejects_enforcing_mode_without_store",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-enforcing-no-store");
   let (cert_path, key_path) =
@@ -5955,8 +5977,11 @@ enabled = false
 
 #[test]
 fn admin_audit_rejects_required_store_without_store() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_rejects_required_store_without_store",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-required-store");
   let (cert_path, key_path) =
@@ -5997,8 +6022,11 @@ required_sinks = ["store"]
 
 #[test]
 fn admin_audit_rejects_unknown_export_sink() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_rejects_unknown_export_sink",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-unknown-export");
   let (cert_path, key_path) =
@@ -6034,8 +6062,11 @@ sinks = ["syslog"]
 
 #[test]
 fn admin_audit_rejects_unsupported_required_sink() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_rejects_unsupported_required_sink",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-required-otlp");
   let (cert_path, key_path) =
@@ -6069,8 +6100,11 @@ required_sinks = ["otlp"]
 
 #[test]
 fn admin_audit_accepts_selective_fsynced_spool_and_hmac_config() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_accepts_selective_fsynced_spool_and_hmac_config",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-selective-spool");
   let (cert_path, key_path) =
@@ -6133,8 +6167,11 @@ hmac_key_id = "audit-2026-07"
 
 #[test]
 fn admin_audit_rejects_invalid_durable_policy_and_spool_fields() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_audit_rejects_invalid_durable_policy_and_spool_fields",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-audit-invalid-durable-policy");
   let (cert_path, key_path) =
@@ -6307,9 +6344,14 @@ acknowledgement = "postgres"
 
 #[test]
 fn admin_mutations_accept_selective_audit_only_when_all_protected_actions_are_covered() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN", "secret");
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_mutations_accept_selective_audit_only_when_all_protected_actions_are_covered",
+    &[
+      ("OXIBELT_ADMIN_TOKEN", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-mutations-selective-audit");
   let (cert_path, key_path) =
@@ -6484,12 +6526,18 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn dynamic_policy_automation_api_config_validates_signature_key_and_quotas() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
-    std::env::set_var(
-      "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
-      base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-    );
+  let signature_key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+  if common::run_test_in_subprocess_with_env(
+    "dynamic_policy_automation_api_config_validates_signature_key_and_quotas",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      (
+        "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
+        signature_key.as_str(),
+      ),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("dynamic-policy-automation");
   let (cert_path, key_path) =
@@ -6552,12 +6600,18 @@ connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
 
 #[test]
 fn dynamic_policy_automation_api_rejects_default_quota_above_global_cap() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
-    std::env::set_var(
-      "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
-      base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-    );
+  let signature_key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+  if common::run_test_in_subprocess_with_env(
+    "dynamic_policy_automation_api_rejects_default_quota_above_global_cap",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      (
+        "OXIBELT_DYNAMIC_POLICY_HMAC_KEY_TEST",
+        signature_key.as_str(),
+      ),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("dynamic-policy-default-quota");
   let (cert_path, key_path) =
@@ -7496,8 +7550,11 @@ fn effective_config_dump_resolves_auto_worker_counts() {
 
 #[test]
 fn admin_transport_plaintext_requires_explicit_insecure_opt_in() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_transport_plaintext_requires_explicit_insecure_opt_in",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-plaintext");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-plaintext");
@@ -7527,8 +7584,11 @@ transport = "plaintext"
 
 #[test]
 fn admin_non_loopback_auto_requires_tls() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_non_loopback_auto_requires_tls",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-auto");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-auto");
@@ -7557,8 +7617,11 @@ transport = "auto"
 
 #[test]
 fn admin_tls_sni_certificate_config_validates() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_tls_sni_certificate_config_validates",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-tls");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-tls");
@@ -7754,8 +7817,11 @@ principal = "controller""#,
 
 #[test]
 fn admin_http3_and_operation_webtransport_config_validates() {
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_http3_and_operation_webtransport_config_validates",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("admin-http3");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "admin-http3");
@@ -7829,8 +7895,11 @@ enabled = true
     "unexpected error: {error}"
   );
 
-  unsafe {
-    std::env::set_var("OXIBELT_ADMIN_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "admin_http3_requires_admin_and_tls13",
+    &[("OXIBELT_ADMIN_TOKEN_TEST", "secret")],
+  ) {
+    return;
   }
   let raw = format!(
     r#"
@@ -7892,8 +7961,14 @@ max_version = "tls1.2"
 
 #[test]
 fn ipm_config_parses_principals_credentials_policies_and_bindings() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_parses_principals_credentials_policies_and_bindings",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-config");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-config");
@@ -8039,8 +8114,14 @@ break_glass_access_token_hash = "{hash}"
 
 #[test]
 fn ipm_config_accepts_oxirule_management_actions() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_accepts_oxirule_management_actions",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-oxirule-actions");
   let (cert_path, key_path) =
@@ -8125,8 +8206,14 @@ policy = "oxirule-management"
 
 #[test]
 fn ipm_config_accepts_diagnostics_actions() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_accepts_diagnostics_actions",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-diagnostics-actions");
   let (cert_path, key_path) =
@@ -8182,8 +8269,14 @@ policy = "diagnostics-preflight"
 
 #[test]
 fn ipm_config_accepts_control_plane_config_update_actions() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_accepts_control_plane_config_update_actions",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-control-plane-actions");
   let (cert_path, key_path) =
@@ -8237,8 +8330,14 @@ policy = "control-plane-config"
 
 #[test]
 fn ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store() {
-  unsafe {
-    std::env::set_var("OXIBELT_IPM_TOKEN_TEST", "secret");
+  if common::run_test_in_subprocess_with_env(
+    "ipm_config_rejects_unknown_action_resource_condition_and_legacy_token_store",
+    &[
+      ("OXIBELT_ADMIN_TOKEN_TEST", "secret"),
+      ("OXIBELT_IPM_TOKEN_TEST", "secret"),
+    ],
+  ) {
+    return;
   }
   let temp_dir = common::TempDir::new("ipm-invalid");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ipm-invalid");

@@ -60,6 +60,9 @@ mod rulepack_render;
 mod rulepack_url;
 #[path = "oxibeltctl/rulepack_values.rs"]
 mod rulepack_values;
+#[cfg(test)]
+#[path = "oxibeltctl/test_support.rs"]
+mod test_support;
 
 use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};

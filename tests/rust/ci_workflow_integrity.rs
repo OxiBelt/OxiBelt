@@ -80,6 +80,7 @@ const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "rust-advisory-checks",
   "test-riscv64-qemu",
   "fuzz-smoke",
+  "unsafe-validation",
 ];
 
 const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
@@ -836,6 +837,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "test",
     "rust-advisory-checks",
     "test-riscv64-qemu",
+    "unsafe-validation",
     "generate-test-matrices",
     "linux-target-builds",
     "docker-alpine-musl-image-amd64",
@@ -1017,6 +1019,48 @@ fn test_job_runs_bounded_loom_models_on_amd64() {
     test_job.matches("name: Loom concurrency models").count(),
     1,
     "Loom models should run once instead of being duplicated across the runner matrix"
+  );
+}
+
+#[test]
+fn unsafe_validation_runs_pinned_miri_and_sanitizers_as_a_primary_gate() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("unsafe-validation")
+    .expect("workflow should define unsafe-validation");
+  let job_text = workflow_job_text(&workflow, "unsafe-validation");
+
+  assert!(
+    job.needs.is_empty(),
+    "unsafe validation should start alongside the other primary Rust gates"
+  );
+  for expected in [
+    "name: Unsafe validation (${{ matrix.check }})",
+    "runs-on: ubuntu-26.04",
+    "contents: read",
+    "fail-fast: false",
+    "- miri",
+    "- address",
+    "- thread",
+    "nightly-2026-07-15",
+    "rustup component add miri --toolchain nightly-2026-07-15",
+    "cargo +nightly-2026-07-15 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
+    "RUSTFLAGS: -Zsanitizer=address",
+    "ASAN_OPTIONS: detect_leaks=1:halt_on_error=1",
+    "-Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked",
+    "RUSTFLAGS: -Zsanitizer=thread",
+    "TSAN_OPTIONS: halt_on_error=1",
+    "--lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "unsafe-validation should include {expected}"
+    );
+  }
+  assert!(
+    !job_text.contains("continue-on-error"),
+    "unsafe-validation must not soften Miri or sanitizer failures"
   );
 }
 

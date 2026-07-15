@@ -360,6 +360,14 @@ fn server_config_applies_resumption_modes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tcp_server_config_accepts_handshake_with_remote_signer() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_TCP_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "tcp_server_config_accepts_handshake_with_remote_signer",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-tcp");
   let (ca_cert_path, ca_key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-ca");
   let (cert_path, key_path) = common::create_ca_signed_server_cert(
@@ -368,13 +376,12 @@ async fn tcp_server_config_accepts_handshake_with_remote_signer() {
     &ca_cert_path,
     &ca_key_path,
   );
-  let token_env = remote_signer_token_env("TCP");
-  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, TOKEN_ENV, false).await;
   let tls_config = remote_tls_config(
     cert_path.clone(),
     signer.socket_path.clone(),
     "edge-default",
-    &token_env,
+    TOKEN_ENV,
     false,
   );
   let listeners = ListenerConfig {
@@ -418,6 +425,14 @@ async fn tcp_server_config_accepts_handshake_with_remote_signer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quic_server_config_accepts_handshake_with_remote_signer() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_QUIC_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "quic_server_config_accepts_handshake_with_remote_signer",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-quic");
   let (ca_cert_path, ca_key_path) = common::create_self_signed_cert(temp_dir.path(), "quic-ca");
   let (cert_path, key_path) = common::create_ca_signed_server_cert(
@@ -426,13 +441,12 @@ async fn quic_server_config_accepts_handshake_with_remote_signer() {
     &ca_cert_path,
     &ca_key_path,
   );
-  let token_env = remote_signer_token_env("QUIC");
-  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, TOKEN_ENV, false).await;
   let tls_config = remote_tls_config(
     cert_path.clone(),
     signer.socket_path.clone(),
     "edge-default",
-    &token_env,
+    TOKEN_ENV,
     false,
   );
 
@@ -443,17 +457,24 @@ async fn quic_server_config_accepts_handshake_with_remote_signer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_signer_rejects_spki_mismatch() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_SPKI_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "remote_signer_rejects_spki_mismatch",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-spki");
   let (cert_path, _key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-spki");
   let (_other_cert, other_key) =
     common::create_self_signed_cert(temp_dir.path(), "remote-spki-other");
-  let token_env = remote_signer_token_env("SPKI");
-  let signer = start_remote_signer(&temp_dir, "edge-default", &other_key, &token_env, false).await;
+  let signer = start_remote_signer(&temp_dir, "edge-default", &other_key, TOKEN_ENV, false).await;
   let tls_config = remote_tls_config(
     cert_path,
     signer.socket_path.clone(),
     "edge-default",
-    &token_env,
+    TOKEN_ENV,
     false,
   );
   let listeners = ListenerConfig {
@@ -478,10 +499,17 @@ async fn remote_signer_rejects_spki_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_signer_protocol_rejects_bad_token_unknown_key_and_invalid_contexts() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_PROTOCOL_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "remote_signer_protocol_rejects_bad_token_unknown_key_and_invalid_contexts",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-protocol");
   let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-proto");
-  let token_env = remote_signer_token_env("PROTO");
-  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, false).await;
+  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, TOKEN_ENV, false).await;
   let good_token = remote_signer_token();
   let bad_token = base64::engine::general_purpose::STANDARD.encode([99u8; 32]);
 
@@ -534,14 +562,21 @@ async fn remote_signer_protocol_rejects_bad_token_unknown_key_and_invalid_contex
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_signer_closes_idle_connections_and_recovers() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_IDLE_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "remote_signer_closes_idle_connections_and_recovers",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-idle-timeout");
   let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-idle");
-  let token_env = remote_signer_token_env("IDLE");
   let signer = start_remote_signer_with_limits(
     &temp_dir,
     "edge-default",
     &key_path,
-    &token_env,
+    TOKEN_ENV,
     false,
     2,
     Duration::from_millis(100),
@@ -587,10 +622,17 @@ async fn remote_signer_closes_idle_connections_and_recovers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_signer_protocol_allows_tls12_when_sidecar_opts_in() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_TLS12_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "remote_signer_protocol_allows_tls12_when_sidecar_opts_in",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-tls12");
   let (_cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-tls12");
-  let token_env = remote_signer_token_env("TLS12");
-  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, &token_env, true).await;
+  let signer = start_remote_signer(&temp_dir, "edge-default", &key_path, TOKEN_ENV, true).await;
   let response = signer
     .request(json!({
         "type": "sign",
@@ -607,15 +649,22 @@ async fn remote_signer_protocol_allows_tls12_when_sidecar_opts_in() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_server_config_builds_with_remote_signer_override() {
+  const TOKEN_ENV: &str = "OXIBELT_KEYSIGNER_TURN_TEST";
+  let token = remote_signer_token();
+  if common::run_test_in_subprocess_with_env(
+    "turn_server_config_builds_with_remote_signer_override",
+    &[(TOKEN_ENV, token.as_str())],
+  ) {
+    return;
+  }
   let temp_dir = common::TempDir::new("remote-signer-turn");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "remote-turn");
-  let token_env = remote_signer_token_env("TURN");
-  let signer = start_remote_signer(&temp_dir, "turn-key", &key_path, &token_env, false).await;
+  let signer = start_remote_signer(&temp_dir, "turn-key", &key_path, TOKEN_ENV, false).await;
   let default_tls = remote_tls_config(
     cert_path.clone(),
     signer.socket_path.clone(),
     "turn-key",
-    &token_env,
+    TOKEN_ENV,
     false,
   );
   let listener_tls = TurnListenerTlsConfig {
@@ -1001,9 +1050,6 @@ async fn start_remote_signer_with_limits(
   max_connections: usize,
   io_timeout: Duration,
 ) -> RemoteSignerTestServer {
-  unsafe {
-    std::env::set_var(token_env, remote_signer_token());
-  }
   let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
   let socket_dir = RemoteSignerSocketDir::new(id);
   let socket_path = socket_dir.socket_path(id);
@@ -1047,11 +1093,6 @@ async fn start_remote_signer_with_limits(
     tokio::time::sleep(Duration::from_millis(10)).await;
   }
   panic!("remote signer socket was not created");
-}
-
-fn remote_signer_token_env(prefix: &str) -> String {
-  let id = NEXT_REMOTE_SIGNER_ID.fetch_add(1, Ordering::Relaxed);
-  format!("OXIBELT_KEYSIGNER_{prefix}_{id}")
 }
 
 fn remote_signer_token() -> String {

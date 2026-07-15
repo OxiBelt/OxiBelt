@@ -206,6 +206,7 @@ jobs:
           - http3_webtransport
           - websocket_frame
           - webrtc_turn
+          - syscall_boundaries
 
     steps:
       - name: Checkout
@@ -232,6 +233,50 @@ jobs:
           path: fuzz/artifacts/${{ matrix.fuzz_target }}
           if-no-files-found: ignore
           retention-days: 0
+
+  unsafe-validation:
+    name: Unsafe validation (${{ matrix.check }})
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - miri
+          - address
+          - thread
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install pinned nightly Rust
+        run: |
+          rustup toolchain install nightly-2026-07-15 --profile minimal --component rust-src
+          if [[ "${{ matrix.check }}" == "miri" ]]; then
+            rustup component add miri --toolchain nightly-2026-07-15
+          fi
+
+      - name: Run Miri contracts
+        if: matrix.check == 'miri'
+        run: cargo +nightly-2026-07-15 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked
+
+      - name: Run AddressSanitizer syscall tests
+        if: matrix.check == 'address'
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          RUSTDOCFLAGS: -Zsanitizer=address
+          RUSTFLAGS: -Zsanitizer=address
+        run: cargo +nightly-2026-07-15 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked -- --test-threads=1
+
+      - name: Run ThreadSanitizer concurrency test
+        if: matrix.check == 'thread'
+        env:
+          RUSTDOCFLAGS: -Zsanitizer=thread
+          RUSTFLAGS: -Zsanitizer=thread
+          TSAN_OPTIONS: halt_on_error=1
+        run: cargo +nightly-2026-07-15 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked -- --test-threads=1
 
   test-riscv64-qemu:
     name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
@@ -306,6 +351,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     permissions:
       contents: read
     outputs:
@@ -387,6 +433,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     permissions:
       contents: read
 
@@ -420,6 +467,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     permissions:
       contents: read
     strategy:
@@ -468,6 +516,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -533,6 +582,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -569,6 +619,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -607,6 +658,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     strategy:
       fail-fast: false
       matrix:
@@ -656,6 +708,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
 
     steps:
       - name: Checkout
@@ -875,6 +928,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     permissions:
       contents: read
     timeout-minutes: 45
@@ -1023,6 +1077,7 @@ jobs:
       - rust-advisory-checks
       - test-riscv64-qemu
       - fuzz-smoke
+      - unsafe-validation
     permissions:
       contents: read
     timeout-minutes: 35

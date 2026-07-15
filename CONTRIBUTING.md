@@ -363,6 +363,13 @@ For security-related changes:
 8. Run the relevant tests or clearly state why they could not be run.
 9. Summarize remaining risks and compatibility concerns.
 
+First-party Rust denies unsafe code by default. Follow
+[`docs/UnsafeCode.md`](docs/UnsafeCode.md) for the exact allowlist, required
+safety documentation, focused validation, and review process. A change to an
+allowlisted module or the allowlist requires approval from a named reviewer
+other than the author, with the safety model and Miri, sanitizer, syscall-test,
+and fuzz evidence recorded in the pull request.
+
 Security-sensitive decisions include WAF and OxiRule evaluation, route matching
 and route authorization, Person proof validation, bot, agent, and person
 classification, rate limiting, TLS policy decisions, upstream selection,
@@ -409,3 +416,5 @@ Before opening or marking a pull request ready:
   temporary volumes.
 - Security-sensitive changes describe trust boundaries, attacker-controlled
   inputs, failure behavior, remaining risks, and compatibility concerns.
+- Unsafe-code allowlist or allowlisted-module changes name a non-author
+  security reviewer and include the evidence required by `docs/UnsafeCode.md`.

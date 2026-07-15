@@ -1,21 +1,20 @@
 //! Linux UDP batch syscalls for stream listeners.
 
-#![allow(unsafe_code)]
-
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::io::{IoSlice, IoSliceMut};
+use std::net::SocketAddr;
 
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
+#[cfg(target_os = "linux")]
+use nix::sys::socket::{
+  ControlMessage, MsgFlags, MultiHeaders, SockaddrStorage, recvmmsg, sendmmsg,
+};
+
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
-
-#[cfg(all(target_os = "linux", target_env = "musl"))]
-const UDP_BATCH_MSG_DONTWAIT: libc::c_uint = libc::MSG_DONTWAIT as libc::c_uint;
-
-#[cfg(all(target_os = "linux", not(target_env = "musl")))]
-const UDP_BATCH_MSG_DONTWAIT: libc::c_int = libc::MSG_DONTWAIT;
 
 #[derive(Debug)]
 pub(super) struct UdpBatchDatagram {
@@ -145,37 +144,26 @@ fn recvmmsg_from_once(
 ) -> io::Result<Vec<UdpBatchDatagram>> {
   let batch_size = batch_size.max(1);
   let mut buffers = vec![vec![0_u8; max_datagram_bytes]; batch_size];
-  let mut addrs = vec![zeroed_sockaddr_storage(); batch_size];
-  let mut iovecs = Vec::<libc::iovec>::with_capacity(batch_size);
-  let mut messages = Vec::<libc::mmsghdr>::with_capacity(batch_size);
-  for index in 0..batch_size {
-    iovecs.push(libc::iovec {
-      iov_base: buffers[index].as_mut_ptr().cast(),
-      iov_len: buffers[index].len(),
-    });
-    let mut message = zeroed_mmsghdr();
-    message.msg_hdr.msg_name = (&mut addrs[index] as *mut libc::sockaddr_storage).cast();
-    message.msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    message.msg_hdr.msg_iov = &mut iovecs[index];
-    message.msg_hdr.msg_iovlen = 1;
-    messages.push(message);
-  }
-  let received = unsafe {
-    libc::recvmmsg(
-      fd,
-      messages.as_mut_ptr(),
-      batch_size as libc::c_uint,
-      UDP_BATCH_MSG_DONTWAIT,
-      std::ptr::null_mut(),
-    )
-  };
-  if received < 0 {
-    return Err(io::Error::last_os_error());
-  }
-  let mut datagrams = Vec::with_capacity(received as usize);
-  for index in 0..received as usize {
-    let len = messages[index].msg_len as usize;
-    let peer = sockaddr_to_addr(&addrs[index], messages[index].msg_hdr.msg_namelen)?;
+  let mut iovecs = buffers
+    .iter_mut()
+    .map(|buffer| [IoSliceMut::new(buffer)])
+    .collect::<Vec<_>>();
+  let mut headers = MultiHeaders::<SockaddrStorage>::preallocate(batch_size, None);
+  let received = recvmmsg(
+    fd,
+    &mut headers,
+    iovecs.iter_mut(),
+    MsgFlags::MSG_DONTWAIT,
+    None,
+  )
+  .map_err(io::Error::from)?
+  .map(|message| (message.bytes, message.address))
+  .collect::<Vec<_>>();
+  let mut datagrams = Vec::with_capacity(received.len());
+  for (index, (len, peer)) in received.into_iter().enumerate() {
+    let peer = peer
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing UDP peer address"))
+      .and_then(sockaddr_to_addr)?;
     datagrams.push(UdpBatchDatagram {
       peer,
       bytes: buffers[index][..len.min(max_datagram_bytes)].to_vec(),
@@ -192,37 +180,26 @@ fn recvmmsg_connected_once(
 ) -> io::Result<Vec<Vec<u8>>> {
   let batch_size = batch_size.max(1);
   let mut buffers = vec![vec![0_u8; max_datagram_bytes]; batch_size];
-  let mut iovecs = Vec::<libc::iovec>::with_capacity(batch_size);
-  let mut messages = Vec::<libc::mmsghdr>::with_capacity(batch_size);
-  for buffer in &mut buffers {
-    iovecs.push(libc::iovec {
-      iov_base: buffer.as_mut_ptr().cast(),
-      iov_len: buffer.len(),
-    });
-  }
-  for iovec in &mut iovecs {
-    let mut message = zeroed_mmsghdr();
-    message.msg_hdr.msg_iov = iovec;
-    message.msg_hdr.msg_iovlen = 1;
-    messages.push(message);
-  }
-  let received = unsafe {
-    libc::recvmmsg(
-      fd,
-      messages.as_mut_ptr(),
-      batch_size as libc::c_uint,
-      UDP_BATCH_MSG_DONTWAIT,
-      std::ptr::null_mut(),
-    )
-  };
-  if received < 0 {
-    return Err(io::Error::last_os_error());
-  }
+  let mut iovecs = buffers
+    .iter_mut()
+    .map(|buffer| [IoSliceMut::new(buffer)])
+    .collect::<Vec<_>>();
+  let mut headers = MultiHeaders::<SockaddrStorage>::preallocate(batch_size, None);
+  let received = recvmmsg(
+    fd,
+    &mut headers,
+    iovecs.iter_mut(),
+    MsgFlags::MSG_DONTWAIT,
+    None,
+  )
+  .map_err(io::Error::from)?
+  .map(|message| message.bytes)
+  .collect::<Vec<_>>();
   Ok(
-    (0..received as usize)
-      .map(|index| {
-        buffers[index][..(messages[index].msg_len as usize).min(max_datagram_bytes)].to_vec()
-      })
+    received
+      .into_iter()
+      .enumerate()
+      .map(|(index, len)| buffers[index][..len.min(max_datagram_bytes)].to_vec())
       .collect(),
   )
 }
@@ -233,117 +210,122 @@ fn sendmmsg_to_once(
   peer: SocketAddr,
   datagrams: &[Vec<u8>],
 ) -> io::Result<usize> {
-  let (mut storage, storage_len) = sockaddr_from_addr(peer);
-  let mut iovecs = Vec::<libc::iovec>::with_capacity(datagrams.len());
-  let mut messages = Vec::<libc::mmsghdr>::with_capacity(datagrams.len());
-  for datagram in datagrams {
-    iovecs.push(libc::iovec {
-      iov_base: datagram.as_ptr().cast_mut().cast(),
-      iov_len: datagram.len(),
-    });
-  }
-  for iovec in &mut iovecs {
-    let mut message = zeroed_mmsghdr();
-    message.msg_hdr.msg_name = (&mut storage as *mut libc::sockaddr_storage).cast();
-    message.msg_hdr.msg_namelen = storage_len;
-    message.msg_hdr.msg_iov = iovec;
-    message.msg_hdr.msg_iovlen = 1;
-    messages.push(message);
-  }
-  let sent = unsafe {
-    libc::sendmmsg(
-      fd,
-      messages.as_mut_ptr(),
-      messages.len() as libc::c_uint,
-      UDP_BATCH_MSG_DONTWAIT,
-    )
-  };
-  if sent < 0 {
-    Err(io::Error::last_os_error())
-  } else {
-    Ok(sent as usize)
-  }
+  let peer = SockaddrStorage::from(peer);
+  let iovecs = datagrams
+    .iter()
+    .map(|datagram| [IoSlice::new(datagram)])
+    .collect::<Vec<_>>();
+  let addresses = vec![Some(peer); datagrams.len()];
+  let control_messages: [ControlMessage<'_>; 0] = [];
+  let mut headers = MultiHeaders::<SockaddrStorage>::preallocate(datagrams.len(), None);
+  sendmmsg(
+    fd,
+    &mut headers,
+    iovecs.iter(),
+    &addresses,
+    control_messages,
+    MsgFlags::MSG_DONTWAIT,
+  )
+  .map(|results| results.count())
+  .map_err(io::Error::from)
 }
 
 #[cfg(target_os = "linux")]
-fn sockaddr_to_addr(
-  storage: &libc::sockaddr_storage,
-  len: libc::socklen_t,
-) -> io::Result<SocketAddr> {
-  match storage.ss_family as libc::c_int {
-    libc::AF_INET if len as usize >= std::mem::size_of::<libc::sockaddr_in>() => {
-      let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in) };
-      let ip = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
-      let port = u16::from_be(addr.sin_port);
-      Ok(SocketAddr::from((ip, port)))
-    }
-    libc::AF_INET6 if len as usize >= std::mem::size_of::<libc::sockaddr_in6>() => {
-      let addr = unsafe { *(storage as *const _ as *const libc::sockaddr_in6) };
-      let ip = Ipv6Addr::from(addr.sin6_addr.s6_addr);
-      let port = u16::from_be(addr.sin6_port);
-      Ok(SocketAddr::from((ip, port)))
-    }
-    _ => Err(io::Error::new(
-      io::ErrorKind::InvalidData,
-      "unsupported UDP peer address family",
-    )),
+fn sockaddr_to_addr(storage: SockaddrStorage) -> io::Result<SocketAddr> {
+  if let Some(address) = storage.as_sockaddr_in() {
+    return Ok(SocketAddr::from(*address));
   }
-}
-
-#[cfg(target_os = "linux")]
-fn sockaddr_from_addr(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
-  let mut storage = zeroed_sockaddr_storage();
-  match addr {
-    SocketAddr::V4(addr) => {
-      let sockaddr = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: addr.port().to_be(),
-        sin_addr: libc::in_addr {
-          s_addr: u32::from(*addr.ip()).to_be(),
-        },
-        sin_zero: [0; 8],
-      };
-      unsafe {
-        std::ptr::write(
-          (&mut storage as *mut libc::sockaddr_storage).cast(),
-          sockaddr,
-        );
-      }
-      (
-        storage,
-        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-      )
-    }
-    SocketAddr::V6(addr) => {
-      let sockaddr = libc::sockaddr_in6 {
-        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-        sin6_port: addr.port().to_be(),
-        sin6_flowinfo: addr.flowinfo(),
-        sin6_addr: libc::in6_addr {
-          s6_addr: addr.ip().octets(),
-        },
-        sin6_scope_id: addr.scope_id(),
-      };
-      unsafe {
-        std::ptr::write(
-          (&mut storage as *mut libc::sockaddr_storage).cast(),
-          sockaddr,
-        );
-      }
-      (
-        storage,
-        std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-      )
-    }
+  if let Some(address) = storage.as_sockaddr_in6() {
+    return Ok(SocketAddr::from(*address));
   }
+  Err(io::Error::new(
+    io::ErrorKind::InvalidData,
+    "unsupported UDP peer address family",
+  ))
 }
 
-#[cfg(target_os = "linux")]
-fn zeroed_sockaddr_storage() -> libc::sockaddr_storage {
-  unsafe { std::mem::zeroed() }
+#[cfg(all(target_os = "linux", feature = "fuzzing"))]
+pub(crate) fn fuzz_socket_address_boundary(address: SocketAddr, batch_size: usize) {
+  let storage = SockaddrStorage::from(address);
+  let _ = sockaddr_to_addr(storage);
+  let _ = MultiHeaders::<SockaddrStorage>::preallocate(batch_size.min(32), None);
 }
 
-#[cfg(target_os = "linux")]
-fn zeroed_mmsghdr() -> libc::mmsghdr {
-  unsafe { std::mem::zeroed() }
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use super::*;
+
+  async fn bind(address: &str) -> UdpSocket {
+    UdpSocket::bind(address)
+      .await
+      .unwrap_or_else(|error| panic!("bind {address}: {error}"))
+  }
+
+  #[tokio::test]
+  async fn unconnected_ipv4_batch_preserves_payloads_and_peer() {
+    let receiver = bind("127.0.0.1:0").await;
+    let sender = bind("127.0.0.1:0").await;
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    let sender_addr = sender.local_addr().expect("sender address");
+    let payloads = vec![b"first".to_vec(), b"second".to_vec()];
+
+    let sent = sendmmsg_to(&sender, receiver_addr, &payloads)
+      .await
+      .expect("send batch");
+    assert_eq!(sent, payloads.len());
+
+    let received = recv_from_batch(&receiver, payloads.len(), 64)
+      .await
+      .expect("receive batch");
+    assert_eq!(received.len(), payloads.len());
+    assert!(received.iter().all(|datagram| datagram.peer == sender_addr));
+    assert_eq!(
+      received
+        .into_iter()
+        .map(|datagram| datagram.bytes)
+        .collect::<Vec<_>>(),
+      payloads
+    );
+  }
+
+  #[tokio::test]
+  async fn connected_ipv4_batch_truncates_to_configured_limit() {
+    let receiver = bind("127.0.0.1:0").await;
+    let sender = bind("127.0.0.1:0").await;
+    receiver
+      .connect(sender.local_addr().expect("sender address"))
+      .await
+      .expect("connect receiver");
+    sender
+      .connect(receiver.local_addr().expect("receiver address"))
+      .await
+      .expect("connect sender");
+    sender.send(b"abcdefgh").await.expect("send datagram");
+
+    let received = recv_connected_batch(&receiver, 1, 4)
+      .await
+      .expect("receive connected batch");
+    assert_eq!(received, vec![b"abcd".to_vec()]);
+  }
+
+  #[tokio::test]
+  async fn unconnected_ipv6_batch_preserves_address_family() {
+    let receiver = bind("[::1]:0").await;
+    let sender = bind("[::1]:0").await;
+    let receiver_addr = receiver.local_addr().expect("receiver address");
+    let sender_addr = sender.local_addr().expect("sender address");
+
+    assert_eq!(
+      sendmmsg_to(&sender, receiver_addr, &[b"ipv6".to_vec()])
+        .await
+        .expect("send IPv6 batch"),
+      1
+    );
+    let received = recv_from_batch(&receiver, 1, 64)
+      .await
+      .expect("receive IPv6 batch");
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].peer, sender_addr);
+    assert_eq!(received[0].bytes, b"ipv6");
+  }
 }

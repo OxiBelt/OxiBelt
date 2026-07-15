@@ -11,6 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 oxibelt = { path = "../source", features = ["fuzzing"] }
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "turn_protocol"
 path = "fuzz_targets/turn_protocol.rs"
@@ -49,6 +52,13 @@ bench = false
 [[bin]]
 name = "webrtc_turn"
 path = "fuzz_targets/webrtc_turn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "syscall_boundaries"
+path = "fuzz_targets/syscall_boundaries.rs"
 test = false
 doc = false
 bench = false

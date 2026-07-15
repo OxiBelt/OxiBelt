@@ -2,8 +2,6 @@
 
 use std::future::Future;
 use std::io::{self, IoSlice};
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use ::http::{HeaderMap, StatusCode};
@@ -338,7 +336,7 @@ async fn write_all_tcp_msg_more(
   context: &'static str,
 ) -> anyhow::Result<()> {
   while !bytes.is_empty() {
-    match send_with_flags(stream, bytes, libc::MSG_MORE) {
+    match send_with_more(stream, bytes) {
       Ok(0) => bail!("{context}"),
       Ok(written) => bytes = &bytes[written..],
       Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -361,41 +359,13 @@ async fn write_all_tcp_msg_more(
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn send_with_flags(stream: &TcpStream, bytes: &[u8], flags: libc::c_int) -> io::Result<usize> {
-  let result = unsafe {
-    libc::send(
-      stream.as_raw_fd(),
-      bytes.as_ptr().cast(),
-      bytes.len(),
-      flags,
-    )
-  };
-  if result < 0 {
-    Err(io::Error::last_os_error())
-  } else {
-    Ok(result as usize)
-  }
+fn send_with_more(stream: &TcpStream, bytes: &[u8]) -> io::Result<usize> {
+  rustix::net::send(stream, bytes, rustix::net::SendFlags::MORE).map_err(io::Error::from)
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
 fn set_tcp_cork(stream: &TcpStream, enabled: bool) -> io::Result<()> {
-  let value: libc::c_int = i32::from(enabled);
-  let result = unsafe {
-    libc::setsockopt(
-      stream.as_raw_fd(),
-      libc::IPPROTO_TCP,
-      libc::TCP_CORK,
-      (&value as *const libc::c_int).cast(),
-      std::mem::size_of_val(&value) as libc::socklen_t,
-    )
-  };
-  if result == 0 {
-    Ok(())
-  } else {
-    Err(io::Error::last_os_error())
-  }
+  rustix::net::sockopt::set_tcp_cork(stream, enabled).map_err(io::Error::from)
 }
 
 #[cfg(not(target_os = "linux"))]

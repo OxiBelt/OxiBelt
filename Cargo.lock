@@ -2707,6 +2707,7 @@ dependencies = [
  "online-dsl-forge",
  "openssl-sys",
  "pretty_assertions",
+ "proc-macro2",
  "quic-parser",
  "regex",
  "rustix",
@@ -2722,6 +2723,7 @@ dependencies = [
  "socket2",
  "sqlx",
  "subtle",
+ "syn",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -2747,6 +2749,14 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "oxibelt",
+]
+
+[[package]]
+name = "oxibelt-unsafe-harness"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "nix",
 ]
 
 [[package]]

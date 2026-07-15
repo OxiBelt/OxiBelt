@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 
 use h3::ext::Protocol;
@@ -44,6 +44,28 @@ pub fn exercise_tls_client_hello(data: &[u8]) {
     ],
   );
   let _ = crate::sni_forward::client_hello::raw_client_hello_sni(data);
+}
+
+pub fn exercise_syscall_boundaries(data: &[u8]) {
+  let data = bounded(data);
+  let mut input = FuzzInput::new(data);
+  let port = input.u16();
+  let address = if input.bool() {
+    SocketAddr::from((
+      Ipv4Addr::new(input.byte(), input.byte(), input.byte(), input.byte()),
+      port,
+    ))
+  } else {
+    let mut octets = [0_u8; 16];
+    for octet in &mut octets {
+      *octet = input.byte();
+    }
+    SocketAddr::from((Ipv6Addr::from(octets), port))
+  };
+  crate::stream::fuzz_socket_address_boundary(address, input.usize(33).saturating_add(1));
+  crate::hardening::fuzz_syscall_boundary(input.byte());
+  crate::tcp_hop::fuzz_syscall_boundary(input.bool());
+  let _ = i64::try_from(input.u64());
 }
 
 pub fn exercise_http_semantics(data: &[u8]) {
@@ -302,6 +324,19 @@ impl<'a> FuzzInput<'a> {
 
   fn u16(&mut self) -> u16 {
     u16::from_be_bytes([self.byte(), self.byte()])
+  }
+
+  fn u64(&mut self) -> u64 {
+    u64::from_be_bytes([
+      self.byte(),
+      self.byte(),
+      self.byte(),
+      self.byte(),
+      self.byte(),
+      self.byte(),
+      self.byte(),
+      self.byte(),
+    ])
   }
 
   fn usize(&mut self, modulo: usize) -> usize {
