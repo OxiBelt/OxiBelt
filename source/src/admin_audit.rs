@@ -347,7 +347,9 @@ impl AdminAuditRuntime {
         return;
       }
     };
-    if let Some(spool) = &self.spool {
+    if self.mode == AdminAuditMode::BestEffort
+      && let Some(spool) = &self.spool
+    {
       match spool.append(event.clone()).await {
         Ok(event) => {
           emit_tracing(&event);
