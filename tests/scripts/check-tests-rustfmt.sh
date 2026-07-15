@@ -12,7 +12,7 @@ unknown_files=()
 
 for file in "${tracked_rust_files[@]}"; do
   case "${file}" in
-    tests/rust/*.rs)
+    tests/rust/*.rs|tests/unsafe_harness/*.rs)
       rust_2024_files+=("${file}")
       ;;
     tests/docker/*.rs)
