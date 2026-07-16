@@ -644,6 +644,9 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
     "CC_aarch64_unknown_linux_musl=musl-gcc",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
+    "CC_riscv64gc_unknown_linux_musl=musl-gcc",
+    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
+    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=\"-Ctarget-feature=+crt-static\"",
     "cargo build --locked --release",
     "--target \"${OXIBELT_BUILD_RUST_TARGET}\"",
   ] {
@@ -664,6 +667,11 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
       "Docker artifact builder should record the explicit musl build input: {expected}"
     );
   }
+
+  assert!(
+    !dockerfile.contains("libgcc_s") && !dockerfile.contains("LIBRARY_PATH"),
+    "RISC-V musl builds should not reintroduce a shared libgcc workaround"
+  );
 
   assert!(
     cli_manifest.contains(
@@ -742,12 +750,22 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     "COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl",
     "COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner",
     "COPY --from=netport-builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher",
+    "controller binary must be statically linked",
+    "keysigner binary must be statically linked",
+    "netport switcher binary must be statically linked",
+    "tools binary must be statically linked",
+    "data-plane binary must be statically linked",
   ] {
     assert!(
       dockerfile.contains(expected),
       "source/ops/Dockerfile.alpine should preserve role contract {expected}"
     );
   }
+  assert_eq!(
+    dockerfile.matches("Requesting program interpreter").count(),
+    5,
+    "every release binary should retain its static-link guard"
+  );
 
   for (role, expected_binaries) in [
     (
@@ -2748,6 +2766,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "https://cyclonedx.org/bom",
     "release_sbom.ts",
     "--ignoreConfig",
+    r#"cp -RL -- node_modules/semver "${metadata_root}/node_modules/semver""#,
+    r#"test -f "${metadata_root}/node_modules/semver/package.json""#,
+    "release-sbom-import-smoke",
+    "await import(target)",
     "attested releases must run from ${release_ref}@${tag_commit}",
     "image-plan.json",
     "install -D -m 0644 Cargo.toml \"${workspace_root}/Cargo.toml\"",
@@ -2759,6 +2781,19 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "release validate job should include {expected}"
     );
   }
+  let semver_stage = validate_job_text
+    .find(r#"cp -RL -- node_modules/semver "${metadata_root}/node_modules/semver""#)
+    .expect("release metadata should stage semver");
+  let import_smoke = validate_job_text
+    .find("release-sbom-import-smoke")
+    .expect("release metadata should smoke-test the isolated module graph");
+  let metadata_upload = validate_job_text
+    .find("actions/upload-artifact@")
+    .expect("release metadata should be uploaded");
+  assert!(
+    semver_stage < import_smoke && import_smoke < metadata_upload,
+    "release metadata dependencies and isolated import should be validated before upload"
+  );
 
   for expected in [
     "name: Release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})",

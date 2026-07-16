@@ -89,21 +89,14 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
         fi; \
         export CC_riscv64gc_unknown_linux_musl=musl-gcc; \
         export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
-        libgcc_s_path="$(find /lib /usr/lib -name libgcc_s.so.1 -print -quit)"; \
-        if [ -z "${libgcc_s_path}" ]; then \
-          echo "libgcc_s.so.1 is required for riscv64 musl unwind support but was not found." >&2; \
-          exit 1; \
-        fi; \
-        mkdir -p /tmp/oxibelt-libgcc && \
-        ln -sf "${libgcc_s_path}" /tmp/oxibelt-libgcc/libgcc_s.so && \
-        export LIBRARY_PATH="/tmp/oxibelt-libgcc:$(dirname "${libgcc_s_path}")${LIBRARY_PATH:+:${LIBRARY_PATH}}" \
+        export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-feature=+crt-static" \
         ;; \
       *) echo "unsupported OXIBELT_RUST_TARGET=${rust_target}" >&2; exit 1 ;; \
     esac && \
     rustup target add "${rust_target}" && \
     printf '%s' "${rust_target}" >/tmp/oxibelt-rust-target && \
     printf 'export OXIBELT_BUILD_RUST_TARGET=%s\n' "${rust_target}" >/tmp/oxibelt-build-env && \
-    env | grep -E '^(CC_|CARGO_TARGET_|LIBRARY_PATH=)' | sed 's/^/export /' >>/tmp/oxibelt-build-env
+    env | grep -E '^(CC_|CARGO_TARGET_)' | sed 's/^/export /' >>/tmp/oxibelt-build-env
 
 FROM builder AS controller-builder
 

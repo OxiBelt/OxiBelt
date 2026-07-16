@@ -274,6 +274,12 @@ jobs:
             --skipLibCheck \
             --outDir "${metadata_root}/release-tools"
           test -f "${metadata_root}/release-tools/release_sbom.js"
+          mkdir -p "${metadata_root}/node_modules"
+          cp -RL -- node_modules/semver "${metadata_root}/node_modules/semver"
+          test -f "${metadata_root}/node_modules/semver/package.json"
+          node --input-type=module --eval \
+            'const target = process.argv[1]; process.argv[1] = "release-sbom-import-smoke"; await import(target)' \
+            "${metadata_root}/release-tools/release_sbom.js"
           install -D -m 0644 Cargo.toml "${workspace_root}/Cargo.toml"
           install -D -m 0644 Cargo.lock "${workspace_root}/Cargo.lock"
           while read -r manifest_path; do
