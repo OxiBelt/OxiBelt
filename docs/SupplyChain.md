@@ -102,10 +102,15 @@ gh attestation verify \
   --signer-workflow "${workflow}" \
   --source-digest "${source_commit}" \
   --source-ref "${release_ref}" \
-  --cert-identity "${identity}" \
   --cert-oidc-issuer https://token.actions.githubusercontent.com \
   --deny-self-hosted-runners
 ```
+
+GitHub CLI treats `--signer-workflow` and `--cert-identity` as mutually
+exclusive identity selectors. The signer workflow, source ref, source commit,
+and OIDC issuer together retain the exact release identity constraints, while
+the separate Cosign command above continues to verify the full certificate
+identity.
 
 The release gate additionally parses the verified provenance and requires the
 GitHub Actions workflow build type, `OxiBelt/OxiBelt` source URL, exact

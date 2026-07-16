@@ -116,6 +116,11 @@ fn release_image_arch_workflow_text() -> String {
     .expect("release image architecture workflow should be readable")
 }
 
+fn supply_chain_doc_text() -> String {
+  fs::read_to_string(repo_root().join("docs/SupplyChain.md"))
+    .expect("supply-chain documentation should be readable")
+}
+
 fn release_sbom_source_text() -> String {
   fs::read_to_string(repo_root().join("devops/sources/release_sbom.ts"))
     .expect("release SBOM source should be readable")
@@ -2468,6 +2473,7 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
 fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions() {
   let workflow = release_workflow_text();
   let arch_workflow = release_image_arch_workflow_text();
+  let supply_chain_doc = supply_chain_doc_text();
   let release_sbom_source = release_sbom_source_text();
   let parsed_workflow: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
@@ -3066,7 +3072,11 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "canonical_tag=\"$(jq -r '.canonicalGhcrTag' <<<\"${artifact_json}\")\"",
     "refusing to replace canonical tag",
     "docker push \"${canonical_tag}\"",
-    "docker buildx imagetools inspect \"${canonical_tag}\"",
+    "retry_command()",
+    "local delay=5",
+    "delay=$((delay * 2))",
+    "retry_command 3 docker buildx imagetools inspect \"${canonical_tag}\" --format '{{json .Manifest}}'",
+    "retry_command 3 docker buildx imagetools inspect \"${OXIBELT_GHCR_IMAGE}@${digest}\" --format '{{json .Image}}'",
     "echo \"digest=${digest}\" >> \"${GITHUB_OUTPUT}\"",
   ] {
     assert!(
@@ -3074,6 +3084,11 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "reusable publish job should include {expected}"
     );
   }
+  assert!(
+    !publish_job_text
+      .contains("docker buildx imagetools inspect \"${canonical_tag}\" --format '{{json .Image}}'"),
+    "reusable publish job should inspect image configuration through the validated immutable digest"
+  );
   for removed in [
     "Checkout release ref",
     "actions/checkout",
@@ -3266,6 +3281,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "--certificate-github-workflow-ref \"${release_ref}\"",
     "--certificate-github-workflow-sha \"${revision}\"",
     "gh attestation verify",
+    "--signer-workflow \"${workflow}\"",
     "--source-digest \"${revision}\"",
     "--source-ref \"${release_ref}\"",
     ".predicate.buildDefinition.internalParameters.github.runner_environment == \"github-hosted\"",
@@ -3288,6 +3304,22 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       && !index_verify_job_text.contains("attestations: write"),
     "index verification should not receive write permissions"
   );
+  for (surface, text) in [
+    ("platform verification workflow", verify_job_text.as_str()),
+    (
+      "index verification workflow",
+      index_verify_job_text.as_str(),
+    ),
+    (
+      "consumer verification documentation",
+      supply_chain_doc.as_str(),
+    ),
+  ] {
+    assert!(
+      !text.contains("--cert-identity "),
+      "{surface} should use --signer-workflow without the mutually exclusive --cert-identity selector"
+    );
+  }
   for expected in [
     "timeout-minutes: 25",
     "contents: read",

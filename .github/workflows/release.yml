@@ -1072,7 +1072,6 @@ jobs:
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${provenance_type}" \
-            --cert-identity "${certificate_identity}" \
             --cert-oidc-issuer "${issuer}" \
             --bundle-from-oci \
             --deny-self-hosted-runners \
@@ -1107,7 +1106,6 @@ jobs:
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${predicate_type}" \
-            --cert-identity "${certificate_identity}" \
             --cert-oidc-issuer "${issuer}" \
             --bundle-from-oci \
             --deny-self-hosted-runners \

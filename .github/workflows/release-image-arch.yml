@@ -591,6 +591,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          retry_command() {
+            local attempts="$1"
+            shift
+            local delay=5
+            local attempt status
+
+            for attempt in $(seq 1 "${attempts}"); do
+              "$@" && return 0
+              status=$?
+              if [[ "${attempt}" == "${attempts}" ]]; then
+                return "${status}"
+              fi
+              printf 'Command failed with status %s; retrying in %ss (%s/%s): %s\n' \
+                "${status}" "${delay}" "${attempt}" "${attempts}" "$*" >&2
+              sleep "${delay}"
+              delay=$((delay * 2))
+            done
+          }
+
           artifact_json="$(jq -c --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch)' "${IMAGE_PLAN}")"
           if [[ -z "${artifact_json}" ]]; then
             echo "release plan is missing artifact ${OXIBELT_ARTIFACT_ARCH}" >&2
@@ -634,10 +653,8 @@ jobs:
             exit 1
           fi
 
-          descriptor="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}')"
+          descriptor="$(retry_command 3 docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}')"
           digest="$(jq -r '.digest' <<<"${descriptor}")"
-          image_architecture="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Image}}' | jq -r '.architecture')"
-          expected_architecture="$(jq -r '.dockerArchitecture' <<<"${artifact_json}")"
           if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "registry returned an invalid digest for ${canonical_tag}: ${digest}" >&2
             exit 1
@@ -646,6 +663,9 @@ jobs:
             echo "registry digest ${digest} does not match Buildx digest ${expected_digest}" >&2
             exit 1
           fi
+
+          image_architecture="$(retry_command 3 docker buildx imagetools inspect "${OXIBELT_GHCR_IMAGE}@${digest}" --format '{{json .Image}}' | jq -r '.architecture')"
+          expected_architecture="$(jq -r '.dockerArchitecture' <<<"${artifact_json}")"
           if [[ "${image_architecture}" != "${expected_architecture}" ]]; then
             echo "registry architecture ${image_architecture} does not match ${expected_architecture}" >&2
             exit 1
@@ -820,7 +840,6 @@ jobs:
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${provenance_type}" \
-            --cert-identity "${certificate_identity}" \
             --cert-oidc-issuer "${issuer}" \
             --bundle-from-oci \
             --deny-self-hosted-runners \
@@ -855,7 +874,6 @@ jobs:
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${predicate_type}" \
-            --cert-identity "${certificate_identity}" \
             --cert-oidc-issuer "${issuer}" \
             --bundle-from-oci \
             --deny-self-hosted-runners \
