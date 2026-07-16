@@ -637,7 +637,7 @@ fn inspect_route_action_template(
   while index < bytes.len() {
     match bytes[index] {
       b'{' => {
-        let Some(close_offset) = bytes[index + 1..].iter().position(|byte| *byte == b'}') else {
+        let Some(close_offset) = memchr::memchr(b'}', &bytes[index + 1..]) else {
           bail!("route {route_name} {field_name} contains an unterminated template token");
         };
         let close = index + 1 + close_offset;

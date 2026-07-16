@@ -360,16 +360,8 @@ fn padding(len: usize) -> usize {
   (4 - (len % 4)) % 4
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
-  let mut crc = 0xffff_ffffu32;
-  for byte in bytes {
-    crc ^= *byte as u32;
-    for _ in 0..8 {
-      let mask = 0u32.wrapping_sub(crc & 1);
-      crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-    }
-  }
-  !crc
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
+  crc32fast::hash(bytes)
 }
 
 pub async fn read_turn_frame<R>(reader: &mut R) -> anyhow::Result<Vec<u8>>
@@ -408,6 +400,31 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn scalar_crc32_reference(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+      crc ^= u32::from(*byte);
+      for _ in 0..8 {
+        let mask = 0u32.wrapping_sub(crc & 1);
+        crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+      }
+    }
+    !crc
+  }
+
+  #[test]
+  fn crc32_matches_independent_ieee_vector_and_scalar_reference() {
+    assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+    for bytes in [
+      &b""[..],
+      &b"a"[..],
+      &b"unaligned payload"[..],
+      &b"0123456789abcdef0123456789abcdef tail"[..],
+    ] {
+      assert_eq!(crc32(bytes), scalar_crc32_reference(bytes));
+    }
+  }
 
   #[test]
   fn stun_success_round_trips_with_fingerprint() {

@@ -10,6 +10,22 @@ Build or provide an OxiBelt image, then run:
 tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy,openresty
 ```
 
+Safe SIMD-backed byte-kernel changes also have an ignored Rust 1.97
+microbenchmark. It compares the production `memmem` and `crc32fast` paths with
+their scalar predecessors and runs twice by default so one noisy sample is not
+treated as evidence. It also retains an uncommitted `str::contains` candidate
+comparison so broad search rewrites can be rejected when short inputs lose:
+
+```sh
+tests/scripts/run-simd-microbench.sh x86-64-v2
+tests/scripts/run-simd-microbench.sh x86-64-v3
+```
+
+The script uses release builds and writes Criterion output below `/tmp` by
+default. Set `OXIBELT_SIMD_BENCH_TARGET_DIR` to retain it elsewhere. A
+SIMD-motivated rewrite should be retained only when its focused result improves
+repeatably while the Docker performance regression gates remain green.
+
 Shared-state delay isolation is a functional state-data integration check, not a comparative benchmark. Run its Redis/Valkey and PostgreSQL cases with the normal rootless `docker` path:
 
 ```sh

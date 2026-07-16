@@ -22,6 +22,7 @@ use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, BoxError, ProxyBody, ProxyBodyFrame};
 
+use super::delimiters::{AppendOnlyDelimiterSearch, crlf, response_header_end, trailer_end};
 use super::request::PreparedDirectH1Request;
 use super::{
   DirectH1Pool, DirectH1Response, DirectH1SendMetricOptions, DirectH1TransportError, timing,
@@ -309,8 +310,9 @@ fn read_response_head(
 ) -> anyhow::Result<ParsedResponse> {
   let end = deadline(timeout);
   let mut buffer = Vec::with_capacity(RESPONSE_IO_BUFFER_BYTES);
+  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
   loop {
-    if let Some(head_end) = header_end(&buffer) {
+    if let Some(head_end) = response_header_end(&mut delimiter_search, &buffer) {
       return parse_response(buffer, head_end, request_method);
     }
     if buffer.len() >= RESPONSE_HEAD_BUFFER_LIMIT {
@@ -517,8 +519,9 @@ fn read_chunk_trailers(
   timeout: Duration,
   sender: &mpsc::Sender<ProxyBodyFrame>,
 ) -> anyhow::Result<()> {
+  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
   loop {
-    if let Some(end) = trailer_end(pending) {
+    if let Some(end) = trailer_end(&mut delimiter_search, pending) {
       let trailers = parse_trailers(&pending[..end])?;
       pending.drain(..end);
       send_body_trailers(sender, trailers)?;
@@ -538,8 +541,9 @@ fn read_chunk_line(
   pending: &mut Vec<u8>,
   timeout: Duration,
 ) -> anyhow::Result<Vec<u8>> {
+  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
   loop {
-    if let Some(line_end) = find_crlf(pending) {
+    if let Some(line_end) = crlf(&mut delimiter_search, pending) {
       let line = pending[..line_end].to_vec();
       pending.drain(..line_end + 2);
       return Ok(line);
@@ -609,25 +613,6 @@ fn send_body_error(sender: &mpsc::Sender<ProxyBodyFrame>, error: anyhow::Error) 
   let _ = sender.blocking_send(Err(error));
 }
 
-fn header_end(buffer: &[u8]) -> Option<usize> {
-  buffer
-    .windows(4)
-    .position(|window| window == b"\r\n\r\n")
-    .map(|index| index + 4)
-}
-
-fn find_crlf(buffer: &[u8]) -> Option<usize> {
-  buffer.windows(2).position(|window| window == b"\r\n")
-}
-
-fn trailer_end(buffer: &[u8]) -> Option<usize> {
-  if buffer.starts_with(b"\r\n") {
-    Some(2)
-  } else {
-    header_end(buffer)
-  }
-}
-
 fn parse_trailers(bytes: &[u8]) -> anyhow::Result<HeaderMap> {
   if bytes == b"\r\n" {
     return Ok(HeaderMap::new());
@@ -641,7 +626,7 @@ fn parse_trailers(bytes: &[u8]) -> anyhow::Result<HeaderMap> {
     if line.is_empty() {
       continue;
     }
-    let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+    let Some(colon) = memchr::memchr(b':', line) else {
       bail!("chunk trailer omitted ':' separator");
     };
     let name = HeaderName::from_bytes(&line[..colon]).context("chunk trailer name is invalid")?;

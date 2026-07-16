@@ -70,6 +70,9 @@ pub mod upstream_discovery;
 pub mod waf;
 pub mod webtransport_admin;
 
+#[cfg(test)]
+mod simd_bench;
+
 use anyhow::Context;
 use config::{Config, RuntimeOverrides};
 use state::{AppHandle, AppSnapshot};

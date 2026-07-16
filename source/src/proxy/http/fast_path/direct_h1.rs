@@ -29,6 +29,8 @@ use super::stage_timing as timing;
 
 #[cfg(target_os = "linux")]
 mod compio_transport;
+#[cfg(target_os = "linux")]
+pub(crate) mod delimiters;
 mod origin;
 mod request;
 mod response;

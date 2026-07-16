@@ -226,21 +226,21 @@ fn is_ebml_doctype(bytes: &[u8], expected_doctype: &[u8]) -> bool {
 
   let limit = bytes.len().min(4096);
   let header = &bytes[..limit];
-  let Some(position) = header.windows(2).position(|window| window == b"\x42\x82") else {
+  let Some(position) = memchr::memmem::find(header, b"\x42\x82") else {
     return false;
   };
   let Some((size_len, doc_type_len)) = parse_ebml_vint(&header[position + 2..]) else {
     return false;
   };
   let start = position + 2 + size_len;
-  let end = start + doc_type_len;
+  let Some(end) = start.checked_add(doc_type_len) else {
+    return false;
+  };
   end <= header.len() && &header[start..end] == expected_doctype
 }
 
 fn byte_contains(bytes: &[u8], needle: &[u8]) -> bool {
-  !needle.is_empty()
-    && bytes.len() >= needle.len()
-    && bytes.windows(needle.len()).any(|window| window == needle)
+  !needle.is_empty() && memchr::memmem::find(bytes, needle).is_some()
 }
 
 fn parse_ebml_vint(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -260,4 +260,25 @@ fn parse_ebml_vint(bytes: &[u8]) -> Option<(usize, usize)> {
     return usize::try_from(value).ok().map(|value| (width, value));
   }
   None
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{byte_contains, is_ebml_doctype};
+
+  #[test]
+  fn byte_contains_preserves_empty_needle_behavior_and_finds_unaligned_matches() {
+    assert!(!byte_contains(b"payload", b""));
+    assert!(byte_contains(b"xunaligned marker", b"marker"));
+    assert!(!byte_contains(b"short", b"longer needle"));
+  }
+
+  #[test]
+  fn ebml_doctype_scan_stays_within_the_first_four_kibibytes() {
+    let mut bytes = b"\x1a\x45\xdf\xa3".to_vec();
+    bytes.resize(4096, 0);
+    bytes.extend_from_slice(b"\x42\x82\x84webm");
+
+    assert!(!is_ebml_doctype(&bytes, b"webm"));
+  }
 }

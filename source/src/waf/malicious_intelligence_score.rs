@@ -506,6 +506,35 @@ mod tests {
   }
 
   #[test]
+  fn prompt_injection_score_preserves_exact_distinct_pattern_weights() {
+    assert_eq!(prompt_injection_score("IGNORE PREVIOUS INSTRUCTIONS"), 22);
+    assert_eq!(
+      prompt_injection_score(
+        "ignore previous instructions ignore previous instructions ignore previous instructions"
+      ),
+      22
+    );
+    assert_eq!(
+      prompt_injection_score("ignore previous instructionsignore all previous instructions"),
+      44
+    );
+    assert_eq!(prompt_injection_score("<system>```system```"), 28);
+  }
+
+  #[test]
+  fn automation_user_agent_score_preserves_precedence() {
+    assert_eq!(automation_user_agent_score("HeadlessBrowser/1"), 72);
+    assert_eq!(automation_user_agent_score("headless sqlmap curl/8"), 90);
+    assert_eq!(automation_user_agent_score("Mozilla/5.0"), 0);
+  }
+
+  #[test]
+  fn delimiter_score_counts_each_kind_once_and_caps_at_four() {
+    assert_eq!(repeated_delimiter_score("........"), 5);
+    assert_eq!(repeated_delimiter_score(".... && || ;; {{ }} [[ ]]"), 20);
+  }
+
+  #[test]
   fn malformed_score_counts_invalid_percent_encoding() {
     assert!(malformed_score("/search?q=%zz%u00qq", "uri").unwrap() >= 20);
   }

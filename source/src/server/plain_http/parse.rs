@@ -154,10 +154,7 @@ fn non_static_origin_form_request_line_fallback(
 }
 
 fn request_line(buffer: &[u8]) -> Option<&[u8]> {
-  buffer
-    .windows(2)
-    .position(|bytes| bytes == b"\r\n")
-    .map(|end| &buffer[..end])
+  memchr::memmem::find(buffer, b"\r\n").map(|end| &buffer[..end])
 }
 
 pub(in crate::server) enum ParseResult {
@@ -273,6 +270,15 @@ pub(in crate::server) fn header_has_token(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn request_line_uses_the_first_complete_crlf() {
+    assert_eq!(
+      request_line(b"GET / HTTP/1.1\r\nHost: example\r\n"),
+      Some(&b"GET / HTTP/1.1"[..])
+    );
+    assert_eq!(request_line(b"GET / HTTP/1.1\r"), None);
+  }
 
   #[test]
   fn request_line_filter_falls_back_before_complete_headers() {

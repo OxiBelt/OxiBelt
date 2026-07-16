@@ -41,3 +41,14 @@ fn response_body_mode_keeps_pure_content_length_response() -> anyhow::Result<()>
   ));
   Ok(())
 }
+
+#[test]
+fn trailer_parser_preserves_http_ows_and_first_colon_semantics() -> anyhow::Result<()> {
+  let trailers = parse_trailers(b"X-Trace:\t value:with:colons \t\r\n\r\n")?;
+
+  assert_eq!(
+    trailers.get("x-trace"),
+    Some(&HeaderValue::from_static("value:with:colons"))
+  );
+  Ok(())
+}

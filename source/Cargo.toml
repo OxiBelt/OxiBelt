@@ -85,6 +85,8 @@ zstd = "0.13.3"
 zeroize = "1.9.0"
 compio = { version = "0.19.1", default-features = false, features = ["io-uring", "polling", "runtime"] }
 compio-driver = { version = "0.12.4", default-features = false, features = ["io-uring", "polling"] }
+crc32fast = "1.5.0"
+memchr = "2.8.3"
 online-dsl-forge = "0.2.0"
 oxibelt-control-protocol.workspace = true
 
@@ -93,6 +95,7 @@ aws-lc-rs = { version = "1.17.1", default-features = false, features = ["bindgen
 
 [dev-dependencies]
 clubcard = { version = "0.3.3", features = ["builder"] }
+criterion = { version = "0.8.2", default-features = false }
 loom = "0.7.2"
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.106"

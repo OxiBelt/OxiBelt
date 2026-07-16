@@ -259,7 +259,7 @@ async fn buffer_watch_data(
   mut data: &[u8],
 ) -> bool {
   while !data.is_empty() {
-    let (segment, rest) = match data.iter().position(|byte| *byte == b'\n') {
+    let (segment, rest) = match memchr::memchr(b'\n', data) {
       Some(index) => data.split_at(index + 1),
       None => (data, &[][..]),
     };

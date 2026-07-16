@@ -40,7 +40,7 @@ members = []
 [workspace.package]
 version = "${ManifestVersion}"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 `

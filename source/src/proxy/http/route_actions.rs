@@ -195,7 +195,7 @@ fn render_template_with(
     match bytes[index] {
       b'{' => {
         rendered.push_str(&template[literal_start..index]);
-        let Some(close_offset) = bytes[index + 1..].iter().position(|byte| *byte == b'}') else {
+        let Some(close_offset) = memchr::memchr(b'}', &bytes[index + 1..]) else {
           bail!("unterminated route action template token");
         };
         let close = index + 1 + close_offset;

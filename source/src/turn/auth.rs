@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use base64::Engine;
 use md5::{Digest, Md5};
+use subtle::ConstantTimeEq;
 
 use crate::config::{TurnAuthConfig, TurnAuthMode};
 
@@ -198,11 +199,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
   if left.len() != right.len() {
     return false;
   }
-  let mut diff = 0u8;
-  for (left, right) in left.iter().zip(right) {
-    diff |= left ^ right;
-  }
-  diff == 0
+  bool::from(left.ct_eq(right))
 }
 
 #[allow(dead_code)]
@@ -215,6 +212,13 @@ mod tests {
   use super::*;
   use crate::config::{TurnAuthConfig, TurnAuthMode};
   use crate::turn::protocol::{ALLOCATE_REQUEST, encode_message, parse_stun};
+
+  #[test]
+  fn constant_time_equality_preserves_length_and_content_checks() {
+    assert!(constant_time_eq(b"same", b"same"));
+    assert!(!constant_time_eq(b"same", b"diff"));
+    assert!(!constant_time_eq(b"same", b"same-length-mismatch"));
+  }
 
   #[test]
   fn validate_mode_reports_missing_integrity() {

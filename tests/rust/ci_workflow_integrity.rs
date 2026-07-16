@@ -634,7 +634,7 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
-    "ARG RUST_BUILDER_IMAGE=rust:1.96.0-trixie",
+    "ARG RUST_BUILDER_IMAGE=rust:1.97.0-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG TARGETARCH",
     "amd64) rust_target=x86_64-unknown-linux-musl",
@@ -1204,8 +1204,8 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
-    "rustup toolchain install 1.96.0 --profile minimal",
-    "rustup default 1.96.0",
+    "rustup toolchain install 1.97.0 --profile minimal",
+    "rustup default 1.97.0",
     "name: Install Rust advisory tools",
     "cargo install cargo-audit --locked",
     "cargo install cargo-deny --locked",
