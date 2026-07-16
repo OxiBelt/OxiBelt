@@ -22,7 +22,7 @@ external_denied_ip=""
 # digest keeps the fixture portable while remaining immutable.
 agnhost_image="registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:b173c7d0ffe3d805d49f4dfe48375169b7b8d2e1feb81783efd61eb9d08042e6"
 curl_image="quay.io/cilium/alpine-curl:v1.10.0@sha256:913e8c9f3d960dde03882defa0edd3a919d529c2eb167caa7f54194528bde364"
-coredns_image="registry.k8s.io/coredns/coredns:v1.14.4@sha256:3e98f280fd601b37411c5fb7075fd9f337833c480f1644970b727ae0af067782"
+coredns_image="registry.k8s.io/coredns/coredns:v1.14.6@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea"
 
 die() {
   echo "Kubernetes NetworkPolicy check: $*" >&2

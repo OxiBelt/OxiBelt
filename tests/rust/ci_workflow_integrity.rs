@@ -882,7 +882,7 @@ fn source_structure_job_stays_independent() {
 fn person_proof_asset_regeneration_uses_the_frozen_workspace_lockfile() {
   let source_structure = workflow_job_text(&workflow_text(), "source-structure");
   for expected in [
-    "corepack prepare pnpm@11.13.0 --activate",
+    "corepack prepare pnpm@11.13.1 --activate",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm --filter @oxibelt/person-proof-ui build",
     "pnpm --filter @oxibelt/person-proof-ui check:openapi",
@@ -1162,9 +1162,9 @@ fn unsafe_validation_runs_pinned_miri_and_sanitizers_as_a_primary_gate() {
     "- miri",
     "- address",
     "- thread",
-    "nightly-2026-07-15",
-    "rustup component add miri --toolchain nightly-2026-07-15",
-    "cargo +nightly-2026-07-15 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
+    "nightly-2026-07-16",
+    "rustup component add miri --toolchain nightly-2026-07-16",
+    "cargo +nightly-2026-07-16 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
     "RUSTFLAGS: -Zsanitizer=address",
     "ASAN_OPTIONS: detect_leaks=1:halt_on_error=1",
     "-Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked",
@@ -1345,9 +1345,9 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   }
 
   for expected in [
-    "gateway_api_version=\"v1.6.0\"",
+    "gateway_api_version=\"v1.6.1\"",
     "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
-    "gateway_api_sha256=\"a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d\"",
+    "gateway_api_sha256=\"24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73\"",
     "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
     "sha256sum --check --status",
     "CI event values are untrusted input",
@@ -1665,7 +1665,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--pull=never",
     "registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:",
     "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
-    "registry.k8s.io/coredns/coredns:v1.14.4@sha256:",
+    "registry.k8s.io/coredns/coredns:v1.14.6@sha256:",
     "minikube delete --profile \"${profile_name}\"",
   ] {
     assert!(
@@ -2638,7 +2638,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       && !workflow.contains("v1.2.3")
   );
   for expected in [
-    "corepack prepare pnpm@11.13.0 --activate",
+    "corepack prepare pnpm@11.13.1 --activate",
     "pnpm install --frozen-lockfile",
     "pnpm run versioning:release",
     "git rev-parse \"${release_ref}^{commit}\"",
@@ -3223,10 +3223,11 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.1")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.3")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=9fcaaeb8f22544b09a19a761f3412c4112215422401634bebdd1296a403cc4bc"
+        "ARG NGINX_SHA256=a7657c50811c2d92d9895395e8b873ef60398142c4db21eb647811c38f6dd525"
       )
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.3\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")
@@ -3271,6 +3272,8 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
   );
   assert!(
     openresty_dockerfile.contains("ARG OPENRESTY_VERSION=1.31.1.1")
+      && openresty_dockerfile.contains("ARG OPENRESTY_IMAGE_VERSION=2")
+      && script.contains("--build-arg \"OPENRESTY_IMAGE_VERSION=2\"")
       && openresty_dockerfile.contains(
         "FROM openresty/openresty:${OPENRESTY_VERSION}-${OPENRESTY_IMAGE_VERSION}-alpine"
       )

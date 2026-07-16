@@ -40,7 +40,7 @@ case "${comparator}" in
   nginx)
     dockerfile="${repo_root}/tests/docker/performance_comparators/Dockerfile.nginx"
     build_args=(
-      --build-arg "NGINX_VERSION=1.31.1"
+      --build-arg "NGINX_VERSION=1.31.3"
       --build-arg "NGINX_TARGET_CPU=${target_cpu}"
     )
     ;;
@@ -55,7 +55,7 @@ case "${comparator}" in
     dockerfile="${repo_root}/tests/docker/performance_comparators/Dockerfile.openresty"
     build_args=(
       --build-arg "OPENRESTY_VERSION=1.31.1.1"
-      --build-arg "OPENRESTY_IMAGE_VERSION=1"
+      --build-arg "OPENRESTY_IMAGE_VERSION=2"
       --build-arg "OPENRESTY_TARGET_CPU=${target_cpu}"
     )
     ;;

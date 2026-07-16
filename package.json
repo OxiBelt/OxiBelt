@@ -2,7 +2,7 @@
   "name": "oxibelt",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.13.0",
+  "packageManager": "pnpm@11.13.1",
   "workspaces": [
     "devops",
     "ui/*"

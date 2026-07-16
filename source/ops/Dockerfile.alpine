@@ -14,7 +14,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY devops/package.json ./devops/package.json
 COPY ui/person-proof/package.json ./ui/person-proof/package.json
 RUN corepack enable && \
-    corepack prepare pnpm@11.13.0 --activate && \
+    corepack prepare pnpm@11.13.1 --activate && \
     pnpm install --frozen-lockfile --ignore-scripts --filter @oxibelt/person-proof-ui...
 COPY ui/person-proof ./ui/person-proof
 RUN --network=none pnpm --filter @oxibelt/person-proof-ui build

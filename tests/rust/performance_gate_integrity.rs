@@ -3254,7 +3254,8 @@ fn mandatory_and_optional_call_sites_are_explicit() {
     "nginx should use the resolved HTTP/3 mode"
   );
   assert!(
-    script.contains("OXIBELT_OPENRESTY_IMAGE"),
+    script.contains("OXIBELT_OPENRESTY_IMAGE")
+      && script.contains("openresty/openresty:1.31.1.1-2-alpine"),
     "OpenResty comparator image should be configurable"
   );
   assert!(

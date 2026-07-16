@@ -34,7 +34,7 @@ quinn = { version = "0.11.11", default-features = false, features = ["log", "run
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 serde_json = "1.0.150"
 sha1 = "0.11.0"
-tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1.52.4", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
 url = "2.5.8"
-web-transport-quinn = { version = "0.11.9", default-features = false, features = ["aws-lc-rs"] }
+web-transport-quinn = { version = "0.11.10", default-features = false, features = ["aws-lc-rs"] }

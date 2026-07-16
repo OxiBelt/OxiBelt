@@ -9,11 +9,11 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-gateway_api_version="v1.6.0"
+gateway_api_version="v1.6.1"
 # Kubernetes v1.31 lacks the CEL format library used by the experimental
 # XBackend CRD. The standard bundle still includes every CRD OxiBelt watches.
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
-gateway_api_sha256="a557172e8348f758479e9ee4000bbbb4b4aa48302a6b73461823ea5349bad56d"
+gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
 # `kind create --image` accepts an OCI image reference. Keep the final v1.31
 # patch tag for operator readability but pin its multi-platform manifest list.
 kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"

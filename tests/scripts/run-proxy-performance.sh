@@ -12,7 +12,7 @@ Environment:
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
-  OXIBELT_OPENRESTY_IMAGE          OpenResty comparator image (default: openresty/openresty:1.31.1.1-1-alpine)
+  OXIBELT_OPENRESTY_IMAGE          OpenResty comparator image (default: openresty/openresty:1.31.1.1-2-alpine)
   OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset
   OXIBELT_EXTERNAL_BENCHMARKS      run h2load/oha/wrk validation rows, 1 or 0 (default: 1)
   OXIBELT_EXTERNAL_BENCHMARK_TOOLS comma-separated h2load,oha,wrk subset (default: h2load,oha,wrk)
@@ -164,7 +164,7 @@ oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${oxibelt_image}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
-openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-1-alpine}"
+openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-2-alpine}"
 nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_perf_probe_image=0
 remove_external_benchmark_image=0
