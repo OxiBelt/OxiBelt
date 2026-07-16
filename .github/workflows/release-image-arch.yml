@@ -740,7 +740,7 @@ jobs:
       - name: Publish keyless platform signature
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
-        run: cosign sign --yes --new-bundle-format=false "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
+        run: cosign sign --yes --new-bundle-format=false --use-signing-config=false "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
 
   verify:
     name: Verify platform signature and attestations (${{ inputs.image_role }}/${{ inputs.artifact_arch }})

@@ -955,7 +955,7 @@ jobs:
       - name: Publish keyless index signature
         env:
           DIGEST: ${{ steps.identity.outputs.digest }}
-        run: cosign sign --yes --new-bundle-format=false "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
+        run: cosign sign --yes --new-bundle-format=false --use-signing-config=false "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
 
   ghcr-index-verify:
     name: Verify multi-arch index signature and attestations (${{ matrix.image_role }})

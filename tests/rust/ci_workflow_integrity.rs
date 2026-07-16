@@ -3097,7 +3097,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "subject-name: ${{ inputs.image }}",
     "subject-digest: ${{ needs.publish.outputs.digest }}",
     "Publish platform build provenance",
-    "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
+    "cosign sign --yes --new-bundle-format=false --use-signing-config=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
     "create-storage-record: false",
     "sbom-path: ${{ runner.temp }}/oxibelt-sbom/${{ inputs.sbom_file }}",
@@ -3249,7 +3249,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "subject-digest: ${{ steps.identity.outputs.digest }}",
     "sbom-path: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json",
     "Publish index build provenance",
-    "cosign sign --yes --new-bundle-format=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
+    "cosign sign --yes --new-bundle-format=false --use-signing-config=false \"${OXIBELT_GHCR_IMAGE}@${DIGEST}\"",
     "push-to-registry: true",
     "create-storage-record: false",
   ] {
