@@ -249,11 +249,12 @@ function RoleBinaryInventory(Fixture: RoleFixture): JsonObject {
   }
 }
 
-function Trivy(ArtifactValue: ArtifactFixture): JsonObject {
+function Trivy(ArtifactValue: ArtifactFixture, SpecVersion = '1.7'): JsonObject {
   const PackageRef = `pkg:apk/alpine/libssl3@3.5.4?arch=${ArtifactValue.ArtifactArch}`
   return {
+    $schema: `http://cyclonedx.org/schema/bom-${SpecVersion}.schema.json`,
     bomFormat: 'CycloneDX',
-    specVersion: '1.6',
+    specVersion: SpecVersion,
     serialNumber: `urn:uuid:00000000-0000-4000-8000-${ArtifactValue.ArtifactArch.padEnd(12, '0').slice(0, 12)}`,
     version: 1,
     metadata: {
@@ -327,6 +328,35 @@ test('platform SBOM deterministically enriches Trivy inventory with release evid
     Assert.match(Serialized, /trivy:pkg:apk\/alpine\/libssl3/)
     ValidateReleaseSbom(First, { Kind: 'platform', Revision, Workflow: PlatformWorkflow })
   }
+})
+
+test('platform SBOM accepts supported Trivy schemas without changing the release schema', () => {
+  const ArtifactValue = Artifact('amd64')
+
+  for (const SpecVersion of ['1.6', '1.7']) {
+    const Document = BuildPlatformSbom({
+      ...PlatformOptions(ArtifactValue),
+      Trivy: Trivy(ArtifactValue, SpecVersion)
+    })
+    Assert.equal(Document.specVersion, '1.6')
+  }
+
+  for (const SpecVersion of ['1.5', '1.8']) {
+    Assert.throws(
+      () => BuildPlatformSbom({
+        ...PlatformOptions(ArtifactValue),
+        Trivy: Trivy(ArtifactValue, SpecVersion)
+      }),
+      /Trivy input must be CycloneDX 1\.6 or 1\.7/
+    )
+  }
+
+  const NonCycloneDx = Trivy(ArtifactValue)
+  NonCycloneDx.bomFormat = 'SPDX'
+  Assert.throws(
+    () => BuildPlatformSbom({ ...PlatformOptions(ArtifactValue), Trivy: NonCycloneDx }),
+    /Trivy input must be CycloneDX 1\.6 or 1\.7/
+  )
 })
 
 test('platform SBOM enforces every role-specific image and executable allowlist', () => {

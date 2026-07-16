@@ -116,6 +116,11 @@ fn release_image_arch_workflow_text() -> String {
     .expect("release image architecture workflow should be readable")
 }
 
+fn release_sbom_source_text() -> String {
+  fs::read_to_string(repo_root().join("devops/sources/release_sbom.ts"))
+    .expect("release SBOM source should be readable")
+}
+
 fn dependabot_config_text() -> String {
   fs::read_to_string(repo_root().join(".github/dependabot.yml"))
     .expect("Dependabot configuration should be readable")
@@ -2438,6 +2443,7 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
 fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions() {
   let workflow = release_workflow_text();
   let arch_workflow = release_image_arch_workflow_text();
+  let release_sbom_source = release_sbom_source_text();
   let parsed_workflow: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
   let _: serde_json::Value = serde_saphyr::from_str(&arch_workflow)
@@ -2988,6 +2994,20 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     assert!(
       scan_job_text.contains(expected),
       "reusable scan job should include {expected}"
+    );
+  }
+  assert_eq!(
+    scan_job_text.matches("version: v0.72.0").count(),
+    2,
+    "release vulnerability and CycloneDX scans should use the reviewed Trivy version"
+  );
+  for expected in [
+    "const ReleaseCycloneDxSpecVersion = '1.6'",
+    "const SupportedTrivyCycloneDxSpecVersions = new Set(['1.6', '1.7'])",
+  ] {
+    assert!(
+      release_sbom_source.contains(expected),
+      "release SBOM ingestion should stay compatible with the pinned Trivy producer: {expected}"
     );
   }
   for removed in [

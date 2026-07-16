@@ -95,7 +95,8 @@ type BuildTimestamps = {
   FinishedOn: string
 }
 
-const CycloneDxSpecVersion = '1.6'
+const ReleaseCycloneDxSpecVersion = '1.6'
+const SupportedTrivyCycloneDxSpecVersions = new Set(['1.6', '1.7'])
 const CycloneDxPredicateType = 'https://cyclonedx.org/bom'
 const OfficialSource = 'https://github.com/OxiBelt/OxiBelt'
 const PlatformBuilderWorkflow = 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
@@ -907,8 +908,12 @@ function RewriteDependencies(
 }
 
 function TrivyInventory(Trivy: JsonObject, RootRef: string): { Components: JsonObject[]; Dependencies: JsonObject[]; RootDependencies: string[] } {
-  if (Trivy.bomFormat !== 'CycloneDX' || Trivy.specVersion !== CycloneDxSpecVersion) {
-    throw new Error(`Trivy input must be CycloneDX ${CycloneDxSpecVersion}`)
+  if (
+    Trivy.bomFormat !== 'CycloneDX' ||
+    typeof Trivy.specVersion !== 'string' ||
+    !SupportedTrivyCycloneDxSpecVersions.has(Trivy.specVersion)
+  ) {
+    throw new Error(`Trivy input must be CycloneDX ${[...SupportedTrivyCycloneDxSpecVersions].join(' or ')}`)
   }
 
   const Components = AsArray(Trivy.components, 'Trivy components')
@@ -1005,7 +1010,7 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonObject {
   ]
   const Document: JsonObject = {
     bomFormat: 'CycloneDX',
-    specVersion: CycloneDxSpecVersion,
+    specVersion: ReleaseCycloneDxSpecVersion,
     serialNumber: `urn:uuid:${DeterministicUuid(IdentitySeed(Identity, 'platform', `${PlatformIdentity}\0${Options.Generated}\0document`))}`,
     version: 1,
     metadata: {
@@ -1210,8 +1215,12 @@ function ValidateRoot(
   Document: JsonObject,
   Options: VerifySbomOptions
 ): { Root: JsonObject; Properties: Map<string, string>; Timestamp: string } {
-  if (Document.bomFormat !== 'CycloneDX' || Document.specVersion !== CycloneDxSpecVersion || Document.version !== 1) {
-    throw new Error(`release SBOM must be CycloneDX ${CycloneDxSpecVersion} document version 1`)
+  if (
+    Document.bomFormat !== 'CycloneDX' ||
+    Document.specVersion !== ReleaseCycloneDxSpecVersion ||
+    Document.version !== 1
+  ) {
+    throw new Error(`release SBOM must be CycloneDX ${ReleaseCycloneDxSpecVersion} document version 1`)
   }
   if (
     typeof Document.serialNumber !== 'string' ||
@@ -1494,7 +1503,7 @@ export function BuildIndexSbom(Options: IndexSbomOptions): JsonObject {
 
   const Document: JsonObject = SortBom({
     bomFormat: 'CycloneDX',
-    specVersion: CycloneDxSpecVersion,
+    specVersion: ReleaseCycloneDxSpecVersion,
     serialNumber: `urn:uuid:${DeterministicUuid(IdentitySeed(Identity, 'index', `${IndexIdentity}\0${Options.Generated}\0document`))}`,
     version: 1,
     metadata: {
