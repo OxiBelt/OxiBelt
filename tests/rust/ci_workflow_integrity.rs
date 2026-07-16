@@ -1658,6 +1658,8 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
     "--label \"oxibelt.network-policy-test=${run_id}\"",
+    "\"${script_dir}/retry-docker-pull.sh\" \"${agnhost_image}\"",
+    "--pull=never",
     "registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:",
     "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
     "registry.k8s.io/coredns/coredns:v1.14.4@sha256:",
@@ -1698,6 +1700,29 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
   );
 
   let agnhost_netexec = "\"${agnhost_image}\" netexec --http-port=8080 --udp-port=-1";
+  let agnhost_pre_pull = "\"${script_dir}/retry-docker-pull.sh\" \"${agnhost_image}\"";
+  let pre_pull_position = script
+    .find(agnhost_pre_pull)
+    .expect("Cilium fixtures should pre-pull the pinned agnhost image with retry");
+  let first_fixture_position = script
+    .find(agnhost_netexec)
+    .expect("Cilium fixtures should start the first agnhost container");
+  assert_eq!(
+    script.matches(agnhost_pre_pull).count(),
+    1,
+    "Cilium fixtures should pre-pull agnhost exactly once"
+  );
+  assert!(
+    pre_pull_position < first_fixture_position,
+    "the bounded agnhost pull must complete before either Cilium fixture starts"
+  );
+  assert_eq!(
+    script
+      .matches("docker run --detach \\\n    --pull=never \\")
+      .count(),
+    2,
+    "both Cilium fixtures must use only the explicitly pre-pulled agnhost image"
+  );
   assert_eq!(
     script.matches(agnhost_netexec).count(),
     2,

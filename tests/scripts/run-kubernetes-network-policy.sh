@@ -366,7 +366,9 @@ if [[ "${cni}" == "cilium" ]]; then
   # agnhost has an exec-form /agnhost entrypoint, so Docker appends only the
   # netexec subcommand here. The Kubernetes fixture below uses command because
   # that field replaces an image entrypoint.
+  "${script_dir}/retry-docker-pull.sh" "${agnhost_image}"
   docker run --detach \
+    --pull=never \
     --name "${external_allowed_container}" \
     --network "${minikube_network}" \
     --label "oxibelt.network-policy-test=${run_id}" \
@@ -376,6 +378,7 @@ if [[ "${cni}" == "cilium" ]]; then
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
     "${agnhost_image}" netexec --http-port=8080 --udp-port=-1 >/dev/null
   docker run --detach \
+    --pull=never \
     --name "${external_denied_container}" \
     --network "${minikube_network}" \
     --label "oxibelt.network-policy-test=${run_id}" \
