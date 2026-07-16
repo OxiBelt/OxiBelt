@@ -812,13 +812,14 @@ jobs:
           predicate_type="$(jq -r '.sbom.predicateType' "${image_plan}")"
           source_repository="$(jq -r '.supplyChain.sourceRepository' "${image_plan}")"
           issuer="$(jq -r '.supplyChain.oidcIssuer' "${image_plan}")"
-          workflow="$(jq -r '.supplyChain.platformBuilderWorkflow' "${image_plan}")"
+          builder_workflow="$(jq -r '.supplyChain.platformBuilderWorkflow' "${image_plan}")"
+          caller_workflow="$(jq -r '.supplyChain.indexBuilderWorkflow' "${image_plan}")"
           provenance_type="$(jq -r '.supplyChain.provenancePredicateType' "${image_plan}")"
           provenance_build_type="$(jq -r '.supplyChain.provenanceBuildType' "${image_plan}")"
           release_ref="${{ inputs.release_ref }}"
           revision="${{ inputs.release_revision }}"
-          workflow_path="${workflow#"${source_repository}/"}"
-          certificate_identity="https://github.com/${workflow}@${release_ref}"
+          workflow_path="${caller_workflow#"${source_repository}/"}"
+          certificate_identity="https://github.com/${builder_workflow}@${release_ref}"
           repository_url="https://github.com/${source_repository}"
           digest_hex="${DIGEST#sha256:}"
 
@@ -836,7 +837,7 @@ jobs:
 
           gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
             --repo "${source_repository}" \
-            --signer-workflow "${workflow}" \
+            --signer-workflow "${builder_workflow}" \
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${provenance_type}" \
@@ -870,7 +871,7 @@ jobs:
 
           gh attestation verify "oci://${OXIBELT_GHCR_IMAGE}@${DIGEST}" \
             --repo "${source_repository}" \
-            --signer-workflow "${workflow}" \
+            --signer-workflow "${builder_workflow}" \
             --source-digest "${revision}" \
             --source-ref "${release_ref}" \
             --predicate-type "${predicate_type}" \
@@ -891,7 +892,7 @@ jobs:
             --role "${OXIBELT_IMAGE_ROLE}" \
             --digest "${DIGEST}" \
             --revision "${{ inputs.release_revision }}" \
-            --workflow "${workflow}" \
+            --workflow "${builder_workflow}" \
             --image "${OXIBELT_GHCR_IMAGE}" \
             --version "${{ inputs.release_version }}"
 

@@ -3142,9 +3142,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "--certificate-github-workflow-repository \"${source_repository}\"",
     "--certificate-github-workflow-ref \"${release_ref}\"",
     "--certificate-github-workflow-sha \"${revision}\"",
+    "builder_workflow=\"$(jq -r '.supplyChain.platformBuilderWorkflow' \"${image_plan}\")\"",
+    "caller_workflow=\"$(jq -r '.supplyChain.indexBuilderWorkflow' \"${image_plan}\")\"",
+    "workflow_path=\"${caller_workflow#\"${source_repository}/\"}\"",
     "gh attestation verify",
     "--bundle-from-oci",
-    "--signer-workflow \"${workflow}\"",
+    "--signer-workflow \"${builder_workflow}\"",
     "--source-digest \"${revision}\"",
     "--source-ref \"${release_ref}\"",
     ".predicate.buildDefinition.internalParameters.github.runner_environment == \"github-hosted\"",
@@ -3155,12 +3158,18 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "--slurpfile expected \"${EXPECTED_SBOM}\"",
     "release_sbom.js\" verify",
     "--role \"${OXIBELT_IMAGE_ROLE}\"",
+    "--workflow \"${builder_workflow}\"",
   ] {
     assert!(
       verify_job_text.contains(expected),
       "platform verification job should include {expected}"
     );
   }
+  assert!(
+    !verify_job_text.contains("workflow_path=\"${builder_workflow#\"${source_repository}/\"}\"")
+      && !verify_job_text.contains("--signer-workflow \"${caller_workflow}\""),
+    "platform provenance should distinguish the top-level caller path from the reusable signer identity"
+  );
   assert!(
     !verify_job_text.contains("packages: write")
       && !verify_job_text.contains("id-token: write")

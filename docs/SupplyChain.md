@@ -116,6 +116,11 @@ The release gate additionally parses the verified provenance and requires the
 GitHub Actions workflow build type, `OxiBelt/OxiBelt` source URL, exact
 workflow path and tag ref, a resolved Git dependency with the exact commit,
 the `github-hosted` runner environment, and the exact builder identity.
+For platform provenance, `externalParameters.workflow.path` identifies the
+top-level `.github/workflows/release.yml` caller, while
+`runDetails.builder.id` and the signer identity identify the reusable
+`.github/workflows/release-image-arch.yml` builder. Index provenance uses the
+top-level workflow for both identities.
 
 For another role, change `image` to its exact repository from the role table.
 For a multi-architecture index, resolve `:${version}`, set `workflow` to
