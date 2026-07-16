@@ -45,57 +45,21 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 artifact_prefix=""
-image_repository=""
-binaries_json=""
-entrypoint_json=""
-user=""
-ports_json=""
-embedded_assets=""
 case "${role}" in
   standalone)
     artifact_prefix="oxibelt"
-    image_repository="ghcr.io/oxibelt/oxibelt"
-    binaries_json='["oxibelt","oxibeltctl","oxibelt-keysigner","oxibelt-netport-switcher"]'
-    entrypoint_json='["/usr/local/bin/oxibelt","--config","/etc/oxibelt/config/oxibelt.toml"]'
-    user="10001:10001"
-    ports_json='["8443/tcp","8443/udp"]'
-    embedded_assets=true
     ;;
   dataplane)
     artifact_prefix="oxibelt-dataplane"
-    image_repository="ghcr.io/oxibelt/oxibelt-dataplane"
-    binaries_json='["oxibelt"]'
-    entrypoint_json='["/usr/local/bin/oxibelt","--config","/etc/oxibelt/config/oxibelt.toml"]'
-    user="10001:10001"
-    ports_json='["8443/tcp","8443/udp"]'
-    embedded_assets=true
     ;;
   controller)
     artifact_prefix="oxibelt-gateway-controller"
-    image_repository="ghcr.io/oxibelt/oxibelt-gateway-controller"
-    binaries_json='["oxibelt-gateway-controller"]'
-    entrypoint_json='["/usr/local/bin/oxibelt-gateway-controller"]'
-    user="10001:10001"
-    ports_json='[]'
-    embedded_assets=false
     ;;
   tools)
     artifact_prefix="oxibelt-tools"
-    image_repository="ghcr.io/oxibelt/oxibelt-tools"
-    binaries_json='["oxibeltctl"]'
-    entrypoint_json='["/usr/local/bin/oxibeltctl"]'
-    user="10001:10001"
-    ports_json='[]'
-    embedded_assets=false
     ;;
   keysigner)
     artifact_prefix="oxibelt-keysigner"
-    image_repository="ghcr.io/oxibelt/oxibelt-keysigner"
-    binaries_json='["oxibelt-keysigner"]'
-    entrypoint_json='["/usr/local/bin/oxibelt-keysigner"]'
-    user="10002:10002"
-    ports_json='[]'
-    embedded_assets=false
     ;;
   *)
     usage
@@ -105,9 +69,7 @@ esac
 image_tag="${artifact_prefix}:alpine-musl-${artifact_arch}"
 image_tar="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}.tar"
 build_metadata="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-build-metadata.json"
-build_inputs="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-build-inputs.json"
 build_metadata_tmp=""
-build_inputs_tmp=""
 rust_toolchain_version="1.96.0"
 rust_builder_image="rust:${rust_toolchain_version}-trixie"
 node_builder_image="node:24-alpine3.24"
@@ -183,70 +145,13 @@ cleanup_temporary_metadata() {
   if [[ -n "${build_metadata_tmp}" ]]; then
     rm -f -- "${build_metadata_tmp}"
   fi
-  if [[ -n "${build_inputs_tmp}" ]]; then
-    rm -f -- "${build_inputs_tmp}"
-  fi
 }
 trap cleanup_temporary_metadata EXIT
 
 build_metadata_tmp="$(mktemp "${build_metadata}.tmp.XXXXXX")"
-build_inputs_tmp="$(mktemp "${build_inputs}.tmp.XXXXXX")"
 rm -f -- "${build_metadata_tmp}"
 
-jq -n \
-  --arg role "${role}" \
-  --arg image "${image_repository}" \
-  --arg docker_target "${role}" \
-  --argjson binaries "${binaries_json}" \
-  --argjson entrypoint "${entrypoint_json}" \
-  --arg user "${user}" \
-  --argjson ports "${ports_json}" \
-  --argjson embedded_assets "${embedded_assets}" \
-  --arg artifact_arch "${artifact_arch}" \
-  --arg platform "${platform}" \
-  --arg rust_toolchain_version "${rust_toolchain_version}" \
-  --arg rust_target "${rust_target}" \
-  --arg target_cpu "${rust_target_cpu}" \
-  --arg rust_builder_image "${rust_builder_image}" \
-  --arg node_builder_image "${node_builder_image}" \
-  --arg runtime_image "${runtime_image}" \
-  '{
-    schemaVersion: 2,
-    role: $role,
-    image: $image,
-    dockerTarget: $docker_target,
-    binaries: $binaries,
-    entrypoint: $entrypoint,
-    user: $user,
-    ports: $ports,
-    embeddedAssets: $embedded_assets,
-    artifactArch: $artifact_arch,
-    platform: $platform,
-    rustToolchainVersion: $rust_toolchain_version,
-    rustTarget: $rust_target,
-    targetCpu: (if $target_cpu == "" then null else $target_cpu end),
-    baseImages: ([
-      {
-        buildArgument: "RUST_BUILDER_IMAGE",
-        stage: "builder",
-        reference: $rust_builder_image
-      }
-    ] + (if $embedded_assets then [
-      {
-        buildArgument: "OXIBELT_NODE_IMAGE",
-        stage: "person-proof-ui",
-        reference: $node_builder_image
-      }
-    ] else [] end) + [
-      {
-        buildArgument: "OXIBELT_RUNTIME_IMAGE",
-        stage: "runtime",
-        reference: $runtime_image
-      }
-    ])
-  }' >"${build_inputs_tmp}"
-
-BUILDX_METADATA_PROVENANCE=max docker buildx build \
+docker buildx build \
   --platform "${platform}" \
   --file "${repo_root}/source/ops/Dockerfile.alpine" \
   --build-arg "RUST_BUILDER_IMAGE=${rust_builder_image}" \
@@ -266,8 +171,6 @@ BUILDX_METADATA_PROVENANCE=max docker buildx build \
   "${repo_root}"
 
 mv -- "${build_metadata_tmp}" "${build_metadata}"
-mv -- "${build_inputs_tmp}" "${build_inputs}"
 
 echo "Wrote ${image_tar}"
 echo "Wrote ${build_metadata}"
-echo "Wrote ${build_inputs}"

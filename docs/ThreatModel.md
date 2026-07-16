@@ -96,9 +96,11 @@ The standalone and minimal data-plane artifacts use the same `oxibelt`
 runtime binary, including co-located Admin and Person Proof. The minimal image
 removes operator, Kubernetes, and helper executables; it is not a reduced
 security-feature variant. Controller, tools, and keysigner images have exact
-single-binary inventories. Release validation, role labels, per-role SBOMs,
-signatures, and provenance make cross-role leakage or substitution observable,
-but operators must still select the intended immutable repository digest.
+single-binary inventories. Release validation, role labels, and executable
+inventory checks make some cross-role packaging mistakes observable, but the
+current release contract provides no consumer-verifiable signature,
+provenance, or release SBOM. Operators must select and record the intended
+immutable repository digest.
 
 ### Listener and entry-point inventory
 
@@ -146,12 +148,12 @@ but operators must still select the intended immutable repository digest.
 - Host root, container runtime, Kubernetes API, DNS, upstreams, external
   providers, and build/release identities are protected outside OxiBelt. A
   compromise of those authorities can exceed the protections in this model.
-- Official images are selected by immutable digest and their keyless
-  signatures, SLSA provenance, and OCI-linked SBOM attestations are verified
-  against the expected source, workflow, issuer, tag, and source commit. The
-  checked-in Kubernetes example enforces these controls only in opted-in
-  namespaces. Registry freshness, rollback prevention, and optional
-  vulnerability policy remain operator controls.
+- Official images are selected from the exact documented repositories by an
+  operator-approved immutable digest. The registry, release workflow, protected
+  refs, and approval process remain external trusted authorities because the
+  current release contract provides no consumer-verifiable signature or build
+  provenance. Registry freshness, rollback prevention, and vulnerability policy
+  remain operator controls.
 
 ### Conditional guarantees
 
@@ -218,12 +220,13 @@ strongest available policy.
 - OxiBelt does not issue or renew certificates, rotate external secrets,
   operate Redis/PostgreSQL, or protect a compromised host,
   cluster administrator, registry, upstream, frontend, or provider.
-- Release workflows publish and independently verify keyless Cosign signatures,
-  SLSA provenance v1, and OCI-linked CycloneDX SBOM attestations for platform
-  and multi-architecture image digests. A rootless live admission gate verifies
-  the just-produced index before alias promotion. These controls do not claim
-  reproducible builds, freshness, rollback prevention, or a vulnerability
-  threshold.
+- Release workflows publish role-specific platform images and
+  multi-architecture indexes, but the current contract does not publish
+  supported signatures, build provenance, or release SBOM attestations.
+  Historical OCI referrers do not imply current evidence coverage. Existing
+  fail-closed admission policies that require the former evidence block new
+  unattested images until operators deliberately migrate or retain an older
+  accepted digest.
 - Experimental features may be disabled, removed, or incompatibly changed and
   have no compatibility or backport guarantee beyond `SECURITY.md`.
 
@@ -343,8 +346,8 @@ canonical references.
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Plugin or custom frontend compromise | Operator rulepack/frontend/provider/handler → policy, browser, or external data | OxiRule is declarative and bounded with no general scripting/import callback sandbox; rulepack provenance can be pinned. Custom frontend URLs are same-origin routes, provider/handler exchanges are bounded, and failures follow explicit policy. | There is no native plugin security boundary. A hostile rulepack changes policy, a frontend can steal browser-visible proof/clearance data, a provider controls proof verdicts, and an external cache can observe or forge cached objects within its authority. |
-| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and role metadata are validated, build and package-write jobs are separated, images are scanned, and per-role keyless signatures, SLSA provenance, and CycloneDX SBOMs bind exact executable inventories and workflow/source claims to immutable platform and index digests. | A compromised dependency, runner, maintainer, pinned action commit, release credential, or workflow can produce a malicious image and matching valid evidence. Signing and provenance do not prove source review, dependency safety, or reproducibility. |
-| Malicious or stale container image, including role confusion | Registry/tag/deployment → running data plane or control plane | Official image scope is an exact five-repository allowlist, OCI role/source/revision labels and executable inventories are checked during release, both Helm charts select separate role repositories and support digests, and an opt-in fail-closed admission example requires signature and minimum provenance policy. | Mutable tags can still select stale content before digest resolution, and a correctly signed old or wrong-role release can pass identity policy if an operator permits that exact repository. Digest and role selection, freshness, rollback controls, registry access, and optional vulnerability policy remain operator responsibilities. |
+| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and role metadata are validated, build and package-write jobs are separated, and images are scanned. | A compromised dependency, runner, maintainer, pinned action commit, release credential, workflow, or registry authority can produce malicious content. The current release contract provides no consumer-verifiable signature, provenance, or release SBOM binding an image digest to reviewed source and workflow identity. |
+| Malicious or stale container image, including role confusion | Registry/tag/deployment → running data plane or control plane | Official image scope is an exact five-repository allowlist, OCI role/source/revision labels and executable inventories are checked during release, and both Helm charts select separate role repositories and support immutable digests. | Mutable tags can select stale content before digest resolution, labels are publisher-controlled, and a wrong-role or compromised-registry image has no current OxiBelt signature/provenance gate. Digest and role selection, freshness, rollback controls, registry access, and operator-owned admission policy remain operator responsibilities. Historical referrers do not establish current evidence coverage. |
 
 ### Shared-state compromise impact
 

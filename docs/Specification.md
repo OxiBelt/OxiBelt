@@ -79,14 +79,15 @@ medium-scale edge controls are complete. Its Helm companion supplies the P1-10
 topology and drain lifecycle contract on Kubernetes 1.31 or later. OxiBelt now
 also implements certificate-to-IPM identity binding (P1-12), single-instance
 general mutation idempotency (P1-13), and bounded, versioned, tamper-evident
-audit acknowledgements (P1-14). Release workflows publish OCI-linked
-CycloneDX SBOM attestations, keyless Cosign signatures, and SLSA provenance for
-immutable platform and multi-architecture image digests (P2-3/P2-4), including
-source/build identity, architecture, toolchain, resolved base-image digests,
-and binary inventory. Release CI verifies the same digest through a fail-closed
-Kubernetes admission example before promoting mutable index aliases. Base-image
-digest pinning (P2-2), vulnerability admission thresholds, freshness, rollback
-prevention, and reproducible-build proof remain separate work.
+audit acknowledgements (P1-14). Release workflows publish role-specific
+platform images and multi-architecture indexes with explicit executable
+inventories. The current release contract does not publish supported keyless
+signatures, build provenance, or release SBOM attestations, and it does not
+provide an OxiBelt-managed signature/provenance admission gate. Operators must
+approve and pin each role's immutable digest. Publisher authentication,
+base-image digest pinning (P2-2), vulnerability admission thresholds,
+freshness, rollback prevention, and reproducible-build proof remain separate
+controls.
 
 ## Request Pipeline
 

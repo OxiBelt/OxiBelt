@@ -12,8 +12,8 @@ The Gateway controller remains a Gateway API controller. It is not an Ingress co
 Both charts accept either `image.tag` or an immutable `image.digest`. When a
 digest is set it takes precedence and renders `repository@sha256:...`; the
 schema rejects malformed or uppercase digests. Production deployments of
-official images should use the digest that passed release signature,
-provenance, SBOM, and admission verification:
+official images should use an operator-approved digest recorded for the exact
+repository, role, release, and target platform:
 
 ```yaml
 image:
@@ -30,13 +30,14 @@ keysigner, Node.js, package manager, or compiler. Use the standalone
 or compatibility helpers are intentionally required. Enabling Admin or Person
 Proof does not require the Gateway Controller or an image change.
 
-The fail-closed Sigstore admission example under
-`deploy/admission/sigstore` verifies official OxiBelt image signatures and
-minimum SLSA Build Level 2 provenance against the expected repository, release
-workflows, issuer, tag, source commit, and deployed digest. Installation,
-namespace opt-in, and rootless Minikube proof instructions are in its
-[`README.md`](../deploy/admission/sigstore/README.md). The admission policy is
-a cluster control and is not installed by either OxiBelt chart.
+The current release contract does not publish supported signatures, provenance,
+or release SBOM attestations for these images. Historical digests may still
+have OCI referrers from earlier releases, but those referrers do not establish
+coverage for a new digest. A cluster with a fail-closed policy that requires the
+former evidence will reject new unattested OxiBelt images. Keep the last
+accepted digest pinned until an explicitly approved replacement policy has been
+tested; do not change the webhook to fail open merely to unblock an upgrade.
+See [Release Image Trust and Migration](SupplyChain.md).
 
 ## Data-Plane Chart
 

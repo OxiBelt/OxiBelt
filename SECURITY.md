@@ -137,15 +137,14 @@ artifact is unambiguous. Unqualified `oxibelt:latest`, forks, mirrors, local
 builds, test helper images, and third-party base images are not official OxiBelt
 images.
 
-Release workflows publish a keyless Cosign signature, SLSA provenance v1, and
-an OCI-linked CycloneDX SBOM attestation for each role/platform image digest
-and each role-specific multi-architecture index digest. Follow [Release Supply-Chain
-Verification](docs/SupplyChain.md) to resolve a digest and verify its expected
-issuer, source, workflow, tag, commit, hosted builder, signature, provenance,
-and SBOM. The checked-in Kubernetes admission example can enforce the signature
-and minimum provenance policy in opted-in namespaces. These controls are not a
-reproducible-build, freshness, rollback-prevention, or vulnerability-policy
-claim; deployments should continue to select approved immutable digests.
+The current release contract does not publish supported keyless signatures,
+build-provenance attestations, or release SBOM attestations for these images.
+Use [Release Image Trust and Migration](docs/SupplyChain.md) to resolve and
+record an approved immutable digest and to migrate policies that required the
+former evidence. Historical OCI referrers can remain attached to older digests;
+their presence does not establish evidence coverage for current releases. A
+fail-closed admission policy that still requires those referrers will reject a
+new unattested image and must not be weakened silently to unblock deployment.
 
 ## Experimental Features
 

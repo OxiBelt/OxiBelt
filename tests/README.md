@@ -37,36 +37,27 @@ CI builds AMD64 Alpine musl images for `x86-64-v2`, `x86-64-v3`, and `x86-64-v4`
 After the OxiBelt image artifacts are built in non-release CI, Trivy scans the `amd64v2`, `amd64`, `amd64v4`, `arm64`, and `riscv64` image artifacts. The scan job reports vulnerabilities as a Markdown table in `GITHUB_STEP_SUMMARY`, uploads the raw JSON report, and keeps findings report-only; a separate canonical-repository job submits Trivy's GitHub-format SBOM output to the Dependency Snapshot API on push, schedule, same-repository PR, or manual runs with `submit_dependency_snapshots` enabled.
 Kubernetes integration keeps the supported Kubernetes `v1.31.14` and Helm 3 compatibility lane. A separate read-only compatibility job runs the full static chart checks with Helm `v4.2.3`, starts a digest-pinned Kubernetes `v1.36.1` Kind node with Kind `v0.32.0`, and submits the default rendered chart to the API server with `--dry-run=server` using kubectl `v1.36.2`.
 The release workflow rebuilds the same artifact matrix from a validated strict
-tag and verifies the CI-only Cargo version rewrite and Docker labels. Each
-reusable per-architecture row builds an unprivileged image tar, records
-BuildKit-resolved inputs, scans the local tar as report-only pre-publish
-evidence, and produces a validated CycloneDX SBOM. An isolated package-write
-job publishes the canonical platform digest without checking out or executing
-release build code. A separate OIDC-enabled job publishes its CycloneDX SBOM,
-SLSA provenance v1, and keyless Cosign signature. A read-only job verifies the
-exact digest, issuer, repository, release workflow, tag ref, source commit,
-GitHub-hosted builder, signature, provenance, and SBOM from OCI before stable
-platform aliases can be promoted.
+tag and verifies the CI-only Cargo version rewrite, Docker labels, role, and
+executable inventory. Each reusable per-architecture row builds an unprivileged
+image tar, records the Buildx digest metadata used by canonical publication,
+and scans the local tar as report-only pre-publish evidence. An isolated
+package-write job publishes each canonical platform digest without checking out
+or executing release build code.
+The current release contract does not publish or verify keyless signatures,
+build provenance, or release SBOM attestations.
 
-The top-level release workflow waits for all five reusable rows, publishes the
-canonical multi-architecture index from the verified `amd64` (x86-64-v3),
-`arm64`, and `riscv64` digests, re-verifies those platform attestations, and
-composes an architecture-preserving aggregate SBOM bound to the resulting
-index digest. It then signs, attests, and independently verifies the index. A
-read-only rootless Docker-backed Minikube gate must admit that exact signed
-digest and reject a historical unsigned OxiBelt digest before mutable index
-aliases can be promoted. QEMU is used only for the RISC-V image; AMD64
-and ARM64 build natively on their release runners. Build tags matching
+The top-level release workflow waits for all 25 role/architecture rows and publishes
+the canonical multi-architecture index from the `amd64` (x86-64-v3), `arm64`,
+and `riscv64` digests for each role. QEMU is used only for the RISC-V image;
+AMD64 and ARM64 build natively on their release runners. Build tags matching
 `major.minor.patch-build.<8 hex chars>` may publish from tag push events;
 stable and `major.minor.patch-beta.N` tags publish from GitHub release or
 manual dispatch events. Workflow integrity tests in
-`rust/ci_workflow_integrity.rs` enforce this fail-closed topology,
-platform/tag/signature/provenance/SBOM coverage, immutable action pins,
-admission dependencies, and permission separation. Static Helm and policy
-checks are provided by `check-helm-image-digest.sh` and
-`check-image-admission-policy.sh`; `run-image-admission-policy.sh` is the live
-admission proof.
-Consumer verification commands and the trust boundary are documented in
+`rust/ci_workflow_integrity.rs` enforce the role/platform/tag topology,
+immutable action pins, executable inventories, and permission separation. The
+static Helm digest check remains in `check-helm-image-digest.sh`.
+The current consumer trust boundary, historical OCI referrer warning, and
+fail-closed admission migration guidance are documented in
 [`docs/SupplyChain.md`](../docs/SupplyChain.md).
 
 Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.

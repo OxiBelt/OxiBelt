@@ -237,12 +237,13 @@ version and source revision:
 | `ghcr.io/oxibelt/oxibelt-tools` | `tools` | `oxibeltctl` | Offline and Admin operator workflows. |
 | `ghcr.io/oxibelt/oxibelt-keysigner` | `keysigner` | `oxibelt-keysigner` | Optional isolated private-key operations. |
 
-CI scans every role/architecture artifact separately. Release CI publishes a
-per-role platform manifest and multi-architecture index, then attaches a
-role-specific keyless signature, SLSA provenance statement, and OCI-linked
-CycloneDX SBOM before promoting aliases. See [Release Supply-Chain
-Verification](docs/SupplyChain.md) for verification commands and trust
-boundaries.
+CI scans every role/architecture artifact separately. Release CI publishes
+per-role platform manifests and multi-architecture indexes. The current release
+contract does not attach supported keyless signatures, build provenance, or
+release SBOM attestations to those digests. Resolve and record an immutable
+digest before deployment; see [Release Image Trust and
+Migration](docs/SupplyChain.md) for the current trust boundary, historical OCI
+referrer warning, and admission-policy migration guidance.
 
 Published tags use strict OxiBelt release tags such
 as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags

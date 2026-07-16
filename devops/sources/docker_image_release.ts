@@ -39,8 +39,6 @@ export type ImageArtifact = {
   targetCpu?: string
   canonicalGhcrTag: string
   aliasGhcrTags: string[]
-  sbomArtifactName: string
-  sbomFile: string
 }
 
 export type ImageManifest = {
@@ -52,14 +50,6 @@ export type ImageManifest = {
   aliasGhcrTags: string[]
 }
 
-export type ReleaseSbomContract = {
-  format: 'cyclonedx-json'
-  specVersion: '1.6'
-  predicateType: 'https://cyclonedx.org/bom'
-  rustToolchainVersion: '1.96.0'
-  roleScoped: true
-}
-
 export type ImageRoleContract = {
   role: ImageRole
   image: string
@@ -69,23 +59,10 @@ export type ImageRoleContract = {
   user: string
   ports: string[]
   embeddedAssets: boolean
-  indexArtifactName: string
-  indexFile: string
-}
-
-export type ReleaseSupplyChainContract = {
-  sourceRepository: 'OxiBelt/OxiBelt'
-  oidcIssuer: 'https://token.actions.githubusercontent.com'
-  cosignVersion: 'v3.1.1'
-  provenancePredicateType: 'https://slsa.dev/provenance/v1'
-  provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1'
-  minimumSlsaBuildLevel: 2
-  platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml'
-  indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 4
+  schemaVersion: 5
   image: string
   tag: string
   version: string
@@ -93,8 +70,6 @@ export type ImageReleasePlan = {
   revision: string
   source: string
   roles: ImageRoleContract[]
-  sbom: ReleaseSbomContract
-  supplyChain: ReleaseSupplyChainContract
   artifacts: ImageArtifact[]
   manifests: ImageManifest[]
 }
@@ -120,7 +95,7 @@ type BuildImageReleasePlanOptions = {
 
 const BuildCommitPrefix = /^[0-9a-f]{8}$/
 
-type RoleTemplate = Omit<ImageRoleContract, 'image' | 'indexArtifactName' | 'indexFile'> & {
+type RoleTemplate = Omit<ImageRoleContract, 'image'> & {
   ImageSuffix: string
 }
 
@@ -189,8 +164,6 @@ ImageArtifact,
 | 'embeddedAssets'
 | 'canonicalGhcrTag'
 | 'aliasGhcrTags'
-| 'sbomArtifactName'
-| 'sbomFile'
 >> = [
   {
     artifactArch: 'amd64v2',
@@ -240,10 +213,6 @@ ImageArtifact,
 export function BuildImageRoleContracts(Image = GhcrImage): ImageRoleContract[] {
   return RoleTemplates.map(Template => {
     const RoleImage = `${Image}${Template.ImageSuffix}`
-    const ArtifactPrefix = Template.role === 'standalone'
-      ? 'oxibelt'
-      : `oxibelt-${Template.role === 'controller' ? 'gateway-controller' : Template.role}`
-    const SbomPrefix = `${ArtifactPrefix}-release`
 
     return {
       role: Template.role,
@@ -253,9 +222,7 @@ export function BuildImageRoleContracts(Image = GhcrImage): ImageRoleContract[] 
       entrypoint: [...Template.entrypoint],
       user: Template.user,
       ports: [...Template.ports],
-      embeddedAssets: Template.embeddedAssets,
-      indexArtifactName: `${SbomPrefix}-sbom-index`,
-      indexFile: `${SbomPrefix}-index.cdx.json`
+      embeddedAssets: Template.embeddedAssets
     }
   })
 }
@@ -376,7 +343,6 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   const Roles = BuildImageRoleContracts(Image)
   const Artifacts: ImageArtifact[] = Roles.flatMap(Role => {
     const ArtifactPrefix = Role.role === 'standalone' ? 'oxibelt' : `oxibelt-${Role.role === 'controller' ? 'gateway-controller' : Role.role}`
-    const SbomPrefix = Role.role === 'standalone' ? 'oxibelt-release' : `${ArtifactPrefix}-release`
 
     return ArtifactSpecs.map(Artifact => {
       const AliasGhcrTags: string[] = []
@@ -399,9 +365,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
         imageTar: `${ArtifactPrefix}-alpine-musl-${Artifact.artifactArch}.tar`,
         localTag: `${ArtifactPrefix}:alpine-musl-${Artifact.artifactArch}`,
         canonicalGhcrTag: `${Role.image}:${Tag}-alpine-musl-${Artifact.artifactArch}`,
-        aliasGhcrTags: AliasGhcrTags,
-        sbomArtifactName: `${SbomPrefix}-sbom-${Artifact.artifactArch}`,
-        sbomFile: `${SbomPrefix}-${Artifact.artifactArch}.cdx.json`
+        aliasGhcrTags: AliasGhcrTags
       }
     })
   })
@@ -435,7 +399,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   })
 
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     image: Image,
     tag: Tag,
     version: Tag,
@@ -443,23 +407,6 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
     revision: Options.revision,
     source: Options.source,
     roles: Roles,
-    sbom: {
-      format: 'cyclonedx-json',
-      specVersion: '1.6',
-      predicateType: 'https://cyclonedx.org/bom',
-      rustToolchainVersion: '1.96.0',
-      roleScoped: true
-    },
-    supplyChain: {
-      sourceRepository: 'OxiBelt/OxiBelt',
-      oidcIssuer: 'https://token.actions.githubusercontent.com',
-      cosignVersion: 'v3.1.1',
-      provenancePredicateType: 'https://slsa.dev/provenance/v1',
-      provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1',
-      minimumSlsaBuildLevel: 2,
-      platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
-      indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
-    },
     artifacts: Artifacts,
     manifests: Manifests
   }

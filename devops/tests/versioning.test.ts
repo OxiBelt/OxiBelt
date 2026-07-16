@@ -276,7 +276,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
-  Assert.equal(Plan.schemaVersion, 4)
+  Assert.equal(Plan.schemaVersion, 5)
   Assert.deepEqual(Plan.roles, [
     {
       role: 'standalone',
@@ -286,9 +286,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
       user: '10001:10001',
       ports: ['8443/tcp', '8443/udp'],
-      embeddedAssets: true,
-      indexArtifactName: 'oxibelt-release-sbom-index',
-      indexFile: 'oxibelt-release-index.cdx.json'
+      embeddedAssets: true
     },
     {
       role: 'dataplane',
@@ -298,9 +296,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
       user: '10001:10001',
       ports: ['8443/tcp', '8443/udp'],
-      embeddedAssets: true,
-      indexArtifactName: 'oxibelt-dataplane-release-sbom-index',
-      indexFile: 'oxibelt-dataplane-release-index.cdx.json'
+      embeddedAssets: true
     },
     {
       role: 'controller',
@@ -310,9 +306,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt-gateway-controller'],
       user: '10001:10001',
       ports: [],
-      embeddedAssets: false,
-      indexArtifactName: 'oxibelt-gateway-controller-release-sbom-index',
-      indexFile: 'oxibelt-gateway-controller-release-index.cdx.json'
+      embeddedAssets: false
     },
     {
       role: 'tools',
@@ -322,9 +316,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibeltctl'],
       user: '10001:10001',
       ports: [],
-      embeddedAssets: false,
-      indexArtifactName: 'oxibelt-tools-release-sbom-index',
-      indexFile: 'oxibelt-tools-release-index.cdx.json'
+      embeddedAssets: false
     },
     {
       role: 'keysigner',
@@ -334,30 +326,13 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt-keysigner'],
       user: '10002:10002',
       ports: [],
-      embeddedAssets: false,
-      indexArtifactName: 'oxibelt-keysigner-release-sbom-index',
-      indexFile: 'oxibelt-keysigner-release-index.cdx.json'
+      embeddedAssets: false
     }
   ])
-  Assert.deepEqual(Plan.sbom, {
-    format: 'cyclonedx-json',
-    specVersion: '1.6',
-    predicateType: 'https://cyclonedx.org/bom',
-    rustToolchainVersion: '1.96.0',
-    roleScoped: true
-  })
-  Assert.deepEqual(Plan.supplyChain, {
-    sourceRepository: 'OxiBelt/OxiBelt',
-    oidcIssuer: 'https://token.actions.githubusercontent.com',
-    cosignVersion: 'v3.1.1',
-    provenancePredicateType: 'https://slsa.dev/provenance/v1',
-    provenanceBuildType: 'https://actions.github.io/buildtypes/workflow/v1',
-    minimumSlsaBuildLevel: 2,
-    platformBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml',
-    indexBuilderWorkflow: 'OxiBelt/OxiBelt/.github/workflows/release.yml'
-  })
-  Assert.equal(Amd64.sbomArtifactName, 'oxibelt-release-sbom-amd64')
-  Assert.equal(Amd64.sbomFile, 'oxibelt-release-amd64.cdx.json')
+  Assert.equal('sbom' in Plan, false)
+  Assert.equal('supplyChain' in Plan, false)
+  Assert.equal('sbomArtifactName' in Amd64, false)
+  Assert.equal('sbomFile' in Amd64, false)
 })
 
 test('image plan defines exact role-specific repositories, inventories, and artifacts', () => {

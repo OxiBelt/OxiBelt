@@ -352,11 +352,12 @@ and API access remain an explicit chart-level discovery choice. The preset does
 select a three-replica minimum, managed hostname/zone distribution, preferred
 same-release anti-affinity, a one-Pod PDB disruption budget, and the fixed
 300-second `SIGUSR1` pre-stop drain inside a 360-second grace period. It
-requires Kubernetes 1.31 or later. It does not turn release supply-chain
-policy into a property of the runtime profile. OCI-linked release signatures,
-SLSA provenance, SBOM attestations, and the optional Kubernetes admission
-example are independent deployment controls; see [Release Supply-Chain
-Verification](SupplyChain.md).
+requires Kubernetes 1.31 or later. It does not turn release-image trust policy
+into a property of the runtime profile. The current release contract relies on
+operator-approved immutable image digests and does not publish supported
+release signatures, provenance, or SBOM attestations. See [Release Image Trust
+and Migration](SupplyChain.md), especially before upgrading a cluster whose
+fail-closed admission policy requires historical OxiBelt referrers.
 
 ## Includes
 
