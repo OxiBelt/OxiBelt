@@ -353,11 +353,14 @@ select a three-replica minimum, managed hostname/zone distribution, preferred
 same-release anti-affinity, a one-Pod PDB disruption budget, and the fixed
 300-second `SIGUSR1` pre-stop drain inside a 360-second grace period. It
 requires Kubernetes 1.31 or later. It does not turn release-image trust policy
-into a property of the runtime profile. The current release contract relies on
-operator-approved immutable image digests and does not publish supported
-release signatures, provenance, or SBOM attestations. See [Release Image Trust
-and Migration](SupplyChain.md), especially before upgrading a cluster whose
-fail-closed admission policy requires historical OxiBelt referrers.
+into a property of the runtime profile. Release CI creates and verifies GitHub
+API-hosted keyless SLSA provenance and CycloneDX SBOM attestations for canonical
+image digests, but those bundles are not GHCR OCI referrers or an
+OxiBelt-managed Kubernetes admission policy. Operators still verify, approve,
+and pin immutable image digests and own freshness, rollback, vulnerability, and
+admission policy. See [Release Image Trust and
+Attestations](SupplyChain.md), especially before upgrading a cluster whose
+fail-closed policy expects registry-resident historical referrers.
 
 ## Includes
 

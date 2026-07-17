@@ -30,14 +30,15 @@ keysigner, Node.js, package manager, or compiler. Use the standalone
 or compatibility helpers are intentionally required. Enabling Admin or Person
 Proof does not require the Gateway Controller or an image change.
 
-The current release contract does not publish supported signatures, provenance,
-or release SBOM attestations for these images. Historical digests may still
-have OCI referrers from earlier releases, but those referrers do not establish
-coverage for a new digest. A cluster with a fail-closed policy that requires the
-former evidence will reject new unattested OxiBelt images. Keep the last
-accepted digest pinned until an explicitly approved replacement policy has been
-tested; do not change the webhook to fail open merely to unblock an upgrade.
-See [Release Image Trust and Migration](SupplyChain.md).
+The release workflow creates and verifies GitHub API-hosted keyless SLSA
+provenance and CycloneDX SBOM attestations before promoting these image digests.
+They are not Cosign signatures or GHCR OCI referrers, and OxiBelt does not ship
+a Kubernetes admission policy that fetches the API bundles. Historical digests
+may still have unrelated OCI referrers from earlier releases. Keep the last
+accepted digest pinned until any operator-owned replacement admission policy
+has been approved and tested; do not change a webhook to fail open merely to
+unblock an upgrade. See [Release Image Trust and
+Attestations](SupplyChain.md).
 
 ## Data-Plane Chart
 

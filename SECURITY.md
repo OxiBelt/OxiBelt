@@ -137,14 +137,17 @@ artifact is unambiguous. Unqualified `oxibelt:latest`, forks, mirrors, local
 builds, test helper images, and third-party base images are not official OxiBelt
 images.
 
-The current release contract does not publish supported keyless signatures,
-build-provenance attestations, or release SBOM attestations for these images.
-Use [Release Image Trust and Migration](docs/SupplyChain.md) to resolve and
-record an approved immutable digest and to migrate policies that required the
-former evidence. Historical OCI referrers can remain attached to older digests;
-their presence does not establish evidence coverage for current releases. A
-fail-closed admission policy that still requires those referrers will reject a
-new unattested image and must not be weakened silently to unblock deployment.
+The release workflow creates and verifies GitHub API-hosted keyless SLSA
+provenance and CycloneDX SBOM attestations for every canonical platform and
+multi-architecture index digest. These bundles are not Cosign signatures or
+GHCR OCI referrers. Use [Release Image Trust and
+Attestations](docs/SupplyChain.md) to resolve and verify an approved immutable
+digest with the exact repository, workflow, source ref, source revision,
+subject, predicate, and trusted-timestamp policy. Historical OCI referrers can
+remain attached to older digests, but their presence does not establish current
+API attestation coverage. OxiBelt does not ship a Kubernetes admission policy
+for these API-only records; do not weaken a fail-closed operator policy merely
+to unblock deployment.
 
 ## Experimental Features
 

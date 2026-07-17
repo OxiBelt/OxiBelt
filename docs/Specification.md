@@ -81,13 +81,16 @@ also implements certificate-to-IPM identity binding (P1-12), single-instance
 general mutation idempotency (P1-13), and bounded, versioned, tamper-evident
 audit acknowledgements (P1-14). Release workflows publish role-specific
 platform images and multi-architecture indexes with explicit executable
-inventories. The current release contract does not publish supported keyless
-signatures, build provenance, or release SBOM attestations, and it does not
-provide an OxiBelt-managed signature/provenance admission gate. Operators must
-approve and pin each role's immutable digest. Publisher authentication,
-base-image digest pinning (P2-2), vulnerability admission thresholds,
-freshness, rollback prevention, and reproducible-build proof remain separate
-controls.
+inventories. They create and verify GitHub API-hosted keyless SLSA provenance
+and CycloneDX SBOM attestations for every canonical platform and index digest
+before promotion. Platform SBOMs carry detailed component inventory; index
+SBOMs identify the three canonical child digests and retain their inventories
+as separate platform attestations. The bundles are not GHCR OCI referrers, and
+the project does not provide an OxiBelt-managed signature/provenance admission
+gate. Operators must verify, approve, and pin each role's immutable digest.
+Base-image digest pinning (P2-2), vulnerability admission thresholds,
+freshness, rollback prevention, code-review proof, and reproducible-build proof
+remain separate controls.
 
 ## Request Pipeline
 

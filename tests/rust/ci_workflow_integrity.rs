@@ -2473,7 +2473,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let arch_workflow = release_image_arch_workflow_text();
   let parsed_workflow: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
-  let _: serde_json::Value = serde_saphyr::from_str(&arch_workflow)
+  let parsed_arch_workflow: serde_json::Value = serde_saphyr::from_str(&arch_workflow)
     .expect("release image architecture workflow should parse as YAML");
   let jobs = parse_jobs(&workflow);
   let arch_jobs = parse_jobs(&arch_workflow);
@@ -2482,21 +2482,26 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     jobs.keys().cloned().collect::<BTreeSet<_>>(),
     BTreeSet::from([
       "ghcr-index-promote".to_owned(),
+      "ghcr-index-attest".to_owned(),
+      "ghcr-index-sbom".to_owned(),
+      "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
       "release-image-arch".to_owned(),
       "validate".to_owned(),
     ]),
-    "release workflow should contain only validation, reusable platform publication, index publication, and index promotion"
+    "release workflow should contain only validation and the attestation-gated platform/index release chains"
   );
   assert_eq!(
     arch_jobs.keys().cloned().collect::<BTreeSet<_>>(),
     BTreeSet::from([
       "build".to_owned(),
+      "attest".to_owned(),
       "promote".to_owned(),
       "publish".to_owned(),
       "scan".to_owned(),
+      "verify".to_owned(),
     ]),
-    "reusable architecture workflow should contain only build, scan, canonical publish, and alias promotion"
+    "reusable architecture workflow should contain the attestation-gated platform release chain"
   );
 
   let validate_job = jobs
@@ -2511,6 +2516,15 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let index_promote_job = jobs
     .get("ghcr-index-promote")
     .expect("release workflow should define ghcr-index-promote");
+  let index_sbom_job = jobs
+    .get("ghcr-index-sbom")
+    .expect("release workflow should define ghcr-index-sbom");
+  let index_attest_job = jobs
+    .get("ghcr-index-attest")
+    .expect("release workflow should define ghcr-index-attest");
+  let index_verify_job = jobs
+    .get("ghcr-index-verify")
+    .expect("release workflow should define ghcr-index-verify");
   let build_job = arch_jobs
     .get("build")
     .expect("reusable release image workflow should define build");
@@ -2523,6 +2537,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   let promote_job = arch_jobs
     .get("promote")
     .expect("reusable release image workflow should define promote");
+  let attest_job = arch_jobs
+    .get("attest")
+    .expect("reusable release image workflow should define attest");
+  let verify_job = arch_jobs
+    .get("verify")
+    .expect("reusable release image workflow should define verify");
 
   assert!(validate_job.needs.is_empty());
   assert_eq!(arch_caller_job.needs, vec!["validate".to_owned()]);
@@ -2530,23 +2550,59 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     manifest_job.needs,
     vec!["validate".to_owned(), "release-image-arch".to_owned()]
   );
-  assert_eq!(
-    index_promote_job.needs,
-    vec!["ghcr-manifest-publish".to_owned()]
-  );
   assert!(build_job.needs.is_empty());
   assert_eq!(scan_job.needs, vec!["build".to_owned()]);
   assert_eq!(publish_job.needs, vec!["scan".to_owned()]);
-  assert_eq!(promote_job.needs, vec!["publish".to_owned()]);
+  assert_eq!(attest_job.needs, vec!["publish".to_owned()]);
+  assert_eq!(
+    verify_job.needs,
+    vec!["publish".to_owned(), "attest".to_owned()]
+  );
+  assert_eq!(
+    promote_job.needs,
+    vec!["publish".to_owned(), "verify".to_owned()]
+  );
+  assert_eq!(
+    index_sbom_job.needs,
+    vec!["validate".to_owned(), "ghcr-manifest-publish".to_owned()]
+  );
+  assert_eq!(
+    index_attest_job.needs,
+    vec![
+      "validate".to_owned(),
+      "ghcr-manifest-publish".to_owned(),
+      "ghcr-index-sbom".to_owned()
+    ]
+  );
+  assert_eq!(
+    index_verify_job.needs,
+    vec![
+      "validate".to_owned(),
+      "ghcr-manifest-publish".to_owned(),
+      "ghcr-index-attest".to_owned()
+    ]
+  );
+  assert_eq!(
+    index_promote_job.needs,
+    vec![
+      "ghcr-manifest-publish".to_owned(),
+      "ghcr-index-verify".to_owned()
+    ]
+  );
 
   let validate_job_text = workflow_job_text(&workflow, "validate");
   let arch_caller_job_text = workflow_job_text(&workflow, "release-image-arch");
   let manifest_job_text = workflow_job_text(&workflow, "ghcr-manifest-publish");
   let index_promote_job_text = workflow_job_text(&workflow, "ghcr-index-promote");
+  let index_sbom_job_text = workflow_job_text(&workflow, "ghcr-index-sbom");
+  let index_attest_job_text = workflow_job_text(&workflow, "ghcr-index-attest");
+  let index_verify_job_text = workflow_job_text(&workflow, "ghcr-index-verify");
   let build_job_text = workflow_job_text(&arch_workflow, "build");
   let scan_job_text = workflow_job_text(&arch_workflow, "scan");
   let publish_job_text = workflow_job_text(&arch_workflow, "publish");
   let promote_job_text = workflow_job_text(&arch_workflow, "promote");
+  let attest_job_text = workflow_job_text(&arch_workflow, "attest");
+  let verify_job_text = workflow_job_text(&arch_workflow, "verify");
 
   let caller_matrix = &parsed_workflow["jobs"]["release-image-arch"]["strategy"]["matrix"];
   let caller_roles = caller_matrix["image_role"]
@@ -2606,6 +2662,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for job_id in [
     "release-image-arch",
     "ghcr-manifest-publish",
+    "ghcr-index-sbom",
+    "ghcr-index-attest",
+    "ghcr-index-verify",
     "ghcr-index-promote",
   ] {
     let includes = parsed_workflow["jobs"][job_id]["strategy"]["matrix"]["include"]
@@ -2640,6 +2699,13 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "corepack prepare pnpm@11.13.1 --activate",
     "pnpm install --frozen-lockfile",
+    "pnpm exec tsc devops/sources/release_sbom.ts",
+    "--ignoreConfig",
+    "--module NodeNext",
+    "--types node",
+    "release_sbom.mjs",
+    "OXIBELT_RELEASE_HELPER=\"file://${helper_root}/release_sbom.mjs\"",
+    "await import(process.env.OXIBELT_RELEASE_HELPER)",
     "pnpm run versioning:release",
     "git rev-parse \"${release_ref}^{commit}\"",
     "releases must run from ${release_ref}@${tag_commit}",
@@ -2652,6 +2718,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "image-plan.json",
     "install -D -m 0644 Cargo.toml \"${workspace_root}/Cargo.toml\"",
     "cargo metadata --locked --no-deps --format-version 1",
+    "${metadata_root}/helper/release_sbom.mjs",
   ] {
     assert!(
       validate_job_text.contains(expected),
@@ -2707,8 +2774,12 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "actions: read",
     "contents: read",
-    "Checkout release ref",
-    "ref: ${{ inputs.release_ref }}",
+    "Checkout release revision",
+    "ref: ${{ inputs.release_revision }}",
+    "Validate immutable release checkout",
+    "if [[ ! \"${EXPECTED_REVISION}\" =~ ^[0-9a-f]{40}$ ]]",
+    "actual_revision=\"$(git rev-parse HEAD)\"",
+    "if [[ \"${actual_revision}\" != \"${EXPECTED_REVISION}\" ]]",
     "Apply release metadata",
     "tests/scripts/build-docker-image-artifact.sh",
     "Validate Docker image artifact",
@@ -2722,6 +2793,22 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "reusable build job should include {expected}"
     );
   }
+  assert!(
+    !build_job_text.contains("ref: ${{ inputs.release_ref }}"),
+    "reusable build checkout must not re-resolve the mutable release ref"
+  );
+  let build_steps = parsed_arch_workflow["jobs"]["build"]["steps"]
+    .as_array()
+    .expect("reusable build job should define steps");
+  assert_eq!(
+    build_steps[0]["name"].as_str(),
+    Some("Checkout release revision")
+  );
+  assert_eq!(
+    build_steps[1]["name"].as_str(),
+    Some("Validate immutable release checkout"),
+    "immutable checkout validation must run immediately after checkout"
+  );
   for removed in [
     "packages: write",
     "GITHUB_TOKEN",
@@ -2749,11 +2836,20 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "vuln-type: os,library",
     "severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
     "exit-code: \"0\"",
+    "Generate CycloneDX platform SBOM",
+    "format: cyclonedx",
+    "-raw.cdx.json",
     "Validate release binaries",
     "docker cp",
     "select(.role == $role) | .binaries[]",
     "{schemaVersion: 1, binaries: $binaries}",
+    "Validate and enrich platform SBOM",
+    "release_sbom.mjs\" platform",
+    "--image-digest \"${image_digest}\"",
+    "--artifact-arch \"${OXIBELT_ARTIFACT_ARCH}\"",
     "Upload Trivy vulnerability report",
+    "Upload platform SBOM",
+    "-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}",
   ] {
     assert!(
       scan_job_text.contains(expected),
@@ -2762,8 +2858,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   }
   assert_eq!(
     scan_job_text.matches("version: v0.72.0").count(),
-    1,
-    "release workflow should run only the report-only vulnerability scan"
+    2,
+    "release workflow should run one vulnerability scan and one CycloneDX inventory scan"
   );
   for removed in [
     "packages: read",
@@ -2771,15 +2867,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "GITHUB_TOKEN",
     "docker login ghcr.io",
     "docker push",
-    "CycloneDX",
-    "cyclonedx",
-    "SBOM",
-    "sbom",
-    "release_sbom",
   ] {
     assert!(
       !scan_job_text.contains(removed),
-      "reusable scan job should not publish or generate release attestations: {removed}"
+      "reusable scan job should remain registry-unprivileged: {removed}"
     );
   }
 
@@ -2806,11 +2897,84 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     );
   }
   for removed in [
-    "Checkout release ref",
+    "Checkout release revision",
     "actions/checkout",
     "tests/scripts/build-docker-image-artifact.sh",
   ] {
     assert!(!publish_job_text.contains(removed));
+  }
+
+  for expected in [
+    "attestations: write",
+    "id-token: write",
+    "packages: read",
+    "Download platform SBOM",
+    "Validate immutable platform attestation subject",
+    "canonical platform tag ${canonical_tag} resolved to ${resolved_digest}, expected ${DIGEST}",
+    "and ([.metadata.component.properties[].name] | length == 9 and (unique | length == 9))",
+    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "Publish signed platform provenance",
+    "Publish signed platform SBOM",
+    "subject-name: ${{ inputs.image }}",
+    "subject-digest: ${{ needs.publish.outputs.digest }}",
+    "sbom-path:",
+    "push-to-registry: false",
+  ] {
+    assert!(
+      attest_job_text.contains(expected),
+      "platform attestation job should include {expected}"
+    );
+  }
+  for removed in [
+    "actions/checkout",
+    "release_sbom.mjs",
+    "node ",
+    "packages: write",
+  ] {
+    assert!(
+      !attest_job_text.contains(removed),
+      "OIDC-bearing platform attestation job must not include {removed}"
+    );
+  }
+
+  for expected in [
+    "attestations: read",
+    "packages: read",
+    "Verify GitHub API platform attestations",
+    "for attempt in 1 2 3 4",
+    "local attempt delay=5",
+    "delay=$((delay * 2))",
+    "gh attestation verify",
+    "--repo OxiBelt/OxiBelt",
+    "--signer-workflow OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml",
+    "--signer-digest \"${RELEASE_REVISION}\"",
+    "--source-digest \"${RELEASE_REVISION}\"",
+    "--source-ref \"${RELEASE_REF}\"",
+    "--cert-oidc-issuer https://token.actions.githubusercontent.com",
+    "--deny-self-hosted-runners",
+    "--limit 100",
+    "--format json",
+    "--predicate-type https://slsa.dev/provenance/v1",
+    "--predicate-type https://cyclonedx.org/bom",
+    "--workflow-path .github/workflows/release.yml",
+    "release_sbom.mjs\" \"${args[@]}\"",
+  ] {
+    assert!(
+      verify_job_text.contains(expected),
+      "platform verification job should include {expected}"
+    );
+  }
+  for removed in [
+    "packages: write",
+    "attestations: write",
+    "id-token: write",
+    "--cert-identity",
+    "--bundle-from-oci",
+  ] {
+    assert!(
+      !verify_job_text.contains(removed),
+      "platform verification job must not include {removed}"
+    );
   }
 
   for expected in [
@@ -2836,12 +3000,13 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "refusing to replace canonical index",
     "actual_descriptors=",
     "expected_descriptors=",
+    "child_descriptors=",
     "os: .platform.os",
     "architecture: .platform.architecture",
     "variant: (.platform.variant // null)",
     "canonical index ${canonical_tag} resolved to ${canonical_digest}, expected ${digest}",
     "name: ${{ matrix.artifact_prefix }}-release-index-metadata",
-    "{schemaVersion: 1, role: $role, image: $image, digest: $digest}",
+    "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
   ] {
     assert!(
       manifest_job_text.contains(expected),
@@ -2850,9 +3015,113 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   }
 
   for expected in [
+    "actions: read",
+    "contents: read",
+    "Download release metadata",
+    "Download immutable index metadata",
+    "Download platform SBOMs",
+    "pattern: ${{ matrix.artifact_prefix }}-release-sbom-*",
+    "merge-multiple: true",
+    "Validate platform SBOMs and compose index SBOM",
+    "release_sbom.mjs\" index",
+    "--platform-sbom \"${PLATFORM_SBOMS}/${OXIBELT_ARTIFACT_PREFIX}-release-amd64.cdx.json\"",
+    "--platform-sbom \"${PLATFORM_SBOMS}/${OXIBELT_ARTIFACT_PREFIX}-release-arm64.cdx.json\"",
+    "--platform-sbom \"${PLATFORM_SBOMS}/${OXIBELT_ARTIFACT_PREFIX}-release-riscv64.cdx.json\"",
+    "Upload index SBOM",
+    "-release-index-sbom",
+  ] {
+    assert!(
+      index_sbom_job_text.contains(expected),
+      "index SBOM job should include {expected}"
+    );
+  }
+  for removed in [
+    "packages: read",
+    "packages: write",
+    "attestations:",
+    "id-token:",
+  ] {
+    assert!(
+      !index_sbom_job_text.contains(removed),
+      "index SBOM composition must remain unprivileged: {removed}"
+    );
+  }
+
+  for expected in [
+    "attestations: write",
+    "id-token: write",
+    "packages: read",
+    "Validate immutable index attestation subject",
+    ".schemaVersion == 2",
+    "[.children[].artifactArch] == [\"amd64\", \"arm64\", \"riscv64\"]",
+    "dependsOn: [$index[0].children[].digest | $image + \"@\" + .]",
+    "release index requires exactly two canonical tags",
+    "canonical index tag ${canonical_tag} resolved to ${resolved_digest}, expected ${digest}",
+    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "Publish signed index provenance",
+    "Publish signed index SBOM",
+    "subject-name: ${{ matrix.image }}",
+    "subject-digest: ${{ steps.identity.outputs.digest }}",
+    "push-to-registry: false",
+  ] {
+    assert!(
+      index_attest_job_text.contains(expected),
+      "index attestation job should include {expected}"
+    );
+  }
+  for removed in [
+    "actions/checkout",
+    "release_sbom.mjs",
+    "node ",
+    "packages: write",
+  ] {
+    assert!(
+      !index_attest_job_text.contains(removed),
+      "OIDC-bearing index attestation job must not include {removed}"
+    );
+  }
+
+  for expected in [
+    "attestations: read",
+    "packages: read",
+    "Verify GitHub API index attestations",
+    "for attempt in 1 2 3 4",
+    "gh attestation verify",
+    "--signer-workflow OxiBelt/OxiBelt/.github/workflows/release.yml",
+    "--signer-digest \"${RELEASE_REVISION}\"",
+    "--source-digest \"${RELEASE_REVISION}\"",
+    "--source-ref \"${RELEASE_REF}\"",
+    "--cert-oidc-issuer https://token.actions.githubusercontent.com",
+    "--deny-self-hosted-runners",
+    "--limit 100",
+    "--format json",
+    "--predicate-type https://slsa.dev/provenance/v1",
+    "--predicate-type https://cyclonedx.org/bom",
+    "--workflow-path .github/workflows/release.yml",
+    "release_sbom.mjs\" \"${args[@]}\"",
+  ] {
+    assert!(
+      index_verify_job_text.contains(expected),
+      "index verification job should include {expected}"
+    );
+  }
+  for removed in [
+    "packages: write",
+    "attestations: write",
+    "id-token: write",
+    "--cert-identity",
+    "--bundle-from-oci",
+  ] {
+    assert!(
+      !index_verify_job_text.contains(removed),
+      "index verification job must not include {removed}"
+    );
+  }
+
+  for expected in [
     "packages: write",
     "Download immutable index metadata",
-    ".schemaVersion == 1",
+    ".schemaVersion == 2",
     ".role == $role",
     ".image == $image",
     ".digest | test(\"^sha256:[0-9a-f]{64}$\")",
@@ -2877,6 +3146,98 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "reusable workflow should grant package-write only to canonical publish and alias promotion"
   );
 
+  assert_eq!(
+    parsed_workflow["jobs"]["release-image-arch"]["permissions"],
+    serde_json::json!({
+      "actions": "read",
+      "attestations": "write",
+      "contents": "read",
+      "id-token": "write",
+      "packages": "write"
+    }),
+    "the reusable caller should expose only the permission ceiling required by its inner jobs"
+  );
+  for (job_id, expected) in [
+    (
+      "ghcr-manifest-publish",
+      serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
+    ),
+    (
+      "ghcr-index-sbom",
+      serde_json::json!({"actions": "read", "contents": "read"}),
+    ),
+    (
+      "ghcr-index-attest",
+      serde_json::json!({
+        "actions": "read",
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
+        "packages": "read"
+      }),
+    ),
+    (
+      "ghcr-index-verify",
+      serde_json::json!({
+        "actions": "read",
+        "attestations": "read",
+        "contents": "read",
+        "packages": "read"
+      }),
+    ),
+    (
+      "ghcr-index-promote",
+      serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
+    ),
+  ] {
+    assert_eq!(
+      parsed_workflow["jobs"][job_id]["permissions"], expected,
+      "main release job {job_id} should keep exact least-privilege permissions"
+    );
+  }
+  for (job_id, expected) in [
+    (
+      "build",
+      serde_json::json!({"actions": "read", "contents": "read"}),
+    ),
+    (
+      "scan",
+      serde_json::json!({"actions": "read", "contents": "read"}),
+    ),
+    (
+      "publish",
+      serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
+    ),
+    (
+      "attest",
+      serde_json::json!({
+        "actions": "read",
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
+        "packages": "read"
+      }),
+    ),
+    (
+      "verify",
+      serde_json::json!({
+        "actions": "read",
+        "attestations": "read",
+        "contents": "read",
+        "packages": "read"
+      }),
+    ),
+    (
+      "promote",
+      serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
+    ),
+  ] {
+    assert_eq!(
+      parsed_arch_workflow["jobs"][job_id]["permissions"], expected,
+      "reusable release job {job_id} should keep exact least-privilege permissions"
+    );
+  }
+
   for (job_name, job_text) in [
     ("platform build", &build_job_text),
     ("platform scan", &scan_job_text),
@@ -2898,38 +3259,47 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     );
   }
 
+  assert_eq!(
+    workflow
+      .matches("actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1")
+      .count()
+      + arch_workflow
+        .matches("actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1")
+        .count(),
+    4,
+    "the two workflow templates should publish provenance and SBOM attestations for platform and index matrices"
+  );
+  assert_eq!(
+    workflow.matches("push-to-registry: false").count()
+      + arch_workflow.matches("push-to-registry: false").count(),
+    4,
+    "every attestation action must keep bundles in the GitHub Attestations API"
+  );
+
   for removed in [
-    "actions/attest",
     "actions/attest-sbom",
     "sigstore/cosign-installer",
     "cosign sign",
     "cosign verify",
-    "gh attestation",
-    "attestations: write",
-    "id-token: write",
+    "push-to-registry: true",
+    "--bundle-from-oci",
+    "--cert-identity",
     "sbom_artifact_name",
     "sbom_file",
-    "release_sbom",
-    "release-sbom",
     ".supplyChain",
-    "CycloneDX",
-    "cyclonedx",
-    "ghcr-index-sbom",
-    "ghcr-index-attest",
-    "ghcr-index-verify",
     "ghcr-index-admission-verify",
     "tests/scripts/check-image-admission-policy.sh",
     "tests/scripts/run-image-admission-policy.sh",
   ] {
     assert!(
       !workflow.contains(removed) && !arch_workflow.contains(removed),
-      "release workflows should not retain signing, provenance, release-SBOM, or admission surface: {removed}"
+      "release workflows should not retain the superseded or prohibited supply-chain surface: {removed}"
     );
   }
 
   for removed in [
     "actions/checkout",
-    "Checkout release ref",
+    "Checkout release revision",
     "tests/scripts/build-docker-image-artifact.sh",
   ] {
     assert!(
@@ -2979,15 +3349,28 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Publish canonical GHCR image",
     "Push canonical arch-specific GHCR tag",
     "Validate release binaries",
+    "Generate CycloneDX platform SBOM",
+    "Publish signed platform provenance",
+    "Publish signed platform SBOM",
+    "Verify GitHub API platform attestations",
     "Promote canonical GHCR aliases",
     "ghcr-manifest-publish",
     "Publish canonical multi-arch manifests",
+    "ghcr-index-sbom",
+    "Compose multi-arch index SBOM",
+    "ghcr-index-attest",
+    "Publish signed index provenance",
+    "Publish signed index SBOM",
+    "ghcr-index-verify",
+    "Verify GitHub API index attestations",
     "ghcr-index-promote",
     "Promote canonical multi-arch aliases",
     "if plan[\"schemaVersion\"] != 5:",
     "release plan must contain exactly 25 unique role/architecture artifacts",
     "release plan must contain exactly 10 unique role manifests",
-    "{schemaVersion: 1, role: $role, image: $image, digest: $digest}",
+    "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
+    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "push-to-registry: false",
     ":latest",
     r#"aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []"#,
   ] {
@@ -3001,14 +3384,10 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "release workflow should not download every image tar during manifest publishing"
   );
   for removed in [
-    "ghcr-index-sbom",
-    "ghcr-index-attest",
-    "ghcr-index-verify",
     "ghcr-index-admission-verify",
-    "release-sbom",
     "cosign",
-    "attestations: write",
-    "id-token: write",
+    "push-to-registry: true",
+    "--bundle-from-oci",
   ] {
     assert!(
       !workflow.contains(removed) && !arch_workflow.contains(removed),
