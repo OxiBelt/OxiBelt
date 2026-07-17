@@ -1,0 +1,475 @@
+name: Close Dependabot pull requests
+
+on:
+  workflow_run:
+    workflows:
+      - "Check OxiBelt"
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type close-all-open-dependabot-prs to run the confirmed backfill
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  authenticate:
+    name: Authenticate Dependabot trigger
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+          github.event.workflow_run.actor.id == 49699333
+        )
+      )
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      authorized: ${{ steps.authenticate.outputs.result }}
+
+    steps:
+      - name: Authenticate repository and trigger
+        id: authenticate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          result-encoding: string
+          script: |
+            const owner = 'OxiBelt';
+            const repo = 'OxiBelt';
+            const repositoryName = `${owner}/${repo}`;
+            const checkWorkflowPath = '.github/workflows/check-oxibelt.yml';
+            const confirmation = 'close-all-open-dependabot-prs';
+            const dependabotLogin = 'dependabot[bot]';
+            const dependabotId = 49699333;
+
+            const deny = message => {
+              core.setFailed(message);
+              return 'false';
+            };
+
+            if (`${context.repo.owner}/${context.repo.repo}` !== repositoryName) {
+              return deny('Dependabot retirement is restricted to the canonical repository.');
+            }
+
+            const { data: repository } = await github.rest.repos.get({ owner, repo });
+            if (repository.full_name !== repositoryName) {
+              return deny('The authenticated repository identity does not match the canonical repository.');
+            }
+
+            if (context.eventName === 'workflow_dispatch') {
+              const suppliedConfirmation = context.payload.inputs?.confirmation;
+              const expectedRef = `refs/heads/${repository.default_branch}`;
+              if (context.ref !== expectedRef || suppliedConfirmation !== confirmation) {
+                return deny('Manual backfill requires the default branch and the exact confirmation value.');
+              }
+              return 'true';
+            }
+
+            if (context.eventName !== 'workflow_run') {
+              return deny('Unsupported Dependabot retirement trigger.');
+            }
+
+            const workflowRun = context.payload.workflow_run;
+            if (
+              workflowRun?.event !== 'pull_request' ||
+              workflowRun?.path !== checkWorkflowPath ||
+              workflowRun?.repository?.id !== repository.id ||
+              workflowRun?.actor?.login !== dependabotLogin ||
+              workflowRun?.actor?.id !== dependabotId ||
+              workflowRun?.actor?.type !== 'Bot'
+            ) {
+              return deny('The completed workflow run is not an authenticated Dependabot pull request run.');
+            }
+
+            const { data: dependabot } = await github.rest.users.getByUsername({
+              username: dependabotLogin
+            });
+            if (
+              dependabot.login !== dependabotLogin ||
+              dependabot.id !== dependabotId ||
+              dependabot.type !== 'Bot'
+            ) {
+              return deny('The live Dependabot identity does not match the expected canonical bot.');
+            }
+
+            const associatedPullRequests = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              {
+                owner,
+                repo,
+                commit_sha: workflowRun.head_sha,
+                per_page: 100
+              }
+            );
+            const hasCanonicalDependabotPullRequest = associatedPullRequests.some(pullRequest =>
+              pullRequest.user?.login === dependabot.login &&
+              pullRequest.user?.id === dependabot.id &&
+              pullRequest.user?.type === 'Bot' &&
+              pullRequest.base?.repo?.id === repository.id
+            );
+            if (!hasCanonicalDependabotPullRequest) {
+              return deny('The completed workflow commit is not associated with a canonical Dependabot pull request.');
+            }
+
+            return 'true';
+
+  reconcile:
+    name: Create issues and close selected Dependabot pull requests
+    needs:
+      - authenticate
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      needs.authenticate.outputs.authorized == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+      pull-requests: write
+    concurrency:
+      group: dependabot-pr-retirement
+      cancel-in-progress: false
+
+    steps:
+      - name: Reconcile selected open Dependabot pull requests
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = 'OxiBelt';
+            const repo = 'OxiBelt';
+            const repositoryName = `${owner}/${repo}`;
+            const dependabotLogin = 'dependabot[bot]';
+            const dependabotId = 49699333;
+            const actionsBotLogin = 'github-actions[bot]';
+            const actionsBotId = 41898282;
+            const maximumPasses = 3;
+            const runUrl = `${context.serverUrl}/${repositoryName}/actions/runs/${context.runId}`;
+            const outcomes = new Map();
+            const terminalFailures = new Set();
+
+            const safeFailureCode = error => {
+              if (typeof error?.safeCode === 'string') {
+                return error.safeCode;
+              }
+              if (Number.isInteger(error?.status)) {
+                return `github_api_status_${error.status}`;
+              }
+              return 'unexpected_error';
+            };
+
+            const fail = (safeCode, issueNumber = null) => {
+              const error = new Error(safeCode);
+              error.safeCode = safeCode;
+              error.issueNumber = issueNumber;
+              throw error;
+            };
+
+            const { data: repository } = await github.rest.repos.get({ owner, repo });
+            if (repository.full_name !== repositoryName) {
+              core.setFailed('The authenticated repository identity does not match the canonical repository.');
+              return;
+            }
+
+            const [{ data: dependabot }, { data: actionsBot }] = await Promise.all([
+              github.rest.users.getByUsername({ username: dependabotLogin }),
+              github.rest.users.getByUsername({ username: actionsBotLogin })
+            ]);
+            if (
+              dependabot.login !== dependabotLogin ||
+              dependabot.id !== dependabotId ||
+              dependabot.type !== 'Bot'
+            ) {
+              core.setFailed('The live Dependabot identity does not match the expected canonical bot.');
+              return;
+            }
+            if (
+              actionsBot.login !== actionsBotLogin ||
+              actionsBot.id !== actionsBotId ||
+              actionsBot.type !== 'Bot'
+            ) {
+              core.setFailed('The live GitHub Actions identity does not match the expected canonical bot.');
+              return;
+            }
+
+            const isCanonicalDependabotPullRequest = pullRequest =>
+              pullRequest.state === 'open' &&
+              pullRequest.merged_at === null &&
+              pullRequest.user?.login === dependabot.login &&
+              pullRequest.user?.id === dependabot.id &&
+              pullRequest.user?.type === 'Bot' &&
+              pullRequest.base?.repo?.id === repository.id;
+
+            const listOpenDependabotPullRequestNumbers = async () => {
+              const pullRequests = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'open',
+                sort: 'created',
+                direction: 'asc',
+                per_page: 100
+              });
+              return pullRequests
+                .filter(isCanonicalDependabotPullRequest)
+                .map(pullRequest => pullRequest.number)
+                .sort((left, right) => left - right);
+            };
+
+            const listTargetDependabotPullRequestNumbers = async () => {
+              if (context.eventName === 'workflow_dispatch') {
+                return listOpenDependabotPullRequestNumbers();
+              }
+              if (context.eventName !== 'workflow_run') {
+                fail('unsupported_reconciliation_trigger');
+              }
+
+              const associatedPullRequests = await github.paginate(
+                github.rest.repos.listPullRequestsAssociatedWithCommit,
+                {
+                  owner,
+                  repo,
+                  commit_sha: context.payload.workflow_run.head_sha,
+                  per_page: 100
+                }
+              );
+              return associatedPullRequests
+                .filter(isCanonicalDependabotPullRequest)
+                .map(pullRequest => pullRequest.number)
+                .sort((left, right) => left - right);
+            };
+
+            const issueMarker = pullNumber =>
+              `<!-- oxibelt:dependabot-pr-retirement:v1:repository=${repository.id}:pr=${pullNumber} -->`;
+            const pullRequestUrl = pullNumber =>
+              `${context.serverUrl}/${repositoryName}/pull/${pullNumber}`;
+
+            const listMarkerIssues = async marker => {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                state: 'all',
+                per_page: 100
+              });
+              return issues.filter(issue =>
+                issue.pull_request === undefined &&
+                typeof issue.body === 'string' &&
+                issue.body.includes(marker)
+              );
+            };
+
+            const validateTrackerOwner = tracker => {
+              if (
+                tracker.user?.login !== actionsBot.login ||
+                tracker.user?.id !== actionsBot.id ||
+                tracker.user?.type !== 'Bot'
+              ) {
+                fail('tracker_marker_owner_mismatch');
+              }
+            };
+
+            const hasDependenciesLabel = tracker => tracker.labels.some(label =>
+              typeof label === 'string' ? label === 'dependencies' : label.name === 'dependencies'
+            );
+
+            const ensureTrackerIssue = async pullNumber => {
+              const marker = issueMarker(pullNumber);
+              let markerIssues = await listMarkerIssues(marker);
+              if (markerIssues.length > 1) {
+                fail('duplicate_tracker_markers');
+              }
+
+              let tracker;
+              if (markerIssues.length === 1) {
+                tracker = markerIssues[0];
+                validateTrackerOwner(tracker);
+                if (tracker.state !== 'open') {
+                  const response = await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: tracker.number,
+                    state: 'open'
+                  });
+                  tracker = response.data;
+                }
+                if (!hasDependenciesLabel(tracker)) {
+                  await github.rest.issues.addLabels({
+                    owner,
+                    repo,
+                    issue_number: tracker.number,
+                    labels: ['dependencies']
+                  });
+                }
+              } else {
+                const body = [
+                  marker,
+                  '',
+                  `This issue tracks dependency work previously proposed in [Dependabot pull request #${pullNumber}](${pullRequestUrl(pullNumber)}).`,
+                  'The automation creates this issue before closing the source pull request so the update remains available for maintainer review.',
+                  '',
+                  `- Source pull request: [#${pullNumber}](${pullRequestUrl(pullNumber)})`,
+                  `- Conversion workflow run: [${context.runId}](${runUrl})`,
+                  '',
+                  '## Follow-up',
+                  '',
+                  '- [ ] Review the dependency update and its upstream release information.',
+                  '- [ ] Apply the accepted update in a maintainer-authored pull request.',
+                  '- [ ] Run the dependency-appropriate validation required by `CONTRIBUTING.md`.',
+                  '- [ ] Close this issue after the validated update lands or is intentionally declined.'
+                ].join('\n');
+
+                try {
+                  const response = await github.rest.issues.create({
+                    owner,
+                    repo,
+                    title: `Track retired Dependabot pull request #${pullNumber}`,
+                    body,
+                    labels: ['dependencies']
+                  });
+                  tracker = response.data;
+                } catch (error) {
+                  markerIssues = await listMarkerIssues(marker);
+                  if (markerIssues.length !== 1) {
+                    fail(`tracker_create_${safeFailureCode(error)}`);
+                  }
+                  tracker = markerIssues[0];
+                  validateTrackerOwner(tracker);
+                }
+              }
+
+              const { data: readback } = await github.rest.issues.get({
+                owner,
+                repo,
+                issue_number: tracker.number
+              });
+              validateTrackerOwner(readback);
+              if (
+                readback.state !== 'open' ||
+                !readback.body?.includes(marker) ||
+                !hasDependenciesLabel(readback)
+              ) {
+                fail('tracker_readback_mismatch');
+              }
+              return readback;
+            };
+
+            const getVerifiedOpenPullRequest = async pullNumber => {
+              const { data: pullRequest } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber
+              });
+              return isCanonicalDependabotPullRequest(pullRequest) ? pullRequest : null;
+            };
+
+            const reconcilePullRequest = async pullNumber => {
+              const initialPullRequest = await getVerifiedOpenPullRequest(pullNumber);
+              if (initialPullRequest === null) {
+                return { status: 'skipped', issueNumber: null };
+              }
+
+              const tracker = await ensureTrackerIssue(pullNumber);
+              const finalPullRequest = await getVerifiedOpenPullRequest(pullNumber);
+              if (finalPullRequest === null) {
+                return { status: 'skipped_after_issue', issueNumber: tracker.number };
+              }
+
+              try {
+                await github.rest.pulls.update({
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  state: 'closed'
+                });
+              } catch (error) {
+                const { data: ambiguousReadback } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: pullNumber
+                });
+                if (ambiguousReadback.state !== 'closed' || ambiguousReadback.merged_at !== null) {
+                  fail(`pull_close_${safeFailureCode(error)}`, tracker.number);
+                }
+              }
+
+              const [{ data: pullRequestReadback }, { data: trackerReadback }] = await Promise.all([
+                github.rest.pulls.get({ owner, repo, pull_number: pullNumber }),
+                github.rest.issues.get({ owner, repo, issue_number: tracker.number })
+              ]);
+              validateTrackerOwner(trackerReadback);
+              if (pullRequestReadback.state !== 'closed' || pullRequestReadback.merged_at !== null) {
+                fail('pull_close_readback_mismatch', tracker.number);
+              }
+              if (
+                trackerReadback.state !== 'open' ||
+                !trackerReadback.body?.includes(issueMarker(pullNumber)) ||
+                !hasDependenciesLabel(trackerReadback)
+              ) {
+                fail('tracker_final_readback_mismatch', tracker.number);
+              }
+
+              return { status: 'closed', issueNumber: tracker.number };
+            };
+
+            for (let pass = 1; pass <= maximumPasses; pass += 1) {
+              const pullNumbers = await listTargetDependabotPullRequestNumbers();
+              if (pullNumbers.length === 0) {
+                break;
+              }
+
+              for (const pullNumber of pullNumbers) {
+                try {
+                  const result = await reconcilePullRequest(pullNumber);
+                  outcomes.set(pullNumber, result);
+                  if (result.status === 'closed') {
+                    terminalFailures.delete(pullNumber);
+                  }
+                } catch (error) {
+                  const safeCode = safeFailureCode(error);
+                  const issueNumber = Number.isInteger(error?.issueNumber)
+                    ? error.issueNumber
+                    : null;
+                  outcomes.set(pullNumber, { status: safeCode, issueNumber });
+                  terminalFailures.add(pullNumber);
+                  core.error(`Dependabot pull request #${pullNumber} failed with ${safeCode}.`);
+                }
+              }
+            }
+
+            const residualPullNumbers = await listTargetDependabotPullRequestNumbers();
+            for (const pullNumber of residualPullNumbers) {
+              terminalFailures.add(pullNumber);
+            }
+
+            await core.summary
+              .addHeading('Dependabot pull request retirement')
+              .addTable([
+                [
+                  { data: 'Pull request', header: true },
+                  { data: 'Tracking issue', header: true },
+                  { data: 'Result', header: true }
+                ],
+                ...Array.from(outcomes.entries())
+                  .sort(([left], [right]) => left - right)
+                  .map(([pullNumber, result]) => [
+                    `[#${pullNumber}](${pullRequestUrl(pullNumber)})`,
+                    result.issueNumber === null
+                      ? 'not created'
+                      : `[#${result.issueNumber}](${context.serverUrl}/${repositoryName}/issues/${result.issueNumber})`,
+                    result.status
+                  ])
+              ])
+              .addRaw(`\nResidual open Dependabot pull requests: ${residualPullNumbers.length}\n`)
+              .write();
+
+            if (terminalFailures.size > 0 || residualPullNumbers.length > 0) {
+              core.setFailed('Dependabot retirement completed with recorded failures or residual open pull requests.');
+            }

@@ -131,6 +131,11 @@ fn dependabot_config_text() -> String {
     .expect("Dependabot configuration should be readable")
 }
 
+fn dependabot_retirement_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/close-dependabot-pull-requests.yml"))
+    .expect("Dependabot retirement workflow should be readable")
+}
+
 fn workflow_job_text(workflow: &str, job_id: &str) -> String {
   let marker = format!("  {job_id}:");
   let mut lines = Vec::new();
@@ -992,6 +997,225 @@ fn dependabot_covers_all_rust_and_container_manifest_directories() {
       .and_then(serde_json::Value::as_str),
     Some("dependency-name"),
     "Dependabot should group matching container updates by dependency name"
+  );
+}
+
+#[test]
+fn dependabot_retirement_uses_authenticated_privilege_separation() {
+  let check_workflow = workflow_text();
+  let workflow = dependabot_retirement_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("Dependabot retirement workflow should parse as YAML");
+  let triggers = parsed
+    .get("on")
+    .and_then(serde_json::Value::as_object)
+    .expect("Dependabot retirement workflow should define mapping triggers");
+  let jobs = parsed
+    .get("jobs")
+    .and_then(serde_json::Value::as_object)
+    .expect("Dependabot retirement workflow should define jobs");
+
+  assert_eq!(
+    triggers.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from(["workflow_dispatch".to_owned(), "workflow_run".to_owned()]),
+    "Dependabot retirement should expose only the authenticated automatic and confirmed backfill triggers"
+  );
+  assert_eq!(
+    triggers["workflow_run"]["workflows"],
+    serde_json::json!(["Check OxiBelt"]),
+    "Dependabot retirement should follow the existing unprivileged check workflow"
+  );
+  assert_eq!(
+    triggers["workflow_run"]["types"],
+    serde_json::json!(["completed"]),
+    "Dependabot retirement should authenticate completed runs regardless of their conclusion"
+  );
+  assert_eq!(
+    triggers["workflow_dispatch"]["inputs"]["confirmation"]["required"],
+    serde_json::json!(true),
+    "Dependabot retirement backfill should require explicit confirmation"
+  );
+  assert_eq!(
+    parsed["permissions"],
+    serde_json::json!({}),
+    "Dependabot retirement should deny token permissions by default"
+  );
+  assert_eq!(
+    jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from(["authenticate".to_owned(), "reconcile".to_owned()]),
+    "Dependabot retirement should separate authentication from mutation"
+  );
+
+  let authenticate = &jobs["authenticate"];
+  let reconcile = &jobs["reconcile"];
+  assert_eq!(
+    authenticate["permissions"],
+    serde_json::json!({"pull-requests": "read"}),
+    "Dependabot trigger authentication should remain read-only"
+  );
+  assert_eq!(
+    reconcile["permissions"],
+    serde_json::json!({"issues": "write", "pull-requests": "write"}),
+    "Dependabot reconciliation should receive only the two required write permissions"
+  );
+  assert_eq!(
+    reconcile["needs"],
+    serde_json::json!(["authenticate"]),
+    "the write-capable job should depend directly on read-only authentication"
+  );
+  assert_eq!(
+    reconcile["if"],
+    "github.repository == 'OxiBelt/OxiBelt' && needs.authenticate.outputs.authorized == 'true'",
+    "the write-capable job should require the canonical repository and authenticated result"
+  );
+  assert_eq!(authenticate["runs-on"], "ubuntu-26.04");
+  assert_eq!(authenticate["timeout-minutes"], 5);
+  assert_eq!(reconcile["runs-on"], "ubuntu-26.04");
+  assert_eq!(reconcile["timeout-minutes"], 10);
+  assert_eq!(
+    reconcile["concurrency"],
+    serde_json::json!({
+      "group": "dependabot-pr-retirement",
+      "cancel-in-progress": false
+    }),
+    "Dependabot mutations should be serialized without cancelling an active reconciliation"
+  );
+  assert_eq!(
+    authenticate["outputs"]["authorized"], "${{ steps.authenticate.outputs.result }}",
+    "the read-only job should expose only its static authorization result"
+  );
+
+  let expected_action = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0";
+  assert_eq!(
+    workflow
+      .matches(&format!("uses: {expected_action}"))
+      .count(),
+    2,
+    "both jobs should use the exact immutable GitHub-owned script action"
+  );
+  assert_eq!(
+    workflow
+      .matches("github-token: ${{ secrets.GITHUB_TOKEN }}")
+      .count(),
+    2,
+    "each isolated job should use only its job-scoped GITHUB_TOKEN"
+  );
+  assert_eq!(
+    workflow.matches("secrets.").count(),
+    2,
+    "Dependabot retirement should not consume any secret other than each job-scoped GITHUB_TOKEN"
+  );
+  assert_eq!(
+    workflow
+      .lines()
+      .filter(|line| line.contains("uses: "))
+      .count(),
+    2,
+    "Dependabot retirement should not add any other action dependency"
+  );
+  for forbidden in [
+    "pull_request_target",
+    "actions/checkout@",
+    "actions/download-artifact@",
+    "actions/cache@",
+    "pnpm",
+    "docker",
+    "personal_access_token",
+    "workflowRun.pull_requests",
+    "workflow_run.pull_requests",
+  ] {
+    assert!(
+      !workflow.contains(forbidden),
+      "Dependabot retirement must not consume privileged or untrusted surface {forbidden}"
+    );
+  }
+  assert!(
+    workflow
+      .lines()
+      .all(|line| !line.trim_start().starts_with("run:")),
+    "Dependabot retirement should keep API data out of generated shell commands"
+  );
+
+  for expected in [
+    "github.event.workflow_run.event == 'pull_request'",
+    "github.event.workflow_run.actor.login == 'dependabot[bot]'",
+    "github.event.workflow_run.actor.id == 49699333",
+    "workflowRun?.path !== checkWorkflowPath",
+    "workflowRun?.repository?.id !== repository.id",
+    "github.rest.users.getByUsername",
+    "github.rest.repos.listPullRequestsAssociatedWithCommit",
+    "commit_sha: workflowRun.head_sha",
+    "context.ref !== expectedRef",
+    "close-all-open-dependabot-prs",
+    "needs.authenticate.outputs.authorized == 'true'",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "Dependabot retirement trigger authentication should include {expected}"
+    );
+  }
+  assert_eq!(
+    workflow
+      .matches("await listTargetDependabotPullRequestNumbers()")
+      .count(),
+    2,
+    "both reconciliation passes and final residual validation should use the trigger-scoped target set"
+  );
+
+  for expected in [
+    "const maximumPasses = 3",
+    "github.paginate(github.rest.pulls.list",
+    "github.paginate(github.rest.issues.listForRepo",
+    "const listTargetDependabotPullRequestNumbers = async () =>",
+    "context.eventName === 'workflow_dispatch'",
+    "commit_sha: context.payload.workflow_run.head_sha",
+    "state: 'all'",
+    "pullRequest.user?.login === dependabot.login",
+    "pullRequest.user?.id === dependabot.id",
+    "pullRequest.user?.type === 'Bot'",
+    "pullRequest.base?.repo?.id === repository.id",
+    "oxibelt:dependabot-pr-retirement:v1:repository=",
+    "tracker_marker_owner_mismatch",
+    "duplicate_tracker_markers",
+    "labels: ['dependencies']",
+    "!hasDependenciesLabel(readback)",
+    "const finalPullRequest = await getVerifiedOpenPullRequest(pullNumber)",
+    "state: 'closed'",
+    "pull_close_readback_mismatch",
+    "tracker_final_readback_mismatch",
+    "error.issueNumber = issueNumber",
+    "Residual open Dependabot pull requests",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "Dependabot reconciliation should preserve {expected}"
+    );
+  }
+  for forbidden in [
+    "pullRequest.title",
+    "pullRequest.body",
+    "pullRequest.head",
+    "pullRequest.labels",
+  ] {
+    assert!(
+      !workflow.contains(forbidden),
+      "Dependabot-controlled metadata must not flow into issue text or commands: {forbidden}"
+    );
+  }
+  let create_issue_position = workflow
+    .find("github.rest.issues.create")
+    .expect("Dependabot retirement should create a tracking issue");
+  let close_pull_position = workflow
+    .find("github.rest.pulls.update")
+    .expect("Dependabot retirement should close the source pull request");
+  assert!(
+    create_issue_position < close_pull_position,
+    "Dependabot retirement should make the durable issue visible before closing the pull request"
+  );
+  assert!(
+    check_workflow.starts_with("name: Check OxiBelt\n")
+      && check_workflow.contains("  pull_request:\n"),
+    "the authenticated source workflow should retain its exact name and pull-request trigger"
   );
 }
 
