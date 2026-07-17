@@ -410,15 +410,15 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonRecord {
   if (!RootIdentifiesLocalTag(Root, LocalTag)) {
     throw new Error(`Trivy CycloneDX root component does not identify local image tag ${LocalTag}`)
   }
-  const ExistingRootProperties = Properties(Root.properties, 'Trivy CycloneDX root properties')
-    .map(PropertyValue => CloneJson(PropertyValue))
   const OldRootRef = StringValue(Root['bom-ref'], 'Trivy CycloneDX root component bom-ref')
   Root.type = 'container'
   Root.name = LocalTag
   Root.version = Version
   Root['bom-ref'] = LocalTag
   Root.hashes = [{ alg: 'SHA-256', content: Digest.slice('sha256:'.length) }]
-  Root.properties = [...ExistingRootProperties,
+  // Trivy root properties are producer metadata and may be multi-valued.
+  // The attested root owns only the exact protected release identity below.
+  Root.properties = [
     Property('io.oxibelt.image.role', Options.role),
     Property('io.oxibelt.release.version', Version),
     Property('io.oxibelt.release.revision', Revision),

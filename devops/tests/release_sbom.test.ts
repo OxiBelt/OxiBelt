@@ -222,6 +222,39 @@ test('platform enrichment is deterministic and attaches binaries to the root dep
   Assert.equal(Dependency.dependsOn.some(Reference => Reference.startsWith('urn:oxibelt:binary:')), true)
 })
 
+test('platform enrichment normalizes multi-valued Trivy root properties', () => {
+  const Options = PlatformOptions('controller')
+  const Plan = Options.imagePlan as ReturnType<typeof ReleasePlan>
+  const Artifact = Plan.artifacts.find(Item => Item.role === 'controller' && Item.artifactArch === 'amd64')
+  if (Artifact === undefined) {
+    throw new Error('missing controller/amd64 fixture')
+  }
+  const InputRoot = RootComponent(Options.trivySbom as Record<string, unknown>)
+  InputRoot.name = '/controller.tar'
+  InputRoot.properties = [
+    { name: 'aquasecurity:trivy:DiffID', value: Digest('1') },
+    { name: 'aquasecurity:trivy:DiffID', value: Digest('2') },
+    { name: 'aquasecurity:trivy:Reference', value: Artifact.localTag }
+  ]
+
+  const Result = BuildPlatformSbom(Options)
+  const Root = RootComponent(Result)
+  const RootProperties = Root.properties as Array<{ name: string, value: string }>
+  Assert.equal(RootProperties.length, 9)
+  Assert.equal(new Set(RootProperties.map(Item => Item.name)).size, 9)
+  Assert.equal(RootProperties.every(Item => Item.name.startsWith('io.oxibelt.')), true)
+  Assert.equal(RootProperties.some(Item => Item.name.startsWith('aquasecurity:trivy:')), false)
+
+  const Components = Result.components as Array<Record<string, unknown>>
+  Assert.equal(Components.some(Item => Item.name === 'musl'), true)
+  Assert.equal(Components.some(Item => Item.type === 'application' && Item.name === 'oxibelt-gateway-controller'), true)
+  const RootDependency = (Result.dependencies as Array<{ ref: string, dependsOn: string[] }>)
+    .find(Item => Item.ref === Artifact.localTag)
+  Assert.ok(RootDependency)
+  Assert.equal(RootDependency.dependsOn.includes('pkg:apk/alpine/musl@1.2.5'), true)
+  Assert.equal(RootDependency.dependsOn.some(Reference => Reference.startsWith('urn:oxibelt:binary:')), true)
+})
+
 test('platform enrichment rejects invalid CycloneDX identity, reserved properties, and duplicate refs', () => {
   Assert.throws(() => ParseJsonDocument('{', 'test document'), /not valid JSON/)
 
