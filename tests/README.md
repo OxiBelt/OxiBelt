@@ -18,7 +18,7 @@
 - `scripts/check-performance-aggregate-incomplete-gate.sh`: Docker regression check that creates a focused OxiBelt-only static performance smoke artifact, aggregates it, and asserts the missing Caddy static regression gate fails closed instead of passing with incomplete samples.
 - `scripts/run-browser-webdriver-check.sh`: starts a mock upstream and validates that Chromium or Firefox WebDriver can reach OxiBelt through either a local release binary or an `OXIBELT_DOCKER_IMAGE` container. Pass a scenario name (`basic-navigation`, `waf-request`, `waf-response`, `person-proof`, or `hot-reload`) to run the corresponding browser-level check.
 - `rust/oxibelt-docker-integration-matrix.rs`: test-only Rust binary used by CI and scripts to list GitHub matrix entries and materialize Docker/WebDriver case manifests.
-- `rust/ci_workflow_integrity.rs`: Cargo integration test that guards CI job dependencies so structure-check failures cannot skip Rust, Docker image, Docker integration, or browser jobs.
+- `rust/ci_workflow_integrity.rs`: Cargo integration test that guards CI job dependencies so structure-check failures cannot skip Rust, Docker image, Docker integration, or browser jobs, and ensures every dependency-free `check-oxibelt` entry job skips runs initiated by Dependabot.
 - `fixtures/oxibelt-docker-integration-matrix/docker/`: per-case shell checks and extra fixture files copied by the matrix materializer for Docker integration cases.
 - `fixtures/oxibelt-docker-performance/`: OxiBelt, nginx, Caddy, and OpenResty configuration fixtures used by the performance runner.
 - `docker/mock_upstream/client.py`: test-only HTTPS client used by the integration script. It connects through Docker-network endpoints and trusts generated test CAs instead of disabling certificate verification; SNI forwarding cases can set a distinct TLS server name.
@@ -70,6 +70,8 @@ Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/dow
 ## Concurrency and Fault-Injection Invariants
 
 Race-sensitive tests use model exploration, explicit barriers, observed metrics, or bounded polling. Sleeps and timeouts are safety ceilings, not the condition that decides whether an invariant passed. Every injected runtime fault must prove recovery with a later successful operation and must leave bounded task, queue, pool, or fill gauges at zero.
+
+The CI cadences below apply to non-Dependabot workflow events. Dependabot-triggered `check-oxibelt` runs intentionally skip every dependency-free entry job, so their downstream jobs do not allocate runners.
 
 | Test type | Deterministic trigger | Preserved invariant and recovery assertion | CI cadence |
 | --- | --- | --- | --- |

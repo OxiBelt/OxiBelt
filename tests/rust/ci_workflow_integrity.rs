@@ -83,6 +83,16 @@ const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "unsafe-validation",
 ];
 
+const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
+  "source-structure",
+  "test",
+  "rust-advisory-checks",
+  "fuzz-smoke",
+  "unsafe-validation",
+  "test-riscv64-qemu",
+];
+const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
+
 const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
   "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
 const PERFORMANCE_WORKFLOW_JOB_IF: &str =
@@ -876,6 +886,43 @@ fn source_structure_job_stays_independent() {
     workflow.contains("bash tests/scripts/check-cargo-package-boundaries.sh"),
     "source-structure should enforce the data-plane Cargo package boundary"
   );
+}
+
+#[test]
+fn check_workflow_entry_jobs_skip_dependabot() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let parsed_workflow: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let workflow_jobs = parsed_workflow
+    .get("jobs")
+    .and_then(serde_json::Value::as_object)
+    .expect("check-oxibelt workflow should define jobs");
+  let entry_jobs = jobs
+    .iter()
+    .filter_map(|(job_id, job)| job.needs.is_empty().then_some(job_id.as_str()))
+    .collect::<BTreeSet<_>>();
+  let expected_entry_jobs = CHECK_WORKFLOW_ENTRY_JOBS
+    .iter()
+    .copied()
+    .collect::<BTreeSet<_>>();
+
+  assert_eq!(
+    entry_jobs, expected_entry_jobs,
+    "check-oxibelt entry jobs should remain explicit so new roots cannot bypass the Dependabot guard"
+  );
+
+  for job_id in CHECK_WORKFLOW_ENTRY_JOBS {
+    let condition = workflow_jobs
+      .get(*job_id)
+      .and_then(|job| job.get("if"))
+      .and_then(serde_json::Value::as_str);
+    assert_eq!(
+      condition,
+      Some(DEPENDABOT_ACTOR_CONDITION),
+      "{job_id} should skip workflow runs initiated by Dependabot"
+    );
+  }
 }
 
 #[test]

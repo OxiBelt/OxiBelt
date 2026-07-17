@@ -74,6 +74,7 @@ jobs:
   source-structure:
     name: Source structure checks
     runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
 
@@ -140,6 +141,7 @@ jobs:
   test:
     name: Test (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
     runs-on: ${{ matrix.runner }}
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
     strategy:
@@ -181,6 +183,7 @@ jobs:
   rust-advisory-checks:
     name: Rust advisory checks
     runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
 
@@ -207,6 +210,7 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
     strategy:
@@ -250,6 +254,7 @@ jobs:
   unsafe-validation:
     name: Unsafe validation (${{ matrix.check }})
     runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
     strategy:
@@ -294,6 +299,7 @@ jobs:
   test-riscv64-qemu:
     name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
     runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
     strategy:
