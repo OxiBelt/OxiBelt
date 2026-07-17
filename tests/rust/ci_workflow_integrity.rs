@@ -1418,7 +1418,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "openssl rand -hex 32 | tr -d '\\r\\n' >\"${work_dir}/admin-token\"",
     "grep -Eq '^[a-f0-9]{64}$' \"${work_dir}/admin-token\"",
     "verify_admin_mtls",
-    "Admin listener accepted a bearer-authenticated client without a certificate",
+    "Admin listener completed an HTTP exchange without a client certificate",
     ".projected.defaultMode == 288",
     "automountServiceAccountToken == false",
     "kube-api-access",
@@ -1497,6 +1497,174 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     assert!(
       !script.contains(forbidden),
       "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn kubernetes_immutable_rollout_admin_mtls_probe_is_connection_isolated() {
+  let script = kubernetes_immutable_rollout_script_text();
+  let diagnostics = script
+    .split_once("print_admin_probe_diagnostics() {")
+    .expect("rollout harness should define bounded Admin probe diagnostics")
+    .1
+    .split_once("\n}\n\nkube() {")
+    .expect("Admin probe diagnostics should precede the kubectl wrapper")
+    .0;
+  let readiness = script
+    .split_once("admin_port_forward_is_ready() {")
+    .expect("rollout harness should define Admin port-forward readiness")
+    .1
+    .split_once("\n}\n\nstart_admin_port_forward() {")
+    .expect("Admin port-forward readiness should precede startup")
+    .0;
+  let start = script
+    .split_once("start_admin_port_forward() {")
+    .expect("rollout harness should define phase-specific Admin port-forward startup")
+    .1
+    .split_once("\n}\n\nstop_admin_port_forward() {")
+    .expect("Admin port-forward startup should precede teardown")
+    .0;
+  let stop = script
+    .split_once("stop_admin_port_forward() {")
+    .expect("rollout harness should define exact Admin port-forward teardown")
+    .1
+    .split_once("\n}\n\nadmin_pod_runtime_identity() {")
+    .expect("Admin port-forward teardown should precede Pod identity capture")
+    .0;
+  let identity = script
+    .split_once("admin_pod_runtime_identity() {")
+    .expect("rollout harness should capture the selected Admin Pod identity")
+    .1
+    .split_once("\n}\n\nadmin_tls_handshake_failure_count() {")
+    .expect("Admin Pod identity capture should precede TLS rejection evidence")
+    .0;
+  let verify = script
+    .split_once("verify_admin_mtls() {")
+    .expect("rollout harness should define the Admin mTLS proof")
+    .1
+    .split_once("\n}\n\ncheck_pod_runtime_proof() {")
+    .expect("Admin mTLS proof should precede the per-Pod runtime proof")
+    .0;
+  let no_client_certificate_probe = verify
+    .split_once("  if curl ")
+    .expect("Admin mTLS proof should issue a no-client-certificate curl probe")
+    .1
+    .split_once("\n  fi")
+    .expect("no-client-certificate curl probe should be a bounded conditional")
+    .0;
+
+  assert!(
+    readiness.contains("kill -0 \"${port_forward_pid}\"")
+      && readiness.contains("Forwarding from 127.0.0.1:${port} -> 9092"),
+    "each Admin probe must wait for both a live forwarding process and the kubectl bind message"
+  );
+  for expected in [
+    "authenticated-before-rejection",
+    "no-client-certificate",
+    "authenticated-after-rejection",
+    "\"pod/${pod}\" \"${port}:9092\"",
+    "wait_for \"${phase} Admin port-forward bind\"",
+  ] {
+    assert!(
+      start.contains(expected),
+      "phase-specific Admin port-forward startup should preserve {expected}"
+    );
+  }
+  assert!(
+    !script.contains("\"service/${admin_service_name}\" \"${port}:9092\""),
+    "Admin mTLS probes must not reuse a Service-targeted kubectl port-forward"
+  );
+  for expected in [
+    "kill \"${port_forward_pid}\"",
+    "wait \"${port_forward_pid}\"",
+    "port_forward_pid=\"\"",
+  ] {
+    assert!(
+      stop.contains(expected),
+      "Admin port-forward teardown should preserve {expected}"
+    );
+  }
+
+  for expected in [
+    ".metadata.uid",
+    "$container.containerID",
+    "$container.restartCount",
+    "$container.ready == true",
+    "$container.state.running != null",
+  ] {
+    assert!(
+      identity.contains(expected),
+      "Admin Pod identity capture should preserve {expected}"
+    );
+  }
+  for expected in [
+    "identity_before=\"$(admin_pod_runtime_identity \"${pod}\")\"",
+    "identity_after=\"$(admin_pod_runtime_identity \"${pod}\")\"",
+    "[[ \"${identity_after}\" == \"${identity_before}\" ]]",
+    "admin_tls_rejection_observed \"${pod}\" \"${tls_failures_before}\"",
+    "Admin listener did not recover after rejecting a client without a certificate",
+  ] {
+    assert!(
+      verify.contains(expected),
+      "Admin mTLS proof should preserve {expected}"
+    );
+  }
+
+  let phase_positions = [
+    "start_admin_port_forward \"${pod}\" \"${port}\" authenticated-before-rejection",
+    "start_admin_port_forward \"${pod}\" \"${port}\" no-client-certificate",
+    "start_admin_port_forward \"${pod}\" \"${port}\" authenticated-after-rejection",
+  ]
+  .map(|phase| {
+    verify
+      .find(phase)
+      .unwrap_or_else(|| panic!("Admin mTLS proof should start phase {phase}"))
+  });
+  let stop_positions = verify
+    .match_indices("stop_admin_port_forward")
+    .map(|(position, _)| position)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    stop_positions.len(),
+    3,
+    "each Admin mTLS phase should stop and reap its own port-forward"
+  );
+  assert!(
+    phase_positions[0] < stop_positions[0]
+      && stop_positions[0] < phase_positions[1]
+      && phase_positions[1] < stop_positions[1]
+      && stop_positions[1] < phase_positions[2]
+      && phase_positions[2] < stop_positions[2],
+    "Admin mTLS phases must run in authenticated, rejected, authenticated order with isolated forwards"
+  );
+
+  assert!(
+    !no_client_certificate_probe.contains("--fail")
+      && !no_client_certificate_probe.contains("--cert")
+      && !no_client_certificate_probe.contains("--key"),
+    "the negative Admin probe must treat every HTTP response as failure and omit client credentials"
+  );
+  assert!(
+    script.contains("grep -Fc \"admin TLS handshake failed\"")
+      && script.contains("((10#${after} > 10#${before}))"),
+    "the negative Admin probe must require a newly observed server-side TLS rejection"
+  );
+  assert!(
+    script.contains("verify_admin_mtls \"${pods[0]}\""),
+    "the Admin mTLS proof must target one of the exact Ready Pods proved by the rollout"
+  );
+
+  assert!(
+    diagnostics.contains("tail -n 80")
+      && diagnostics.contains("admin-port-forward-${phase}.log")
+      && diagnostics.contains("admin-no-client-certificate-curl.log"),
+    "Admin failure diagnostics must remain bounded and phase-specific"
+  );
+  for forbidden in ["admin-headers.txt", "admin-token", ".crt", ".key"] {
+    assert!(
+      !diagnostics.contains(forbidden),
+      "Admin failure diagnostics must not expose credential material through {forbidden}"
     );
   }
 }

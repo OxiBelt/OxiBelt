@@ -47,6 +47,24 @@ require_command() {
   command -v "${command}" >/dev/null 2>&1 || die "required command is unavailable: ${command}"
 }
 
+print_admin_probe_diagnostics() {
+  local phase
+  local log
+
+  [[ -n "${work_dir}" ]] || return 0
+  for phase in authenticated-before-rejection no-client-certificate authenticated-after-rejection; do
+    log="${work_dir}/admin-port-forward-${phase}.log"
+    if [[ -f "${log}" ]]; then
+      echo "Admin ${phase} port-forward diagnostics:" >&2
+      tail -n 80 -- "${log}" >&2
+    fi
+  done
+  if [[ -f "${work_dir}/admin-no-client-certificate-curl.log" ]]; then
+    echo "Admin no-client-certificate curl diagnostics:" >&2
+    tail -n 80 -- "${work_dir}/admin-no-client-certificate-curl.log" >&2
+  fi
+}
+
 kube() {
   kubectl --context "kind-${cluster_name}" "$@"
 }
@@ -58,6 +76,10 @@ cleanup() {
   if [[ -n "${port_forward_pid}" ]]; then
     kill "${port_forward_pid}" >/dev/null 2>&1 || true
     wait "${port_forward_pid}" >/dev/null 2>&1 || true
+  fi
+
+  if ((status != 0)); then
+    print_admin_probe_diagnostics
   fi
 
   if ((status != 0 && cluster_created == 1)); then
@@ -182,32 +204,131 @@ admin_endpoint_accepts_client() {
     >/dev/null
 }
 
-verify_admin_mtls() {
+admin_port_forward_is_ready() {
   local port="$1"
-  local url="https://${admin_server_name}:${port}/admin/v1/openapi.json"
+  local log="$2"
 
+  [[ -n "${port_forward_pid}" ]] \
+    && kill -0 "${port_forward_pid}" 2>/dev/null \
+    && grep -Fq "Forwarding from 127.0.0.1:${port} -> 9092" "${log}"
+}
+
+start_admin_port_forward() {
+  local pod="$1"
+  local port="$2"
+  local phase="$3"
+  local log
+
+  case "${phase}" in
+    authenticated-before-rejection | no-client-certificate | authenticated-after-rejection)
+      ;;
+    *)
+      die "refusing unexpected Admin probe phase: ${phase}"
+      ;;
+  esac
+  [[ -z "${port_forward_pid}" ]] || die "an Admin port-forward is already active"
+
+  log="${work_dir}/admin-port-forward-${phase}.log"
   kubectl --context "kind-${cluster_name}" -n "${namespace}" port-forward \
-    --address 127.0.0.1 "service/${admin_service_name}" "${port}:9092" \
-    >"${work_dir}/admin-port-forward.log" 2>&1 &
+    --address 127.0.0.1 "pod/${pod}" "${port}:9092" \
+    >"${log}" 2>&1 &
   port_forward_pid="$!"
 
-  wait_for "mTLS Admin response" 60 admin_endpoint_accepts_client "${port}"
+  wait_for "${phase} Admin port-forward bind" 30 \
+    admin_port_forward_is_ready "${port}" "${log}"
+}
 
-  if curl --fail --silent --show-error --max-time 5 --tlsv1.3 \
-    --resolve "${admin_server_name}:${port}:127.0.0.1" \
-    --cacert "${work_dir}/admin-server-ca.crt" \
-    --header "@${work_dir}/admin-headers.txt" \
-    "${url}" \
-    >/dev/null 2>&1; then
-    die "Admin listener accepted a bearer-authenticated client without a certificate"
-  fi
-
-  admin_endpoint_accepts_client "${port}" \
-    || die "Admin listener rejected the configured mTLS client and bearer token"
+stop_admin_port_forward() {
+  [[ -n "${port_forward_pid}" ]] || return 0
 
   kill "${port_forward_pid}" >/dev/null 2>&1 || true
   wait "${port_forward_pid}" >/dev/null 2>&1 || true
   port_forward_pid=""
+}
+
+admin_pod_runtime_identity() {
+  local pod="$1"
+  local pod_json
+
+  pod_json="$(kube -n "${namespace}" get "pod/${pod}" -o json 2>/dev/null)" || return 1
+  jq -er '
+    [.status.containerStatuses[]? | select(.name == "oxibelt")] as $containers
+    | select(.metadata.deletionTimestamp == null)
+    | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+    | select(($containers | length) == 1)
+    | $containers[0] as $container
+    | select($container.ready == true and $container.state.running != null)
+    | select(.metadata.uid | type == "string" and length > 0)
+    | select($container.containerID | type == "string" and length > 0)
+    | select($container.restartCount | type == "number")
+    | [.metadata.uid, $container.containerID, ($container.restartCount | tostring)]
+    | @tsv
+  ' <<<"${pod_json}"
+}
+
+admin_tls_handshake_failure_count() {
+  local pod="$1"
+  local count
+  local logs
+
+  logs="$(kube -n "${namespace}" logs "pod/${pod}" -c oxibelt 2>/dev/null)" || return 1
+  count="$(grep -Fc "admin TLS handshake failed" <<<"${logs}" || true)"
+  [[ "${count}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${count}"
+}
+
+admin_tls_rejection_observed() {
+  local pod="$1"
+  local before="$2"
+  local after
+
+  after="$(admin_tls_handshake_failure_count "${pod}")" || return 1
+  ((10#${after} > 10#${before}))
+}
+
+verify_admin_mtls() {
+  local pod="$1"
+  local port="$2"
+  local url="https://${admin_server_name}:${port}/admin/v1/openapi.json"
+  local identity_before
+  local identity_after
+  local tls_failures_before
+
+  identity_before="$(admin_pod_runtime_identity "${pod}")" \
+    || die "selected Admin probe Pod is not Ready with a stable OxiBelt container identity: ${pod}"
+
+  start_admin_port_forward "${pod}" "${port}" authenticated-before-rejection
+  admin_endpoint_accepts_client "${port}" \
+    || die "Admin listener rejected the configured mTLS client and bearer token before the rejection probe"
+  stop_admin_port_forward
+
+  tls_failures_before="$(admin_tls_handshake_failure_count "${pod}")" \
+    || die "could not read the selected Admin probe Pod logs: ${pod}"
+  start_admin_port_forward "${pod}" "${port}" no-client-certificate
+
+  # Deliberately omit --fail: any completed HTTP exchange, including a 4xx,
+  # means the unauthenticated client crossed the mTLS trust boundary.
+  if curl --silent --show-error --max-time 5 --tlsv1.3 \
+    --resolve "${admin_server_name}:${port}:127.0.0.1" \
+    --cacert "${work_dir}/admin-server-ca.crt" \
+    --header "@${work_dir}/admin-headers.txt" \
+    "${url}" \
+    >/dev/null 2>"${work_dir}/admin-no-client-certificate-curl.log"; then
+    die "Admin listener completed an HTTP exchange without a client certificate"
+  fi
+  wait_for "Admin TLS handshake rejection without a client certificate" 30 \
+    admin_tls_rejection_observed "${pod}" "${tls_failures_before}"
+  stop_admin_port_forward
+
+  start_admin_port_forward "${pod}" "${port}" authenticated-after-rejection
+  admin_endpoint_accepts_client "${port}" \
+    || die "Admin listener did not recover after rejecting a client without a certificate"
+  stop_admin_port_forward
+
+  identity_after="$(admin_pod_runtime_identity "${pod}")" \
+    || die "selected Admin probe Pod lost its Ready OxiBelt container identity: ${pod}"
+  [[ "${identity_after}" == "${identity_before}" ]] \
+    || die "Admin mTLS probes changed the selected Pod UID, OxiBelt container ID, or restart count: ${pod}"
 }
 
 check_pod_runtime_proof() {
@@ -276,7 +397,7 @@ assert_controller_can_i() {
   fi
 }
 
-for command in docker kind kubectl helm curl jq openssl sha256sum tr; do
+for command in docker kind kubectl helm curl jq openssl sha256sum tail tr; do
   require_command "${command}"
 done
 
@@ -771,7 +892,7 @@ mapfile -t pods < <(jq -r '
 for index in "${!pods[@]}"; do
   check_pod_runtime_proof "${pods[${index}]}" "$((21000 + RANDOM % 10000 + index))" "${revision}" "${digest}"
 done
-verify_admin_mtls "$((25000 + RANDOM % 10000))"
+verify_admin_mtls "${pods[0]}" "$((25000 + RANDOM % 10000))"
 
 # A Pod with a valid mounted immutable configuration but a different assigned
 # digest must fail before startup. Keep the standalone fixture outside the
