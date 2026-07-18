@@ -45,6 +45,16 @@ impl WorkloadPodOwnership {
       .iter()
       .any(|owner_uid| controller_owned_by(pod, self.pod_owner_kind, owner_uid))
   }
+
+  pub(crate) fn proof_owner_uids(&self) -> Vec<&str> {
+    let mut uids = self
+      .pod_owner_uids
+      .iter()
+      .map(String::as_str)
+      .collect::<Vec<_>>();
+    uids.sort();
+    uids
+  }
 }
 
 pub(crate) fn pod_is_selected(

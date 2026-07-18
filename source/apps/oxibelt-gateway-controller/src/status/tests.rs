@@ -28,6 +28,7 @@ fn committed_rollout() -> RolloutStatus {
     desired_revision: Some("revision".to_string()),
     desired_content_digest: Some("digest".to_string()),
     reason: None,
+    proof: Some(crate::rollout_status::CommitProof::test()),
   }
 }
 

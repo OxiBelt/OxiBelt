@@ -6,6 +6,19 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+# Two replicas are the supported highly available default. Set this to 1 only
+# for an intentional single-replica development deployment.
+replicaCount: 2
+
+leaderElection:
+  # Empty uses the chart's controller name. The Helm release owns this exact
+  # metadata-only Lease; the controller may get, watch, and patch it but cannot
+  # create arbitrary Leases.
+  leaseName: ""
+  leaseDurationSeconds: 15
+  renewDeadlineSeconds: 10
+  retryPeriodSeconds: 2
+
 controllerName: oxibelt.dev/gateway-controller
 # A safe nested relative `.toml` path under the selected workload config root.
 managedConfigPath: conf.d/gateway-api.generated.toml
@@ -53,3 +66,11 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+podAntiAffinity:
+  enabled: true
+  weight: 100
+  topologyKey: kubernetes.io/hostname
+topologySpreadConstraints: []
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

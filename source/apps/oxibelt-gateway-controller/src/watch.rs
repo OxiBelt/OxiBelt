@@ -6,11 +6,13 @@ use bytes::Bytes;
 use http::Request;
 use oxibelt_control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 use url::Url;
 
 use super::cli::{RunArgs, SharedArgs};
 use super::health::ControllerHealth;
+use super::leader_election::{Leadership, WritePermit, validate_write_permit};
 use super::model::KubernetesObject;
 use super::rollout;
 use super::rollout_status::RolloutStatus;
@@ -21,11 +23,13 @@ const DEFAULT_SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serv
 const DEFAULT_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 pub(super) const KUBERNETES_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct KubernetesPoller {
   pub(super) client: ControlHttpClient,
   pub(super) base_url: Url,
   pub(super) service_account_token_path: PathBuf,
   pub(super) namespace: Option<String>,
+  pub(super) leadership: Option<Leadership>,
 }
 
 impl KubernetesPoller {
@@ -51,7 +55,23 @@ impl KubernetesPoller {
       base_url,
       service_account_token_path: token_path.to_path_buf(),
       namespace: args.watch_namespace.clone(),
+      leadership: None,
     })
+  }
+
+  pub fn with_leadership(mut self, leadership: Leadership) -> Self {
+    self.leadership = Some(leadership);
+    self
+  }
+
+  pub(super) async fn authorize_write(&self) -> anyhow::Result<WritePermit> {
+    let leadership = self
+      .leadership
+      .as_ref()
+      .context("Kubernetes mutation attempted without leader-election authority")?;
+    let permit = leadership.write_permit()?;
+    validate_write_permit(self, leadership, &permit).await?;
+    Ok(permit)
   }
 
   pub(super) fn bearer(&self) -> anyhow::Result<String> {
@@ -158,6 +178,7 @@ impl KubernetesPoller {
 
   pub async fn apply_status_patches(&self, patches: &[status::StatusPatch]) -> anyhow::Result<()> {
     for patch in patches {
+      let _permit = self.authorize_write().await?;
       self.patch_status(patch).await.with_context(|| {
         format!(
           "failed to patch status for {}/{}/{}",
@@ -184,26 +205,29 @@ impl KubernetesPoller {
     let mut url = self.base_url.clone();
     url.set_path(&path);
     url.set_query(None);
-    let body = serde_json::to_vec(&json!({ "status": patch.status.clone() }))
-      .context("failed to serialize Kubernetes status patch")?;
+    let resource_version = patch
+      .resource_version
+      .as_deref()
+      .context("status mutation requires the observed metadata.resourceVersion")?;
+    let body = serde_json::to_vec(&json!([
+      {"op":"test", "path":"/metadata/resourceVersion", "value":resource_version},
+      {"op":"add", "path":"/status", "value":patch.status.clone()}
+    ]))
+    .context("failed to serialize Kubernetes status patch")?;
     let bearer = self.bearer()?;
     let request = Request::builder()
       .method(http::Method::PATCH)
       .uri(uri_from_url(&url)?)
       .header(http::header::ACCEPT, "application/json")
       .header(http::header::AUTHORIZATION, bearer)
-      .header(http::header::CONTENT_TYPE, "application/merge-patch+json")
+      .header(http::header::CONTENT_TYPE, "application/json-patch+json")
       .body(full_body(Bytes::from(body)))?;
     let response = self
       .client
       .request(request, Duration::from_secs(10), KUBERNETES_MAX_BODY_BYTES)
       .await?;
     if response.status == http::StatusCode::NOT_FOUND {
-      warn!(
-        path,
-        "Kubernetes status subresource was not found; skipping status patch"
-      );
-      return Ok(());
+      bail!("Kubernetes status subresource {path} disappeared before the guarded patch");
     }
     if !response.status.is_success() {
       let body = String::from_utf8_lossy(&response.body);
@@ -236,17 +260,31 @@ pub async fn run_poll_loop(
   shared: &SharedArgs,
   args: &RunArgs,
   health: ControllerHealth,
+  leadership: Leadership,
+  mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let interval = Duration::from_millis(args.poll_interval_ms.max(250));
   loop {
-    match reconcile_once(&kubernetes, shared, args).await {
-      Ok(rollout_status) => health.mark_reconciled(rollout_status),
-      Err(error) => {
-        health.mark_failed(error.to_string());
-        error!(error = %error, "Gateway API reconcile failed");
+    if *shutdown.borrow() {
+      return Ok(());
+    }
+    if leadership.is_leader() {
+      match reconcile_once(&kubernetes, shared, args).await {
+        Ok(rollout_status) => health.mark_reconciled(rollout_status),
+        Err(error) => {
+          health.mark_failed(error.to_string());
+          error!(error = %error, "Gateway API reconcile failed");
+        }
       }
     }
-    tokio::time::sleep(interval).await;
+    tokio::select! {
+      changed = shutdown.changed() => {
+        if changed.is_err() || *shutdown.borrow() {
+          return Ok(());
+        }
+      }
+      _ = tokio::time::sleep(interval) => {}
+    }
   }
 }
 
@@ -271,13 +309,21 @@ async fn reconcile_once(
       &rendered.diagnostics,
       &rollout_status,
     )
-    .await;
+    .await?;
     bail!("translation produced blocking diagnostics; refusing to apply generated config");
   }
   let rollout_status = if shared.dry_run {
     info!("dry-run enabled; immutable ConfigMap rollout was not applied");
     RolloutStatus::pending("DryRun")
   } else {
+    apply_status_patches(
+      kubernetes,
+      &objects,
+      shared,
+      &rendered.diagnostics,
+      &RolloutStatus::pending("RolloutInProgress"),
+    )
+    .await?;
     match kubernetes
       .reconcile_immutable_rollout(shared, args, &rendered.toml)
       .await
@@ -285,26 +331,56 @@ async fn reconcile_once(
       Ok(status) => status,
       Err(error) => {
         let rollout_status = RolloutStatus::failed("RolloutFailed");
+        let failed_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
         apply_status_patches(
           kubernetes,
-          &objects,
+          &failed_objects,
           shared,
           &rendered.diagnostics,
           &rollout_status,
         )
-        .await;
+        .await?;
         return Err(error);
       }
     }
   };
+  let (status_objects, status_diagnostics, source_snapshot_digest) = if shared.dry_run {
+    (
+      objects.clone(),
+      rendered.diagnostics.clone(),
+      source_snapshot_digest(&objects),
+    )
+  } else {
+    let fresh_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
+    let fresh_rendered = translate::translate_objects(&fresh_objects, shared)?;
+    if rollout_status.phase.is_committed()
+      && (fresh_rendered.toml != rendered.toml
+        || fresh_rendered
+          .diagnostics
+          .iter()
+          .any(|diagnostic| matches!(diagnostic.severity, super::model::DiagnosticSeverity::Error)))
+    {
+      bail!("Gateway API resources changed before status commit; refusing stale Programmed=True");
+    }
+    let digest = source_snapshot_digest(&fresh_objects);
+    (fresh_objects, fresh_rendered.diagnostics, digest)
+  };
+  let mut rollout_status = rollout_status;
+  if rollout_status.phase.is_committed() && !shared.dry_run {
+    rollout_status.proof = Some(
+      kubernetes
+        .prove_committed_rollout(args, &rollout_status, source_snapshot_digest)
+        .await?,
+    );
+  }
   apply_status_patches(
     kubernetes,
-    &objects,
+    &status_objects,
     shared,
-    &rendered.diagnostics,
+    &status_diagnostics,
     &rollout_status,
   )
-  .await;
+  .await?;
   Ok(rollout_status)
 }
 
@@ -314,16 +390,38 @@ async fn apply_status_patches(
   shared: &SharedArgs,
   diagnostics: &[super::model::Diagnostic],
   rollout_status: &RolloutStatus,
-) {
+) -> anyhow::Result<()> {
   let status_patches = status::build_status_patches(objects, shared, diagnostics, rollout_status);
   if shared.dry_run {
     info!(
       patches = status_patches.len(),
       "dry-run enabled; Kubernetes status patches were not applied"
     );
-  } else if let Err(error) = kubernetes.apply_status_patches(&status_patches).await {
-    warn!(error = %error, "Gateway API status patching failed");
+  } else {
+    kubernetes.apply_status_patches(&status_patches).await?;
   }
+  Ok(())
+}
+
+fn source_snapshot_digest(objects: &[KubernetesObject]) -> String {
+  let mut proof = objects
+    .iter()
+    .map(|object| {
+      format!(
+        "{}/{}/{}/{}/{}/{}/{}",
+        object.api_version,
+        object.kind,
+        object.namespace(),
+        object.name(),
+        object.metadata.uid.as_deref().unwrap_or(""),
+        object.metadata.generation.unwrap_or_default(),
+        object.metadata.resource_version.as_deref().unwrap_or("")
+      )
+    })
+    .collect::<Vec<_>>();
+  proof.sort();
+  let digest = Sha256::digest(proof.join("\n").as_bytes());
+  digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_list(body: Bytes) -> anyhow::Result<Vec<KubernetesObject>> {

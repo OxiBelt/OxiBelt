@@ -80,6 +80,16 @@ pub struct RunArgs {
     default_value = "oxibelt-gateway-config"
   )]
   pub rollout_config_map_prefix: String,
+  #[arg(long = "leader-election-namespace")]
+  pub leader_election_namespace: String,
+  #[arg(long = "leader-election-lease-name")]
+  pub leader_election_lease_name: String,
+  #[arg(long = "leader-election-lease-duration-seconds", default_value_t = 15)]
+  pub leader_election_lease_duration_seconds: u64,
+  #[arg(long = "leader-election-renew-deadline-seconds", default_value_t = 10)]
+  pub leader_election_renew_deadline_seconds: u64,
+  #[arg(long = "leader-election-retry-period-seconds", default_value_t = 2)]
+  pub leader_election_retry_period_seconds: u64,
 }
 
 #[derive(Debug, Args)]

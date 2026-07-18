@@ -36,6 +36,7 @@ cluster_created=0
 admin_server_name=""
 admin_service_name="${workload_name}-admin"
 controller_selector="app.kubernetes.io/name=oxibelt-gateway-controller"
+leader_lease_name="oxibelt-gateway-controller"
 
 die() {
   echo "kubernetes immutable rollout test: $*" >&2
@@ -150,6 +151,58 @@ gateway_is_programmed() {
   jq -e \
     'any(.status.conditions[]?; .type == "Programmed" and .status == "True")' \
     >/dev/null <<<"${gateway}"
+}
+
+controller_has_two_ready_replicas() {
+  local deployment
+  deployment="$(kube -n "${namespace}" get deployment "${controller_release}" -o json 2>/dev/null)" \
+    || return 1
+  jq -e '
+    .spec.replicas == 2
+      and .status.readyReplicas == 2
+      and .spec.strategy.type == "RollingUpdate"
+      and .spec.strategy.rollingUpdate.maxUnavailable == 0
+      and .spec.strategy.rollingUpdate.maxSurge == 1
+  ' >/dev/null <<<"${deployment}"
+}
+
+lease_holder_pod() {
+  local holder
+  holder="$(kube -n "${namespace}" get lease "${leader_lease_name}" \
+    -o jsonpath='{.spec.holderIdentity}' 2>/dev/null)" || return 1
+  [[ -n "${holder}" ]] || return 1
+  printf '%s\n' "${holder%%.*}"
+}
+
+lease_has_live_unique_holder() {
+  local holder_pod
+  local live_pods
+  holder_pod="$(lease_holder_pod)" || return 1
+  live_pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
+    || return 1
+  jq -e --arg holder "${holder_pod}" '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | ($pods | length) == 2
+      and ([ $pods[] | select(.metadata.name == $holder) ] | length) == 1
+  ' >/dev/null <<<"${live_pods}"
+}
+
+lease_holder_changed() {
+  local previous="$1"
+  local current
+  current="$(lease_holder_pod)" || return 1
+  [[ "${current}" != "${previous}" ]]
+}
+
+controller_pods_are_unready() {
+  local pods
+  pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
+    || return 1
+  jq -e '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | ($pods | length) >= 1
+      and all($pods[]; all(.status.conditions[]?; .type != "Ready" or .status != "True"))
+  ' >/dev/null <<<"${pods}"
 }
 
 bootstrap_pods_have_identity() {
@@ -761,6 +814,13 @@ assert_controller_can_i yes list pods --namespace "${namespace}"
 assert_controller_can_i yes list replicasets.apps --namespace "${namespace}"
 assert_controller_can_i yes get "deployments.apps/${workload_name}" --namespace "${namespace}"
 assert_controller_can_i yes patch "deployments.apps/${workload_name}" --namespace "${namespace}"
+assert_controller_can_i yes get "leases.coordination.k8s.io/${leader_lease_name}" --namespace "${namespace}"
+assert_controller_can_i yes watch "leases.coordination.k8s.io/${leader_lease_name}" --namespace "${namespace}"
+assert_controller_can_i yes patch "leases.coordination.k8s.io/${leader_lease_name}" --namespace "${namespace}"
+assert_controller_can_i no create leases.coordination.k8s.io --namespace "${namespace}"
+assert_controller_can_i no delete "leases.coordination.k8s.io/${leader_lease_name}" --namespace "${namespace}"
+assert_controller_can_i no patch leases.coordination.k8s.io/not-the-controller --namespace "${namespace}"
+assert_controller_can_i no get "leases.coordination.k8s.io/${leader_lease_name}" --namespace "${outside_namespace}"
 assert_controller_can_i no list namespaces
 assert_controller_can_i no get "namespaces/${outside_namespace}"
 assert_controller_can_i no watch gatewayclasses.gateway.networking.k8s.io
@@ -777,6 +837,54 @@ kube -n "${namespace}" rollout status "deployment/${workload_name}" \
   --timeout "${rollout_timeout_seconds}s"
 wait_for "committed immutable workload state" "${rollout_timeout_seconds}" deployment_is_committed
 wait_for "Gateway Programmed=True after full rollout convergence" "${rollout_timeout_seconds}" gateway_is_programmed
+wait_for "two Ready controller replicas" 60 controller_has_two_ready_replicas
+wait_for "one live Lease holder among two simultaneous replicas" 60 lease_has_live_unique_holder
+
+pdb_json="$(kube -n "${namespace}" get poddisruptionbudget "${controller_release}" -o json)"
+jq -e '
+  .spec.minAvailable == 1
+    and .status.expectedPods == 2
+    and .status.desiredHealthy == 1
+' >/dev/null <<<"${pdb_json}" \
+  || die "controller PodDisruptionBudget does not preserve one available replica"
+
+# Terminate the active writer and require a distinct live Pod to acquire a
+# higher Lease epoch while the immutable rollout and Programmed proof remain
+# recoverable from Kubernetes state.
+first_leader="$(lease_holder_pod)"
+first_epoch="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.spec.leaseTransitions}')"
+kube -n "${namespace}" delete pod "${first_leader}" --wait=false >/dev/null
+wait_for "replacement controller leader" 60 lease_holder_changed "${first_leader}"
+wait_for "two Ready replicas after leader termination" 60 controller_has_two_ready_replicas
+wait_for "committed rollout recovered after leader termination" "${rollout_timeout_seconds}" deployment_is_committed
+wait_for "Programmed proof recovered after leader termination" "${rollout_timeout_seconds}" gateway_is_programmed
+next_epoch="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.spec.leaseTransitions}')"
+((10#${next_epoch} > 10#${first_epoch})) \
+  || die "replacement leader did not advance the Lease fencing epoch"
+
+# Exercise the Deployment's RollingUpdate strategy. maxUnavailable=0 plus the
+# PDB must keep an election participant available throughout replacement.
+kube -n "${namespace}" rollout restart "deployment/${controller_release}" >/dev/null
+kube -n "${namespace}" rollout status "deployment/${controller_release}" --timeout=120s
+wait_for "one leader after rolling controller upgrade" 60 lease_has_live_unique_holder
+wait_for "Programmed proof after rolling controller upgrade" "${rollout_timeout_seconds}" gateway_is_programmed
+
+# Deleting the selected Lease revokes both writers. The controller lacks create
+# permission, so only reapplying the Helm release can recreate the exact object.
+old_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.metadata.uid}')"
+kube -n "${namespace}" delete lease "${leader_lease_name}" --wait=true >/dev/null
+wait_for "controller readiness revocation after Lease deletion" 30 controller_pods_are_unready
+helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
+  --namespace "${namespace}" \
+  --reuse-values \
+  --wait \
+  --timeout "${rollout_timeout_seconds}s"
+wait_for "leadership after Helm recreates the exact Lease" 60 lease_has_live_unique_holder
+new_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.metadata.uid}')"
+[[ "${new_lease_uid}" != "${old_lease_uid}" ]] \
+  || die "recreated Lease did not receive a new UID fencing domain"
+wait_for "rollout recovery after Lease recreation" "${rollout_timeout_seconds}" deployment_is_committed
+wait_for "Programmed proof after Lease recreation" "${rollout_timeout_seconds}" gateway_is_programmed
 
 deployment_json="$(kube -n "${namespace}" get deployment "${workload_name}" -o json)"
 revision="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-revision"] // empty' <<<"${deployment_json}")"

@@ -170,6 +170,32 @@ resources owned by its configured `--controller-name`.
 `--dry-run` skips immutable artifact/workload mutations and Kubernetes status
 mutations.
 
+## High Availability and Fencing
+
+In `run` mode, every replica participates in a named
+`coordination.k8s.io/v1` Lease election. The process identity combines the Pod
+name, Pod UID, and a fresh cryptographic nonce. A leadership term is the tuple
+of Lease UID, `leaseTransitions` epoch, and holder identity. Followers stay
+warm at the election boundary but do not translate resources or perform
+ConfigMap, workload, rollback, cleanup, or status writes.
+
+Every mutating request requires a current local write permit and a fresh GET of
+the exact Lease immediately before the request. Workload patches also persist
+the Lease UID, epoch, and holder in `oxibelt.dev/gateway-controller-*`
+annotations and reject an older epoch in the same Lease UID fencing domain.
+The ConfigMap identity remains content-addressed and independent of the
+leader, so a replacement leader reconstructs an in-progress rollout from the
+workload annotations, immutable ConfigMap, ReplicaSets, and Pods rather than
+from process memory.
+
+The chart owns a metadata-only Lease. Controller RBAC permits only `get`,
+`watch`, and `patch` for that exact Lease name in the release namespace; it
+does not grant Lease `create`, `list`, or `delete`. Deleting the Lease therefore
+revokes all writers and readiness. Reapply or upgrade the Helm release to
+recreate the exact Lease, then wait for a new UID and leader before considering
+the controller recovered. Do not grant namespace-wide Lease creation merely
+to automate this recovery.
+
 ## Immutable Rollout Model
 
 The base OxiBelt config must include the controller-owned path, usually with a
@@ -243,6 +269,14 @@ digest is committed across all Ready selected replicas. During convergence they
 remain `False` with a bounded rollout reason. Route attachment and reference
 conditions continue to reflect translation independently.
 
+Before a true `Programmed` commit, the leader re-lists the source resources,
+requires unchanged deterministic output, re-reads the workload and owned Pod
+chain, checks generation and resource version, and revalidates its Lease term.
+Status writes use a resource-version JSON Patch. The condition message records
+a bounded proof containing the workload UID/generation/resource version,
+owner-chain and source-snapshot digests, immutable content digest context, and
+leadership term.
+
 The controller does not read, write, or authenticate to an OxiBelt Admin
 Service. In `kubernetes_immutable` mode, the data plane rejects local mutable
 config load, rollback, file-sync, and downstream TLS reload operations rather
@@ -262,6 +296,8 @@ Run in-cluster:
 ```sh
 oxibelt-gateway-controller \
   --managed-config-path conf.d/gateway-api.generated.toml \
+  --health-bind 0.0.0.0:9090 \
+  run \
   --rollout-target-namespace default \
   --rollout-target-kind deployment \
   --rollout-target-name oxibelt \
@@ -269,8 +305,11 @@ oxibelt-gateway-controller \
   --rollout-volume-name gateway-config \
   --rollout-timeout-seconds 300 \
   --rollout-config-map-prefix oxibelt-gateway-config \
-  --health-bind 0.0.0.0:9090 \
-  run
+  --leader-election-namespace default \
+  --leader-election-lease-name oxibelt-gateway-controller \
+  --leader-election-lease-duration-seconds 15 \
+  --leader-election-renew-deadline-seconds 10 \
+  --leader-election-retry-period-seconds 2
 ```
 
 The `run` command uses a Kubernetes API token and CA from
@@ -291,10 +330,11 @@ A minimal chart lives under:
 deploy/helm/oxibelt-gateway-controller
 ```
 
-It installs a single-replica `Recreate` controller `Deployment`, a separate
+It installs a two-replica `RollingUpdate` controller `Deployment`, a separate
 ServiceAccount with automatic mounting disabled, an explicit bounded API
 projection, read-only-by-default Gateway API RBAC, a target-namespace rollout
-Role, health probes, and an example Gateway API manifest. The default Gateway
+Role, exact-name Lease Role, metadata-only Lease, `PodDisruptionBudget`, soft
+hostname anti-affinity, health probes, and an example Gateway API manifest. The default Gateway
 API read Role is limited to the release namespace; set `watchAllNamespaces:
 true` only after reviewing the resulting cluster-wide permissions. The target
 Role grants no Secret access; it gets and creates ConfigMaps, lists Pods and,
@@ -306,3 +346,17 @@ permission. The controller chart defaults to the role-specific
 `oxibelt`, `oxibeltctl`, and the public runtime filesystem. The data-plane
 chart independently defaults to `ghcr.io/oxibelt/oxibelt-dataplane`; the two
 images must use the same release version and source revision.
+
+The rolling strategy uses `maxUnavailable: 0` and `maxSurge: 1`; the default
+PDB keeps `minAvailable: 1`. `replicaCount: 1` remains available for deliberate
+development use, normally with the PDB disabled. `/healthz` is process health,
+`/readyz` means the replica is a current election participant (leader or
+follower), `/leaderz` is leader-only, and `/reconcilez` is leader-only and
+requires a committed proof. Leader-election values default to 15/10/2 seconds
+for Lease duration, renew deadline, and retry period and are rejected unless
+they satisfy the chart and CLI safety bounds.
+
+During an upgrade, leave the metadata-only Lease in place and let
+`RollingUpdate` replace replicas. To downgrade to a controller version without
+Lease fencing, first scale this controller to one replica and wait for the
+rolling update to finish; running multiple unfenced old replicas is unsafe.

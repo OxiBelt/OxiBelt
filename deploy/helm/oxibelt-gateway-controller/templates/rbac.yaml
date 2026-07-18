@@ -43,6 +43,32 @@ subjects:
   name: {{ include "oxibelt-gateway-controller.name" . }}
   namespace: {{ .Release.Namespace }}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames:
+  - {{ include "oxibelt-gateway-controller.leaseName" . | quote }}
+  verbs: ["get", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "oxibelt-gateway-controller.name" . }}-leader-election
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+---
 {{- if $watchAllNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

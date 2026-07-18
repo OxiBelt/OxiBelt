@@ -1,0 +1,13 @@
+{{- include "oxibelt-gateway-controller.validateSecurity" . -}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "oxibelt-gateway-controller.name" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
+{{- end }}

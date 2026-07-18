@@ -8,9 +8,12 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
@@ -21,6 +24,7 @@ spec:
     spec:
       serviceAccountName: {{ include "oxibelt-gateway-controller.name" . }}
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
       securityContext:
 {{ toYaml .Values.podSecurityContext | indent 8 }}
       containers:
@@ -39,6 +43,11 @@ spec:
         - "--rollout-volume-name={{ .Values.rollout.volumeName }}"
         - "--rollout-timeout-seconds={{ .Values.rollout.timeoutSeconds }}"
         - "--rollout-config-map-prefix={{ .Values.rollout.configMapPrefix }}"
+        - "--leader-election-namespace={{ .Release.Namespace }}"
+        - "--leader-election-lease-name={{ include "oxibelt-gateway-controller.leaseName" . }}"
+        - "--leader-election-lease-duration-seconds={{ .Values.leaderElection.leaseDurationSeconds }}"
+        - "--leader-election-renew-deadline-seconds={{ .Values.leaderElection.renewDeadlineSeconds }}"
+        - "--leader-election-retry-period-seconds={{ .Values.leaderElection.retryPeriodSeconds }}"
         - "--health-bind={{ .Values.healthBind }}"
         {{- if not .Values.watchAllNamespaces }}
         - "--watch-namespace={{ $watchNamespace }}"
@@ -53,6 +62,15 @@ spec:
         ports:
         - name: health
           containerPort: 9090
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
         readinessProbe:
           httpGet:
             path: /readyz
@@ -90,5 +108,29 @@ spec:
 {{ toYaml .Values.nodeSelector | indent 8 }}
       tolerations:
 {{ toYaml .Values.tolerations | indent 8 }}
+{{- if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: {{ .Values.podAntiAffinity.weight }}
+            podAffinityTerm:
+              topologyKey: {{ .Values.podAntiAffinity.topologyKey | quote }}
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
+{{- with .Values.affinity.nodeAffinity }}
+        nodeAffinity:
+{{ toYaml . | indent 10 }}
+{{- end }}
+{{- with .Values.affinity.podAffinity }}
+        podAffinity:
+{{ toYaml . | indent 10 }}
+{{- end }}
+{{- else }}
       affinity:
 {{ toYaml .Values.affinity | indent 8 }}
+{{- end }}
+{{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+{{ toYaml . | indent 8 }}
+{{- end }}

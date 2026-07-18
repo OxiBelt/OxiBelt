@@ -4,9 +4,11 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use serde_json::{Map, Value, json};
 
+use super::leader_election::LeadershipTerm;
 use super::rollout::{
   ARTIFACT_DIGEST_ANNOTATION, CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact,
-  IMMUTABLE_ROLLOUT_ANNOTATION, MANAGED_PATH_ANNOTATION, RolloutState, RolloutTarget, annotation,
+  HOLDER_IDENTITY_ANNOTATION, IMMUTABLE_ROLLOUT_ANNOTATION, LEADER_EPOCH_ANNOTATION,
+  LEASE_UID_ANNOTATION, MANAGED_PATH_ANNOTATION, RolloutState, RolloutTarget, annotation,
 };
 
 #[path = "rollout_patch/volume.rs"]
@@ -507,6 +509,47 @@ pub fn build_workload_patch(
   Ok(WorkloadPatch { operations })
 }
 
+pub fn add_leadership_fence(
+  patch: &mut WorkloadPatch,
+  workload: &Value,
+  term: &LeadershipTerm,
+) -> anyhow::Result<()> {
+  let existing_uid = annotation(workload, LEASE_UID_ANNOTATION);
+  let existing_epoch = annotation(workload, LEADER_EPOCH_ANNOTATION)
+    .map(|epoch| {
+      epoch
+        .parse::<u64>()
+        .context("target workload leader epoch annotation must be an unsigned integer")
+    })
+    .transpose()?;
+  let existing_holder = annotation(workload, HOLDER_IDENTITY_ANNOTATION);
+  if existing_uid == Some(term.lease_uid.as_str()) {
+    if existing_epoch.is_some_and(|epoch| epoch > term.leader_epoch) {
+      bail!("stale leader epoch cannot overwrite workload state from a newer leader");
+    }
+    if existing_epoch == Some(term.leader_epoch)
+      && existing_holder.is_some_and(|holder| holder != term.holder_identity)
+    {
+      bail!("workload leadership annotations conflict within the same Lease epoch");
+    }
+  }
+  let annotations = Map::from_iter([
+    (
+      LEASE_UID_ANNOTATION.to_string(),
+      Value::String(term.lease_uid.clone()),
+    ),
+    (
+      LEADER_EPOCH_ANNOTATION.to_string(),
+      Value::String(term.leader_epoch.to_string()),
+    ),
+    (
+      HOLDER_IDENTITY_ANNOTATION.to_string(),
+      Value::String(term.holder_identity.clone()),
+    ),
+  ]);
+  patch_annotations(&mut patch.operations, workload, "/metadata", annotations)
+}
+
 pub fn validate_rollout_opt_in(workload: &Value) -> anyhow::Result<()> {
   if annotation(workload, IMMUTABLE_ROLLOUT_ANNOTATION) != Some("true") {
     bail!(
@@ -579,6 +622,7 @@ mod tests {
   use serde_json::json;
 
   use super::*;
+  use crate::leader_election::LeadershipTerm;
   use crate::rollout::WorkloadKind;
 
   const MANAGED_PATH: &str = "conf.d/gateway-api.generated.toml";
@@ -653,5 +697,37 @@ mod tests {
     );
 
     assert!(base_config_reference(&workload("conf.d/.keep"), &target, MANAGED_PATH).is_err());
+  }
+
+  #[test]
+  fn stale_leader_cannot_append_a_late_workload_write() {
+    let workload = json!({
+      "metadata": {
+        "annotations": {
+          LEASE_UID_ANNOTATION: "lease-a",
+          LEADER_EPOCH_ANNOTATION: "8",
+          HOLDER_IDENTITY_ANNOTATION: "pod-new"
+        }
+      }
+    });
+    let mut patch = WorkloadPatch {
+      operations: Vec::new(),
+    };
+    let stale = LeadershipTerm {
+      lease_uid: "lease-a".to_string(),
+      leader_epoch: 7,
+      holder_identity: "pod-old".to_string(),
+    };
+    assert!(add_leadership_fence(&mut patch, &workload, &stale).is_err());
+    assert!(patch.operations.is_empty());
+
+    let recreated = LeadershipTerm {
+      lease_uid: "lease-b".to_string(),
+      leader_epoch: 1,
+      holder_identity: "pod-replacement".to_string(),
+    };
+    add_leadership_fence(&mut patch, &workload, &recreated)
+      .expect("a recreated Lease starts a new UID fencing domain");
+    assert_eq!(patch.operations.len(), 3);
   }
 }

@@ -9,16 +9,18 @@ use tracing::{info, warn};
 
 use super::cli::{RunArgs, SharedArgs};
 use super::rollout::{
-  CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact, RolloutPhase, RolloutState,
-  RolloutTarget, WorkloadKind, WorkloadPodOwnership, annotation, build_workload_patch,
-  evaluate_convergence, now_unix_seconds, pod_is_selected,
+  CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact, HOLDER_IDENTITY_ANNOTATION,
+  LEADER_EPOCH_ANNOTATION, LEASE_UID_ANNOTATION, RolloutPhase, RolloutState, RolloutTarget,
+  WorkloadKind, WorkloadPodOwnership, annotation, build_workload_patch, evaluate_convergence,
+  now_unix_seconds, pod_is_selected,
 };
 use super::rollout_decision::{
   ObservationDecision, decide_observation, mark_failed_attempt, prepare_rollback_state,
   requires_rollback,
 };
 use super::rollout_patch::{
-  base_config_reference, validate_immutable_base_config, validate_rollout_opt_in,
+  add_leadership_fence, base_config_reference, validate_immutable_base_config,
+  validate_rollout_opt_in,
 };
 use super::rollout_status::RolloutStatus;
 use super::watch::{KUBERNETES_MAX_BODY_BYTES, KubernetesPoller};
@@ -45,6 +47,22 @@ impl KubernetesPoller {
       .await?;
     self.ensure_config_map(&target, &candidate).await?;
     let state = RolloutState::from_workload(&workload);
+
+    if state.desired_revision.is_some() {
+      let permit = self.authorize_write().await?;
+      if !workload_term_matches(&workload, permit.term()) {
+        let desired = self.load_desired_artifact(&target, &state).await?;
+        self
+          .apply_state(&target, &workload, &desired, &state)
+          .await?;
+        info!(
+          lease_uid = %permit.term().lease_uid,
+          leader_epoch = permit.term().leader_epoch,
+          "adopted persisted immutable rollout state under the current leadership term"
+        );
+        return Ok(RolloutStatus::from(&state));
+      }
+    }
 
     if state.phase == RolloutPhase::RolledBack
       && state.failed_revision.as_deref() == Some(candidate.name.as_str())
@@ -226,7 +244,9 @@ impl KubernetesPoller {
     artifact: &ConfigArtifact,
     state: &RolloutState,
   ) -> anyhow::Result<()> {
-    let patch = build_workload_patch(workload, target, artifact, state)?;
+    let permit = self.authorize_write().await?;
+    let mut patch = build_workload_patch(workload, target, artifact, state)?;
+    add_leadership_fence(&mut patch, workload, permit.term())?;
     let body =
       serde_json::to_vec(&patch.json()).context("failed to serialize workload JSON Patch")?;
     let (status, response) = self
@@ -268,6 +288,7 @@ impl KubernetesPoller {
       bail!("immutable ConfigMap name collision has different content or metadata");
     }
     let collection = format!("/api/v1/namespaces/{}/configmaps", target.namespace);
+    let _permit = self.authorize_write().await?;
     let body = serde_json::to_vec(&artifact.manifest(target))
       .context("failed to serialize immutable ConfigMap")?;
     let (status, response) = self
@@ -358,7 +379,7 @@ impl KubernetesPoller {
     ConfigArtifact::from_existing(target, &value)
   }
 
-  async fn get_required_json(&self, path: &str) -> anyhow::Result<Value> {
+  pub(super) async fn get_required_json(&self, path: &str) -> anyhow::Result<Value> {
     self
       .get_optional_json(path)
       .await?
@@ -381,7 +402,7 @@ impl KubernetesPoller {
     Ok(Some(value))
   }
 
-  async fn list_pods(&self, namespace: &str) -> anyhow::Result<Vec<Value>> {
+  pub(super) async fn list_pods(&self, namespace: &str) -> anyhow::Result<Vec<Value>> {
     let path = format!("/api/v1/namespaces/{namespace}/pods");
     let value = self
       .get_required_json(&path)
@@ -396,7 +417,7 @@ impl KubernetesPoller {
     )
   }
 
-  async fn list_replica_sets(&self, namespace: &str) -> anyhow::Result<Vec<Value>> {
+  pub(super) async fn list_replica_sets(&self, namespace: &str) -> anyhow::Result<Vec<Value>> {
     let path = format!("/apis/apps/v1/namespaces/{namespace}/replicasets");
     let value = self
       .get_required_json(&path)
@@ -440,6 +461,13 @@ impl KubernetesPoller {
   }
 }
 
+fn workload_term_matches(workload: &Value, term: &super::leader_election::LeadershipTerm) -> bool {
+  annotation(workload, LEASE_UID_ANNOTATION) == Some(term.lease_uid.as_str())
+    && annotation(workload, LEADER_EPOCH_ANNOTATION).and_then(|epoch| epoch.parse::<u64>().ok())
+      == Some(term.leader_epoch)
+    && annotation(workload, HOLDER_IDENTITY_ANNOTATION) == Some(term.holder_identity.as_str())
+}
+
 fn rollout_timed_out(state: &RolloutState, target: &RolloutTarget) -> bool {
   state
     .started_at_unix
@@ -472,6 +500,7 @@ fn convergence_lost_status(state: &RolloutState) -> RolloutStatus {
     desired_revision: state.desired_revision.clone(),
     desired_content_digest: state.desired_content_digest.clone(),
     reason: Some("ConvergenceLost".to_string()),
+    proof: None,
   }
 }
 
@@ -528,7 +557,23 @@ fn response_message(body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::leader_election::LeadershipTerm;
   use serde_json::json;
+
+  #[test]
+  fn persisted_rollout_requires_current_term_adoption() {
+    let term = LeadershipTerm {
+      lease_uid: "lease-a".to_string(),
+      leader_epoch: 3,
+      holder_identity: "pod-a".to_string(),
+    };
+    let mut workload = json!({"metadata":{"annotations":{}}});
+    assert!(!workload_term_matches(&workload, &term));
+    workload["metadata"]["annotations"][LEASE_UID_ANNOTATION] = json!("lease-a");
+    workload["metadata"]["annotations"][LEADER_EPOCH_ANNOTATION] = json!("3");
+    workload["metadata"]["annotations"][HOLDER_IDENTITY_ANNOTATION] = json!("pod-a");
+    assert!(workload_term_matches(&workload, &term));
+  }
 
   #[test]
   fn rejection_detection_ignores_selector_colliding_pods_outside_the_owner_chain() {

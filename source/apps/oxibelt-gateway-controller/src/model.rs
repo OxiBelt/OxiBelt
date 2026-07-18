@@ -15,6 +15,10 @@ pub struct ObjectMeta {
   pub labels: BTreeMap<String, String>,
   #[serde(default)]
   pub generation: Option<i64>,
+  #[serde(default, rename = "resourceVersion")]
+  pub resource_version: Option<String>,
+  #[serde(default)]
+  pub uid: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

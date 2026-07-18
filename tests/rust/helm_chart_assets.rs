@@ -32,6 +32,7 @@ fn data_plane_chart_metadata_and_values_are_valid() {
 
   let values = read_yaml("deploy/helm/oxibelt/values.yaml");
   assert_eq!(values["image"]["digest"], "");
+  assert_eq!(values["replicaCount"], 2);
   assert_eq!(values["workload"]["kind"], "Deployment");
   assert_eq!(values["workload"]["deployment"]["maxUnavailable"], 0);
   assert_eq!(values["workload"]["deployment"]["maxSurge"], 1);
@@ -731,6 +732,14 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
 
   let values = read_yaml("deploy/helm/oxibelt-gateway-controller/values.yaml");
   assert_eq!(values["image"]["digest"], "");
+  assert_eq!(values["replicaCount"], 2);
+  assert_eq!(values["leaderElection"]["leaseName"], "");
+  assert_eq!(values["leaderElection"]["leaseDurationSeconds"], 15);
+  assert_eq!(values["leaderElection"]["renewDeadlineSeconds"], 10);
+  assert_eq!(values["leaderElection"]["retryPeriodSeconds"], 2);
+  assert_eq!(values["podDisruptionBudget"]["enabled"], true);
+  assert_eq!(values["podDisruptionBudget"]["minAvailable"], 1);
+  assert_eq!(values["podAntiAffinity"]["enabled"], true);
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
   assert_eq!(values["backendResolution"], "cluster_dns");
   assert_eq!(values["rollout"]["target"]["kind"], "deployment");
@@ -792,6 +801,15 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
       ["maximum"],
     3600
   );
+  assert_eq!(schema["properties"]["replicaCount"]["minimum"], 1);
+  assert_eq!(
+    schema["properties"]["leaderElection"]["properties"]["leaseDurationSeconds"]["minimum"],
+    10
+  );
+  assert_eq!(
+    schema["properties"]["podAntiAffinity"]["properties"]["weight"]["maximum"],
+    100
+  );
 
   let deployment = read_repo("deploy/helm/oxibelt-gateway-controller/templates/deployment.yaml");
   assert!(
@@ -802,7 +820,11 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(helpers.contains("image.digest must be an empty string or a lower-case sha256 digest"));
   assert!(deployment.contains("--backend-resolution={{ .Values.backendResolution }}"));
   assert!(deployment.contains("--status-service={{ .Values.statusService }}"));
-  assert!(deployment.contains("strategy:\n    type: Recreate"));
+  assert!(deployment.contains("replicas: {{ .Values.replicaCount }}"));
+  assert!(deployment.contains("strategy:\n    type: RollingUpdate"));
+  assert!(deployment.contains("maxUnavailable: 0"));
+  assert!(deployment.contains("maxSurge: 1"));
+  assert!(!deployment.contains("type: Recreate"));
   assert!(deployment.contains("validateManagedConfigPath"));
   assert!(deployment.contains("validateSecurity"));
   assert!(deployment.contains("automountServiceAccountToken: false"));
@@ -847,6 +869,14 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(!deployment.contains("admin-token"));
   assert!(deployment.contains("securityContext"));
   assert!(deployment.contains("startupProbe"));
+  assert!(deployment.contains("--leader-election-namespace={{ .Release.Namespace }}"));
+  assert!(deployment.contains("--leader-election-lease-name="));
+  assert!(deployment.contains("--leader-election-lease-duration-seconds="));
+  assert!(deployment.contains("--leader-election-renew-deadline-seconds="));
+  assert!(deployment.contains("--leader-election-retry-period-seconds="));
+  assert!(deployment.contains("fieldPath: metadata.name"));
+  assert!(deployment.contains("fieldPath: metadata.uid"));
+  assert!(deployment.contains("preferredDuringSchedulingIgnoredDuringExecution"));
 
   let rbac = read_repo("deploy/helm/oxibelt-gateway-controller/templates/rbac.yaml");
   assert!(rbac.contains("gatewayclasses"));
@@ -875,4 +905,26 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
   assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
   assert!(!rbac.contains("secrets"));
+
+  let leader_role = rbac
+    .split("name: {{ include \"oxibelt-gateway-controller.name\" . }}-leader-election")
+    .nth(1)
+    .and_then(|section| section.split("\n---").next())
+    .expect("release-namespace leader-election Role should be present");
+  assert!(leader_role.contains("apiGroups: [\"coordination.k8s.io\"]"));
+  assert!(leader_role.contains("resources: [\"leases\"]"));
+  assert!(leader_role.contains("resourceNames:"));
+  assert!(leader_role.contains("verbs: [\"get\", \"watch\", \"patch\"]"));
+  assert!(!leader_role.contains("create"));
+  assert!(!leader_role.contains("delete"));
+
+  let lease = read_repo("deploy/helm/oxibelt-gateway-controller/templates/lease.yaml");
+  assert!(lease.contains("apiVersion: coordination.k8s.io/v1"));
+  assert!(lease.contains("kind: Lease"));
+  assert!(!lease.contains("spec:"));
+
+  let pdb = read_repo("deploy/helm/oxibelt-gateway-controller/templates/pdb.yaml");
+  assert!(pdb.contains("apiVersion: policy/v1"));
+  assert!(pdb.contains("kind: PodDisruptionBudget"));
+  assert!(pdb.contains("minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}"));
 }

@@ -1085,6 +1085,9 @@ jobs:
       - name: Validate Helm ServiceAccount token hardening
         run: tests/scripts/check-helm-service-account-token.sh
 
+      - name: Validate Gateway controller high availability
+        run: tests/scripts/check-helm-gateway-controller-ha.sh
+
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
@@ -1250,6 +1253,7 @@ jobs:
           tests/scripts/check-helm-base-config.sh
           tests/scripts/check-helm-edge-secure-medium-profile.sh
           tests/scripts/check-helm-service-account-token.sh
+          tests/scripts/check-helm-gateway-controller-ha.sh
           tests/scripts/check-helm-pod-lifecycle.sh
           tests/scripts/check-helm-autoscaling.sh
           tests/scripts/check-helm-network-policy.sh

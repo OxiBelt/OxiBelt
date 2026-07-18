@@ -13,8 +13,10 @@ pub struct ControllerHealth {
 
 #[derive(Debug, Default)]
 struct HealthState {
+  election_participant: bool,
+  leader: bool,
   reconciled: bool,
-  ready: bool,
+  reconcile_ready: bool,
   last_error: Option<String>,
 }
 
@@ -22,7 +24,7 @@ impl ControllerHealth {
   pub fn mark_reconciled(&self, status: RolloutStatus) {
     if let Ok(mut state) = self.state.write() {
       state.reconciled = true;
-      state.ready = status.is_committed();
+      state.reconcile_ready = status.is_committed();
       state.last_error = status.reason;
     }
   }
@@ -30,8 +32,22 @@ impl ControllerHealth {
   pub fn mark_failed(&self, error: String) {
     if let Ok(mut state) = self.state.write() {
       state.reconciled = false;
-      state.ready = false;
+      state.reconcile_ready = false;
       state.last_error = Some(error);
+    }
+  }
+
+  pub fn mark_election(&self, participant: bool, leader: bool, error: Option<String>) {
+    if let Ok(mut state) = self.state.write() {
+      state.election_participant = participant;
+      state.leader = participant && leader;
+      if error.is_some() {
+        state.last_error = error;
+      }
+      if !state.leader {
+        state.reconciled = false;
+        state.reconcile_ready = false;
+      }
     }
   }
 
@@ -39,7 +55,19 @@ impl ControllerHealth {
     self
       .state
       .read()
-      .map(|state| state.reconciled && state.ready)
+      .map(|state| state.election_participant)
+      .unwrap_or(false)
+  }
+
+  fn leader(&self) -> bool {
+    self.state.read().map(|state| state.leader).unwrap_or(false)
+  }
+
+  fn reconcile_ready(&self) -> bool {
+    self
+      .state
+      .read()
+      .map(|state| state.leader && state.reconciled && state.reconcile_ready)
       .unwrap_or(false)
   }
 }
@@ -69,6 +97,10 @@ pub async fn spawn_if_configured(
           "/healthz" => ("200 OK", "ok\n"),
           "/readyz" if health.ready() => ("200 OK", "ready\n"),
           "/readyz" => ("503 Service Unavailable", "not ready\n"),
+          "/leaderz" if health.leader() => ("200 OK", "leader\n"),
+          "/leaderz" => ("503 Service Unavailable", "not leader\n"),
+          "/reconcilez" if health.reconcile_ready() => ("200 OK", "reconciled\n"),
+          "/reconcilez" => ("503 Service Unavailable", "not reconciled\n"),
           _ => ("404 Not Found", "not found\n"),
         };
         let response = format!(
@@ -89,17 +121,26 @@ mod tests {
   use crate::rollout::RolloutPhase;
 
   #[test]
-  fn readiness_requires_a_committed_reconciliation() {
+  fn readiness_distinguishes_election_participation_from_leadership_and_reconciliation() {
     let health = ControllerHealth::default();
     assert!(!health.ready());
+    health.mark_election(true, false, None);
+    assert!(health.ready());
+    assert!(!health.leader());
+    assert!(!health.reconcile_ready());
+    health.mark_election(true, true, None);
     health.mark_reconciled(RolloutStatus::pending("Pending"));
-    assert!(!health.ready());
+    assert!(health.ready());
+    assert!(health.leader());
+    assert!(!health.reconcile_ready());
     health.mark_reconciled(RolloutStatus {
       phase: RolloutPhase::Committed,
       desired_revision: Some("revision".to_string()),
       desired_content_digest: Some("digest".to_string()),
       reason: None,
+      proof: Some(crate::rollout_status::CommitProof::test()),
     });
     assert!(health.ready());
+    assert!(health.reconcile_ready());
   }
 }

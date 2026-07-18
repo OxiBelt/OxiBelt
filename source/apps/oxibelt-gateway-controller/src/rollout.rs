@@ -30,6 +30,9 @@ pub const FAILED_REVISION_ANNOTATION: &str = "oxibelt.dev/gateway-config-failed-
 pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 pub const ROLLOUT_TARGET_LABEL: &str = "oxibelt.dev/rollout-target";
 pub const ROLLOUT_TARGET_KIND_LABEL: &str = "oxibelt.dev/rollout-target-kind";
+pub const LEASE_UID_ANNOTATION: &str = "oxibelt.dev/gateway-controller-lease-uid";
+pub const LEADER_EPOCH_ANNOTATION: &str = "oxibelt.dev/gateway-controller-leader-epoch";
+pub const HOLDER_IDENTITY_ANNOTATION: &str = "oxibelt.dev/gateway-controller-holder-identity";
 
 const CONTROLLER_NAME: &str = "oxibelt-gateway-controller";
 const DIGEST_DOMAIN: &[u8] = b"oxibelt-gateway-config-v1\0";

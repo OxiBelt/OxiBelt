@@ -516,6 +516,22 @@ controlled rather than controller garbage collected. ConfigMap access is still
 namespace scoped because content-addressed artifact names are known only at
 runtime.
 
+The controller chart defaults to two replicas with `RollingUpdate`
+(`maxUnavailable: 0`, `maxSurge: 1`), a `minAvailable: 1` PDB, and preferred
+hostname anti-affinity. Only the holder of the Helm-owned metadata-only Lease
+may translate or mutate. The selected Lease Role is confined to the release
+namespace and exact name with `get`, `watch`, and `patch`; the controller cannot
+create, list, or delete Leases. If that Lease is deleted, both replicas become
+unready and stop writing. Restore it by reapplying the Helm release, then verify
+the new Lease UID and holder before resuming operations.
+
+Use `/healthz` for liveness, `/readyz` for election-participant readiness,
+`/leaderz` to identify the current writer, and `/reconcilez` when an operator
+needs the leader's committed reconciliation proof. On normal termination the
+replica revokes local writer authority before attempting a guarded Lease
+release; expiry remains the fallback. Scale to one replica before downgrading
+to a release that predates Lease fencing.
+
 Pod proof follows exact controller-owner UIDs: a DaemonSet Pod must be directly
 controlled by the selected DaemonSet, while a Deployment Pod must be directly
 controlled by a ReplicaSet directly controlled by the selected Deployment. This

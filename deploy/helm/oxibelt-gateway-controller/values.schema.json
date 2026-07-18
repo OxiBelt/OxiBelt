@@ -14,6 +14,22 @@
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "leaderElection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaseName": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "leaseDurationSeconds": { "type": "integer", "minimum": 10, "maximum": 300 },
+        "renewDeadlineSeconds": { "type": "integer", "minimum": 5, "maximum": 120 },
+        "retryPeriodSeconds": { "type": "integer", "minimum": 1, "maximum": 30 }
+      },
+      "required": ["leaseName", "leaseDurationSeconds", "renewDeadlineSeconds", "retryPeriodSeconds"]
+    },
     "controllerName": { "type": "string", "minLength": 1 },
     "managedConfigPath": {
       "type": "string",
@@ -60,6 +76,31 @@
         "configMapPrefix": { "type": "string", "minLength": 1 }
       },
       "required": ["target", "volumeName", "timeoutSeconds", "configMapPrefix"]
+    },
+    "podAntiAffinity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "weight": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "topologyKey": { "type": "string", "minLength": 1 }
+      },
+      "required": ["enabled", "weight", "topologyKey"]
+    },
+    "topologySpreadConstraints": { "type": "array" },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "pattern": "^[0-9]+%$" }
+          ]
+        }
+      },
+      "required": ["enabled", "minAvailable"]
     }
   },
   "allOf": [
