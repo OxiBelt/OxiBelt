@@ -116,6 +116,106 @@ impl AdminAuditRuntime {
     self.metrics.record_admin_audit_required_rejection(reason);
   }
 
+  /// Builds a bounded lifecycle event for a durable Admin operation.
+  ///
+  /// Operation execution is detached from the originating HTTP request, so
+  /// this event intentionally carries only the authenticated actor/principal,
+  /// immutable operation identity, fixed kind/state values, and revision. Raw
+  /// work payloads, checkpoints, progress details, and error strings never
+  /// enter enforcing audit storage through this path.
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn operation_lifecycle_event(
+    &self,
+    operation_id: &str,
+    kind: &str,
+    actor: &str,
+    principal: &str,
+    request_id: &str,
+    state: &str,
+    revision: u64,
+    error_code: Option<&str>,
+  ) -> AdminAuditEvent {
+    let occurrence = super::event::occurrence_timestamp().ok();
+    let terminal = matches!(
+      state,
+      "succeeded" | "failed" | "cancelled" | "indeterminate"
+    );
+    let result = match state {
+      "succeeded" | "cancelled" => super::event::AuditResult::Applied,
+      "indeterminate" => super::event::AuditResult::Indeterminate,
+      "failed" => super::event::AuditResult::Rejected,
+      _ => super::event::AuditResult::Accepted,
+    };
+    let status = match state {
+      "succeeded" | "cancelled" => StatusCode::OK,
+      "failed" | "indeterminate" => StatusCode::INTERNAL_SERVER_ERROR,
+      _ => StatusCode::ACCEPTED,
+    };
+    let resource = format!("operation/{kind}/{operation_id}");
+    AdminAuditEvent {
+      schema_version: super::event::ADMIN_AUDIT_SCHEMA_VERSION.to_string(),
+      event_id: super::event::generate_event_id().unwrap_or_default(),
+      timestamp: occurrence
+        .as_ref()
+        .map(|timestamp| timestamp.rfc3339.clone())
+        .unwrap_or_default(),
+      timestamp_unix_ms: occurrence.map_or(0, |timestamp| timestamp.unix_ms),
+      instance_id: self.instance_id.to_string(),
+      phase: if terminal {
+        super::event::AuditPhase::Terminal
+      } else {
+        super::event::AuditPhase::Intent
+      },
+      request_id: request_id.to_string(),
+      mutation_request_id: Some(operation_id.to_string()),
+      actor: Some(actor.to_string()),
+      principal: Some(principal.to_string()),
+      subject: None,
+      groups: Vec::new(),
+      workload_identity_kind: None,
+      workload_identity: None,
+      workload_principal: None,
+      certificate_fingerprint_sha256: None,
+      credential_kind: None,
+      credential_identity: None,
+      credential_principal: None,
+      credential_id: None,
+      authentication_reason: Some("previously_authorized_operation".to_string()),
+      peer: "internal".to_string(),
+      source_ip: None,
+      source_address: None,
+      scheme: "internal".to_string(),
+      method: "WORKER".to_string(),
+      path: format!("/admin/v1/operations/{operation_id}"),
+      service: Some("admin-operation".to_string()),
+      operation: "operations.lifecycle".to_string(),
+      durability_action: Some("operations.lifecycle".to_string()),
+      action: Some("operations.lifecycle".to_string()),
+      resource: Some(resource),
+      target_kind: Some("operation".to_string()),
+      target_id: Some(operation_id.to_string()),
+      previous_revision: revision.checked_sub(1).map(|value| value.to_string()),
+      desired_revision: Some(revision.to_string()),
+      content_digest: None,
+      status: status.as_u16(),
+      result,
+      outcome: state.to_string(),
+      error_code: error_code.map(str::to_string),
+      error: None,
+      request_summary: json!({
+        "operation": {
+          "id": operation_id,
+          "kind": kind,
+          "state": state,
+          "revision": revision,
+        }
+      }),
+      integrity: None,
+      durable_required: true,
+      lifecycle_managed: true,
+    }
+  }
+
   /// Persists a critical mutation event before returning to the caller.
   ///
   /// Unlike the normal bounded audit queue, this path proves the row exists
@@ -267,6 +367,35 @@ mod tests {
         .lifecycle_managed,
       "only a claimed mutation transfers terminal auditing to the mutation lifecycle"
     );
+  }
+
+  #[test]
+  fn operation_lifecycle_event_contains_only_bounded_safe_context() {
+    let runtime = AdminAuditRuntime::test_export_only();
+    let event = runtime.operation_lifecycle_event(
+      "op_550e8400-e29b-41d4-a716-446655440000",
+      "dynamic_policy_import",
+      "controller",
+      "platform-admin",
+      "request-1",
+      "indeterminate",
+      9,
+      Some("commit_outcome_unknown"),
+    );
+
+    assert_eq!(event.operation, "operations.lifecycle");
+    assert_eq!(event.outcome, "indeterminate");
+    assert_eq!(
+      event.result,
+      super::super::event::AuditResult::Indeterminate
+    );
+    assert_eq!(event.previous_revision.as_deref(), Some("8"));
+    assert_eq!(event.desired_revision.as_deref(), Some("9"));
+    assert_eq!(event.error_code.as_deref(), Some("commit_outcome_unknown"));
+    assert!(event.error.is_none());
+    let encoded = serde_json::to_string(&event).expect("operation event should encode");
+    assert!(!encoded.contains("Authorization"));
+    assert!(!encoded.contains("checkpoint"));
   }
 
   #[tokio::test]

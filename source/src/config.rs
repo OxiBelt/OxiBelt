@@ -17,6 +17,7 @@ mod access_log;
 mod admin_audit;
 mod admin_legacy;
 mod admin_mutations;
+mod admin_operations;
 mod admin_runtime;
 mod admin_workload_identity;
 mod allowed_keys;
@@ -125,7 +126,7 @@ use turn::RawWebRtcTurnListenerConfig;
 pub use turn::*;
 pub use upstream_pool::*;
 pub use workers::*;
-pub use {access_log::*, admin_audit::*, admin_mutations::*};
+pub use {access_log::*, admin_audit::*, admin_mutations::*, admin_operations::*};
 
 /// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
 #[derive(Debug, Clone, PartialEq)]
@@ -1977,6 +1978,7 @@ impl Config {
   fn validate_admin(&self) -> anyhow::Result<()> {
     self.validate_legacy_admin_authorization()?;
     self.validate_admin_audit_config_fields()?;
+    self.validate_admin_operations_config()?;
     if self.admin.audit.queue_capacity == 0 {
       bail!("admin.audit.queue_capacity must be greater than 0");
     }
@@ -1994,30 +1996,6 @@ impl Config {
     }
     self.validate_admin_privileged_ports()?;
     self.validate_admin_audit_runtime()?;
-    if self.admin.operations.max_running == 0 {
-      bail!("admin.operations.max_running must be greater than 0");
-    }
-    if self.admin.operations.max_queued == 0 {
-      bail!("admin.operations.max_queued must be greater than 0");
-    }
-    if self.admin.operations.max_stored == 0 {
-      bail!("admin.operations.max_stored must be greater than 0");
-    }
-    if self.admin.operations.max_stored < self.admin.operations.max_running {
-      bail!("admin.operations.max_stored must be at least admin.operations.max_running");
-    }
-    if self.admin.operations.retention_seconds == 0 {
-      bail!("admin.operations.retention_seconds must be greater than 0");
-    }
-    if self.admin.operations.event_buffer == 0 {
-      bail!("admin.operations.event_buffer must be greater than 0");
-    }
-    if self.admin.operations.result_max_bytes == 0 {
-      bail!("admin.operations.result_max_bytes must be greater than 0");
-    }
-    if self.admin.operations.webtransport_max_sessions == 0 {
-      bail!("admin.operations.webtransport_max_sessions must be greater than 0");
-    }
     if !self.ipm.enabled {
       if self.admin.bearer_token_env.trim().is_empty() {
         bail!("admin.bearer_token_env must not be empty when admin is enabled");
@@ -3128,11 +3106,19 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "admin.audit.spool" => allowed_keys::ADMIN_AUDIT_SPOOL_CONFIG_KEYS,
     "admin.audit.integrity" => allowed_keys::ADMIN_AUDIT_INTEGRITY_CONFIG_KEYS,
     "admin.operations" => &[
+      "artifact_key_env",
+      "artifact_max_bytes",
+      "backend",
+      "checkpoint_max_bytes",
       "enabled",
       "event_buffer",
+      "lease_renew_seconds",
+      "lease_seconds",
+      "max_lifetime_seconds",
       "max_queued",
       "max_running",
       "max_stored",
+      "persistence",
       "result_max_bytes",
       "retention_seconds",
       "webtransport",
@@ -5045,47 +5031,6 @@ impl Default for AdminConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct AdminOperationsConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_admin_operations_max_running")]
-  pub max_running: usize,
-  #[serde(default = "default_admin_operations_max_queued")]
-  pub max_queued: usize,
-  #[serde(default = "default_admin_operations_max_stored")]
-  pub max_stored: usize,
-  #[serde(default = "default_admin_operations_retention_seconds")]
-  pub retention_seconds: u64,
-  #[serde(default = "default_admin_operations_event_buffer")]
-  pub event_buffer: usize,
-  #[serde(default = "default_admin_operations_result_max_bytes")]
-  pub result_max_bytes: usize,
-  #[serde(default = "default_true")]
-  pub websocket: bool,
-  #[serde(default = "default_true")]
-  pub webtransport: bool,
-  #[serde(default = "default_admin_operations_webtransport_max_sessions")]
-  pub webtransport_max_sessions: usize,
-}
-
-impl Default for AdminOperationsConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      max_running: default_admin_operations_max_running(),
-      max_queued: default_admin_operations_max_queued(),
-      max_stored: default_admin_operations_max_stored(),
-      retention_seconds: default_admin_operations_retention_seconds(),
-      event_buffer: default_admin_operations_event_buffer(),
-      result_max_bytes: default_admin_operations_result_max_bytes(),
-      websocket: true,
-      webtransport: true,
-      webtransport_max_sessions: default_admin_operations_webtransport_max_sessions(),
-    }
-  }
-}
-
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct AdminHttp3Config {
   #[serde(default)]
@@ -5775,32 +5720,4 @@ pub(super) fn default_database_postgres_connect_timeout_ms() -> u64 {
 
 fn default_admin_audit_queue_capacity() -> usize {
   1024
-}
-
-fn default_admin_operations_max_running() -> usize {
-  4
-}
-
-fn default_admin_operations_max_queued() -> usize {
-  64
-}
-
-fn default_admin_operations_max_stored() -> usize {
-  256
-}
-
-fn default_admin_operations_retention_seconds() -> u64 {
-  3_600
-}
-
-fn default_admin_operations_event_buffer() -> usize {
-  256
-}
-
-fn default_admin_operations_result_max_bytes() -> usize {
-  16 * 1024 * 1024
-}
-
-fn default_admin_operations_webtransport_max_sessions() -> usize {
-  64
 }

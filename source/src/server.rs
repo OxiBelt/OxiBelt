@@ -131,11 +131,16 @@ pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
   "webtransport_drain",
 ];
 pub const ADMIN_OPERATION_STATE_WIRE_VALUES: &[&str] = &[
+  "accepted",
   "queued",
+  "claimed",
   "running",
+  "cancellation_requested",
+  "compensating",
   "succeeded",
   "failed",
   "cancelled",
+  "indeterminate",
   "expired",
 ];
 
@@ -158,8 +163,10 @@ pub async fn serve(
     error_tx.clone(),
   )
   .await?;
-  let admin_operations =
-    AdminOperationRuntime::new(state.snapshot().config.admin.operations.clone());
+  let admin_operations = {
+    let snapshot = state.snapshot();
+    AdminOperationRuntime::prepare(&snapshot.config, &snapshot.admin_audit).await?
+  };
   let mut listeners = ListenerSupervisor::start(
     state.clone(),
     error_tx.clone(),
@@ -212,6 +219,7 @@ pub async fn serve(
     )
     .await
   };
+  admin_operations.shutdown().await;
   if let Some(tasks) = cluster_runtime_tasks {
     tasks.shutdown().await;
   }
@@ -607,9 +615,13 @@ async fn admin_response_inner(
     .await;
   }
 
-  if let Some(response) =
-    admin_metadata::admin_metadata_response(snapshot.as_ref(), &authorization, &method, &path)
-  {
+  if let Some(response) = admin_metadata::admin_metadata_response(
+    snapshot.as_ref(),
+    &admin_operations,
+    &authorization,
+    &method,
+    &path,
+  ) {
     return response;
   }
 

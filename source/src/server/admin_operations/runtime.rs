@@ -12,12 +12,14 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tracing::{info, warn};
 
-use crate::config::AdminOperationsConfig;
+use crate::admin_audit::AdminAuditRuntime;
+use crate::config::{AdminOperationsConfig, Config};
 
 use super::id::new_operation_id;
+use super::runtime_durable::DurableOperationRuntime;
 use super::types::{
-  AdminOperationEvent, AdminOperationKind, AdminOperationProgress, AdminOperationSnapshot,
-  AdminOperationState,
+  AdminOperationEvent, AdminOperationKind, AdminOperationProgress, AdminOperationRecoveryClass,
+  AdminOperationSnapshot, AdminOperationState,
 };
 use crate::server::admin_auth::AdminActor;
 
@@ -30,6 +32,7 @@ pub(in crate::server) struct AdminOperationRuntime {
 
 struct AdminOperationRuntimeInner {
   config: AdminOperationsConfig,
+  durable: Option<DurableOperationRuntime>,
   running: Arc<Semaphore>,
   webtransport_sessions: Arc<Semaphore>,
   store: Mutex<AdminOperationStore>,
@@ -46,6 +49,7 @@ struct AdminOperationRecord {
   events: broadcast::Sender<AdminOperationEvent>,
   history: VecDeque<AdminOperationEvent>,
   next_sequence: u64,
+  durable_guard: Option<Arc<Mutex<super::LeaseGuard>>>,
 }
 
 #[derive(Debug)]
@@ -55,23 +59,66 @@ pub(in crate::server) enum AdminOperationError {
   StoreFull,
   NotFound,
   AlreadyTerminal,
+  IdempotencyConflict,
+  Unavailable,
   Internal,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::server) struct AdminOperationSubmission {
+  pub kind: AdminOperationKind,
+  pub permission_action: String,
+  pub redacted_resource: Option<String>,
+  pub idempotency_key: Option<String>,
+  pub command: Option<Value>,
+  pub recovery_class: AdminOperationRecoveryClass,
+}
+
+impl AdminOperationSubmission {
+  pub(in crate::server) fn new(
+    kind: AdminOperationKind,
+    permission_action: impl Into<String>,
+    redacted_resource: Option<String>,
+    recovery_class: AdminOperationRecoveryClass,
+  ) -> Self {
+    Self {
+      kind,
+      permission_action: permission_action.into(),
+      redacted_resource,
+      idempotency_key: None,
+      command: None,
+      recovery_class,
+    }
+  }
+
+  pub(in crate::server) fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+    self.idempotency_key = Some(key.into());
+    self
+  }
+
+  pub(in crate::server) fn with_command(mut self, command: Value) -> Self {
+    self.command = Some(command);
+    self
+  }
 }
 
 #[derive(Clone)]
 pub(in crate::server) struct AdminOperationContext {
-  id: String,
-  runtime: AdminOperationRuntime,
-  cancel: Arc<AtomicBool>,
+  pub(super) id: String,
+  pub(super) runtime: AdminOperationRuntime,
+  pub(super) cancel: Arc<AtomicBool>,
+  pub(super) durable_guard: Option<Arc<Mutex<super::LeaseGuard>>>,
 }
 
 impl AdminOperationRuntime {
+  #[cfg_attr(not(test), allow(dead_code))]
   pub(in crate::server) fn new(config: AdminOperationsConfig) -> Self {
     Self {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(config.max_running)),
         webtransport_sessions: Arc::new(Semaphore::new(config.webtransport_max_sessions)),
         config,
+        durable: None,
         store: Mutex::new(AdminOperationStore {
           operations: HashMap::new(),
           order: VecDeque::new(),
@@ -80,8 +127,44 @@ impl AdminOperationRuntime {
     }
   }
 
+  pub(in crate::server) async fn prepare(
+    config: &Config,
+    audit: &AdminAuditRuntime,
+  ) -> anyhow::Result<Self> {
+    let operations = config.admin.operations.clone();
+    let durable = DurableOperationRuntime::prepare(config, audit).await?;
+    Ok(Self {
+      inner: Arc::new(AdminOperationRuntimeInner {
+        running: Arc::new(Semaphore::new(operations.max_running)),
+        webtransport_sessions: Arc::new(Semaphore::new(operations.webtransport_max_sessions)),
+        config: operations,
+        durable,
+        store: Mutex::new(AdminOperationStore {
+          operations: HashMap::new(),
+          order: VecDeque::new(),
+        }),
+      }),
+    })
+  }
+
+  pub(in crate::server) async fn shutdown(&self) {
+    if let Some(durable) = self.inner.durable.as_ref() {
+      durable.shutdown().await;
+    }
+  }
+
   pub(in crate::server) fn config(&self) -> &AdminOperationsConfig {
     &self.inner.config
+  }
+
+  pub(in crate::server) fn persistence_status(&self) -> Value {
+    let durable = self.inner.durable.is_some();
+    serde_json::json!({
+      "configured": self.inner.config.persistence.as_str(),
+      "effective": if durable { "postgres" } else { "ephemeral" },
+      "fallback_reason": (self.inner.config.persistence == crate::config::AdminOperationsPersistence::Auto
+        && !durable).then_some("prerequisites_unavailable"),
+    })
   }
 
   pub(in crate::server) fn try_acquire_webtransport_session(
@@ -112,10 +195,59 @@ impl AdminOperationRuntime {
     F: FnOnce(AdminOperationContext) -> Fut + Send + 'static,
     Fut: Future<Output = AdminOperationWorkResult> + Send + 'static,
   {
+    let submission = AdminOperationSubmission::new(
+      kind,
+      "operations.write",
+      Some(format!("operation/{}", kind.as_str())),
+      AdminOperationRecoveryClass::NonResumable,
+    );
+    self
+      .enqueue_with_submission(submission, actor, request_id, work)
+      .await
+  }
+
+  pub(in crate::server) async fn enqueue_with_submission<F, Fut>(
+    &self,
+    submission: AdminOperationSubmission,
+    actor: &AdminActor,
+    request_id: String,
+    work: F,
+  ) -> Result<AdminOperationSnapshot, AdminOperationError>
+  where
+    F: FnOnce(AdminOperationContext) -> Fut + Send + 'static,
+    Fut: Future<Output = AdminOperationWorkResult> + Send + 'static,
+  {
     if !self.inner.config.enabled {
       return Err(AdminOperationError::Disabled);
     }
 
+    if let Some(durable) = self.inner.durable.as_ref()
+      && !matches!(
+        submission.kind,
+        AdminOperationKind::WebTransportSnapshot | AdminOperationKind::WebTransportDrain
+      )
+    {
+      return durable
+        .enqueue(self.clone(), submission, actor, request_id, work)
+        .await;
+    }
+
+    self
+      .enqueue_ephemeral(submission.kind, actor, request_id, work)
+      .await
+  }
+
+  async fn enqueue_ephemeral<F, Fut>(
+    &self,
+    kind: AdminOperationKind,
+    actor: &AdminActor,
+    request_id: String,
+    work: F,
+  ) -> Result<AdminOperationSnapshot, AdminOperationError>
+  where
+    F: FnOnce(AdminOperationContext) -> Fut + Send + 'static,
+    Fut: Future<Output = AdminOperationWorkResult> + Send + 'static,
+  {
     let id = new_operation_id().map_err(|_| AdminOperationError::Internal)?;
     let cancel = Arc::new(AtomicBool::new(false));
     let (events, _) = broadcast::channel(self.inner.config.event_buffer);
@@ -137,6 +269,7 @@ impl AdminOperationRuntime {
       }),
       result: None,
       error: None,
+      ..AdminOperationSnapshot::default()
     };
 
     {
@@ -159,6 +292,7 @@ impl AdminOperationRuntime {
         events,
         history: VecDeque::with_capacity(self.inner.config.event_buffer),
         next_sequence: 1,
+        durable_guard: None,
       };
       push_event(&mut record, "operation.queued");
       store.order.push_back(id.clone());
@@ -188,6 +322,7 @@ impl AdminOperationRuntime {
         id: task_id.clone(),
         runtime: runtime.clone(),
         cancel,
+        durable_guard: None,
       };
       let result = work(context).await;
       drop(permit);
@@ -202,34 +337,61 @@ impl AdminOperationRuntime {
     Ok(snapshot)
   }
 
-  pub(in crate::server) async fn get(&self, id: &str) -> Option<AdminOperationSnapshot> {
+  pub(in crate::server) async fn get(
+    &self,
+    id: &str,
+  ) -> Result<Option<AdminOperationSnapshot>, AdminOperationError> {
+    if let Some(durable) = self.inner.durable.as_ref()
+      && let Some(snapshot) = durable.get(id).await?
+    {
+      return Ok(Some(snapshot));
+    }
     let mut store = self.inner.store.lock().await;
     self.prune_locked(&mut store);
-    store
-      .operations
-      .get(id)
-      .map(|record| record.snapshot.clone())
+    Ok(
+      store
+        .operations
+        .get(id)
+        .map(|record| record.snapshot.clone()),
+    )
   }
 
-  pub(in crate::server) async fn list(&self) -> Vec<AdminOperationSnapshot> {
+  pub(in crate::server) async fn list(
+    &self,
+  ) -> Result<Vec<AdminOperationSnapshot>, AdminOperationError> {
+    let mut durable_rows = if let Some(durable) = self.inner.durable.as_ref() {
+      durable.list(self.inner.config.max_stored).await?
+    } else {
+      Vec::new()
+    };
     let mut store = self.inner.store.lock().await;
     self.prune_locked(&mut store);
-    store
-      .order
-      .iter()
-      .filter_map(|id| {
-        store
-          .operations
-          .get(id)
-          .map(|record| record.snapshot.clone())
-      })
-      .collect()
+    durable_rows.extend(
+      store
+        .order
+        .iter()
+        .filter_map(|id| {
+          store
+            .operations
+            .get(id)
+            .map(|record| record.snapshot.clone())
+        })
+        .filter(|snapshot| snapshot.durability.as_str() == "ephemeral"),
+    );
+    durable_rows.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.created_at_unix_ms));
+    durable_rows.truncate(self.inner.config.max_stored);
+    Ok(durable_rows)
   }
 
   pub(in crate::server) async fn cancel(
     &self,
     id: &str,
   ) -> Result<AdminOperationSnapshot, AdminOperationError> {
+    if let Some(durable) = self.inner.durable.as_ref()
+      && durable.contains(id).await?
+    {
+      return durable.cancel(self, id).await;
+    }
     let mut store = self.inner.store.lock().await;
     self.prune_locked(&mut store);
     let Some(record) = store.operations.get_mut(id) else {
@@ -247,19 +409,29 @@ impl AdminOperationRuntime {
   pub(in crate::server) async fn subscribe(
     &self,
     id: &str,
-  ) -> Option<(
-    Vec<AdminOperationEvent>,
-    broadcast::Receiver<AdminOperationEvent>,
-    AdminOperationSnapshot,
-  )> {
+  ) -> Result<
+    Option<(
+      Vec<AdminOperationEvent>,
+      broadcast::Receiver<AdminOperationEvent>,
+      AdminOperationSnapshot,
+    )>,
+    AdminOperationError,
+  > {
+    if let Some(durable) = self.inner.durable.as_ref()
+      && let Some(subscription) = durable.subscribe(self, id).await?
+    {
+      return Ok(Some(subscription));
+    }
     let mut store = self.inner.store.lock().await;
     self.prune_locked(&mut store);
-    let record = store.operations.get(id)?;
-    Some((
+    let Some(record) = store.operations.get(id) else {
+      return Ok(None);
+    };
+    Ok(Some((
       record.history.iter().cloned().collect(),
       record.events.subscribe(),
       record.snapshot.clone(),
-    ))
+    )))
   }
 
   async fn start(&self, id: &str) {
@@ -376,6 +548,79 @@ impl AdminOperationRuntime {
       .operations
       .retain(|_, record| !operation_is_expired(record, cutoff));
   }
+
+  pub(super) fn running_semaphore(&self) -> Arc<Semaphore> {
+    Arc::clone(&self.inner.running)
+  }
+
+  pub(super) async fn insert_durable_local(
+    &self,
+    snapshot: AdminOperationSnapshot,
+    cancel: Arc<AtomicBool>,
+  ) -> bool {
+    let (events, _) = broadcast::channel(self.inner.config.event_buffer);
+    let id = snapshot.id.clone();
+    let record = AdminOperationRecord {
+      next_sequence: snapshot.revision.saturating_add(1),
+      snapshot,
+      cancel,
+      events,
+      history: VecDeque::with_capacity(self.inner.config.event_buffer),
+      durable_guard: None,
+    };
+    let mut store = self.inner.store.lock().await;
+    if store.operations.contains_key(&id) {
+      return false;
+    }
+    store.order.push_back(id.clone());
+    store.operations.insert(id, record);
+    true
+  }
+
+  pub(super) async fn set_durable_guard(&self, id: &str, guard: Arc<Mutex<super::LeaseGuard>>) {
+    if let Some(record) = self.inner.store.lock().await.operations.get_mut(id) {
+      record.durable_guard = Some(guard);
+    }
+  }
+
+  pub(super) async fn durable_local_parts(
+    &self,
+    id: &str,
+  ) -> Option<(
+    Arc<AtomicBool>,
+    Option<Arc<Mutex<super::LeaseGuard>>>,
+    broadcast::Receiver<AdminOperationEvent>,
+  )> {
+    let store = self.inner.store.lock().await;
+    let record = store.operations.get(id)?;
+    Some((
+      Arc::clone(&record.cancel),
+      record.durable_guard.clone(),
+      record.events.subscribe(),
+    ))
+  }
+
+  pub(super) async fn publish_durable(&self, snapshot: AdminOperationSnapshot, event_name: &str) {
+    let mut store = self.inner.store.lock().await;
+    let Some(record) = store.operations.get_mut(&snapshot.id) else {
+      return;
+    };
+    record.snapshot = snapshot.clone();
+    record.next_sequence = snapshot.revision.saturating_add(1);
+    let event = AdminOperationEvent {
+      sequence: snapshot.revision,
+      event: event_name.to_string(),
+      created_at_unix_ms: snapshot
+        .updated_at_unix_ms
+        .unwrap_or(snapshot.created_at_unix_ms),
+      operation: snapshot,
+    };
+    if record.history.len() >= self.inner.config.event_buffer {
+      record.history.pop_front();
+    }
+    record.history.push_back(event.clone());
+    let _ = record.events.send(event);
+  }
 }
 
 fn operation_is_expired(record: &AdminOperationRecord, cutoff: u64) -> bool {
@@ -426,6 +671,14 @@ impl AdminOperationContext {
       processed,
       total,
     };
+    if let Some(guard) = self.durable_guard.as_ref()
+      && let Some(durable) = self.runtime.inner.durable.as_ref()
+    {
+      durable
+        .progress(&self.runtime, &self.id, guard, progress)
+        .await;
+      return;
+    }
     self
       .runtime
       .update(&self.id, |record| {
@@ -477,6 +730,10 @@ impl std::fmt::Display for AdminOperationError {
       Self::StoreFull => formatter.write_str("admin operation store is full"),
       Self::NotFound => formatter.write_str("operation not found"),
       Self::AlreadyTerminal => formatter.write_str("operation already finished"),
+      Self::IdempotencyConflict => {
+        formatter.write_str("Idempotency-Key conflicts with an existing operation")
+      }
+      Self::Unavailable => formatter.write_str("durable admin operation state is unavailable"),
       Self::Internal => formatter.write_str("admin operation state is unavailable"),
     }
   }
@@ -489,192 +746,5 @@ pub(in crate::server) fn value_result<T: serde::Serialize>(value: T) -> AdminOpe
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn actor(name: &str) -> AdminActor {
-    AdminActor {
-      name: name.to_string(),
-      principal: name.to_string(),
-      subject: format!("{name}@example.test"),
-      groups: Vec::new(),
-    }
-  }
-
-  fn config() -> AdminOperationsConfig {
-    AdminOperationsConfig {
-      max_running: 1,
-      max_queued: 1,
-      max_stored: 2,
-      event_buffer: 4,
-      retention_seconds: 60,
-      ..AdminOperationsConfig::default()
-    }
-  }
-
-  async fn wait_for_terminal(runtime: &AdminOperationRuntime, id: &str) -> AdminOperationSnapshot {
-    for _ in 0..100 {
-      let snapshot = runtime.get(id).await.expect("operation should exist");
-      if snapshot.state.is_terminal() {
-        return snapshot;
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    panic!("operation did not finish");
-  }
-
-  #[tokio::test]
-  async fn queue_capacity_is_enforced() {
-    let mut config = config();
-    config.max_running = 0;
-    config.max_queued = 1;
-    let runtime = AdminOperationRuntime::new(config);
-    let actor = actor("admin");
-    let first = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req1".to_string(),
-        |_| async {
-          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-          Ok(serde_json::json!({"ok": true}))
-        },
-      )
-      .await;
-    assert!(first.is_ok());
-    let second = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req2".to_string(),
-        |_| async { Ok(serde_json::json!({"ok": true})) },
-      )
-      .await;
-    assert!(matches!(second, Err(AdminOperationError::QueueFull)));
-  }
-
-  #[tokio::test]
-  async fn cancellation_marks_operation_cancel_requested() {
-    let runtime = AdminOperationRuntime::new(config());
-    let actor = actor("admin");
-    let snapshot = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req1".to_string(),
-        |context| async move {
-          while !context.is_cancelled() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-          }
-          Err("operation cancelled".to_string())
-        },
-      )
-      .await
-      .expect("operation should enqueue");
-    let cancelled = runtime
-      .cancel(&snapshot.id)
-      .await
-      .expect("operation should cancel");
-    assert!(cancelled.cancel_requested);
-  }
-
-  #[tokio::test]
-  async fn state_transitions_to_succeeded() {
-    let runtime = AdminOperationRuntime::new(config());
-    let actor = actor("admin");
-    let snapshot = runtime
-      .enqueue(
-        AdminOperationKind::SupportBundle,
-        &actor,
-        "req1".to_string(),
-        |context| async move {
-          context.progress("working", Some(1), Some(2)).await;
-          Ok(serde_json::json!({"ok": true}))
-        },
-      )
-      .await
-      .expect("operation should enqueue");
-    let terminal = wait_for_terminal(&runtime, &snapshot.id).await;
-    assert_eq!(terminal.state, AdminOperationState::Succeeded);
-    assert_eq!(terminal.result, Some(serde_json::json!({"ok": true})));
-  }
-
-  #[tokio::test]
-  async fn event_history_is_bounded_and_replayed() {
-    let mut config = config();
-    config.event_buffer = 2;
-    let runtime = AdminOperationRuntime::new(config);
-    let actor = actor("admin");
-    let snapshot = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req1".to_string(),
-        |context| async move {
-          context.progress("one", Some(1), Some(3)).await;
-          context.progress("two", Some(2), Some(3)).await;
-          context.progress("three", Some(3), Some(3)).await;
-          Ok(serde_json::json!({"ok": true}))
-        },
-      )
-      .await
-      .expect("operation should enqueue");
-    let terminal = wait_for_terminal(&runtime, &snapshot.id).await;
-    assert_eq!(terminal.state, AdminOperationState::Succeeded);
-
-    let (history, _receiver, _) = runtime
-      .subscribe(&snapshot.id)
-      .await
-      .expect("operation should be subscribable");
-    assert!(history.len() <= 2);
-    assert_eq!(
-      history.last().map(|event| event.event.as_str()),
-      Some("operation.result")
-    );
-  }
-
-  #[tokio::test]
-  async fn retention_prunes_finished_operations() {
-    let mut config = config();
-    config.retention_seconds = 1;
-    let runtime = AdminOperationRuntime::new(config);
-    let actor = actor("admin");
-    let snapshot = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req1".to_string(),
-        |_| async { Ok(serde_json::json!({"ok": true})) },
-      )
-      .await
-      .expect("operation should enqueue");
-    let _terminal = wait_for_terminal(&runtime, &snapshot.id).await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-    assert!(runtime.get(&snapshot.id).await.is_none());
-  }
-
-  #[tokio::test]
-  async fn oversized_results_fail_the_operation() {
-    let mut config = config();
-    config.result_max_bytes = 4;
-    let runtime = AdminOperationRuntime::new(config);
-    let actor = actor("admin");
-    let snapshot = runtime
-      .enqueue(
-        AdminOperationKind::CacheWarm,
-        &actor,
-        "req1".to_string(),
-        |_| async { Ok(serde_json::json!({"too": "large"})) },
-      )
-      .await
-      .expect("operation should enqueue");
-    let terminal = wait_for_terminal(&runtime, &snapshot.id).await;
-    assert_eq!(terminal.state, AdminOperationState::Failed);
-    assert!(
-      terminal
-        .error
-        .unwrap_or_default()
-        .contains("result_max_bytes")
-    );
-  }
-}
+#[path = "runtime_tests.rs"]
+mod tests;

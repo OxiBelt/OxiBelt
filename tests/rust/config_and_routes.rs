@@ -7,25 +7,25 @@ use std::path::Path;
 use base64::Engine;
 use oxibelt::config::{
   AccessLogSchema, AccessTokenRateLimitSource, AdminAuditAcknowledgement, AdminAuditExportSink,
-  AdminAuditMode, AdminAuditRequiredSink, AdminAuditStoreKind, AdminTransportMode,
-  BackendFailureMode, BufferingMode, CacheStore, CapacitySetting, CircuitFailureCondition,
-  ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
-  CompressionConfig, CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
-  ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
-  CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
-  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
-  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
-  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
-  OutboundOcspMode, PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
-  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
-  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
-  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
-  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
-  TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode, UpstreamTls12ResumptionMode,
-  UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  AdminAuditMode, AdminAuditRequiredSink, AdminAuditStoreKind, AdminOperationsPersistence,
+  AdminTransportMode, BackendFailureMode, BufferingMode, CacheStore, CapacitySetting,
+  CircuitFailureCondition, ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage,
+  ClientIdentityAsnMode, CompressionConfig, CompressionProxiedPredicate,
+  CompressionUpstreamAcceptEncodingMode, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
+  CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, CryptoPrimitiveBackend,
+  CryptoPrimitiveProvider, DatabaseMitigationMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
+  EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
+  ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind, ForwardedClientIpSource,
+  ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
+  KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
+  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
+  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides,
+  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
+  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -7868,6 +7868,261 @@ default = true
   );
   assert!(!config.admin.operations.webtransport);
   assert_eq!(config.admin.operations.webtransport_max_sessions, 12);
+}
+
+fn durable_admin_operations_config_toml(cert_path: &Path, key_path: &Path) -> String {
+  format!(
+    r#"
+{}
+
+[admin]
+enabled = true
+bind = "127.0.0.1:0"
+transport = "plaintext_allowlist"
+
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "postgres"
+
+[admin.audit.store]
+enabled = true
+backend = "postgres-main"
+
+[admin.operations]
+persistence = "postgres"
+backend = "postgres-main"
+
+[shared_state]
+enabled = true
+namespace = "admin-operation-tests"
+instance_id_env = "OXIBELT_ADMIN_OPERATION_INSTANCE_TEST"
+
+[[shared_state.backends]]
+name = "postgres-main"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#,
+    common::minimal_config_toml(cert_path, key_path)
+  )
+}
+
+#[test]
+fn admin_operations_persistence_defaults_and_postgres_contract_validate() {
+  if common::run_test_in_subprocess_with_env(
+    "admin_operations_persistence_defaults_and_postgres_contract_validate",
+    &[
+      ("OXIBELT_ADMIN_TOKEN", "secret"),
+      ("OXIBELT_ADMIN_OPERATION_INSTANCE_TEST", "edge-a"),
+      (
+        "OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      ),
+    ],
+  ) {
+    return;
+  }
+  let temp_dir = common::TempDir::new("admin-operations-postgres-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-operations-postgres-config");
+
+  let defaults: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("default operation config should parse");
+  assert_eq!(
+    defaults.admin.operations.persistence,
+    AdminOperationsPersistence::Auto
+  );
+  assert_eq!(defaults.admin.operations.backend, None);
+  assert_eq!(
+    defaults.admin.operations.artifact_key_env,
+    "OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY"
+  );
+  assert_eq!(defaults.admin.operations.lease_seconds, 15);
+  assert_eq!(defaults.admin.operations.lease_renew_seconds, 5);
+  assert_eq!(defaults.admin.operations.max_lifetime_seconds, 86_400);
+  assert_eq!(
+    defaults.admin.operations.artifact_max_bytes,
+    16 * 1024 * 1024
+  );
+  assert_eq!(defaults.admin.operations.checkpoint_max_bytes, 1024 * 1024);
+
+  let config: Config = toml::from_str(&durable_admin_operations_config_toml(&cert_path, &key_path))
+    .expect("durable operation config should parse");
+  config
+    .validate()
+    .expect("durable operation config should validate");
+  assert_eq!(
+    config.admin.operations.persistence,
+    AdminOperationsPersistence::Postgres
+  );
+  assert_eq!(
+    config.admin.operations.backend.as_deref(),
+    Some("postgres-main")
+  );
+
+  let inferred_raw = durable_admin_operations_config_toml(&cert_path, &key_path).replace(
+    "[admin.operations]\npersistence = \"postgres\"\nbackend = \"postgres-main\"",
+    "[admin.operations]\npersistence = \"postgres\"",
+  );
+  let inferred: Config =
+    toml::from_str(&inferred_raw).expect("inferred durable operation backend should parse");
+  inferred
+    .validate()
+    .expect("Admin audit store backend should satisfy omitted operation backend");
+  assert_eq!(inferred.admin.operations.backend, None);
+}
+
+#[test]
+fn admin_operations_auto_backend_does_not_require_runtime_secrets() {
+  if common::run_test_in_subprocess_with_env(
+    "admin_operations_auto_backend_does_not_require_runtime_secrets",
+    &[("OXIBELT_ADMIN_TOKEN", "secret")],
+  ) {
+    return;
+  }
+  let temp_dir = common::TempDir::new("admin-operations-auto-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-operations-auto-config");
+  let raw = durable_admin_operations_config_toml(&cert_path, &key_path)
+    .replace("persistence = \"postgres\"", "persistence = \"auto\"");
+  let config: Config = toml::from_str(&raw).expect("auto operation config should parse");
+  config
+    .validate()
+    .expect("auto must defer missing key and stable instance identity to runtime activation");
+}
+
+#[test]
+fn admin_operations_persistence_rejects_unsafe_or_unbounded_configuration() {
+  if common::run_test_in_subprocess_with_env(
+    "admin_operations_persistence_rejects_unsafe_or_unbounded_configuration",
+    &[
+      ("OXIBELT_ADMIN_TOKEN", "secret"),
+      ("OXIBELT_ADMIN_OPERATION_INSTANCE_TEST", "edge-a"),
+      (
+        "OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      ),
+    ],
+  ) {
+    return;
+  }
+  let temp_dir = common::TempDir::new("admin-operations-invalid-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-operations-invalid-config");
+  let valid = durable_admin_operations_config_toml(&cert_path, &key_path);
+  let cases = [
+    (
+      "ephemeral backend",
+      valid.replace("persistence = \"postgres\"", "persistence = \"ephemeral\""),
+      "persistence = \"ephemeral\" does not accept admin.operations.backend",
+    ),
+    (
+      "non-PostgreSQL backend",
+      valid.replace("kind = \"postgres\"", "kind = \"redis\""),
+      "admin.operations.backend postgres-main must use kind = \"postgres\"",
+    ),
+    (
+      "retention upper bound",
+      valid.replace(
+        "backend = \"postgres-main\"\n\n[shared_state]",
+        "backend = \"postgres-main\"\nretention_seconds = 2592001\n\n[shared_state]",
+      ),
+      "retention_seconds must be between 1 and 2592000",
+    ),
+    (
+      "unsafe renewal interval",
+      valid.replace(
+        "backend = \"postgres-main\"\n\n[shared_state]",
+        "backend = \"postgres-main\"\nlease_renew_seconds = 6\n\n[shared_state]",
+      ),
+      "lease_renew_seconds must be greater than 0 and no more than one third",
+    ),
+    (
+      "lease exceeds journal bound",
+      valid.replace(
+        "backend = \"postgres-main\"\n\n[shared_state]",
+        "backend = \"postgres-main\"\nlease_seconds = 301\nlease_renew_seconds = 100\n\n[shared_state]",
+      ),
+      "lease_seconds must be between 3 and 300",
+    ),
+    (
+      "checkpoint larger than artifact",
+      valid.replace(
+        "backend = \"postgres-main\"\n\n[shared_state]",
+        "backend = \"postgres-main\"\nartifact_max_bytes = 1024\ncheckpoint_max_bytes = 1025\n\n[shared_state]",
+      ),
+      "checkpoint_max_bytes must be greater than 0 and not exceed",
+    ),
+    (
+      "stored capacity below queued capacity",
+      valid.replace(
+        "backend = \"postgres-main\"\n\n[shared_state]",
+        "backend = \"postgres-main\"\nmax_queued = 100\nmax_stored = 50\n\n[shared_state]",
+      ),
+      "max_stored must be at least admin.operations.max_queued",
+    ),
+    (
+      "best-effort audit",
+      valid.replace("mode = \"durable_required\"", "mode = \"best_effort\""),
+      "require enforcing Admin audit coverage",
+    ),
+    (
+      "incomplete selective audit",
+      valid.replace(
+        "mode = \"durable_required\"",
+        "mode = \"durable_required_for_actions\"\nrequired_actions = [\"operations.write\"]",
+      ),
+      "coverage for operations.write and operations.lifecycle",
+    ),
+    (
+      "missing stable instance ID",
+      valid.replace(
+        "OXIBELT_ADMIN_OPERATION_INSTANCE_TEST",
+        "OXIBELT_ADMIN_OPERATION_INSTANCE_UNSET",
+      ),
+      "failed to read shared_state.instance_id_env",
+    ),
+  ];
+
+  for (name, raw, expected) in cases {
+    let config: Config = toml::from_str(&raw).unwrap_or_else(|error| panic!("{name}: {error}"));
+    let error = match config.validate() {
+      Ok(()) => panic!("{name} should fail validation"),
+      Err(error) => error,
+    };
+    assert!(
+      error.to_string().contains(expected),
+      "{name}: unexpected error: {error}"
+    );
+  }
+}
+
+#[test]
+fn admin_operations_postgres_rejects_invalid_artifact_key() {
+  if common::run_test_in_subprocess_with_env(
+    "admin_operations_postgres_rejects_invalid_artifact_key",
+    &[
+      ("OXIBELT_ADMIN_TOKEN", "secret"),
+      ("OXIBELT_ADMIN_OPERATION_INSTANCE_TEST", "edge-a"),
+      ("OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY", "too-short"),
+    ],
+  ) {
+    return;
+  }
+  let temp_dir = common::TempDir::new("admin-operations-invalid-key");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-operations-invalid-key");
+  let config: Config = toml::from_str(&durable_admin_operations_config_toml(&cert_path, &key_path))
+    .expect("durable operation config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable operation config should reject an invalid artifact key");
+  assert!(
+    error
+      .to_string()
+      .contains("admin.operations.artifact_key_env must contain base64"),
+    "unexpected error: {error}"
+  );
 }
 
 #[test]

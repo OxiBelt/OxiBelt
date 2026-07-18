@@ -129,10 +129,10 @@ async fn list_operations(
   if !authorization.is_allowed("admin:ListOperations", "operation/*") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
-  json_response(
-    StatusCode::OK,
-    &json!({ "operations": operations.list().await }),
-  )
+  match operations.list().await {
+    Ok(operations) => json_response(StatusCode::OK, &json!({ "operations": operations })),
+    Err(error) => super::enqueue_error_response(error),
+  }
 }
 
 async fn get_operation(
@@ -140,8 +140,10 @@ async fn get_operation(
   authorization: &AdminAuthorization<'_>,
   id: &str,
 ) -> Response<ProxyBody> {
-  let Some(snapshot) = operations.get(id).await else {
-    return text_response(StatusCode::NOT_FOUND, "not found");
+  let snapshot = match operations.get(id).await {
+    Ok(Some(snapshot)) => snapshot,
+    Ok(None) => return text_response(StatusCode::NOT_FOUND, "not found"),
+    Err(error) => return super::enqueue_error_response(error),
   };
   if !can_access_operation(authorization, &snapshot, "admin:ReadOperation") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
@@ -154,8 +156,10 @@ async fn cancel_operation(
   authorization: &AdminAuthorization<'_>,
   id: &str,
 ) -> Response<ProxyBody> {
-  let Some(snapshot) = operations.get(id).await else {
-    return text_response(StatusCode::NOT_FOUND, "not found");
+  let snapshot = match operations.get(id).await {
+    Ok(Some(snapshot)) => snapshot,
+    Ok(None) => return text_response(StatusCode::NOT_FOUND, "not found"),
+    Err(error) => return super::enqueue_error_response(error),
   };
   if !can_access_operation(authorization, &snapshot, "admin:CancelOperation") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
@@ -166,7 +170,7 @@ async fn cancel_operation(
       text_response(StatusCode::CONFLICT, "operation already finished")
     }
     Err(AdminOperationError::NotFound) => text_response(StatusCode::NOT_FOUND, "not found"),
-    Err(error) => text_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    Err(error) => super::enqueue_error_response(error),
   }
 }
 
@@ -177,8 +181,10 @@ async fn watch_operation(
   id: &str,
   websocket: bool,
 ) -> Response<ProxyBody> {
-  let Some(snapshot) = operations.get(id).await else {
-    return text_response(StatusCode::NOT_FOUND, "not found");
+  let snapshot = match operations.get(id).await {
+    Ok(Some(snapshot)) => snapshot,
+    Ok(None) => return text_response(StatusCode::NOT_FOUND, "not found"),
+    Err(error) => return super::enqueue_error_response(error),
   };
   if !can_access_operation(authorization, &snapshot, "admin:ReadOperation") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
@@ -189,8 +195,10 @@ async fn watch_operation(
       "WebSocket operation events are disabled",
     );
   }
-  let Some((history, receiver, _snapshot)) = operations.subscribe(id).await else {
-    return text_response(StatusCode::NOT_FOUND, "not found");
+  let (history, receiver, _snapshot) = match operations.subscribe(id).await {
+    Ok(Some(subscription)) => subscription,
+    Ok(None) => return text_response(StatusCode::NOT_FOUND, "not found"),
+    Err(error) => return super::enqueue_error_response(error),
   };
   if websocket {
     return websocket_response(request, history, receiver);
@@ -212,6 +220,10 @@ async fn create_operation(
     .get(::http::header::IF_MATCH)
     .and_then(|value| value.to_str().ok())
     .map(str::to_string);
+  let idempotency_key = match super::idempotency_key(&request) {
+    Ok(key) => key,
+    Err(response) => return *response,
+  };
   let body =
     match crate::server::admin_body::collect_admin_json::<AdminOperationCreateRequest>(request)
       .await
@@ -228,6 +240,7 @@ async fn create_operation(
         authorization,
         request_id,
         context.peer_addr,
+        idempotency_key,
       )
       .await
     }
@@ -239,6 +252,7 @@ async fn create_operation(
         context.operations,
         authorization,
         request_id,
+        idempotency_key,
       )
       .await
     }
@@ -250,7 +264,10 @@ async fn create_operation(
         context.admin_control,
         context.operations,
         authorization,
-        request_id,
+        super::AdminOperationRequestMetadata {
+          request_id,
+          idempotency_key,
+        },
       )
       .await
     }
@@ -262,6 +279,7 @@ async fn create_operation(
         authorization,
         request_id,
         if_match,
+        idempotency_key,
       )
       .await
     }
@@ -349,6 +367,7 @@ mod tests {
       progress: None,
       result: None,
       error: None,
+      ..AdminOperationSnapshot::default()
     }
   }
 

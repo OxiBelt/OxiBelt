@@ -428,6 +428,11 @@ fn admin_mutation_postgres_script_text() -> String {
     .expect("Admin mutation PostgreSQL script should be readable")
 }
 
+fn admin_operation_postgres_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-admin-operation-postgres.sh"))
+    .expect("Admin operation PostgreSQL script should be readable")
+}
+
 fn kubernetes_immutable_rollout_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-immutable-rollout.sh"))
     .expect("Kubernetes immutable rollout script should be readable")
@@ -1241,6 +1246,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "docker-external-benchmark-image",
     "docker-integration-helper-images",
     "admin-mutation-postgres",
+    "admin-operation-postgres",
     "kubernetes-immutable-rollout",
     "kubernetes-pod-lifecycle",
     "kubernetes-network-policy",
@@ -1340,6 +1346,75 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
     assert!(
       !script.contains(forbidden),
       "Admin mutation PostgreSQL harness must not use {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn admin_operation_postgres_ci_is_mandatory_bounded_and_rootless() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("admin-operation-postgres")
+    .expect("workflow should define the Admin operation PostgreSQL durability job");
+  let job_text = workflow_job_text(&workflow, "admin-operation-postgres");
+  let script = admin_operation_postgres_script_text();
+
+  assert_eq!(
+    job.needs,
+    expected_needs(&["docker-integration-helper-images"]),
+    "Admin operation PostgreSQL tests should use the build-validated helper image"
+  );
+  for expected in [
+    "name: Admin operation PostgreSQL durability",
+    "runs-on: ubuntu-26.04",
+    "timeout-minutes: 45",
+    "actions: read",
+    "contents: read",
+    "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
+    "OXIBELT_REQUIRE_ADMIN_OPERATION_POSTGRES_TESTS: \"1\"",
+    "tests/scripts/run-admin-operation-postgres.sh",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Admin operation PostgreSQL job should preserve {expected}"
+    );
+  }
+  for expected in [
+    "set -euo pipefail",
+    "docker_publish_args=(--publish 127.0.0.1::5432)",
+    "docker_publish_args=()",
+    "\"${docker_publish_args[@]}\"",
+    "od -An -N 32 -tx1 /dev/urandom",
+    "OXIBELT_REQUIRE_ADMIN_OPERATION_POSTGRES_TESTS=1",
+    "OXIBELT_POSTGRES_CONNECT_HOST",
+    "OXIBELT_TEST_ADMIN_OPERATION_POSTGRES_URL=",
+    "NetworkSettings.Networks",
+    "timeout --signal=TERM 35m",
+    "cargo test --all-features --locked -p oxibelt --lib",
+    "'admin_operations::store::postgres_tests::' -- --test-threads=1",
+    "docker rm --force --volumes \"${container_name}\"",
+    "trap cleanup EXIT",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Admin operation PostgreSQL harness should preserve {expected}"
+    );
+  }
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker volume prune",
+    "docker network prune",
+    "--privileged",
+    "--network host",
+    "eval ",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Admin operation PostgreSQL harness must not use {forbidden}"
     );
   }
 }
@@ -2546,8 +2621,8 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + 1,
-    "each Docker integration job plus the Admin mutation durability job should download the helper image artifact"
+    DOCKER_INTEGRATION_JOBS.len() + 2,
+    "each Docker integration job plus both Admin PostgreSQL durability jobs should download the helper image artifact"
   );
   assert_eq!(
     workflow
@@ -2568,7 +2643,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
-      DOCKER_INTEGRATION_JOBS.len() + 1
+      DOCKER_INTEGRATION_JOBS.len() + 2
     } else {
       DOCKER_INTEGRATION_JOBS.len()
     };

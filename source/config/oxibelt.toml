@@ -645,6 +645,14 @@ max_event_bytes = 65536
 
 [admin.operations]
 enabled = true
+persistence = "auto" # auto | ephemeral | postgres
+# backend = "cluster" # named PostgreSQL shared_state backend; inferred from Admin audit for postgres
+artifact_key_env = "OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY" # exactly 32 base64-encoded bytes when postgres is selected
+lease_seconds = 15
+lease_renew_seconds = 5
+max_lifetime_seconds = 86400
+artifact_max_bytes = 16777216
+checkpoint_max_bytes = 1048576
 max_running = 4
 max_queued = 64
 max_stored = 256

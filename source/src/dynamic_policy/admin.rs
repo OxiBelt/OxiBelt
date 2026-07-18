@@ -26,7 +26,7 @@ use store::*;
 use validation::*;
 use write::*;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DynamicPolicyAdminCreate {
   #[serde(default)]
   pub enabled: Option<bool>,
@@ -105,7 +105,7 @@ pub struct DynamicPolicyAdminPatch {
   pub ttl_seconds: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DynamicPolicyAdminImport {
   pub policies: Vec<DynamicPolicyAdminCreate>,
 }

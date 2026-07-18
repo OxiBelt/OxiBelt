@@ -27,7 +27,7 @@
     },
     {
       "name": "operations",
-      "description": "Process-local long-running Admin operation queue, polling, and event streams."
+      "description": "Long-running Admin operation journal, polling, cancellation, terminal receipts, and event streams. Durable PostgreSQL-backed and explicitly ephemeral operation classes are distinguished on every snapshot."
     },
     {
       "name": "config",
@@ -291,7 +291,7 @@
           "operations"
         ],
         "operationId": "listAdminOperations",
-        "summary": "List process-local long-running Admin operations.",
+        "summary": "List long-running Admin operations from their configured authority.",
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
@@ -316,6 +316,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatchOptional"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationIdempotencyKey"
           }
         ],
         "requestBody": {
@@ -370,6 +373,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       },
@@ -402,6 +408,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1533,12 +1542,19 @@
         ],
         "operationId": "warmCache",
         "summary": "Warm one or more cacheable URLs.",
+        "parameters": [
+          { "$ref": "#/components/parameters/AdminOperationAsyncPreference" },
+          { "$ref": "#/components/parameters/AdminOperationIdempotencyKey" }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/CacheWarmRequest"
         },
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -1962,12 +1978,19 @@
         ],
         "operationId": "replayOxiRule",
         "summary": "Replay candidate OxiRule content against NDJSON fixtures.",
+        "parameters": [
+          { "$ref": "#/components/parameters/AdminOperationAsyncPreference" },
+          { "$ref": "#/components/parameters/AdminOperationIdempotencyKey" }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/OxiRuleReplayRequest"
         },
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2196,11 +2219,20 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ExternalProbe"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationAsyncPreference"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationIdempotencyKey"
           }
         ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/DiagnosticsReport"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2219,12 +2251,19 @@
         ],
         "operationId": "runDiagnosticsPreflight",
         "summary": "Run diagnostics against candidate TOML.",
+        "parameters": [
+          { "$ref": "#/components/parameters/AdminOperationAsyncPreference" },
+          { "$ref": "#/components/parameters/AdminOperationIdempotencyKey" }
+        ],
         "requestBody": {
           "$ref": "#/components/requestBodies/PreflightRequest"
         },
         "responses": {
           "200": {
             "$ref": "#/components/responses/DiagnosticsReport"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2254,11 +2293,20 @@
           },
           {
             "$ref": "#/components/parameters/ExternalProbe"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationAsyncPreference"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationIdempotencyKey"
           }
         ],
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -3818,6 +3866,12 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationAsyncPreference"
+          },
+          {
+            "$ref": "#/components/parameters/AdminOperationIdempotencyKey"
           }
         ],
         "requestBody": {
@@ -3826,6 +3880,9 @@
         "responses": {
           "200": {
             "$ref": "#/components/responses/JsonObject"
+          },
+          "202": {
+            "$ref": "#/components/responses/AdminOperationAccepted"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4466,6 +4523,28 @@
           "pattern": "^[\\x21-\\x7E]+$"
         },
         "description": "Optional retry key for Person proof clearance revocation. The same key and normalized request replay the original result while its tombstone remains active; reusing it with a different request returns 409."
+      },
+      "AdminOperationIdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7E]+$"
+        },
+        "description": "Optional durable operation retry key. Exact authenticated request replays return the same operation and stable terminal receipt; reuse for different request content returns 409. The raw value is never persisted."
+      },
+      "AdminOperationAsyncPreference": {
+        "name": "Prefer",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "const": "respond-async"
+        },
+        "description": "Requests asynchronous execution. Supported source endpoints return 202 and an operation snapshot when selected."
       },
       "AdminListLimit": {
         "name": "limit",
@@ -6944,12 +7023,40 @@
       "AdminOperationState": {
         "type": "string",
         "enum": [
+          "accepted",
           "queued",
+          "claimed",
           "running",
+          "cancellation_requested",
+          "compensating",
           "succeeded",
           "failed",
           "cancelled",
+          "indeterminate",
           "expired"
+        ]
+      },
+      "AdminOperationDurability": {
+        "type": "string",
+        "enum": ["ephemeral", "durable"]
+      },
+      "AdminOperationRecoveryClass": {
+        "type": "string",
+        "enum": ["resumable", "restartable", "compensatable", "non_resumable"]
+      },
+      "AdminOperationSafeErrorClass": {
+        "type": "string",
+        "enum": [
+          "invalid_request",
+          "authorization_denied",
+          "conflict",
+          "capacity",
+          "dependency_unavailable",
+          "integrity",
+          "timeout",
+          "cancelled",
+          "internal",
+          "indeterminate"
         ]
       },
       "AdminOperationProgress": {
@@ -6973,6 +7080,10 @@
           "id",
           "kind",
           "state",
+          "schema_version",
+          "revision",
+          "durability",
+          "recovery_class",
           "created_at_unix_ms",
           "actor",
           "principal",
@@ -6989,13 +7100,36 @@
           "state": {
             "$ref": "#/components/schemas/AdminOperationState"
           },
+          "schema_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "durability": {
+            "$ref": "#/components/schemas/AdminOperationDurability"
+          },
+          "recovery_class": {
+            "$ref": "#/components/schemas/AdminOperationRecoveryClass"
+          },
           "created_at_unix_ms": {
+            "type": "integer"
+          },
+          "updated_at_unix_ms": {
             "type": "integer"
           },
           "started_at_unix_ms": {
             "type": "integer"
           },
           "finished_at_unix_ms": {
+            "type": "integer"
+          },
+          "expires_at_unix_ms": {
+            "type": "integer"
+          },
+          "retention_until_unix_ms": {
             "type": "integer"
           },
           "actor": {
@@ -7019,7 +7153,43 @@
           },
           "error": {
             "type": "string"
+          },
+          "error_class": {
+            "$ref": "#/components/schemas/AdminOperationSafeErrorClass"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "terminal_receipt": {
+            "$ref": "#/components/schemas/AdminOperationTerminalReceiptV1"
           }
+        },
+        "additionalProperties": false
+      },
+      "AdminOperationTerminalReceiptV1": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "operation_id",
+          "kind",
+          "state",
+          "revision",
+          "completed_at_unix_ms"
+        ],
+        "properties": {
+          "schema_version": { "type": "integer", "const": 1 },
+          "operation_id": { "$ref": "#/components/schemas/AdminOperationId" },
+          "kind": { "$ref": "#/components/schemas/AdminOperationKind" },
+          "state": {
+            "type": "string",
+            "enum": ["succeeded", "failed", "cancelled", "indeterminate"]
+          },
+          "revision": { "type": "integer", "minimum": 1 },
+          "completed_at_unix_ms": { "type": "integer" },
+          "result_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "error_class": { "$ref": "#/components/schemas/AdminOperationSafeErrorClass" },
+          "error_code": { "type": "string" },
+          "audit_record_id": { "type": "integer", "minimum": 1 }
         },
         "additionalProperties": false
       },
@@ -8047,6 +8217,7 @@
           "api_version",
           "package_version",
           "features",
+          "operation_persistence",
           "authentication",
           "limits"
         ],
@@ -8123,6 +8294,41 @@
         "admin_mutation_replay": {
           "type": "boolean"
         }
+            },
+            "additionalProperties": false
+          },
+          "operation_persistence": {
+            "type": "object",
+            "required": [
+              "configured",
+              "effective"
+            ],
+            "properties": {
+              "configured": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "ephemeral",
+                  "postgres"
+                ]
+              },
+              "effective": {
+                "type": "string",
+                "enum": [
+                  "ephemeral",
+                  "postgres"
+                ]
+              },
+              "fallback_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "prerequisites_unavailable",
+                  null
+                ]
+              }
             },
             "additionalProperties": false
           },

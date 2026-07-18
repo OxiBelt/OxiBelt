@@ -30,7 +30,7 @@ pub struct OxiRuleDevtoolsEvalRequest {
   pub expected: Option<OxiRuleExpectedOutcome>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OxiRuleDevtoolsReplayRequest {
   pub rule: OxiRuleCandidate,
   #[serde(default)]
@@ -58,7 +58,7 @@ pub struct OxiRuleHardeningPlanRequest {
   pub threats: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OxiRuleCandidate {
   pub content: String,
   #[serde(default)]
@@ -77,7 +77,7 @@ pub struct OxiRuleCandidate {
   pub route: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OxiRuleGroupCandidate {
   pub content: String,
   #[serde(default)]

@@ -14,6 +14,7 @@ use crate::state::AppSnapshot;
 use super::admin::{self, ADMIN_JSON_BODY_LIMIT};
 use super::admin_auth::AdminAuthorization;
 use super::admin_control::ADMIN_CONFIG_BODY_LIMIT;
+use super::admin_operations::AdminOperationRuntime;
 use super::admin_ops::OXIRULE_REPLAY_BODY_LIMIT;
 
 const ADMIN_API_VERSION: &str = "v1";
@@ -24,6 +25,7 @@ const ADMIN_OPENAPI_SHA256: &str = env!("OXIBELT_ADMIN_OPENAPI_SHA256");
 
 pub(super) fn admin_metadata_response(
   snapshot: &AppSnapshot,
+  operations: &AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   method: &::http::Method,
   path: &str,
@@ -47,13 +49,16 @@ pub(super) fn admin_metadata_response(
 
   match path {
     "/admin/v1/openapi.json" => Some(static_json_response(StatusCode::OK, OPENAPI_JSON)),
-    "/admin/v1/capabilities" => Some(capabilities_response(snapshot)),
+    "/admin/v1/capabilities" => Some(capabilities_response(snapshot, operations)),
     "/admin/v1/version" => Some(version_response()),
     _ => None,
   }
 }
 
-fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
+fn capabilities_response(
+  snapshot: &AppSnapshot,
+  operations: &AdminOperationRuntime,
+) -> Response<ProxyBody> {
   let features = json!({
     "config_load": true,
     "file_sync": true,
@@ -80,6 +85,7 @@ fn capabilities_response(snapshot: &AppSnapshot) -> Response<ProxyBody> {
       "api_version": ADMIN_API_VERSION,
       "package_version": env!("CARGO_PKG_VERSION"),
       "features": features,
+      "operation_persistence": operations.persistence_status(),
       "authentication": {
         "mtls_workload_identity": {
           "enabled": workload_identity.enabled,

@@ -1878,11 +1878,20 @@ enabled = false
 # bind = "127.0.0.1:9092"
 ```
 
-`[admin.operations]` controls the process-local long-running operation runtime:
+`[admin.operations]` controls long-running operation execution and optional
+PostgreSQL persistence:
 
 ```toml
 [admin.operations]
 enabled = true
+persistence = "auto" # auto | ephemeral | postgres
+# backend = "cluster"
+artifact_key_env = "OXIBELT_ADMIN_OPERATION_ARTIFACT_KEY"
+lease_seconds = 15
+lease_renew_seconds = 5
+max_lifetime_seconds = 86400
+artifact_max_bytes = 16777216
+checkpoint_max_bytes = 1048576
 max_running = 4
 max_queued = 64
 max_stored = 256
@@ -1894,9 +1903,37 @@ webtransport = true
 webtransport_max_sessions = 64
 ```
 
-The operation store is in-memory and lost on restart. Existing Admin endpoints
-remain synchronous unless `Prefer: respond-async` is supplied. Accepted async
-requests return `202` with `Location`, `Operation-Location`, and
+`persistence = "ephemeral"` retains the process-local store, rejects `backend`,
+and loses operation state on restart. `persistence = "postgres"` selects a
+named PostgreSQL `[[shared_state.backends]]` entry, either directly through
+`backend` or from `[admin.audit.store].backend`. It also requires enabled
+PostgreSQL-acknowledged Admin audit on that same backend with enforcing coverage
+for `operations.write` and `operations.lifecycle`, a non-empty stable instance
+ID in `[shared_state].instance_id_env`, and a standard-base64 artifact key of
+exactly 32 bytes in `artifact_key_env`. Durable operation inputs and checkpoints
+are encrypted with that key; the key is never stored in TOML or the operation
+journal.
+
+The default `auto` mode activates PostgreSQL persistence only when the runtime
+can establish all durable prerequisites. Supplying `backend` in `auto` still
+requires it to name a configured PostgreSQL shared-state backend, but a missing
+artifact key or enforcing audit configuration leaves the runtime explicitly
+ephemeral instead of making otherwise compatible configurations fail startup.
+Once durable handling activates it does not fall back to process-local state on
+a database failure. Explicit `postgres` fails validation when any prerequisite
+is missing.
+
+`retention_seconds` must be between 1 and 2,592,000 seconds. `lease_seconds`
+must be between 3 and 300, and `lease_renew_seconds` must be positive and no
+more than one third of the lease. `max_lifetime_seconds` must be between 60 and
+2,592,000 and at least as large as the lease. `artifact_max_bytes` is bounded
+to 16 MiB, while
+`checkpoint_max_bytes` must be positive and no larger than the artifact bound.
+These limits prevent retained operation state from becoming unbounded.
+
+Existing Admin endpoints remain synchronous unless `Prefer: respond-async` is
+supplied. Accepted async requests return `202` with `Location`,
+`Operation-Location`, and
 `Preference-Applied: respond-async`. IDs are `op_<uuid-v4>` with canonical
 lowercase UUIDs. `GET /admin/v1/operations/{id}/events` streams SSE by default
 or NDJSON with `?format=ndjson`; this follows MCP Streamable HTTP-style event
@@ -1944,7 +1981,8 @@ modes are:
   `config.files_sync`, `config.downstream_tls_reload`,
   `config.upstream_tls_refresh`, `config.key_rotate`,
   `config.secret_reference_update`, `ipm.write`, `break_glass.activate`,
-  `break_glass.revoke`, `operations.write`, `cache.warm`, `cache.purge`,
+  `break_glass.revoke`, `operations.write`, `operations.lifecycle`,
+  `cache.warm`, `cache.purge`,
   `person_proof.revoke`, `lifecycle.drain`, `lifecycle.undrain`,
   `dynamic_policy.write`, `upstream_pool.write`, and `stream_pool.write`.
   Unknown, duplicate, wildcard, or empty selections are rejected.

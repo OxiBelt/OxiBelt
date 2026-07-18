@@ -3,7 +3,7 @@
 
 use ::http::{Response, StatusCode};
 use hyper::body::Incoming;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::admin_audit::AdminAuditHandle;
@@ -18,7 +18,12 @@ use super::admin_body::collect_admin_json;
 use super::admin_control::AdminControlHandle;
 use super::admin_operations;
 
-#[derive(Debug, Clone, Deserialize)]
+#[path = "admin_diagnostics_query.rs"]
+mod query;
+
+use query::{preflight_options, require_redact, support_bundle_options};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AdminPreflightRequest {
   #[serde(default = "default_config_format")]
   format: String,
@@ -27,7 +32,7 @@ struct AdminPreflightRequest {
   external_probes: Vec<ExternalProbeKind>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct AdminSupportBundleRequest {
   #[serde(default)]
   redact: bool,
@@ -57,6 +62,14 @@ pub(super) async fn admin_diagnostics_response(
   match (method, path) {
     (&::http::Method::GET, "/admin/v1/diagnostics/preflight") => {
       let respond_async = admin_operations::prefer_respond_async(&request);
+      let idempotency_key = if respond_async {
+        match admin_operations::idempotency_key(&request) {
+          Ok(key) => key,
+          Err(response) => return Some(*response),
+        }
+      } else {
+        None
+      };
       let request_id = AdminAuditHandle::from_request(&request)
         .map(|audit| audit.request_id())
         .unwrap_or_else(|| "unknown".to_string());
@@ -76,15 +89,27 @@ pub(super) async fn admin_diagnostics_response(
         return Some(response);
       }
       if respond_async {
+        let command = json!({
+          "source": "active",
+          "external_probes": options.external_probes.clone(),
+        });
+        let submission = operation_submission(
+          admin_operations::AdminOperationKind::DiagnosticsPreflight,
+          "diagnostics:ReadPreflight",
+          "preflight/current",
+          command,
+          idempotency_key,
+        );
         return Some(
           match operations
-            .enqueue(
-              admin_operations::AdminOperationKind::DiagnosticsPreflight,
+            .enqueue_with_submission(
+              submission,
               authorization.actor,
               request_id,
               move |context| async move {
                 context.ensure_not_cancelled()?;
                 context.progress("diagnosing", None, None).await;
+                context.ensure_not_cancelled()?;
                 let report = crate::diagnostics::diagnose_config(config, &options).await;
                 context.ensure_not_cancelled()?;
                 admin_operations::value_result(report)
@@ -102,6 +127,14 @@ pub(super) async fn admin_diagnostics_response(
     }
     (&::http::Method::POST, "/admin/v1/diagnostics/preflight") => {
       let respond_async = admin_operations::prefer_respond_async(&request);
+      let idempotency_key = if respond_async {
+        match admin_operations::idempotency_key(&request) {
+          Ok(key) => key,
+          Err(response) => return Some(*response),
+        }
+      } else {
+        None
+      };
       let request_id = AdminAuditHandle::from_request(&request)
         .map(|audit| audit.request_id())
         .unwrap_or_else(|| "unknown".to_string());
@@ -112,6 +145,7 @@ pub(super) async fn admin_diagnostics_response(
         Ok(body) => body,
         Err(response) => return Some(response),
       };
+      let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
       if body.format != "toml" {
         return Some(text_response(
           StatusCode::BAD_REQUEST,
@@ -138,15 +172,21 @@ pub(super) async fn admin_diagnostics_response(
         return Some(response);
       }
       if respond_async {
+        let submission = diagnostics_submission(
+          admin_operations::AdminOperationKind::DiagnosticsPreflight,
+          command,
+          idempotency_key,
+        );
         return Some(
           match operations
-            .enqueue(
-              admin_operations::AdminOperationKind::DiagnosticsPreflight,
+            .enqueue_with_submission(
+              submission,
               authorization.actor,
               request_id,
               move |context| async move {
                 context.ensure_not_cancelled()?;
                 context.progress("diagnosing", None, None).await;
+                context.ensure_not_cancelled()?;
                 let report = crate::diagnostics::diagnose_config(config, &options).await;
                 context.ensure_not_cancelled()?;
                 admin_operations::value_result(report)
@@ -164,6 +204,14 @@ pub(super) async fn admin_diagnostics_response(
     }
     (&::http::Method::GET, "/admin/v1/diagnostics/support-bundle") => {
       let respond_async = admin_operations::prefer_respond_async(&request);
+      let idempotency_key = if respond_async {
+        match admin_operations::idempotency_key(&request) {
+          Ok(key) => key,
+          Err(response) => return Some(*response),
+        }
+      } else {
+        None
+      };
       let request_id = AdminAuditHandle::from_request(&request)
         .map(|audit| audit.request_id())
         .unwrap_or_else(|| "unknown".to_string());
@@ -185,15 +233,25 @@ pub(super) async fn admin_diagnostics_response(
         return Some(response);
       }
       if respond_async {
+        let command = json!({
+          "redact": true,
+          "external_probes": options.external_probes.clone(),
+        });
+        let submission = diagnostics_submission(
+          admin_operations::AdminOperationKind::SupportBundle,
+          command,
+          idempotency_key,
+        );
         return Some(
           match operations
-            .enqueue(
-              admin_operations::AdminOperationKind::SupportBundle,
+            .enqueue_with_submission(
+              submission,
               authorization.actor,
               request_id,
               move |context| async move {
                 context.ensure_not_cancelled()?;
                 context.progress("collecting", None, None).await;
+                context.ensure_not_cancelled()?;
                 let status =
                   append_operational_profile_status(admin_control.status().await, &active.config);
                 let effective = admin_control
@@ -265,11 +323,21 @@ pub(in crate::server) async fn enqueue_diagnostics_operation(
   admin_control: AdminControlHandle,
   operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
-  request_id: String,
+  metadata: admin_operations::AdminOperationRequestMetadata,
 ) -> Response<ProxyBody> {
+  let request_id = metadata.request_id;
+  let idempotency_key = metadata.idempotency_key;
   match kind {
     admin_operations::AdminOperationKind::DiagnosticsPreflight => {
-      enqueue_preflight_operation(request, state, operations, authorization, request_id).await
+      enqueue_preflight_operation(
+        request,
+        state,
+        operations,
+        authorization,
+        request_id,
+        idempotency_key,
+      )
+      .await
     }
     admin_operations::AdminOperationKind::SupportBundle => {
       enqueue_support_bundle_operation(
@@ -279,6 +347,7 @@ pub(in crate::server) async fn enqueue_diagnostics_operation(
         operations,
         authorization,
         request_id,
+        idempotency_key,
       )
       .await
     }
@@ -295,6 +364,7 @@ async fn enqueue_preflight_operation(
   operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   request_id: String,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let body = match serde_json::from_value::<AdminPreflightRequest>(request) {
     Ok(body) => body,
@@ -305,6 +375,7 @@ async fn enqueue_preflight_operation(
       );
     }
   };
+  let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
   if !authorization.is_allowed("diagnostics:RunPreflight", "preflight/candidate") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
@@ -327,6 +398,8 @@ async fn enqueue_preflight_operation(
         admin_operations::AdminOperationKind::DiagnosticsPreflight,
         authorization,
         request_id,
+        command.clone(),
+        idempotency_key.clone(),
         report,
       )
       .await;
@@ -338,6 +411,8 @@ async fn enqueue_preflight_operation(
       admin_operations::AdminOperationKind::DiagnosticsPreflight,
       authorization,
       request_id,
+      command.clone(),
+      idempotency_key.clone(),
       report,
     )
     .await;
@@ -345,14 +420,20 @@ async fn enqueue_preflight_operation(
   if let Some(response) = ensure_probe_target_permissions(authorization, &config, &options) {
     return response;
   }
+  let submission = diagnostics_submission(
+    admin_operations::AdminOperationKind::DiagnosticsPreflight,
+    command,
+    idempotency_key,
+  );
   match operations
-    .enqueue(
-      admin_operations::AdminOperationKind::DiagnosticsPreflight,
+    .enqueue_with_submission(
+      submission,
       authorization.actor,
       request_id,
       move |context| async move {
         context.ensure_not_cancelled()?;
         context.progress("diagnosing", None, None).await;
+        context.ensure_not_cancelled()?;
         let report = crate::diagnostics::diagnose_config(config, &options).await;
         context.ensure_not_cancelled()?;
         admin_operations::value_result(report)
@@ -372,6 +453,7 @@ async fn enqueue_support_bundle_operation(
   operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   request_id: String,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let body = if request.is_null() {
     AdminSupportBundleRequest::default()
@@ -381,6 +463,7 @@ async fn enqueue_support_bundle_operation(
       Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid support_bundle request"),
     }
   };
+  let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
   if !body.redact {
     return text_response(StatusCode::BAD_REQUEST, "redact=true is required");
   }
@@ -398,14 +481,20 @@ async fn enqueue_support_bundle_operation(
   if let Some(response) = ensure_probe_target_permissions(authorization, &active.config, &options) {
     return response;
   }
+  let submission = diagnostics_submission(
+    admin_operations::AdminOperationKind::SupportBundle,
+    command,
+    idempotency_key,
+  );
   match operations
-    .enqueue(
-      admin_operations::AdminOperationKind::SupportBundle,
+    .enqueue_with_submission(
+      submission,
       authorization.actor,
       request_id,
       move |context| async move {
         context.ensure_not_cancelled()?;
         context.progress("collecting", None, None).await;
+        context.ensure_not_cancelled()?;
         let status =
           append_operational_profile_status(admin_control.status().await, &active.config);
         let effective = admin_control
@@ -447,19 +536,58 @@ async fn enqueue_completed_report<T>(
   kind: admin_operations::AdminOperationKind,
   authorization: &AdminAuthorization<'_>,
   request_id: String,
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
   report: T,
 ) -> Response<ProxyBody>
 where
   T: serde::Serialize + Send + 'static,
 {
+  let submission = diagnostics_submission(kind, command, idempotency_key);
   match operations
-    .enqueue(kind, authorization.actor, request_id, move |_| async move {
-      admin_operations::value_result(report)
-    })
+    .enqueue_with_submission(
+      submission,
+      authorization.actor,
+      request_id,
+      move |_| async move { admin_operations::value_result(report) },
+    )
     .await
   {
     Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
     Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+fn diagnostics_submission(
+  kind: admin_operations::AdminOperationKind,
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
+) -> admin_operations::AdminOperationSubmission {
+  let (action, resource) = if kind == admin_operations::AdminOperationKind::DiagnosticsPreflight {
+    ("diagnostics:RunPreflight", "preflight/candidate")
+  } else {
+    ("diagnostics:ReadSupportBundle", "support-bundle/current")
+  };
+  operation_submission(kind, action, resource, command, idempotency_key)
+}
+
+fn operation_submission(
+  kind: admin_operations::AdminOperationKind,
+  action: &str,
+  resource: &str,
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
+) -> admin_operations::AdminOperationSubmission {
+  let submission = admin_operations::AdminOperationSubmission::new(
+    kind,
+    action,
+    Some(resource.to_string()),
+    admin_operations::AdminOperationRecoveryClass::Restartable,
+  )
+  .with_command(command);
+  match idempotency_key {
+    Some(key) => submission.with_idempotency_key(key),
+    None => submission,
   }
 }
 
@@ -487,63 +615,6 @@ fn ensure_probe_target_permissions(
     }
   }
   None
-}
-
-fn support_bundle_options(
-  request: &hyper::Request<Incoming>,
-) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
-  require_redact(request)?;
-  external_probe_options(request)
-}
-
-fn preflight_options(
-  request: &hyper::Request<Incoming>,
-) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
-  external_probe_options(request)
-}
-
-fn external_probe_options(
-  request: &hyper::Request<Incoming>,
-) -> Result<DoctorOptions, Box<Response<ProxyBody>>> {
-  let mut external_probes = Vec::new();
-  for (key, value) in query_pairs(request) {
-    if key == "external_probe" {
-      match value.parse::<ExternalProbeKind>() {
-        Ok(probe) => external_probes.push(probe),
-        Err(error) => {
-          return Err(Box::new(text_response(
-            StatusCode::BAD_REQUEST,
-            &error.to_string(),
-          )));
-        }
-      }
-    }
-  }
-  Ok(DoctorOptions {
-    external_probes,
-    allow_secret_env_probes: false,
-  })
-}
-
-fn require_redact(request: &hyper::Request<Incoming>) -> Result<(), Box<Response<ProxyBody>>> {
-  let redact = query_pairs(request)
-    .into_iter()
-    .filter(|(key, _)| key == "redact")
-    .map(|(_, value)| value)
-    .next_back();
-  match redact.as_deref() {
-    Some("true") => Ok(()),
-    _ => Err(Box::new(text_response(
-      StatusCode::BAD_REQUEST,
-      "redact=true is required",
-    ))),
-  }
-}
-
-fn query_pairs(request: &hyper::Request<Incoming>) -> Vec<(String, String)> {
-  url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
-    .into_owned()
-    .collect()
 }
 
 fn default_config_format() -> String {

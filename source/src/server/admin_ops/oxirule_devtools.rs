@@ -114,6 +114,14 @@ pub(in crate::server) async fn admin_waf_devtools_response(
     }
     (&::http::Method::POST, "/admin/v1/waf/oxirule/replay") => {
       let respond_async = admin_operations::prefer_respond_async(&request);
+      let idempotency_key = if respond_async {
+        match admin_operations::idempotency_key(&request) {
+          Ok(key) => key,
+          Err(response) => return Some(*response),
+        }
+      } else {
+        None
+      };
       let request_id = AdminAuditHandle::from_request(&request)
         .map(|audit| audit.request_id())
         .unwrap_or_else(|| "unknown".to_string());
@@ -130,7 +138,17 @@ pub(in crate::server) async fn admin_waf_devtools_response(
         return Some(response);
       }
       if respond_async {
-        return Some(enqueue_replay(body, snapshot, operations, authorization, request_id).await);
+        return Some(
+          enqueue_replay(
+            body,
+            snapshot,
+            operations,
+            authorization,
+            request_id,
+            idempotency_key,
+          )
+          .await,
+        );
       }
       Some(admin::json_response(
         StatusCode::OK,
@@ -231,6 +249,7 @@ pub(in crate::server) async fn enqueue_oxirule_replay_operation(
   operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   request_id: String,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let body = match serde_json::from_value::<crate::waf::OxiRuleDevtoolsReplayRequest>(request) {
     Ok(body) => body,
@@ -239,7 +258,15 @@ pub(in crate::server) async fn enqueue_oxirule_replay_operation(
   if let Some(response) = authorize_replay(authorization, &body) {
     return response;
   }
-  enqueue_replay(body, snapshot, operations, authorization, request_id).await
+  enqueue_replay(
+    body,
+    snapshot,
+    operations,
+    authorization,
+    request_id,
+    idempotency_key,
+  )
+  .await
 }
 
 async fn enqueue_replay(
@@ -248,11 +275,15 @@ async fn enqueue_replay(
   operations: admin_operations::AdminOperationRuntime,
   authorization: &AdminAuthorization<'_>,
   request_id: String,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let config = snapshot.config.clone();
+  let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
+  let resource = crate::waf::oxirule_rule_resource_name(&body.rule).replace("oxirule/", "replay/");
+  let submission = durable_submission(command, idempotency_key, resource);
   match operations
-    .enqueue(
-      admin_operations::AdminOperationKind::OxiRuleReplay,
+    .enqueue_with_submission(
+      submission,
       authorization.actor,
       request_id,
       move |context| async move {
@@ -265,6 +296,7 @@ async fn enqueue_replay(
         context
           .progress("replaying", Some(0), Some(total as u64))
           .await;
+        context.ensure_not_cancelled()?;
         let report = crate::waf::replay_oxirule(&config, body);
         context.ensure_not_cancelled()?;
         context
@@ -277,6 +309,24 @@ async fn enqueue_replay(
   {
     Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
     Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+fn durable_submission(
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
+  resource: String,
+) -> admin_operations::AdminOperationSubmission {
+  let submission = admin_operations::AdminOperationSubmission::new(
+    admin_operations::AdminOperationKind::OxiRuleReplay,
+    "waf:ReplayOxiRule",
+    Some(resource),
+    admin_operations::AdminOperationRecoveryClass::Resumable,
+  )
+  .with_command(command);
+  match idempotency_key {
+    Some(key) => submission.with_idempotency_key(key),
+    None => submission,
   }
 }
 

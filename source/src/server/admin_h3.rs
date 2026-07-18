@@ -25,10 +25,12 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
 use super::admin_operations::{
-  AdminOperationError, AdminOperationEvent, AdminOperationRuntime, can_access_operation,
-  encode_ndjson_event, parse_operation_id,
+  AdminOperationEvent, AdminOperationRuntime, can_access_operation, encode_ndjson_event,
 };
 use super::{admin_error, connection_errors};
+
+#[path = "admin_h3_webtransport.rs"]
+mod webtransport;
 
 type AdminH3BidiStream = crate::quic::h3::BidiStream<Bytes>;
 type AdminH3RequestStream = h3::server::RequestStream<AdminH3BidiStream, Bytes>;
@@ -305,7 +307,7 @@ async fn handle_admin_http3_connection(
       request.extensions_mut().insert(client_certificate.clone());
     }
     let path = request.uri().path().to_string();
-    if matches_operation_event_webtransport_path(&path) && is_webtransport_request(&request) {
+    if webtransport::matches_operation_event_path(&path) && is_webtransport_request(&request) {
       let Some(_control_request) = state
         .snapshot()
         .overload
@@ -388,7 +390,7 @@ async fn admin_http3_response_inner(
   if !admin_http3_listener_current(&snapshot, listener_bind) {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
-  if !matches_operation_event_webtransport_path(path) {
+  if !webtransport::matches_operation_event_path(path) {
     return text_response(StatusCode::NOT_FOUND, "not found");
   }
   if request.method() != ::http::Method::CONNECT {
@@ -428,18 +430,29 @@ async fn admin_http3_response_inner(
   if let Some(audit) = &audit {
     authentication.record_audit(audit);
   }
+  if let Err(response) = webtransport::require_break_glass_activation(
+    &snapshot,
+    authentication.authenticated_with_break_glass(),
+    &authentication.actor.principal,
+  )
+  .await
+  {
+    return response;
+  }
   let actor = &authentication.actor;
   let authorization = if let Some(audit) = audit {
     AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &context, audit)
   } else {
     AdminAuthorization::new(actor, &snapshot.ipm, &context)
   };
-  let operation_id = match operation_id_from_webtransport_path(path) {
+  let operation_id = match webtransport::operation_id_from_path(path) {
     Ok(id) => id,
     Err(error) => return text_response(StatusCode::BAD_REQUEST, &error.to_string()),
   };
-  let Some((_, _, operation)) = operations.subscribe(operation_id).await else {
-    return text_response(StatusCode::NOT_FOUND, "not found");
+  let (_, _, operation) = match operations.subscribe(operation_id).await {
+    Ok(Some(subscription)) => subscription,
+    Ok(None) => return text_response(StatusCode::NOT_FOUND, "not found"),
+    Err(error) => return webtransport::error_response(error),
   };
   if !can_access_operation(&authorization, &operation, "admin:ReadOperation") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
@@ -519,7 +532,7 @@ async fn prepare_operation_event_webtransport(
       "WebTransport operation events are disabled",
     ));
   }
-  let operation_id = operation_id_from_webtransport_path(request.uri().path())
+  let operation_id = webtransport::operation_id_from_path(request.uri().path())
     .map_err(|error| text_response(StatusCode::BAD_REQUEST, &error.to_string()))?;
   let context = admin_request_context(request, peer_addr);
   let audit = AdminAuditHandle::from_request(request);
@@ -545,21 +558,29 @@ async fn prepare_operation_event_webtransport(
   if let Some(audit) = &audit {
     authentication.record_audit(audit);
   }
+  webtransport::require_break_glass_activation(
+    &snapshot,
+    authentication.authenticated_with_break_glass(),
+    &authentication.actor.principal,
+  )
+  .await?;
   let actor = &authentication.actor;
   let authorization = if let Some(audit) = audit {
     AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &context, audit)
   } else {
     AdminAuthorization::new(actor, &snapshot.ipm, &context)
   };
-  let Some((history, receiver, operation)) = operations.subscribe(operation_id).await else {
-    return Err(text_response(StatusCode::NOT_FOUND, "not found"));
+  let (history, receiver, operation) = match operations.subscribe(operation_id).await {
+    Ok(Some(subscription)) => subscription,
+    Ok(None) => return Err(text_response(StatusCode::NOT_FOUND, "not found")),
+    Err(error) => return Err(webtransport::error_response(error)),
   };
   if !can_access_operation(&authorization, &operation, "admin:ReadOperation") {
     return Err(text_response(StatusCode::FORBIDDEN, "forbidden"));
   }
   let permit = operations
     .try_acquire_webtransport_session()
-    .map_err(operation_webtransport_error_response)?;
+    .map_err(webtransport::error_response)?;
   Ok((history, receiver, permit))
 }
 
@@ -656,45 +677,6 @@ async fn finalize_admin_h3_response(
     );
   }
   response
-}
-
-fn operation_webtransport_error_response(error: AdminOperationError) -> Response<ProxyBody> {
-  match error {
-    AdminOperationError::Disabled => text_response(
-      StatusCode::METHOD_NOT_ALLOWED,
-      "WebTransport operation events are disabled",
-    ),
-    AdminOperationError::QueueFull => text_response(
-      StatusCode::SERVICE_UNAVAILABLE,
-      "too many active WebTransport operation event sessions",
-    ),
-    AdminOperationError::StoreFull
-    | AdminOperationError::NotFound
-    | AdminOperationError::AlreadyTerminal
-    | AdminOperationError::Internal => {
-      text_response(StatusCode::SERVICE_UNAVAILABLE, &error.to_string())
-    }
-  }
-}
-
-fn matches_operation_event_webtransport_path(path: &str) -> bool {
-  path.starts_with("/admin/v1/operations/") && path.ends_with("/events/wt")
-}
-
-fn operation_id_from_webtransport_path(path: &str) -> anyhow::Result<&str> {
-  let Some(rest) = path.strip_prefix("/admin/v1/operations/") else {
-    anyhow::bail!("not an operation event WebTransport endpoint");
-  };
-  let mut segments = rest.split('/');
-  match (
-    segments.next(),
-    segments.next(),
-    segments.next(),
-    segments.next(),
-  ) {
-    (Some(id), Some("events"), Some("wt"), None) => parse_operation_id(id),
-    _ => anyhow::bail!("not an operation event WebTransport endpoint"),
-  }
 }
 
 pub(super) fn configured_bind(snapshot: &AppSnapshot) -> SocketAddr {

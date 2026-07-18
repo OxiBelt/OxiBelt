@@ -345,7 +345,7 @@ pub struct WafRuleConfig {
   pub loaded_from_logical_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WafPhase {
   Request,

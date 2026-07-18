@@ -243,6 +243,14 @@ pub(super) async fn dynamic_policy_response(
     }
     (&::http::Method::POST, "/admin/v1/dynamic-policies/import") => {
       let respond_async = admin_operations::prefer_respond_async(&request);
+      let idempotency_key = if respond_async {
+        match admin_operations::idempotency_key(&request) {
+          Ok(key) => key,
+          Err(response) => return Some(*response),
+        }
+      } else {
+        None
+      };
       let request_id = AdminAuditHandle::from_request(&request)
         .map(|audit| audit.request_id())
         .unwrap_or_else(|| "unknown".to_string());
@@ -264,10 +272,12 @@ pub(super) async fn dynamic_policy_response(
       }
       if respond_async {
         let actor_name = authorization.actor.name.clone();
+        let command = json!({ "request": body.clone(), "if_match": if_match.clone() });
+        let submission = dynamic_policy_import_submission(command, idempotency_key);
         return Some(
           match operations
-            .enqueue(
-              admin_operations::AdminOperationKind::DynamicPolicyImport,
+            .enqueue_with_submission(
+              submission,
               authorization.actor,
               request_id,
               move |context| async move {
@@ -275,13 +285,13 @@ pub(super) async fn dynamic_policy_response(
                 context
                   .progress("importing", Some(0), Some(body.policies.len() as u64))
                   .await;
+                context.ensure_not_cancelled()?;
                 let policies = state
                   .snapshot()
                   .dynamic_policy
                   .admin_import(&actor_name, body, if_match.as_deref())
                   .await
                   .map_err(|error| error.to_string())?;
-                context.ensure_not_cancelled()?;
                 context
                   .progress(
                     "importing",
@@ -402,6 +412,7 @@ pub(in crate::server) async fn enqueue_dynamic_policy_import_operation(
   authorization: &AdminAuthorization<'_>,
   request_id: String,
   if_match: Option<String>,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let body = match serde_json::from_value::<DynamicPolicyAdminImport>(request) {
     Ok(body) => body,
@@ -424,9 +435,11 @@ pub(in crate::server) async fn enqueue_dynamic_policy_import_operation(
     }
   }
   let actor_name = authorization.actor.name.clone();
+  let command = json!({ "request": body.clone(), "if_match": if_match.clone() });
+  let submission = dynamic_policy_import_submission(command, idempotency_key);
   match operations
-    .enqueue(
-      admin_operations::AdminOperationKind::DynamicPolicyImport,
+    .enqueue_with_submission(
+      submission,
       authorization.actor,
       request_id,
       move |context| async move {
@@ -434,13 +447,13 @@ pub(in crate::server) async fn enqueue_dynamic_policy_import_operation(
         context
           .progress("importing", Some(0), Some(body.policies.len() as u64))
           .await;
+        context.ensure_not_cancelled()?;
         let policies = state
           .snapshot()
           .dynamic_policy
           .admin_import(&actor_name, body, if_match.as_deref())
           .await
           .map_err(|error| error.to_string())?;
-        context.ensure_not_cancelled()?;
         context
           .progress(
             "importing",
@@ -455,6 +468,23 @@ pub(in crate::server) async fn enqueue_dynamic_policy_import_operation(
   {
     Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
     Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+fn dynamic_policy_import_submission(
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
+) -> admin_operations::AdminOperationSubmission {
+  let submission = admin_operations::AdminOperationSubmission::new(
+    admin_operations::AdminOperationKind::DynamicPolicyImport,
+    "dynamic-policy:Import",
+    Some("dynamic-policy/import".to_string()),
+    admin_operations::AdminOperationRecoveryClass::Restartable,
+  )
+  .with_command(command);
+  match idempotency_key {
+    Some(key) => submission.with_idempotency_key(key),
+    None => submission,
   }
 }
 

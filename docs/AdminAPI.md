@@ -86,12 +86,31 @@ stored. Query filters are `limit`, `outcome`, `actor`, `principal`, `service`,
 ## Long-Running Operations
 
 Admin operations can run control-plane work asynchronously without changing
-existing endpoint behavior by default. The v1 runtime is process-local,
-in-memory, and lost on restart. Supplying `Prefer: respond-async` to supported
-source endpoints returns `202 Accepted` with the operation snapshot plus
+existing endpoint behavior by default. With
+`admin.operations.persistence = "postgres"`, or when `"auto"` can activate a
+suitable PostgreSQL shared-state backend and enforcing Admin audit on that same
+backend, long-running operation status is journaled and remains queryable across
+process restarts. `"ephemeral"` keeps the bounded process-local behavior. An
+`"auto"` activation failure is visible and falls back to ephemeral operation
+status; an explicitly configured PostgreSQL mode fails closed at startup.
+`GET /admin/v1/capabilities` reports the configured and effective operation
+persistence modes plus a fixed-vocabulary fallback reason when automatic
+activation selected ephemeral mode.
+
+Supplying `Prefer: respond-async` to supported source endpoints returns `202
+Accepted` with the operation snapshot plus
 `Location`, `Operation-Location`, and `Preference-Applied: respond-async`.
 Operation IDs are canonical UUIDv4 values prefixed with `op_`, for example
 `op_550e8400-e29b-41d4-a716-446655440000`.
+
+Every snapshot reports `durability` (`durable` or `ephemeral`), its recovery
+class, schema version, and monotonic revision. Durable states are `accepted`,
+`queued`, `claimed`, `running`, `cancellation_requested`, `compensating`,
+`succeeded`, `failed`, `cancelled`, and `indeterminate`. Terminal durable
+snapshots include a stable versioned receipt. A crash with ambiguous side
+effects is recovered according to the operation's declared recovery class and
+becomes `indeterminate` when success cannot be proved; it is never synthesized
+as success.
 
 Supported async kinds are `cache_warm`, `oxirule_replay`,
 `diagnostics_preflight`, `support_bundle`, `dynamic_policy_import`,
@@ -100,6 +119,11 @@ Explicit creation uses `POST /admin/v1/operations` with `{ "kind": "...",
 "request": { ... } }`; the request payload is the same shape as the matching
 source endpoint. `dynamic_policy_import` still enforces `If-Match` at execution
 time, so a stale ETag fails the operation without applying changes.
+An optional `Idempotency-Key` contains 1 to 128 visible ASCII bytes. In durable
+mode it is stored only as a domain-separated keyed digest and replays the
+original operation and terminal receipt when the authenticated principal,
+permission action, and canonical request fingerprint match. Reusing the same
+key for a different request is rejected as a conflict.
 
 Operations can be listed, polled, cancelled, and watched:
 
@@ -129,11 +153,12 @@ callers need `admin:ReadOperation` on `operation/<kind>/<id>` or
 `operation/*`.
 
 `webtransport_snapshot` returns active data-plane WebTransport sessions from
-the process-local registry. `webtransport_drain` installs a drain rule for a
+the process-local registry and therefore remains explicitly ephemeral.
+`webtransport_drain` installs a process-local drain rule for a
 scope, rejects new matching sessions with `503`, waits for `grace_ms` or
 `runtime.drain.long_connection_close_delay_ms`, and closes remaining matching
-sessions. Cancelling the drain removes the rule but does not restore sessions
-already closed.
+sessions; it also remains explicitly ephemeral. Cancelling the drain removes
+the rule but does not restore sessions already closed.
 
 ## Resource Scoping
 

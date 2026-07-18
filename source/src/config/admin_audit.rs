@@ -262,7 +262,7 @@ pub const ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS: [&str; 9] = [
   "break_glass.revoke",
 ];
 
-pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 19] = [
+pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 20] = [
   "config.load",
   "config.rollback",
   "config.files_sync",
@@ -274,6 +274,7 @@ pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 19] = [
   "break_glass.activate",
   "break_glass.revoke",
   "operations.write",
+  "operations.lifecycle",
   "cache.warm",
   "cache.purge",
   "person_proof.revoke",

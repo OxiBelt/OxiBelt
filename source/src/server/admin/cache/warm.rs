@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use ::http::{HeaderMap, Method, Response, StatusCode, Uri};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::admin_audit::AdminAuditHandle;
@@ -16,12 +16,12 @@ use super::{
   CacheWarmPolicyInput, authorize_cache_target, effective_warm_policy, header_map_from_strings,
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AdminCacheWarmRequest {
   items: Vec<AdminCacheWarmItem>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AdminCacheWarmItem {
   #[serde(default)]
   policy: Option<String>,
@@ -63,6 +63,14 @@ pub(in crate::server) async fn cache_warm_response(
     return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
   }
   let respond_async = admin_operations::prefer_respond_async(&request);
+  let idempotency_key = if respond_async {
+    match admin_operations::idempotency_key(&request) {
+      Ok(key) => key,
+      Err(response) => return *response,
+    }
+  } else {
+    None
+  };
   let request_id = AdminAuditHandle::from_request(&request)
     .map(|audit| audit.request_id())
     .unwrap_or_else(|| "unknown".to_string());
@@ -70,14 +78,16 @@ pub(in crate::server) async fn cache_warm_response(
     Ok(body) => body,
     Err(response) => return response,
   };
+  let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
   let plan = match prepare_cache_warm_plan(body, &state, authorization, peer_addr) {
     Ok(plan) => plan,
     Err(response) => return *response,
   };
   if respond_async {
+    let submission = durable_submission(command, idempotency_key);
     return match operations
-      .enqueue(
-        admin_operations::AdminOperationKind::CacheWarm,
+      .enqueue_with_submission(
+        submission,
         authorization.actor,
         request_id,
         move |context| async move {
@@ -103,18 +113,21 @@ pub(in crate::server) async fn enqueue_cache_warm_operation(
   authorization: &AdminAuthorization<'_>,
   request_id: String,
   peer_addr: SocketAddr,
+  idempotency_key: Option<String>,
 ) -> Response<ProxyBody> {
   let body = match serde_json::from_value::<AdminCacheWarmRequest>(request) {
     Ok(body) => body,
     Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid cache_warm request"),
   };
+  let command = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
   let plan = match prepare_cache_warm_plan(body, &state, authorization, peer_addr) {
     Ok(plan) => plan,
     Err(response) => return *response,
   };
+  let submission = durable_submission(command, idempotency_key);
   match operations
-    .enqueue(
-      admin_operations::AdminOperationKind::CacheWarm,
+    .enqueue_with_submission(
+      submission,
       authorization.actor,
       request_id,
       move |context| async move {
@@ -125,6 +138,23 @@ pub(in crate::server) async fn enqueue_cache_warm_operation(
   {
     Ok(snapshot) => admin_operations::accepted_operation_response(&snapshot),
     Err(error) => admin_operations::enqueue_error_response(error),
+  }
+}
+
+fn durable_submission(
+  command: serde_json::Value,
+  idempotency_key: Option<String>,
+) -> admin_operations::AdminOperationSubmission {
+  let submission = admin_operations::AdminOperationSubmission::new(
+    admin_operations::AdminOperationKind::CacheWarm,
+    "cache:Warm",
+    Some("cache/warm".to_string()),
+    admin_operations::AdminOperationRecoveryClass::Resumable,
+  )
+  .with_command(command);
+  match idempotency_key {
+    Some(key) => submission.with_idempotency_key(key),
+    None => submission,
   }
 }
 
@@ -225,6 +255,7 @@ async fn execute_cache_warm_plan(
       context
         .progress("warming", Some(index as u64), Some(total))
         .await;
+      context.ensure_not_cancelled()?;
     }
     let item = match item {
       CacheWarmPlanItem::Ready(item) => *item,
@@ -296,15 +327,7 @@ fn ensure_cache_warm_policy_is_current(
 fn operation_enqueue_error_response(
   error: admin_operations::AdminOperationError,
 ) -> Response<ProxyBody> {
-  let status = match error {
-    admin_operations::AdminOperationError::Disabled => StatusCode::CONFLICT,
-    admin_operations::AdminOperationError::QueueFull
-    | admin_operations::AdminOperationError::StoreFull => StatusCode::SERVICE_UNAVAILABLE,
-    admin_operations::AdminOperationError::NotFound => StatusCode::NOT_FOUND,
-    admin_operations::AdminOperationError::AlreadyTerminal => StatusCode::CONFLICT,
-    admin_operations::AdminOperationError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-  };
-  text_response(status, &error.to_string())
+  admin_operations::enqueue_error_response(error)
 }
 
 #[cfg(test)]
