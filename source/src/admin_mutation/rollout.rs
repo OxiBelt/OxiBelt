@@ -10,17 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
+use tokio::sync::{RwLock, watch};
 use tokio::time::{MissedTickBehavior, interval};
 
-use super::ledger::{MutationRecord, MutationState, TerminalMutation, validate_identifier};
-use super::rollout_store::{
-  self, HeartbeatUpdate, InstanceHeartbeat, RolloutTarget, TargetState, TargetTransition,
-};
+use super::ledger::{MutationRecord, MutationState, validate_identifier};
+use super::rollout_store::{self, HeartbeatUpdate, MemberFence, RolloutTarget, TargetState};
 use super::store::MutationStore;
 
 #[path = "rollout_state.rs"]
@@ -37,6 +33,7 @@ pub(crate) struct RolloutSettings {
   pub(crate) instance_id: String,
   pub(crate) boot_id: String,
   pub(crate) build_version: String,
+  pub(crate) artifact_key_fingerprint: String,
   pub(crate) heartbeat_interval: Duration,
   pub(crate) stale_after: Duration,
   pub(crate) phase_timeout: Duration,
@@ -52,6 +49,10 @@ impl RolloutSettings {
       ("instance_id", self.instance_id.as_str()),
       ("boot_id", self.boot_id.as_str()),
       ("build_version", self.build_version.as_str()),
+      (
+        "artifact_key_fingerprint",
+        self.artifact_key_fingerprint.as_str(),
+      ),
     ] {
       validate_identifier(name, value, 256)?;
     }
@@ -123,12 +124,12 @@ pub(crate) struct AdminClusterRolloutController {
   store: MutationStore,
   settings: Arc<RolloutSettings>,
   local_status: Arc<RwLock<LocalRolloutStatus>>,
+  member_fence: Arc<RwLock<Option<MemberFence>>>,
   ready: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RolloutDirective {
-  Passive,
   AwaitMembership,
   Validate(Vec<String>),
   AwaitValidation,
@@ -144,15 +145,6 @@ pub(crate) enum RolloutDirective {
   Completed(MutationState),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RolloutTerminal {
-  Committed,
-  Failed,
-  RolledBack,
-  RollbackFailed,
-  Indeterminate,
-}
-
 impl AdminClusterRolloutController {
   pub(crate) fn new(
     store: MutationStore,
@@ -166,6 +158,7 @@ impl AdminClusterRolloutController {
       store,
       settings: Arc::new(settings),
       local_status: Arc::new(RwLock::new(initial_status)),
+      member_fence: Arc::new(RwLock::new(None)),
       ready: Arc::new(AtomicBool::new(false)),
     })
   }
@@ -190,32 +183,68 @@ impl AdminClusterRolloutController {
     &self.settings.membership_revision
   }
 
+  pub(crate) async fn member_fence(&self) -> anyhow::Result<MemberFence> {
+    self
+      .member_fence
+      .read()
+      .await
+      .clone()
+      .context("Admin cluster member authority is unavailable")
+  }
+
+  pub(crate) fn coordinator_lease_seconds(&self) -> anyhow::Result<i32> {
+    seconds_i32(self.settings.stale_after, "coordinator lease")
+  }
+
   pub(crate) async fn update_local_status(&self, status: LocalRolloutStatus) -> anyhow::Result<()> {
     status.validate()?;
     *self.local_status.write().await = status;
     Ok(())
   }
 
-  /// Starts DB-time heartbeats. Dropping the returned task stops renewal and
-  /// lets the lease expire; callers should abort it during server shutdown.
-  pub(crate) fn spawn_heartbeat_task(&self) -> JoinHandle<()> {
-    let controller = self.clone();
-    tokio::spawn(async move {
-      let mut ticker = interval(controller.settings.heartbeat_interval);
-      ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-      loop {
-        ticker.tick().await;
-        let heartbeat_ok = controller.heartbeat_once().await.is_ok();
-        let durable_ready = heartbeat_ok && controller.durable_readiness().await.unwrap_or(false);
-        controller.ready.store(durable_ready, Ordering::Release);
+  pub(crate) async fn release(&self) -> anyhow::Result<()> {
+    self.ready.store(false, Ordering::Release);
+    let fence = self.member_fence.read().await.clone();
+    if let Some(fence) = fence {
+      ensure!(
+        rollout_store::release_member_fence(&self.store, &fence).await?,
+        "Admin cluster member release was fenced"
+      );
+    }
+    Ok(())
+  }
+
+  pub(crate) async fn heartbeat_until_shutdown(
+    &self,
+    mut shutdown: watch::Receiver<bool>,
+  ) -> anyhow::Result<()> {
+    let mut ticker = interval(self.settings.heartbeat_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+      tokio::select! {
+        biased;
+        changed = shutdown.changed() => {
+          if changed.is_err() || *shutdown.borrow() {
+            self.ready.store(false, Ordering::Release);
+            return Ok(());
+          }
+        }
+        _ = ticker.tick() => {
+          if let Err(error) = self.heartbeat_once().await {
+            self.ready.store(false, Ordering::Release);
+            return Err(error);
+          }
+          let durable_ready = self.durable_readiness().await.unwrap_or(false);
+          self.ready.store(durable_ready, Ordering::Release);
+        }
       }
-    })
+    }
   }
 
   pub(crate) async fn heartbeat_once(&self) -> anyhow::Result<()> {
     let status = self.local_status.read().await.clone();
     status.validate()?;
-    rollout_store::heartbeat(
+    let fence = rollout_store::heartbeat_fenced(
       &self.store,
       &HeartbeatUpdate {
         cluster_id: self.settings.cluster_id.clone(),
@@ -223,6 +252,7 @@ impl AdminClusterRolloutController {
         boot_id: self.settings.boot_id.clone(),
         build_version: self.settings.build_version.clone(),
         capability_version: CAPABILITY_VERSION.to_string(),
+        artifact_key_fingerprint: self.settings.artifact_key_fingerprint.clone(),
         membership_revision: self.settings.membership_revision.clone(),
         assigned_revision: status.assigned_revision,
         applied_revision: status.applied_revision,
@@ -231,338 +261,9 @@ impl AdminClusterRolloutController {
         lease_seconds: seconds_i32(self.settings.stale_after, "stale interval")?,
       },
     )
-    .await
-  }
-
-  /// Registers the exact fixed membership before any coordinator can acquire
-  /// the request. This operation is idempotent for the same member set.
-  pub(crate) async fn prepare(&self, request_id: &str) -> anyhow::Result<()> {
-    rollout_store::register_targets(&self.store, request_id, &self.settings.members).await?;
-    Ok(())
-  }
-
-  /// Reconciles one durable phase. Every mutating call first renews a DB-time
-  /// coordinator lease, so an instance with an expired heartbeat cannot act.
-  pub(crate) async fn reconcile(&self, request_id: &str) -> anyhow::Result<RolloutDirective> {
-    let initial = self
-      .store
-      .load_mutation(request_id)
-      .await?
-      .context("rollout mutation disappeared")?;
-    if initial.state.is_terminal() {
-      return Ok(RolloutDirective::Completed(initial.state));
-    }
-    if matches!(
-      initial.state,
-      MutationState::Claimed | MutationState::Validating
-    ) {
-      self.prepare(request_id).await?;
-    }
-    if !rollout_store::acquire_coordinator_lease(
-      &self.store,
-      request_id,
-      &self.settings.instance_id,
-      seconds_i32(self.settings.stale_after, "coordinator lease")?,
-    )
-    .await?
-    {
-      return Ok(RolloutDirective::Passive);
-    }
-
-    let record = self
-      .store
-      .load_mutation(request_id)
-      .await?
-      .context("rollout mutation disappeared")?;
-    let targets = rollout_store::load_targets(&self.store, request_id).await?;
-    let live = rollout_store::load_live_members(
-      &self.store,
-      &self.settings.cluster_id,
-      &self.settings.membership_revision,
-    )
     .await?;
-    let membership_exact = exact_live_membership(&self.settings, &live);
-    let clock = self.phase_clock(request_id, record.state).await?;
-    let directive = classify(
-      &record,
-      &targets,
-      membership_exact,
-      clock.phase_timed_out,
-      clock.rollback_timed_out,
-      clock.observation_complete,
-      &self.settings.members,
-    );
-    self.apply_safe_transition(request_id, directive).await
-  }
-
-  pub(crate) async fn record_validated(
-    &self,
-    request_id: &str,
-    instance_id: &str,
-  ) -> anyhow::Result<()> {
-    self.require_member(instance_id)?;
-    self
-      .transition_target(
-        request_id,
-        instance_id,
-        TargetState::Applying,
-        None,
-        None,
-        None,
-        None,
-      )
-      .await
-  }
-
-  pub(crate) async fn record_nack(
-    &self,
-    request_id: &str,
-    instance_id: &str,
-    error_code: &str,
-  ) -> anyhow::Result<()> {
-    self.require_member(instance_id)?;
-    self
-      .transition_target(
-        request_id,
-        instance_id,
-        TargetState::Nacked,
-        None,
-        None,
-        None,
-        Some(error_code),
-      )
-      .await
-  }
-
-  pub(crate) async fn record_ack(
-    &self,
-    request_id: &str,
-    instance_id: &str,
-    boot_id: &str,
-    applied_revision: &str,
-    applied_digest: &str,
-  ) -> anyhow::Result<()> {
-    self.require_member(instance_id)?;
-    self
-      .transition_target(
-        request_id,
-        instance_id,
-        TargetState::Acked,
-        Some(boot_id),
-        Some(applied_revision),
-        Some(applied_digest),
-        None,
-      )
-      .await
-  }
-
-  pub(crate) async fn record_rollback(
-    &self,
-    request_id: &str,
-    instance_id: &str,
-    error_code: Option<&str>,
-  ) -> anyhow::Result<()> {
-    self.require_member(instance_id)?;
-    let next = if error_code.is_some() {
-      TargetState::RollbackFailed
-    } else {
-      TargetState::RolledBack
-    };
-    self
-      .transition_target(request_id, instance_id, next, None, None, None, error_code)
-      .await
-  }
-
-  pub(crate) async fn finalize(
-    &self,
-    request_id: &str,
-    terminal: RolloutTerminal,
-    status: u16,
-    safe_response: Option<Value>,
-    error_code: Option<String>,
-    terminal_audit_record_id: i64,
-  ) -> anyhow::Result<MutationRecord> {
-    let state = match terminal {
-      RolloutTerminal::Committed => MutationState::Committed,
-      RolloutTerminal::Failed => MutationState::Failed,
-      RolloutTerminal::RolledBack => MutationState::RolledBack,
-      RolloutTerminal::RollbackFailed => MutationState::RollbackFailed,
-      RolloutTerminal::Indeterminate => MutationState::Indeterminate,
-    };
-    self
-      .store
-      .finish(
-        request_id,
-        &TerminalMutation {
-          state,
-          http_status: status,
-          safe_response,
-          error_code,
-          terminal_audit_record_id,
-        },
-      )
-      .await
-  }
-
-  fn require_member(&self, instance_id: &str) -> anyhow::Result<()> {
-    ensure!(
-      self
-        .settings
-        .members
-        .binary_search(&instance_id.to_string())
-        .is_ok(),
-      "instance is not in the configured rollout membership"
-    );
+    *self.member_fence.write().await = Some(fence);
     Ok(())
-  }
-
-  #[allow(clippy::too_many_arguments)]
-  async fn transition_target(
-    &self,
-    request_id: &str,
-    instance_id: &str,
-    next: TargetState,
-    boot_id: Option<&str>,
-    applied_revision: Option<&str>,
-    applied_digest: Option<&str>,
-    error_code: Option<&str>,
-  ) -> anyhow::Result<()> {
-    rollout_store::transition_target(
-      &self.store,
-      request_id,
-      instance_id,
-      &TargetTransition {
-        next,
-        boot_id: boot_id.map(str::to_string),
-        applied_revision: applied_revision.map(str::to_string),
-        applied_digest: applied_digest.map(str::to_string),
-        error_code: error_code.map(str::to_string),
-      },
-    )
-    .await?;
-    Ok(())
-  }
-
-  async fn apply_safe_transition(
-    &self,
-    request_id: &str,
-    directive: RolloutDirective,
-  ) -> anyhow::Result<RolloutDirective> {
-    match directive {
-      RolloutDirective::Validate(ref members) => {
-        for member in members {
-          self
-            .transition_target(
-              request_id,
-              member,
-              TargetState::Validating,
-              None,
-              None,
-              None,
-              None,
-            )
-            .await?;
-        }
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state == MutationState::Claimed {
-          self
-            .store
-            .transition(request_id, MutationState::Validating)
-            .await?;
-        }
-      }
-      RolloutDirective::ApplyCanary(_) => {
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state == MutationState::Validating {
-          self
-            .store
-            .transition(request_id, MutationState::CanaryApplying)
-            .await?;
-        }
-      }
-      RolloutDirective::ObserveCanary => {
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state == MutationState::CanaryApplying {
-          self
-            .store
-            .transition(request_id, MutationState::CanaryHealthy)
-            .await?;
-        }
-      }
-      RolloutDirective::ApplyExpansion(_) => {
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state == MutationState::CanaryHealthy {
-          self
-            .store
-            .transition(request_id, MutationState::Expanding)
-            .await?;
-        }
-      }
-      RolloutDirective::Commit => {
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state == MutationState::Expanding {
-          self
-            .store
-            .transition(request_id, MutationState::FullyApplied)
-            .await?;
-        }
-      }
-      RolloutDirective::RollBack(ref members) => {
-        let record = self
-          .store
-          .load_mutation(request_id)
-          .await?
-          .context("mutation missing")?;
-        if record.state != MutationState::RollingBack {
-          self
-            .store
-            .transition(request_id, MutationState::RollingBack)
-            .await?;
-        }
-        for member in members {
-          let target = rollout_store::load_targets(&self.store, request_id)
-            .await?
-            .into_iter()
-            .find(|target| target.instance_id == *member)
-            .context("rollback target disappeared")?;
-          if target.state != TargetState::RollingBack {
-            self
-              .transition_target(
-                request_id,
-                member,
-                TargetState::RollingBack,
-                None,
-                None,
-                None,
-                None,
-              )
-              .await?;
-          }
-        }
-      }
-      _ => {}
-    }
-    Ok(directive)
   }
 
   async fn phase_clock(
@@ -599,27 +300,45 @@ impl AdminClusterRolloutController {
     })
   }
 
+  pub(crate) async fn classify_durable(
+    &self,
+    record: &MutationRecord,
+    targets: &[RolloutTarget],
+  ) -> anyhow::Result<RolloutDirective> {
+    let clock = self.phase_clock(&record.request_id, record.state).await?;
+    Ok(classify(
+      record,
+      targets,
+      true,
+      clock.phase_timed_out,
+      clock.rollback_timed_out,
+      clock.observation_complete,
+      &self.settings.members,
+    ))
+  }
+
   async fn durable_readiness(&self) -> anyhow::Result<bool> {
+    for resource in ["config", "ipm", "break-glass"] {
+      rollout_store::prove_exact_resource_membership(
+        &self.store,
+        &self.settings.cluster_id,
+        &self.settings.membership_revision,
+        &self.settings.members,
+        &self.settings.build_version,
+        CAPABILITY_VERSION,
+        &self.settings.artifact_key_fingerprint,
+        resource,
+      )
+      .await?;
+    }
     let ready: bool = sqlx::query_scalar(
-      "SELECT EXISTS (
-         SELECT 1 FROM oxibelt_admin_instance_heartbeats heartbeat
-          WHERE heartbeat.namespace = $1 AND heartbeat.cluster_id = $2
-            AND heartbeat.membership_revision = $3 AND heartbeat.instance_id = $4
-            AND heartbeat.boot_id = $5 AND heartbeat.ready = true
-            AND heartbeat.lease_expires_at > now()
-            AND (heartbeat.assigned_revision IS NULL
-                 OR heartbeat.assigned_revision = heartbeat.applied_revision)
-       ) AND NOT EXISTS (
+      "SELECT NOT EXISTS (
          SELECT 1 FROM oxibelt_admin_mutations mutation
           WHERE mutation.namespace = $1
             AND mutation.state IN ('rollback_failed', 'indeterminate')
        )",
     )
     .bind(self.store.namespace())
-    .bind(&self.settings.cluster_id)
-    .bind(&self.settings.membership_revision)
-    .bind(&self.settings.instance_id)
-    .bind(&self.settings.boot_id)
     .fetch_one(self.store.pool())
     .await?;
     Ok(ready)
@@ -631,20 +350,6 @@ struct PhaseClock {
   phase_timed_out: bool,
   rollback_timed_out: bool,
   observation_complete: bool,
-}
-
-fn exact_live_membership(settings: &RolloutSettings, live: &[InstanceHeartbeat]) -> bool {
-  let actual = live
-    .iter()
-    .filter(|heartbeat| {
-      heartbeat.cluster_id == settings.cluster_id
-        && heartbeat.membership_revision == settings.membership_revision
-        && heartbeat.build_version == settings.build_version
-        && heartbeat.capability_version == CAPABILITY_VERSION
-    })
-    .map(|heartbeat| heartbeat.instance_id.clone())
-    .collect::<Vec<_>>();
-  actual == settings.members
 }
 
 fn normalized_members(members: &[String]) -> anyhow::Result<Vec<String>> {
@@ -660,7 +365,7 @@ fn normalized_members(members: &[String]) -> anyhow::Result<Vec<String>> {
   clippy::expect_used,
   reason = "rollout settings validation rejects empty fixed membership before selection"
 )]
-fn deterministic_canary(request_id: &str, members: &[String]) -> String {
+pub(crate) fn deterministic_canary(request_id: &str, members: &[String]) -> String {
   members
     .iter()
     .min_by_key(|member| {

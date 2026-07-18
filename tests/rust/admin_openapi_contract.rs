@@ -467,10 +467,26 @@ fn mutation_receipts_instances_and_typed_activation_routes_are_documented() {
       &instances_response["required"],
       "instances response required"
     ),
-    ["configured_members", "instances"]
-      .into_iter()
-      .map(str::to_string)
-      .collect()
+    [
+      "configured_members",
+      "membership_revision",
+      "authority",
+      "active_rollouts",
+      "logical_revisions",
+      "live_members_truncated",
+      "instances",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+  );
+  assert_eq!(
+    instances_response["properties"]["active_rollouts"]["maxItems"],
+    32
+  );
+  assert_eq!(
+    instances_response["properties"]["authority"]["additionalProperties"],
+    false
   );
   let instance = &spec["components"]["schemas"]["ConfigInstance"];
   let instance_required = json_string_set(&instance["required"], "ConfigInstance.required");

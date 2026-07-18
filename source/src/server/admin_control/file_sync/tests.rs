@@ -424,6 +424,39 @@ fn file_sync_rejects_duplicate_canonical_config_targets() {
   assert_eq!(included_config_content(&config), original);
 }
 
+#[cfg(unix)]
+#[test]
+fn cluster_file_sync_rejects_external_symlink_before_parent_creation() {
+  let (temp_dir, config) = load_temp_config("cluster-file-sync-external-symlink");
+  let oxirule_dir = config
+    .source_paths
+    .oxirule_dir
+    .as_ref()
+    .expect("OxiRule directory should be set");
+  let outside = temp_dir.path().join("outside");
+  std::fs::create_dir_all(&outside).expect("outside directory should be created");
+  std::os::unix::fs::symlink(&outside, oxirule_dir.join("alias"))
+    .expect("external OxiRule alias should be created");
+  let request = put_request(
+    AdminFileRoot::OxiRule,
+    "alias/nested/missing/main.oxirule.toml",
+    "when = \"true\"\n",
+  );
+
+  let error = capture_cluster_before_images(&request, &config)
+    .expect_err("external OxiRule alias should be rejected");
+
+  assert!(
+    error
+      .to_string()
+      .contains("file sync target must stay within the configured root")
+  );
+  assert!(
+    !outside.join("nested").exists(),
+    "rejected file sync must not create directories outside the configured root"
+  );
+}
+
 #[test]
 fn file_sync_rejects_path_escape_and_checksum_mismatch() {
   let (_temp_dir, config) = load_temp_config("admin-file-sync-rejects");

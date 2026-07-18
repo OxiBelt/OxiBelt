@@ -5,9 +5,15 @@ fn target(instance_id: &str, state: TargetState) -> RolloutTarget {
   RolloutTarget {
     instance_id: instance_id.to_string(),
     state,
+    state_version: 0,
+    assignment_epoch: 0,
     boot_id: None,
+    instance_epoch: None,
+    effect_started_at: None,
     applied_revision: None,
     applied_digest: None,
+    restored_revision: None,
+    restored_digest: None,
     error_code: None,
     updated_at: String::new(),
   }
@@ -197,6 +203,93 @@ fn rollback_failure_and_timeout_remain_blocking() {
 }
 
 #[test]
+fn canary_nack_before_effect_requires_no_member_rollback() {
+  let members = members();
+  let canary = deterministic_canary(&record(MutationState::CanaryApplying).request_id, &members);
+  let targets = members
+    .iter()
+    .map(|member| {
+      target(
+        member,
+        if member == &canary {
+          TargetState::Nacked
+        } else {
+          TargetState::Validated
+        },
+      )
+    })
+    .collect::<Vec<_>>();
+  let RolloutDirective::RollBack(rollback) = classify(
+    &record(MutationState::CanaryApplying),
+    &targets,
+    true,
+    false,
+    false,
+    false,
+    &members,
+  ) else {
+    panic!("canary NACK must enter rollback");
+  };
+  assert!(rollback.is_empty());
+}
+
+#[test]
+fn untouched_apply_assignment_is_complete_after_central_restore() {
+  assert_eq!(
+    classify(
+      &record(MutationState::RollingBack),
+      &[
+        target("edge-a", TargetState::ApplyAssigned),
+        target("edge-b", TargetState::Nacked),
+        target("edge-c", TargetState::Validated),
+      ],
+      true,
+      false,
+      false,
+      false,
+      &members(),
+    ),
+    RolloutDirective::FinishRolledBack
+  );
+}
+
+#[test]
+fn partial_expansion_rollback_accepts_untouched_validated_members() {
+  let mut untouched = target("edge-a", TargetState::Validated);
+  let restored = target("edge-b", TargetState::RolledBack);
+  let validation_nack = target("edge-c", TargetState::Nacked);
+  assert_eq!(
+    classify(
+      &record(MutationState::RollingBack),
+      &[untouched.clone(), restored, validation_nack],
+      true,
+      false,
+      false,
+      false,
+      &members(),
+    ),
+    RolloutDirective::FinishRolledBack
+  );
+  untouched.effect_started_at = Some("now".to_string());
+  assert!(matches!(
+    classify(
+      &record(MutationState::RollingBack),
+      &[
+        untouched,
+        target("edge-b", TargetState::RolledBack),
+        target("edge-c", TargetState::Nacked)
+      ],
+      true,
+      false,
+      false,
+      false,
+      &members(),
+    ),
+    RolloutDirective::RollBack(_)
+  ));
+}
+
+#[test]
 fn membership_loss_before_apply_waits_then_fails_without_rollback() {
   let members = members();
   let targets = members
@@ -244,6 +337,7 @@ async fn controller_identity_getters_expose_the_validated_local_boot() {
       instance_id: "edge-a".to_string(),
       boot_id: "boot-a".to_string(),
       build_version: "test".to_string(),
+      artifact_key_fingerprint: "sha256:test-key".to_string(),
       heartbeat_interval: Duration::from_secs(5),
       stale_after: Duration::from_secs(15),
       phase_timeout: Duration::from_secs(60),

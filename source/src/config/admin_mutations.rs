@@ -3,7 +3,7 @@
 //! This configuration is a control-plane trust root.  Runtime Admin mutations
 //! may use it, but may not replace it while finalizing their own request.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -12,13 +12,19 @@ use serde::Deserialize;
 use super::{
   ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS, AdminAuditMode, Config, IpmBreakGlassAccessMode,
   SharedStateBackendKind, resolve_existing_local_config_file_path_with_logical,
-  validate_optional_non_empty, validate_runtime_identifier,
+  validate_base64_32_byte_env, validate_optional_non_empty, validate_runtime_identifier,
 };
 
 const MAX_VALIDITY_SECONDS: u64 = 3_600;
 const MAX_CLOCK_SKEW_SECONDS: u64 = 300;
 const MAX_RETENTION_SECONDS: u64 = 31_536_000;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLUSTER_MEMBERS: usize = 1_024;
+const MAX_HEARTBEAT_INTERVAL_SECONDS: u64 = 60;
+const MAX_STALE_AFTER_SECONDS: u64 = 300;
+const MAX_CANARY_OBSERVATION_SECONDS: u64 = 600;
+const MAX_PHASE_TIMEOUT_SECONDS: u64 = 3_600;
+const MAX_ROLLBACK_TIMEOUT_SECONDS: u64 = 3_600;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -291,10 +297,102 @@ impl Config {
   }
 
   fn validate_admin_cluster_rollout(&self) -> anyhow::Result<()> {
-    bail!(
-      "admin.mutations.rollout.mode = \"admin_cluster\" is reserved and fail-closed; use \"single_instance\""
-    )
+    let mutations = &self.admin.mutations;
+    let rollout = &mutations.rollout;
+    if !mutations.mode.required() {
+      bail!("admin_cluster rollout requires admin.mutations.mode = \"required\"");
+    }
+    if !self.ipm.enabled || self.ipm_backend_name() != mutations.backend.as_deref() {
+      bail!(
+        "admin_cluster rollout requires enabled IPM storage on the same PostgreSQL backend as admin.mutations.backend"
+      );
+    }
+    validate_runtime_identifier("admin.mutations.rollout.cluster_id", &rollout.cluster_id)?;
+    if rollout.cluster_id.len() > 253 {
+      bail!("admin.mutations.rollout.cluster_id must not exceed 253 bytes");
+    }
+    if !(2..=MAX_CLUSTER_MEMBERS).contains(&rollout.members.len()) {
+      bail!(
+        "admin.mutations.rollout.members must contain between 2 and {MAX_CLUSTER_MEMBERS} members"
+      );
+    }
+    let mut members = BTreeSet::new();
+    for member in &rollout.members {
+      validate_runtime_identifier("admin.mutations.rollout.members", member)?;
+      if member.len() > 253 {
+        bail!("admin.mutations.rollout member {member} must not exceed 253 bytes");
+      }
+      if !members.insert(member.as_str()) {
+        bail!("duplicate admin.mutations.rollout member {member}");
+      }
+    }
+    validate_environment_name(
+      "admin.mutations.rollout.instance_id_env",
+      &rollout.instance_id_env,
+    )?;
+    let instance_id = std::env::var(&rollout.instance_id_env).with_context(|| {
+      format!(
+        "failed to read admin.mutations.rollout.instance_id_env {}",
+        rollout.instance_id_env
+      )
+    })?;
+    validate_runtime_identifier("Admin cluster instance ID", &instance_id)?;
+    if instance_id.len() > 253 || !members.contains(instance_id.as_str()) {
+      bail!("Admin cluster instance ID must be one of admin.mutations.rollout.members");
+    }
+    validate_environment_name(
+      "admin.mutations.artifact_key_env",
+      &mutations.artifact_key_env,
+    )?;
+    validate_base64_32_byte_env(
+      "admin.mutations.artifact_key_env",
+      &mutations.artifact_key_env,
+    )?;
+    if !(1..=MAX_HEARTBEAT_INTERVAL_SECONDS).contains(&rollout.heartbeat_interval_seconds) {
+      bail!(
+        "admin.mutations.rollout.heartbeat_interval_seconds must be between 1 and {MAX_HEARTBEAT_INTERVAL_SECONDS}"
+      );
+    }
+    if rollout.stale_after_seconds < rollout.heartbeat_interval_seconds.saturating_mul(2)
+      || rollout.stale_after_seconds > MAX_STALE_AFTER_SECONDS
+    {
+      bail!(
+        "admin.mutations.rollout.stale_after_seconds must be at least twice heartbeat_interval_seconds and at most {MAX_STALE_AFTER_SECONDS}"
+      );
+    }
+    if !(1..=MAX_CANARY_OBSERVATION_SECONDS).contains(&rollout.canary_observation_seconds) {
+      bail!(
+        "admin.mutations.rollout.canary_observation_seconds must be between 1 and {MAX_CANARY_OBSERVATION_SECONDS}"
+      );
+    }
+    if rollout.phase_timeout_seconds <= rollout.canary_observation_seconds
+      || rollout.phase_timeout_seconds > MAX_PHASE_TIMEOUT_SECONDS
+    {
+      bail!(
+        "admin.mutations.rollout.phase_timeout_seconds must exceed canary_observation_seconds and be at most {MAX_PHASE_TIMEOUT_SECONDS}"
+      );
+    }
+    if !(1..=MAX_ROLLBACK_TIMEOUT_SECONDS).contains(&rollout.rollback_timeout_seconds) {
+      bail!(
+        "admin.mutations.rollout.rollback_timeout_seconds must be between 1 and {MAX_ROLLBACK_TIMEOUT_SECONDS}"
+      );
+    }
+    Ok(())
   }
+}
+
+fn validate_environment_name(field: &str, value: &str) -> anyhow::Result<()> {
+  let mut bytes = value.bytes();
+  let starts_valid = bytes
+    .next()
+    .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+  if !starts_valid
+    || value.len() > 253
+    || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+  {
+    bail!("{field} must contain a valid environment variable name");
+  }
+  Ok(())
 }
 
 fn validate_mutation_signers(signers: &[AdminMutationSignerConfig]) -> anyhow::Result<()> {
@@ -392,4 +490,22 @@ const fn default_rollback_timeout_seconds() -> u64 {
 
 const fn default_canary_observation_seconds() -> u64 {
   30
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cluster_environment_names_are_shell_safe() {
+    for valid in ["OXIBELT_INSTANCE_ID", "_PRIVATE", "KEY2"] {
+      validate_environment_name("test", valid).expect("valid environment name");
+    }
+    for invalid in ["", "2KEY", "KEY-NAME", "KEY.NAME", " PADDED"] {
+      assert!(
+        validate_environment_name("test", invalid).is_err(),
+        "accepted {invalid:?}"
+      );
+    }
+  }
 }

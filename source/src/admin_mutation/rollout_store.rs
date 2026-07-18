@@ -1,32 +1,86 @@
 //! Fixed-member rollout targets, instance heartbeats, and coordinator leases.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 
-use anyhow::{Context, ensure};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::ensure;
 use serde::Serialize;
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::Row;
+#[cfg(test)]
+use sqlx::{Postgres, Transaction};
 
-use super::ledger::{MAX_ERROR_CODE_BYTES, validate_identifier};
+use super::artifact::is_sha256_digest;
+#[cfg(test)]
+use super::ledger::MAX_ERROR_CODE_BYTES;
+use super::ledger::validate_identifier;
 use super::store::MutationStore;
 
+#[path = "rollout_store_fencing.rs"]
+mod fencing;
+#[path = "rollout_store_heads.rs"]
+mod heads;
+#[path = "rollout_store_payload.rs"]
+mod payload;
+#[path = "rollout_store_recovery.rs"]
+mod recovery;
+#[path = "rollout_store_shared.rs"]
+mod shared;
+#[path = "rollout_store_target.rs"]
+mod target;
+#[cfg(test)]
+pub(crate) use fencing::ExactMembership;
+pub(crate) use fencing::{
+  CoordinatorFence, FencedTargetTransition, MemberFence, RolloutTransitionPlan, TargetPlan,
+  acquire_coordinator_fence, apply_transition_plan, heartbeat_fenced, prove_exact_live_membership,
+};
+pub(crate) use heads::{
+  ResourceHeadUpdate, load_resource_heads, prove_exact_resource_membership, publish_resource_head,
+};
+pub(crate) use payload::{
+  SealedCheckpoint, cluster_admit_tx, fetch_checkpoint, fetch_committed_artifact,
+  is_admission_origin, publish_checkpoint, publish_checkpoint_in_coordinator_transaction,
+};
+pub(crate) use recovery::{
+  MemberWork, RecoveryMutation, guarded_cluster_finish_tx, load_member_work,
+  load_recoverable_mutations, release_member_fence,
+};
+pub(crate) use shared::{
+  FencedCoordinatorTransaction, SharedPublicationClaim, SharedPublicationOutcome,
+  SharedPublicationState, begin_coordinator_transaction, claim_shared_publication,
+  consume_shared_winner_response, finish_shared_publication, load_applied_shared_publication_tx,
+  load_shared_publication,
+};
+pub(crate) use target::transition_target_fenced;
+
+#[cfg(test)]
 const ACQUIRE_COORDINATOR_LEASE_SQL: &str = "UPDATE oxibelt_admin_mutations AS mutation
       SET coordinator_instance_id = $3,
+          coordinator_boot_id = heartbeat.boot_id,
+          coordinator_instance_epoch = heartbeat.instance_epoch,
+          coordinator_epoch = CASE
+            WHEN mutation.coordinator_instance_id = $3
+             AND mutation.coordinator_boot_id = heartbeat.boot_id
+             AND mutation.coordinator_instance_epoch = heartbeat.instance_epoch
+             AND mutation.coordinator_lease_expires_at > now()
+            THEN mutation.coordinator_epoch ELSE mutation.coordinator_epoch + 1 END,
           coordinator_lease_expires_at = now() + make_interval(secs => $4::double precision)
+     FROM oxibelt_admin_instance_heartbeats heartbeat
     WHERE mutation.namespace = $1 AND mutation.request_id = $2
       AND mutation.state NOT IN
         ('committed', 'failed', 'rolled_back', 'rollback_failed', 'indeterminate')
-      AND (mutation.coordinator_instance_id = $3
+      AND ((mutation.coordinator_instance_id = $3
+            AND mutation.coordinator_boot_id = heartbeat.boot_id
+            AND mutation.coordinator_instance_epoch = heartbeat.instance_epoch)
            OR mutation.coordinator_lease_expires_at IS NULL
            OR mutation.coordinator_lease_expires_at <= now())
-      AND EXISTS (
-        SELECT 1 FROM oxibelt_admin_instance_heartbeats heartbeat
-         WHERE heartbeat.namespace = mutation.namespace
-           AND heartbeat.cluster_id = mutation.cluster_id
-           AND heartbeat.membership_revision = mutation.membership_revision
-           AND heartbeat.instance_id = $3
-           AND heartbeat.ready = true
-           AND heartbeat.lease_expires_at > now()
-      )
+      AND heartbeat.namespace = mutation.namespace
+      AND heartbeat.cluster_id = mutation.cluster_id
+      AND heartbeat.membership_revision = mutation.membership_revision
+      AND heartbeat.instance_id = $3
+      AND heartbeat.ready = true
+      AND heartbeat.lease_expires_at > now()
       AND EXISTS (
         SELECT 1 FROM oxibelt_admin_mutation_targets target
          WHERE target.namespace = mutation.namespace
@@ -39,9 +93,12 @@ const ACQUIRE_COORDINATOR_LEASE_SQL: &str = "UPDATE oxibelt_admin_mutations AS m
 pub(crate) enum TargetState {
   Pending,
   Validating,
+  Validated,
+  ApplyAssigned,
   Applying,
   Acked,
   Nacked,
+  RollbackAssigned,
   RollingBack,
   RolledBack,
   RollbackFailed,
@@ -52,9 +109,12 @@ impl TargetState {
     match self {
       Self::Pending => "pending",
       Self::Validating => "validating",
+      Self::Validated => "validated",
+      Self::ApplyAssigned => "apply_assigned",
       Self::Applying => "applying",
       Self::Acked => "acked",
       Self::Nacked => "nacked",
+      Self::RollbackAssigned => "rollback_assigned",
       Self::RollingBack => "rolling_back",
       Self::RolledBack => "rolled_back",
       Self::RollbackFailed => "rollback_failed",
@@ -65,9 +125,12 @@ impl TargetState {
     Ok(match value {
       "pending" => Self::Pending,
       "validating" => Self::Validating,
+      "validated" => Self::Validated,
+      "apply_assigned" => Self::ApplyAssigned,
       "applying" => Self::Applying,
       "acked" => Self::Acked,
       "nacked" => Self::Nacked,
+      "rollback_assigned" => Self::RollbackAssigned,
       "rolling_back" => Self::RollingBack,
       "rolled_back" => Self::RolledBack,
       "rollback_failed" => Self::RollbackFailed,
@@ -78,10 +141,16 @@ impl TargetState {
   pub(crate) const fn may_transition_to(self, next: Self) -> bool {
     match self {
       Self::Pending => matches!(next, Self::Validating | Self::Nacked),
-      Self::Validating => matches!(next, Self::Applying | Self::Nacked),
-      Self::Applying => matches!(next, Self::Acked | Self::Nacked | Self::RollingBack),
-      Self::Acked => matches!(next, Self::RollingBack),
-      Self::Nacked => matches!(next, Self::RollingBack),
+      Self::Validating => matches!(next, Self::Validated | Self::Applying | Self::Nacked),
+      Self::Validated => matches!(next, Self::ApplyAssigned | Self::Nacked),
+      Self::ApplyAssigned => matches!(next, Self::Applying | Self::Nacked),
+      Self::Applying => matches!(
+        next,
+        Self::Acked | Self::Nacked | Self::RollbackAssigned | Self::RollingBack
+      ),
+      Self::Acked => matches!(next, Self::RollbackAssigned | Self::RollingBack),
+      Self::Nacked => matches!(next, Self::RollbackAssigned | Self::RollingBack),
+      Self::RollbackAssigned => matches!(next, Self::RollingBack | Self::RollbackFailed),
       Self::RollingBack => matches!(next, Self::RolledBack | Self::RollbackFailed),
       Self::RolledBack | Self::RollbackFailed => false,
     }
@@ -92,13 +161,20 @@ impl TargetState {
 pub(crate) struct RolloutTarget {
   pub(crate) instance_id: String,
   pub(crate) state: TargetState,
+  pub(crate) state_version: i64,
+  pub(crate) assignment_epoch: i64,
   pub(crate) boot_id: Option<String>,
+  pub(crate) instance_epoch: Option<i64>,
+  pub(crate) effect_started_at: Option<String>,
   pub(crate) applied_revision: Option<String>,
   pub(crate) applied_digest: Option<String>,
+  pub(crate) restored_revision: Option<String>,
+  pub(crate) restored_digest: Option<String>,
   pub(crate) error_code: Option<String>,
   pub(crate) updated_at: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct TargetTransition {
   pub(crate) next: TargetState,
@@ -115,6 +191,7 @@ pub(crate) struct HeartbeatUpdate {
   pub(crate) boot_id: String,
   pub(crate) build_version: String,
   pub(crate) capability_version: String,
+  pub(crate) artifact_key_fingerprint: String,
   pub(crate) membership_revision: String,
   pub(crate) assigned_revision: Option<String>,
   pub(crate) applied_revision: String,
@@ -131,6 +208,10 @@ impl HeartbeatUpdate {
       ("boot_id", self.boot_id.as_str()),
       ("build_version", self.build_version.as_str()),
       ("capability_version", self.capability_version.as_str()),
+      (
+        "artifact_key_fingerprint",
+        self.artifact_key_fingerprint.as_str(),
+      ),
       ("membership_revision", self.membership_revision.as_str()),
       ("applied_revision", self.applied_revision.as_str()),
       ("applied_digest", self.applied_digest.as_str()),
@@ -143,6 +224,15 @@ impl HeartbeatUpdate {
     ensure!(
       (1..=300).contains(&self.lease_seconds),
       "heartbeat lease must be between 1 and 300 seconds"
+    );
+    ensure!(
+      is_sha256_digest(&self.applied_digest),
+      "heartbeat applied digest must be canonical SHA-256"
+    );
+    ensure!(
+      is_sha256_digest(&self.membership_revision)
+        && is_sha256_digest(&self.artifact_key_fingerprint),
+      "heartbeat membership and artifact-key fingerprints must be canonical SHA-256"
     );
     if self.ready {
       ensure!(
@@ -162,8 +252,10 @@ pub(crate) struct InstanceHeartbeat {
   pub(crate) cluster_id: String,
   pub(crate) instance_id: String,
   pub(crate) boot_id: String,
+  pub(crate) instance_epoch: i64,
   pub(crate) build_version: String,
   pub(crate) capability_version: String,
+  pub(crate) artifact_key_fingerprint: String,
   pub(crate) membership_revision: String,
   pub(crate) assigned_revision: Option<String>,
   pub(crate) applied_revision: String,
@@ -173,6 +265,7 @@ pub(crate) struct InstanceHeartbeat {
   pub(crate) updated_at: String,
 }
 
+#[cfg(test)]
 pub(crate) async fn register_targets(
   store: &MutationStore,
   request_id: &str,
@@ -226,6 +319,7 @@ pub(crate) async fn register_targets(
   load_targets(store, request_id).await
 }
 
+#[cfg(test)]
 pub(crate) async fn transition_target(
   store: &MutationStore,
   request_id: &str,
@@ -345,8 +439,9 @@ pub(crate) async fn load_targets(
   request_id: &str,
 ) -> anyhow::Result<Vec<RolloutTarget>> {
   let rows = sqlx::query(
-    "SELECT instance_id, state, boot_id, applied_revision, applied_digest,
-            error_code, updated_at::text AS updated_at
+    "SELECT instance_id, state, state_version, assignment_epoch, boot_id, instance_epoch,
+            effect_started_at::text AS effect_started_at, applied_revision, applied_digest,
+            restored_revision, restored_digest, error_code, updated_at::text AS updated_at
        FROM oxibelt_admin_mutation_targets
       WHERE namespace = $1 AND request_id = $2 ORDER BY instance_id ASC",
   )
@@ -357,70 +452,48 @@ pub(crate) async fn load_targets(
   rows.iter().map(target_from_row).collect()
 }
 
+#[cfg(test)]
 pub(crate) async fn heartbeat(
   store: &MutationStore,
   update: &HeartbeatUpdate,
 ) -> anyhow::Result<()> {
-  update.validate()?;
-  sqlx::query(
-    "INSERT INTO oxibelt_admin_instance_heartbeats
-       (namespace, cluster_id, instance_id, boot_id, build_version,
-        capability_version, membership_revision, assigned_revision,
-        applied_revision, applied_digest, ready, lease_expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-             now() + make_interval(secs => $12::double precision))
-     ON CONFLICT (namespace, cluster_id, instance_id)
-     DO UPDATE SET boot_id = EXCLUDED.boot_id,
-                   build_version = EXCLUDED.build_version,
-                   capability_version = EXCLUDED.capability_version,
-                   membership_revision = EXCLUDED.membership_revision,
-                   assigned_revision = EXCLUDED.assigned_revision,
-                   applied_revision = EXCLUDED.applied_revision,
-                   applied_digest = EXCLUDED.applied_digest,
-                   ready = EXCLUDED.ready,
-                   lease_expires_at = EXCLUDED.lease_expires_at,
-                   updated_at = now()",
-  )
-  .bind(store.namespace())
-  .bind(&update.cluster_id)
-  .bind(&update.instance_id)
-  .bind(&update.boot_id)
-  .bind(&update.build_version)
-  .bind(&update.capability_version)
-  .bind(&update.membership_revision)
-  .bind(&update.assigned_revision)
-  .bind(&update.applied_revision)
-  .bind(&update.applied_digest)
-  .bind(update.ready)
-  .bind(f64::from(update.lease_seconds))
-  .execute(store.pool())
-  .await?;
+  let _ = heartbeat_fenced(store, update).await?;
   Ok(())
 }
 
-pub(crate) async fn load_live_members(
+pub(crate) async fn load_live_members_bounded(
   store: &MutationStore,
   cluster_id: &str,
-  membership_revision: &str,
-) -> anyhow::Result<Vec<InstanceHeartbeat>> {
+  limit: i64,
+) -> anyhow::Result<(Vec<InstanceHeartbeat>, bool)> {
+  ensure!(
+    (1..=2048).contains(&limit),
+    "live-member diagnostic limit is invalid"
+  );
   let rows = sqlx::query(
-    "SELECT cluster_id, instance_id, boot_id, build_version, capability_version,
-            membership_revision, assigned_revision, applied_revision, applied_digest,
-            ready, lease_expires_at::text AS lease_expires_at,
+    "SELECT cluster_id, instance_id, boot_id, instance_epoch, build_version, capability_version,
+            artifact_key_fingerprint, membership_revision, assigned_revision, applied_revision,
+            applied_digest, ready, lease_expires_at::text AS lease_expires_at,
             updated_at::text AS updated_at
        FROM oxibelt_admin_instance_heartbeats
-      WHERE namespace = $1 AND cluster_id = $2 AND membership_revision = $3
-        AND lease_expires_at > now()
-      ORDER BY instance_id ASC",
+      WHERE namespace = $1 AND cluster_id = $2 AND lease_expires_at > now()
+      ORDER BY instance_id ASC LIMIT $3",
   )
   .bind(store.namespace())
   .bind(cluster_id)
-  .bind(membership_revision)
+  .bind(limit + 1)
   .fetch_all(store.pool())
   .await?;
-  rows.iter().map(heartbeat_from_row).collect()
+  let truncated = i64::try_from(rows.len())? > limit;
+  rows
+    .iter()
+    .take(usize::try_from(limit)?)
+    .map(heartbeat_from_row)
+    .collect::<anyhow::Result<Vec<_>>>()
+    .map(|members| (members, truncated))
 }
 
+#[cfg(test)]
 pub(crate) async fn acquire_coordinator_lease(
   store: &MutationStore,
   request_id: &str,
@@ -442,6 +515,7 @@ pub(crate) async fn acquire_coordinator_lease(
   Ok(result.rows_affected() == 1)
 }
 
+#[cfg(test)]
 fn normalized_instances(instance_ids: &[String]) -> anyhow::Result<Vec<String>> {
   ensure!(
     !instance_ids.is_empty(),
@@ -459,6 +533,7 @@ fn normalized_instances(instance_ids: &[String]) -> anyhow::Result<Vec<String>> 
   Ok(unique.into_iter().collect())
 }
 
+#[cfg(test)]
 async fn load_target_ids_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
@@ -475,6 +550,7 @@ async fn load_target_ids_tx(
   .map_err(Into::into)
 }
 
+#[cfg(test)]
 async fn select_target_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
@@ -482,8 +558,9 @@ async fn select_target_tx(
   instance_id: &str,
 ) -> anyhow::Result<sqlx::postgres::PgRow> {
   sqlx::query(
-    "SELECT instance_id, state, boot_id, applied_revision, applied_digest,
-            error_code, updated_at::text AS updated_at
+    "SELECT instance_id, state, state_version, assignment_epoch, boot_id, instance_epoch,
+            effect_started_at::text AS effect_started_at, applied_revision, applied_digest,
+            restored_revision, restored_digest, error_code, updated_at::text AS updated_at
        FROM oxibelt_admin_mutation_targets
       WHERE namespace = $1 AND request_id = $2 AND instance_id = $3",
   )
@@ -499,9 +576,15 @@ fn target_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<RolloutTarget>
   Ok(RolloutTarget {
     instance_id: row.try_get("instance_id")?,
     state: TargetState::parse(&row.try_get::<String, _>("state")?)?,
+    state_version: row.try_get("state_version")?,
+    assignment_epoch: row.try_get("assignment_epoch")?,
     boot_id: row.try_get("boot_id")?,
+    instance_epoch: row.try_get("instance_epoch")?,
+    effect_started_at: row.try_get("effect_started_at")?,
     applied_revision: row.try_get("applied_revision")?,
     applied_digest: row.try_get("applied_digest")?,
+    restored_revision: row.try_get("restored_revision")?,
+    restored_digest: row.try_get("restored_digest")?,
     error_code: row.try_get("error_code")?,
     updated_at: row.try_get("updated_at")?,
   })
@@ -512,8 +595,10 @@ fn heartbeat_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<InstanceHea
     cluster_id: row.try_get("cluster_id")?,
     instance_id: row.try_get("instance_id")?,
     boot_id: row.try_get("boot_id")?,
+    instance_epoch: row.try_get("instance_epoch")?,
     build_version: row.try_get("build_version")?,
     capability_version: row.try_get("capability_version")?,
+    artifact_key_fingerprint: row.try_get("artifact_key_fingerprint")?,
     membership_revision: row.try_get("membership_revision")?,
     assigned_revision: row.try_get("assigned_revision")?,
     applied_revision: row.try_get("applied_revision")?,

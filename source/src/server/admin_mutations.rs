@@ -2,15 +2,16 @@
 
 use ::http::{HeaderMap, Method, Response, StatusCode, header};
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
 use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::admin_audit::AdminAuditHandle;
 use crate::admin_mutation::{
-  AdminMutationRuntime, MutationAdmission, MutationAdmissionError, MutationConflict,
-  MutationRecord, MutationResponseMetadata, attach_mutation_response_headers,
+  AdminMutationRuntime, ClusterCommandAuthorization, MutationAdmission, MutationAdmissionError,
+  MutationConflict, MutationRecord, MutationResponseMetadata, MutationState,
+  attach_mutation_response_headers,
 };
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -19,8 +20,13 @@ use crate::state::AppHandle;
 use super::admin::json_response;
 use super::admin_auth::AdminAuthorization;
 use super::admin_body::collect_admin_request_bytes;
+use super::admin_cluster_executor::authorization_checks;
 use super::admin_control::{self, AdminControlHandle};
 use super::{admin_ipm, admin_mutation_resources, admin_ops};
+
+#[path = "admin_mutations/wait.rs"]
+mod wait;
+use wait::{attach_in_progress_headers, wait_for_terminal};
 
 pub(super) fn break_glass_activation_bootstrap_route(method: &Method, path: &str) -> bool {
   matches!(
@@ -53,6 +59,7 @@ pub(super) async fn response(
   admin_control: AdminControlHandle,
   authorization: &AdminAuthorization<'_>,
   authenticated_with_break_glass: bool,
+  credential_kind: &str,
   method: &Method,
   path: &str,
 ) -> Response<ProxyBody> {
@@ -78,12 +85,6 @@ pub(super) async fn response(
     .await
     .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
-  if runtime.cluster_mode() {
-    return text_response(
-      StatusCode::SERVICE_UNAVAILABLE,
-      "fixed-member Admin mutation rollout is not ready",
-    );
-  }
   let if_match = match normalized_if_match(request.headers()) {
     Ok(value) => value,
     Err(response) => return response,
@@ -103,22 +104,101 @@ pub(super) async fn response(
     };
   let (action, resource) = mutation_scope(method, path);
   let active_revision = current_revision(&state, &admin_control, path).await;
-  let admission = runtime
-    .admit(
-      &parts.headers,
-      method,
-      &parts.uri,
-      &authorization.actor.principal,
-      &bytes,
-      action,
-      resource,
-      &active_revision,
-      &if_match,
-      &audit,
-      &snapshot.admin_audit,
-    )
-    .await;
+  let admission = if runtime.cluster_mode() {
+    let checks = match authorization_checks(method, path, &bytes, &authorization.actor.principal) {
+      Ok(checks) => checks,
+      Err(error)
+        if error
+          .to_string()
+          .contains("secret_reference_activation_unavailable") =>
+      {
+        return text_response(
+          StatusCode::CONFLICT,
+          "secret reference activation is unavailable",
+        );
+      }
+      Err(error) => {
+        warn!(error = %error, "cluster mutation route validation failed");
+        return text_response(StatusCode::BAD_REQUEST, "invalid cluster mutation request");
+      }
+    };
+    if checks
+      .iter()
+      .any(|check| !authorization.is_allowed(&check.action, &check.resource))
+    {
+      return text_response(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let permissions = admin_control::control_plane_config_permissions(authorization);
+    let evidence = match ClusterCommandAuthorization::from_checks(
+      permissions.admin_update_config,
+      permissions.ipm_update_config,
+      &checks,
+    ) {
+      Ok(value) => value,
+      Err(error) => {
+        warn!(error = %error, "cluster mutation authorization evidence was invalid");
+        return text_response(
+          StatusCode::BAD_REQUEST,
+          "invalid cluster mutation authorization",
+        );
+      }
+    };
+    runtime
+      .admit_cluster(
+        &parts.headers,
+        method,
+        &parts.uri,
+        &authorization.actor.principal,
+        authorization.actor,
+        credential_kind,
+        authenticated_with_break_glass,
+        &bytes,
+        action,
+        resource,
+        &active_revision,
+        &if_match,
+        evidence,
+        &audit,
+        &snapshot.admin_audit,
+      )
+      .await
+  } else {
+    runtime
+      .admit(
+        &parts.headers,
+        method,
+        &parts.uri,
+        &authorization.actor.principal,
+        &bytes,
+        action,
+        resource,
+        &active_revision,
+        &if_match,
+        &audit,
+        &snapshot.admin_audit,
+      )
+      .await
+  };
   let execution = match admission {
+    Ok(MutationAdmission::Claimed(mut execution)) if runtime.cluster_mode() => {
+      let wait_timeout = runtime.terminal_wait_timeout(execution.expects_winner_response());
+      return match wait_for_terminal(&runtime, &execution.request_id, wait_timeout).await {
+        Ok(Some(record)) => {
+          let response = execution.take_winner_response();
+          if winner_response_allowed(record.state)
+            && let Some(response) = response
+          {
+            one_time_terminal_response(record, response)
+          } else {
+            terminal_response(record, false)
+          }
+        }
+        Ok(None) => {
+          in_progress_response_for_execution(&execution.request_id, &execution.new_revision)
+        }
+        Err(error) => admission_error_response(&error),
+      };
+    }
     Ok(MutationAdmission::Claimed(execution)) => execution,
     Ok(MutationAdmission::Replay(record)) => return replay_response(record),
     Ok(MutationAdmission::InProgress(record)) => return in_progress_response(&record),
@@ -360,6 +440,10 @@ fn mutation_scope(method: &Method, path: &str) -> (&'static str, &'static str) {
 }
 
 fn replay_response(record: MutationRecord) -> Response<ProxyBody> {
+  terminal_response(record, true)
+}
+
+fn terminal_response(record: MutationRecord, replayed: bool) -> Response<ProxyBody> {
   let status = record
     .http_status
     .and_then(|value| u16::try_from(value).ok())
@@ -380,14 +464,70 @@ fn replay_response(record: MutationRecord) -> Response<ProxyBody> {
     MutationResponseMetadata {
       request_id: &record.request_id,
       revision: &record.new_revision,
-      replayed: true,
+      replayed,
     },
   );
   response
 }
 
+fn one_time_terminal_response(
+  record: MutationRecord,
+  response: zeroize::Zeroizing<Vec<u8>>,
+) -> Response<ProxyBody> {
+  let status = record
+    .http_status
+    .and_then(|value| u16::try_from(value).ok())
+    .and_then(|value| StatusCode::from_u16(value).ok())
+    .unwrap_or(StatusCode::OK);
+  let body = Full::new(Bytes::copy_from_slice(&response))
+    .map_err(|never| -> crate::proxy::http::body::BoxError { match never {} })
+    .boxed();
+  let mut result = Response::new(body);
+  *result.status_mut() = status;
+  result.headers_mut().insert(
+    header::CONTENT_TYPE,
+    header::HeaderValue::from_static("application/json"),
+  );
+  attach_mutation_response_headers(
+    &mut result,
+    MutationResponseMetadata {
+      request_id: &record.request_id,
+      revision: &record.new_revision,
+      replayed: false,
+    },
+  );
+  result
+}
+
+fn winner_response_allowed(state: MutationState) -> bool {
+  state == MutationState::Committed
+}
+
+fn in_progress_response_for_execution(request_id: &str, revision: &str) -> Response<ProxyBody> {
+  let mut response = json_response(
+    StatusCode::CONFLICT,
+    &json!({
+      "error": "mutation outcome is not terminal",
+      "code": "mutation_in_progress",
+      "request_id": request_id,
+      "revision": revision,
+      "state": "claimed",
+    }),
+  );
+  attach_mutation_response_headers(
+    &mut response,
+    MutationResponseMetadata {
+      request_id,
+      revision,
+      replayed: false,
+    },
+  );
+  attach_in_progress_headers(&mut response, request_id);
+  response
+}
+
 fn in_progress_response(record: &MutationRecord) -> Response<ProxyBody> {
-  json_response(
+  let mut response = json_response(
     StatusCode::CONFLICT,
     &json!({
       "error": "mutation outcome is not terminal",
@@ -395,7 +535,9 @@ fn in_progress_response(record: &MutationRecord) -> Response<ProxyBody> {
       "request_id": record.request_id,
       "state": record.state,
     }),
-  )
+  );
+  attach_in_progress_headers(&mut response, &record.request_id);
+  response
 }
 
 fn precondition_failed_response(active_revision: &str) -> Response<ProxyBody> {
@@ -469,6 +611,20 @@ async fn receipt_response(
   {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
+  let members = if record.cluster_id.is_some() {
+    match runtime.cluster_targets(&record.request_id).await {
+      Ok(targets) => serde_json::to_value(targets).unwrap_or_else(|_| json!([])),
+      Err(error) => {
+        warn!(error = %error, "failed to load Admin mutation member summary");
+        return text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "mutation store unavailable",
+        );
+      }
+    }
+  } else {
+    json!([])
+  };
   json_response(
     StatusCode::OK,
     &json!({
@@ -485,6 +641,8 @@ async fn receipt_response(
         "membership_revision": record.membership_revision,
       },
       "state": record.state,
+      "phase": record.state,
+      "members": members,
       "http_status": record.http_status,
       "result": record.safe_response,
       "error_code": record.error_code,
@@ -503,14 +661,11 @@ async fn instances_response(
   if !authorization.is_allowed("config:GetInstances", "instances/current") {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
-  match runtime.live_instances().await {
-    Ok(instances) => json_response(
-      StatusCode::OK,
-      &json!({
-        "configured_members": runtime.configured_members(),
-        "instances": instances,
-      }),
-    ),
+  match runtime.cluster_diagnostics().await {
+    Ok(mut diagnostics) => {
+      diagnostics["configured_members"] = json!(runtime.configured_members());
+      json_response(StatusCode::OK, &diagnostics)
+    }
     Err(error) => {
       warn!(error = %error, "failed to load Admin mutation instance state");
       text_response(
@@ -522,106 +677,5 @@ async fn instances_response(
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use http_body_util::BodyExt;
-
-  #[test]
-  fn inactive_break_glass_credentials_are_limited_to_activation_bootstrap_routes() {
-    assert!(break_glass_activation_bootstrap_route(
-      &Method::GET,
-      "/admin/v1/break-glass/activations/self",
-    ));
-    assert!(break_glass_activation_bootstrap_route(
-      &Method::POST,
-      "/admin/v1/break-glass/activations",
-    ));
-    assert!(!break_glass_activation_bootstrap_route(
-      &Method::POST,
-      "/admin/v1/config/load",
-    ));
-  }
-
-  #[test]
-  fn protected_route_set_covers_every_p1_13_operation_family() {
-    for path in [
-      "/admin/v1/config/load",
-      "/admin/v1/config/rollback",
-      "/admin/v1/files/sync",
-      "/admin/v1/tls/downstream/reload",
-      "/admin/v1/keys/rotate",
-      "/admin/v1/config/secret-references/update",
-      "/admin/v1/break-glass/activations",
-      "/admin/v1/ipm/policies",
-    ] {
-      assert!(is_protected_write(&Method::POST, path), "missing {path}");
-    }
-    assert!(!is_protected_write(&Method::POST, "/admin/v1/ipm/simulate"));
-    assert!(!is_protected_write(&Method::GET, "/admin/v1/config"));
-  }
-
-  #[test]
-  fn if_match_requires_one_strong_quoted_revision() {
-    let mut headers = HeaderMap::new();
-    assert_eq!(
-      normalized_if_match(&headers)
-        .expect_err("missing If-Match")
-        .status(),
-      StatusCode::PRECONDITION_REQUIRED
-    );
-
-    headers.insert(header::IF_MATCH, "\"r-2041\"".parse().expect("header"));
-    assert_eq!(
-      normalized_if_match(&headers).expect("strong ETag"),
-      "r-2041"
-    );
-
-    headers.insert(header::IF_MATCH, "W/\"r-2041\"".parse().expect("header"));
-    assert_eq!(
-      normalized_if_match(&headers)
-        .expect_err("weak ETag")
-        .status(),
-      StatusCode::BAD_REQUEST
-    );
-
-    headers.insert(header::IF_MATCH, "\"r-2041\"".parse().expect("header"));
-    headers.append(header::IF_MATCH, "\"r-2042\"".parse().expect("header"));
-    assert_eq!(
-      normalized_if_match(&headers)
-        .expect_err("duplicate If-Match")
-        .status(),
-      StatusCode::BAD_REQUEST
-    );
-  }
-
-  #[tokio::test]
-  async fn operational_precondition_failure_preserves_legacy_response() {
-    let response = precondition_failed_response("r-2042");
-    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
-    assert!(
-      !response
-        .headers()
-        .contains_key(crate::admin_mutation::IDEMPOTENT_REPLAY_HEADER)
-    );
-    assert!(
-      !response
-        .headers()
-        .contains_key(crate::admin_mutation::MUTATION_REQUEST_ID_HEADER)
-    );
-    let body = response
-      .into_body()
-      .collect()
-      .await
-      .expect("collect precondition response")
-      .to_bytes();
-    let payload: serde_json::Value =
-      serde_json::from_slice(&body).expect("precondition response JSON");
-    assert_eq!(
-      payload,
-      json!({
-        "error": "If-Match does not match the active revision",
-        "details": { "expected": "r-2042" },
-      })
-    );
-  }
-}
+#[path = "admin_mutations/tests.rs"]
+mod tests;

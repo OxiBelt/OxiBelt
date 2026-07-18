@@ -1,38 +1,39 @@
 //! Runtime trust configuration and durable admission for protected Admin writes.
 
-use std::fmt::Write as _;
+use std::collections::HashMap;
 use std::fs;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 use crate::config::{
   AdminMutationMode, AdminMutationRolloutMode, AdminMutationSignatureSuite, Config,
 };
 
-use super::artifact::{
-  ArtifactBinding, MutationArtifactCipher, MutationArtifactPlaintext, MutationArtifactReceipt,
-};
+use super::artifact::{ArtifactBinding, MutationArtifactCipher, MutationArtifactPlaintext};
 use super::artifact_store;
+use super::cluster_command::ClusterMutationCommand;
 use super::envelope::{MutationTarget, TranscriptContext};
 use super::ledger::{ClaimOutcome, MutationClaim, MutationRecord};
 use super::rollout::{AdminClusterRolloutController, LocalRolloutStatus, RolloutSettings};
-use super::rollout_store::{self, InstanceHeartbeat};
 use super::store::{
-  BreakGlassActivation, MutationStore, create_break_glass_activation_tx, init_postgres,
-  load_active_break_glass_for_principal, revoke_break_glass_activation_tx,
+  BreakGlassActivation, MAX_STORED_ARTIFACT_BYTES, MutationStore, create_break_glass_activation_tx,
+  init_postgres, load_active_break_glass_for_principal, revoke_break_glass_activation_tx,
 };
 use super::{
   MUTATION_HEADER, MutationProtocolError, MutationProtocolErrorKind, SignerBinding, SignerRegistry,
 };
+pub(crate) use cluster_heartbeat::ClusterHeartbeatTask;
+use target::{configured_target, digest_parts, ensure_cluster_member};
 
 const EMPTY_DIGEST: &str =
   "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const ORDINARY_TERMINAL_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct AdminMutationRuntime {
@@ -51,10 +52,11 @@ struct RuntimeInner {
   rollout_mode: AdminMutationRolloutMode,
   cluster_id: String,
   members: Vec<String>,
-  #[allow(dead_code)]
   artifact_cipher: Option<MutationArtifactCipher>,
-  #[allow(dead_code)]
   cluster_controller: OnceLock<AdminClusterRolloutController>,
+  cluster_worker_state: AtomicU8,
+  winner_responses: Mutex<HashMap<String, Option<zeroize::Zeroizing<Vec<u8>>>>>,
+  winner_response_wait: Duration,
 }
 
 #[derive(Debug)]
@@ -71,6 +73,17 @@ pub(crate) enum MutationAdmission {
 pub(crate) struct MutationExecution {
   pub(crate) request_id: String,
   pub(crate) new_revision: String,
+  winner_response: Option<cluster_checkpoint::SharedWinnerResponseGuard>,
+}
+
+impl MutationExecution {
+  pub(crate) fn expects_winner_response(&self) -> bool {
+    self.winner_response.is_some()
+  }
+
+  pub(crate) fn take_winner_response(&mut self) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    self.winner_response.as_mut()?.take()
+  }
 }
 
 #[derive(Debug)]
@@ -101,16 +114,27 @@ impl AdminMutationRuntime {
     init_postgres(&pool)
       .await
       .context("failed to initialize Admin mutation PostgreSQL tables")?;
-    let store = MutationStore::new(pool, config.shared_state.namespace.clone())?;
+    let store = if mutation_config.rollout.mode.is_cluster() {
+      MutationStore::new_cluster(pool, config.shared_state.namespace.clone())?
+    } else {
+      MutationStore::new(pool, config.shared_state.namespace.clone())?
+    };
     let target = configured_target(config);
+    let mut members = mutation_config.rollout.members.clone();
+    members.sort();
     let artifact_cipher = if mutation_config.rollout.mode.is_cluster() {
       Some(MutationArtifactCipher::from_environment(
         &mutation_config.artifact_key_env,
-        mutation_config.max_response_bytes,
+        MAX_STORED_ARTIFACT_BYTES,
       )?)
     } else {
       None
     };
+    let winner_response_wait = cluster_checkpoint::winner_response_wait(
+      mutation_config.rollout.phase_timeout_seconds,
+      mutation_config.rollout.rollback_timeout_seconds,
+      mutation_config.rollout.stale_after_seconds,
+    )?;
 
     Ok(Self {
       inner: Arc::new(RuntimeInner {
@@ -125,9 +149,12 @@ impl AdminMutationRuntime {
         target,
         rollout_mode: mutation_config.rollout.mode,
         cluster_id: mutation_config.rollout.cluster_id.clone(),
-        members: mutation_config.rollout.members.clone(),
+        members,
         artifact_cipher,
         cluster_controller: OnceLock::new(),
+        cluster_worker_state: AtomicU8::new(0),
+        winner_responses: Mutex::new(HashMap::new()),
+        winner_response_wait,
       }),
     })
   }
@@ -151,6 +178,9 @@ impl AdminMutationRuntime {
         members: Vec::new(),
         artifact_cipher: None,
         cluster_controller: OnceLock::new(),
+        cluster_worker_state: AtomicU8::new(0),
+        winner_responses: Mutex::new(HashMap::new()),
+        winner_response_wait: ORDINARY_TERMINAL_WAIT,
       }),
     }
   }
@@ -273,6 +303,7 @@ impl AdminMutationRuntime {
       return Ok(claim_outcome_admission(
         record.classify_existing_claim(&claim),
         audit,
+        None,
       ));
     }
     if precondition_revision != current_revision {
@@ -301,7 +332,7 @@ impl AdminMutationRuntime {
       .claim(&claim)
       .await
       .context("failed to claim Admin mutation")?;
-    Ok(claim_outcome_admission(outcome, audit))
+    Ok(claim_outcome_admission(outcome, audit, None))
   }
 
   pub(crate) async fn load_mutation(
@@ -312,18 +343,6 @@ impl AdminMutationRuntime {
       Some(store) => store.load_mutation(request_id).await,
       None => Ok(None),
     }
-  }
-
-  pub(crate) async fn live_instances(&self) -> anyhow::Result<Vec<InstanceHeartbeat>> {
-    if self.inner.rollout_mode != AdminMutationRolloutMode::AdminCluster {
-      return Ok(Vec::new());
-    }
-    rollout_store::load_live_members(
-      self.store()?,
-      &self.inner.cluster_id,
-      &self.inner.target.membership_revision,
-    )
-    .await
   }
 
   pub(crate) fn configured_members(&self) -> &[String] {
@@ -346,12 +365,11 @@ impl AdminMutationRuntime {
       return Ok(false);
     }
     let rollout = &config.admin.mutations.rollout;
-    let instance_id = std::env::var(&rollout.instance_id_env).with_context(|| {
-      format!(
-        "Admin cluster instance environment variable {} is not set",
-        rollout.instance_id_env
-      )
-    })?;
+    let instance_id = config
+      .rollout
+      .instance_id()
+      .context("Admin cluster rollout identity is missing its instance ID")?
+      .to_string();
     let controller = AdminClusterRolloutController::new(
       self.store()?.clone(),
       RolloutSettings {
@@ -361,6 +379,7 @@ impl AdminMutationRuntime {
         instance_id,
         boot_id,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
+        artifact_key_fingerprint: self.artifact_key_fingerprint()?.to_string(),
         heartbeat_interval: Duration::from_secs(rollout.heartbeat_interval_seconds),
         stale_after: Duration::from_secs(rollout.stale_after_seconds),
         phase_timeout: Duration::from_secs(rollout.phase_timeout_seconds),
@@ -371,7 +390,7 @@ impl AdminMutationRuntime {
         assigned_revision: None,
         applied_revision,
         applied_digest,
-        ready: true,
+        ready: false,
       },
     )?;
     ensure!(
@@ -392,37 +411,39 @@ impl AdminMutationRuntime {
     self.inner.cluster_controller.get().cloned()
   }
 
-  #[allow(dead_code)]
   pub(crate) fn cluster_rollout_ready(&self) -> bool {
     !self.cluster_mode()
-      || self
+      || (self.inner.cluster_worker_state.load(Ordering::Acquire) == 0b11
+        && self
+          .inner
+          .cluster_controller
+          .get()
+          .is_some_and(AdminClusterRolloutController::ready))
+  }
+
+  pub(crate) fn terminal_wait_timeout(&self, expects_winner_response: bool) -> Duration {
+    if expects_winner_response {
+      self.inner.winner_response_wait
+    } else {
+      ORDINARY_TERMINAL_WAIT
+    }
+  }
+
+  pub(crate) fn set_cluster_worker_running(&self, member: bool, running: bool) {
+    let bit = if member { 0b01 } else { 0b10 };
+    if running {
+      self
         .inner
-        .cluster_controller
-        .get()
-        .is_some_and(AdminClusterRolloutController::ready)
+        .cluster_worker_state
+        .fetch_or(bit, Ordering::AcqRel);
+    } else {
+      self
+        .inner
+        .cluster_worker_state
+        .fetch_and(!bit, Ordering::AcqRel);
+    }
   }
 
-  #[allow(dead_code)]
-  pub(crate) async fn publish_cluster_artifact(
-    &self,
-    record: &MutationRecord,
-    plaintext: MutationArtifactPlaintext,
-  ) -> anyhow::Result<MutationArtifactReceipt> {
-    let controller = self.cluster_controller_ref()?;
-    ensure_cluster_member(self, controller.instance_id())?;
-    let binding = self.artifact_binding(record)?;
-    let sealed = self.artifact_cipher()?.seal(&binding, plaintext)?;
-    artifact_store::publish(
-      self.store()?,
-      controller.instance_id(),
-      controller.boot_id(),
-      &binding,
-      &sealed,
-    )
-    .await
-  }
-
-  #[allow(dead_code)]
   pub(crate) async fn fetch_cluster_artifact(
     &self,
     record: &MutationRecord,
@@ -440,6 +461,23 @@ impl AdminMutationRuntime {
     )
     .await?;
     cipher.open(&binding, stored)
+  }
+
+  pub(crate) async fn fetch_cluster_command(
+    &self,
+    record: &MutationRecord,
+  ) -> anyhow::Result<ClusterMutationCommand> {
+    let binding = self.artifact_binding(record)?;
+    let plaintext = self.fetch_cluster_artifact(record).await?;
+    let command = ClusterMutationCommand::from_plaintext(&plaintext, &binding)?;
+    command.reverify(
+      &self.inner.signers,
+      &self.inner.namespace,
+      &binding,
+      self.inner.maximum_validity_seconds,
+      self.inner.maximum_clock_skew_seconds,
+    )?;
+    Ok(command)
   }
 
   #[allow(dead_code)]
@@ -460,6 +498,10 @@ impl AdminMutationRuntime {
       .artifact_cipher
       .as_ref()
       .context("encrypted mutation artifacts require admin_cluster rollout mode")
+  }
+
+  pub(crate) fn artifact_key_fingerprint(&self) -> anyhow::Result<&str> {
+    Ok(self.artifact_cipher()?.key_fingerprint())
   }
 
   #[allow(dead_code)]
@@ -543,7 +585,7 @@ impl AdminMutationRuntime {
     Ok(revoked)
   }
 
-  fn store(&self) -> anyhow::Result<&MutationStore> {
+  pub(crate) fn store(&self) -> anyhow::Result<&MutationStore> {
     self
       .inner
       .store
@@ -552,13 +594,18 @@ impl AdminMutationRuntime {
   }
 }
 
-fn claim_outcome_admission(outcome: ClaimOutcome, audit: &AdminAuditHandle) -> MutationAdmission {
+fn claim_outcome_admission(
+  outcome: ClaimOutcome,
+  audit: &AdminAuditHandle,
+  winner_response: Option<cluster_checkpoint::SharedWinnerResponseGuard>,
+) -> MutationAdmission {
   match outcome {
     ClaimOutcome::Claimed(record) => {
       audit.mark_critical_mutation_lifecycle_managed();
       MutationAdmission::Claimed(MutationExecution {
         request_id: record.request_id,
         new_revision: record.new_revision,
+        winner_response,
       })
     }
     ClaimOutcome::Replay(record) => MutationAdmission::Replay(record),
@@ -672,54 +719,18 @@ fn load_signer(config: &crate::config::AdminMutationSignerConfig) -> anyhow::Res
   }
 }
 
-fn configured_target(config: &Config) -> MutationTarget {
-  let rollout = &config.admin.mutations.rollout;
-  let cluster_id = if rollout.cluster_id.is_empty() {
-    "single".to_string()
-  } else {
-    rollout.cluster_id.clone()
-  };
-  let mut digest_fields = vec![cluster_id.as_str(), rollout.instance_id_env.as_str()];
-  digest_fields.extend(rollout.members.iter().map(String::as_str));
-  let membership_revision = digest_parts(digest_fields);
-  MutationTarget {
-    cluster_id,
-    membership_revision,
-  }
-}
-
-fn digest_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-  let mut hasher = Sha256::new();
-  hasher.update(b"OXIBELT-ADMIN-MUTATION-MEMBERSHIP\0");
-  for part in parts {
-    hasher.update((part.len() as u64).to_be_bytes());
-    hasher.update(part.as_bytes());
-  }
-  let mut output = String::with_capacity(71);
-  output.push_str("sha256:");
-  for byte in hasher.finalize() {
-    let _ = write!(output, "{byte:02x}");
-  }
-  output
-}
-
-#[allow(dead_code)]
-fn ensure_cluster_member(runtime: &AdminMutationRuntime, instance_id: &str) -> anyhow::Result<()> {
-  ensure!(
-    runtime.cluster_mode(),
-    "Admin mutation runtime is not in admin_cluster mode"
-  );
-  ensure!(
-    runtime
-      .inner
-      .members
-      .iter()
-      .any(|member| member == instance_id),
-    "instance is not in the configured Admin cluster membership"
-  );
-  Ok(())
-}
-
+#[path = "runtime/cluster_admission.rs"]
+mod cluster_admission;
+#[path = "runtime/cluster_checkpoint.rs"]
+mod cluster_checkpoint;
+#[path = "runtime/cluster_diagnostics.rs"]
+mod cluster_diagnostics;
+#[path = "runtime/cluster_heartbeat.rs"]
+mod cluster_heartbeat;
+#[path = "runtime/cluster_worker.rs"]
+mod cluster_worker;
+#[path = "runtime/target.rs"]
+mod target;
 #[path = "runtime/terminal.rs"]
 mod terminal;
 #[cfg(test)]

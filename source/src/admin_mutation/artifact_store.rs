@@ -1,15 +1,19 @@
 //! PostgreSQL persistence for encrypted fixed-member mutation artifacts.
 
 use anyhow::{Context, ensure};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::Row;
+#[cfg(test)]
+use sqlx::{Postgres, Transaction};
 
+use super::artifact::{ARTIFACT_ALGORITHM, ARTIFACT_TAG_BYTES, ArtifactBinding, StoredArtifact};
+#[cfg(test)]
 use super::artifact::{
-  ARTIFACT_ALGORITHM, ARTIFACT_NONCE_BYTES, ARTIFACT_TAG_BYTES, ArtifactBinding,
-  MutationArtifactReceipt, SealedArtifact, StoredArtifact, sha256_digest,
+  ARTIFACT_NONCE_BYTES, MutationArtifactReceipt, SealedArtifact, sha256_digest,
 };
 use super::ledger::validate_identifier;
 use super::store::MutationStore;
 
+#[cfg(test)]
 pub(super) async fn publish(
   store: &MutationStore,
   coordinator_instance_id: &str,
@@ -158,7 +162,8 @@ pub(super) async fn fetch_for_member(
         AND mutation.state NOT IN
           ('committed', 'failed', 'rolled_back', 'rollback_failed', 'indeterminate')
         AND target.state IN
-          ('validating', 'applying', 'acked', 'nacked', 'rolling_back')
+          ('validating', 'validated', 'apply_assigned', 'applying', 'acked',
+           'nacked', 'rollback_assigned', 'rolling_back')
         AND heartbeat.lease_expires_at > now()
         AND octet_length(artifact.ciphertext) <= $5",
   )
@@ -190,6 +195,7 @@ pub(super) async fn fetch_for_member(
   })
 }
 
+#[cfg(test)]
 async fn lock_publishable_mutation(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,

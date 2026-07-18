@@ -69,7 +69,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
     ("redis-shared-state-tls", "supported"),
     ("admin-api-runtime-control", "supported"),
     ("admin-mutation-replay", "supported"),
-    ("admin-mutation-admin-cluster-rollout", "reserved"),
+    ("admin-mutation-admin-cluster-rollout", "supported"),
     ("observability", "supported"),
     ("gateway-controller", "experimental"),
     ("gateway-api-httproute", "experimental"),

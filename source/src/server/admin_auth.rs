@@ -128,6 +128,14 @@ impl AdminAuthentication {
       .is_some_and(|credential| credential.kind == "break_glass")
   }
 
+  pub(super) fn credential_kind(&self) -> &'static str {
+    self
+      .details
+      .credential
+      .as_ref()
+      .map_or("certificate", |credential| credential.kind)
+  }
+
   pub(super) fn record_audit(&self, audit: &AdminAuditHandle) {
     audit.set_actor(
       &self.actor.name,

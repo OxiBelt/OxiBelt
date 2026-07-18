@@ -48,6 +48,8 @@ mod admin_audit_endpoint;
 mod admin_audit_gate;
 mod admin_auth;
 mod admin_body;
+mod admin_cluster_executor;
+mod admin_cluster_runtime;
 mod admin_config_diff;
 mod admin_control;
 mod admin_diagnostics;
@@ -150,6 +152,12 @@ pub async fn serve(
     .and_then(|path| Config::load_effective_toml_redacted(path).ok())
     .and_then(|value| toml::to_string_pretty(&value).ok());
   let (admin_control, admin_control_rx) = AdminControlHandle::new(effective_config);
+  let prepared_cluster = admin_cluster_runtime::PreparedAdminClusterRuntime::prepare(
+    &state,
+    &admin_control,
+    error_tx.clone(),
+  )
+  .await?;
   let admin_operations =
     AdminOperationRuntime::new(state.snapshot().config.admin.operations.clone());
   let mut listeners = ListenerSupervisor::start(
@@ -159,6 +167,8 @@ pub async fn serve(
     admin_operations.clone(),
   )
   .await?;
+  let (cluster_heartbeat, cluster_runtime_tasks) =
+    prepared_cluster.start_workers(state.clone(), admin_control.clone(), error_tx.clone());
   let mut process_signals = ProcessSignals::new()?;
   let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
   let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
@@ -182,7 +192,7 @@ pub async fn serve(
     runtime_overrides,
   };
   drop(error_tx);
-  if let Some(reload) = reload {
+  let result = if let Some(reload) = reload {
     serve_with_reload(
       state,
       &mut listeners,
@@ -201,7 +211,19 @@ pub async fn serve(
       &mut process_signals,
     )
     .await
+  };
+  if let Some(tasks) = cluster_runtime_tasks {
+    tasks.shutdown().await;
   }
+  if let Some(cluster_heartbeat) = cluster_heartbeat
+    && let Err(error) = cluster_heartbeat.shutdown().await
+  {
+    if result.is_ok() {
+      return Err(error.context("failed to release Admin cluster member authority"));
+    }
+    warn!(error = %error, "failed to release Admin cluster member authority");
+  }
+  result
 }
 
 async fn serve_admin_listener(
@@ -569,6 +591,7 @@ async fn admin_response_inner(
       admin_control.clone(),
       &authorization,
       authenticated_with_break_glass,
+      authentication.credential_kind(),
       &method,
       &path,
     )

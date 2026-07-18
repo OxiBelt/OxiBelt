@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{Method, StatusCode};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
 
 use super::ledger::{ClaimOutcome, MutationClaim, MutationState, TerminalMutation};
 use super::store::{
@@ -19,14 +18,9 @@ async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
 }
 
 async fn postgres_atomicity_test_body() {
-  let Ok(url) = std::env::var("OXIBELT_TEST_MUTATION_POSTGRES_URL") else {
+  let Some(pool) = super::postgres_test_support::connect("mutation store tests").await else {
     return;
   };
-  let pool = PgPoolOptions::new()
-    .max_connections(4)
-    .connect(&url)
-    .await
-    .expect("mutation test PostgreSQL connection");
   init_postgres(&pool)
     .await
     .expect("mutation test schema initialization");

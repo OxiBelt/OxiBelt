@@ -37,6 +37,46 @@ fn optional_degradation_does_not_fail_readiness() {
   assert_eq!(health.snapshot().status, RuntimeSubsystemState::Degraded);
 }
 
+#[test]
+fn admin_mutation_cluster_health_uses_fixed_labels_and_fails_closed() {
+  let health = RuntimeHealth::default();
+  let generation = health.allocate_generation();
+  health.activate_generation(generation);
+  health.set_subsystem_state(
+    generation,
+    RuntimeSubsystem::AdminMutation,
+    RuntimeSubsystemState::Failed,
+    true,
+  );
+  health.set_task_state(
+    generation,
+    RuntimeTaskKind::AdminMutationCoordinator,
+    RuntimeTaskPolicy::RestartableCritical,
+    RuntimeSubsystemState::Failed,
+  );
+
+  assert!(!health.is_ready());
+  assert_eq!(health.snapshot().failed_subsystems, vec!["admin_mutation"]);
+  assert_eq!(
+    health.snapshot().failed_tasks,
+    vec!["admin_mutation_coordinator"]
+  );
+
+  let mut metrics = String::new();
+  health.append_prometheus(&mut metrics);
+  for label in [
+    "admin_mutation_heartbeat",
+    "admin_mutation_member",
+    "admin_mutation_coordinator",
+  ] {
+    assert!(
+      metrics.contains(&format!("task=\"{label}\"")),
+      "runtime metrics should expose the fixed {label} task label"
+    );
+  }
+  assert!(metrics.contains("subsystem=\"admin_mutation\""));
+}
+
 #[tokio::test(start_paused = true)]
 async fn critical_task_restarts_unready_then_recovers() {
   let health = Arc::new(RuntimeHealth::default());

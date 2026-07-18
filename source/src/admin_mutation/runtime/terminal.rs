@@ -1,16 +1,117 @@
 //! Durable terminal mutation outcomes after the protected side effect returns.
 
 use anyhow::Context;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use serde_json::Value;
+use serde_json::json;
 
 use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 
 use super::{AdminMutationRuntime, MutationExecution};
+use crate::admin_mutation::ClusterExecutionModel;
 use crate::admin_mutation::ledger::{MutationRecord, MutationState, TerminalMutation};
+use crate::admin_mutation::rollout_store::{
+  CoordinatorFence, guarded_cluster_finish_tx, load_applied_shared_publication_tx,
+};
 use crate::admin_mutation::store::finish_tx;
 
 impl AdminMutationRuntime {
+  pub(crate) async fn finish_cluster_rollout(
+    &self,
+    fence: &CoordinatorFence,
+    state: MutationState,
+    error_code: Option<String>,
+    audit_runtime: &AdminAuditRuntime,
+  ) -> anyhow::Result<MutationRecord> {
+    let record = self
+      .load_mutation(&fence.request_id)
+      .await?
+      .context("cluster mutation disappeared before terminal audit")?;
+    let command = self.fetch_cluster_command(&record).await?;
+    let (status, outcome) = match state {
+      MutationState::Committed => (
+        terminal_success_status(
+          command.execution_model,
+          &command.method,
+          &command.path_and_query,
+        ),
+        "applied",
+      ),
+      MutationState::Failed | MutationState::RolledBack => (StatusCode::CONFLICT, "rejected"),
+      MutationState::RollbackFailed | MutationState::Indeterminate => {
+        (StatusCode::SERVICE_UNAVAILABLE, "indeterminate")
+      }
+      _ => anyhow::bail!("cluster rollout terminal state is invalid"),
+    };
+    let audit = AdminAuditHandle::new(
+      "0.0.0.0:0".parse()?,
+      "admin-cluster",
+      &command.method,
+      command.path_and_query.split('?').next().unwrap_or_default(),
+      None,
+    );
+    audit.set_actor(
+      &command.actor.name,
+      &command.actor.principal,
+      &command.actor.subject,
+      &command.actor.groups,
+    );
+    audit.set_authentication(
+      "cluster_recovery",
+      None,
+      None,
+      None,
+      None,
+      Some(&command.actor.credential_kind),
+      None,
+      Some(&command.actor.principal),
+    );
+    audit.record_mutation_context(
+      &record.signer_id,
+      &record.action,
+      &record.resource,
+      &record.expected_previous_revision,
+      &record.new_revision,
+      &record.content_digest,
+      record.cluster_id.as_deref().unwrap_or_default(),
+      record.membership_revision.as_deref().unwrap_or_default(),
+    );
+    let event =
+      audit.critical_mutation_event(&record.request_id, status, outcome, error_code.as_deref());
+    let staged = audit_runtime.stage_critical_mutation(event).await?;
+    let store = self.store()?;
+    let mut tx = store.pool().begin().await?;
+    let terminal_audit_record_id = staged.insert(&mut tx).await?;
+    let safe_response = if state == MutationState::Committed
+      && command.execution_model == ClusterExecutionModel::SharedStaged
+    {
+      load_applied_shared_publication_tx(&mut tx, store, fence)
+        .await?
+        .context("committed shared rollout is missing its exact applied publication")?
+        .safe_response
+        .context("committed shared rollout is missing its safe response")?
+    } else {
+      json!({
+        "ok": state == MutationState::Committed,
+        "request_id": record.request_id,
+        "revision": record.new_revision,
+        "state": state,
+        "token_recoverable": false,
+      })
+    };
+    let terminal = TerminalMutation {
+      state,
+      http_status: status.as_u16(),
+      safe_response: Some(safe_response),
+      error_code,
+      terminal_audit_record_id,
+    };
+    let finished = guarded_cluster_finish_tx(&mut tx, store, fence, &terminal).await?;
+    tx.commit().await?;
+    staged.publish();
+    Ok(finished)
+  }
+
   pub(crate) async fn finish(
     &self,
     execution: &MutationExecution,
@@ -96,6 +197,29 @@ impl AdminMutationRuntime {
   }
 }
 
+fn terminal_success_status(
+  execution_model: ClusterExecutionModel,
+  method: &Method,
+  path_and_query: &str,
+) -> StatusCode {
+  let path = path_and_query.split('?').next().unwrap_or_default();
+  if execution_model == ClusterExecutionModel::SharedStaged
+    && *method == Method::POST
+    && matches!(
+      path,
+      "/admin/v1/ipm/principals"
+        | "/admin/v1/ipm/credentials"
+        | "/admin/v1/ipm/policies"
+        | "/admin/v1/ipm/bindings"
+        | "/admin/v1/break-glass/activations"
+    )
+  {
+    StatusCode::CREATED
+  } else {
+    StatusCode::OK
+  }
+}
+
 fn terminal_state_for_status(status: StatusCode) -> MutationState {
   if status.is_success() {
     MutationState::Committed
@@ -126,6 +250,34 @@ mod tests {
     assert_eq!(
       terminal_state_for_status(StatusCode::OK),
       MutationState::Committed
+    );
+  }
+
+  #[test]
+  fn shared_create_preserves_created_while_updates_and_deletes_use_ok() {
+    assert_eq!(
+      terminal_success_status(
+        ClusterExecutionModel::SharedStaged,
+        &Method::POST,
+        "/admin/v1/ipm/credentials",
+      ),
+      StatusCode::CREATED
+    );
+    assert_eq!(
+      terminal_success_status(
+        ClusterExecutionModel::SharedStaged,
+        &Method::PATCH,
+        "/admin/v1/ipm/credentials/api",
+      ),
+      StatusCode::OK
+    );
+    assert_eq!(
+      terminal_success_status(
+        ClusterExecutionModel::SharedStaged,
+        &Method::DELETE,
+        "/admin/v1/ipm/credentials/api",
+      ),
+      StatusCode::OK
     );
   }
 }

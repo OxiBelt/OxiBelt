@@ -2489,11 +2489,14 @@ fn validate_base64_32_byte_env(field_name: &str, env_name: &str) -> anyhow::Resu
   if env_name.trim().is_empty() {
     bail!("{field_name} must not be empty");
   }
-  let raw =
-    std::env::var(env_name).with_context(|| format!("failed to read {field_name} {env_name}"))?;
-  let bytes = base64::engine::general_purpose::STANDARD
-    .decode(raw.trim())
-    .with_context(|| format!("{field_name} must contain base64"))?;
+  let raw = zeroize::Zeroizing::new(
+    std::env::var(env_name).with_context(|| format!("failed to read {field_name} {env_name}"))?,
+  );
+  let bytes = zeroize::Zeroizing::new(
+    base64::engine::general_purpose::STANDARD
+      .decode(raw.trim())
+      .with_context(|| format!("{field_name} must contain base64"))?,
+  );
   if bytes.len() != 32 {
     bail!("{field_name} must contain exactly 32 bytes");
   }

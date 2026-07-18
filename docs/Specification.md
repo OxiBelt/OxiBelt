@@ -290,12 +290,32 @@ ML-DSA-44 signatures over the same suite-bound transcript and never
 downgrades. Signer public keys are bound to IPM principals; private signing
 keys remain outside the OxiBelt process.
 
-`admin.mutations.rollout.mode = "admin_cluster"` is reserved for a future
-non-Kubernetes rollout authority. Configuration validation rejects selecting
-the mode, and a defense-in-depth request-path guard returns `503` if such a
-runtime is constructed. This release does not claim distributed validation,
-canary application, convergence, or rollback. Kubernetes immutable rollout
-remains the supported multi-instance configuration authority.
+`admin.mutations.rollout.mode = "admin_cluster"` is a PostgreSQL-backed,
+fixed-member, all-ACK rollout authority for the protected mutation families.
+It requires required signed mutations, same-backend enforcing audit, disabled
+hot reload, an exact membership containing the local instance, and a shared
+artifact-encryption key. Admission atomically records the signed bindings,
+encrypted command, and exact target set. Every member validates; a
+deterministic canary applies and passes a bounded observation interval; the
+remaining members then apply. The request cannot return normal success and the
+logical head cannot advance until every configured member has durably ACKed the
+exact revision and digest.
+
+Database-time leases and monotonic member/coordinator epochs fence cluster,
+membership, instance, boot, logical revision, and artifact identity. Durable
+assignments are the restart source of truth. NACK, timeout, readiness loss, or
+evidence mismatch rolls back every possibly applied target. If neither the
+candidate nor prior state can be proved across all members, the terminal state
+is `indeterminate` and subsequent protected writes remain blocked. A client
+disconnect does not cancel ordinary durable work; an exact duplicate while
+active receives `409 mutation_in_progress` plus the receipt location. A
+credential create/rotate that can emit a one-time token instead binds every
+forward phase to a cancellation-safe response owner on the admission origin.
+Because token plaintext is neither durable nor replayable, owner loss fails or
+rolls back, and admission-origin restart cannot become a committed token-loss
+success. Kubernetes immutable
+rollout remains a separate workload-controller authority and does not
+participate in this protocol.
 
 The lifecycle drain configuration is:
 
@@ -330,7 +350,7 @@ Lifecycle endpoints are:
 - `GET /admin/v1/capabilities`: requires `admin:ReadMetadata` on `metadata/capabilities`, returns API version, package version, feature flags, active mTLS workload-identity mode, and Admin request-size limits.
 - `GET /admin/v1/version`: requires `admin:ReadMetadata` on `metadata/version`, returns API version, package name/version, source revision, Person Proof API version, and SHA-256 identities for the embedded Person Proof and Admin OpenAPI assets.
 - `GET /admin/v1/config/status`: requires `config:GetStatus`, returns active config revision, resolved operational-profile name/version when selected, ETag, rollback availability, and last admin operation status; immutable-rollout Pods additionally report their instance ID, rollout mode, desired/applied revision, raw digest, and apply state.
-- `GET /admin/v1/config/instances`: returns configured member IDs and bounded live-heartbeat diagnostics for the reserved fixed-member mode; it is not convergence proof.
+- `GET /admin/v1/config/instances`: returns the canonical fixed membership, durable authority/blocking state, active rollout summary, and bounded per-instance configured/live/ready/compatible revision, digest, and lease evidence. It is diagnostic; guarded terminal commit is convergence proof.
 - `GET /admin/v1/mutations/{request_id}`: returns the caller-authorized redacted durable mutation receipt.
 - `GET /admin/v1/config/effective`: requires `config:GetEffective`, returns the redacted active effective TOML and ETag, including the canonical profile/version and injected v1 defaults when a profile is selected.
 - `POST /admin/v1/config/validate`: requires `config:Validate`, validates submitted TOML against the active path roots without installing it.

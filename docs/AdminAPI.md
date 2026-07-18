@@ -199,13 +199,48 @@ workload, and relies on per-Pod revision/digest proof. In
 from its assigned revision. Read-only status, effective-config, validation, and
 diff endpoints remain available to operators.
 
-`[admin.mutations.rollout] mode = "admin_cluster"` is reserved for a future
-fixed-member rollout authority. Configuration validation rejects selecting the
-mode. A defense-in-depth request-path guard also returns `503` if such a runtime
-is constructed; this release does not claim distributed validation, apply,
-acknowledgement, or rollback. `single_instance` is the supported P1-13 runtime.
-`GET /admin/v1/config/instances` exposes only the bounded configured-member and
-live-heartbeat diagnostic view; it is not convergence proof.
+`[admin.mutations.rollout] mode = "admin_cluster"` enables the PostgreSQL-backed
+fixed-member rollout authority. It requires mutation mode `required`, matching
+process rollout mode, disabled hot reload, two through 1,024 unique configured
+members, a local instance ID in that set, and one shared 32-byte artifact key.
+The configured membership is an all-member policy boundary; there is no
+majority-quorum mode.
+
+The winning request is durably claimed with its exact encrypted command and
+target set. Every configured member validates the candidate, the deterministic
+canary applies and remains ready for the observation interval, and only then do
+the remaining members apply. The normal endpoint response cannot return a
+successful status until PostgreSQL contains an exact revision-and-digest ACK
+from every configured member. Ordinary requests wait up to 30 seconds for that
+terminal proof; if the rollout remains active they return
+`409 mutation_in_progress` with `Location` and `Retry-After`. Clients can inspect
+the redacted receipt at that location, and a disconnect does not cancel an
+ordinary durable rollout. Credential create/rotate is the bounded exception:
+because its plaintext token is neither durable nor replayable, the winning
+request remains open for a rollout-derived bound covering forward phases,
+rollback, and lease loss. Its request-scoped response owner must remain live
+through commit; disconnect, process restart, or owner loss forces failure before
+effect or durable rollback instead of committing an unrecoverable credential.
+
+A NACK, timeout, readiness loss, or revision/digest mismatch rolls back every
+member that may have applied. If neither convergence nor restoration can be
+proved, the receipt becomes `indeterminate` and further protected writes remain
+blocked. Member and coordinator authority is fenced by cluster, membership,
+instance, boot, database epoch/lease, logical revision, and artifact digest;
+restart recovery uses the durable assignments rather than an in-memory queue.
+Configuration, file, downstream-TLS, and key operations execute per member.
+IPM and break-glass updates are staged once in PostgreSQL, published after every
+member validates, observed by the deterministic canary before the remaining
+members, and committed only after every exact member ACKs the published
+revision and digest. Failure restores the encrypted before-image once; an
+unprovable restoration is `indeterminate`. The typed secret-reference endpoint
+retains its documented fail-closed `409` behavior.
+
+`GET /admin/v1/config/instances` reports the configured membership, membership
+revision, durable authority state, a safe blocking reason, active rollout
+summary, and bounded per-instance configured/live/ready/compatible evidence.
+It is an operational diagnostic view; the mutation's guarded terminal
+transaction, not this read response, is the convergence authority.
 
 ## Protected Mutations
 
@@ -255,6 +290,13 @@ whose commit outcome cannot be proved remains indeterminate and cannot be
 automatically retried. `GET /admin/v1/mutations/{request_id}` exposes a bounded,
 redacted receipt; it never returns raw bodies, credentials, signatures, private
 keys, or secret values.
+
+In `admin_cluster` mode, receipt phases and member summaries are durable and
+bounded. `committed` means all exact configured targets ACKed the same signed
+revision and digest under current fencing evidence. `rollback_failed` means a
+member explicitly failed restoration; `indeterminate` means OxiBelt could not
+prove either the candidate or previous revision cluster-wide. Neither state is
+automatically retried or treated as success.
 
 Credential creation and rotation return plaintext token material only from the
 first successful execution. An exact replay returns only the reduced safe

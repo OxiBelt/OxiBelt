@@ -39,6 +39,15 @@ pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Resp
         snapshot,
       ));
     }
+    if !snapshot.admin_mutations.cluster_rollout_ready() {
+      return Some(with_rollout_identity_headers(
+        text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "Admin cluster mutation authority unavailable",
+        ),
+        snapshot,
+      ));
+    }
     if !snapshot.runtime_health.is_ready() {
       return Some(with_rollout_identity_headers(
         text_response(

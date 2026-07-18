@@ -693,7 +693,11 @@ artifact_key_env = "OXIBELT_ADMIN_MUTATION_ARTIFACT_KEY"
 # ml_dsa_44_public_key_file = "admin-mutation/controller.ml-dsa-44.spki"
 
 [admin.mutations.rollout]
-mode = "single_instance" # admin_cluster is reserved and rejected fail-closed.
+# For fixed-member rollout, set mode = "admin_cluster", a non-empty cluster_id,
+# members = ["edge-a", "edge-b", ...], OXIBELT_CONFIG_ROLLOUT_MODE=admin_cluster,
+# OXIBELT_INSTANCE_ID to this process's member ID, a shared artifact key, and
+# runtime.hot_reload.mode = "off".
+mode = "single_instance" # single_instance | admin_cluster
 cluster_id = ""
 members = []
 instance_id_env = "OXIBELT_INSTANCE_ID"

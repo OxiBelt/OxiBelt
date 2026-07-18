@@ -9,22 +9,33 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{Aes256GcmKey, random_fill};
 
-use super::ledger::{MutationRecord, validate_identifier};
+use super::ledger::{MutationClaim, MutationRecord, validate_identifier};
 
 pub(super) const ARTIFACT_ALGORITHM: &str = "aes-256-gcm-v1";
 pub(super) const ARTIFACT_NONCE_BYTES: usize = 12;
 pub(super) const ARTIFACT_TAG_BYTES: usize = 16;
-pub(super) const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const ARTIFACT_AAD_DOMAIN: &[u8] = b"OXIBELT-ADMIN-MUTATION-ARTIFACT-V1\0";
+const CHECKPOINT_AAD_DOMAIN: &[u8] = b"OXIBELT-ADMIN-MUTATION-CHECKPOINT-V1\0";
 
 pub(crate) struct MutationArtifactPlaintext {
   bytes: Zeroizing<Vec<u8>>,
+  signed_content_digest: String,
 }
 
 impl MutationArtifactPlaintext {
+  #[cfg(test)]
   pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    let signed_content_digest = sha256_digest(&bytes);
     Self {
       bytes: Zeroizing::new(bytes),
+      signed_content_digest,
+    }
+  }
+
+  pub(super) fn with_signed_digest(bytes: Vec<u8>, signed_content_digest: String) -> Self {
+    Self {
+      bytes: Zeroizing::new(bytes),
+      signed_content_digest,
     }
   }
 
@@ -34,6 +45,10 @@ impl MutationArtifactPlaintext {
 
   pub(crate) fn len(&self) -> usize {
     self.bytes.len()
+  }
+
+  fn signed_content_digest(&self) -> &str {
+    &self.signed_content_digest
   }
 }
 
@@ -58,14 +73,45 @@ pub(super) struct ArtifactBinding {
   pub(super) namespace: String,
   pub(super) request_id: String,
   pub(super) fingerprint: String,
+  pub(super) principal: String,
+  pub(super) signer_id: String,
+  pub(super) action: String,
   pub(super) resource: String,
   pub(super) cluster_id: String,
   pub(super) membership_revision: String,
   pub(super) new_revision: String,
+  pub(super) expected_previous_revision: String,
   pub(super) content_digest: String,
 }
 
 impl ArtifactBinding {
+  pub(super) fn from_claim(namespace: &str, claim: &MutationClaim) -> anyhow::Result<Self> {
+    let cluster_id = claim
+      .cluster_id
+      .clone()
+      .context("cluster mutation is missing cluster_id")?;
+    let membership_revision = claim
+      .membership_revision
+      .clone()
+      .context("cluster mutation is missing membership_revision")?;
+    let binding = Self {
+      namespace: namespace.to_string(),
+      request_id: claim.request_id.clone(),
+      fingerprint: claim.fingerprint.clone(),
+      principal: claim.principal.clone(),
+      signer_id: claim.signer_id.clone(),
+      action: claim.action.clone(),
+      resource: claim.resource.clone(),
+      cluster_id,
+      membership_revision,
+      new_revision: claim.new_revision.clone(),
+      expected_previous_revision: claim.expected_previous_revision.clone(),
+      content_digest: claim.content_digest.clone(),
+    };
+    binding.validate()?;
+    Ok(binding)
+  }
+
   pub(super) fn from_record(namespace: &str, record: &MutationRecord) -> anyhow::Result<Self> {
     let cluster_id = record
       .cluster_id
@@ -79,10 +125,14 @@ impl ArtifactBinding {
       namespace: namespace.to_string(),
       request_id: record.request_id.clone(),
       fingerprint: record.fingerprint.clone(),
+      principal: record.principal.clone(),
+      signer_id: record.signer_id.clone(),
+      action: record.action.clone(),
       resource: record.resource.clone(),
       cluster_id,
       membership_revision,
       new_revision: record.new_revision.clone(),
+      expected_previous_revision: record.expected_previous_revision.clone(),
       content_digest: record.content_digest.clone(),
     };
     binding.validate()?;
@@ -94,10 +144,17 @@ impl ArtifactBinding {
       ("namespace", self.namespace.as_str()),
       ("request_id", self.request_id.as_str()),
       ("fingerprint", self.fingerprint.as_str()),
+      ("principal", self.principal.as_str()),
+      ("signer_id", self.signer_id.as_str()),
+      ("action", self.action.as_str()),
       ("resource", self.resource.as_str()),
       ("cluster_id", self.cluster_id.as_str()),
       ("membership_revision", self.membership_revision.as_str()),
       ("new_revision", self.new_revision.as_str()),
+      (
+        "expected_previous_revision",
+        self.expected_previous_revision.as_str(),
+      ),
       ("content_digest", self.content_digest.as_str()),
     ] {
       validate_identifier(name, value, 256)?;
@@ -115,10 +172,14 @@ impl ArtifactBinding {
       self.namespace.as_bytes(),
       self.request_id.as_bytes(),
       self.fingerprint.as_bytes(),
+      self.principal.as_bytes(),
+      self.signer_id.as_bytes(),
+      self.action.as_bytes(),
       self.resource.as_bytes(),
       self.cluster_id.as_bytes(),
       self.membership_revision.as_bytes(),
       self.new_revision.as_bytes(),
+      self.expected_previous_revision.as_bytes(),
       self.content_digest.as_bytes(),
       ARTIFACT_ALGORITHM.as_bytes(),
     ];
@@ -139,6 +200,54 @@ impl ArtifactBinding {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckpointArtifactBinding {
+  pub(super) artifact: ArtifactBinding,
+  pub(super) instance_id: String,
+  pub(super) assignment_epoch: i64,
+  pub(super) prior_revision: String,
+  pub(super) prior_digest: String,
+}
+
+impl CheckpointArtifactBinding {
+  fn additional_data(&self) -> anyhow::Result<Vec<u8>> {
+    self.artifact.validate()?;
+    validate_identifier("instance_id", &self.instance_id, 256)?;
+    ensure!(
+      self.assignment_epoch > 0,
+      "checkpoint assignment epoch is invalid"
+    );
+    validate_identifier("prior_revision", &self.prior_revision, 256)?;
+    ensure!(
+      is_sha256_digest(&self.prior_digest),
+      "checkpoint prior digest must be canonical SHA-256"
+    );
+    let artifact = self.artifact.additional_data()?;
+    let fields = [
+      artifact.as_slice(),
+      self.instance_id.as_bytes(),
+      self.prior_revision.as_bytes(),
+      self.prior_digest.as_bytes(),
+      ARTIFACT_ALGORITHM.as_bytes(),
+    ];
+    let capacity = fields
+      .iter()
+      .try_fold(CHECKPOINT_AAD_DOMAIN.len() + 8, |total, field| {
+        total.checked_add(4 + field.len())
+      })
+      .context("checkpoint binding is too large")?;
+    let mut aad = Vec::with_capacity(capacity);
+    aad.extend_from_slice(CHECKPOINT_AAD_DOMAIN);
+    aad.extend_from_slice(&self.assignment_epoch.to_be_bytes());
+    for field in fields {
+      let length = u32::try_from(field.len()).context("checkpoint binding field is too large")?;
+      aad.extend_from_slice(&length.to_be_bytes());
+      aad.extend_from_slice(field);
+    }
+    Ok(aad)
+  }
+}
+
 pub(super) struct SealedArtifact {
   pub(super) nonce: [u8; ARTIFACT_NONCE_BYTES],
   pub(super) ciphertext: Zeroizing<Vec<u8>>,
@@ -146,7 +255,14 @@ pub(super) struct SealedArtifact {
   pub(super) plaintext_len: usize,
 }
 
-pub(super) struct StoredArtifact {
+pub(super) struct SealedCheckpointArtifact {
+  pub(super) nonce: [u8; ARTIFACT_NONCE_BYTES],
+  pub(super) ciphertext: Zeroizing<Vec<u8>>,
+  pub(super) ciphertext_digest: String,
+  pub(super) plaintext_len: usize,
+}
+
+pub(crate) struct StoredArtifact {
   pub(super) binding: ArtifactBinding,
   pub(super) nonce: Vec<u8>,
   pub(super) ciphertext: Vec<u8>,
@@ -156,6 +272,7 @@ pub(super) struct StoredArtifact {
 
 pub(super) struct MutationArtifactCipher {
   key: Aes256GcmKey,
+  key_fingerprint: String,
   maximum_plaintext_bytes: usize,
 }
 
@@ -186,12 +303,17 @@ impl MutationArtifactCipher {
     );
     Ok(Self {
       key: Aes256GcmKey::new_from_slice(key)?,
+      key_fingerprint: artifact_key_fingerprint(key),
       maximum_plaintext_bytes,
     })
   }
 
   pub(super) fn maximum_plaintext_bytes(&self) -> usize {
     self.maximum_plaintext_bytes
+  }
+
+  pub(super) fn key_fingerprint(&self) -> &str {
+    &self.key_fingerprint
   }
 
   pub(super) fn seal(
@@ -204,7 +326,7 @@ impl MutationArtifactCipher {
       "mutation artifact exceeds the configured size limit"
     );
     ensure!(
-      sha256_digest(plaintext.as_bytes()) == binding.content_digest,
+      plaintext.signed_content_digest() == binding.content_digest,
       "mutation artifact digest does not match the signed mutation"
     );
     let mut nonce = [0u8; ARTIFACT_NONCE_BYTES];
@@ -223,7 +345,7 @@ impl MutationArtifactCipher {
       "mutation artifact exceeds the configured size limit"
     );
     ensure!(
-      sha256_digest(plaintext.as_bytes()) == binding.content_digest,
+      plaintext.signed_content_digest() == binding.content_digest,
       "mutation artifact digest does not match the signed mutation"
     );
     let aad = binding.additional_data()?;
@@ -276,12 +398,94 @@ impl MutationArtifactCipher {
       "stored mutation artifact length mismatch"
     );
     plaintext.truncate(opened_len);
+    let signed_content_digest = if sha256_digest(&plaintext) == expected_binding.content_digest {
+      expected_binding.content_digest.clone()
+    } else {
+      super::cluster_command::signed_digest_from_encoded(&plaintext)?
+    };
     ensure!(
-      sha256_digest(&plaintext) == expected_binding.content_digest,
+      signed_content_digest == expected_binding.content_digest,
       "decrypted mutation artifact digest mismatch"
     );
-    Ok(MutationArtifactPlaintext { bytes: plaintext })
+    Ok(MutationArtifactPlaintext {
+      bytes: plaintext,
+      signed_content_digest,
+    })
   }
+
+  pub(super) fn seal_checkpoint(
+    &self,
+    binding: &CheckpointArtifactBinding,
+    plaintext: &[u8],
+  ) -> anyhow::Result<SealedCheckpointArtifact> {
+    ensure!(
+      plaintext.len() <= self.maximum_plaintext_bytes,
+      "mutation checkpoint exceeds the configured artifact size limit"
+    );
+    let mut nonce = [0u8; ARTIFACT_NONCE_BYTES];
+    random_fill(&mut nonce).context("failed to generate mutation checkpoint nonce")?;
+    let aad = binding.additional_data()?;
+    let plaintext_len = plaintext.len();
+    let mut ciphertext = Zeroizing::new(plaintext.to_vec());
+    self
+      .key
+      .seal_in_place_append_tag(nonce, &aad, &mut ciphertext)
+      .map_err(|()| anyhow::anyhow!("failed to encrypt mutation checkpoint"))?;
+    let ciphertext_digest = sha256_digest(&ciphertext);
+    Ok(SealedCheckpointArtifact {
+      nonce,
+      ciphertext,
+      ciphertext_digest,
+      plaintext_len,
+    })
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(super) fn open_checkpoint(
+    &self,
+    binding: &CheckpointArtifactBinding,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+    ciphertext_digest: &str,
+    plaintext_len: usize,
+  ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    ensure!(
+      plaintext_len <= self.maximum_plaintext_bytes
+        && ciphertext.len() == plaintext_len + ARTIFACT_TAG_BYTES
+        && sha256_digest(&ciphertext) == ciphertext_digest,
+      "stored mutation checkpoint exceeds its authenticated bound"
+    );
+    let nonce: [u8; ARTIFACT_NONCE_BYTES] = nonce
+      .try_into()
+      .map_err(|_| anyhow::anyhow!("stored mutation checkpoint nonce is invalid"))?;
+    let aad = binding.additional_data()?;
+    let mut plaintext = Zeroizing::new(ciphertext);
+    let opened_len = self
+      .key
+      .open_in_place(nonce, &aad, &mut plaintext)
+      .map_err(|()| anyhow::anyhow!("mutation checkpoint authentication failed"))?
+      .len();
+    ensure!(
+      opened_len == plaintext_len,
+      "stored mutation checkpoint length mismatch"
+    );
+    plaintext.truncate(opened_len);
+    Ok(plaintext)
+  }
+}
+
+fn artifact_key_fingerprint(key: &[u8]) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(b"OXIBELT-ADMIN-MUTATION-ARTIFACT-KEY-V1\0");
+  hasher.update(key);
+  let digest = hasher.finalize();
+  let mut encoded = String::with_capacity(71);
+  encoded.push_str("sha256:");
+  for byte in digest {
+    use std::fmt::Write as _;
+    let _ = write!(encoded, "{byte:02x}");
+  }
+  encoded
 }
 
 pub(super) fn sha256_digest(bytes: &[u8]) -> String {
@@ -297,13 +501,13 @@ pub(super) fn sha256_digest(bytes: &[u8]) -> String {
 
 fn validate_limit(maximum_plaintext_bytes: usize) -> anyhow::Result<()> {
   ensure!(
-    (1..=MAX_ARTIFACT_BYTES).contains(&maximum_plaintext_bytes),
+    (1..=super::store::MAX_STORED_ARTIFACT_BYTES).contains(&maximum_plaintext_bytes),
     "mutation artifact size limit is outside the supported range"
   );
   Ok(())
 }
 
-fn is_sha256_digest(value: &str) -> bool {
+pub(super) fn is_sha256_digest(value: &str) -> bool {
   value.len() == 71
     && value.starts_with("sha256:")
     && value.as_bytes()[7..]

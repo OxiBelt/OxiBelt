@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use http::HeaderValue;
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
 
 use crate::admin_mutation::envelope::sha256_labelled;
 use crate::admin_mutation::{
@@ -25,20 +24,82 @@ fn disabled_runtime_exposes_no_cluster_artifact_capability() {
   assert!(runtime.cluster_rollout_ready());
 }
 
+#[test]
+fn winner_response_guard_removes_cancelled_request_slot() {
+  let runtime = AdminMutationRuntime::disabled("default");
+  let guard = runtime.register_shared_winner_response("request-cancelled");
+  assert!(runtime.shared_winner_response_registered("request-cancelled"));
+  drop(guard);
+  assert!(!runtime.shared_winner_response_registered("request-cancelled"));
+  runtime.deliver_shared_winner_response(
+    "request-cancelled",
+    zeroize::Zeroizing::new(b"discarded token".to_vec()),
+  );
+  assert!(!runtime.shared_winner_response_registered("request-cancelled"));
+}
+
+#[test]
+fn winner_response_guard_transfers_the_response_once() {
+  let runtime = AdminMutationRuntime::disabled("default");
+  let mut guard = runtime.register_shared_winner_response("request-winner");
+  runtime.deliver_shared_winner_response(
+    "request-winner",
+    zeroize::Zeroizing::new(b"one-time token".to_vec()),
+  );
+  let response = guard.take().expect("winner response");
+  assert_eq!(response.as_slice(), b"one-time token");
+  assert!(guard.take().is_none());
+  assert!(!runtime.shared_winner_response_registered("request-winner"));
+}
+
+#[test]
+fn winner_response_wait_covers_forward_phases_rollback_and_lease_loss() {
+  assert_eq!(
+    cluster_checkpoint::winner_response_wait(300, 300, 15)
+      .expect("winner response wait")
+      .as_secs(),
+    1515
+  );
+  assert_eq!(
+    cluster_checkpoint::winner_response_wait(1, 1, 1)
+      .expect("minimum winner response wait")
+      .as_secs(),
+    30
+  );
+}
+
+#[test]
+fn cluster_worker_liveness_drops_on_each_task_exit() {
+  let runtime = AdminMutationRuntime::disabled("default");
+  runtime.set_cluster_worker_running(true, true);
+  runtime.set_cluster_worker_running(false, true);
+  assert_eq!(
+    runtime.inner.cluster_worker_state.load(Ordering::Acquire),
+    0b11
+  );
+  runtime.set_cluster_worker_running(true, false);
+  assert_eq!(
+    runtime.inner.cluster_worker_state.load(Ordering::Acquire),
+    0b10
+  );
+  runtime.set_cluster_worker_running(false, false);
+  assert_eq!(
+    runtime.inner.cluster_worker_state.load(Ordering::Acquire),
+    0
+  );
+}
+
 #[tokio::test]
 async fn committed_replay_precedes_advanced_operational_and_logical_revisions() {
   Box::pin(committed_replay_test_body()).await;
 }
 
 async fn committed_replay_test_body() {
-  let Ok(url) = std::env::var("OXIBELT_TEST_MUTATION_POSTGRES_URL") else {
+  let Some(pool) =
+    crate::admin_mutation::postgres_test_support::connect("mutation runtime tests").await
+  else {
     return;
   };
-  let pool = PgPoolOptions::new()
-    .max_connections(4)
-    .connect(&url)
-    .await
-    .expect("mutation runtime test PostgreSQL connection");
   init_postgres(&pool)
     .await
     .expect("mutation runtime test schema initialization");
@@ -84,6 +145,9 @@ async fn committed_replay_test_body() {
       members: Vec::new(),
       artifact_cipher: None,
       cluster_controller: OnceLock::new(),
+      cluster_worker_state: AtomicU8::new(0),
+      winner_responses: Mutex::new(HashMap::new()),
+      winner_response_wait: ORDINARY_TERMINAL_WAIT,
     }),
   };
   let (now, issued_at, expires_at): (i64, String, String) = sqlx::query_as(

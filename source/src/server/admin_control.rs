@@ -18,7 +18,8 @@ use crate::waf::WafEngine;
 
 use super::{ListenerSupervisor, admin::json_response, admin_auth::AdminAuthorization};
 
-mod file_sync;
+pub(crate) mod checkpoint;
+pub(super) mod file_sync;
 mod load_scope;
 mod request;
 #[cfg(test)]

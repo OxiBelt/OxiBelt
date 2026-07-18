@@ -18,6 +18,7 @@ mod admin;
 mod admin_bindings;
 mod admin_references;
 mod admin_support;
+mod admin_transaction;
 mod admin_types;
 mod refresh;
 mod simulation;
@@ -26,6 +27,9 @@ mod state_access;
 mod store;
 mod token;
 mod workload_identity;
+pub(crate) use admin_transaction::{
+  IpmAdminMutation, IpmMutationCheckpoint, IpmTransactionalMutationResult,
+};
 pub use admin_types::*;
 pub use simulation::{
   IpmPreparedSimulation, IpmSimulationAuthorizationRequirements, IpmSimulationRequest,

@@ -125,7 +125,6 @@ impl AppSnapshot {
       self.metrics.record_request();
     }
   }
-
   #[inline]
   pub(crate) fn record_hot_path_response(&self, status: StatusCode) {
     if self.request_path_features.hot_path_metrics {
@@ -350,9 +349,11 @@ impl AppSnapshot {
         .await
         .context("failed to build admin audit runtime")?
     };
-    let admin_mutations = AdminMutationRuntime::new(&config, &admin_audit)
-      .await
-      .context("failed to build Admin mutation runtime")?;
+    let prior_admin_mutations = previous.map(|value| (&value.config, &value.admin_mutations));
+    let admin_mutations =
+      AdminMutationRuntime::new_or_reuse(&config, &admin_audit, prior_admin_mutations)
+        .await
+        .context("failed to build Admin mutation runtime")?;
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
@@ -465,7 +466,6 @@ impl AppSnapshot {
     );
 
     config.rollout.mark_applied();
-
     Ok(Self {
       config,
       effective_direct_h1_io,

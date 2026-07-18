@@ -494,7 +494,7 @@ fn hex_nibble(byte: u8) -> u8 {
   }
 }
 
-fn parse_timestamp(value: &str) -> Result<i64, MutationProtocolError> {
+pub(super) fn parse_timestamp(value: &str) -> Result<i64, MutationProtocolError> {
   let bytes = value.as_bytes();
   if bytes.len() != 20
     || bytes.get(4) != Some(&b'-')

@@ -1,6 +1,3 @@
-//! Admin-controlled file synchronization.
-//! Sync targets are restricted by load scope before writing managed files.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -23,7 +20,10 @@ use super::{
   apply_downstream_tls_reload, apply_full_from_files, apply_oxirule_from_files, check_if_match,
   current_revision, etag_for_revision, record_operation, validate_control_plane_config_scope,
 };
-
+mod cluster_checkpoint;
+pub(crate) use cluster_checkpoint::{
+  capture_cluster_before_images, restore_cluster_before_images, verify_cluster_file_state,
+};
 const ADMIN_FILE_SYNC_BODY_LIMIT: usize = 1024 * 1024;
 
 #[allow(clippy::too_many_arguments)]
@@ -266,9 +266,6 @@ fn commit_file_sync(
   }
   ensure_unique_config_sync_targets(request, config)?;
 
-  // Reject every predictable path, hash, and content error before changing
-  // any target. The second pass repeats the hash check immediately before the
-  // mutation to detect an external change between validation and commit.
   for (index, operation) in request.operations.iter().enumerate() {
     let normalized_path = file_sync_path::normalized_relative_path(&operation.path)
       .map_err(|message| anyhow!("operation {index} has invalid file sync path: {message}"))?;
@@ -359,18 +356,25 @@ fn ensure_parent_stays_under_base(base: &Path, target: &Path) -> anyhow::Result<
   let parent = target
     .parent()
     .ok_or_else(|| anyhow!("file sync target has no parent directory"))?;
-  std::fs::create_dir_all(parent)
-    .with_context(|| format!("failed to create {}", parent.display()))?;
   let canonical_base = base.canonicalize().with_context(|| {
     format!(
       "failed to resolve file sync base directory {}",
       base.display()
     )
   })?;
+  let projected_parent = crate::config::canonicalize_local_config_file_target(
+    "admin file sync parent directory",
+    parent,
+  )?;
+  if !projected_parent.starts_with(&canonical_base) {
+    bail!("file sync target must stay within the configured root");
+  }
+  std::fs::create_dir_all(parent)
+    .with_context(|| format!("failed to create {}", parent.display()))?;
   let canonical_parent = parent
     .canonicalize()
     .with_context(|| format!("failed to resolve {}", parent.display()))?;
-  if !canonical_parent.starts_with(canonical_base) {
+  if !canonical_parent.starts_with(&canonical_base) {
     bail!("file sync target must stay within the configured root");
   }
   Ok(())

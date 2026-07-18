@@ -1020,6 +1020,40 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar
           retention-days: 0
 
+  admin-mutation-postgres:
+    name: Admin mutation PostgreSQL durability
+    runs-on: ubuntu-26.04
+    needs:
+      - docker-integration-helper-images
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load PostgreSQL helper image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
+      - name: Run mandatory Admin mutation PostgreSQL tests
+        env:
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REQUIRE_MUTATION_POSTGRES_TESTS: "1"
+        run: tests/scripts/run-admin-mutation-postgres.sh
+
   kubernetes-immutable-rollout:
     name: Kubernetes immutable Gateway rollout
     runs-on: ubuntu-26.04

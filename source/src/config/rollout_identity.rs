@@ -78,7 +78,18 @@ pub struct ConfigRolloutIdentity {
 
 impl ConfigRolloutIdentity {
   pub fn from_environment(source_paths: &ConfigSourcePaths) -> anyhow::Result<Self> {
-    Self::from_environment_values(EnvironmentValues::read()?, source_paths)
+    Self::from_environment_with_instance_id(source_paths, INSTANCE_ID_ENV)
+  }
+
+  fn from_environment_with_instance_id(
+    source_paths: &ConfigSourcePaths,
+    instance_id_env: &str,
+  ) -> anyhow::Result<Self> {
+    Self::from_environment_values_for_instance(
+      EnvironmentValues::read(instance_id_env)?,
+      source_paths,
+      instance_id_env,
+    )
   }
 
   pub fn mode(&self) -> ConfigRolloutMode {
@@ -91,6 +102,10 @@ impl ConfigRolloutIdentity {
 
   pub fn is_admin_cluster(&self) -> bool {
     self.mode == ConfigRolloutMode::AdminCluster
+  }
+
+  pub fn instance_id(&self) -> Option<&str> {
+    self.instance_id.as_deref()
   }
 
   pub fn blocks_per_pod_mutation(&self) -> bool {
@@ -119,7 +134,7 @@ impl ConfigRolloutIdentity {
         );
       }
       if self.instance_id.is_none() {
-        bail!("{INSTANCE_ID_ENV} is required in admin_cluster rollout mode");
+        bail!("the configured Admin cluster instance ID environment variable is required");
       }
       return Ok(());
     }
@@ -179,9 +194,18 @@ impl ConfigRolloutIdentity {
     Some((self.desired_revision.as_deref()?, self.digest.as_deref()?))
   }
 
+  #[cfg(test)]
   fn from_environment_values(
     values: EnvironmentValues,
     source_paths: &ConfigSourcePaths,
+  ) -> anyhow::Result<Self> {
+    Self::from_environment_values_for_instance(values, source_paths, INSTANCE_ID_ENV)
+  }
+
+  fn from_environment_values_for_instance(
+    values: EnvironmentValues,
+    source_paths: &ConfigSourcePaths,
+    instance_id_env: &str,
   ) -> anyhow::Result<Self> {
     match values.mode.as_deref() {
       None => {
@@ -215,7 +239,7 @@ impl ConfigRolloutIdentity {
         Ok(Self {
           mode: ConfigRolloutMode::AdminCluster,
           instance_id: Some(required_metadata_value(
-            INSTANCE_ID_ENV,
+            instance_id_env,
             values.instance_id,
           )?),
           desired_revision: None,
@@ -234,7 +258,10 @@ impl ConfigRolloutIdentity {
 impl Config {
   /// Resolves the process-level Kubernetes rollout identity after config paths are known.
   pub fn resolve_rollout_identity_from_environment(&mut self) -> anyhow::Result<()> {
-    let identity = ConfigRolloutIdentity::from_environment(&self.source_paths)?;
+    let identity = ConfigRolloutIdentity::from_environment_with_instance_id(
+      &self.source_paths,
+      &self.admin.mutations.rollout.instance_id_env,
+    )?;
     identity.validate(&self.source_paths, self.runtime.hot_reload.mode)?;
     self.rollout = identity;
     Ok(())
@@ -251,13 +278,19 @@ struct EnvironmentValues {
 }
 
 impl EnvironmentValues {
-  fn read() -> anyhow::Result<Self> {
+  fn read(instance_id_env: &str) -> anyhow::Result<Self> {
+    let mode = read_environment(CONFIG_ROLLOUT_MODE_ENV)?;
+    let selected_instance_id_env = if mode.as_deref() == Some(ADMIN_CLUSTER_MODE) {
+      instance_id_env
+    } else {
+      INSTANCE_ID_ENV
+    };
     Ok(Self {
-      mode: read_environment(CONFIG_ROLLOUT_MODE_ENV)?,
+      mode,
       revision: read_environment(CONFIG_REVISION_ENV)?,
       digest: read_environment(CONFIG_DIGEST_ENV)?,
       revision_file: read_environment(CONFIG_REVISION_FILE_ENV)?,
-      instance_id: read_environment(INSTANCE_ID_ENV)?,
+      instance_id: read_environment(selected_instance_id_env)?,
     })
   }
 

@@ -601,10 +601,10 @@
           "config"
         ],
         "operationId": "listConfigInstances",
-        "summary": "List configured members and live heartbeat diagnostics for the reserved fixed-member mode; this is not convergence proof.",
+        "summary": "List fixed membership, durable authority, active rollout, and bounded per-instance convergence diagnostics.",
         "responses": {
           "200": {
-            "description": "Configured member IDs and currently live heartbeat records for diagnostics.",
+            "description": "Configured membership and bounded durable authority, rollout, readiness, compatibility, revision, digest, and lease diagnostics. Guarded terminal mutation commit is the convergence authority.",
             "headers": {
               "X-OxiBelt-Request-Id": {
                 "$ref": "#/components/headers/AdminRequestId"
@@ -619,6 +619,11 @@
                   "type": "object",
                   "required": [
                     "configured_members",
+                    "membership_revision",
+                    "authority",
+                    "active_rollouts",
+                    "logical_revisions",
+                    "live_members_truncated",
                     "instances"
                   ],
                   "properties": {
@@ -627,6 +632,44 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "membership_revision": {
+                      "type": "string"
+                    },
+                    "authority": {
+                      "type": "object",
+                      "required": [
+                        "ready",
+                        "blocking_reason"
+                      ],
+                      "properties": {
+                        "ready": {
+                          "type": "boolean"
+                        },
+                        "blocking_reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "active_rollouts": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "logical_revisions": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "live_members_truncated": {
+                      "type": "boolean",
+                      "description": "True when live heartbeat diagnostics exceeded the bounded response limit; authority is not ready in this case."
                     },
                     "instances": {
                       "type": "array",
@@ -2637,6 +2680,7 @@
         ],
         "operationId": "createIpmCredential",
         "summary": "Create an IPM credential and return its token once.",
+        "description": "In fixed-member mode the winning request remains open for the bounded rollout because token plaintext is non-durable and non-replayable. Disconnect or admission-origin loss fails or rolls back instead of committing an unrecoverable credential.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -2807,6 +2851,7 @@
         ],
         "operationId": "rotateIpmCredential",
         "summary": "Rotate an IPM credential token with previous-token overlap.",
+        "description": "In fixed-member mode the winning request remains open for the bounded rollout because token plaintext is non-durable and non-replayable. Disconnect or admission-origin loss fails or rolls back instead of committing an unrecoverable credential.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -5885,7 +5930,7 @@
         }
       },
       "ServiceUnavailable": {
-        "description": "Admin control plane, mutation replay ledger, or enforcing audit is unavailable; reserved admin_cluster mode also rejects protected writes with this status.",
+        "description": "Admin control plane, mutation replay ledger, enforcing audit, or current fixed-member rollout authority is unavailable. Protected cluster writes fail closed when exact membership or fencing evidence cannot be proved.",
         "headers": {
           "X-OxiBelt-Request-Id": {
             "$ref": "#/components/headers/AdminRequestId"
@@ -6521,6 +6566,8 @@
           "content_digest",
           "target",
           "state",
+          "phase",
+          "members",
           "http_status",
           "result",
           "error_code",
@@ -6596,6 +6643,18 @@
               "indeterminate"
             ]
           },
+          "phase": {
+            "type": "string",
+            "description": "Current durable rollout phase; equal to state for this receipt version."
+          },
+          "members": {
+            "type": "array",
+            "maxItems": 1024,
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
           "http_status": {
             "type": [
               "integer",
@@ -6638,60 +6697,65 @@
       "ConfigInstance": {
         "type": "object",
         "required": [
-          "cluster_id",
           "instance_id",
-          "boot_id",
-          "build_version",
-          "capability_version",
-          "membership_revision",
-          "assigned_revision",
-          "applied_revision",
-          "applied_digest",
+          "configured",
+          "live",
           "ready",
-          "lease_expires_at",
-          "updated_at"
+          "compatible",
+          "heartbeat",
+          "resources"
         ],
         "properties": {
-          "cluster_id": {
-            "type": "string"
-          },
           "instance_id": {
             "type": "string"
           },
-          "boot_id": {
-            "type": "string"
+          "configured": {
+            "type": "boolean"
           },
-          "build_version": {
-            "type": "string"
-          },
-          "capability_version": {
-            "type": "string"
-          },
-          "membership_revision": {
-            "type": "string"
-          },
-          "assigned_revision": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "applied_revision": {
-            "type": "string"
-          },
-          "applied_digest": {
-            "type": "string"
+          "live": {
+            "type": "boolean"
           },
           "ready": {
             "type": "boolean"
           },
-          "lease_expires_at": {
-            "type": "string",
-            "format": "date-time"
+          "compatible": {
+            "type": "boolean"
           },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
+          "heartbeat": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "resources": {
+            "type": "object",
+            "required": [
+              "config",
+              "ipm",
+              "break-glass"
+            ],
+            "properties": {
+              "config": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "ipm": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "break-glass": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -7126,7 +7190,7 @@
         "additionalProperties": false
       },
       "ConfigRolloutStatus": {
-        "description": "Process rollout identity for mutable, Kubernetes immutable, or reserved fail-closed admin_cluster mode. admin_cluster does not prove convergence. This object is additive to the existing config status response.",
+        "description": "Process rollout identity for mutable, Kubernetes immutable, or PostgreSQL-backed fixed-member Admin rollout mode. Cluster convergence is proved by guarded mutation commit rather than this local status object. This object is additive to the existing config status response.",
         "type": "object",
         "required": [
           "instance_id",

@@ -41,7 +41,10 @@ pub(super) fn classify(
         Some(TargetState::Acked) => RolloutDirective::ObserveCanary,
         Some(TargetState::Nacked) | None => rollback_directive(targets),
         Some(_) if phase_timed_out => rollback_directive(targets),
-        Some(_) => RolloutDirective::ApplyCanary(canary),
+        Some(TargetState::Validated | TargetState::ApplyAssigned | TargetState::Applying) => {
+          RolloutDirective::ApplyCanary(canary)
+        }
+        Some(_) => rollback_directive(targets),
       }
     }
     MutationState::CanaryHealthy => {
@@ -96,7 +99,7 @@ fn classify_validation(
     RolloutDirective::FailBeforeApply("rollout_validation_timeout")
   } else if targets
     .iter()
-    .all(|target| target.state == TargetState::Applying)
+    .all(|target| matches!(target.state, TargetState::Validated | TargetState::Applying))
   {
     RolloutDirective::ApplyCanary(deterministic_canary(&record.request_id, members))
   } else {
@@ -119,10 +122,7 @@ fn classify_rollback(targets: &[RolloutTarget], rollback_timed_out: bool) -> Rol
     .any(|target| target.state == TargetState::RollbackFailed)
   {
     RolloutDirective::FinishRollbackFailed
-  } else if targets
-    .iter()
-    .all(|target| target.state == TargetState::RolledBack)
-  {
+  } else if targets.iter().all(rollback_complete_for_target) {
     RolloutDirective::FinishRolledBack
   } else if rollback_timed_out {
     RolloutDirective::FinishIndeterminate
@@ -131,18 +131,32 @@ fn classify_rollback(targets: &[RolloutTarget], rollback_timed_out: bool) -> Rol
   }
 }
 
+fn rollback_complete_for_target(target: &RolloutTarget) -> bool {
+  target.state == TargetState::RolledBack
+    || (target.effect_started_at.is_none()
+      && matches!(
+        target.state,
+        TargetState::Pending
+          | TargetState::Validating
+          | TargetState::Validated
+          | TargetState::ApplyAssigned
+          | TargetState::Nacked
+      ))
+}
+
 fn rollback_directive(targets: &[RolloutTarget]) -> RolloutDirective {
   RolloutDirective::RollBack(
     targets
       .iter()
       .filter(|target| {
-        matches!(
-          target.state,
-          TargetState::Applying
-            | TargetState::Acked
-            | TargetState::Nacked
-            | TargetState::RollingBack
-        )
+        target.effect_started_at.is_some()
+          || matches!(
+            target.state,
+            TargetState::Applying
+              | TargetState::Acked
+              | TargetState::RollbackAssigned
+              | TargetState::RollingBack
+          )
       })
       .map(|target| target.instance_id.clone())
       .collect(),
@@ -153,8 +167,10 @@ fn apply_ready_targets(targets: &[RolloutTarget], exclude: Option<&str>) -> Vec<
   targets
     .iter()
     .filter(|target| {
-      target.state == TargetState::Applying
-        && exclude.is_none_or(|excluded| target.instance_id != excluded)
+      matches!(
+        target.state,
+        TargetState::Validated | TargetState::ApplyAssigned | TargetState::Applying
+      ) && exclude.is_none_or(|excluded| target.instance_id != excluded)
     })
     .map(|target| target.instance_id.clone())
     .collect()

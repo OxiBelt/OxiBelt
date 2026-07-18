@@ -608,14 +608,22 @@ pub(super) async fn begin_ipm_write(
   store: &super::store::IpmStore,
 ) -> anyhow::Result<Transaction<'static, Postgres>> {
   let mut tx = store.pool().begin().await?;
+  lock_ipm_write_tx(&mut tx).await?;
+  Ok(tx)
+}
+
+/// Serializes an IPM write inside a transaction owned by a wider control-plane
+/// operation. Callers must refresh the runtime snapshot after this lock is
+/// acquired and before evaluating authority or anti-lockout invariants.
+pub(crate) async fn lock_ipm_write_tx(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<()> {
   sqlx::query(
     "LOCK TABLE oxibelt_ipm_principals, oxibelt_ipm_credentials,
                 oxibelt_ipm_policies, oxibelt_ipm_policy_bindings
        IN SHARE ROW EXCLUSIVE MODE",
   )
-  .execute(&mut *tx)
+  .execute(&mut **tx)
   .await?;
-  Ok(tx)
+  Ok(())
 }
 
 pub(super) async fn bump_generation_tx(

@@ -2157,7 +2157,7 @@ ed25519_public_key_file = "admin-mutation/controller.ed25519.pub"
 # ml_dsa_44_public_key_file = "admin-mutation/controller.ml-dsa-44.spki"
 
 [admin.mutations.rollout]
-mode = "single_instance" # supported; admin_cluster is reserved and rejects protected writes
+mode = "single_instance" # single_instance | admin_cluster
 cluster_id = "edge-a"
 members = []
 instance_id_env = "OXIBELT_INSTANCE_ID"
@@ -2175,16 +2175,67 @@ files, and never contain private key material. The Ed25519 file contains the
 `ed25519_ml_dsa_44` is accepted
 only when the post-quantum build feature is present and requires both public
 keys and both valid signatures over the same suite-bound transcript; there is
-no automatic downgrade. `artifact_key_env` supplies a 32-byte AEAD key used
-only to retain rollback artifacts. It must not be placed directly in TOML,
-audit events, mutation receipts, or support bundles.
+no automatic downgrade. `artifact_key_env` supplies a base64-encoded 32-byte
+AEAD key used for encrypted cluster commands and rollback artifacts. Every
+member in one fixed cluster must receive the same key through a protected
+external secret channel and keep it stable across restarts. The key and
+plaintext artifacts must not be placed in TOML, PostgreSQL, audit events,
+mutation receipts, support bundles, or logs.
 
-`admin_cluster` is a reserved fixed-member rollout mode. Its configuration
-shape, encrypted artifact storage, and durable coordination primitives are
-reserved for future wiring, but configuration validation currently rejects
-selecting the mode. A defense-in-depth request-path guard returns `503` if such
-a runtime is constructed. Do not use the heartbeat view as convergence proof.
-`single_instance` is the supported P1-13 runtime.
+`admin_cluster` is the supported fixed-member rollout mode. It requires all of
+the following:
+
+- `[admin.mutations] mode = "required"` and the existing same-PostgreSQL
+  mutation-ledger and enforcing-audit requirements;
+- `OXIBELT_CONFIG_ROLLOUT_MODE=admin_cluster` and
+  `[runtime.hot_reload] mode = "off"`;
+- a non-empty cluster ID and 2 through 1,024 unique member IDs;
+- `instance_id_env` naming a valid environment variable whose value is one
+  configured member;
+- `artifact_key_env` containing exactly 32 base64-encoded bytes;
+- heartbeat interval `1..=60` seconds, stale interval at least twice heartbeat
+  and at most 300 seconds, canary observation `1..=600` seconds, phase timeout
+  greater than observation and at most 3,600 seconds, and rollback timeout
+  `1..=3,600` seconds.
+
+Member order is not significant. OxiBelt derives the signed membership target
+from the cluster ID and canonical sorted member set. All members must use the
+same membership, compatible build/capability version, and artifact key. A
+missing, extra, stale, duplicate, incompatible, or differently keyed member
+keeps durable write authority unavailable. Membership changes are an offline
+operation: stop protected writes, allow old leases and nonterminal rollouts to
+finish or expire, deploy the exact new set, and wait for every member to report
+the same baseline revision/digest before admitting work. Do not reuse a cluster
+ID to overlap old and new live memberships.
+
+The PostgreSQL state machine uses database-time leases and monotonic fencing
+epochs. It durably claims the signed request and encrypted command, validates
+on every member, applies to a deterministic canary, observes it, expands to all
+remaining members, and commits only after every exact member ACKs the same
+revision and digest. NACK, timeout, readiness loss, or mismatch rolls back every
+member that may have applied. An outcome that cannot prove convergence or
+restoration is `indeterminate` and blocks later protected writes.
+
+The ordinary winning HTTP request waits up to 30 seconds for terminal
+convergence and never returns its normal successful response early. If work is
+still active it returns `409 mutation_in_progress` with `Location` and
+`Retry-After`; disconnecting or reaching that timeout does not cancel ordinary
+durable work, and the redacted mutation receipt is the recovery interface.
+Credential create/rotate uses a longer bounded delivery window equal to four
+configured phase timeouts plus the rollback timeout and stale-member interval.
+Its plaintext token is process-local and non-replayable, so the admission-origin
+request owns a cancellation-safe rendezvous through every forward phase. Owner
+loss fails before an effect or initiates rollback; an origin crash prevents
+forward takeover and reaches rollback after the durable phase timeout rather
+than committing a credential whose token cannot be returned. Configuration,
+file, downstream-TLS, and key changes are applied per member. IPM and
+break-glass changes use a staged PostgreSQL mutation published once after all
+members validate; the deterministic canary observes it first, then every
+remaining member observes the same revision and digest before terminal commit.
+Failure restores the encrypted before-image once, and an unprovable restoration
+becomes `indeterminate`. Typed secret reference
+activation remains unavailable and returns
+`409 secret_reference_activation_unavailable`.
 
 Protected requests carry unpadded base64url JSON in
 `X-OxiBelt-Mutation`. The strict envelope contains `version`, `signer_id`, a
@@ -2485,9 +2536,12 @@ Config read endpoints use `config:GetStatus` and `config:GetEffective`; validate
 the authenticated actor's protected request or callers with
 `admin:ReadMutations` on `mutation/<request_id>`. `GET
 /admin/v1/config/instances` returns configured member IDs plus currently live
-heartbeat records; reserved `admin_cluster` mode does not treat this as rollout
-convergence proof. `POST /admin/v1/keys/rotate` verifies and reloads only the
-configured default or SNI downstream TLS key path. `POST
+heartbeat records. In `admin_cluster` mode it also reports the canonical
+membership revision, durable authority/readiness, a safe blocking reason, the
+active rollout summary, and per-instance configured/live/ready/compatible
+status. This bounded read view is diagnostic; terminal mutation commit is the
+authoritative convergence proof. `POST /admin/v1/keys/rotate` verifies and
+reloads only the configured default or SNI downstream TLS key path. `POST
 /admin/v1/config/secret-references/update` validates the allowlisted reference
 shape but returns `409` because atomic activation is unavailable. Break-glass activation is
 exposed through `GET /admin/v1/break-glass/activations/self`,
@@ -3675,8 +3729,9 @@ Configuration validation rejects:
   same-backend enforcing audit, a valid retained-response/expiry window, or at
   least one contained principal-bound signer key; hybrid signers without the
   post-quantum feature or both public keys; two-factor break glass without
-  mutation protection; or selection of the reserved fixed-member
-  `admin_cluster` mutation rollout mode.
+  mutation protection; or `admin_cluster` without matching process mode,
+  disabled hot reload, a valid shared artifact key, an exact 2..=1,024-member
+  set containing the local instance, or bounded rollout timing values.
 - Invalid rate, connection, cache, health, security-header, database, WAF, pattern-set, OxiRule, or budget settings.
 
 ## Minimal Example

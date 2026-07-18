@@ -2,8 +2,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::postgres::PgPoolOptions;
-
 use super::artifact::{
   ArtifactBinding, MutationArtifactCipher, MutationArtifactPlaintext, sha256_digest,
 };
@@ -14,14 +12,9 @@ use super::store::{MutationStore, init_postgres};
 
 #[tokio::test]
 async fn postgres_artifact_is_ciphertext_only_and_bound_to_a_live_member() {
-  let Ok(url) = std::env::var("OXIBELT_TEST_MUTATION_POSTGRES_URL") else {
+  let Some(pool) = super::postgres_test_support::connect("mutation artifact tests").await else {
     return;
   };
-  let pool = PgPoolOptions::new()
-    .max_connections(4)
-    .connect(&url)
-    .await
-    .expect("mutation artifact test PostgreSQL connection");
   init_postgres(&pool)
     .await
     .expect("mutation artifact test schema initialization");
@@ -33,7 +26,8 @@ async fn postgres_artifact_is_ciphertext_only_and_bound_to_a_live_member() {
       .expect("test clock")
       .as_nanos()
   );
-  let store = MutationStore::new(pool.clone(), namespace.clone()).expect("artifact test store");
+  let store =
+    MutationStore::new_cluster(pool.clone(), namespace.clone()).expect("artifact test store");
   let membership = sha256_digest(b"edge-a,edge-b");
   let old_digest = sha256_digest(b"old config");
   let plaintext = br#"{"config":"exact","secret_reference":"vault://edge/key"}"#;
@@ -65,6 +59,7 @@ async fn postgres_artifact_is_ciphertext_only_and_bound_to_a_live_member() {
       boot_id: "boot-a".to_string(),
       build_version: env!("CARGO_PKG_VERSION").to_string(),
       capability_version: "admin-mutation-rollout-v1".to_string(),
+      artifact_key_fingerprint: sha256_digest(b"test artifact key"),
       membership_revision: membership.clone(),
       assigned_revision: None,
       applied_revision: "r-1".to_string(),

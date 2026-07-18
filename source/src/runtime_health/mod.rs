@@ -58,11 +58,12 @@ pub(crate) enum RuntimeSubsystem {
   Ipm,
   ClientIdentity,
   AdminAudit,
+  AdminMutation,
   Waf,
 }
 
 impl RuntimeSubsystem {
-  pub(crate) const ALL: [Self; 14] = [
+  pub(crate) const ALL: [Self; 15] = [
     Self::AppState,
     Self::TaskRegistry,
     Self::ResponseCache,
@@ -76,6 +77,7 @@ impl RuntimeSubsystem {
     Self::Ipm,
     Self::ClientIdentity,
     Self::AdminAudit,
+    Self::AdminMutation,
     Self::Waf,
   ];
 
@@ -96,6 +98,7 @@ impl RuntimeSubsystem {
       Self::Ipm => "ipm",
       Self::ClientIdentity => "client_identity",
       Self::AdminAudit => "admin_audit",
+      Self::AdminMutation => "admin_mutation",
       Self::Waf => "waf",
     }
   }
@@ -114,10 +117,13 @@ pub(crate) enum RuntimeTaskKind {
   PoolHealth,
   OverloadSampler,
   UpstreamDiscovery,
+  AdminMutationHeartbeat,
+  AdminMutationMember,
+  AdminMutationCoordinator,
 }
 
 impl RuntimeTaskKind {
-  pub(crate) const ALL: [Self; 10] = [
+  pub(crate) const ALL: [Self; 13] = [
     Self::HttpConnection,
     Self::AdminConnection,
     Self::OpsConnection,
@@ -128,6 +134,9 @@ impl RuntimeTaskKind {
     Self::PoolHealth,
     Self::OverloadSampler,
     Self::UpstreamDiscovery,
+    Self::AdminMutationHeartbeat,
+    Self::AdminMutationMember,
+    Self::AdminMutationCoordinator,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -144,6 +153,9 @@ impl RuntimeTaskKind {
       Self::PoolHealth => "pool_health",
       Self::OverloadSampler => "overload_sampler",
       Self::UpstreamDiscovery => "upstream_discovery",
+      Self::AdminMutationHeartbeat => "admin_mutation_heartbeat",
+      Self::AdminMutationMember => "admin_mutation_member",
+      Self::AdminMutationCoordinator => "admin_mutation_coordinator",
     }
   }
 }

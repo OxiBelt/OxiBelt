@@ -5,10 +5,14 @@ fn binding(plaintext: &[u8]) -> ArtifactBinding {
     namespace: "edge".to_string(),
     request_id: "00000000-0000-4000-8000-000000000001".to_string(),
     fingerprint: sha256_digest(b"signed-transcript"),
+    principal: "controller".to_string(),
+    signer_id: "controller-1".to_string(),
+    action: "config.load".to_string(),
     resource: "config".to_string(),
     cluster_id: "edge-cluster".to_string(),
     membership_revision: sha256_digest(b"edge-a,edge-b"),
     new_revision: "r-2".to_string(),
+    expected_previous_revision: "r-1".to_string(),
     content_digest: sha256_digest(plaintext),
   }
 }
@@ -111,4 +115,14 @@ fn artifact_aad_is_unambiguous_across_field_boundaries() {
     left.additional_data().expect("left AAD"),
     right.additional_data().expect("right AAD")
   );
+}
+
+#[test]
+fn artifact_key_fingerprint_is_stable_and_domain_separated() {
+  let first = MutationArtifactCipher::new(&[7; 32], 1024).expect("first cipher");
+  let same = MutationArtifactCipher::new(&[7; 32], 1024).expect("same cipher");
+  let different = MutationArtifactCipher::new(&[8; 32], 1024).expect("different cipher");
+  assert_eq!(first.key_fingerprint(), same.key_fingerprint());
+  assert_ne!(first.key_fingerprint(), different.key_fingerprint());
+  assert_ne!(first.key_fingerprint(), sha256_digest(&[7; 32]));
 }
