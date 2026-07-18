@@ -14,7 +14,7 @@ use http::Method;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::admin_mutation::{ClusterAuthorizationCheck, CoordinatorFence};
+use crate::admin_mutation::{ClusterAuthorizationCheck, ClusterMutationCommand, CoordinatorFence};
 use crate::ipm::{
   IpmActor, IpmAdminMutation, IpmBindingCreate, IpmCredentialCreate, IpmCredentialPatch,
   IpmCredentialRevoke, IpmCredentialRotate, IpmPolicyCreate, IpmPolicyPatch, IpmPrincipalCreate,
@@ -424,24 +424,19 @@ pub(crate) struct SharedMutationKindEvidence(SharedMutationKind);
 impl SharedMutationKindEvidence {
   pub(crate) fn attach(
     self,
-    method: Method,
-    path: String,
-    principal: String,
-    previous_revision: String,
-    operational_precondition_revision: String,
-    candidate_revision: String,
-    candidate_digest: String,
-    body: &[u8],
+    command: &ClusterMutationCommand,
+    path: &str,
+    candidate_digest: &str,
   ) -> SharedStagedOperation {
     SharedStagedOperation {
-      method,
-      path,
-      principal,
-      previous_revision,
-      operational_precondition_revision,
-      candidate_revision,
-      candidate_digest,
-      body: Zeroizing::new(body.to_vec()),
+      method: command.method.clone(),
+      path: path.to_string(),
+      principal: command.principal.clone(),
+      previous_revision: command.expected_previous_revision.clone(),
+      operational_precondition_revision: command.precondition_revision.clone(),
+      candidate_revision: command.new_revision.clone(),
+      candidate_digest: candidate_digest.to_string(),
+      body: Zeroizing::new(command.body().to_vec()),
       kind: self.0,
     }
   }

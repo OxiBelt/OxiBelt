@@ -169,7 +169,7 @@ async fn member_loop_running(
   observed: &[ObservedResourceHead],
   shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-  activate_resource_heads(&runtime, &executor, publisher, &observed).await?;
+  activate_resource_heads(runtime, executor, publisher, observed).await?;
   let mut ticker = interval(WORK_INTERVAL);
   ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
   loop {
@@ -180,7 +180,7 @@ async fn member_loop_running(
       }
       _ = ticker.tick() => {
         for work in runtime.cluster_member_work().await? {
-          if let Err(error) = process_member_work(&runtime, &executor, publisher, work).await {
+          if let Err(error) = process_member_work(runtime, executor, publisher, work).await {
             warn!(error = %error, "Admin cluster member work failed");
           }
         }

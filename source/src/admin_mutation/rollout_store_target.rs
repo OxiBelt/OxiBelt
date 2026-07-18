@@ -84,12 +84,14 @@ pub(crate) async fn transition_target_fenced(
       store,
       &mut tx,
       member,
-      transition.applied_revision.as_deref(),
-      transition.applied_digest.as_deref(),
-      &row.try_get::<String, _>("resource")?,
-      &row.try_get::<String, _>("new_revision")?,
-      &row.try_get::<String, _>("content_digest")?,
-      "ACK",
+      TargetEvidence {
+        revision: transition.applied_revision.as_deref(),
+        digest: transition.applied_digest.as_deref(),
+        resource: &row.try_get::<String, _>("resource")?,
+        expected_revision: &row.try_get::<String, _>("new_revision")?,
+        expected_digest: &row.try_get::<String, _>("content_digest")?,
+        kind: "ACK",
+      },
     )
     .await?;
   }
@@ -98,12 +100,14 @@ pub(crate) async fn transition_target_fenced(
       store,
       &mut tx,
       member,
-      transition.restored_revision.as_deref(),
-      transition.restored_digest.as_deref(),
-      &row.try_get::<String, _>("resource")?,
-      &row.try_get::<String, _>("expected_previous_revision")?,
-      &row.try_get::<String, _>("prior_digest")?,
-      "rollback",
+      TargetEvidence {
+        revision: transition.restored_revision.as_deref(),
+        digest: transition.restored_digest.as_deref(),
+        resource: &row.try_get::<String, _>("resource")?,
+        expected_revision: &row.try_get::<String, _>("expected_previous_revision")?,
+        expected_digest: &row.try_get::<String, _>("prior_digest")?,
+        kind: "rollback",
+      },
     )
     .await?;
   }
@@ -145,20 +149,26 @@ pub(crate) async fn transition_target_fenced(
   target_from_row(&selected)
 }
 
+struct TargetEvidence<'a> {
+  revision: Option<&'a str>,
+  digest: Option<&'a str>,
+  resource: &'a str,
+  expected_revision: &'a str,
+  expected_digest: &'a str,
+  kind: &'static str,
+}
+
 async fn verify_evidence(
   store: &MutationStore,
   tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
   member: &MemberFence,
-  revision: Option<&str>,
-  digest: Option<&str>,
-  resource: &str,
-  expected_revision: &str,
-  expected_digest: &str,
-  kind: &str,
+  evidence: TargetEvidence<'_>,
 ) -> anyhow::Result<()> {
   ensure!(
-    revision == Some(expected_revision) && digest == Some(expected_digest),
-    "{kind} evidence does not match the durable mutation"
+    evidence.revision == Some(evidence.expected_revision)
+      && evidence.digest == Some(evidence.expected_digest),
+    "{} evidence does not match the durable mutation",
+    evidence.kind
   );
   let (head_revision, head_digest): (String, String) = sqlx::query_as(
     "SELECT applied_revision,applied_digest FROM oxibelt_admin_instance_resource_heads
@@ -170,12 +180,14 @@ async fn verify_evidence(
   .bind(&member.instance_id)
   .bind(&member.boot_id)
   .bind(member.instance_epoch)
-  .bind(resource)
+  .bind(evidence.resource)
   .fetch_one(&mut **tx)
   .await?;
   ensure!(
-    revision == Some(head_revision.as_str()) && digest == Some(head_digest.as_str()),
-    "{kind} evidence does not match the live member resource head"
+    evidence.revision == Some(head_revision.as_str())
+      && evidence.digest == Some(head_digest.as_str()),
+    "{} evidence does not match the live member resource head",
+    evidence.kind
   );
   Ok(())
 }

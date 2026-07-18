@@ -590,8 +590,7 @@ async fn admin_response_inner(
       state.clone(),
       admin_control.clone(),
       &authorization,
-      authenticated_with_break_glass,
-      authentication.credential_kind(),
+      &authentication,
       &method,
       &path,
     )

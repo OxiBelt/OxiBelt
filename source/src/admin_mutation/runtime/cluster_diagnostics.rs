@@ -120,7 +120,7 @@ impl AdminMutationRuntime {
         store
           .load_revision(resource)
           .await?
-          .map(|value| serde_json::to_value(value))
+          .map(serde_json::to_value)
           .transpose()?
           .unwrap_or(Value::Null),
       );

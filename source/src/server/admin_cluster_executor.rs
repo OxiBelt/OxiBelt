@@ -172,20 +172,12 @@ impl AdminClusterExecutor {
       admin_update_config: command.authorization.admin_update_config,
       ipm_update_config: command.authorization.ipm_update_config,
     };
+    let candidate_digest = command.signed_content_digest();
     let shared = if kind == OperationKind::SharedStaged {
       let (evidence, _) =
         decode_shared_operation(&command.method, path, command.body(), &command.principal)
           .map_err(|error| rejected(error.to_string()))?;
-      Some(evidence.attach(
-        command.method.clone(),
-        path.to_string(),
-        command.principal.clone(),
-        command.expected_previous_revision.clone(),
-        command.precondition_revision.clone(),
-        command.new_revision.clone(),
-        command.signed_content_digest(),
-        command.body(),
-      ))
+      Some(evidence.attach(command, path, &candidate_digest))
     } else {
       None
     };
@@ -198,7 +190,7 @@ impl AdminClusterExecutor {
       previous_revision: command.expected_previous_revision.clone(),
       operational_precondition_revision: command.precondition_revision.clone(),
       candidate_revision: command.new_revision.clone(),
-      candidate_digest: command.signed_content_digest(),
+      candidate_digest,
       body: Zeroizing::new(command.body().to_vec()),
       permissions,
       file_apply,

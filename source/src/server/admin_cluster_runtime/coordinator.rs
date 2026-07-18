@@ -283,7 +283,7 @@ fn transition_plan(
       target
         .state
         .may_transition_to(next_state)
-        .then(|| TargetPlan {
+        .then_some(TargetPlan {
           instance_id,
           expected_state: target.state,
           expected_state_version: target.state_version,

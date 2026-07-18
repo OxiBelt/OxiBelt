@@ -18,7 +18,7 @@ use crate::proxy::http::response::text_response;
 use crate::state::AppHandle;
 
 use super::admin::json_response;
-use super::admin_auth::AdminAuthorization;
+use super::admin_auth::{AdminAuthentication, AdminAuthorization};
 use super::admin_body::collect_admin_request_bytes;
 use super::admin_cluster_executor::authorization_checks;
 use super::admin_control::{self, AdminControlHandle};
@@ -58,8 +58,7 @@ pub(super) async fn response(
   state: AppHandle,
   admin_control: AdminControlHandle,
   authorization: &AdminAuthorization<'_>,
-  authenticated_with_break_glass: bool,
-  credential_kind: &str,
+  authentication: &AdminAuthentication,
   method: &Method,
   path: &str,
 ) -> Response<ProxyBody> {
@@ -80,7 +79,7 @@ pub(super) async fn response(
       method,
       path,
       None,
-      authenticated_with_break_glass,
+      authentication.authenticated_with_break_glass(),
     )
     .await
     .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
@@ -150,8 +149,8 @@ pub(super) async fn response(
         &parts.uri,
         &authorization.actor.principal,
         authorization.actor,
-        credential_kind,
-        authenticated_with_break_glass,
+        authentication.credential_kind(),
+        authentication.authenticated_with_break_glass(),
         &bytes,
         action,
         resource,
@@ -221,7 +220,7 @@ pub(super) async fn response(
     state,
     admin_control,
     authorization,
-    authenticated_with_break_glass,
+    authentication.authenticated_with_break_glass(),
     method,
     path,
     &execution.request_id,

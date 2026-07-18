@@ -307,7 +307,7 @@ struct PublicationContext {
 }
 
 enum AppliedEffect {
-  Ipm(IpmTransactionalMutationResult),
+  Ipm(Box<IpmTransactionalMutationResult>),
   BreakGlass {
     checkpoint: crate::admin_mutation::BreakGlassMutationCheckpoint,
     safe_response: serde_json::Value,
@@ -373,7 +373,7 @@ async fn apply_effect(
   maximum_break_glass_ttl: u64,
 ) -> anyhow::Result<AppliedEffect> {
   if let Some(mutation) = operation.ipm_mutation()? {
-    return Ok(AppliedEffect::Ipm(
+    return Ok(AppliedEffect::Ipm(Box::new(
       ipm
         .apply_admin_mutation_tx(
           transaction.transaction(),
@@ -382,7 +382,7 @@ async fn apply_effect(
           mutation,
         )
         .await?,
-    ));
+    )));
   }
   ipm
     .validate_admin_mutation_tx_precondition(
