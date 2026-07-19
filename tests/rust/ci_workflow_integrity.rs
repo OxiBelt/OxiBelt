@@ -2628,6 +2628,39 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
       "bounded burst helper should preserve {expected}"
     );
   }
+
+  let lifecycle = &scripts[4];
+  for expected in [
+    "docker exec \"${http_container}\" python /opt/mock_upstream/client.py",
+    "--target-host 127.0.0.1",
+    "--timeout 2",
+    ".waiting == 0 and .released == false",
+    "for _attempt in $(seq 1 100)",
+    "signal_drain_gate_request GET",
+    "signal_drain_gate_request POST",
+  ] {
+    assert!(
+      lifecycle.contains(expected),
+      "the lifecycle drain fixture should preserve bounded readiness behavior {expected}"
+    );
+  }
+  assert!(
+    !lifecycle.contains("seq 1 300"),
+    "the lifecycle drain fixture should not poll beyond the upstream gate deadline"
+  );
+  let gate_ready = lifecycle
+    .find(".waiting == 0 and .released == false")
+    .expect("the lifecycle drain fixture should wait for the empty upstream gate");
+  let proxy_ready = lifecycle
+    .find("plain_client_request_with_headers_on_port 9091 \"proxy\" \"/ready\" 200")
+    .expect("the lifecycle drain fixture should wait for proxy readiness");
+  let probe_start = lifecycle
+    .find("for index in 1 2 3 4")
+    .expect("the lifecycle drain fixture should launch the H2 and H3 probes");
+  assert!(
+    gate_ready < probe_start && proxy_ready < probe_start,
+    "the lifecycle drain fixture should establish mock and proxy readiness before launching probes"
+  );
 }
 
 #[test]

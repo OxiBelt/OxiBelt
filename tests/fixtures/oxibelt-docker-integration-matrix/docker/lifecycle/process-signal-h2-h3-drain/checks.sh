@@ -1,3 +1,20 @@
+signal_drain_gate_request() {
+  local method="$1"
+  local path="$2"
+
+  docker exec "${http_container}" python /opt/mock_upstream/client.py \
+    --target-host 127.0.0.1 \
+    --scheme http \
+    --port 18080 \
+    --host mock-http \
+    --method "${method}" \
+    --path "${path}" \
+    --body "" \
+    --dump-response-json \
+    --expect-status 200 \
+    --timeout 2
+}
+
 run_case_checks() {
   local gate_id="shutdown-drain"
   local gate_status=""
@@ -12,6 +29,14 @@ run_case_checks() {
   local -a drain_client_pids=()
   local -a drain_client_protocols=()
   local -a drain_client_bodies=()
+
+  gate_status="$(plain_client_request_with_headers_to_target \
+    "mock-http" 18080 "mock-http" "/__fault/gates/${gate_id}" 200 "GET" "")"
+  assert_response_jq \
+    "${gate_status}" \
+    ".body | fromjson | .id == \"${gate_id}\" and .waiting == 0 and .released == false"
+  response="$(plain_client_request_with_headers_on_port 9091 "proxy" "/ready" 200 "GET" "")"
+  assert_response_jq "${response}" '.body == "ready"'
 
   for index in 1 2 3 4; do
     start_signal_drain_probe \
@@ -34,9 +59,8 @@ run_case_checks() {
       drain_client_bodies
   done
 
-  for _attempt in $(seq 1 300); do
-    gate_status="$(plain_client_request_with_headers_to_target \
-      "mock-http" 18080 "mock-http" "/__fault/gates/${gate_id}" 200 "GET" "")"
+  for _attempt in $(seq 1 100); do
+    gate_status="$(signal_drain_gate_request GET "/__fault/gates/${gate_id}")"
     if jq -e '.body | fromjson | .waiting == 8 and .released == false' \
       <<<"${gate_status}" >/dev/null; then
       break
@@ -56,8 +80,7 @@ run_case_checks() {
   assert_response_jq "${response}" '.body == "live"'
 
   docker kill --signal TERM "${proxy_container}" >/dev/null
-  response="$(plain_client_request_with_headers_to_target \
-    "mock-http" 18080 "mock-http" "/__fault/gates/${gate_id}/release" 200 "POST" "")"
+  response="$(signal_drain_gate_request POST "/__fault/gates/${gate_id}/release")"
   assert_body_jq "${response}" ".id == \"${gate_id}\" and .released == true"
 
   for index in "${!drain_client_pids[@]}"; do
