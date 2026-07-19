@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::cli::RunArgs;
 use super::health::ControllerHealth;
-use super::kubernetes_time::rfc3339_now;
+use super::kubernetes_time::rfc3339_micro_now;
 use super::watch::{KUBERNETES_MAX_BODY_BYTES, KubernetesPoller};
 
 const LEASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -222,16 +222,37 @@ pub async fn run_leader_election(
 
     let wait = if leadership.is_leader() {
       wait_for_shutdown(config.retry_period, &mut shutdown).await
-    } else {
-      tokio::select! {
-        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
-        result = watch_lease_once(&kubernetes, &config) => {
-          if let Err(error) = result {
-            warn!(error = %error, lease = %config.lease_name, "Lease watch ended; reconnecting from a fresh GET");
+    } else if let Some(resource_version) = observed
+      .as_ref()
+      .map(|lease| lease.resource_version.clone())
+    {
+      let watch_started_at = Instant::now();
+      let watch_result = tokio::select! {
+        changed = shutdown.changed() => {
+          if changed.is_err() || *shutdown.borrow() {
+            None
+          } else {
+            Some(Ok(()))
           }
-          false
+        },
+        result = watch_lease_once(&kubernetes, &config, &resource_version) => Some(result),
+      };
+      match watch_result {
+        None => true,
+        Some(Ok(())) => false,
+        Some(Err(error)) => {
+          warn!(error = %error, lease = %config.lease_name, "Lease watch ended; reconnecting from a fresh GET");
+          wait_for_shutdown(
+            config
+              .retry_period
+              .saturating_sub(watch_started_at.elapsed()),
+            &mut shutdown,
+          )
+          .await
         }
       }
+    } else {
+      wait_for_shutdown(config.retry_period, &mut shutdown).await
     };
     if wait {
       break;
@@ -341,7 +362,7 @@ fn build_lease_patch(
 ) -> anyhow::Result<Value> {
   let resource_version = required_string(lease, "/metadata/resourceVersion")?;
   let uid = required_string(lease, "/metadata/uid")?;
-  let now = rfc3339_now();
+  let now = rfc3339_micro_now();
   let mut operations = vec![
     json!({"op":"test", "path":"/metadata/resourceVersion", "value":resource_version}),
     json!({"op":"test", "path":"/metadata/uid", "value":uid}),
@@ -352,11 +373,11 @@ fn build_lease_patch(
   let mut spec = json!({
     "holderIdentity": identity,
     "leaseDurationSeconds": config.lease_duration.as_secs(),
-    "renewTime": now,
+    "renewTime": now.clone(),
     "leaseTransitions": epoch,
   });
   if acquiring {
-    spec["acquireTime"] = Value::String(rfc3339_now());
+    spec["acquireTime"] = Value::String(now);
   } else if let Some(acquire_time) = lease.pointer("/spec/acquireTime") {
     spec["acquireTime"] = acquire_time.clone();
   }
@@ -400,8 +421,11 @@ async fn patch_lease(
     Some(body),
   )
   .await?;
-  if status == StatusCode::CONFLICT || status == StatusCode::UNPROCESSABLE_ENTITY {
-    bail!("Lease changed while acquiring or renewing leadership");
+  if status == StatusCode::CONFLICT {
+    bail!("Lease changed while acquiring or renewing leadership (HTTP 409 Conflict)");
+  }
+  if status == StatusCode::UNPROCESSABLE_ENTITY {
+    bail!("Kubernetes rejected the Lease update (HTTP 422 Unprocessable Entity)");
   }
   if !status.is_success() {
     bail!(
@@ -484,6 +508,7 @@ async fn lease_request(
 async fn watch_lease_once(
   kubernetes: &KubernetesPoller,
   config: &LeaderElectionConfig,
+  resource_version: &str,
 ) -> anyhow::Result<()> {
   let mut url = kubernetes.base_url.clone();
   url.set_path(&config.lease_collection_path());
@@ -496,6 +521,7 @@ async fn watch_lease_once(
     );
     query.append_pair("watch", "true");
     query.append_pair("allowWatchBookmarks", "true");
+    query.append_pair("resourceVersion", resource_version);
     query.append_pair(
       "timeoutSeconds",
       &config.retry_period.as_secs().max(1).to_string(),
@@ -526,19 +552,58 @@ async fn watch_lease_once(
       let Some(data) = frame.data_ref() else {
         continue;
       };
-      if buffer.len().saturating_add(data.len()) > MAX_WATCH_EVENT_BYTES {
-        bail!("Kubernetes Lease watch event exceeded {MAX_WATCH_EVENT_BYTES} bytes");
-      }
-      buffer.extend_from_slice(data);
-      if buffer.contains(&b'\n') {
-        break;
+      for chunk in data.split_inclusive(|byte| *byte == b'\n') {
+        if buffer.len().saturating_add(chunk.len()) > MAX_WATCH_EVENT_BYTES {
+          bail!("Kubernetes Lease watch event exceeded {MAX_WATCH_EVENT_BYTES} bytes");
+        }
+        buffer.extend_from_slice(chunk);
+        if chunk.last() != Some(&b'\n') {
+          continue;
+        }
+        let mut event_len = buffer.len().saturating_sub(1);
+        if event_len > 0 && buffer[event_len - 1] == b'\r' {
+          event_len -= 1;
+        }
+        let refresh = if buffer[..event_len]
+          .iter()
+          .all(|byte| byte.is_ascii_whitespace())
+        {
+          false
+        } else {
+          watch_event_requests_refresh(&buffer[..event_len])?
+        };
+        buffer.clear();
+        if refresh {
+          return Ok(());
+        }
       }
     }
-    Ok::<(), anyhow::Error>(())
+    if !buffer.is_empty() {
+      bail!("Kubernetes Lease watch ended with an incomplete event");
+    }
+    bail!("Kubernetes Lease watch ended before a material event")
   })
   .await
   .context("Kubernetes Lease watch timed out")??;
   Ok(())
+}
+
+fn watch_event_requests_refresh(event: &[u8]) -> anyhow::Result<bool> {
+  let event: Value =
+    serde_json::from_slice(event).context("failed to parse Kubernetes Lease watch event")?;
+  match event.get("type").and_then(Value::as_str) {
+    Some("BOOKMARK") => Ok(false),
+    Some("ADDED" | "MODIFIED" | "DELETED") => Ok(true),
+    Some("ERROR") => {
+      if event.pointer("/object/code").and_then(Value::as_u64) == Some(410) {
+        Ok(true)
+      } else {
+        bail!("Kubernetes Lease watch returned a non-recoverable ERROR event")
+      }
+    }
+    Some(_) => bail!("Kubernetes Lease watch returned an unsupported event type"),
+    None => bail!("Kubernetes Lease watch event has no valid type"),
+  }
 }
 
 fn required_string<'a>(value: &'a Value, pointer: &str) -> anyhow::Result<&'a str> {

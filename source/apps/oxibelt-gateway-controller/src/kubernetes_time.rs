@@ -1,19 +1,35 @@
 //! Minimal UTC timestamp formatting for Kubernetes condition and Lease fields.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn rfc3339_now() -> String {
-  let seconds = SystemTime::now()
+  let duration = duration_since_epoch();
+  format_rfc3339(duration.as_secs() as i64, None)
+}
+
+pub fn rfc3339_micro_now() -> String {
+  let duration = duration_since_epoch();
+  format_rfc3339(duration.as_secs() as i64, Some(duration.subsec_micros()))
+}
+
+fn duration_since_epoch() -> Duration {
+  SystemTime::now()
     .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_secs() as i64)
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
+
+fn format_rfc3339(seconds: i64, fractional_micros: Option<u32>) -> String {
   let days = seconds.div_euclid(86_400);
   let seconds_of_day = seconds.rem_euclid(86_400);
   let (year, month, day) = civil_from_days(days);
   let hour = seconds_of_day / 3_600;
   let minute = seconds_of_day % 3_600 / 60;
   let second = seconds_of_day % 60;
-  format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+  if let Some(micros) = fractional_micros {
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z")
+  } else {
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+  }
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
