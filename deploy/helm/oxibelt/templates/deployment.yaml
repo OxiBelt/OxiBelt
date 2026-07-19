@@ -8,6 +8,7 @@
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
+{{- $cacheVolumeEnabled := eq (include "oxibelt.cacheVolumeEnabled" .) "true" -}}
 {{- if eq .Values.workload.kind "Deployment" }}
 apiVersion: apps/v1
 kind: Deployment
@@ -90,7 +91,7 @@ spec:
       - name: oxibelt
         image: {{ include "oxibelt.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
-        command: ["/usr/local/bin/oxibelt"]
+        command: [{{ include "oxibelt.imageExecutable" . | quote }}]
         args:
         - "--config"
         - "{{ .Values.config.mountPath }}/{{ .Values.config.key }}"
@@ -99,7 +100,7 @@ spec:
           preStop:
             exec:
               command:
-              - /usr/local/bin/oxibelt
+              - {{ include "oxibelt.imageExecutable" . }}
               - __lifecycle-prestop
               - --wait-seconds
               - {{ int .Values.lifecycle.preStop.drainSeconds | quote }}
@@ -206,8 +207,10 @@ spec:
           mountPath: {{ .Values.oxirule.mountPath }}
           readOnly: true
         {{- end }}
+        {{- if $cacheVolumeEnabled }}
         - name: cache
           mountPath: /var/cache/oxibelt
+        {{- end }}
         {{- with .Values.extraVolumeMounts }}
 {{ toYaml . | indent 8 }}
         {{- end }}
@@ -289,8 +292,14 @@ spec:
               - key: ca.crt
                 path: ca.crt
       {{- end }}
+      {{- if $cacheVolumeEnabled }}
       - name: cache
-        emptyDir: {}
+        emptyDir:
+          {{- if .Values.cacheVolume.sizeLimit }}
+          sizeLimit: {{ .Values.cacheVolume.sizeLimit | quote }}
+          {{- else }} {}
+          {{- end }}
+      {{- end }}
 {{- with .Values.extraVolumes }}
 {{ toYaml . | indent 6 }}
 {{- end }}

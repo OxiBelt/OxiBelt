@@ -41,6 +41,7 @@ RUN apt-get update && \
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY source ./source
+COPY source/apps/oxibelt-dataplane-strict ./source/apps/oxibelt-dataplane-strict
 COPY source/apps/oxibelt-gateway-controller ./source/apps/oxibelt-gateway-controller
 COPY source/apps/oxibelt-keysigner ./source/apps/oxibelt-keysigner
 COPY source/apps/oxibelt-netport-switcher ./source/apps/oxibelt-netport-switcher
@@ -159,6 +160,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       exit 1; \
     fi
 
+FROM builder AS strict-dataplane-builder
+
+COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/repo/target,sharing=locked \
+    . /tmp/oxibelt-build-env && \
+    cargo build --locked --release -p oxibelt-dataplane-strict --bin oxibelt-dataplane-strict \
+      --no-default-features --target "${OXIBELT_BUILD_RUST_TARGET}" && \
+    install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt-dataplane-strict" \
+      /tmp/oxibelt-dataplane-strict && \
+    if readelf -l /tmp/oxibelt-dataplane-strict | grep -q 'Requesting program interpreter'; then \
+      echo "strict data-plane binary must be statically linked" >&2; \
+      exit 1; \
+    fi && \
+    printf '%s\n' 'oxibelt:x:10001:10001:OxiBelt strict data plane:/nonexistent:/sbin/nologin' \
+      >/tmp/oxibelt-strict-passwd && \
+    printf '%s\n' 'oxibelt:x:10001:' >/tmp/oxibelt-strict-group && \
+    chmod 0644 /tmp/oxibelt-strict-passwd /tmp/oxibelt-strict-group
+
 FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime
 
 RUN apk --no-cache upgrade && \
@@ -178,6 +198,20 @@ RUN apk --no-cache upgrade && \
 
 COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
 RUN chmod 0644 /etc/oxibelt/config/oxibelt.toml
+
+FROM runtime AS strict-runtime
+
+# Derive the strict default from the compatibility example while removing every
+# Admin TOML table. The strict executable also rejects Admin configuration at
+# startup and reload, so this build step cannot weaken the runtime boundary.
+RUN awk '\
+      /^[[:space:]]*\[\[?[[:space:]]*admin([[:space:]]*[.][^][]+)*[[:space:]]*\]\]?[[:space:]]*(#.*)?$/ { drop_admin = 1; next } \
+      /^[[:space:]]*\[/ { drop_admin = 0 } \
+      !drop_admin { print } \
+    ' /etc/oxibelt/config/oxibelt.toml >/tmp/oxibelt-strict.toml && \
+    ! grep -Eq '^[[:space:]]*\[\[?[[:space:]]*admin([[:space:]]*[.]|[[:space:]]*\])' /tmp/oxibelt-strict.toml && \
+    install -m 0644 /tmp/oxibelt-strict.toml /etc/oxibelt/config/oxibelt.toml && \
+    rm -f /tmp/oxibelt-strict.toml
 
 FROM scratch AS role-metadata
 
@@ -215,6 +249,39 @@ EXPOSE 8443/tcp
 EXPOSE 8443/udp
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"]
+
+FROM scratch AS dataplane-strict
+
+ARG OXIBELT_VERSION
+ARG OXIBELT_REVISION
+ARG OXIBELT_CREATED
+ARG OXIBELT_SOURCE
+ARG OXIBELT_REF_NAME
+
+LABEL org.opencontainers.image.title="OxiBelt strict data plane" \
+      org.opencontainers.image.description="Compile-time Admin-free OxiBelt public data-plane runtime" \
+      org.opencontainers.image.source="${OXIBELT_SOURCE}" \
+      org.opencontainers.image.url="${OXIBELT_SOURCE}" \
+      org.opencontainers.image.version="${OXIBELT_VERSION}" \
+      org.opencontainers.image.ref.name="${OXIBELT_REF_NAME}" \
+      org.opencontainers.image.revision="${OXIBELT_REVISION}" \
+      org.opencontainers.image.created="${OXIBELT_CREATED}" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.oxibelt.image.role="dataplane-strict"
+
+COPY --from=strict-dataplane-builder /tmp/oxibelt-strict-passwd /etc/passwd
+COPY --from=strict-dataplane-builder /tmp/oxibelt-strict-group /etc/group
+COPY --from=runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=strict-runtime /etc/oxibelt /etc/oxibelt
+COPY --from=strict-runtime /app /app
+COPY --from=strict-dataplane-builder /tmp/oxibelt-dataplane-strict /usr/local/bin/oxibelt-dataplane-strict
+
+WORKDIR /app
+USER 10001:10001
+EXPOSE 8443/tcp
+EXPOSE 8443/udp
+STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/local/bin/oxibelt-dataplane-strict", "--config", "/etc/oxibelt/config/oxibelt.toml"]
 
 FROM role-metadata AS controller
 

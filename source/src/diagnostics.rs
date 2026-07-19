@@ -15,6 +15,7 @@ mod discovery_probe;
 mod probes;
 mod rules;
 mod sarif;
+#[cfg(feature = "admin-runtime")]
 mod support_bundle;
 mod system;
 mod tls_checks;
@@ -23,6 +24,7 @@ mod upstream_probe;
 #[cfg(test)]
 mod doctor_contract_tests;
 
+#[cfg(feature = "admin-runtime")]
 pub use support_bundle::{
   RuntimeSnapshot, SupportBundle, build_runtime_snapshot, build_support_bundle,
 };
@@ -353,6 +355,7 @@ pub(crate) fn validate_config_for_diagnostics(config: &Config) -> Result<(), Dia
   config.validate().map_err(validation_config_report)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn external_probe_target_resources(
   config: &Config,
   options: &DoctorOptions,

@@ -33,10 +33,12 @@ impl IpmStore {
     Self { pool, namespace }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn pool(&self) -> &Pool<Postgres> {
     &self.pool
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn namespace(&self) -> &str {
     &self.namespace
   }
@@ -249,6 +251,7 @@ async fn load_principals(
             groups,
           },
           enabled: row.try_get("enabled")?,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Store,
         },
       ))
@@ -284,14 +287,17 @@ async fn load_credentials(
         principal: row.try_get("principal_id")?,
         source: IpmEntrySource::Store,
         bearer_token_env: String::new(),
+        #[cfg(feature = "admin-runtime")]
         break_glass_access_token_hash: None,
         enabled: row.try_get("enabled")?,
         revoked: row.try_get("revoked")?,
         expires_at: row.try_get("expires_at")?,
         expires_at_unix: row.try_get("expires_at_unix")?,
+        #[cfg(feature = "admin-runtime")]
         token_prefix: row.try_get("token_prefix")?,
         token_hash: row.try_get("token_hash")?,
         token_hash_alg: Some(alg),
+        #[cfg(feature = "admin-runtime")]
         previous_token_prefix: row.try_get("previous_token_prefix")?,
         previous_token_hash: row.try_get("previous_token_hash")?,
         previous_token_overlap_until: row.try_get("previous_token_overlap_until")?,
@@ -328,6 +334,7 @@ async fn load_policies(
         IpmPolicyRuntime {
           policy,
           enabled: row.try_get("enabled")?,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Store,
         },
       ))
@@ -357,6 +364,7 @@ async fn load_bindings(
         group: row.try_get("group_name")?,
         policy: row.try_get("policy_id")?,
         enabled: row.try_get("enabled")?,
+        #[cfg(feature = "admin-runtime")]
         source: IpmEntrySource::Store,
       })
     })

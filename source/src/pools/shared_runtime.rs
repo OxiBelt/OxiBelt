@@ -108,6 +108,7 @@ impl PoolState {
     Ok(selection)
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn snapshots_async(&self) -> Vec<super::PoolRuntimeSnapshot> {
     for pool in self.pools.values() {
       self.refresh_shared_pool_view(pool).await;
@@ -115,6 +116,7 @@ impl PoolState {
     self.snapshots()
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn snapshot_async(&self, pool_name: &str) -> Option<super::PoolRuntimeSnapshot> {
     let pool = self.pools.get(pool_name)?;
     self.refresh_shared_pool_view(pool).await;

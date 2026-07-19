@@ -92,6 +92,15 @@ Base-image digest pinning (P2-2), vulnerability admission thresholds,
 freshness, rollback prevention, code-review proof, and reproducible-build proof
 remain separate controls.
 
+The optional strict data-plane release is a separate
+`oxibelt-dataplane-strict` package, executable, and OCI repository. It retains
+Person Proof and the public data-plane behavior but is compiled without the
+Admin listener, Admin mutation/operation/cluster runtime, or Admin OpenAPI
+asset. The compatibility `oxibelt` package and existing standalone/default
+build remain unchanged. A workspace-wide all-features build is not evidence of
+strict isolation; release acceptance uses an isolated package graph plus
+binary, image-filesystem, listener, Helm-role, SBOM, and provenance checks.
+
 ## Request Pipeline
 
 At a high level, each HTTP transaction follows this order:

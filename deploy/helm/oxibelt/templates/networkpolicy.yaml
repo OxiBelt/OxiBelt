@@ -1,4 +1,6 @@
 {{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- include "oxibelt.validateOperationalProfile" . -}}
+{{- include "oxibelt.validateAdmin" . -}}
 {{- if .Values.networkPolicy.enabled -}}
 {{- $public := .Values.networkPolicy.ingress.public -}}
 {{- $metrics := .Values.networkPolicy.ingress.metrics -}}

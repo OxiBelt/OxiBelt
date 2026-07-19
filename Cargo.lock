@@ -2874,6 +2874,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibelt-dataplane-strict"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nix",
+ "oxibelt",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "oxibelt-deployment-diagnostics"
 version = "0.0.0"
 dependencies = [

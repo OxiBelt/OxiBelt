@@ -11,6 +11,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
   CertificateError, DigitallySignedStruct, DistinguishedName, Error, OtherError, SignatureScheme,
 };
+#[cfg(feature = "admin-runtime")]
 use serde::Serialize;
 
 use super::{crlite, crlite_managed, ocsp};
@@ -34,19 +35,23 @@ struct OutboundRevocationInner {
   control_http: ControlHttpClient,
   metrics: Arc<Metrics>,
   ocsp_cache: Mutex<HashMap<Vec<u8>, CachedOcspResponse>>,
+  #[cfg(feature = "admin-runtime")]
   ocsp_contexts: Mutex<HashMap<Vec<u8>, CachedOcspContext>>,
   ocsp_fetches: Mutex<HashSet<Vec<u8>>>,
   managed_filters: Vec<ManagedCrlitePolicy>,
+  #[cfg(feature = "admin-runtime")]
   status: Mutex<OutboundRevocationRuntimeStatus>,
 }
 
 #[derive(Clone, Debug)]
 struct CachedOcspResponse {
   response_der: Vec<u8>,
+  #[cfg(feature = "admin-runtime")]
   this_update: SystemTime,
   next_update: SystemTime,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Clone)]
 struct CachedOcspContext {
   policy: OutboundTlsRevocationConfig,
@@ -59,6 +64,7 @@ struct ManagedCrlitePolicy {
   filter: Arc<crlite_managed::ManagedFilter>,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Clone, Debug, Serialize)]
 pub struct OutboundRevocationRuntimeStatus {
   pub enabled: bool,
@@ -80,6 +86,9 @@ impl OutboundRevocationRuntime {
         .context("failed to build outbound revocation bootstrap HTTP client")?;
     let (managed_filters, initial_crlite_error_code) =
       load_managed_crlite_filters(config, &metrics).await?;
+    #[cfg(not(feature = "admin-runtime"))]
+    drop(initial_crlite_error_code);
+    #[cfg(feature = "admin-runtime")]
     let crlite_managed_filters = managed_filters.len();
     Ok(Self {
       inner: Arc::new(OutboundRevocationInner {
@@ -88,9 +97,11 @@ impl OutboundRevocationRuntime {
         control_http,
         metrics,
         ocsp_cache: Mutex::new(HashMap::new()),
+        #[cfg(feature = "admin-runtime")]
         ocsp_contexts: Mutex::new(HashMap::new()),
         ocsp_fetches: Mutex::new(HashSet::new()),
         managed_filters,
+        #[cfg(feature = "admin-runtime")]
         status: Mutex::new(OutboundRevocationRuntimeStatus {
           enabled,
           ocsp_mode: default_policy.ocsp.mode.as_str().to_string(),
@@ -136,6 +147,7 @@ impl OutboundRevocationRuntime {
     })
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn status(&self) -> OutboundRevocationRuntimeStatus {
     let mut status = self
       .inner
@@ -168,6 +180,7 @@ impl OutboundRevocationRuntime {
     status
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn refresh(&self) {
     let contexts = self
       .inner
@@ -232,6 +245,7 @@ impl OutboundRevocationRuntime {
     }
 
     let key = certificate_cache_key(end_entity.as_ref());
+    #[cfg(feature = "admin-runtime")]
     self.remember_ocsp_context(&key, policy, &context);
     if let Some(cached) = self.cached_ocsp_response(&key) {
       return match ocsp::verify_ocsp_response(&context.verification, &cached.response_der) {
@@ -308,6 +322,7 @@ impl OutboundRevocationRuntime {
       }
       Err(error) => {
         let code = crlite::classify_crlite_error(&error);
+        #[cfg(feature = "admin-runtime")]
         self.set_crlite_error(code);
         self.inner.metrics.record_outbound_revocation_crlite_error();
         if policy.crlite.failure_policy == CrliteFailurePolicy::FailClosed {
@@ -329,6 +344,7 @@ impl OutboundRevocationRuntime {
     Some(cached.clone())
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn remember_ocsp_context(
     &self,
     key: &[u8],
@@ -401,6 +417,7 @@ impl OutboundRevocationRuntime {
     let verified = ocsp::verify_ocsp_response(&context.verification, response.body.as_ref())?;
     let cached = CachedOcspResponse {
       response_der: verified.response_der,
+      #[cfg(feature = "admin-runtime")]
       this_update: verified.this_update,
       next_update: verified.next_update,
     };
@@ -427,8 +444,9 @@ impl OutboundRevocationRuntime {
       fetches.remove(key);
     }
     match result {
-      Ok(cached) => {
+      Ok(_cached) => {
         self.inner.metrics.record_outbound_revocation_ocsp_success();
+        #[cfg(feature = "admin-runtime")]
         if let Ok(mut status) = self.inner.status.lock() {
           status.last_ocsp_error_code = None;
           status.ocsp_cache_entries = self
@@ -437,12 +455,13 @@ impl OutboundRevocationRuntime {
             .lock()
             .map(|cache| cache.len())
             .unwrap_or_default();
-          let _ = ocsp::next_refresh_time(cached.this_update, cached.next_update, 10);
+          let _ = ocsp::next_refresh_time(_cached.this_update, _cached.next_update, 10);
         }
       }
       Err(error) => {
-        let code = ocsp::classify_ocsp_error(&error);
-        self.set_ocsp_error(code);
+        let _code = ocsp::classify_ocsp_error(&error);
+        #[cfg(feature = "admin-runtime")]
+        self.set_ocsp_error(_code);
         self.inner.metrics.record_outbound_revocation_ocsp_error();
       }
     }
@@ -454,6 +473,7 @@ impl OutboundRevocationRuntime {
     error: anyhow::Error,
   ) -> anyhow::Result<()> {
     let code = ocsp::classify_ocsp_error(&error);
+    #[cfg(feature = "admin-runtime")]
     self.set_ocsp_error(code);
     self.inner.metrics.record_outbound_revocation_ocsp_error();
     if code == "ocsp_cert_status" {
@@ -465,12 +485,14 @@ impl OutboundRevocationRuntime {
     Ok(())
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn set_ocsp_error(&self, code: &'static str) {
     if let Ok(mut status) = self.inner.status.lock() {
       status.last_ocsp_error_code = Some(code.to_string());
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn set_crlite_error(&self, code: &'static str) {
     if let Ok(mut status) = self.inner.status.lock() {
       status.last_crlite_error_code = Some(code.to_string());

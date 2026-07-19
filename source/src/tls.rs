@@ -9,18 +9,21 @@ use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::CertificateDer;
 use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) use self::certificate_io::validate_local_certificate_key_pair;
 use self::certificate_io::{end_entity_cert, load_certs, load_private_key};
 use self::negotiation::{
   downstream_crypto_provider_for_policy, downstream_crypto_provider_for_tls12,
   downstream_crypto_provider_for_tls13,
 };
+#[cfg(feature = "admin-runtime")]
+use crate::config::AdminTlsConfig;
 use crate::config::{
-  AdminTlsConfig, CryptoConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig,
-  TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion,
-  TurnListenerTlsConfig,
+  CryptoConfig, QuicConfig, QuicZeroRttMode, TlsClientAuthConfig, TlsClientAuthMode, TlsConfig,
+  TlsKeyExchangeGroup, TlsNegotiationPolicy, TlsVersion, TurnListenerTlsConfig,
 };
 
+#[cfg(feature = "admin-runtime")]
 mod admin_quic;
 mod cert_metadata;
 mod certificate_io;
@@ -40,11 +43,16 @@ mod resumption;
 mod server_policy;
 mod upstream_client;
 pub(crate) use cert_metadata::{
-  ParsedCertificateMetadata, VerifiedClientCertificate, VerifiedClientCertificateIdentity,
-  client_certificate_metadata, parse_certificate_metadata, verified_client_certificate,
+  ParsedCertificateMetadata, client_certificate_metadata, parse_certificate_metadata,
+};
+#[cfg(feature = "admin-runtime")]
+pub(crate) use cert_metadata::{
+  VerifiedClientCertificate, VerifiedClientCertificateIdentity, verified_client_certificate,
 };
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resumption;
+#[cfg(feature = "admin-runtime")]
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
@@ -53,9 +61,11 @@ use downstream_tcp::{
   build_downstream_tcp_server_config_for_tls13,
 };
 pub use downstream_tcp::{build_server_config, build_server_config_with_resumption};
+#[cfg(feature = "admin-runtime")]
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
+#[cfg(feature = "admin-runtime")]
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;
 pub(crate) use redis_client::{
   RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config,
@@ -254,12 +264,14 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
 }
 
 /// Builds the TCP TLS server configuration for the admin listener.
+#[cfg(feature = "admin-runtime")]
 pub fn build_admin_server_config(tls: &AdminTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
   let crypto = CryptoConfig::default();
   build_admin_server_config_with_crypto_and_resumption(&crypto, tls, None)
 }
 
 /// Builds the admin TCP TLS server configuration with optional shared resumption storage.
+#[cfg(feature = "admin-runtime")]
 pub fn build_admin_server_config_with_resumption(
   tls: &AdminTlsConfig,
   resumption_state: Option<&TlsResumptionState>,
@@ -268,6 +280,7 @@ pub fn build_admin_server_config_with_resumption(
   build_admin_server_config_with_crypto_and_resumption(&crypto, tls, resumption_state)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
   crypto: &CryptoConfig,
   tls: &AdminTlsConfig,
@@ -584,12 +597,14 @@ fn load_remote_turn_certified_key(
 }
 
 #[derive(Debug)]
+#[cfg(feature = "admin-runtime")]
 struct AdminCertificate {
   server_names: Vec<String>,
   certified_key: Arc<CertifiedKey>,
 }
 
 #[derive(Debug)]
+#[cfg(feature = "admin-runtime")]
 struct AdminCertResolver {
   certificates: Vec<AdminCertificate>,
   default: Option<Arc<CertifiedKey>>,
@@ -597,6 +612,7 @@ struct AdminCertResolver {
   reject_unknown_sni: bool,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl rustls::server::ResolvesServerCert for AdminCertResolver {
   fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
     let Some(server_name) = client_hello.server_name() else {
@@ -617,6 +633,7 @@ impl rustls::server::ResolvesServerCert for AdminCertResolver {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn select_admin_certificate_by_names<'a, T>(
   certificates: &'a [T],
   server_name: &str,
@@ -714,33 +731,9 @@ fn tls_protocol_versions(
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use super::{select_admin_certificate_by_names, sni_matches};
+#[cfg(all(test, feature = "admin-runtime"))]
+mod tests;
 
-  #[test]
-  fn sni_matches_without_lowercase_allocation() {
-    assert!(sni_matches("admin.example.test", "Admin.Example.Test"));
-    assert!(sni_matches("*.example.test", "Admin.Example.Test"));
-    assert!(!sni_matches("*.example.test", "deep.admin.example.test"));
-    assert!(!sni_matches("*.example.test", "example.test"));
-  }
-
-  #[test]
-  fn admin_certificate_selection_prefers_exact_name_before_wildcard() {
-    let certificates = vec![
-      vec!["*.example.test".to_string()],
-      vec!["admin.example.test".to_string()],
-    ];
-
-    let selected =
-      select_admin_certificate_by_names(&certificates, "Admin.Example.Test", Vec::as_slice)
-        .expect("admin certificate should match");
-
-    assert_eq!(selected, &certificates[1]);
-  }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 #[path = "tls/admin_client_auth_tests.rs"]
 mod admin_client_auth_tests;

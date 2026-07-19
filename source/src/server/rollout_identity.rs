@@ -39,6 +39,7 @@ pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Resp
         snapshot,
       ));
     }
+    #[cfg(feature = "admin-runtime")]
     if !snapshot.admin_mutations.cluster_rollout_ready() {
       return Some(with_rollout_identity_headers(
         text_response(
@@ -71,6 +72,7 @@ pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Resp
   None
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn immutable_mutation_rejected() -> Response<ProxyBody> {
   text_response(
     StatusCode::CONFLICT,
@@ -147,6 +149,7 @@ fn with_config_revision_headers(
 mod tests {
   use super::*;
 
+  #[cfg(feature = "admin-runtime")]
   #[test]
   fn immutable_mutation_boundary_returns_conflict() {
     assert_eq!(immutable_mutation_rejected().status(), StatusCode::CONFLICT,);

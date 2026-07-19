@@ -18,6 +18,7 @@ pub(super) fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml>
   load_toml_document(path, &HashMap::new(), &mut stack)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn load_toml_with_includes_and_overrides(
   path: &Path,
   overrides: &HashMap<PathBuf, Option<String>>,

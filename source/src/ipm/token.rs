@@ -1,14 +1,19 @@
 //! IPM bearer-token hashing and verification.
 //! Token material is compared through hashes so plaintext credentials do not enter snapshots.
 
+#[cfg(feature = "admin-runtime")]
 use base64::Engine;
 use subtle::ConstantTimeEq;
 
 pub(super) const TOKEN_HASH_ALG: &str = "sha256-v1";
+#[cfg(feature = "admin-runtime")]
 const TOKEN_PREFIX: &str = "obt_v1_";
+#[cfg(feature = "admin-runtime")]
 const TOKEN_BYTES: usize = 32;
+#[cfg(feature = "admin-runtime")]
 const TOKEN_LIST_PREFIX_BYTES: usize = 18;
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn generate_token() -> anyhow::Result<GeneratedToken> {
   let mut bytes = [0_u8; TOKEN_BYTES];
   crate::crypto::random_fill(&mut bytes)
@@ -28,6 +33,7 @@ pub(super) fn hash_token(token: &str) -> String {
   hex_encode(&crate::crypto::sha256(token.as_bytes()))
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn token_prefix(token: &str) -> String {
   token.chars().take(TOKEN_LIST_PREFIX_BYTES).collect()
 }
@@ -59,12 +65,14 @@ pub(super) fn hex_encode(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "admin-runtime")]
 pub(super) struct GeneratedToken {
   pub token: String,
   pub prefix: String,
   pub hash: String,
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn expires_clause(
   ttl_seconds: Option<i64>,
   expires_at: &Option<String>,
@@ -85,6 +93,7 @@ pub(super) fn expires_clause(
   Ok(())
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn require_expiry(
   ttl_seconds: Option<i64>,
   expires_at: &Option<String>,

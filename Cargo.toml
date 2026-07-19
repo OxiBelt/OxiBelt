@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "source",
+  "source/apps/oxibelt-dataplane-strict",
   "source/apps/oxibelt-gateway-controller",
   "source/apps/oxibelt-keysigner",
   "source/apps/oxibelt-netport-switcher",

@@ -1,14 +1,17 @@
 use std::path::PathBuf;
+#[cfg(feature = "admin-runtime")]
 use std::time::Duration;
 
+#[cfg(feature = "admin-runtime")]
 use url::Url;
 
 use crate::config::Config;
 
+#[cfg(feature = "admin-runtime")]
+use super::SecretReferenceUpdateRequest;
+#[cfg(feature = "admin-runtime")]
 use super::resolver::resolve_contained_file_path;
-use super::{
-  SecretActivationError, SecretMaterialType, SecretProviderIdentity, SecretReferenceUpdateRequest,
-};
+use super::{SecretActivationError, SecretMaterialType, SecretProviderIdentity};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum SecretReferenceField {
@@ -33,6 +36,7 @@ pub(super) struct SecretReferenceSpec {
 }
 
 impl SecretReferenceField {
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn parse(raw: &str) -> Result<Self, SecretActivationError> {
     match raw {
       "tls.remote_signer.token_env" => return Ok(Self::TlsRemoteSignerTokenEnv),
@@ -77,6 +81,7 @@ impl SecretReferenceField {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) const fn is_file(&self) -> bool {
     matches!(self, Self::TlsRemoteSignerTokenFile)
   }
@@ -107,6 +112,7 @@ impl SecretReferenceField {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn apply(
     &self,
     config: &mut Config,
@@ -230,6 +236,7 @@ impl SecretReferenceField {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(super) fn upstream_tls_preflight(&self, config: &Config) -> Option<(Url, Duration)> {
     let (url, timeout_ms) = match self {
       Self::ExternalAuthClientIdEnv(name) | Self::ExternalAuthClientSecretEnv(name) => {
@@ -389,6 +396,7 @@ fn push_env(
   });
 }
 
+#[cfg(feature = "admin-runtime")]
 fn checked_component(raw: &str) -> Result<String, SecretActivationError> {
   if raw.is_empty()
     || raw.len() > 256
@@ -401,6 +409,7 @@ fn checked_component(raw: &str) -> Result<String, SecretActivationError> {
   Ok(raw.to_string())
 }
 
+#[cfg(feature = "admin-runtime")]
 fn remove_remote_signer_file_tracking(config: &mut Config) {
   let Some(logical) = config
     .source_paths

@@ -113,6 +113,7 @@ impl ExternalCacheLookupRequest {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ExternalCachePurgeKind {
@@ -121,6 +122,7 @@ pub(crate) enum ExternalCachePurgeKind {
   Tag,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ExternalCachePurgeRequest {
   pub protocol_version: String,
@@ -135,6 +137,7 @@ pub(crate) struct ExternalCachePurgeRequest {
   pub partition: Option<String>,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl ExternalCachePurgeRequest {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
@@ -162,6 +165,7 @@ impl ExternalCachePurgeRequest {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ExternalCachePurgeResponse {
   #[serde(default)]

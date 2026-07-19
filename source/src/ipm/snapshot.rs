@@ -39,6 +39,7 @@ pub struct IpmSnapshotCounts {
 pub(crate) struct IpmPrincipalRuntime {
   pub(crate) actor: IpmActor,
   pub(crate) enabled: bool,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) source: IpmEntrySource,
 }
 
@@ -46,6 +47,7 @@ pub(crate) struct IpmPrincipalRuntime {
 pub(crate) struct IpmPolicyRuntime {
   pub(crate) policy: IpmPolicyConfig,
   pub(crate) enabled: bool,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) source: IpmEntrySource,
 }
 
@@ -56,6 +58,7 @@ pub(crate) struct IpmBindingRuntime {
   pub(crate) group: Option<String>,
   pub(crate) policy: String,
   pub(crate) enabled: bool,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) source: IpmEntrySource,
 }
 
@@ -65,14 +68,17 @@ pub(crate) struct IpmCredentialRuntime {
   pub(crate) principal: String,
   pub(crate) source: IpmEntrySource,
   pub(crate) bearer_token_env: String,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) break_glass_access_token_hash: Option<String>,
   pub(crate) enabled: bool,
   pub(crate) revoked: bool,
   pub(crate) expires_at: Option<String>,
   pub(crate) expires_at_unix: Option<i64>,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) token_prefix: Option<String>,
   pub(crate) token_hash: Option<String>,
   pub(crate) token_hash_alg: Option<String>,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) previous_token_prefix: Option<String>,
   pub(crate) previous_token_hash: Option<String>,
   pub(crate) previous_token_overlap_until: Option<String>,
@@ -156,6 +162,7 @@ pub(crate) fn static_snapshot(config: &crate::config::Config) -> anyhow::Result<
             groups: principal.groups.clone(),
           },
           enabled: true,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Config,
         },
       )
@@ -172,6 +179,7 @@ pub(crate) fn static_snapshot(config: &crate::config::Config) -> anyhow::Result<
         IpmPolicyRuntime {
           policy: policy.clone(),
           enabled: true,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Config,
         },
       )
@@ -187,14 +195,17 @@ pub(crate) fn static_snapshot(config: &crate::config::Config) -> anyhow::Result<
       principal: credential.principal.clone(),
       source: IpmEntrySource::Config,
       bearer_token_env: credential.bearer_token_env.clone(),
+      #[cfg(feature = "admin-runtime")]
       break_glass_access_token_hash: credential.break_glass_access_token_hash.clone(),
       enabled: true,
       revoked: false,
       expires_at: None,
       expires_at_unix: None,
+      #[cfg(feature = "admin-runtime")]
       token_prefix: None,
       token_hash: None,
       token_hash_alg: None,
+      #[cfg(feature = "admin-runtime")]
       previous_token_prefix: None,
       previous_token_hash: None,
       previous_token_overlap_until: None,
@@ -229,6 +240,7 @@ pub(crate) fn static_snapshot(config: &crate::config::Config) -> anyhow::Result<
       group: binding.group.clone(),
       policy: binding.policy.clone(),
       enabled: true,
+      #[cfg(feature = "admin-runtime")]
       source: IpmEntrySource::Config,
     });
   }

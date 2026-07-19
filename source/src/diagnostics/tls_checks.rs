@@ -16,6 +16,7 @@ use super::{DiagnosticReport, DiagnosticSeverity};
 pub(super) fn diagnose_tls(config: &Config, report: &mut DiagnosticReport) {
   diagnose_quic_host_key(config, report);
   diagnose_downstream_tls(config, report);
+  #[cfg(feature = "admin-runtime")]
   diagnose_admin_tls(config, report);
   diagnose_turn_tls(config, report);
   diagnose_client_auth_roots(config, report);
@@ -90,6 +91,7 @@ fn diagnose_downstream_tls(config: &Config, report: &mut DiagnosticReport) {
   check_ocsp_file(config, report);
 }
 
+#[cfg(feature = "admin-runtime")]
 fn diagnose_admin_tls(config: &Config, report: &mut DiagnosticReport) {
   if !config.admin.enabled || !config.admin.tls.enabled {
     return;

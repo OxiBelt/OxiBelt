@@ -3,13 +3,17 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "admin-runtime")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+#[cfg(feature = "admin-runtime")]
 use crate::diagnostics::{RuntimeSnapshot, build_runtime_snapshot};
+#[cfg(feature = "admin-runtime")]
 use crate::state::AppSnapshot;
 
+#[cfg(feature = "admin-runtime")]
 const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Default)]
@@ -158,6 +162,7 @@ impl Drop for RuntimeCounterGuard {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg(feature = "admin-runtime")]
 pub struct RuntimeIntrospection {
   pub metadata: RuntimeIntrospectionMetadata,
   pub runtime: RuntimeSnapshot,
@@ -165,6 +170,7 @@ pub struct RuntimeIntrospection {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg(feature = "admin-runtime")]
 pub struct RuntimeIntrospectionMetadata {
   pub format_version: u32,
   pub generated_at_unix_ms: u64,
@@ -215,6 +221,7 @@ pub struct TurnConnectionSnapshot {
   pub tls_connections_active: usize,
 }
 
+#[cfg(feature = "admin-runtime")]
 pub fn build_runtime_introspection(snapshot: &AppSnapshot) -> RuntimeIntrospection {
   RuntimeIntrospection {
     metadata: RuntimeIntrospectionMetadata {
@@ -228,6 +235,7 @@ pub fn build_runtime_introspection(snapshot: &AppSnapshot) -> RuntimeIntrospecti
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn now_unix_ms() -> u64 {
   SystemTime::now()
     .duration_since(UNIX_EPOCH)

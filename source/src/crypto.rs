@@ -70,6 +70,7 @@ pub(crate) fn random_fill(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
   getrandom::fill(bytes)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn sha1(bytes: &[u8]) -> [u8; SHA1_LEN] {
   let digest = Sha1::digest(bytes);
   let mut out = [0u8; SHA1_LEN];

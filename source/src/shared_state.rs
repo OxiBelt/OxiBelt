@@ -51,7 +51,9 @@ use runtime::{BackendRuntime, CleanupDispatcher, SharedPoolWarningLimiter};
 
 pub use cache_lock::SharedCacheLock;
 pub use cache_store::shared_header_values;
-pub(crate) use failure_policy::{BackendFeatureFailureStatus, SharedStateFeature};
+#[cfg(feature = "admin-runtime")]
+pub(crate) use failure_policy::BackendFeatureFailureStatus;
+pub(crate) use failure_policy::SharedStateFeature;
 pub use person_proof::{
   PersonProofSharedClearance, PersonProofSharedClearancePage, PersonProofSharedStatus,
 };
@@ -432,6 +434,7 @@ impl SharedState {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn backend_failure_statuses(&self) -> Vec<BackendFeatureFailureStatus> {
     self.failure_registry.statuses()
   }

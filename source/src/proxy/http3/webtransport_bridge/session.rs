@@ -27,9 +27,11 @@ use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContex
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
 use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
+#[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportSessionRegistration;
 
 #[path = "session/admin_commands.rs"]
+#[cfg(feature = "admin-runtime")]
 mod admin_commands;
 #[path = "session/connection_limits.rs"]
 mod connection_limits;
@@ -44,6 +46,9 @@ mod state;
 #[path = "session/task_reporting.rs"]
 mod task_reporting;
 
+#[cfg(feature = "admin-runtime")]
+pub(super) use admin_commands::close_session_with_code;
+#[cfg(feature = "admin-runtime")]
 use admin_commands::spawn_admin_session_command_forwarder;
 use connection_limits::acquire_webtransport_session_permits;
 pub(super) use index::WebTransportSessionIndex;
@@ -93,12 +98,14 @@ pub(super) async fn accept_webtransport_session(
     }
   };
 
+  #[cfg(feature = "admin-runtime")]
   let registration = WebTransportSessionRegistration {
     route: prepared.route_name.clone(),
     upstream: prepared.upstream.name.clone(),
     peer_ip: peer_addr.ip(),
     client_ip: prepared.client_addr.ip(),
   };
+  #[cfg(feature = "admin-runtime")]
   if snapshot.webtransport_admin.is_draining(&registration) {
     respond_to_h3_request(
       stream,
@@ -185,7 +192,9 @@ pub(super) async fn accept_webtransport_session(
   let inserted_session = session_index.insert(connect_stream_id);
   debug_assert_eq!(inserted_session, session_id);
   let upstream = Arc::new(upstream);
+  #[cfg(feature = "admin-runtime")]
   let (admin_command_tx, admin_command_rx) = tokio::sync::mpsc::unbounded_channel();
+  #[cfg(feature = "admin-runtime")]
   let admin_guard = snapshot
     .webtransport_admin
     .register(registration, admin_command_tx)
@@ -209,17 +218,22 @@ pub(super) async fn accept_webtransport_session(
     stream_waf_state.clone(),
     stream_waf.clone(),
   );
-  let mut tasks = tasks;
-  tasks.push(spawn_admin_session_command_forwarder(
-    session_id,
-    admin_command_rx,
-    events,
-  ));
+  #[cfg(feature = "admin-runtime")]
+  let tasks = {
+    let mut tasks = tasks;
+    tasks.push(spawn_admin_session_command_forwarder(
+      session_id,
+      admin_command_rx,
+      events,
+    ));
+    tasks
+  };
   sessions.insert(
     session_id,
     ActiveWebTransportSession {
       upstream,
       connect_stream: stream,
+      #[cfg(feature = "admin-runtime")]
       admin_guard,
       _connection_permits: connection_permits,
       _introspection_guard: introspection_guard,
@@ -622,23 +636,6 @@ pub(super) fn close_session(
   );
 }
 
-pub(super) fn close_session_with_code(
-  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
-  session_index: &mut WebTransportSessionIndex,
-  session_id: SessionId,
-  close_code: u32,
-  reason: &[u8],
-) {
-  close_session_inner(
-    sessions,
-    session_index,
-    session_id,
-    None,
-    close_code,
-    reason,
-  );
-}
-
 fn close_session_inner(
   sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
   session_index: &mut WebTransportSessionIndex,
@@ -742,6 +739,6 @@ where
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 #[path = "session_tests.rs"]
 mod tests;

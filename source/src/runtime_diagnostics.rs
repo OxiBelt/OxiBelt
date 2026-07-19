@@ -335,6 +335,7 @@ fn load_tls_material_for_check(config: &Config) -> anyhow::Result<()> {
     )
     .context("failed to build downstream QUIC TLS config")?;
   }
+  #[cfg(not(oxibelt_strict_artifact))]
   if config.admin.enabled && config.admin.tls.enabled {
     oxibelt::tls::build_admin_server_config(&config.admin.tls)
       .context("failed to build admin TLS config")?;

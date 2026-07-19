@@ -214,17 +214,20 @@ Build the standalone compatibility image from the repository root:
 docker build --pull -t oxibelt -f source/ops/Dockerfile.alpine .
 ```
 
-The same Dockerfile exposes `dataplane`, `controller`, `tools`, and `keysigner`
-targets. For example:
+The same Dockerfile exposes `dataplane`, `dataplane-strict`, `controller`,
+`tools`, and `keysigner` targets. For example:
 
 ```sh
 docker build --pull --target dataplane -t oxibelt-dataplane -f source/ops/Dockerfile.alpine .
+docker build --pull --target dataplane-strict -t oxibelt-dataplane-strict -f source/ops/Dockerfile.alpine .
 docker build --pull --target controller -t oxibelt-gateway-controller -f source/ops/Dockerfile.alpine .
 ```
 
-The build regenerates `ui/person-proof`, validates the Person Proof and Admin
-OpenAPI inputs, and embeds both into the `oxibelt` binary. Node.js, pnpm, Cargo,
-and the Rust compiler are build-stage inputs only.
+The build regenerates and validates `ui/person-proof` for both data-plane
+artifacts. The compatibility `oxibelt` binary additionally validates and embeds
+the Admin OpenAPI input; `oxibelt-dataplane-strict` does not compile or embed
+the Admin runtime or OpenAPI asset. Node.js, pnpm, Cargo, and the Rust compiler
+are build-stage inputs only.
 
 Official releases publish these role-specific repositories from the same
 version and source revision:
@@ -233,6 +236,7 @@ version and source revision:
 | --- | --- | --- | --- |
 | `ghcr.io/oxibelt/oxibelt` | `standalone` | `oxibelt`, `oxibeltctl`, `oxibelt-keysigner`, `oxibelt-netport-switcher` | Backward-compatible single-container distribution. |
 | `ghcr.io/oxibelt/oxibelt-dataplane` | `dataplane` | `oxibelt` | Hardened public runtime with co-located Admin and Person Proof, but no operator or Kubernetes binaries. |
+| `ghcr.io/oxibelt/oxibelt-dataplane-strict` | `dataplane-strict` | `oxibelt-dataplane-strict` | Optional compile-time Admin-free public runtime with Person Proof retained. |
 | `ghcr.io/oxibelt/oxibelt-gateway-controller` | `controller` | `oxibelt-gateway-controller` | External Kubernetes orchestration. |
 | `ghcr.io/oxibelt/oxibelt-tools` | `tools` | `oxibeltctl` | Offline and Admin operator workflows. |
 | `ghcr.io/oxibelt/oxibelt-keysigner` | `keysigner` | `oxibelt-keysigner` | Optional isolated private-key operations. |
@@ -245,6 +249,14 @@ not Cosign signatures or GHCR OCI referrers. Resolve, verify, approve, and
 record an immutable digest before deployment; see [Release Image Trust and
 Attestations](docs/SupplyChain.md) for exact verification commands, platform
 and index SBOM coverage, residual trust, and historical-referrer guidance.
+
+Choose `dataplane` when the co-located Admin API or Admin mutation workflows
+are required. Choose `dataplane-strict` when configuration is delivered by
+files, signals, or immutable Kubernetes rollout and the running public process
+must be structurally incapable of opening an Admin listener. Person Proof is
+available in both roles. Switching roles requires changing the repository,
+executable, and digest together; the Helm chart performs this mapping through
+`image.role`.
 
 Published tags use strict OxiBelt release tags such
 as `15.2.0`, `15.2.0-beta.1`, or `15.2.0-build.4f43abcd`; `v`-prefixed tags

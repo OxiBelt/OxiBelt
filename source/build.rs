@@ -3,12 +3,15 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "admin-runtime")]
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const PERSON_PROOF_ASSET: &str = "assets/person-proof-challenge.html";
+#[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_ASSET: &str = "assets/admin-openapi.json";
 const PERSON_PROOF_OUTPUT: &str = "person-proof-challenge.html";
+#[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_OUTPUT: &str = "admin-openapi.json";
 
 const PERSON_PROOF_PLACEHOLDERS: &[(&str, usize)] = &[
@@ -29,6 +32,7 @@ const PERSON_PROOF_PLACEHOLDERS: &[(&str, usize)] = &[
 fn main() {
   embed_validated_assets();
 
+  println!("cargo:rustc-check-cfg=cfg(oxibelt_strict_artifact)");
   println!("cargo:rustc-check-cfg=cfg(aes_backend, values(\"soft\", \"avx256\", \"avx512\"))");
   println!("cargo:rustc-check-cfg=cfg(chacha20_avx512)");
   println!(
@@ -50,24 +54,30 @@ fn embed_validated_assets() {
   let out_dir =
     PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide the build-script OUT_DIR"));
   let person_proof_path = manifest_dir.join(PERSON_PROOF_ASSET);
+  #[cfg(feature = "admin-runtime")]
   let admin_openapi_path = manifest_dir.join(ADMIN_OPENAPI_ASSET);
 
   println!("cargo:rerun-if-changed={}", person_proof_path.display());
+  #[cfg(feature = "admin-runtime")]
   println!("cargo:rerun-if-changed={}", admin_openapi_path.display());
   println!("cargo:rerun-if-env-changed=OXIBELT_SOURCE_REVISION");
 
   let person_proof = read_asset(&person_proof_path, "Person Proof challenge");
   validate_person_proof_asset(&person_proof);
+  #[cfg(feature = "admin-runtime")]
   let admin_openapi = read_asset(&admin_openapi_path, "Admin OpenAPI document");
+  #[cfg(feature = "admin-runtime")]
   validate_admin_openapi(&admin_openapi);
 
   write_embedded_asset(&out_dir.join(PERSON_PROOF_OUTPUT), &person_proof);
+  #[cfg(feature = "admin-runtime")]
   write_embedded_asset(&out_dir.join(ADMIN_OPENAPI_OUTPUT), &admin_openapi);
 
   println!(
     "cargo:rustc-env=OXIBELT_PERSON_PROOF_ASSET_SHA256={}",
     sha256_hex(&person_proof)
   );
+  #[cfg(feature = "admin-runtime")]
   println!(
     "cargo:rustc-env=OXIBELT_ADMIN_OPENAPI_SHA256={}",
     sha256_hex(&admin_openapi)
@@ -150,6 +160,7 @@ fn placeholder_counts(text: &str) -> BTreeMap<String, usize> {
   placeholders
 }
 
+#[cfg(feature = "admin-runtime")]
 fn validate_admin_openapi(bytes: &[u8]) {
   assert!(
     (64 * 1024..=1024 * 1024).contains(&bytes.len()),

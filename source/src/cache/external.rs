@@ -2,8 +2,12 @@
 
 use super::external_handler::{
   CACHE_KEY_VERSION, ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader,
-  ExternalCacheLookupHit, ExternalCacheLookupRequest, ExternalCachePublishBody,
-  ExternalCachePurgeKind, ExternalCachePurgeRequest, ExternalCacheVary, PROTOCOL_VERSION,
+  ExternalCacheLookupHit, ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheVary,
+  PROTOCOL_VERSION,
+};
+#[cfg(feature = "admin-runtime")]
+use super::external_handler::{
+  ExternalCachePurgeKind, ExternalCachePurgeReport, ExternalCachePurgeRequest,
 };
 use super::*;
 
@@ -262,6 +266,7 @@ impl ResponseCache {
     self.external_cache.spawn_revalidate(handler, metadata);
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn purge_external_exact_partition(
     &self,
     policy: &str,
@@ -287,6 +292,7 @@ impl ResponseCache {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn purge_external_prefix_partition(
     &self,
     policy: &str,
@@ -312,6 +318,7 @@ impl ResponseCache {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn purge_external_tag_partition(
     &self,
     policy: &str,
@@ -337,6 +344,7 @@ impl ResponseCache {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   async fn purge_external(
     &self,
     policy: &str,

@@ -139,7 +139,7 @@ jobs:
               raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 5:
+          if plan["schemaVersion"] != 6:
               raise SystemExit("unsupported image release plan schema")
           if plan["version"] != tag:
               raise SystemExit("image plan version does not match release tag")
@@ -152,11 +152,12 @@ jobs:
 
           major = tag.split(".", 1)[0]
           expected_roles = {
-              "standalone": (image, "standalone", ["oxibelt", "oxibeltctl", "oxibelt-keysigner", "oxibelt-netport-switcher"], ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"], "10001:10001", ["8443/tcp", "8443/udp"], True, "oxibelt"),
-              "dataplane": (f"{image}-dataplane", "dataplane", ["oxibelt"], ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"], "10001:10001", ["8443/tcp", "8443/udp"], True, "oxibelt-dataplane"),
-              "controller": (f"{image}-gateway-controller", "controller", ["oxibelt-gateway-controller"], ["/usr/local/bin/oxibelt-gateway-controller"], "10001:10001", [], False, "oxibelt-gateway-controller"),
-              "tools": (f"{image}-tools", "tools", ["oxibeltctl"], ["/usr/local/bin/oxibeltctl"], "10001:10001", [], False, "oxibelt-tools"),
-              "keysigner": (f"{image}-keysigner", "keysigner", ["oxibelt-keysigner"], ["/usr/local/bin/oxibelt-keysigner"], "10002:10002", [], False, "oxibelt-keysigner"),
+              "standalone": (image, "standalone", ["oxibelt", "oxibeltctl", "oxibelt-keysigner", "oxibelt-netport-switcher"], ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"], "10001:10001", ["8443/tcp", "8443/udp"], ["admin-openapi", "person-proof"], "oxibelt"),
+              "dataplane": (f"{image}-dataplane", "dataplane", ["oxibelt"], ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.toml"], "10001:10001", ["8443/tcp", "8443/udp"], ["admin-openapi", "person-proof"], "oxibelt-dataplane"),
+              "dataplane-strict": (f"{image}-dataplane-strict", "dataplane-strict", ["oxibelt-dataplane-strict"], ["/usr/local/bin/oxibelt-dataplane-strict", "--config", "/etc/oxibelt/config/oxibelt.toml"], "10001:10001", ["8443/tcp", "8443/udp"], ["person-proof"], "oxibelt-dataplane-strict"),
+              "controller": (f"{image}-gateway-controller", "controller", ["oxibelt-gateway-controller"], ["/usr/local/bin/oxibelt-gateway-controller"], "10001:10001", [], [], "oxibelt-gateway-controller"),
+              "tools": (f"{image}-tools", "tools", ["oxibeltctl"], ["/usr/local/bin/oxibeltctl"], "10001:10001", [], [], "oxibelt-tools"),
+              "keysigner": (f"{image}-keysigner", "keysigner", ["oxibelt-keysigner"], ["/usr/local/bin/oxibelt-keysigner"], "10002:10002", [], [], "oxibelt-keysigner"),
           }
           roles = {role["role"]: role for role in plan["roles"]}
           if set(roles) != set(expected_roles) or len(roles) != len(plan["roles"]):
@@ -170,8 +171,8 @@ jobs:
               "riscv64": ("linux/riscv64", "riscv64", None),
           }
           artifacts = {(artifact["role"], artifact["artifactArch"]): artifact for artifact in plan["artifacts"]}
-          if len(artifacts) != 25 or len(artifacts) != len(plan["artifacts"]):
-              raise SystemExit("release plan must contain exactly 25 unique role/architecture artifacts")
+          if len(artifacts) != 30 or len(artifacts) != len(plan["artifacts"]):
+              raise SystemExit("release plan must contain exactly 30 unique role/architecture artifacts")
           for role, contract in expected_roles.items():
               role_image, docker_target, binaries, entrypoint, user, ports, embedded_assets, prefix = contract
               expected_role = {
@@ -205,8 +206,8 @@ jobs:
                       raise SystemExit(f"unexpected artifact contract for {role}/{arch}")
 
           manifests = {(manifest["role"], manifest["name"]): manifest for manifest in plan["manifests"]}
-          if len(manifests) != 10 or len(manifests) != len(plan["manifests"]):
-              raise SystemExit("release plan must contain exactly 10 unique role manifests")
+          if len(manifests) != 12 or len(manifests) != len(plan["manifests"]):
+              raise SystemExit("release plan must contain exactly 12 unique role manifests")
           for role, contract in expected_roles.items():
               role_image = contract[0]
               expected_manifests = {
@@ -293,6 +294,7 @@ jobs:
         image_role:
           - standalone
           - dataplane
+          - dataplane-strict
           - controller
           - tools
           - keysigner
@@ -309,6 +311,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller
@@ -378,6 +383,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller
@@ -431,7 +439,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 5:
+          if plan["schemaVersion"] != 6:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
@@ -639,6 +647,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller
@@ -723,6 +734,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller
@@ -889,6 +903,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller
@@ -1027,6 +1044,9 @@ jobs:
           - image_role: dataplane
             image: ghcr.io/oxibelt/oxibelt-dataplane
             artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - image_role: controller
             image: ghcr.io/oxibelt/oxibelt-gateway-controller
             artifact_prefix: oxibelt-gateway-controller

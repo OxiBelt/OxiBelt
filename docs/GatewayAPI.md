@@ -345,7 +345,12 @@ permission. The controller chart defaults to the role-specific
 `/usr/local/bin/oxibelt-gateway-controller` and intentionally excludes
 `oxibelt`, `oxibeltctl`, and the public runtime filesystem. The data-plane
 chart independently defaults to `ghcr.io/oxibelt/oxibelt-dataplane`; the two
-images must use the same release version and source revision.
+images must use the same release version and source revision. The data-plane
+chart may instead select `image.role: dataplane-strict` and
+`ghcr.io/oxibelt/oxibelt-dataplane-strict`; immutable ConfigMap rollout and
+Gateway translation do not require the Admin API. The strict role retains
+Person Proof and rejects any Admin configuration rather than falling back to
+Admin file sync.
 
 The rolling strategy uses `maxUnavailable: 0` and `maxSurge: 1`; the default
 PDB keeps `minAvailable: 1`. `replicaCount: 1` remains available for deliberate

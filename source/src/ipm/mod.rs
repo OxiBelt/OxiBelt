@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(feature = "admin-runtime")]
+use std::sync::RwLock;
 
 use anyhow::{Context, bail};
 use arc_swap::ArcSwap;
+#[cfg(feature = "admin-runtime")]
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use http::HeaderMap;
+#[cfg(feature = "admin-runtime")]
 use tokio::sync::Semaphore;
 use tracing::warn;
 
@@ -14,23 +18,37 @@ use crate::config::{
   IpmPolicyStatementConfig,
 };
 
+#[cfg(feature = "admin-runtime")]
 mod admin;
+#[cfg(feature = "admin-runtime")]
 mod admin_bindings;
+#[cfg(feature = "admin-runtime")]
 mod admin_references;
+#[cfg(feature = "admin-runtime")]
 mod admin_support;
+#[cfg(feature = "admin-runtime")]
 mod admin_transaction;
+#[cfg(feature = "admin-runtime")]
 mod admin_types;
+#[cfg(feature = "admin-runtime")]
+mod lists;
 mod refresh;
+#[cfg(feature = "admin-runtime")]
 mod simulation;
 mod snapshot;
+#[cfg(feature = "admin-runtime")]
 mod state_access;
 mod store;
 mod token;
+#[cfg(feature = "admin-runtime")]
 mod workload_identity;
+#[cfg(feature = "admin-runtime")]
 pub(crate) use admin_transaction::{
   IpmAdminMutation, IpmMutationCheckpoint, IpmTransactionalMutationResult,
 };
+#[cfg(feature = "admin-runtime")]
 pub use admin_types::*;
+#[cfg(feature = "admin-runtime")]
 pub use simulation::{
   IpmPreparedSimulation, IpmSimulationAuthorizationRequirements, IpmSimulationRequest,
   IpmSimulationResponse,
@@ -42,11 +60,13 @@ pub(crate) use snapshot::{
 pub use snapshot::{
   IpmSnapshotCounts, RedactedIpmBinding, RedactedIpmCredential, RedactedIpmPolicy,
 };
+#[cfg(feature = "admin-runtime")]
 pub(crate) use workload_identity::{
   IpmAdminBearerAuthentication, IpmAdminCredentialKind, IpmPresentedWorkloadIdentity,
   IpmWorkloadIdentity, IpmWorkloadIdentityError,
 };
 
+#[cfg(feature = "admin-runtime")]
 const BREAK_GLASS_AUTH_CONCURRENCY: usize = 1;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -91,12 +111,15 @@ struct IpmRuntimeInner {
   static_snapshot: Arc<IpmSnapshot>,
   snapshot: ArcSwap<IpmSnapshot>,
   store: Option<store::IpmStore>,
+  #[cfg(feature = "admin-runtime")]
   last_refresh: RwLock<IpmRefreshState>,
   legacy_admin_env: String,
   allow_legacy_bootstrap: bool,
+  #[cfg(feature = "admin-runtime")]
   break_glass_verifier: Arc<Semaphore>,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone)]
 struct IpmRefreshState {
   ok: bool,
@@ -104,6 +127,7 @@ struct IpmRefreshState {
   error: Option<String>,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl IpmRefreshState {
   fn ok(generation: i64) -> Self {
     Self {
@@ -127,6 +151,7 @@ impl IpmRuntime {
     let static_snapshot = static_snapshot(config)?;
     let mut active_snapshot = static_snapshot.clone();
     let mut store_runtime = None;
+    #[cfg(feature = "admin-runtime")]
     let mut refresh_state = IpmRefreshState::ok(active_snapshot.generation);
 
     if config.ipm.enabled
@@ -149,12 +174,18 @@ impl IpmRuntime {
           match store.load_snapshot(&static_snapshot).await {
             Ok(snapshot) => {
               active_snapshot = snapshot;
-              refresh_state = IpmRefreshState::ok(active_snapshot.generation);
+              #[cfg(feature = "admin-runtime")]
+              {
+                refresh_state = IpmRefreshState::ok(active_snapshot.generation);
+              }
             }
             Err(error) if !config.ipm.fail_closed => {
               let message = error.to_string();
               warn!(error = %message, "IPM PostgreSQL snapshot load failed; using static IPM config only");
-              refresh_state = IpmRefreshState::failed(active_snapshot.generation, message);
+              #[cfg(feature = "admin-runtime")]
+              {
+                refresh_state = IpmRefreshState::failed(active_snapshot.generation, message);
+              }
             }
             Err(error) => return Err(error).context("failed to load IPM PostgreSQL snapshot"),
           }
@@ -162,7 +193,10 @@ impl IpmRuntime {
         }
         Err(error) if !config.ipm.fail_closed => {
           tracing::warn!(error = %error, "IPM PostgreSQL connection failed; using static IPM config only");
-          refresh_state = IpmRefreshState::failed(active_snapshot.generation, error.to_string());
+          #[cfg(feature = "admin-runtime")]
+          {
+            refresh_state = IpmRefreshState::failed(active_snapshot.generation, error.to_string());
+          }
         }
         Err(error) => return Err(error).context("failed to connect IPM PostgreSQL backend"),
       }
@@ -174,9 +208,11 @@ impl IpmRuntime {
         static_snapshot: Arc::new(static_snapshot),
         snapshot: ArcSwap::from_pointee(active_snapshot),
         store: store_runtime,
+        #[cfg(feature = "admin-runtime")]
         last_refresh: RwLock::new(refresh_state),
         legacy_admin_env: config.admin.bearer_token_env.clone(),
         allow_legacy_bootstrap: !config.ipm.enabled,
+        #[cfg(feature = "admin-runtime")]
         break_glass_verifier: break_glass_verifier(),
       }),
     };
@@ -231,6 +267,7 @@ impl IpmRuntime {
     None
   }
 
+  #[cfg(feature = "admin-runtime")]
   async fn break_glass_actor_from_bearer(&self, bearer: &str) -> Option<IpmActor> {
     let snapshot = self.snapshot();
     for credential in &snapshot.credentials {
@@ -293,79 +330,11 @@ pub(super) fn authorize_snapshot(
 }
 
 impl IpmRuntime {
-  pub fn list_principals(&self) -> Vec<IpmActor> {
-    let snapshot = self.snapshot();
-    let mut principals = snapshot
-      .principals
-      .values()
-      .map(|principal| principal.actor.clone())
-      .collect::<Vec<_>>();
-    principals.sort_by(|left, right| left.principal.cmp(&right.principal));
-    principals
-  }
-
-  pub fn list_policies(&self) -> Vec<RedactedIpmPolicy> {
-    let snapshot = self.snapshot();
-    let mut policies = snapshot
-      .policies
-      .values()
-      .map(|policy| RedactedIpmPolicy {
-        name: policy.policy.name.clone(),
-        version: policy.policy.version.clone(),
-        statements: policy.policy.statements.clone(),
-        enabled: policy.enabled,
-        source: policy.source,
-      })
-      .collect::<Vec<_>>();
-    policies.sort_by(|left, right| left.name.cmp(&right.name));
-    policies
-  }
-
-  pub fn list_credentials(&self) -> Vec<RedactedIpmCredential> {
-    let snapshot = self.snapshot();
-    let mut credentials = snapshot
-      .credentials
-      .iter()
-      .map(|credential| RedactedIpmCredential {
-        name: credential.name.clone(),
-        principal: credential.principal.clone(),
-        bearer_token_env: credential.bearer_token_env.clone(),
-        break_glass_access: credential.break_glass_access_token_hash.is_some(),
-        source: credential.source,
-        enabled: credential.enabled,
-        revoked: credential.revoked,
-        expires_at: credential.expires_at.clone(),
-        token_prefix: credential.token_prefix.clone(),
-        previous_token_prefix: credential.previous_token_prefix.clone(),
-        previous_token_overlap_until: credential.previous_token_overlap_until.clone(),
-      })
-      .collect::<Vec<_>>();
-    credentials.sort_by(|left, right| left.name.cmp(&right.name));
-    credentials
-  }
-
-  pub fn list_bindings(&self) -> Vec<RedactedIpmBinding> {
-    let snapshot = self.snapshot();
-    let mut bindings = snapshot
-      .bindings
-      .iter()
-      .map(|binding| RedactedIpmBinding {
-        id: binding.id.clone(),
-        principal: binding.principal.clone(),
-        group: binding.group.clone(),
-        policy: binding.policy.clone(),
-        enabled: binding.enabled,
-        source: binding.source,
-      })
-      .collect::<Vec<_>>();
-    bindings.sort_by(|left, right| left.id.cmp(&right.id));
-    bindings
-  }
-
   fn spawn_store_refresh_task(&self) {
     refresh::spawn_store_refresh_task(&self.inner);
   }
 
+  #[cfg(feature = "admin-runtime")]
   async fn refresh_store(&self) -> anyhow::Result<()> {
     refresh::refresh_store_inner(&self.inner).await.map(|_| ())
   }
@@ -402,6 +371,7 @@ impl IpmRuntime {
         IpmPrincipalRuntime {
           actor,
           enabled: true,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Config,
         },
       )]),
@@ -410,6 +380,7 @@ impl IpmRuntime {
         IpmPolicyRuntime {
           policy,
           enabled: true,
+          #[cfg(feature = "admin-runtime")]
           source: IpmEntrySource::Config,
         },
       )]),
@@ -424,9 +395,11 @@ impl IpmRuntime {
         static_snapshot: Arc::new(snapshot.clone()),
         snapshot: ArcSwap::from_pointee(snapshot),
         store: None,
+        #[cfg(feature = "admin-runtime")]
         last_refresh: RwLock::new(IpmRefreshState::ok(0)),
         legacy_admin_env: "OXIBELT_ADMIN_TOKEN".to_string(),
         allow_legacy_bootstrap: false,
+        #[cfg(feature = "admin-runtime")]
         break_glass_verifier: break_glass_verifier(),
       }),
     }
@@ -662,6 +635,7 @@ fn credential_matches(credential: &IpmCredentialRuntime, bearer: &str) -> bool {
       })
 }
 
+#[cfg(feature = "admin-runtime")]
 async fn bearer_matches_argon2id_hash_bounded(
   verifier: Arc<Semaphore>,
   hash: &str,
@@ -690,6 +664,7 @@ async fn bearer_matches_argon2id_hash_bounded(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn bearer_matches_argon2id_hash(hash: &str, actual: &str) -> bool {
   if hash.trim().is_empty() || actual.is_empty() {
     return false;
@@ -702,6 +677,7 @@ fn bearer_matches_argon2id_hash(hash: &str, actual: &str) -> bool {
     .is_ok()
 }
 
+#[cfg(feature = "admin-runtime")]
 fn break_glass_verifier() -> Arc<Semaphore> {
   Arc::new(Semaphore::new(BREAK_GLASS_AUTH_CONCURRENCY))
 }

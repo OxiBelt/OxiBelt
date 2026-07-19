@@ -75,7 +75,9 @@ mod waf_body_capture;
 pub(crate) mod waf_body_coding;
 pub(crate) mod webtransport;
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) mod warm;
+#[cfg(feature = "admin-runtime")]
 pub(crate) use warm::warm_cache_request;
 
 pub(crate) use self::access_log::SystemAccessLogContext;
@@ -91,6 +93,7 @@ use self::circuit_breakers::{
   rejection_response as circuit_breaker_rejection_response,
   with_request_lease as with_circuit_breaker_request_lease,
 };
+#[cfg(feature = "admin-runtime")]
 pub(crate) use self::entry::handle_inner;
 pub(crate) use self::entry::{handle, handle_http3, handle_with_forwarded_header_cache};
 use self::flow_helpers::{

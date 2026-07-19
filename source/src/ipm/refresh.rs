@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::{IpmRefreshState, IpmRuntimeInner};
+#[cfg(feature = "admin-runtime")]
+use super::IpmRefreshState;
+use super::IpmRuntimeInner;
 
 const STORE_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -30,11 +32,14 @@ async fn refresh_loop(inner: Weak<IpmRuntimeInner>) {
       Ok(true) => info!("IPM store snapshot refreshed"),
       Ok(false) => {}
       Err(error) => {
-        let current_generation = inner.snapshot.load().generation;
-        inner.set_refresh_state(IpmRefreshState::failed(
-          current_generation,
-          error.to_string(),
-        ));
+        #[cfg(feature = "admin-runtime")]
+        {
+          let current_generation = inner.snapshot.load().generation;
+          inner.set_refresh_state(IpmRefreshState::failed(
+            current_generation,
+            error.to_string(),
+          ));
+        }
         warn!(error = %error, "failed to refresh IPM store snapshot; keeping last-good snapshot");
       }
     }
@@ -51,11 +56,14 @@ pub(super) async fn refresh_store_inner(inner: &Arc<IpmRuntimeInner>) -> anyhow:
   if changed {
     inner.snapshot.store(Arc::new(next));
   }
-  let generation = if changed {
-    inner.snapshot.load().generation
-  } else {
-    current.generation
-  };
-  inner.set_refresh_state(IpmRefreshState::ok(generation));
+  #[cfg(feature = "admin-runtime")]
+  {
+    let generation = if changed {
+      inner.snapshot.load().generation
+    } else {
+      current.generation
+    };
+    inner.set_refresh_state(IpmRefreshState::ok(generation));
+  }
   Ok(changed)
 }

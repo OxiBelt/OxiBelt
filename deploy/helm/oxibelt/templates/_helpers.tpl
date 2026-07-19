@@ -2,8 +2,40 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "oxibelt.validateImageRole" -}}
+{{- $role := .Values.image.role -}}
+{{- if not (has $role (list "dataplane" "dataplane-strict" "standalone")) -}}
+{{- fail "image.role must be dataplane, dataplane-strict, or standalone" -}}
+{{- end -}}
+{{- $repository := .Values.image.repository | default "" -}}
+{{- $expectedRepository := include "oxibelt.imageRepositoryForRole" . -}}
+{{- $officialRepositories := list "ghcr.io/oxibelt/oxibelt" "ghcr.io/oxibelt/oxibelt-dataplane" "ghcr.io/oxibelt/oxibelt-dataplane-strict" -}}
+{{- if and $repository (has $repository $officialRepositories) (ne $repository $expectedRepository) -}}
+{{- fail (printf "image.repository %s does not match image.role %s; expected %s" $repository $role $expectedRepository) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.imageRepositoryForRole" -}}
+{{- if eq .Values.image.role "standalone" -}}
+ghcr.io/oxibelt/oxibelt
+{{- else if eq .Values.image.role "dataplane-strict" -}}
+ghcr.io/oxibelt/oxibelt-dataplane-strict
+{{- else -}}
+ghcr.io/oxibelt/oxibelt-dataplane
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.imageExecutable" -}}
+{{- if eq .Values.image.role "dataplane-strict" -}}
+/usr/local/bin/oxibelt-dataplane-strict
+{{- else -}}
+/usr/local/bin/oxibelt
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.image" -}}
-{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- include "oxibelt.validateImageRole" . -}}
+{{- $repository := .Values.image.repository | default (include "oxibelt.imageRepositoryForRole" .) -}}
 {{- $digest := .Values.image.digest | default "" -}}
 {{- if $digest -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
@@ -12,6 +44,27 @@
 {{- printf "%s@%s" $repository $digest -}}
 {{- else -}}
 {{- printf "%s:%s" $repository (required "image.tag is required when image.digest is empty" .Values.image.tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.cacheVolumeEnabled" -}}
+{{- if eq .Values.cacheVolume.mode "enabled" -}}true
+{{- else if eq .Values.cacheVolume.mode "disabled" -}}false
+{{- else if eq .Values.image.role "dataplane-strict" -}}false
+{{- else -}}true
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateCacheVolume" -}}
+{{- if not (has .Values.cacheVolume.mode (list "auto" "enabled" "disabled")) -}}
+{{- fail "cacheVolume.mode must be auto, enabled, or disabled" -}}
+{{- end -}}
+{{- $sizeLimit := .Values.cacheVolume.sizeLimit | default "" -}}
+{{- if and (eq .Values.cacheVolume.mode "disabled") $sizeLimit -}}
+{{- fail "cacheVolume.sizeLimit requires cacheVolume.mode=auto or enabled" -}}
+{{- end -}}
+{{- if and (eq .Values.image.role "dataplane-strict") (eq .Values.cacheVolume.mode "enabled") (not $sizeLimit) -}}
+{{- fail "cacheVolume.sizeLimit is required when cacheVolume.mode=enabled for image.role=dataplane-strict" -}}
 {{- end -}}
 {{- end -}}
 
@@ -136,6 +189,7 @@ reject_unknown_sni = true
 {{- end -}}
 
 {{- define "oxibelt.adminConfig" -}}
+{{- if ne .Values.image.role "dataplane-strict" -}}
 [admin]
 enabled = {{ .Values.admin.enabled }}
 bind = {{ include "oxibelt.adminBind" . | quote }}
@@ -177,6 +231,7 @@ ca_certs = []
 {{- end }}
 verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end }}
+{{- end -}}
 {{- end -}}
 
 {{- define "oxibelt.generatedConfigDigest" -}}
@@ -671,6 +726,8 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 
 {{- define "oxibelt.validateAdmin" -}}
+{{- include "oxibelt.validateImageRole" . -}}
+{{- include "oxibelt.validateCacheVolume" . -}}
 {{- $admin := .Values.admin -}}
 {{- $address := $admin.bindAddress -}}
 {{- $isLoopback := or (eq $address "127.0.0.1") (eq $address "::1") -}}
@@ -679,6 +736,22 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $expectedCertMountPath := include "oxibelt.certMountPath" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
+{{- if eq .Values.image.role "dataplane-strict" -}}
+{{- if or $admin.enabled $admin.service.enabled $admin.insecureDevelopmentMode.enabled $admin.tls.enabled $admin.mtls.enabled -}}
+{{- fail "image.role=dataplane-strict does not support Admin enablement, service exposure, TLS, mTLS, or insecure development mode" -}}
+{{- end -}}
+{{- if or (ne $admin.bindAddress "127.0.0.1") (ne (int $admin.service.port) 9092) (ne $admin.service.type "ClusterIP") $admin.service.annotations $admin.tokenSecretName (ne $admin.tokenSecretKey "token") $admin.tls.secretName (ne $admin.tls.certKey "tls.crt") (ne $admin.tls.privateKeyKey "tls.key") $admin.tls.serverNames (ne $admin.mtls.enforcement "required_non_loopback") $admin.mtls.clientCaSecretName (ne $admin.mtls.clientCaSecretKey "ca.crt") (ne (int $admin.mtls.verifyDepth) 4) -}}
+{{- fail "image.role=dataplane-strict rejects Admin listener settings and Admin secret or certificate projections" -}}
+{{- end -}}
+{{- if .Values.networkPolicy.ingress.admin.from -}}
+{{- fail "image.role=dataplane-strict rejects networkPolicy.ingress.admin.from" -}}
+{{- end -}}
+{{- $inlineConfig := tpl .Values.config.inline . -}}
+{{- if regexMatch "(?m)^[[:space:]]*\\[{1,2}admin([.]|\\])" $inlineConfig -}}
+{{- fail "image.role=dataplane-strict rejects Admin sections in config.inline; externally managed ConfigMaps are validated by the strict executable" -}}
+{{- end -}}
+{{- include "oxibelt.validateStrictPodSecurity" . -}}
+{{- end -}}
 {{- if or (not (hasPrefix "/" $configMountPath)) (eq $configMountPath "/") -}}
 {{- fail "config.mountPath must be an absolute non-root directory" -}}
 {{- end -}}
@@ -719,6 +792,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "admin.tls.enabled is required for a non-loopback admin.bindAddress unless admin.insecureDevelopmentMode.enabled=true" -}}
 {{- end -}}
 {{- end -}}
+
 {{- if $admin.tls.enabled -}}
 {{- if not $admin.tls.secretName -}}
 {{- fail "admin.tls.secretName is required when admin TLS is enabled" -}}
@@ -761,6 +835,30 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if and (not $admin.insecureDevelopmentMode.enabled) (eq $admin.mtls.enforcement "required_external") $externalService (not $admin.mtls.enabled) -}}
 {{- fail "admin.mtls.enabled is required for NodePort or LoadBalancer Admin Services by the required_external policy" -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateStrictPodSecurity" -}}
+{{- $pod := .Values.podSecurityContext -}}
+{{- $container := .Values.securityContext -}}
+{{- if or (not $pod.runAsNonRoot) (ne (int $pod.runAsUser) 10001) (ne (int $pod.runAsGroup) 10001) -}}
+{{- fail "image.role=dataplane-strict requires podSecurityContext.runAsNonRoot=true and runAsUser/runAsGroup=10001" -}}
+{{- end -}}
+{{- if or $container.allowPrivilegeEscalation (not $container.readOnlyRootFilesystem) -}}
+{{- fail "image.role=dataplane-strict requires securityContext.allowPrivilegeEscalation=false and readOnlyRootFilesystem=true" -}}
+{{- end -}}
+{{- if not (has "ALL" $container.capabilities.drop) -}}
+{{- fail "image.role=dataplane-strict requires securityContext.capabilities.drop to contain ALL" -}}
+{{- end -}}
+{{- if $container.capabilities.add -}}
+{{- fail "image.role=dataplane-strict rejects securityContext.capabilities.add" -}}
+{{- end -}}
+{{- $seccomp := $pod.seccompProfile -}}
+{{- if not (has $seccomp.type (list "RuntimeDefault" "Localhost")) -}}
+{{- fail "image.role=dataplane-strict requires a RuntimeDefault or Localhost seccomp profile" -}}
+{{- end -}}
+{{- if and (eq $seccomp.type "Localhost") (not $seccomp.localhostProfile) -}}
+{{- fail "podSecurityContext.seccompProfile.localhostProfile is required when type=Localhost" -}}
 {{- end -}}
 {{- end -}}
 

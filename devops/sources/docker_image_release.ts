@@ -6,7 +6,8 @@ import * as Semver from 'semver'
 export const GhcrImage = 'ghcr.io/oxibelt/oxibelt'
 
 export type ReleaseKind = 'stable' | 'beta' | 'build'
-export type ImageRole = 'standalone' | 'dataplane' | 'controller' | 'tools' | 'keysigner'
+export type ImageRole = 'standalone' | 'dataplane' | 'dataplane-strict' | 'controller' | 'tools' | 'keysigner'
+export type EmbeddedAsset = 'admin-openapi' | 'person-proof'
 
 /* eslint-disable @typescript-eslint/naming-convention -- Release metadata JSON uses stable lower-camel-case keys. */
 export type ReleaseTagInfo = {
@@ -29,7 +30,7 @@ export type ImageArtifact = {
   entrypoint: string[]
   user: string
   ports: string[]
-  embeddedAssets: boolean
+  embeddedAssets: EmbeddedAsset[]
   artifactArch: ArtifactArch
   artifactName: string
   imageTar: string
@@ -58,11 +59,11 @@ export type ImageRoleContract = {
   entrypoint: string[]
   user: string
   ports: string[]
-  embeddedAssets: boolean
+  embeddedAssets: EmbeddedAsset[]
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 5
+  schemaVersion: 6
   image: string
   tag: string
   version: string
@@ -108,7 +109,7 @@ const RoleTemplates: RoleTemplate[] = [
     entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
     user: '10001:10001',
     ports: ['8443/tcp', '8443/udp'],
-    embeddedAssets: true
+    embeddedAssets: ['admin-openapi', 'person-proof']
   },
   {
     role: 'dataplane',
@@ -118,7 +119,17 @@ const RoleTemplates: RoleTemplate[] = [
     entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
     user: '10001:10001',
     ports: ['8443/tcp', '8443/udp'],
-    embeddedAssets: true
+    embeddedAssets: ['admin-openapi', 'person-proof']
+  },
+  {
+    role: 'dataplane-strict',
+    ImageSuffix: '-dataplane-strict',
+    dockerTarget: 'dataplane-strict',
+    binaries: ['oxibelt-dataplane-strict'],
+    entrypoint: ['/usr/local/bin/oxibelt-dataplane-strict', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+    user: '10001:10001',
+    ports: ['8443/tcp', '8443/udp'],
+    embeddedAssets: ['person-proof']
   },
   {
     role: 'controller',
@@ -128,7 +139,7 @@ const RoleTemplates: RoleTemplate[] = [
     entrypoint: ['/usr/local/bin/oxibelt-gateway-controller'],
     user: '10001:10001',
     ports: [],
-    embeddedAssets: false
+    embeddedAssets: []
   },
   {
     role: 'tools',
@@ -138,7 +149,7 @@ const RoleTemplates: RoleTemplate[] = [
     entrypoint: ['/usr/local/bin/oxibeltctl'],
     user: '10001:10001',
     ports: [],
-    embeddedAssets: false
+    embeddedAssets: []
   },
   {
     role: 'keysigner',
@@ -148,7 +159,7 @@ const RoleTemplates: RoleTemplate[] = [
     entrypoint: ['/usr/local/bin/oxibelt-keysigner'],
     user: '10002:10002',
     ports: [],
-    embeddedAssets: false
+    embeddedAssets: []
   }
 ]
 
@@ -222,7 +233,7 @@ export function BuildImageRoleContracts(Image = GhcrImage): ImageRoleContract[] 
       entrypoint: [...Template.entrypoint],
       user: Template.user,
       ports: [...Template.ports],
-      embeddedAssets: Template.embeddedAssets
+      embeddedAssets: [...Template.embeddedAssets]
     }
   })
 }
@@ -360,7 +371,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
         entrypoint: [...Role.entrypoint],
         user: Role.user,
         ports: [...Role.ports],
-        embeddedAssets: Role.embeddedAssets,
+        embeddedAssets: [...Role.embeddedAssets],
         artifactName: `${ArtifactPrefix}-alpine-musl-${Artifact.artifactArch}-image`,
         imageTar: `${ArtifactPrefix}-alpine-musl-${Artifact.artifactArch}.tar`,
         localTag: `${ArtifactPrefix}:alpine-musl-${Artifact.artifactArch}`,
@@ -399,7 +410,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   })
 
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     image: Image,
     tag: Tag,
     version: Tag,

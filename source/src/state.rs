@@ -1,12 +1,14 @@
 //! Immutable runtime snapshots and shared client pools; reloads swap snapshots so in-flight work can finish against a consistent view.
 use crate::access_log::{AccessLogRuntime, AccessLogSinks, AccessLogSource, SystemAccessLog};
+#[cfg(feature = "admin-runtime")]
 use crate::admin_audit::AdminAuditRuntime;
+#[cfg(feature = "admin-runtime")]
 use crate::admin_mutation::AdminMutationRuntime;
 use crate::cache::ResponseCache;
 use crate::client_identity::ClientIdentityRuntime;
-use crate::config::{
-  AdminAuditExportSink, Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig,
-};
+#[cfg(feature = "admin-runtime")]
+use crate::config::AdminAuditExportSink;
+use crate::config::{Config, RuntimeDirectH1IoMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -27,9 +29,7 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
-use crate::runtime::backend::{
-  RuntimeBackendSnapshot, TOKIO_HYPER_RUNTIME_NAME, runtime_backend_snapshot,
-};
+use crate::runtime::backend::runtime_backend_snapshot;
 use crate::runtime_health::RuntimeHealth;
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
@@ -40,6 +40,7 @@ use crate::sni_forward::SniForwardTable;
 use crate::stream::pools::StreamPoolState;
 use crate::turn::TurnPoolState;
 use crate::waf::WafEngine;
+#[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportAdminRegistry;
 use crate::{telemetry::TelemetryRuntime, tls};
 use anyhow::Context;
@@ -55,6 +56,7 @@ mod runtime_services;
 mod secret_references;
 mod stream_pool_update;
 mod upstream_clients;
+mod upstream_precompute;
 pub(crate) use alt_svc::{AltSvcHeaderValues, build_alt_svc_header_values};
 use generation::next_upstream_pool_generation;
 pub use handle::AppHandle;
@@ -63,6 +65,7 @@ use stream_pool_update::next_stream_pool_generation;
 pub use upstream_clients::UpstreamBody;
 use upstream_clients::build_clients;
 pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
+use upstream_precompute::{build_upstream_uri_parts, effective_direct_h1_io_for_backend};
 /// Immutable snapshot of runtime configuration and derived state.
 #[derive(Clone)]
 pub struct AppSnapshot {
@@ -103,16 +106,21 @@ pub struct AppSnapshot {
   pub external_auth: ExternalAuthRuntime,
   pub client_identity: ClientIdentityRuntime,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
+  #[cfg(feature = "admin-runtime")]
   pub webtransport_admin: Arc<WebTransportAdminRegistry>,
   pub lifecycle: Arc<LifecycleState>,
+  #[cfg(feature = "admin-runtime")]
   pub admin_audit: AdminAuditRuntime,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) admin_mutations: AdminMutationRuntime,
   pub shared_state: Option<Arc<SharedState>>,
   pub(crate) crlite: tls::CrliteRuntime,
   pub(crate) ocsp_staple: tls::OcspStapleRuntime,
   pub tls_server_config: tls::DownstreamTlsServerConfig,
+  #[cfg(feature = "admin-runtime")]
   pub admin_tls_server_config: Option<Arc<rustls::ServerConfig>>,
   pub quic_server_config: Option<tls::DownstreamQuicServerConfig>,
+  #[cfg(feature = "admin-runtime")]
   pub admin_quic_server_config: Option<h3_quinn::quinn::ServerConfig>,
   pub(crate) tls_resumption: tls::TlsResumptionState,
   pub waf: WafEngine,
@@ -319,6 +327,7 @@ impl AppSnapshot {
       .map(|snapshot| snapshot.runtime_introspection.clone())
       .unwrap_or_default();
     runtime_introspection.set_enabled(config.admin.enabled);
+    #[cfg(feature = "admin-runtime")]
     let webtransport_admin = previous
       .map(|snapshot| snapshot.webtransport_admin.clone())
       .unwrap_or_default();
@@ -328,7 +337,9 @@ impl AppSnapshot {
     let access_log_runtime = AccessLogRuntime::new(&config.access_log, &config.crypto)
       .await
       .context("failed to build access log runtime")?;
+    #[cfg(feature = "admin-runtime")]
     let admin_access_logs = AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Admin);
+    #[cfg(feature = "admin-runtime")]
     let reusable_admin_audit = previous.filter(|previous| {
       config.admin.enabled == previous.config.admin.enabled
         && config.admin.audit == previous.config.admin.audit
@@ -337,6 +348,7 @@ impl AppSnapshot {
         && (!config.admin.audit.store.enabled
           || config.shared_state.backends == previous.config.shared_state.backends)
     });
+    #[cfg(feature = "admin-runtime")]
     let admin_audit = if let Some(previous) = reusable_admin_audit {
       let export = (config.admin.enabled
         && config.admin.audit.enabled
@@ -354,7 +366,9 @@ impl AppSnapshot {
         .await
         .context("failed to build admin audit runtime")?
     };
+    #[cfg(feature = "admin-runtime")]
     let prior_admin_mutations = previous.map(|value| (&value.config, &value.admin_mutations));
+    #[cfg(feature = "admin-runtime")]
     let admin_mutations =
       AdminMutationRuntime::new_or_reuse(&config, &admin_audit, prior_admin_mutations)
         .await
@@ -385,6 +399,7 @@ impl AppSnapshot {
       Some(&crlite),
     )
     .context("failed to build downstream TLS config")?;
+    #[cfg(feature = "admin-runtime")]
     let admin_tls_server_config = if config.admin.enabled && config.admin.tls.enabled {
       Some(
         tls::build_admin_server_config_with_crypto_and_resumption(
@@ -414,6 +429,7 @@ impl AppSnapshot {
     } else {
       None
     };
+    #[cfg(feature = "admin-runtime")]
     let admin_quic_server_config = if config.admin.enabled && config.admin.http3.enabled {
       Some(
         tls::build_admin_quic_server_config_with_crypto_and_resumption(
@@ -510,16 +526,21 @@ impl AppSnapshot {
       external_auth,
       client_identity,
       runtime_introspection,
+      #[cfg(feature = "admin-runtime")]
       webtransport_admin,
       lifecycle,
+      #[cfg(feature = "admin-runtime")]
       admin_audit,
+      #[cfg(feature = "admin-runtime")]
       admin_mutations,
       shared_state,
       crlite,
       ocsp_staple,
       tls_server_config,
+      #[cfg(feature = "admin-runtime")]
       admin_tls_server_config,
       quic_server_config,
+      #[cfg(feature = "admin-runtime")]
       admin_quic_server_config,
       tls_resumption,
       waf,
@@ -688,16 +709,21 @@ impl AppSnapshot {
       external_auth,
       client_identity,
       runtime_introspection: previous.runtime_introspection.clone(),
+      #[cfg(feature = "admin-runtime")]
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_audit: previous.admin_audit.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_tls_server_config: previous.admin_tls_server_config.clone(),
       quic_server_config: previous.quic_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_quic_server_config: previous.admin_quic_server_config.clone(),
       tls_resumption: previous.tls_resumption.clone(),
       waf: previous.waf.clone(),
@@ -709,39 +735,6 @@ impl AppSnapshot {
       http1_upgrades_possible,
     })
   }
-}
-fn effective_direct_h1_io_for_backend(
-  config: &Config,
-  runtime_backend: RuntimeBackendSnapshot,
-) -> RuntimeDirectH1IoMode {
-  if config.runtime.direct_h1_io != RuntimeDirectH1IoMode::Compio {
-    return config.runtime.direct_h1_io;
-  }
-  if config.runtime.main_runtime == RuntimeMainRuntimeMode::TokioHyper
-    || runtime_backend.active_runtime == TOKIO_HYPER_RUNTIME_NAME
-  {
-    tracing::warn!(
-      configured_direct_h1_io = "compio",
-      active_runtime = runtime_backend.active_runtime,
-      "runtime.direct_h1_io = \"compio\" requires an active Compio main runtime; using Tokio/Hyper direct-H1 IO"
-    );
-    return RuntimeDirectH1IoMode::TokioHyper;
-  }
-  RuntimeDirectH1IoMode::Compio
-}
-
-fn build_upstream_uri_parts(
-  upstreams: &[UpstreamConfig],
-) -> anyhow::Result<(HashMap<String, UpstreamUriParts>, Vec<UpstreamUriParts>)> {
-  let mut by_name = HashMap::with_capacity(upstreams.len());
-  let mut by_index = Vec::with_capacity(upstreams.len());
-  for upstream in upstreams {
-    let parts = UpstreamUriParts::from_url(&upstream.origin)
-      .with_context(|| format!("failed to precompute URI parts for {}", upstream.name))?;
-    by_name.insert(upstream.name.clone(), parts.clone());
-    by_index.push(parts);
-  }
-  Ok((by_name, by_index))
 }
 
 #[cfg(test)]

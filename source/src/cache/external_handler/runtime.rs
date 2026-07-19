@@ -3,6 +3,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "admin-runtime")]
 use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::warn;
@@ -11,9 +12,9 @@ use crate::config::Config;
 use crate::metrics::Metrics;
 
 use super::client::{ExternalCacheHttpClient, ExternalCacheLookupHit, ExternalCachePublishBody};
-use super::protocol::{
-  ExternalCacheEntryMetadata, ExternalCacheLookupRequest, ExternalCachePurgeRequest,
-};
+#[cfg(feature = "admin-runtime")]
+use super::protocol::ExternalCachePurgeRequest;
+use super::protocol::{ExternalCacheEntryMetadata, ExternalCacheLookupRequest};
 
 #[derive(Clone)]
 pub(crate) struct ExternalCacheRuntime {
@@ -27,6 +28,7 @@ struct ExternalCacheHandler {
   limiter: Arc<Semaphore>,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ExternalCachePurgeReport {
   pub handler: String,
@@ -152,6 +154,7 @@ impl ExternalCacheRuntime {
     });
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn purge(
     &self,
     handler_name: &str,

@@ -382,6 +382,11 @@ fn docker_image_artifact_build_script_text() -> String {
     .expect("Docker image artifact build script should be readable")
 }
 
+fn strict_dataplane_image_validator_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/validate-strict-dataplane-image.py"))
+    .expect("strict data-plane image validator should be readable")
+}
+
 fn performance_probe_build_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/build-performance-probe-image-artifact.sh"))
     .expect("performance probe build script should be readable")
@@ -746,6 +751,11 @@ fn alpine_dockerfile_bundles_operations_binaries() {
       "netport-builder",
     ),
     ("oxibeltctl", "oxibeltctl", "tools-builder"),
+    (
+      "oxibelt-dataplane-strict",
+      "oxibelt-dataplane-strict",
+      "strict-dataplane-builder",
+    ),
   ] {
     assert!(
       dockerfile.contains(&format!(
@@ -762,11 +772,13 @@ fn alpine_dockerfile_bundles_operations_binaries() {
   for expected in [
     "FROM scratch AS role-metadata",
     "FROM role-metadata AS dataplane",
+    "FROM scratch AS dataplane-strict",
     "FROM role-metadata AS controller",
     "FROM role-metadata AS tools",
     "FROM role-metadata AS keysigner",
     "FROM runtime AS standalone",
     "io.oxibelt.image.role=\"dataplane\"",
+    "io.oxibelt.image.role=\"dataplane-strict\"",
     "io.oxibelt.image.role=\"controller\"",
     "io.oxibelt.image.role=\"tools\"",
     "io.oxibelt.image.role=\"keysigner\"",
@@ -780,6 +792,7 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     "netport switcher binary must be statically linked",
     "tools binary must be statically linked",
     "data-plane binary must be statically linked",
+    "strict data-plane binary must be statically linked",
   ] {
     assert!(
       dockerfile.contains(expected),
@@ -788,7 +801,7 @@ fn alpine_dockerfile_bundles_operations_binaries() {
   }
   assert_eq!(
     dockerfile.matches("Requesting program interpreter").count(),
-    5,
+    6,
     "every release binary should retain its static-link guard"
   );
 
@@ -796,6 +809,12 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     (
       "dataplane",
       vec!["COPY --from=runtime-builder /tmp/oxibelt /usr/local/bin/oxibelt"],
+    ),
+    (
+      "dataplane-strict",
+      vec![
+        "COPY --from=strict-dataplane-builder /tmp/oxibelt-dataplane-strict /usr/local/bin/oxibelt-dataplane-strict",
+      ],
     ),
     (
       "controller",
@@ -876,6 +895,40 @@ fn alpine_dockerfile_records_release_ref_name_label() {
     assert!(
       !script.contains(removed),
       "Docker image artifact builder should not retain provenance input {removed}"
+    );
+  }
+}
+
+#[test]
+fn strict_dataplane_image_validator_is_exact_and_non_extracting() {
+  let validator = strict_dataplane_image_validator_text();
+
+  for expected in [
+    "EXPECTED_FILES = {",
+    "oxibelt-dataplane-strict",
+    "EXPECTED_PASSWD",
+    "EXPECTED_GROUP",
+    "PERSON_PROOF_MARKER",
+    "ADMIN_MARKERS",
+    "ADMIN_CONFIG_SECTION",
+    "member.isfile() or member.isdir()",
+    "startswith(\".wh.\")",
+    "MAXIMUM_ARCHIVE_BYTES",
+    "MAXIMUM_LAYER_BYTES",
+    "MAXIMUM_FILE_BYTES",
+    "must have mode 0755",
+    "must have mode 0644",
+    r#"re.fullmatch(r"[0-9a-f]{64}/layer\.tar", normalized)"#,
+  ] {
+    assert!(
+      validator.contains(expected),
+      "strict image validator should enforce {expected}"
+    );
+  }
+  for forbidden in ["extractall(", ".extract(", "os.system(", "subprocess."] {
+    assert!(
+      !validator.contains(forbidden),
+      "strict image validator must not use unsafe extraction/execution primitive {forbidden}"
     );
   }
 }
@@ -1720,6 +1773,11 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "name: Docker Kubernetes role image (Alpine musl, amd64, ${{ matrix.role }})",
     "role: dataplane",
     "artifact_prefix: oxibelt-dataplane",
+    "role: dataplane-strict",
+    "artifact_prefix: oxibelt-dataplane-strict",
+    "name: Validate strict data-plane image inventory",
+    "if: matrix.role == 'dataplane-strict'",
+    "tests/scripts/validate-strict-dataplane-image.py",
     "role: controller",
     "artifact_prefix: oxibelt-gateway-controller",
     "tests/scripts/build-docker-image-artifact.sh",
@@ -1745,6 +1803,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "tests/scripts/check-helm-base-config.sh",
     "name: Validate Helm edge-secure-medium profile",
     "tests/scripts/check-helm-edge-secure-medium-profile.sh",
+    "name: Validate Helm strict data-plane profile",
+    "tests/scripts/check-helm-strict-dataplane.sh",
     "name: Validate Helm ServiceAccount token hardening",
     "tests/scripts/check-helm-service-account-token.sh",
     "name: Validate Gateway controller high availability",
@@ -3219,6 +3279,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     BTreeSet::from([
       "controller",
       "dataplane",
+      "dataplane-strict",
       "keysigner",
       "standalone",
       "tools"
@@ -3239,6 +3300,11 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "dataplane".to_owned(),
       "ghcr.io/oxibelt/oxibelt-dataplane".to_owned(),
       "oxibelt-dataplane".to_owned(),
+    ),
+    (
+      "dataplane-strict".to_owned(),
+      "ghcr.io/oxibelt/oxibelt-dataplane-strict".to_owned(),
+      "oxibelt-dataplane-strict".to_owned(),
     ),
     (
       "controller".to_owned(),
@@ -3280,7 +3346,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       .collect::<BTreeSet<_>>();
     assert_eq!(
       actual_role_rows, expected_role_rows,
-      "{job_id} should cover exactly the five release image roles"
+      "{job_id} should cover exactly the six release image roles"
     );
   }
 
@@ -3306,10 +3372,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "pnpm run versioning:release",
     "git rev-parse \"${release_ref}^{commit}\"",
     "releases must run from ${release_ref}@${tag_commit}",
-    "if plan[\"schemaVersion\"] != 5:",
+    "if plan[\"schemaVersion\"] != 6:",
     "expected_roles = {",
-    "release plan must contain exactly 25 unique role/architecture artifacts",
-    "release plan must contain exactly 10 unique role manifests",
+    "release plan must contain exactly 30 unique role/architecture artifacts",
+    "release plan must contain exactly 12 unique role manifests",
     "if artifact != expected_artifact:",
     "if manifests[(role, name)] != expected_manifest:",
     "image-plan.json",
@@ -3383,7 +3449,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Upload Docker image artifact",
     "-build-metadata.json",
     "io.oxibelt.image.role",
-    "if plan[\"schemaVersion\"] != 5:",
+    "if plan[\"schemaVersion\"] != 6:",
+    "validate-strict-dataplane-image.py",
   ] {
     assert!(
       build_job_text.contains(expected),
@@ -3474,7 +3541,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "packages: write",
     "Validate Docker image artifact for publish",
-    "if plan[\"schemaVersion\"] != 5:",
+    "if plan[\"schemaVersion\"] != 6:",
     "GHCR_TOKEN: ${{ secrets.ghcr_token }}",
     "docker login ghcr.io",
     r#"jq -c --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch)'"#,
@@ -3588,7 +3655,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
 
   for expected in [
     "packages: write",
-    "if plan[\"schemaVersion\"] != 5:",
+    "if plan[\"schemaVersion\"] != 6:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
@@ -3923,6 +3990,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
   for (image_role, artifact_prefix) in [
     ("standalone", "oxibelt"),
     ("dataplane", "oxibelt-dataplane"),
+    ("dataplane-strict", "oxibelt-dataplane-strict"),
     ("controller", "oxibelt-gateway-controller"),
     ("tools", "oxibelt-tools"),
     ("keysigner", "oxibelt-keysigner"),
@@ -3962,9 +4030,9 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Verify GitHub API index attestations",
     "ghcr-index-promote",
     "Promote canonical multi-arch aliases",
-    "if plan[\"schemaVersion\"] != 5:",
-    "release plan must contain exactly 25 unique role/architecture artifacts",
-    "release plan must contain exactly 10 unique role manifests",
+    "if plan[\"schemaVersion\"] != 6:",
+    "release plan must contain exactly 30 unique role/architecture artifacts",
+    "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
     "push-to-registry: false",

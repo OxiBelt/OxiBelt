@@ -19,9 +19,11 @@ mod http_io;
 mod ocsp;
 mod outbound_revocation;
 mod pool;
+mod prometheus_storage;
 mod shared_state;
 mod shared_state_api;
 pub(crate) use shared_state_api::SharedStatePoolStatus;
+#[cfg(feature = "admin-runtime")]
 mod secret_activation;
 mod sni_forward;
 mod stream;
@@ -59,6 +61,7 @@ pub struct Metrics {
   request_mirror_errors_total: AtomicU64,
   request_mirror_skips_total: AtomicU64,
   admin_audit: admin_audit::AdminAuditMetrics,
+  #[cfg(feature = "admin-runtime")]
   secret_activation: secret_activation::SecretActivationMetrics,
   mitigation_queued_total: AtomicU64,
   mitigation_dropped_total: AtomicU64,
@@ -583,6 +586,7 @@ impl Metrics {
     );
     auth::append_auth_and_mirror_metrics(&mut output, self);
     self.append_admin_audit_prometheus(&mut output);
+    #[cfg(feature = "admin-runtime")]
     self.append_secret_activation_prometheus(&mut output);
     append_metric(
       &mut output,
@@ -631,90 +635,7 @@ impl Metrics {
     self.pool.append_prometheus(&mut output);
     self.append_shared_state_prometheus(&mut output);
     self.backend_failure.append_prometheus(&mut output);
-    append_metric(
-      &mut output,
-      "oxibelt_cache_disk_recovered_entries_total",
-      "counter",
-      cache.disk_recovered_entries_total,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_disk_recovery_errors_total",
-      "counter",
-      cache.disk_recovery_errors_total,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_disk_recovery_removed_files_total",
-      "counter",
-      cache.disk_recovery_removed_files_total,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_memory_entries",
-      "gauge",
-      cache.memory_entries,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_disk_entries",
-      "gauge",
-      cache.disk_entries,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_tmpfs_entries",
-      "gauge",
-      cache.tmpfs_entries,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_memory_bytes",
-      "gauge",
-      cache.memory_bytes,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_disk_bytes",
-      "gauge",
-      cache.disk_bytes,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_cache_tmpfs_bytes",
-      "gauge",
-      cache.tmpfs_bytes,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_tls_server_session_storage_put_total",
-      "counter",
-      tls_session_storage.put_count,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_tls_server_session_storage_get_total",
-      "counter",
-      tls_session_storage.get_count,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_tls_server_session_storage_take_total",
-      "counter",
-      tls_session_storage.take_count,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_tls_server_session_storage_lock_wait_ns_total",
-      "counter",
-      tls_session_storage.lock_wait_ns,
-    );
-    append_metric(
-      &mut output,
-      "oxibelt_tls_server_session_storage_put_duration_ns_total",
-      "counter",
-      tls_session_storage.put_duration_ns,
-    );
+    prometheus_storage::append_storage_metrics(&mut output, cache, tls_session_storage);
     if config.detail == MetricsDetail::Detailed {
       self.append_detailed_prometheus(&mut output);
     }

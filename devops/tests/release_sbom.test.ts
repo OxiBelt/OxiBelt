@@ -14,7 +14,7 @@ const Version = '1.2.3'
 const Revision = '0123456789abcdef0123456789abcdef01234567'
 const Repository = 'OxiBelt/OxiBelt'
 const Source = `https://github.com/${Repository}`
-const Roles = ['standalone', 'dataplane', 'controller', 'tools', 'keysigner']
+const Roles = ['standalone', 'dataplane', 'dataplane-strict', 'controller', 'tools', 'keysigner']
 const Archs = ['amd64v2', 'amd64', 'amd64v4', 'arm64', 'riscv64']
 
 /* eslint-disable @typescript-eslint/naming-convention -- Fixtures intentionally mirror external CycloneDX and GitHub JSON fields. */
@@ -290,7 +290,7 @@ test('platform enrichment rejects invalid CycloneDX identity, reserved propertie
 test('platform enrichment rejects plan, digest, component, and binary inventory mismatches', () => {
   const BadSchema = PlatformOptions()
   ;(BadSchema.imagePlan as Record<string, unknown>).schemaVersion = 4
-  Assert.throws(() => BuildPlatformSbom(BadSchema), /schemaVersion must be 5/)
+  Assert.throws(() => BuildPlatformSbom(BadSchema), /schemaVersion must be 6/)
 
   const BadDigest = PlatformOptions()
   BadDigest.imageDigest = Digest('b')
@@ -303,6 +303,15 @@ test('platform enrichment rejects plan, digest, component, and binary inventory 
   const BadRole = PlatformOptions()
   BadRole.role = 'unknown'
   Assert.throws(() => BuildPlatformSbom(BadRole), /role contract/)
+
+  const BadAssets = PlatformOptions()
+  const RoleContract = (BadAssets.imagePlan as ReturnType<typeof ReleasePlan>).roles
+    .find(Item => Item.role === BadAssets.role)
+  if (RoleContract === undefined) {
+    throw new Error('missing role contract fixture')
+  }
+  ;(RoleContract as unknown as Record<string, unknown>).embeddedAssets = ['person-proof', 'unknown']
+  Assert.throws(() => BuildPlatformSbom(BadAssets), /unique recognized embedded assets/)
 
   const BadInventory = PlatformOptions()
   const Binaries = (BadInventory.binaryInventory as { binaries: Array<Record<string, unknown>> }).binaries

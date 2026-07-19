@@ -3,6 +3,7 @@ use std::io::Write as _;
 use serde_json::{Map, Number, Value, json};
 use tracing::warn;
 
+#[cfg(feature = "admin-runtime")]
 use crate::admin_audit::AdminAuditEvent;
 
 use super::AccessLogSource;
@@ -214,6 +215,7 @@ fn base_event(
   root
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn admin_event_value(event: &AdminAuditEvent) -> Value {
   json!({
     "event": "oxibelt.admin.access",
@@ -661,6 +663,7 @@ mod tests {
   }
 
   #[test]
+  #[cfg(feature = "admin-runtime")]
   fn admin_event_value_includes_tls_and_token_identity() {
     let audit = crate::admin_audit::AdminAuditHandle::new(
       "127.0.0.1:12345".parse().unwrap(),

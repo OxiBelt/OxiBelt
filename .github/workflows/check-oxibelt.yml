@@ -544,6 +544,8 @@ jobs:
         include:
           - role: dataplane
             artifact_prefix: oxibelt-dataplane
+          - role: dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
           - role: controller
             artifact_prefix: oxibelt-gateway-controller
 
@@ -564,6 +566,12 @@ jobs:
             "amd64" \
             "${RUNNER_TEMP}/oxibelt-image" \
             "${{ matrix.role }}"
+
+      - name: Validate strict data-plane image inventory
+        if: matrix.role == 'dataplane-strict'
+        run: |
+          python3 tests/scripts/validate-strict-dataplane-image.py \
+            "${RUNNER_TEMP}/oxibelt-image/${{ matrix.artifact_prefix }}-alpine-musl-amd64.tar"
 
       - name: Upload role-specific Docker image artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
@@ -1115,6 +1123,9 @@ jobs:
 
       - name: Validate Helm edge-secure-medium profile
         run: tests/scripts/check-helm-edge-secure-medium-profile.sh
+
+      - name: Validate Helm strict data-plane profile
+        run: tests/scripts/check-helm-strict-dataplane.sh
 
       - name: Validate Helm ServiceAccount token hardening
         run: tests/scripts/check-helm-service-account-token.sh

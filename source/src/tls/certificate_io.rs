@@ -2,10 +2,14 @@ use std::fs;
 
 use anyhow::{Context, anyhow, bail};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+#[cfg(feature = "admin-runtime")]
 use rustls::sign::CertifiedKey;
 
-use crate::config::{CryptoConfig, OcspConfig, OcspMode, canonicalize_existing_file};
+#[cfg(feature = "admin-runtime")]
+use crate::config::CryptoConfig;
+use crate::config::{OcspConfig, OcspMode, canonicalize_existing_file};
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn validate_local_certificate_key_pair(
   cert_chain: &std::path::Path,
   private_key: &std::path::Path,

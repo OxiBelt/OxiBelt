@@ -282,8 +282,8 @@ function FindReleaseContract(ImagePlanValue: unknown, Role: string, ArtifactArch
   artifact?: JsonRecord
 } {
   const Plan = RecordValue(ImagePlanValue, 'image release plan')
-  if (Plan.schemaVersion !== 5) {
-    throw new Error('image release plan schemaVersion must be 5')
+  if (Plan.schemaVersion !== 6) {
+    throw new Error('image release plan schemaVersion must be 6')
   }
   const Version = StringValue(Plan.version, 'image release plan version')
   ExactString(Plan.tag, Version, 'image release plan tag')
@@ -299,6 +299,14 @@ function FindReleaseContract(ImagePlanValue: unknown, Role: string, ArtifactArch
   const Binaries = ArrayValue(RoleContract.binaries, `release role ${Role} binaries`).map((Item, Index) => StringValue(Item, `release role ${Role} binaries[${Index}]`))
   if (Binaries.length === 0 || new Set(Binaries).size !== Binaries.length) {
     throw new Error(`release role ${Role} must have unique binaries`)
+  }
+  const EmbeddedAssets = ArrayValue(RoleContract.embeddedAssets, `release role ${Role} embeddedAssets`)
+    .map((Item, Index) => StringValue(Item, `release role ${Role} embeddedAssets[${Index}]`))
+  if (
+    new Set(EmbeddedAssets).size !== EmbeddedAssets.length ||
+    EmbeddedAssets.some(Item => !['admin-openapi', 'person-proof'].includes(Item))
+  ) {
+    throw new Error(`release role ${Role} must have unique recognized embedded assets`)
   }
   if (ArtifactArch === undefined) {
     return { plan: Plan, role: RoleContract }

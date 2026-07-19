@@ -19,9 +19,11 @@ use crate::limits::LimitState;
 use crate::limits::sybil_identity::{self, SybilIdentityContext};
 use crate::metrics::Metrics;
 
+#[cfg(feature = "admin-runtime")]
 pub mod admin;
 pub mod signature;
 pub mod store;
+#[cfg(feature = "admin-runtime")]
 pub use admin::*;
 mod action;
 mod evaluation;

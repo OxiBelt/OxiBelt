@@ -32,10 +32,12 @@ mod connection;
 mod session;
 
 use connection::{DownstreamWebTransportConnection, spawn_downstream_reader_tasks};
+#[cfg(feature = "admin-runtime")]
+use session::close_session_with_code;
 use session::{
   ActiveWebTransportSession, WebTransportSessionIndex, accept_webtransport_session,
-  close_all_sessions, close_expired_sessions, close_session, close_session_with_code,
-  handle_downstream_bidi_stream, handle_downstream_datagram, handle_downstream_uni_stream,
+  close_all_sessions, close_expired_sessions, close_session, handle_downstream_bidi_stream,
+  handle_downstream_datagram, handle_downstream_uni_stream,
 };
 
 type H3OpenStreams = <crate::quic::h3::Connection as H3QuicConnection<Bytes>>::OpenStreams;
@@ -56,6 +58,7 @@ enum DispatcherEvent {
   DownstreamDatagram(StreamId, Bytes),
   DownstreamRequest(Request<()>, Box<H3RequestStream>),
   Activity(SessionId),
+  #[cfg(feature = "admin-runtime")]
   AdminClose(SessionId, u32, String),
   Blocked(SessionId, WafStreamClose),
   SilentBlocked(SessionId),
@@ -191,6 +194,7 @@ pub(super) async fn serve_webtransport_connection(
               session.record_activity();
             }
           }
+          #[cfg(feature = "admin-runtime")]
           Some(DispatcherEvent::AdminClose(session_id, close_code, reason)) => {
             close_session_with_code(
               &mut sessions,

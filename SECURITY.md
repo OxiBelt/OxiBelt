@@ -122,6 +122,7 @@ release workflows in these exact repositories:
 
 - `ghcr.io/oxibelt/oxibelt`
 - `ghcr.io/oxibelt/oxibelt-dataplane`
+- `ghcr.io/oxibelt/oxibelt-dataplane-strict`
 - `ghcr.io/oxibelt/oxibelt-gateway-controller`
 - `ghcr.io/oxibelt/oxibelt-tools`
 - `ghcr.io/oxibelt/oxibelt-keysigner`

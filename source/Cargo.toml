@@ -8,10 +8,11 @@ publish.workspace = true
 autobins = false
 
 [features]
-default = []
+default = ["admin-runtime"]
+admin-runtime = []
 crypto-ring = ["rustls/ring"]
 fuzzing = []
-mutation-pqc = ["aws-lc-rs/unstable"]
+mutation-pqc = ["admin-runtime", "aws-lc-rs/unstable"]
 
 [dependencies]
 anyhow = "1.0.103"
@@ -112,6 +113,7 @@ workspace = true
 [[bin]]
 name = "oxibelt"
 path = "src/main.rs"
+required-features = ["admin-runtime"]
 
 [[bin]]
 name = "oxibelt-docker-integration-matrix"

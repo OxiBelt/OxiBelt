@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   echo "usage: $0 <docker-platform> <artifact-arch> <output-dir> [role]" >&2
   echo "artifact-arch: amd64v2, amd64, amd64v4, arm64, or riscv64" >&2
-  echo "role: standalone (default), dataplane, controller, tools, or keysigner" >&2
+  echo "role: standalone (default), dataplane, dataplane-strict, controller, tools, or keysigner" >&2
 }
 
 default_oxibelt_source="https://github.com/OxiBelt/OxiBelt"
@@ -51,6 +51,9 @@ case "${role}" in
     ;;
   dataplane)
     artifact_prefix="oxibelt-dataplane"
+    ;;
+  dataplane-strict)
+    artifact_prefix="oxibelt-dataplane-strict"
     ;;
   controller)
     artifact_prefix="oxibelt-gateway-controller"

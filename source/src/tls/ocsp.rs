@@ -21,6 +21,7 @@ mod verify;
 use super::certificate_io::load_ocsp_response;
 use super::certificate_partition::normalize_server_names;
 pub(super) use schedule::{classify_ocsp_error, failure_retry_time, next_refresh_time, unix_now};
+#[cfg(feature = "admin-runtime")]
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
 pub(in crate::tls) use verify::{
@@ -39,6 +40,7 @@ pub(crate) struct OcspStapleRuntime {
 
 struct OcspStapleRuntimeInner {
   live: Option<Arc<DownstreamCertResolverBundle>>,
+  #[cfg(feature = "admin-runtime")]
   status: Arc<Mutex<OcspStatusState>>,
   worker: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -78,11 +80,12 @@ impl OcspStapleRuntime {
     }
   }
 
-  fn inactive(status: OcspStatusState) -> Self {
+  fn inactive(_status: OcspStatusState) -> Self {
     Self {
       inner: Arc::new(OcspStapleRuntimeInner {
         live: None,
-        status: Arc::new(Mutex::new(status)),
+        #[cfg(feature = "admin-runtime")]
+        status: Arc::new(Mutex::new(_status)),
         worker: Mutex::new(Vec::new()),
       }),
     }
@@ -105,7 +108,7 @@ impl OcspStapleRuntime {
     let default_identity = super::certificate_identity(&base_key.cert);
     let mut aggregate_certs = Vec::new();
     aggregate_certs.extend(base_key.cert.iter().cloned());
-    let (default_resolver, status) = build_certificate_ocsp_resolver(
+    let (default_resolver, _status) = build_certificate_ocsp_resolver(
       "tls",
       &tls.ocsp,
       base_key,
@@ -158,7 +161,8 @@ impl OcspStapleRuntime {
     Ok(Self {
       inner: Arc::new(OcspStapleRuntimeInner {
         live: Some(live),
-        status,
+        #[cfg(feature = "admin-runtime")]
+        status: _status,
         worker: Mutex::new(workers),
       }),
     })
@@ -168,6 +172,7 @@ impl OcspStapleRuntime {
     self.inner.live.as_ref().map(Arc::clone)
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn status(&self) -> OcspRuntimeStatus {
     self
       .inner

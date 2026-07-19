@@ -1,6 +1,6 @@
 # Release Image Trust and Attestations
 
-OxiBelt publishes five role-specific container images. The release workflow
+OxiBelt publishes six role-specific container images. The release workflow
 creates GitHub artifact attestations for every canonical platform image digest
 and every canonical multi-architecture index digest. Each digest receives:
 
@@ -29,15 +29,18 @@ Only the following repositories are official OxiBelt image sources:
 | --- | --- | --- |
 | `standalone` | `ghcr.io/oxibelt/oxibelt` | `oxibelt`, `oxibeltctl`, `oxibelt-keysigner`, `oxibelt-netport-switcher` |
 | `dataplane` | `ghcr.io/oxibelt/oxibelt-dataplane` | `oxibelt` |
+| `dataplane-strict` | `ghcr.io/oxibelt/oxibelt-dataplane-strict` | `oxibelt-dataplane-strict` |
 | `controller` | `ghcr.io/oxibelt/oxibelt-gateway-controller` | `oxibelt-gateway-controller` |
 | `tools` | `ghcr.io/oxibelt/oxibelt-tools` | `oxibeltctl` |
 | `keysigner` | `ghcr.io/oxibelt/oxibelt-keysigner` | `oxibelt-keysigner` |
 
 Do not treat the broader `ghcr.io/oxibelt/*` namespace, a similarly named
 repository, a fork, or a mirror as an official source. The standalone and
-minimal data-plane images use the same integrated `oxibelt` runtime, including
-Admin and Person Proof. The minimal image removes operator, controller, and
-helper executables; it does not remove those runtime security capabilities.
+compatibility `dataplane` images use the same integrated `oxibelt` runtime,
+including Admin and Person Proof. The `dataplane-strict` package retains Person
+Proof but removes the Admin runtime and Admin OpenAPI asset at compile time; it
+is not merely a different entrypoint or an Admin-disabled configuration. The
+controller, tools, and keysigner images remain separate single-purpose roles.
 
 Releases may include these platform and CPU-policy variants:
 
@@ -81,14 +84,17 @@ renders `repository@sha256:...`:
 
 ```yaml
 image:
+  role: dataplane
   repository: ghcr.io/oxibelt/oxibelt-dataplane
   digest: sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
 ```
 
 Use the controller repository with the same `image.digest` shape in the
 Gateway Controller chart. Pin and verify each role independently; a data-plane
-attestation is not evidence for a controller, tools, keysigner, or standalone
-image.
+attestation is not evidence for a strict data plane, controller, tools,
+keysigner, or standalone image. The Helm chart validates official
+repository/role combinations so selecting `dataplane-strict` cannot silently
+run the compatibility `oxibelt` executable.
 
 ## Verify GitHub attestations
 
@@ -273,7 +279,7 @@ interrupted attempt, so none alone proves release completion.
 
 For rollback, retain the previous repository and digest for each deployed role.
 Rollback should change the pinned digest, not repoint a mutable tag. The
-standalone compatibility image keeps its existing entrypoint and integrated
-Admin and Person Proof behavior; switching between standalone and minimal
-data-plane repositories is an artifact-role change, not an equivalent digest
-rollback.
+standalone and compatibility data-plane images keep their integrated Admin and
+Person Proof behavior; the strict image retains Person Proof but has no Admin
+runtime. Switching between any of these repositories changes the artifact role,
+executable, and capability boundary and is not an equivalent digest rollback.

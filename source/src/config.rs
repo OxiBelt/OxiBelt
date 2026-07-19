@@ -1,7 +1,9 @@
 //! Configuration parsing and validation for every runtime boundary.
 //! This module keeps defaults explicit before listeners, proxying, WAF, and admin code consume them.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+#[cfg(feature = "admin-runtime")]
+use std::collections::HashMap;
+use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -90,9 +92,9 @@ use limits::{
 };
 pub use listener::{HttpListenerMode, ListenerConfig, ProxyProtocolConfig, ProxyProtocolVersion};
 use listener::{RawListenerConfig, validate_bind_list, validate_bind_lists_do_not_overlap};
-use loader::{
-  absolute_config_path, load_toml_with_includes, load_toml_with_includes_and_overrides,
-};
+#[cfg(feature = "admin-runtime")]
+use loader::load_toml_with_includes_and_overrides;
+use loader::{absolute_config_path, load_toml_with_includes};
 pub use logging::*;
 pub use operational_profile::OperationalProfile;
 pub use outbound_revocation::*;
@@ -330,6 +332,13 @@ pub struct RuntimeOverrides {
   pub hot_reload_poll_interval_ms: Option<u64>,
 }
 
+/// Compile-time runtime artifact whose structural capabilities constrain configuration.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RuntimeArtifact {
+  Standalone,
+  StrictDataPlane,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ConfigBehaviorConfig {
   #[serde(default = "default_true")]
@@ -370,6 +379,7 @@ impl Config {
     Ok(config)
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn load_with_config_file_overrides(
     path: &Path,
     overrides: &HashMap<PathBuf, Option<String>>,
@@ -905,6 +915,9 @@ impl Config {
   }
 
   pub fn validate(&self) -> anyhow::Result<()> {
+    #[cfg(not(feature = "admin-runtime"))]
+    self.validate_for_artifact(RuntimeArtifact::StrictDataPlane)?;
+
     if !self.listeners.http1
       && !self.listeners.http2
       && !self.listeners.http3
@@ -1317,6 +1330,68 @@ impl Config {
     crate::waf::validate_config(self)?;
     operational_profile::validate(self)?;
 
+    Ok(())
+  }
+
+  /// Rejects configuration that requests capabilities absent from a role-specific artifact.
+  pub fn validate_for_artifact(&self, artifact: RuntimeArtifact) -> anyhow::Result<()> {
+    if artifact == RuntimeArtifact::Standalone {
+      return Ok(());
+    }
+
+    let defaults = AdminConfig::default();
+    let mut configured = Vec::new();
+    if self.admin.enabled {
+      configured.push("admin.enabled");
+    }
+    if self.admin.bind != defaults.bind {
+      configured.push("admin.bind");
+    }
+    if self.admin.bearer_token_env != defaults.bearer_token_env {
+      configured.push("admin.bearer_token_env");
+    }
+    if self.admin.transport != defaults.transport {
+      configured.push("admin.transport");
+    }
+    if self.admin.allow_insecure_plaintext != defaults.allow_insecure_plaintext {
+      configured.push("admin.allow_insecure_plaintext");
+    }
+    if self.admin.plaintext_allowed_source_cidrs != defaults.plaintext_allowed_source_cidrs {
+      configured.push("admin.plaintext_allowed_source_cidrs");
+    }
+    if self.admin.cache_purge_signing != defaults.cache_purge_signing {
+      configured.push("admin.cache_purge_signing");
+    }
+    if self.admin.workload_identity != defaults.workload_identity {
+      configured.push("admin.workload_identity");
+    }
+    if self.admin.audit != defaults.audit {
+      configured.push("admin.audit");
+    }
+    if self.admin.operations != defaults.operations {
+      configured.push("admin.operations");
+    }
+    if self.admin.mutations != defaults.mutations {
+      configured.push("admin.mutations");
+    }
+    if self.admin.http3 != defaults.http3 {
+      configured.push("admin.http3");
+    }
+    if self.admin.tls != defaults.tls {
+      configured.push("admin.tls");
+    }
+    if self.admin.legacy_rbac.is_some() {
+      configured.push("admin.rbac");
+    }
+    if self.admin.legacy_token_store.is_some() {
+      configured.push("admin.token_store");
+    }
+    if !configured.is_empty() {
+      bail!(
+        "strict data-plane artifact cannot enable or customize Admin capabilities: {}",
+        configured.join(", ")
+      );
+    }
     Ok(())
   }
 

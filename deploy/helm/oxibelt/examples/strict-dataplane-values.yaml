@@ -1,0 +1,32 @@
+# Optional compile-time Admin-free data plane. Pin `digest` to the verified
+# multi-platform manifest before production rollout.
+image:
+  role: dataplane-strict
+  repository: ghcr.io/oxibelt/oxibelt-dataplane-strict
+  tag: latest
+  digest: ""
+
+# `auto` intentionally omits /var/cache/oxibelt for the strict role. Select
+# `enabled` only with a nonempty sizeLimit when a configured data-plane feature
+# requires disk-backed cache state.
+cacheVolume:
+  mode: auto
+  sizeLimit: ""
+
+admin:
+  enabled: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL

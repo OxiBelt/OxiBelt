@@ -22,10 +22,11 @@ use crate::config::ExternalCacheHandlerConfig;
 use crate::tls;
 
 use super::protocol::{
-  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheLookupRequest,
-  ExternalCachePurgeRequest, ExternalCachePurgeResponse, FRAME_PREFIX_BYTES,
+  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheLookupRequest, FRAME_PREFIX_BYTES,
   external_cache_metadata_frame, parse_metadata,
 };
+#[cfg(feature = "admin-runtime")]
+use super::protocol::{ExternalCachePurgeRequest, ExternalCachePurgeResponse};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ExternalHttpBody = BoxBody<Bytes, BoxError>;
@@ -170,6 +171,7 @@ impl ExternalCacheHttpClient {
     Ok(())
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn purge(
     &self,
     purge: &ExternalCachePurgeRequest,

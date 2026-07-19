@@ -57,6 +57,7 @@ impl SharedStateFeature {
 }
 
 /// Sanitized runtime state suitable for bounded diagnostics and support data.
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone)]
 pub(crate) struct BackendFeatureFailureStatus {
   pub(crate) feature: &'static str,
@@ -218,6 +219,7 @@ impl BackendFailureRegistry {
       .any(|entry| entry.backend.is_some() && entry.failure_epoch.is_degraded())
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(super) fn statuses(&self) -> Vec<BackendFeatureFailureStatus> {
     self
       .entries

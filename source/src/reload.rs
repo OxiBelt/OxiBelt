@@ -16,6 +16,7 @@ use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::tls;
 use crate::waf::WafEngine;
 
+#[cfg(feature = "admin-runtime")]
 #[path = "reload/audit.rs"]
 mod audit;
 
@@ -185,16 +186,21 @@ impl ReloadManager {
       external_auth: active.external_auth.clone(),
       client_identity: active.client_identity.clone(),
       runtime_introspection: active.runtime_introspection.clone(),
+      #[cfg(feature = "admin-runtime")]
       webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_audit: active.admin_audit.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite: active.crlite.clone(),
       ocsp_staple: active.ocsp_staple.clone(),
       tls_server_config: active.tls_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config: active.quic_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_quic_server_config: active.admin_quic_server_config.clone(),
       tls_resumption: active.tls_resumption.clone(),
       waf,
@@ -295,6 +301,7 @@ impl ReloadManager {
     } else {
       None
     };
+    #[cfg(feature = "admin-runtime")]
     let admin_quic_server_config = active.admin_quic_server_config.clone();
     let ipm = crate::ipm::IpmRuntime::new(&config)
       .await
@@ -362,16 +369,21 @@ impl ReloadManager {
       external_auth: active.external_auth.clone(),
       client_identity: active.client_identity.clone(),
       runtime_introspection: active.runtime_introspection.clone(),
+      #[cfg(feature = "admin-runtime")]
       webtransport_admin: active.webtransport_admin.clone(),
       lifecycle: active.lifecycle.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_audit: active.admin_audit.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite,
       ocsp_staple,
       tls_server_config,
+      #[cfg(feature = "admin-runtime")]
       admin_tls_server_config: active.admin_tls_server_config.clone(),
       quic_server_config,
+      #[cfg(feature = "admin-runtime")]
       admin_quic_server_config,
       tls_resumption: active.tls_resumption.clone(),
       waf: active.waf.clone(),
@@ -412,12 +424,15 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
       replacement.runtime.worker_threads
     );
   }
+  #[cfg(feature = "admin-runtime")]
   if replacement.admin.mutations != active.admin.mutations {
     bail!(
       "full hot reload rejected because admin.mutations is a restart-only control-plane trust root"
     );
   }
+  #[cfg(feature = "admin-runtime")]
   audit::validate_runtime_compatibility(active, replacement)?;
+  #[cfg(feature = "admin-runtime")]
   if active.admin.mutations.mode.enabled()
     && (replacement.shared_state != active.shared_state
       || replacement.ipm.backend != active.ipm.backend
@@ -637,105 +652,4 @@ fn fingerprint_file(path: PathBuf) -> FileFingerprint {
 }
 
 #[cfg(test)]
-mod tests {
-  use std::sync::atomic::{AtomicU64, Ordering};
-
-  use super::*;
-
-  static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-  #[test]
-  fn fingerprint_changes_when_symlink_target_changes() {
-    let root = test_artifact_root().join(format!(
-      "fingerprint-symlink-{}",
-      NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&root).expect("failed to create temp dir");
-    let first = root.join("first.pem");
-    let second = root.join("second.pem");
-    let link = root.join("current.pem");
-    fs::write(&first, b"first").expect("failed to write first target");
-    fs::write(&second, b"second certificate body").expect("failed to write second target");
-
-    std::os::unix::fs::symlink(&first, &link).expect("failed to create symlink");
-    let first_fingerprint = fingerprint_files(vec![link.clone()]);
-    fs::remove_file(&link).expect("failed to remove symlink");
-    std::os::unix::fs::symlink(&second, &link).expect("failed to retarget symlink");
-    let second_fingerprint = fingerprint_files(vec![link.clone()]);
-
-    let _ = fs::remove_dir_all(&root);
-    assert_ne!(first_fingerprint, second_fingerprint);
-  }
-
-  #[test]
-  fn full_reload_rejects_runtime_worker_thread_resize() {
-    let active = parse_worker_reload_config(2);
-    let replacement = parse_worker_reload_config(3);
-
-    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
-      .expect_err("runtime worker resize should require process restart");
-    assert!(
-      error
-        .to_string()
-        .contains("runtime.worker_threads changed from 2 to 3"),
-      "unexpected error: {error}"
-    );
-  }
-
-  #[test]
-  fn full_reload_rejects_mutation_runtime_policy_changes() {
-    let active = parse_worker_reload_config(2);
-    let mut replacement = active.clone();
-    replacement.admin.mutations.mode = crate::config::AdminMutationMode::Optional;
-
-    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
-      .expect_err("mutation trust changes should require process restart");
-    assert!(error.to_string().contains("admin.mutations"));
-  }
-
-  #[test]
-  fn full_reload_rejects_admin_audit_authority_changes() {
-    let mut active = parse_worker_reload_config(2);
-    active.admin.audit.enabled = true;
-    let mut replacement = active.clone();
-    replacement.admin.audit.mode = crate::config::AdminAuditMode::BestEffort;
-
-    let error = validate_full_reload_runtime_compatibility(&active, &replacement)
-      .expect_err("audit authority changes should require process restart");
-    assert!(error.to_string().contains("admin.audit"));
-  }
-
-  fn parse_worker_reload_config(worker_threads: usize) -> Config {
-    toml::from_str(&format!(
-      r#"
-[runtime]
-worker_threads = {worker_threads}
-
-[runtime.accept]
-workers = 1
-reuse_port = false
-backlog = 1024
-accept_error_backoff_ms = 50
-
-[listeners]
-https_bind = "127.0.0.1:8443"
-http1 = true
-http2 = true
-http3 = false
-
-[tls]
-cert_chain = "fullchain.pem"
-private_key = "privkey.pem"
-"#
-    ))
-    .expect("test config should parse")
-  }
-
-  fn test_artifact_root() -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/oxibelt-reload-test-fixtures");
-    fs::create_dir_all(&root).expect("failed to create test artifact root");
-    root
-      .canonicalize()
-      .expect("failed to resolve test artifact root")
-  }
-}
+mod tests;

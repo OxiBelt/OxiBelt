@@ -51,16 +51,21 @@ impl AppSnapshot {
       external_auth: previous.external_auth.clone(),
       client_identity: previous.client_identity.clone(),
       runtime_introspection: previous.runtime_introspection.clone(),
+      #[cfg(feature = "admin-runtime")]
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_audit: previous.admin_audit.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_tls_server_config: previous.admin_tls_server_config.clone(),
       quic_server_config: previous.quic_server_config.clone(),
+      #[cfg(feature = "admin-runtime")]
       admin_quic_server_config: previous.admin_quic_server_config.clone(),
       tls_resumption: previous.tls_resumption.clone(),
       waf: previous.waf.clone(),

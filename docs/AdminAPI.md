@@ -1,5 +1,11 @@
 # Admin API
 
+This API is present in the compatibility `oxibelt` package and the standalone
+and `dataplane` images. The optional `oxibelt-dataplane-strict` package and
+image do not compile or embed the Admin listener, mutation/operation runtime,
+or this OpenAPI asset. Deploy a compatibility artifact when any endpoint in
+this document is required.
+
 OxiBelt exposes its authenticated control-plane API on the configured
 `[admin]` listener. The canonical machine-readable contract is
 `source/assets/admin-openapi.json`, an OpenAPI 3.1 document for the current

@@ -3,9 +3,12 @@ use std::fs::OpenOptions;
 use std::io::Read as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "admin-runtime")]
+use std::path::{Component, PathBuf};
 
 use base64::Engine as _;
+#[cfg(feature = "admin-runtime")]
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
@@ -17,9 +20,13 @@ const MAX_TEXT_SECRET_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SecretActivationError {
+  #[cfg(feature = "admin-runtime")]
   UnsupportedVersion,
+  #[cfg(feature = "admin-runtime")]
   FieldNotAllowlisted,
+  #[cfg(feature = "admin-runtime")]
   InvalidReference,
+  #[cfg(feature = "admin-runtime")]
   TargetNotFound,
   TargetAmbiguous,
   ReferenceMissing,
@@ -27,17 +34,29 @@ pub(crate) enum SecretActivationError {
   ProviderUnavailable,
   WrongMaterialType,
   MaterialTooLarge,
+  #[cfg(feature = "admin-runtime")]
   DigestMismatch,
+  #[cfg(feature = "admin-runtime")]
   CandidateInvalid,
+  #[cfg(feature = "admin-runtime")]
   CertificateKeyMismatch,
+  #[cfg(feature = "admin-runtime")]
   CertificateExpired,
+  #[cfg(feature = "admin-runtime")]
   CertificateNotYetValid,
+  #[cfg(feature = "admin-runtime")]
   CaBundleInvalid,
+  #[cfg(feature = "admin-runtime")]
   UpstreamTlsPreflightFailed,
+  #[cfg(feature = "admin-runtime")]
   HostnameValidationFailed,
+  #[cfg(feature = "admin-runtime")]
   ClientIdentityUnusable,
+  #[cfg(feature = "admin-runtime")]
   ActivationConflict,
+  #[cfg(feature = "admin-runtime")]
   ValidationEvidenceMismatch,
+  #[cfg(feature = "admin-runtime")]
   RollbackFailed,
   EntropyUnavailable,
 }
@@ -53,9 +72,13 @@ impl std::error::Error for SecretActivationError {}
 impl SecretActivationError {
   pub(crate) const fn code(self) -> &'static str {
     match self {
+      #[cfg(feature = "admin-runtime")]
       Self::UnsupportedVersion => "secret_reference_version_unsupported",
+      #[cfg(feature = "admin-runtime")]
       Self::FieldNotAllowlisted => "secret_reference_field_not_allowlisted",
+      #[cfg(feature = "admin-runtime")]
       Self::InvalidReference => "secret_reference_invalid",
+      #[cfg(feature = "admin-runtime")]
       Self::TargetNotFound => "secret_reference_target_not_found",
       Self::TargetAmbiguous => "secret_reference_target_ambiguous",
       Self::ReferenceMissing => "secret_reference_missing",
@@ -63,22 +86,35 @@ impl SecretActivationError {
       Self::ProviderUnavailable => "secret_reference_provider_unavailable",
       Self::WrongMaterialType => "secret_reference_type_mismatch",
       Self::MaterialTooLarge => "secret_reference_size_exceeded",
+      #[cfg(feature = "admin-runtime")]
       Self::DigestMismatch => "secret_reference_digest_mismatch",
+      #[cfg(feature = "admin-runtime")]
       Self::CandidateInvalid => "secret_material_invalid_format",
+      #[cfg(feature = "admin-runtime")]
       Self::CertificateKeyMismatch => "secret_certificate_key_mismatch",
+      #[cfg(feature = "admin-runtime")]
       Self::CertificateExpired => "secret_certificate_expired",
+      #[cfg(feature = "admin-runtime")]
       Self::CertificateNotYetValid => "secret_certificate_not_yet_valid",
+      #[cfg(feature = "admin-runtime")]
       Self::CaBundleInvalid => "secret_ca_bundle_invalid",
+      #[cfg(feature = "admin-runtime")]
       Self::UpstreamTlsPreflightFailed => "secret_upstream_tls_preflight_failed",
+      #[cfg(feature = "admin-runtime")]
       Self::HostnameValidationFailed => "secret_hostname_validation_failed",
+      #[cfg(feature = "admin-runtime")]
       Self::ClientIdentityUnusable => "secret_client_identity_unusable",
+      #[cfg(feature = "admin-runtime")]
       Self::ActivationConflict => "secret_activation_snapshot_conflict",
+      #[cfg(feature = "admin-runtime")]
       Self::ValidationEvidenceMismatch => "secret_activation_validation_evidence_mismatch",
+      #[cfg(feature = "admin-runtime")]
       Self::RollbackFailed => "secret_activation_rollback_failed",
       Self::EntropyUnavailable => "secret_activation_entropy_unavailable",
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn classify_candidate_error(message: &str) -> Self {
     let message = message.to_ascii_lowercase();
     if message.contains("expired") {
@@ -122,6 +158,7 @@ pub(super) fn resolve_spec(
   normalize_material(spec.material_type, raw)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn resolve_contained_file_path(
   base: &Path,
   relative: &Path,
@@ -155,6 +192,7 @@ pub(super) fn resolve_contained_file_path(
   Ok(resolved)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn verify_update_digest(
   path: &Path,
   expected: &str,
@@ -248,6 +286,7 @@ fn map_io_error(error: std::io::Error) -> SecretActivationError {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn lowercase_hex(value: &[u8]) -> String {
   let mut output = String::with_capacity(value.len() * 2);
   for byte in value {

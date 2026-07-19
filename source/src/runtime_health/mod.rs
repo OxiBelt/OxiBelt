@@ -389,6 +389,7 @@ impl RuntimeHealth {
     true
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn snapshot(&self) -> RuntimeHealthSnapshot {
     let active = self.active_generation();
     let mut degraded_subsystems = Vec::new();
@@ -518,6 +519,7 @@ impl RuntimeHealth {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RuntimeHealthSnapshot {
   pub(crate) status: RuntimeSubsystemState,

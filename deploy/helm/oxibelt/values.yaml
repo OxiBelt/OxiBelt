@@ -1,5 +1,11 @@
 image:
-  repository: ghcr.io/oxibelt/oxibelt-dataplane
+  # `dataplane` preserves the existing integrated Admin-capable runtime.
+  # `dataplane-strict` selects the compile-time Admin-free runtime, while
+  # `standalone` selects the compatibility image that also carries tools.
+  role: dataplane # dataplane | dataplane-strict | standalone
+  # Empty selects the official repository for `role`. Custom repositories are
+  # accepted, but an official OxiBelt repository must match the selected role.
+  repository: ""
   tag: latest
   # Set an immutable `sha256:...` digest for verified production rollouts.
   # A non-empty digest takes precedence over `tag`.
@@ -301,6 +307,13 @@ configRollout:
   # A safe nested path under the mounted config root; root-level paths are
   # rejected because the controller needs a pre-existing parent directory.
   managedConfigPath: conf.d/gateway-api.generated.toml
+
+# `auto` preserves the writable cache for compatibility images and omits it
+# from the strict image. Strict deployments that explicitly enable the cache
+# must bound the emptyDir so disk-backed state cannot grow without limit.
+cacheVolume:
+  mode: auto # auto | enabled | disabled
+  sizeLimit: ""
 
 tls:
   enabled: true

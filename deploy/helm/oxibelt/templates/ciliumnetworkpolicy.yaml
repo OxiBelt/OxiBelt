@@ -1,4 +1,6 @@
 {{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- include "oxibelt.validateOperationalProfile" . -}}
+{{- include "oxibelt.validateAdmin" . -}}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.cilium.enabled }}
 {{- $cilium := .Values.networkPolicy.cilium -}}
 apiVersion: cilium.io/v2

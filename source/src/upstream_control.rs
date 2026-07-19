@@ -1,9 +1,12 @@
 //! Administrative controls for upstream pool state.
 //! Operator overrides are explicit so health automation and manual actions do not conflict.
 
-use std::{collections::HashMap, fmt};
+use std::collections::HashMap;
+#[cfg(feature = "admin-runtime")]
+use std::fmt;
 
 use anyhow::{Context, bail};
+#[cfg(feature = "admin-runtime")]
 use serde::Serialize;
 
 use crate::config::{
@@ -14,24 +17,28 @@ use crate::state::{AppHandle, AppSnapshot};
 
 const MAX_RUNTIME_POOL_UPDATE_ATTEMPTS: usize = 8;
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UpstreamPoolAdminStatus {
   pub generation: u64,
   pub etag: String,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum UpstreamPoolPreconditionErrorKind {
   Missing,
   Stale,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone)]
 pub(crate) struct UpstreamPoolPreconditionError {
   kind: UpstreamPoolPreconditionErrorKind,
   expected: String,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl UpstreamPoolPreconditionError {
   pub(crate) fn kind(&self) -> UpstreamPoolPreconditionErrorKind {
     self.kind
@@ -42,6 +49,7 @@ impl UpstreamPoolPreconditionError {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 impl fmt::Display for UpstreamPoolPreconditionError {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self.kind {
@@ -56,15 +64,24 @@ impl fmt::Display for UpstreamPoolPreconditionError {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 impl std::error::Error for UpstreamPoolPreconditionError {}
 
 pub(crate) async fn apply_runtime_pool_update<F>(state: &AppHandle, mutate: F) -> anyhow::Result<()>
 where
   F: Fn(&mut Config) -> anyhow::Result<()>,
 {
-  apply_runtime_pool_update_inner(state, None, mutate).await
+  #[cfg(feature = "admin-runtime")]
+  {
+    apply_runtime_pool_update_inner(state, None, mutate).await
+  }
+  #[cfg(not(feature = "admin-runtime"))]
+  {
+    apply_runtime_pool_update_inner(state, mutate).await
+  }
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) async fn apply_runtime_pool_update_checked<F>(
   state: &AppHandle,
   if_match: Option<&str>,
@@ -78,7 +95,7 @@ where
 
 async fn apply_runtime_pool_update_inner<F>(
   state: &AppHandle,
-  if_match: Option<Option<&str>>,
+  #[cfg(feature = "admin-runtime")] if_match: Option<Option<&str>>,
   mutate: F,
 ) -> anyhow::Result<()>
 where
@@ -86,6 +103,7 @@ where
 {
   for _ in 0..MAX_RUNTIME_POOL_UPDATE_ATTEMPTS {
     let active = state.snapshot();
+    #[cfg(feature = "admin-runtime")]
     let expected_generation = if let Some(if_match) = if_match {
       Some(check_if_match(active.as_ref(), if_match)?)
     } else {
@@ -101,7 +119,9 @@ where
     if state.replace_if_current(&active, snapshot) {
       return Ok(());
     }
+    #[cfg(feature = "admin-runtime")]
     let latest = state.snapshot();
+    #[cfg(feature = "admin-runtime")]
     if let Some(expected_generation) = expected_generation
       && latest.upstream_pool_generation != expected_generation
     {
@@ -117,6 +137,7 @@ where
   bail!("upstream pool update conflicted with repeated runtime snapshot changes");
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn upstream_pool_status(snapshot: &AppSnapshot) -> UpstreamPoolAdminStatus {
   UpstreamPoolAdminStatus {
     generation: snapshot.upstream_pool_generation,
@@ -124,10 +145,12 @@ pub(crate) fn upstream_pool_status(snapshot: &AppSnapshot) -> UpstreamPoolAdminS
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn upstream_pool_etag(generation: u64) -> String {
   format!("\"oxibelt-upstream-pools-{generation}\"")
 }
 
+#[cfg(feature = "admin-runtime")]
 fn check_if_match(snapshot: &AppSnapshot, if_match: Option<&str>) -> anyhow::Result<u64> {
   let expected = upstream_pool_etag(snapshot.upstream_pool_generation);
   match if_match {
@@ -160,6 +183,7 @@ pub(crate) fn find_pool_mut<'a>(
     .with_context(|| format!("unknown upstream pool {pool_name}"))
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn find_server_mut<'a>(
   pool: &'a mut UpstreamPoolConfig,
   server_id: &str,
@@ -173,6 +197,7 @@ pub(crate) fn find_server_mut<'a>(
     .with_context(|| format!("unknown upstream pool server {server_id}"))
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn ensure_unique_server_id(
   pool: &UpstreamPoolConfig,
   candidate_id: &str,

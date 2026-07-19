@@ -20,8 +20,8 @@ use oxibelt::config::{
   KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
   MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
   PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeMainRuntimeMode, RuntimeOverrides,
-  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode,
+  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
   StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
   Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
   TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
@@ -56,6 +56,37 @@ fn edge_secure_medium_config_toml(cert_path: &Path, key_path: &Path) -> String {
     )
     .replacen("[tls]\n", "[tls]\nserver_names = [\"example.com\"]\n", 1);
   format!("{raw}\n[waf]\nenabled = true\n")
+}
+
+#[test]
+fn strict_data_plane_accepts_disabled_default_admin_configuration() {
+  let temp_dir = common::TempDir::new("strict-admin-defaults");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "strict-defaults");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("minimal config should parse");
+
+  config
+    .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
+    .expect("strict artifact should accept disabled Admin defaults");
+}
+
+#[test]
+fn strict_data_plane_reports_every_customized_admin_capability() {
+  let temp_dir = common::TempDir::new("strict-admin-rejection");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "strict-rejection");
+  let raw = format!(
+    "{}\n[admin]\nenabled = true\nbind = \"127.0.0.1:9192\"\ntransport = \"plaintext\"\n",
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("Admin config should parse");
+
+  let error = config
+    .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
+    .expect_err("strict artifact must reject Admin capability configuration");
+  let message = error.to_string();
+  for field in ["admin.enabled", "admin.bind", "admin.transport"] {
+    assert!(message.contains(field), "missing {field} in {message}");
+  }
 }
 
 #[test]

@@ -4,28 +4,41 @@
 //! public and durable surfaces receive only revisions and keyed fingerprints.
 
 mod field;
+#[cfg(feature = "admin-runtime")]
 mod preflight;
 mod resolver;
 
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(feature = "admin-runtime")]
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "admin-runtime")]
+use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::config::{AdminMutationRolloutMode, Config};
+#[cfg(feature = "admin-runtime")]
+use crate::config::AdminMutationRolloutMode;
+use crate::config::Config;
+#[cfg(feature = "admin-runtime")]
 use crate::state::AppSnapshot;
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) use field::SecretReferenceField;
 use field::collect_reference_specs;
+#[cfg(feature = "admin-runtime")]
 use preflight::{preflight_certificate_material, preflight_upstream_tls};
 pub(crate) use resolver::SecretActivationError;
-use resolver::{resolve_spec, verify_update_digest};
+use resolver::resolve_spec;
+#[cfg(feature = "admin-runtime")]
+use resolver::verify_update_digest;
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) const SECRET_REFERENCE_SCHEMA_VERSION: u16 = 1;
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn new_local_request_id() -> Result<String, SecretActivationError> {
   let mut bytes = [0_u8; 16];
   crate::crypto::random_fill(&mut bytes).map_err(|_| SecretActivationError::EntropyUnavailable)?;
@@ -34,6 +47,7 @@ pub(crate) fn new_local_request_id() -> Result<String, SecretActivationError> {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "admin-runtime")]
 pub(crate) struct SecretReferenceUpdateRequest {
   #[serde(default = "default_schema_version")]
   pub(crate) schema_version: u16,
@@ -43,6 +57,7 @@ pub(crate) struct SecretReferenceUpdateRequest {
   pub(crate) sha256: Option<String>,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl fmt::Debug for SecretReferenceUpdateRequest {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter
@@ -55,6 +70,7 @@ impl fmt::Debug for SecretReferenceUpdateRequest {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 const fn default_schema_version() -> u16 {
   SECRET_REFERENCE_SCHEMA_VERSION
 }
@@ -107,6 +123,7 @@ impl fmt::Debug for ResolvedSecretReference {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg(feature = "admin-runtime")]
 pub(crate) struct SecretActivationBinding {
   pub(crate) mutation_request_id: String,
   pub(crate) config_logical_revision: String,
@@ -120,17 +137,19 @@ pub(crate) struct SecretReferenceRuntime {
   fingerprint_key: Arc<Zeroizing<[u8; 32]>>,
   entries: Arc<[ResolvedSecretReference]>,
   reference_set_digest: String,
+  #[cfg(feature = "admin-runtime")]
   binding: Option<SecretActivationBinding>,
 }
 
 impl fmt::Debug for SecretReferenceRuntime {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter
-      .debug_struct("SecretReferenceRuntime")
+    let mut debug = formatter.debug_struct("SecretReferenceRuntime");
+    debug
       .field("entry_count", &self.entries.len())
-      .field("reference_set_digest", &self.reference_set_digest)
-      .field("binding", &self.binding)
-      .finish_non_exhaustive()
+      .field("reference_set_digest", &self.reference_set_digest);
+    #[cfg(feature = "admin-runtime")]
+    debug.field("binding", &self.binding);
+    debug.finish_non_exhaustive()
   }
 }
 
@@ -177,10 +196,12 @@ impl SecretReferenceRuntime {
       fingerprint_key,
       entries: entries.into(),
       reference_set_digest,
+      #[cfg(feature = "admin-runtime")]
       binding: None,
     })
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn bind_with_runtime_revision(
     mut self,
     mutation_request_id: String,
@@ -206,10 +227,12 @@ impl SecretReferenceRuntime {
     self
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn reference_set_digest(&self) -> &str {
     &self.reference_set_digest
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) fn binding(&self) -> Option<&SecretActivationBinding> {
     self.binding.as_ref()
   }
@@ -223,6 +246,7 @@ impl SecretReferenceRuntime {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) async fn build_candidate_snapshot(
   active: &AppSnapshot,
   request: &SecretReferenceUpdateRequest,
@@ -256,6 +280,7 @@ pub(crate) async fn build_candidate_snapshot(
   Ok(snapshot)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn apply_reference_update(
   config: &mut Config,
   update: &SecretReferenceUpdateRequest,
@@ -278,6 +303,7 @@ pub(crate) fn apply_reference_update(
   Ok(field)
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn validate_update_request(
   update: &SecretReferenceUpdateRequest,
 ) -> Result<SecretReferenceField, SecretActivationError> {
@@ -330,6 +356,7 @@ pub(crate) fn validate_update_request(
   Ok(field)
 }
 
+#[cfg(feature = "admin-runtime")]
 fn fingerprint_key_for_config(
   config: &Config,
   previous: Option<&SecretReferenceRuntime>,
@@ -358,6 +385,14 @@ fn fingerprint_key_for_config(
   )
   .map_err(|_| SecretActivationError::EntropyUnavailable)?;
   Ok(Some(Arc::new(key)))
+}
+
+#[cfg(not(feature = "admin-runtime"))]
+fn fingerprint_key_for_config(
+  _config: &Config,
+  previous: Option<&SecretReferenceRuntime>,
+) -> Result<Option<Arc<Zeroizing<[u8; 32]>>>, SecretActivationError> {
+  Ok(previous.map(|runtime| runtime.fingerprint_key.clone()))
 }
 
 fn fingerprint(key: &[u8], domain: &[u8], value: &[u8]) -> [u8; 32] {
@@ -398,5 +433,5 @@ fn lowercase_hex(value: &[u8]) -> String {
   output
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod tests;

@@ -16,9 +16,13 @@ compile_error!("oxibelt-proxy intentionally targets Linux only.");
 compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 
 pub mod access_log;
+#[cfg(feature = "admin-runtime")]
 pub mod admin_audit;
+#[cfg(feature = "admin-runtime")]
 pub mod admin_client;
+#[cfg(feature = "admin-runtime")]
 pub(crate) mod admin_list;
+#[cfg(feature = "admin-runtime")]
 pub mod admin_mutation;
 pub mod cache;
 pub mod circuit_breakers;
@@ -60,6 +64,7 @@ pub mod shared_state;
 pub(crate) mod sni_forward;
 pub mod state;
 pub mod stream;
+#[cfg(feature = "admin-runtime")]
 pub(crate) mod stream_control;
 mod tcp_hop;
 mod tcp_socket;
@@ -69,6 +74,7 @@ pub mod turn;
 pub mod upstream_control;
 pub mod upstream_discovery;
 pub mod waf;
+#[cfg(feature = "admin-runtime")]
 pub mod webtransport_admin;
 
 #[cfg(test)]

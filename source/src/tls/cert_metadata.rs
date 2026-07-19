@@ -16,6 +16,7 @@ pub(crate) struct ParsedCertificateMetadata {
   pub(crate) not_after_unix_seconds: i64,
   pub(crate) subject_common_names: Vec<String>,
   pub(crate) san_dns_names: Vec<String>,
+  #[cfg(feature = "admin-runtime")]
   pub(crate) san_uri_names: Vec<String>,
   pub(crate) san_ip_addresses: Vec<IpAddr>,
 }
@@ -24,12 +25,14 @@ pub(crate) struct ParsedCertificateMetadata {
 ///
 /// This type intentionally carries parsed SANs and a fingerprint rather than raw DER so
 /// downstream authorization and audit code cannot accidentally retain certificate material.
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum VerifiedClientCertificate {
   Parsed(VerifiedClientCertificateIdentity),
   Unparseable { fingerprint_sha256: String },
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct VerifiedClientCertificateIdentity {
   pub(crate) fingerprint_sha256: String,
@@ -42,6 +45,7 @@ pub(crate) struct VerifiedClientCertificateIdentity {
 ///
 /// A malformed leaf is represented explicitly. Binding callers must treat it as a failed
 /// identity assertion, while feature-disabled callers can preserve the existing TLS behavior.
+#[cfg(feature = "admin-runtime")]
 pub(crate) fn verified_client_certificate(
   certificates: &[CertificateDer<'_>],
 ) -> Option<VerifiedClientCertificate> {
@@ -104,6 +108,7 @@ pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCer
     not_after_unix_seconds: unix_seconds(validity.not_after),
     subject_common_names: subject_common_names(&cert),
     san_dns_names: Vec::new(),
+    #[cfg(feature = "admin-runtime")]
     san_uri_names: Vec::new(),
     san_ip_addresses: Vec::new(),
   };
@@ -153,11 +158,14 @@ fn collect_subject_alt_names(
   while !reader.is_empty() {
     let (tag, value) = reader.read_any()?;
     match tag {
+      #[cfg(feature = "admin-runtime")]
       0x86 => {
         if let Ok(uri) = std::str::from_utf8(value) {
           metadata.san_uri_names.push(uri.to_string());
         }
       }
+      #[cfg(not(feature = "admin-runtime"))]
+      0x86 => {}
       0x82 => {
         if let Ok(name) = std::str::from_utf8(value) {
           metadata.san_dns_names.push(name.to_ascii_lowercase());
@@ -180,6 +188,7 @@ fn collect_subject_alt_names(
   Ok(())
 }
 
+#[cfg(feature = "admin-runtime")]
 fn is_canonical_spiffe_id(value: &str) -> bool {
   const PREFIX: &str = "spiffe://";
   if value.len() > 2048 || !value.starts_with(PREFIX) || value.contains('%') {
@@ -334,6 +343,7 @@ mod tests {
   }
 
   #[test]
+  #[cfg(feature = "admin-runtime")]
   fn verified_client_certificate_extracts_a_single_canonical_spiffe_id() {
     let temp_dir = common::TempDir::new("verified-client-spiffe");
     let (cert_path, _key_path) = create_self_signed_cert_with_uri_san(
@@ -412,6 +422,7 @@ IP.2 = 2001:db8::1
     (cert_path, key_path)
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn create_self_signed_cert_with_uri_san(dir: &Path, uri: &str) -> (PathBuf, PathBuf) {
     let key_path = dir.join("client-uri-san.key");
     let cert_path = dir.join("client-uri-san.pem");

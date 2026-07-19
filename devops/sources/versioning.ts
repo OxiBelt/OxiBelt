@@ -50,6 +50,7 @@ type TomlRecord = Record<string, unknown>
 
 const ProductionPackageNames = [
   'oxibelt',
+  'oxibelt-dataplane-strict',
   'oxibelt-control-http',
   'oxibelt-control-protocol',
   'oxibelt-deployment-diagnostics',

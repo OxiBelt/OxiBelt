@@ -1,9 +1,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "admin-runtime")]
 use serde::Serialize;
 
 use super::FAILURE_RETRY_SECONDS;
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize)]
 pub struct OcspRuntimeStatus {
   pub status: String,
@@ -69,6 +71,7 @@ impl OcspStatusState {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(super) fn to_public(&self) -> OcspRuntimeStatus {
     OcspRuntimeStatus {
       status: self.status.clone(),
@@ -99,6 +102,7 @@ pub(super) fn system_time_to_unix(time: SystemTime) -> u64 {
 mod tests {
   use super::*;
 
+  #[cfg(feature = "admin-runtime")]
   #[test]
   fn public_status_uses_drop_stale_policy_and_unix_seconds() {
     let status = OcspStatusState {

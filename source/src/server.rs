@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,21 +19,22 @@ use tokio::task::JoinHandle;
 use tokio_rustls::LazyConfigAcceptor;
 use tracing::{info, warn};
 
+#[cfg(feature = "admin-runtime")]
 use crate::admin_audit::AdminAuditHandle;
-use crate::config::{
-  AdminTransportMode, Config, ConnectionLimitIdentityMode, IpmBreakGlassAccessMode,
-  RuntimeOverrides,
-};
+use crate::config::ConnectionLimitIdentityMode;
+#[cfg(feature = "admin-runtime")]
+use crate::config::{AdminTransportMode, IpmBreakGlassAccessMode};
+#[cfg(feature = "admin-runtime")]
 use crate::identity::Cidr;
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
+#[cfg(feature = "admin-runtime")]
 use crate::overload::ControlPlane;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::{SilentClose, is_silent_close_response, text_response};
 use crate::proxy::{http, http3};
 use crate::proxy_protocol;
-use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::{AppHandle, AppSnapshot};
@@ -43,43 +43,72 @@ use crate::tcp_hop;
 use crate::telemetry::TelemetryRuntime;
 use crate::turn::{BoundTurnListener, TurnListenerTask};
 use crate::waf::{WafTlsMetadata, WafTransportMetadataInput};
+#[cfg(feature = "admin-runtime")]
 mod admin;
+#[cfg(feature = "admin-runtime")]
 mod admin_audit_endpoint;
+#[cfg(feature = "admin-runtime")]
 mod admin_audit_gate;
+#[cfg(feature = "admin-runtime")]
 mod admin_auth;
+#[cfg(feature = "admin-runtime")]
 mod admin_body;
+#[cfg(feature = "admin-runtime")]
 mod admin_cluster_executor;
+#[cfg(feature = "admin-runtime")]
 mod admin_cluster_runtime;
+#[cfg(feature = "admin-runtime")]
 mod admin_config_diff;
+#[cfg(feature = "admin-runtime")]
 mod admin_control;
+#[cfg(feature = "admin-runtime")]
 mod admin_diagnostics;
+#[cfg(feature = "admin-runtime")]
 mod admin_error;
+#[cfg(feature = "admin-runtime")]
 mod admin_h3;
+#[cfg(feature = "admin-runtime")]
 mod admin_ipm;
+#[cfg(feature = "admin-runtime")]
 mod admin_ipm_list;
+#[cfg(feature = "admin-runtime")]
 mod admin_ipm_simulation;
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_ipm_simulation_security_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_listener;
+#[cfg(feature = "admin-runtime")]
 mod admin_metadata;
+#[cfg(feature = "admin-runtime")]
 mod admin_mutation_resources;
+#[cfg(feature = "admin-runtime")]
 mod admin_mutations;
+#[cfg(feature = "admin-runtime")]
 mod admin_operations;
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_operations_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_ops;
+#[cfg(feature = "admin-runtime")]
 mod admin_person_proof;
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_person_proof_scope_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_resource;
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_resource_scope_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_rulepacks;
-#[cfg(test)]
+#[cfg(feature = "admin-runtime")]
+mod admin_runtime;
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_stream_pool_scope_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_stream_pools;
+#[cfg(feature = "admin-runtime")]
 mod admin_upstream_pools;
 mod connection_errors;
+#[cfg(feature = "admin-runtime")]
 mod file_sync_path;
 mod h1_fast_proxy;
 mod http_io;
@@ -93,17 +122,25 @@ mod process_signals;
 #[cfg(test)]
 mod reload_tests;
 mod rollout_identity;
+#[cfg(not(feature = "admin-runtime"))]
+mod strict_runtime;
+#[cfg(feature = "admin-runtime")]
 use admin_auth::{
   AdminActor, AdminAuthentication, AdminAuthorization, admin_authentication, admin_request_context,
 };
-use admin_control::{AdminControlCommand, AdminControlHandle, RollbackSnapshot};
+#[cfg(feature = "admin-runtime")]
+use admin_control::AdminControlHandle;
+#[cfg(feature = "admin-runtime")]
 use admin_operations::AdminOperationRuntime;
+#[cfg(feature = "admin-runtime")]
+pub use admin_runtime::serve;
+#[cfg(feature = "admin-runtime")]
 use admin_stream_pools::admin_stream_pools_response;
+#[cfg(feature = "admin-runtime")]
 use admin_upstream_pools::admin_upstream_pools_response;
-use ops::OpsTasks;
-use process_signals::{
-  ProcessSignal, ProcessSignals, begin_process_predrain, graceful_process_shutdown,
-};
+#[cfg(not(feature = "admin-runtime"))]
+pub use strict_runtime::serve;
+#[cfg(feature = "admin-runtime")]
 pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "config_load",
   "file_sync",
@@ -122,6 +159,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "admin_mutation_replay",
   "atomic_secret_reference_activation",
 ];
+#[cfg(feature = "admin-runtime")]
 pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
   "cache_warm",
   "oxirule_replay",
@@ -131,6 +169,7 @@ pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
   "webtransport_snapshot",
   "webtransport_drain",
 ];
+#[cfg(feature = "admin-runtime")]
 pub const ADMIN_OPERATION_STATE_WIRE_VALUES: &[&str] = &[
   "accepted",
   "queued",
@@ -147,94 +186,7 @@ pub const ADMIN_OPERATION_STATE_WIRE_VALUES: &[&str] = &[
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
 const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
-pub async fn serve(
-  state: AppHandle,
-  config_path: Option<PathBuf>,
-  runtime_overrides: RuntimeOverrides,
-) -> anyhow::Result<()> {
-  let (error_tx, mut error_rx) = mpsc::unbounded_channel();
-  let effective_config = config_path
-    .as_ref()
-    .and_then(|path| Config::load_effective_toml_redacted(path).ok())
-    .and_then(|value| toml::to_string_pretty(&value).ok());
-  let (admin_control, admin_control_rx) = AdminControlHandle::new(effective_config);
-  let prepared_cluster = admin_cluster_runtime::PreparedAdminClusterRuntime::prepare(
-    &state,
-    &admin_control,
-    error_tx.clone(),
-  )
-  .await?;
-  let admin_operations = {
-    let snapshot = state.snapshot();
-    AdminOperationRuntime::prepare(&snapshot.config, &snapshot.admin_audit).await?
-  };
-  let mut listeners = ListenerSupervisor::start(
-    state.clone(),
-    error_tx.clone(),
-    admin_control.clone(),
-    admin_operations.clone(),
-  )
-  .await?;
-  let (cluster_heartbeat, cluster_runtime_tasks) =
-    prepared_cluster.start_workers(state.clone(), admin_control.clone(), error_tx.clone());
-  let mut process_signals = ProcessSignals::new()?;
-  let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
-  let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
-    match config_path {
-      Some(config_path) => Some(ReloadManager::new(
-        config_path,
-        runtime_overrides.clone(),
-        state.snapshot().as_ref(),
-      )?),
-      None => {
-        warn!("hot reload is enabled but no configuration path is available; reload disabled");
-        None
-      }
-    }
-  } else {
-    None
-  };
-  let admin_control = AdminControlContext {
-    receiver: admin_control_rx,
-    handle: admin_control,
-    runtime_overrides,
-  };
-  drop(error_tx);
-  let result = if let Some(reload) = reload {
-    serve_with_reload(
-      state,
-      &mut listeners,
-      &mut error_rx,
-      admin_control,
-      reload,
-      &mut process_signals,
-    )
-    .await
-  } else {
-    serve_until_shutdown(
-      state,
-      &mut listeners,
-      &mut error_rx,
-      admin_control,
-      &mut process_signals,
-    )
-    .await
-  };
-  admin_operations.shutdown().await;
-  if let Some(tasks) = cluster_runtime_tasks {
-    tasks.shutdown().await;
-  }
-  if let Some(cluster_heartbeat) = cluster_heartbeat
-    && let Err(error) = cluster_heartbeat.shutdown().await
-  {
-    if result.is_ok() {
-      return Err(error.context("failed to release Admin cluster member authority"));
-    }
-    warn!(error = %error, "failed to release Admin cluster member authority");
-  }
-  result
-}
-
+#[cfg(feature = "admin-runtime")]
 async fn serve_admin_listener(
   listener: TcpListener,
   configured_bind: SocketAddr,
@@ -300,6 +252,7 @@ async fn serve_admin_listener(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 async fn handle_admin_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,
@@ -378,6 +331,7 @@ async fn handle_admin_connection(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> bool {
   snapshot
     .config
@@ -388,6 +342,7 @@ fn admin_plaintext_allowed(snapshot: &AppSnapshot, peer_addr: SocketAddr) -> boo
     .any(|cidr| cidr.contains(peer_addr.ip()))
 }
 
+#[cfg(feature = "admin-runtime")]
 async fn admin_response(
   mut request: hyper::Request<Incoming>,
   state: AppHandle,
@@ -428,6 +383,7 @@ async fn admin_response(
   .await;
   admin_audit_gate::commit_response(audit, audit_reservation, response, &state).await
 }
+#[cfg(feature = "admin-runtime")]
 async fn admin_response_inner(
   request: hyper::Request<Incoming>,
   state: AppHandle,
@@ -845,11 +801,13 @@ async fn admin_response_inner(
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(feature = "admin-runtime")]
 enum AdminAuditOutcome {
   Applied,
   Rejected,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl AdminAuditOutcome {
   fn as_str(self) -> &'static str {
     match self {
@@ -859,6 +817,7 @@ impl AdminAuditOutcome {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn admin_audit(
   peer_addr: SocketAddr,
   actor: &AdminActor,
@@ -883,97 +842,20 @@ fn admin_audit(
   );
 }
 
-struct AdminControlContext {
-  receiver: mpsc::UnboundedReceiver<AdminControlCommand>,
-  handle: AdminControlHandle,
-  runtime_overrides: RuntimeOverrides,
-}
-
-async fn serve_until_shutdown(
-  state: AppHandle,
-  listeners: &mut ListenerSupervisor,
-  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  mut admin_control: AdminControlContext,
-  process_signals: &mut ProcessSignals,
-) -> anyhow::Result<()> {
-  let mut rollback: Option<RollbackSnapshot> = None;
-  loop {
-    tokio::select! {
-      result = process_signals.recv() => {
-          match result? {
-            ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
-            ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
-          }
-      }
-      Some(error) = error_rx.recv() => return Err(error),
-      Some(command) = admin_control.receiver.recv() => {
-        admin_control::handle_admin_control_command(
-          command,
-          &state,
-          listeners,
-          &admin_control.handle,
-          &admin_control.runtime_overrides,
-          &mut rollback,
-        ).await;
-      }
-    }
-  }
-}
-
-async fn serve_with_reload(
-  state: AppHandle,
-  listeners: &mut ListenerSupervisor,
-  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  mut admin_control: AdminControlContext,
-  mut reload: ReloadManager,
-  process_signals: &mut ProcessSignals,
-) -> anyhow::Result<()> {
-  #[cfg(unix)]
-  let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-    .context("failed to install SIGHUP listener")?;
-
-  let mut rollback: Option<RollbackSnapshot> = None;
-  loop {
-    let poll_sleep = tokio::time::sleep(reload.poll_interval());
-    tokio::pin!(poll_sleep);
-    tokio::select! {
-        result = process_signals.recv() => {
-            match result? {
-              ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
-              ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
-            }
-        }
-        Some(error) = error_rx.recv() => return Err(error),
-        Some(command) = admin_control.receiver.recv() => {
-            admin_control::handle_admin_control_command(
-              command,
-              &state,
-              listeners,
-              &admin_control.handle,
-              &admin_control.runtime_overrides,
-              &mut rollback,
-            ).await;
-        }
-        _ = &mut poll_sleep, if !state.snapshot().lifecycle.is_shutdown_draining() => {
-            reload.reload_if_changed(ReloadTrigger::Poll, &state, listeners).await;
-        }
-        _ = hup.recv(), if !state.snapshot().lifecycle.is_shutdown_draining() => {
-            reload.reload_if_changed(ReloadTrigger::Signal, &state, listeners).await;
-        }
-    }
-  }
-}
-
 pub(crate) struct ListenerSupervisor {
   tcp: BTreeMap<SocketAddr, TcpListenerTask>,
   http: BTreeMap<SocketAddr, TcpListenerTask>,
   http3: BTreeMap<SocketAddr, Http3ListenerTask>,
+  #[cfg(feature = "admin-runtime")]
   admin: Option<AdminListenerTask>,
+  #[cfg(feature = "admin-runtime")]
   admin_h3: Option<admin_h3::AdminHttp3ListenerTask>,
   streams: Vec<StreamListenerTask>,
   turns: Vec<TurnListenerTask>,
   error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  #[cfg(feature = "admin-runtime")]
   admin_control: AdminControlHandle,
+  #[cfg(feature = "admin-runtime")]
   admin_operations: AdminOperationRuntime,
   quiescing: bool,
 }
@@ -1021,6 +903,7 @@ struct BoundHttp3Listener {
   sni_forward_quic: Vec<crate::sni_forward::quic::BoundQuicForwardSocket>,
 }
 
+#[cfg(feature = "admin-runtime")]
 struct AdminListenerTask {
   bind: SocketAddr,
   shutdown: watch::Sender<bool>,
@@ -1028,6 +911,7 @@ struct AdminListenerTask {
   task: JoinHandle<()>,
 }
 
+#[cfg(feature = "admin-runtime")]
 struct BoundAdminListener {
   bind: SocketAddr,
   listener: TcpListener,
@@ -1037,11 +921,14 @@ pub(crate) struct PendingListenerUpdate {
   tcp: Option<listener_sets::PendingTcpListenerSetUpdate>,
   http: Option<listener_sets::PendingTcpListenerSetUpdate>,
   http3: Option<listener_sets::PendingHttp3ListenerSetUpdate>,
+  #[cfg(feature = "admin-runtime")]
   admin: Option<Option<BoundAdminListener>>,
+  #[cfg(feature = "admin-runtime")]
   admin_h3: Option<Option<admin_h3::BoundAdminHttp3Listener>>,
   streams: Option<Vec<BoundStreamListener>>,
   turns: Option<Vec<BoundTurnListener>>,
   refresh_http3_config: bool,
+  #[cfg(feature = "admin-runtime")]
   refresh_admin_h3_config: bool,
 }
 
@@ -1063,6 +950,7 @@ impl DrainTimeouts {
 }
 
 impl ListenerSupervisor {
+  #[cfg(feature = "admin-runtime")]
   async fn start(
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
@@ -1074,13 +962,37 @@ impl ListenerSupervisor {
       tcp: BTreeMap::new(),
       http: BTreeMap::new(),
       http3: BTreeMap::new(),
+      #[cfg(feature = "admin-runtime")]
       admin: None,
+      #[cfg(feature = "admin-runtime")]
       admin_h3: None,
       streams: Vec::new(),
       turns: Vec::new(),
       error_tx,
+      #[cfg(feature = "admin-runtime")]
       admin_control,
+      #[cfg(feature = "admin-runtime")]
       admin_operations,
+      quiescing: false,
+    };
+    let pending = supervisor.prepare(&snapshot).await?;
+    supervisor.commit(pending, &snapshot, state);
+    Ok(supervisor)
+  }
+
+  #[cfg(not(feature = "admin-runtime"))]
+  async fn start(
+    state: AppHandle,
+    error_tx: mpsc::UnboundedSender<anyhow::Error>,
+  ) -> anyhow::Result<Self> {
+    let snapshot = state.snapshot();
+    let mut supervisor = Self {
+      tcp: BTreeMap::new(),
+      http: BTreeMap::new(),
+      http3: BTreeMap::new(),
+      streams: Vec::new(),
+      turns: Vec::new(),
+      error_tx,
       quiescing: false,
     };
     let pending = supervisor.prepare(&snapshot).await?;
@@ -1131,6 +1043,7 @@ impl ListenerSupervisor {
     let (http3, refresh_http3_config) =
       listener_sets::prepare_http3_listener_set_update(&self.http3, desired_http3, snapshot)?;
 
+    #[cfg(feature = "admin-runtime")]
     let admin = if snapshot.config.admin.enabled {
       let bind = snapshot.config.admin.bind;
       if self.admin.as_ref().map(|task| task.bind) == Some(bind) {
@@ -1144,6 +1057,7 @@ impl ListenerSupervisor {
       None
     };
 
+    #[cfg(feature = "admin-runtime")]
     let (admin_h3, refresh_admin_h3_config) =
       if snapshot.config.admin.enabled && snapshot.config.admin.http3.enabled {
         let bind = admin_h3::configured_bind(snapshot);
@@ -1229,11 +1143,14 @@ impl ListenerSupervisor {
       tcp,
       http,
       http3,
+      #[cfg(feature = "admin-runtime")]
       admin,
+      #[cfg(feature = "admin-runtime")]
       admin_h3,
       streams,
       turns,
       refresh_http3_config,
+      #[cfg(feature = "admin-runtime")]
       refresh_admin_h3_config,
     })
   }
@@ -1279,6 +1196,7 @@ impl ListenerSupervisor {
       }
       None => {}
     }
+    #[cfg(feature = "admin-runtime")]
     match pending.admin {
       Some(Some(admin)) => {
         let admin = admin.start(
@@ -1299,6 +1217,7 @@ impl ListenerSupervisor {
       }
       None => {}
     }
+    #[cfg(feature = "admin-runtime")]
     match pending.admin_h3 {
       Some(Some(admin_h3)) => {
         let admin_h3 = admin_h3.start(
@@ -1358,9 +1277,11 @@ impl ListenerSupervisor {
     for task in std::mem::take(&mut self.http3).into_values() {
       tasks.push(task.drain());
     }
+    #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin.take() {
       tasks.push(task.drain());
     }
+    #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin_h3.take() {
       tasks.push(task.drain());
     }
@@ -1408,9 +1329,11 @@ impl Drop for ListenerSupervisor {
     for task in std::mem::take(&mut self.http3).into_values() {
       task.drain_background();
     }
+    #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin.take() {
       task.drain_background();
     }
+    #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin_h3.take() {
       task.drain_background();
     }
@@ -1626,6 +1549,7 @@ impl BoundHttp3Listener {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 impl AdminListenerTask {
   fn drain_background(self) {
     drop(self.drain());
@@ -1650,6 +1574,7 @@ impl AdminListenerTask {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 impl BoundAdminListener {
   fn start(
     self,
@@ -1710,6 +1635,7 @@ impl TcpListenerKind {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListener> {
   let listener = TcpListener::bind(bind)
     .await
@@ -1717,12 +1643,12 @@ async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<BoundAdminListe
   Ok(BoundAdminListener { bind, listener })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 fn test_admin_control() -> AdminControlHandle {
   AdminControlHandle::new(None).0
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 fn test_admin_operations() -> AdminOperationRuntime {
   AdminOperationRuntime::new(crate::config::AdminOperationsConfig::default())
 }
@@ -2501,28 +2427,28 @@ fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
   unique
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_audit_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_diagnostics_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_diagnostics_async_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_diagnostics_probe_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_json_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_metadata_assertions;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod admin_runtime_introspection_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod tests {
   use super::*;
 

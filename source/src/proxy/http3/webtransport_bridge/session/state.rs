@@ -13,11 +13,13 @@ use crate::proxy::stream_waf::StreamWafRequestContext;
 use crate::runtime_introspection::RuntimeCounterGuard;
 use crate::state::AppSnapshot;
 use crate::telemetry::{TelemetryStart, TraceContext};
+#[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportSessionGuard;
 
 pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSession {
   pub(super) upstream: Arc<web_transport_quinn::Session>,
   pub(super) connect_stream: H3RequestStream,
+  #[cfg(feature = "admin-runtime")]
   pub(super) admin_guard: WebTransportSessionGuard,
   pub(super) _connection_permits: WebTransportSessionPermits,
   pub(super) _introspection_guard: RuntimeCounterGuard,
@@ -42,6 +44,7 @@ impl ActiveWebTransportSession {
 
   pub(in crate::proxy::http3::webtransport_bridge) fn record_activity(&mut self) {
     self.last_activity = Instant::now();
+    #[cfg(feature = "admin-runtime")]
     self
       .metrics_state
       .webtransport_admin

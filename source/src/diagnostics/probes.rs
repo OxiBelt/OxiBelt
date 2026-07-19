@@ -1,7 +1,9 @@
 //! Diagnostic probe planning and reporting.
 //! Probe output is structured so callers can distinguish configuration, network, and TLS failures.
 
+#[cfg(feature = "admin-runtime")]
 use std::collections::BTreeSet;
+#[cfg(feature = "admin-runtime")]
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -9,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+#[cfg(feature = "admin-runtime")]
 use url::Url;
 
 use crate::config::{Config, DatabaseTlsMode, SharedStateBackendConfig, SharedStateBackendKind};
@@ -31,6 +34,7 @@ pub(super) async fn run_external_probes(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 pub(super) fn external_probe_target_resources(
   config: &Config,
   options: &DoctorOptions,
@@ -52,6 +56,7 @@ pub(super) fn external_probe_target_resources(
   resources.into_iter().collect()
 }
 
+#[cfg(feature = "admin-runtime")]
 fn collect_shared_state_targets(
   config: &Config,
   options: &DoctorOptions,
@@ -69,6 +74,7 @@ fn collect_shared_state_targets(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn collect_ipm_store_targets(
   config: &Config,
   options: &DoctorOptions,
@@ -95,6 +101,7 @@ fn collect_ipm_store_targets(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn collect_remote_signer_targets(
   config: &Config,
   options: &DoctorOptions,
@@ -111,6 +118,7 @@ fn collect_remote_signer_targets(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn collect_upstream_targets(
   config: &Config,
   options: &DoctorOptions,
@@ -143,6 +151,7 @@ fn collect_upstream_targets(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn discovery_dns_resource(
   discovery: &crate::config::UpstreamPoolDiscoveryConfig,
 ) -> Option<String> {
@@ -153,6 +162,7 @@ fn discovery_dns_resource(
   Some(format!("probe/upstream/dns/{name}"))
 }
 
+#[cfg(feature = "admin-runtime")]
 fn shared_state_backend_resource(
   kind: &str,
   backend: &SharedStateBackendConfig,
@@ -176,12 +186,14 @@ fn backend_requires_secret_probe_permission(backend: &SharedStateBackendConfig) 
   backend.connection_url_env.is_some() || backend.redis_auth.is_configured()
 }
 
+#[cfg(feature = "admin-runtime")]
 fn tcp_resource_from_url(kind: &str, url: &Url, default_port: Option<u16>) -> Option<String> {
   let host = normalized_probe_host(url.host_str()?);
   let port = url.port_or_known_default().or(default_port)?;
   Some(format!("probe/{kind}/tcp/{host}:{port}"))
 }
 
+#[cfg(feature = "admin-runtime")]
 fn normalized_probe_host(host: &str) -> String {
   match host.parse::<IpAddr>() {
     Ok(IpAddr::V4(ip)) => ip.to_string(),

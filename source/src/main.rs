@@ -23,7 +23,7 @@ const LIFECYCLE_PRESTOP_MIN_WAIT_SECONDS: u64 = 1;
 const LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Parser)]
-#[command(name = "oxibelt")]
+#[command(name = env!("CARGO_PKG_NAME"))]
 #[command(about = "OxiBelt reverse proxy")]
 struct Cli {
   #[arg(long, value_name = "FILE")]
@@ -185,6 +185,10 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
   let mut config = Config::load(config_path)
     .with_context(|| format!("failed to load {}", config_path.display()))?;
   let override_warnings = config.apply_runtime_overrides(&runtime_overrides);
+
+  if env!("CARGO_PKG_NAME") == "oxibelt-dataplane-strict" {
+    config.validate_for_artifact(oxibelt::config::RuntimeArtifact::StrictDataPlane)?;
+  }
 
   let observability = oxibelt::runtime::init_observability(&config)?;
   for warning in override_warnings {

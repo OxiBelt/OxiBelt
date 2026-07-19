@@ -17,18 +17,34 @@ repository, role, release, and target platform:
 
 ```yaml
 image:
+  role: dataplane
   repository: ghcr.io/oxibelt/oxibelt-dataplane
   digest: sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST
 ```
 
-The data-plane chart defaults to the role-specific minimal image. It contains
-only `/usr/local/bin/oxibelt`; Admin remains available through the same process
-when securely enabled, and Person Proof APIs plus the built-in frontend remain
-embedded. It does not contain a shell, operator CLI, Gateway Controller,
-keysigner, Node.js, package manager, or compiler. Use the standalone
-`ghcr.io/oxibelt/oxibelt` image only when in-container `oxibeltctl` convenience
-or compatibility helpers are intentionally required. Enabling Admin or Person
-Proof does not require the Gateway Controller or an image change.
+The data-plane chart defaults to `image.role: dataplane` and the role-specific
+minimal image. It contains only `/usr/local/bin/oxibelt`; Admin remains
+available through the same process when securely enabled, and Person Proof APIs
+plus the built-in frontend remain embedded. It does not contain a shell,
+operator CLI, Gateway Controller, keysigner, Node.js, package manager, or
+compiler. Use `image.role: standalone` only when in-container `oxibeltctl`
+convenience or compatibility helpers are intentionally required.
+
+Set `image.role: dataplane-strict` to select
+`ghcr.io/oxibelt/oxibelt-dataplane-strict` and
+`/usr/local/bin/oxibelt-dataplane-strict`. This optional package retains the
+public proxy, WAF, Person Proof, health, metrics, signal lifecycle, and immutable
+configuration-rollout surfaces, but does not compile or embed the Admin
+listener, Admin mutation runtime, Admin cluster/operation workers, or Admin
+OpenAPI asset. The chart rejects Admin listener values, secret projections,
+network-policy peers, or inline Admin TOML for this role. Operator-managed
+ConfigMaps cannot be inspected by Helm and are therefore also checked by the
+strict executable before sockets or background services start.
+
+The role/repository mapping is fail closed for official OxiBelt repositories.
+Custom repositories remain possible, but they are operator-owned artifacts and
+must provide the executable contract declared by `image.role`. Person Proof is
+available in both data-plane roles and does not require the Gateway Controller.
 
 The release workflow creates and verifies GitHub API-hosted keyless SLSA
 provenance and CycloneDX SBOM attestations before promoting these image digests.
@@ -145,7 +161,24 @@ The chart defaults are compatible with the release image's non-root runtime:
 - all Linux capabilities dropped
 - `seccompProfile.type: RuntimeDefault`
 - config, TLS, and OxiRule mounts read-only
-- `/var/cache/oxibelt` backed by an `emptyDir`
+- compatibility roles get `/var/cache/oxibelt` backed by an `emptyDir`
+
+`cacheVolume.mode: auto` preserves the compatibility-role cache and omits it
+for `dataplane-strict`, leaving the strict Pod without a default writable
+mount. Select `cacheVolume.mode: enabled` for strict only when configured cache,
+CRLite, ASN, spool, or other data-plane behavior genuinely needs disk, and set
+a nonempty `cacheVolume.sizeLimit`. Other writable state uses deliberately
+reviewed `extraVolumes`/`extraVolumeMounts`; mounting a writable host path or a
+Kubernetes API credential changes the strict deployment's threat boundary.
+
+`RuntimeDefault` is the portable seccomp baseline. Clusters that install the
+repository profiles from `deploy/seccomp/` may instead select a `Localhost`
+profile appropriate to the configured Tokio or Compio runtime. Test that
+profile against the exact image and enabled protocols before enforcing it.
+AppArmor and SELinux policy names, loading, and labels are distribution and
+cluster specific; the chart does not invent or install a generic profile.
+Apply an operator-tested policy through Pod annotations or admission only after
+verifying probes, TLS/QUIC, reload, and graceful drain behavior.
 
 ### ServiceAccount credentials and Kubernetes discovery
 
@@ -299,6 +332,12 @@ non-loopback escape hatch. It cannot be combined with TLS, mTLS, `NodePort`,
 or `LoadBalancer` exposure. It is intended only for isolated development
 clusters.
 
+The `dataplane-strict` role has no Admin listener to secure or expose. Helm
+rejects every Admin opt-in for that role rather than silently ignoring it. Use
+the compatibility `dataplane` or `standalone` role when an Admin operation,
+runtime mutation, Admin audit endpoint, or fixed-member Admin cluster is a
+deployment requirement.
+
 The chart validates its generated default Admin TOML. If an operator replaces
 `config.inline` or uses `config.existingConfigMap`, that TOML remains
 operator-owned and must be checked with `oxibelt --config <file> --check`.
@@ -441,16 +480,18 @@ or managed spread policy for a DaemonSet: it already places at most one Pod on
 each eligible node. The secure DaemonSet setting instead uses
 `maxUnavailable: 0` plus `maxSurge: 1`.
 
-When `lifecycle.preStop.enabled` is true, the chart renders only the fixed
-command `kill -USR1 1; exec sleep <drainSeconds>`. The duration is a validated
-integer, not an operator-supplied shell fragment. `SIGUSR1` starts OxiBelt's
-drain-only state before Kubernetes sends its final termination signal: readiness
-withdraws, new traffic is rejected, HTTP/2 emits graceful shutdown/GOAWAY, and
-HTTP/3 stops accepting new streams while permitted work drains. Kubernetes
-counts pre-stop time inside `terminationGracePeriodSeconds`; choose a grace
-period that covers the pre-stop delay, the runtime shutdown delay, the ordinary
-graceful timeout, and an orchestration margin. The secure companion's
-`300 + 10 + 30 + 20 = 360` second budget is its supported contract.
+When `lifecycle.preStop.enabled` is true, the chart invokes the selected role's
+executable with the fixed internal
+`__lifecycle-prestop --wait-seconds <drainSeconds>` command. The duration is a
+validated integer and no shell is
+present or invoked. The helper signals PID 1 into OxiBelt's drain-only state
+before Kubernetes sends its final termination signal: readiness withdraws, new
+traffic is rejected, HTTP/2 emits graceful shutdown/GOAWAY, and HTTP/3 stops
+accepting new streams while permitted work drains. Kubernetes counts pre-stop
+time inside `terminationGracePeriodSeconds`; choose a grace period that covers
+the pre-stop delay, the runtime shutdown delay, the ordinary graceful timeout,
+and an orchestration margin. The secure companion's `300 + 10 + 30 + 20 = 360`
+second budget is its supported contract.
 
 Long-lived WebSocket, Upgrade, CONNECT, WebTransport, and stream sessions use
 the runtime long-connection delay after drain begins. QUIC connection state is

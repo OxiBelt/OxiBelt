@@ -46,7 +46,7 @@ pub mod signing;
 mod streaming;
 
 pub use entry::{CacheBodyFile, CacheEntry};
-pub(crate) use external_handler::{ExternalCachePurgeReport, ExternalCacheRuntime};
+pub(crate) use external_handler::ExternalCacheRuntime;
 pub(crate) use fill::{CacheFillDecision, CacheFillSuppressionReason};
 pub use fill::{CacheFillGuard, CacheFillWaiter};
 use metadata::{decode_metadata, encode_metadata, remove_metadata};

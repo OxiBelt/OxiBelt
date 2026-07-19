@@ -48,6 +48,7 @@ publish = false
 
   const ProductionPackages = [
     'oxibelt',
+    'oxibelt-dataplane-strict',
     'oxibelt-control-http',
     'oxibelt-control-protocol',
     'oxibelt-deployment-diagnostics',
@@ -83,7 +84,7 @@ function Cleanup(WorkspaceValue: Workspace): void {
 
 function AssertRepresentativeManifestArchs(
   Plan: ReturnType<typeof BuildImageReleasePlan>,
-  Role: 'standalone' | 'dataplane' | 'controller' | 'tools' | 'keysigner' = 'standalone'
+  Role: 'standalone' | 'dataplane' | 'dataplane-strict' | 'controller' | 'tools' | 'keysigner' = 'standalone'
 ): void {
   const ExpectedArchs = ['amd64', 'arm64', 'riscv64']
   const ReleaseManifest = Plan.manifests.find(Manifest => Manifest.role === Role && Manifest.name === 'release')
@@ -276,7 +277,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
-  Assert.equal(Plan.schemaVersion, 5)
+  Assert.equal(Plan.schemaVersion, 6)
   Assert.deepEqual(Plan.roles, [
     {
       role: 'standalone',
@@ -286,7 +287,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
       user: '10001:10001',
       ports: ['8443/tcp', '8443/udp'],
-      embeddedAssets: true
+      embeddedAssets: ['admin-openapi', 'person-proof']
     },
     {
       role: 'dataplane',
@@ -296,7 +297,17 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt', '--config', '/etc/oxibelt/config/oxibelt.toml'],
       user: '10001:10001',
       ports: ['8443/tcp', '8443/udp'],
-      embeddedAssets: true
+      embeddedAssets: ['admin-openapi', 'person-proof']
+    },
+    {
+      role: 'dataplane-strict',
+      image: 'ghcr.io/oxibelt/oxibelt-dataplane-strict',
+      dockerTarget: 'dataplane-strict',
+      binaries: ['oxibelt-dataplane-strict'],
+      entrypoint: ['/usr/local/bin/oxibelt-dataplane-strict', '--config', '/etc/oxibelt/config/oxibelt.toml'],
+      user: '10001:10001',
+      ports: ['8443/tcp', '8443/udp'],
+      embeddedAssets: ['person-proof']
     },
     {
       role: 'controller',
@@ -306,7 +317,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt-gateway-controller'],
       user: '10001:10001',
       ports: [],
-      embeddedAssets: false
+      embeddedAssets: []
     },
     {
       role: 'tools',
@@ -316,7 +327,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibeltctl'],
       user: '10001:10001',
       ports: [],
-      embeddedAssets: false
+      embeddedAssets: []
     },
     {
       role: 'keysigner',
@@ -326,7 +337,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
       entrypoint: ['/usr/local/bin/oxibelt-keysigner'],
       user: '10002:10002',
       ports: [],
-      embeddedAssets: false
+      embeddedAssets: []
     }
   ])
   Assert.equal('sbom' in Plan, false)
@@ -342,9 +353,9 @@ test('image plan defines exact role-specific repositories, inventories, and arti
     source: 'https://github.com/OxiBelt/OxiBelt'
   })
 
-  Assert.equal(Plan.artifacts.length, 25)
-  Assert.equal(Plan.manifests.length, 10)
-  for (const Role of ['standalone', 'dataplane', 'controller', 'tools', 'keysigner'] as const) {
+  Assert.equal(Plan.artifacts.length, 30)
+  Assert.equal(Plan.manifests.length, 12)
+  for (const Role of ['standalone', 'dataplane', 'dataplane-strict', 'controller', 'tools', 'keysigner'] as const) {
     AssertRepresentativeManifestArchs(Plan, Role)
     Assert.equal(Plan.artifacts.filter(Artifact => Artifact.role === Role).length, 5)
     Assert.equal(Plan.manifests.filter(Manifest => Manifest.role === Role).length, 2)
@@ -360,6 +371,17 @@ test('image plan defines exact role-specific repositories, inventories, and arti
     'ghcr.io/oxibelt/oxibelt-dataplane:5.2.0-alpine-musl-amd64'
   )
   Assert.equal(Dataplane?.artifactName, 'oxibelt-dataplane-alpine-musl-amd64-image')
+
+  const Strict = Plan.artifacts.find(
+    Artifact => Artifact.role === 'dataplane-strict' && Artifact.artifactArch === 'amd64'
+  )
+  Assert.equal(Strict?.dockerTarget, 'dataplane-strict')
+  Assert.deepEqual(Strict?.binaries, ['oxibelt-dataplane-strict'])
+  Assert.deepEqual(Strict?.embeddedAssets, ['person-proof'])
+  Assert.equal(
+    Strict?.canonicalGhcrTag,
+    'ghcr.io/oxibelt/oxibelt-dataplane-strict:5.2.0-alpine-musl-amd64'
+  )
 })
 
 test('beta and build image plans use amd64 representative manifests', () => {

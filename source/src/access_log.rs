@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::warn;
 
+#[cfg(feature = "admin-runtime")]
 use crate::admin_audit::AdminAuditEvent;
 use crate::config::{AccessLogConfig, AccessLogSchema, CryptoConfig, LoggingAccessLogConfig};
 use crate::waf::{
@@ -17,7 +18,9 @@ mod otlp;
 mod projection;
 
 use otlp::{OtlpAccessLogSink, OtlpLogRecord};
-use projection::{admin_event_value, emit_stdout, project_ecs, project_ocsf};
+#[cfg(feature = "admin-runtime")]
+use projection::admin_event_value;
+use projection::{emit_stdout, project_ecs, project_ocsf};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AccessLogSource {
@@ -81,6 +84,7 @@ impl AccessLogRuntime {
     self.emit_value(source, record.timestamp_unix_ms(), record.to_json_value());
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn emit_admin_event(&self, event: &AdminAuditEvent) {
     self.emit_value(
       AccessLogSource::Admin,
@@ -149,6 +153,7 @@ impl AccessLogSinks {
     self.runtime.emit_record(self.source, record);
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub fn emit_admin_event(&self, event: &AdminAuditEvent) {
     self.runtime.emit_admin_event(event);
   }
