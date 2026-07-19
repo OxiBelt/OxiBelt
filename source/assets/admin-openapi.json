@@ -8257,7 +8257,8 @@
               "admin_http3",
         "admin_operation_webtransport",
         "admin_audit",
-        "admin_mutation_replay"
+        "admin_mutation_replay",
+        "atomic_secret_reference_activation"
             ],
             "properties": {
               "config_load": {
@@ -8303,6 +8304,9 @@
           "type": "boolean"
         },
         "admin_mutation_replay": {
+          "type": "boolean"
+        },
+        "atomic_secret_reference_activation": {
           "type": "boolean"
         }
             },
