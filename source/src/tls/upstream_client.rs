@@ -10,11 +10,11 @@ use rustls::pki_types::EchConfigListBytes;
 
 use crate::config::{
   CryptoConfig, OutboundTlsRevocationConfig, QuicConfig, UpstreamEchConfig, UpstreamEchMode,
-  UpstreamTlsResumptionConfig,
+  UpstreamTlsResumptionConfig, UpstreamTlsTrust,
 };
 
 use super::certificate_io::read_existing_file;
-use super::client_roots::{load_upstream_root_store, load_webpki_root_store};
+use super::client_roots::{load_upstream_root_store_with_trust, load_webpki_root_store};
 use super::outbound_revocation::OutboundRevocationRuntime;
 use super::resumption::{
   TlsResumptionState, upstream_client_config_key, upstream_client_resumption,
@@ -76,11 +76,35 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
   upstream_name: &str,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
+  build_upstream_client_config_with_trust(
+    crypto,
+    extra_root_certificates,
+    UpstreamTlsTrust::Inherit,
+    ech,
+    resumption,
+    state,
+    upstream_name,
+    revocation,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_upstream_client_config_with_trust(
+  crypto: &CryptoConfig,
+  extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+  revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
+) -> anyhow::Result<ClientConfig> {
   let key = upstream_client_config_key(
     "tcp",
     crypto.tls_provider,
     upstream_name,
     extra_root_certificates,
+    trust,
     ech,
     resumption,
   )?;
@@ -94,6 +118,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
       build_uncached_upstream_client_config(
         crypto,
         extra_root_certificates,
+        trust,
         ech,
         resumption,
         false,
@@ -104,6 +129,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
   build_uncached_upstream_client_config(
     crypto,
     extra_root_certificates,
+    trust,
     ech,
     resumption,
     false,
@@ -114,13 +140,17 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
 fn build_uncached_upstream_client_config(
   crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   quic_only: bool,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
   let provider = Arc::new(super::provider::crypto_provider(crypto)?);
-  let roots = Arc::new(load_upstream_root_store(extra_root_certificates)?);
+  let roots = Arc::new(load_upstream_root_store_with_trust(
+    extra_root_certificates,
+    trust,
+  )?);
   let revocation_enabled = revocation
     .as_ref()
     .is_some_and(|(_, policy)| policy.enabled());
@@ -253,11 +283,37 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
   upstream_name: &str,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<QuinnClientConfig> {
+  build_upstream_quic_client_config_with_trust(
+    crypto,
+    extra_root_certificates,
+    UpstreamTlsTrust::Inherit,
+    ech,
+    quic,
+    resumption,
+    state,
+    upstream_name,
+    revocation,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_upstream_quic_client_config_with_trust(
+  crypto: &CryptoConfig,
+  extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
+  ech: &UpstreamEchConfig,
+  quic: &QuicConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+  revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
+) -> anyhow::Result<QuinnClientConfig> {
   let key = upstream_client_config_key(
     "quic",
     crypto.tls_provider,
     upstream_name,
     extra_root_certificates,
+    trust,
     ech,
     resumption,
   )?;
@@ -271,6 +327,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
       build_uncached_upstream_client_config(
         crypto,
         extra_root_certificates,
+        trust,
         ech,
         resumption,
         true,
@@ -281,6 +338,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
     build_uncached_upstream_client_config(
       crypto,
       extra_root_certificates,
+      trust,
       ech,
       resumption,
       true,

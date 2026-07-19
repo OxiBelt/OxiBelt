@@ -10017,6 +10017,142 @@ udp_datagram_burst = 20
 }
 
 #[test]
+fn stream_listeners_allow_tcp_and_udp_on_the_same_socket_number() {
+  let temp_dir = common::TempDir::new("stream-transport-aware-bind");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-transport-aware-bind");
+  let raw = format!(
+    r#"
+{}
+
+[[stream_listeners]]
+name = "tcp"
+network = "tcp"
+bind = "127.0.0.1:15445"
+target = "tcp.internal.example:15445"
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_new_flow_rate = "200r/s"
+udp_new_flow_burst = 400
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("TCP and UDP should be allowed to share a socket number");
+  assert_eq!(
+    config.stream_listeners[1].udp_new_flow_rate.as_deref(),
+    Some("200r/s")
+  );
+  assert_eq!(config.stream_listeners[1].udp_new_flow_burst, 400);
+}
+
+#[test]
+fn stream_listeners_reject_same_transport_overlapping_binds() {
+  let temp_dir = common::TempDir::new("stream-overlapping-bind");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-overlapping-bind");
+  let raw = format!(
+    r#"
+{}
+
+[[stream_listeners]]
+name = "tcp-wildcard"
+network = "tcp"
+bind = "0.0.0.0:15447"
+target = "tcp.internal.example:15447"
+
+[[stream_listeners]]
+name = "tcp-loopback"
+network = "tcp"
+bind = "127.0.0.1:15447"
+target = "tcp.internal.example:15448"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("overlapping same-transport stream binds must fail closed");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping stream listener bind"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn udp_stream_listener_rejects_active_http3_bind_conflict() {
+  let temp_dir = common::TempDir::new("stream-http3-bind-conflict");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-http3-bind-conflict");
+  let base =
+    common::minimal_config_toml(&cert_path, &key_path).replace("http3 = false", "http3 = true");
+  let raw = format!(
+    r#"
+{base}
+
+[quic.socket]
+reuse_port = true
+
+[[stream_listeners]]
+name = "udp-http3-conflict"
+network = "udp"
+bind = "127.0.0.1:8443"
+target = "udp.internal.example:8443"
+"#,
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("a UDP stream must not reuse the active HTTP/3 bind");
+  assert!(
+    error.to_string().contains("overlaps listeners HTTP/3 bind"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn udp_new_flow_rate_requires_a_positive_burst() {
+  let temp_dir = common::TempDir::new("stream-new-flow-burst");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-new-flow-burst");
+  let raw = format!(
+    r#"
+{}
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15446"
+target = "udp.internal.example:15446"
+udp_new_flow_rate = "200r/s"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("a new-flow rate without burst must fail closed");
+  assert!(
+    error
+      .to_string()
+      .contains("udp_new_flow_burst must be greater than 0"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn stream_pool_rejects_invalid_origin_scheme() {
   let temp_dir = common::TempDir::new("stream-pool-invalid-scheme");
   let (cert_path, key_path) =
@@ -11064,6 +11200,60 @@ filter_file = "health-crlite.filter"
       .downstream_tls_files
       .contains(&expected_ca_path)
   );
+}
+
+#[test]
+fn config_load_resolves_and_digest_binds_pool_server_tls_roots() {
+  use sha2::{Digest, Sha256};
+
+  let temp_dir = common::TempDir::new("pool-server-tls-policy");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("failed to create config directory");
+  std::fs::create_dir_all(&cert_dir).expect("failed to create cert directory");
+
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "pool-server-tls-policy");
+  let cert_bytes = std::fs::read(&cert_path).expect("failed to read generated CA certificate");
+  let digest = Sha256::digest(&cert_bytes)
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect::<String>();
+  let cert_file = cert_path.file_name().unwrap().to_string_lossy();
+  let key_file = key_path.file_name().unwrap().to_string_lossy();
+  let config_path = config_dir.join("oxibelt.toml");
+  std::fs::write(
+    &config_path,
+    format!(
+      r#"
+{}
+
+[[upstream_pools]]
+name = "app-pool"
+
+[[upstream_pools.servers]]
+id = "app-a"
+origin = "https://app-a.default.svc.cluster.local:8443"
+
+[upstream_pools.servers.tls]
+server_name = "backend.example.test"
+trust = "exclusive"
+trusted_ca_certs = ["{cert_file}"]
+trusted_ca_sha256 = ["{digest}"]
+"#,
+      common::minimal_config_toml_with_paths(&cert_file, &key_file)
+    ),
+  )
+  .expect("failed to write config");
+
+  let config = Config::load(&config_path).expect("policy-bound pool config should load");
+  let tls = &config.upstream_pools[0].servers[0].tls;
+  assert_eq!(tls.server_name.as_deref(), Some("backend.example.test"));
+  assert_eq!(tls.trust, oxibelt::config::UpstreamTlsTrust::Exclusive);
+  assert_eq!(
+    tls.trusted_ca_certs,
+    vec![cert_path.canonicalize().unwrap()]
+  );
+  assert_eq!(tls.trusted_ca_sha256, vec![digest]);
 }
 
 #[test]

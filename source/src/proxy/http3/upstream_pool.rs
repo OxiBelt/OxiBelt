@@ -45,21 +45,26 @@ impl UpstreamH3Pools {
       if upstream.max_http_version != HttpVersion::H3 {
         continue;
       }
-      let quic_config =
-        tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
-          &config.crypto,
-          &config.proxy.trusted_ca_certs,
-          &upstream.tls.ech,
-          &config.quic,
-          &upstream.tls.resumption,
-          Some(tls_resumption),
-          &upstream.name,
-          Some((
-            outbound_revocation,
-            outbound_revocation.policy_for_upstream(upstream),
-          )),
-        )
-        .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
+      let inherited_roots = config
+        .proxy
+        .trusted_ca_certs
+        .iter()
+        .chain(&upstream.extra_trusted_ca_certs)
+        .cloned()
+        .collect::<Vec<_>>();
+      let quic_config = tls::build_upstream_quic_client_config_with_policy(
+        &config.crypto,
+        &inherited_roots,
+        &upstream.tls,
+        &config.quic,
+        Some(tls_resumption),
+        &upstream.name,
+        Some((
+          outbound_revocation,
+          outbound_revocation.policy_for_upstream(upstream),
+        )),
+      )
+      .with_context(|| format!("failed to build upstream HTTP/3 pool for {}", upstream.name))?;
       by_upstream.insert(
         upstream.name.clone(),
         Arc::new(UpstreamH3Pool {
@@ -227,7 +232,12 @@ impl UpstreamH3Pool {
     let _pending = overload.lease(WorkKind::PendingUpstreamRequests, 1);
     let uri = request.uri().clone();
     metrics.record_http_upstream_client_request("h3", "https", "primary");
-    let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+    let (origin_server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+    let server_name = upstream
+      .tls
+      .server_name
+      .clone()
+      .unwrap_or(origin_server_name);
     let key = H3PoolKey {
       remote_addr,
       server_name,

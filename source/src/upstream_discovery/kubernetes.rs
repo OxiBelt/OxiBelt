@@ -440,6 +440,7 @@ fn discovered_ip_server(
     max_conns: 0,
     backup: false,
     state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
     source,
   })
 }

@@ -236,6 +236,12 @@ pub(crate) fn replace_discovered_servers(
   }
 
   let pool = find_pool_mut(config, pool_name)?;
+  let discovery_tls = pool
+    .discovery
+    .iter()
+    .find(|discovery| discovery_source(discovery.provider) == source)
+    .map(|discovery| discovery.tls.clone())
+    .ok_or_else(|| anyhow::anyhow!("upstream pool {pool_name} has no matching discovery policy"))?;
   let previous_states = pool
     .servers
     .iter()
@@ -249,6 +255,7 @@ pub(crate) fn replace_discovered_servers(
     validate_runtime_identifier("discovered upstream pool server id", &server_id)?;
     server.id = Some(server_id.clone());
     server.source = source;
+    server.tls = discovery_tls.clone();
     if let Some(state) = previous_states.get(&server_id) {
       server.state = *state;
     } else if server.state != UpstreamPoolServerState::Ready {
@@ -259,6 +266,19 @@ pub(crate) fn replace_discovered_servers(
   pool.servers.retain(|server| server.source != source);
   pool.servers.extend(servers);
   Ok(())
+}
+
+fn discovery_source(
+  provider: crate::config::UpstreamDiscoveryProvider,
+) -> UpstreamPoolServerSource {
+  match provider {
+    crate::config::UpstreamDiscoveryProvider::Dns => UpstreamPoolServerSource::Dns,
+    crate::config::UpstreamDiscoveryProvider::File => UpstreamPoolServerSource::File,
+    crate::config::UpstreamDiscoveryProvider::Kubernetes => UpstreamPoolServerSource::Kubernetes,
+    crate::config::UpstreamDiscoveryProvider::Consul => UpstreamPoolServerSource::Consul,
+    crate::config::UpstreamDiscoveryProvider::Etcd => UpstreamPoolServerSource::Etcd,
+    crate::config::UpstreamDiscoveryProvider::Nomad => UpstreamPoolServerSource::Nomad,
+  }
 }
 
 pub(crate) fn stable_generated_server_id(parts: &[&str]) -> String {

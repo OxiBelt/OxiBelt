@@ -10,6 +10,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 gateway_api_version="v1.6.1"
+gateway_api_commit="8bb74df00e56ec8f944d48c25e6c1c9c2f6848e3"
 # Kubernetes v1.31 lacks the CEL format library used by the experimental
 # XBackend CRD. The standard bundle still includes every CRD OxiBelt watches.
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
@@ -436,6 +437,75 @@ stale_config_pod_reports_digest_mismatch() {
     <<<"${logs}"
 }
 
+run_gateway_api_l4_conformance() {
+  local source_dir="${work_dir}/gateway-api-source"
+  local binary="${work_dir}/gateway-api-conformance.test"
+  local node="${cluster_name}-control-plane"
+  local node_binary="/tmp/oxibelt-gateway-api-conformance-${run_id}.test"
+  local node_report="/tmp/oxibelt-gateway-api-conformance-${run_id}.yaml"
+  local implementation_version
+
+  implementation_version="$(git -C "${repo_root}" rev-parse --verify 'HEAD^{commit}')"
+  [[ "${implementation_version}" =~ ^[a-f0-9]{40}$ ]] \
+    || die "repository HEAD did not resolve to a lower-case commit SHA for the conformance report"
+
+  # The cross-namespace core profile cases need the chart's explicit
+  # cluster-wide watch mode. Upgrade only after the scoped-RBAC assertions and
+  # leader-replacement checks above have completed.
+  helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
+    --namespace "${namespace}" \
+    -f "${controller_image_values}" \
+    --set "watchAllNamespaces=true" \
+    --set-string "managedConfigPath=${managed_config_path}" \
+    --set-string "statusService=${namespace}/${workload_name}" \
+    --set-string "statusAddresses[0]=${status_service_address}" \
+    --set-string "rollout.target.namespace=${namespace}" \
+    --set-string "rollout.target.kind=deployment" \
+    --set-string "rollout.target.name=${workload_name}" \
+    --set-string "rollout.target.containerName=oxibelt" \
+    --set-string "rollout.volumeName=gateway-config" \
+    --set "rollout.timeoutSeconds=300" \
+    --set-string "rollout.configMapPrefix=oxibelt-gateway-config" \
+    --wait \
+    --timeout "${rollout_timeout_seconds}s"
+
+  kube apply -f - >/dev/null <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: gateway-conformance
+spec:
+  controllerName: oxibelt.dev/gateway-controller
+EOF
+
+  git clone --quiet --filter=blob:none --branch "${gateway_api_version}" --depth 1 \
+    https://github.com/kubernetes-sigs/gateway-api.git "${source_dir}"
+  [[ "$(git -C "${source_dir}" rev-parse HEAD)" == "${gateway_api_commit}" ]] \
+    || die "Gateway API conformance source did not match the pinned v1.6.1 commit"
+  (
+    cd -- "${source_dir}"
+    GOTOOLCHAIN=auto go test -c -o "${binary}" ./conformance
+  )
+
+  docker cp "${binary}" "${node}:${node_binary}"
+  docker exec \
+    --env KUBECONFIG=/etc/kubernetes/admin.conf \
+    "${node}" \
+    "${node_binary}" \
+    -test.v \
+    -test.timeout=45m \
+    -test.run='^TestConformance$' \
+    -gateway-class=gateway-conformance \
+    -conformance-profiles=GATEWAY-TCP,GATEWAY-UDP \
+    -skip-provisional-tests=false \
+    -report-output="${node_report}" \
+    -organization=OxiBelt \
+    -project=OxiBelt \
+    -url=https://github.com/OxiBelt/OxiBelt \
+    -version="${implementation_version}"
+  docker cp "${node}:${node_report}" "${work_dir}/gateway-api-conformance-report.yaml"
+}
+
 assert_controller_can_i() {
   local expected="$1"
   shift
@@ -450,7 +520,7 @@ assert_controller_can_i() {
   fi
 }
 
-for command in docker kind kubectl helm curl jq openssl sha256sum tail tr; do
+for command in docker kind kubectl helm curl git go jq openssl sha256sum tail tr; do
   require_command "${command}"
 done
 
@@ -534,23 +604,6 @@ curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
 printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
 kube apply --server-side --force-conflicts -f "${gateway_api_manifest}" >/dev/null
 
-# OxiBelt still watches TCPRoute v1alpha2 to publish the documented
-# unsupported/status-only diagnostic. Gateway API v1.6 retains that schema in
-# the standard bundle but disables serving it, so enable only that pinned
-# compatibility version in this isolated test cluster.
-tcp_route_v1alpha2_index="$(
-  kube get crd tcproutes.gateway.networking.k8s.io -o json \
-    | jq -er '
-        [.spec.versions | to_entries[] | select(.value.name == "v1alpha2")] as $matches
-        | if ($matches | length) == 1 then $matches[0].key
-          else error("expected exactly one TCPRoute v1alpha2 CRD version")
-          end
-      '
-)"
-[[ "${tcp_route_v1alpha2_index}" =~ ^[0-9]+$ ]] \
-  || die "TCPRoute v1alpha2 CRD version index is not numeric"
-kube patch crd tcproutes.gateway.networking.k8s.io --type=json \
-  --patch "[{\"op\":\"test\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/name\",\"value\":\"v1alpha2\"},{\"op\":\"replace\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/served\",\"value\":true}]" >/dev/null
 kube wait --for=condition=Established --timeout=120s \
   crd/gatewayclasses.gateway.networking.k8s.io \
   crd/gateways.gateway.networking.k8s.io \
@@ -558,7 +611,9 @@ kube wait --for=condition=Established --timeout=120s \
   crd/grpcroutes.gateway.networking.k8s.io \
   crd/tlsroutes.gateway.networking.k8s.io \
   crd/referencegrants.gateway.networking.k8s.io \
-  crd/tcproutes.gateway.networking.k8s.io
+  crd/tcproutes.gateway.networking.k8s.io \
+  crd/udproutes.gateway.networking.k8s.io \
+  crd/backendtlspolicies.gateway.networking.k8s.io
 
 kube create namespace "${namespace}" >/dev/null
 kube create namespace "${outside_namespace}" >/dev/null
@@ -694,6 +749,7 @@ helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --namespace "${namespace}" \
   -f "${dataplane_image_values}" \
   -f "${repo_root}/deploy/helm/oxibelt/examples/admin-mtls-values.yaml" \
+  -f "${repo_root}/tests/fixtures/gateway-api-conformance-values.yaml" \
   --set "replicaCount=3" \
   --set "service.type=ClusterIP" \
   --set-string "admin.tls.serverNames[0]=${admin_server_name}" \
@@ -757,11 +813,17 @@ jq -e --arg revision "${bootstrap_revision}" '
 wait_for "three bootstrap Pods with the base revision and empty digest" 60 \
   bootstrap_pods_have_identity "${bootstrap_revision}" "${empty_config_digest}"
 
+status_service_address="$(kube -n "${namespace}" get service "${workload_name}" -o jsonpath='{.spec.clusterIP}')"
+[[ "${status_service_address}" =~ ^[0-9a-fA-F:.]+$ ]] \
+  || die "data-plane Service did not expose a valid conformance status address"
+
 helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   -f "${controller_image_values}" \
   --set-string "managedConfigPath=${managed_config_path}" \
   --set-string "watchNamespace=${namespace}" \
+  --set-string "statusService=${namespace}/${workload_name}" \
+  --set-string "statusAddresses[0]=${status_service_address}" \
   --set-string "rollout.target.namespace=${namespace}" \
   --set-string "rollout.target.kind=deployment" \
   --set-string "rollout.target.name=${workload_name}" \
@@ -828,6 +890,10 @@ assert_controller_can_i no update gatewayclasses.gateway.networking.k8s.io --sub
 assert_controller_can_i no get secrets --namespace "${namespace}"
 assert_controller_can_i no list secrets --namespace "${namespace}"
 assert_controller_can_i no get services --namespace "${namespace}"
+assert_controller_can_i no create services --namespace "${namespace}"
+assert_controller_can_i no patch services --namespace "${namespace}"
+assert_controller_can_i no update services --namespace "${namespace}"
+assert_controller_can_i no delete services --namespace "${namespace}"
 assert_controller_can_i no delete configmaps --namespace "${namespace}"
 assert_controller_can_i no delete pods --namespace "${namespace}"
 assert_controller_can_i no patch deployments.apps/not-the-target --namespace "${namespace}"
@@ -1032,4 +1098,6 @@ wait_for "a failed-closed stale-config Pod" 60 \
 wait_for "the immutable digest-mismatch log from stale-config Pod" 30 \
   stale_config_pod_reports_digest_mismatch "${stale_pod}"
 
-echo "Kubernetes immutable three-replica rollout passed"
+run_gateway_api_l4_conformance
+
+echo "Kubernetes immutable three-replica rollout and Gateway API TCP/UDP conformance passed"

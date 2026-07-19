@@ -27,6 +27,7 @@ pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig
         max_conns: 0,
         backup: false,
         state: Default::default(),
+        tls: Default::default(),
         source: Default::default(),
       },
       UpstreamPoolServerConfig {
@@ -36,6 +37,7 @@ pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig
         max_conns: 0,
         backup: false,
         state: Default::default(),
+        tls: Default::default(),
         source: Default::default(),
       },
     ],
@@ -246,29 +248,25 @@ fn runtime_state_excludes_servers_from_new_selection() {
 }
 
 #[test]
-fn runtime_weight_is_used_for_candidate_sampling() {
+fn runtime_weight_biases_bounded_candidate_sampling() {
   let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
   pool.servers[0].weight = 3;
   pool.servers[1].weight = 1;
   let state = PoolState::new(&[pool], None);
-  let runtime = app_pool_runtime(&state);
+  let weighted_name = synthetic_upstream_name("app-pool", 0);
+  let selected_weighted = (0..256)
+    .filter(|_| {
+      state
+        .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
+        .unwrap()
+        .upstream_name
+        == weighted_name
+    })
+    .count();
 
-  let weighted = weighted_available(runtime, &HashSet::new());
-
-  assert_eq!(weighted.len(), 4);
-  assert_eq!(
-    weighted
-      .iter()
-      .filter(|server| server.upstream_name == synthetic_upstream_name("app-pool", 0))
-      .count(),
-    3
-  );
-  assert_eq!(
-    weighted
-      .iter()
-      .filter(|server| server.upstream_name == synthetic_upstream_name("app-pool", 1))
-      .count(),
-    1
+  assert!(
+    selected_weighted > 128,
+    "higher-weight server should be sampled more often without weight-expanded storage"
   );
 }
 
@@ -306,6 +304,7 @@ fn slow_start_scales_weight_for_new_servers_after_rebuild() {
     max_conns: 0,
     backup: false,
     state: Default::default(),
+    tls: Default::default(),
     source: UpstreamPoolServerSource::Admin,
   });
   let rebuilt = PoolState::new_with_previous(&[pool], None, Some(initial.as_ref()));

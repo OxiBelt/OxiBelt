@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -28,6 +28,26 @@ pub struct SharedArgs {
   pub status_address: Vec<String>,
   #[arg(long, global = true)]
   pub status_service: Option<String>,
+  #[arg(long, global = true, default_value = "0.0.0.0")]
+  pub l4_bind_address: IpAddr,
+  #[arg(long, global = true, default_value_t = 3000)]
+  pub l4_connect_timeout_ms: u64,
+  #[arg(long, global = true, default_value_t = 75_000)]
+  pub l4_idle_timeout_ms: u64,
+  #[arg(long, global = true, default_value_t = 8192)]
+  pub udp_max_flows: usize,
+  #[arg(long, global = true, default_value = "200r/s")]
+  pub udp_new_flow_rate: String,
+  #[arg(long, global = true, default_value_t = 400)]
+  pub udp_new_flow_burst: u32,
+  #[arg(long, global = true, default_value = "200r/s")]
+  pub udp_datagram_rate: String,
+  #[arg(long, global = true, default_value_t = 400)]
+  pub udp_datagram_burst: u32,
+  #[arg(long, global = true, value_enum, default_value = "auto")]
+  pub udp_batch: UdpBatchMode,
+  #[arg(long, global = true, default_value_t = 16)]
+  pub udp_batch_size: usize,
   #[arg(long, global = true, value_enum, default_value = "cluster_dns")]
   pub backend_resolution: BackendResolution,
   #[arg(long, global = true)]
@@ -42,6 +62,25 @@ pub enum BackendResolution {
   #[default]
   ClusterDns,
   EndpointSliceWatch,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum UdpBatchMode {
+  #[default]
+  Auto,
+  Off,
+  Required,
+}
+
+impl UdpBatchMode {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Auto => "auto",
+      Self::Off => "off",
+      Self::Required => "required",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]

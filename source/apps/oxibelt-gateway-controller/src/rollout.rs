@@ -11,8 +11,11 @@ use super::rollout_patch::json_pointer_escape;
 
 pub use super::rollout_patch::build_workload_patch;
 
+#[path = "rollout/artifact.rs"]
+mod artifact;
 #[path = "rollout/pod_ownership.rs"]
 mod pod_ownership;
+pub use artifact::{ConfigArtifact, ConfigArtifactAsset};
 pub(crate) use pod_ownership::{WorkloadPodOwnership, pod_is_selected};
 
 pub const IMMUTABLE_ROLLOUT_ANNOTATION: &str = "oxibelt.dev/immutable-config-rollout";
@@ -37,8 +40,14 @@ pub const HOLDER_IDENTITY_ANNOTATION: &str = "oxibelt.dev/gateway-controller-hol
 const CONTROLLER_NAME: &str = "oxibelt-gateway-controller";
 const DIGEST_DOMAIN: &[u8] = b"oxibelt-gateway-config-v1\0";
 const MAX_CONFIG_MAP_DATA_BYTES: usize = 900 * 1024;
-const GENERATED_CONFIG_KEYS: &[&str] =
-  &["external_auth", "routes", "sni_forward", "upstream_pools"];
+const GENERATED_CONFIG_KEYS: &[&str] = &[
+  "external_auth",
+  "routes",
+  "sni_forward",
+  "stream_listeners",
+  "stream_upstream_pools",
+  "upstream_pools",
+];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WorkloadKind {
@@ -125,126 +134,6 @@ impl RolloutTarget {
       self.kind.label_value(),
       self.name
     )
-  }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConfigArtifact {
-  pub name: String,
-  pub artifact_digest: String,
-  pub content_digest: String,
-  pub managed_path: String,
-  pub data_key: String,
-  pub toml: String,
-}
-
-impl ConfigArtifact {
-  pub fn new(target: &RolloutTarget, managed_path: &str, toml: String) -> anyhow::Result<Self> {
-    let data_key = validate_managed_config_path(managed_path)?;
-    validate_generated_toml(&toml)?;
-    if toml.len() > MAX_CONFIG_MAP_DATA_BYTES {
-      bail!(
-        "generated configuration is {} bytes, exceeding the {} byte immutable ConfigMap safety limit",
-        toml.len(),
-        MAX_CONFIG_MAP_DATA_BYTES
-      );
-    }
-    let artifact_digest = digest_artifact(managed_path, toml.as_bytes());
-    let content_digest = digest_content(toml.as_bytes());
-    let name = target.config_map_name(&artifact_digest);
-    if name.len() > 253 {
-      bail!("immutable ConfigMap name exceeds Kubernetes 253-character limit");
-    }
-    Ok(Self {
-      name,
-      artifact_digest,
-      content_digest,
-      managed_path: managed_path.to_string(),
-      data_key,
-      toml,
-    })
-  }
-
-  pub fn manifest(&self, target: &RolloutTarget) -> Value {
-    let mut labels = Map::new();
-    labels.insert(
-      MANAGED_BY_LABEL.to_string(),
-      Value::String(CONTROLLER_NAME.to_string()),
-    );
-    labels.insert(
-      ROLLOUT_TARGET_LABEL.to_string(),
-      Value::String(target.name.clone()),
-    );
-    labels.insert(
-      ROLLOUT_TARGET_KIND_LABEL.to_string(),
-      Value::String(target.kind.label_value().to_string()),
-    );
-    let mut annotations = Map::new();
-    annotations.insert(
-      ARTIFACT_DIGEST_ANNOTATION.to_string(),
-      Value::String(self.artifact_digest.clone()),
-    );
-    annotations.insert(
-      CONFIG_DIGEST_ANNOTATION.to_string(),
-      Value::String(self.content_digest.clone()),
-    );
-    annotations.insert(
-      MANAGED_PATH_ANNOTATION.to_string(),
-      Value::String(self.managed_path.clone()),
-    );
-    let mut data = Map::new();
-    data.insert(self.data_key.clone(), Value::String(self.toml.clone()));
-    json!({
-      "apiVersion": "v1",
-      "kind": "ConfigMap",
-      "metadata": {
-        "name": self.name,
-        "namespace": target.namespace,
-        "labels": labels,
-        "annotations": annotations,
-      },
-      "immutable": true,
-      "data": data,
-    })
-  }
-
-  pub fn matches_existing(&self, target: &RolloutTarget, existing: &Value) -> bool {
-    existing.pointer("/metadata/name").and_then(Value::as_str) == Some(self.name.as_str())
-      && existing
-        .pointer("/metadata/namespace")
-        .and_then(Value::as_str)
-        == Some(target.namespace.as_str())
-      && label(existing, MANAGED_BY_LABEL) == Some(CONTROLLER_NAME)
-      && label(existing, ROLLOUT_TARGET_LABEL) == Some(target.name.as_str())
-      && label(existing, ROLLOUT_TARGET_KIND_LABEL) == Some(target.kind.label_value())
-      && existing.get("immutable").and_then(Value::as_bool) == Some(true)
-      && existing
-        .pointer(&format!("/data/{}", json_pointer_escape(&self.data_key)))
-        .and_then(Value::as_str)
-        == Some(self.toml.as_str())
-      && annotation(existing, ARTIFACT_DIGEST_ANNOTATION) == Some(self.artifact_digest.as_str())
-      && annotation(existing, CONFIG_DIGEST_ANNOTATION) == Some(self.content_digest.as_str())
-      && annotation(existing, MANAGED_PATH_ANNOTATION) == Some(self.managed_path.as_str())
-  }
-
-  pub fn from_existing(target: &RolloutTarget, existing: &Value) -> anyhow::Result<Self> {
-    let name = existing
-      .pointer("/metadata/name")
-      .and_then(Value::as_str)
-      .context("immutable ConfigMap metadata.name is required")?;
-    let managed_path = annotation(existing, MANAGED_PATH_ANNOTATION)
-      .context("immutable ConfigMap managed path annotation is required")?;
-    let data_key = validate_managed_config_path(managed_path)?;
-    let toml = existing
-      .pointer(&format!("/data/{}", json_pointer_escape(&data_key)))
-      .and_then(Value::as_str)
-      .context("immutable ConfigMap generated configuration data is required")?
-      .to_string();
-    let artifact = Self::new(target, managed_path, toml)?;
-    if artifact.name != name || !artifact.matches_existing(target, existing) {
-      bail!("immutable ConfigMap does not match its deterministic rollout identity");
-    }
-    Ok(artifact)
   }
 }
 

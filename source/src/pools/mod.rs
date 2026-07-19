@@ -34,7 +34,7 @@ use health::{
 };
 use selection::build_sticky_fallback;
 #[cfg(test)]
-use selection::{normalized_active_score, weighted_available};
+use selection::normalized_active_score;
 use selection::{parse_policy_override, select_by_algorithm};
 
 #[derive(Debug)]
@@ -297,7 +297,7 @@ impl PoolState {
             webrtc: true,
             webtransport: true,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
-            tls: UpstreamTlsConfig::default(),
+            tls: server.tls.clone(),
             extra_trusted_ca_certs: Vec::new(),
           })
       })
@@ -339,8 +339,13 @@ impl PoolState {
             webtransport: true,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
             tls: UpstreamTlsConfig {
-              upstream_revocation: pool.health_check.tls.upstream_revocation.clone(),
-              ..UpstreamTlsConfig::default()
+              upstream_revocation: pool
+                .health_check
+                .tls
+                .upstream_revocation
+                .clone()
+                .or_else(|| server.tls.upstream_revocation.clone()),
+              ..server.tls.clone()
             },
             extra_trusted_ca_certs: pool.health_check.tls.trusted_ca_certs.clone(),
           })
@@ -724,3 +729,5 @@ fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tls_tests;

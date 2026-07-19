@@ -88,28 +88,26 @@ pub(super) fn build_h2_tls_config(
     &root_certs
   };
   let revocation_policy = outbound_revocation.policy_for_upstream(upstream);
-  let mut tls_config =
-    crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
-      crypto,
-      extra_root_certs,
-      &upstream.tls.ech,
-      &upstream.tls.resumption,
-      Some(tls_resumption),
-      &upstream.name,
-      Some((outbound_revocation, revocation_policy)),
-    )?;
+  let mut tls_config = crate::tls::build_upstream_client_config_with_policy(
+    crypto,
+    extra_root_certs,
+    &upstream.tls,
+    Some(tls_resumption),
+    &upstream.name,
+    Some((outbound_revocation, revocation_policy)),
+  )?;
   tls_config.alpn_protocols = vec![b"h2".to_vec()];
   Ok(Arc::new(tls_config))
 }
 
 pub(super) async fn connect_tls_h2(
   tls_config: Arc<rustls::ClientConfig>,
-  host: String,
+  server_name: String,
   stream: tokio::net::TcpStream,
   http2_config: &ProxyHttp2Config,
   timeout: Duration,
 ) -> anyhow::Result<SendRequest<ProxyBody>> {
-  let server_name = rustls::pki_types::ServerName::try_from(host)
+  let server_name = rustls::pki_types::ServerName::try_from(server_name)
     .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
   let tls = tokio::time::timeout(
     timeout,

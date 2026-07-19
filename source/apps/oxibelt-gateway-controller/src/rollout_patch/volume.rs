@@ -119,7 +119,10 @@ fn patch_volume_mount(
 
   match layout.kind {
     BaseConfigLayoutKind::Projected { .. } => {
-      if target_mounts.len() != 1 || target_mounts[0].0 != layout.mount_index {
+      if !target_mounts
+        .iter()
+        .any(|(index, _)| *index == layout.mount_index)
+      {
         bail!(
           "target workload volume mount `{}` conflicts with immutable rollout root mount",
           target.volume_name
@@ -128,7 +131,7 @@ fn patch_volume_mount(
       if !overlapping_mounts.is_empty() {
         bail!("target workload contains a mount overlapping the managed configuration root");
       }
-      return Ok(());
+      return patch_ca_asset_mount(operations, mounts, &path, target, artifact, layout);
     }
     BaseConfigLayoutKind::Bootstrap => {}
   }
@@ -166,6 +169,98 @@ fn patch_volume_mount(
       "op": "remove",
       "path": format!("{path}/{index}"),
     }));
+  }
+  if artifact.assets.is_empty() {
+    Ok(())
+  } else {
+    let mount = desired_ca_asset_mount(target, layout)?;
+    operations.push(json!({ "op": "add", "path": format!("{path}/-"), "value": mount }));
+    Ok(())
+  }
+}
+
+fn patch_ca_asset_mount(
+  operations: &mut Vec<Value>,
+  mounts: &[Value],
+  mounts_path: &str,
+  target: &RolloutTarget,
+  artifact: &ConfigArtifact,
+  layout: &BaseConfigLayout,
+) -> anyhow::Result<()> {
+  let desired = desired_ca_asset_mount(target, layout)?;
+  let desired_path = desired
+    .get("mountPath")
+    .and_then(Value::as_str)
+    .context("internal CA asset mount path is missing")?;
+  let asset_mounts = mounts
+    .iter()
+    .enumerate()
+    .filter(|(index, mount)| {
+      *index != layout.mount_index
+        && mount.get("name").and_then(Value::as_str) == Some(target.volume_name.as_str())
+    })
+    .collect::<Vec<_>>();
+  if asset_mounts.len() > 1 {
+    bail!("immutable rollout volume has duplicate controller-owned CA mounts");
+  }
+  for (index, mount) in mounts.iter().enumerate() {
+    if index == layout.mount_index || asset_mounts.first().is_some_and(|entry| entry.0 == index) {
+      continue;
+    }
+    if mount
+      .get("mountPath")
+      .and_then(Value::as_str)
+      .is_some_and(|path| Path::new(path).starts_with(desired_path))
+    {
+      bail!("target workload contains a mount overlapping the generated Gateway API CA directory");
+    }
+  }
+  match (artifact.assets.is_empty(), asset_mounts.first()) {
+    (true, Some((index, mount))) => {
+      validate_ca_asset_mount(mount, &desired)?;
+      operations.push(json!({ "op": "remove", "path": format!("{mounts_path}/{index}") }));
+    }
+    (true, None) | (false, Some(_)) => {
+      if let Some((_, mount)) = asset_mounts.first() {
+        validate_ca_asset_mount(mount, &desired)?;
+      }
+    }
+    (false, None) => operations.push(json!({
+      "op": "add",
+      "path": format!("{mounts_path}/-"),
+      "value": desired,
+    })),
+  }
+  Ok(())
+}
+
+fn desired_ca_asset_mount(
+  target: &RolloutTarget,
+  layout: &BaseConfigLayout,
+) -> anyhow::Result<Value> {
+  let root = Path::new(&layout.config_root)
+    .parent()
+    .and_then(Path::to_str)
+    .context("configuration root must have a UTF-8 parent for generated CA projection")?;
+  Ok(json!({
+    "name": target.volume_name,
+    "mountPath": format!("{root}/cert/gateway-api-ca"),
+    "subPath": "gateway-api-ca",
+    "readOnly": true,
+  }))
+}
+
+fn validate_ca_asset_mount(actual: &Value, expected: &Value) -> anyhow::Result<()> {
+  let actual = actual
+    .as_object()
+    .context("generated Gateway API CA mount must be an object")?;
+  validate_object_keys(
+    actual,
+    &["name", "mountPath", "subPath", "readOnly"],
+    "generated Gateway API CA mount",
+  )?;
+  if Value::Object(actual.clone()) != *expected {
+    bail!("generated Gateway API CA mount is not controller-owned");
   }
   Ok(())
 }
@@ -239,9 +334,16 @@ fn desired_projected_volume(
 }
 
 fn desired_generated_config_map(artifact: &ConfigArtifact) -> Value {
+  let mut items = vec![json!({ "key": artifact.data_key, "path": artifact.managed_path })];
+  items.extend(
+    artifact
+      .assets
+      .iter()
+      .map(|asset| json!({ "key": asset.data_key, "path": asset.managed_path })),
+  );
   json!({
     "name": artifact.name,
-    "items": [{ "key": artifact.data_key, "path": artifact.managed_path }],
+    "items": items,
   })
 }
 

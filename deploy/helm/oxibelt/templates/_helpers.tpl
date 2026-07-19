@@ -1069,7 +1069,75 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- printf "%s-%s" $base $suffix -}}
 {{- end -}}
 
+{{- define "oxibelt.validateAdditionalServicePorts" -}}
+{{- $ports := .Values.service.additionalPorts | default (list) -}}
+{{- if not (kindIs "slice" $ports) -}}
+{{- fail "service.additionalPorts must be an array" -}}
+{{- end -}}
+{{- if gt (len $ports) 32 -}}
+{{- fail "service.additionalPorts must contain at most 32 entries" -}}
+{{- end -}}
+{{- $names := dict -}}
+{{- $serviceSockets := dict -}}
+{{- $containerSockets := dict -}}
+{{- range $name := list "metrics" "health" -}}
+{{- $_ := set $names $name true -}}
+{{- end -}}
+{{- if .Values.service.ports.http.enabled -}}
+{{- $_ := set $names "http" true -}}
+{{- $_ := set $serviceSockets (printf "TCP/%d" (int .Values.service.ports.http.port)) true -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.service.ports.http.targetPort)) true -}}
+{{- end -}}
+{{- if .Values.service.ports.https.enabled -}}
+{{- $_ := set $names "https" true -}}
+{{- $_ := set $serviceSockets (printf "TCP/%d" (int .Values.service.ports.https.port)) true -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.service.ports.https.targetPort)) true -}}
+{{- end -}}
+{{- if .Values.service.ports.http3.enabled -}}
+{{- $_ := set $names "http3" true -}}
+{{- $_ := set $serviceSockets (printf "UDP/%d" (int .Values.service.ports.http3.port)) true -}}
+{{- $_ := set $containerSockets (printf "UDP/%d" (int .Values.service.ports.http3.targetPort)) true -}}
+{{- end -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.health.port)) true -}}
+{{- if .Values.metrics.enabled -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.metrics.service.port)) true -}}
+{{- end -}}
+{{- if .Values.admin.enabled -}}
+{{- $_ := set $names "admin" true -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.admin.service.port)) true -}}
+{{- end -}}
+{{- range $port := $ports -}}
+{{- if or (not $port.name) (gt (len $port.name) 15) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $port.name)) -}}
+{{- fail "service.additionalPorts[].name must be a unique lower-case Service port name of at most 15 characters" -}}
+{{- end -}}
+{{- if hasKey $names $port.name -}}
+{{- fail (printf "service.additionalPorts must not reuse port name %q" $port.name) -}}
+{{- end -}}
+{{- $_ := set $names $port.name true -}}
+{{- if not (has $port.protocol (list "TCP" "UDP")) -}}
+{{- fail "service.additionalPorts[].protocol must be TCP or UDP" -}}
+{{- end -}}
+{{- if or (lt (int $port.port) 1) (gt (int $port.port) 65535) -}}
+{{- fail "service.additionalPorts[].port must be from 1 through 65535" -}}
+{{- end -}}
+{{- if or (lt (int $port.targetPort) 1024) (gt (int $port.targetPort) 65535) -}}
+{{- fail "service.additionalPorts[].targetPort must be an unprivileged numeric port from 1024 through 65535" -}}
+{{- end -}}
+{{- $serviceSocket := printf "%s/%d" $port.protocol (int $port.port) -}}
+{{- if hasKey $serviceSockets $serviceSocket -}}
+{{- fail (printf "service.additionalPorts must not reuse Service socket %s" $serviceSocket) -}}
+{{- end -}}
+{{- $_ := set $serviceSockets $serviceSocket true -}}
+{{- $containerSocket := printf "%s/%d" $port.protocol (int $port.targetPort) -}}
+{{- if hasKey $containerSockets $containerSocket -}}
+{{- fail (printf "service.additionalPorts must not reuse container socket %s" $containerSocket) -}}
+{{- end -}}
+{{- $_ := set $containerSockets $containerSocket true -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.validateNetworkPolicy" -}}
+{{- include "oxibelt.validateAdditionalServicePorts" . -}}
 {{- $networkPolicy := .Values.networkPolicy -}}
 {{- if not (kindIs "map" $networkPolicy) -}}
 {{- fail "networkPolicy must be an object" -}}
@@ -1112,7 +1180,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if and $public.allowAll (gt (len $public.from) 0) -}}
 {{- fail "networkPolicy.ingress.public.allowAll cannot be combined with networkPolicy.ingress.public.from" -}}
 {{- end -}}
-{{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled -}}
+{{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled (gt (len (.Values.service.additionalPorts | default (list))) 0) -}}
 {{- if and (or $public.allowAll (gt (len $public.from) 0)) (not $hasPublicListener) -}}
 {{- fail "networkPolicy.ingress.public requires an enabled public listener" -}}
 {{- end -}}

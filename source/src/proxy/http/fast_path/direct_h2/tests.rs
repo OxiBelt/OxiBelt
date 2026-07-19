@@ -649,6 +649,7 @@ fn direct_h2_test_pool_with_slots(connect_timeout: Duration, slot_count: usize) 
   };
   DirectH2Pool {
     origin,
+    tls_server_name: None,
     connect_timeout,
     idle_timeout: Duration::from_secs(30),
     max_lifetime: Duration::from_secs(60 * 60),

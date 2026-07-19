@@ -12,7 +12,7 @@ use http::Uri;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
-use hyper_rustls::HttpsConnectorBuilder;
+use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection, HttpConnector};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
@@ -362,27 +362,24 @@ fn build_client_pool(
       .collect::<Vec<PathBuf>>();
     &root_certs
   };
-  let h1_tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+  let h1_tls_config = tls::build_upstream_client_config_with_policy(
     crypto,
     extra_root_certs,
-    &upstream.tls.ech,
-    &upstream.tls.resumption,
+    &upstream.tls,
     Some(tls_resumption),
     &upstream.name,
     Some((outbound_revocation, revocation_policy.clone())),
   )
   .context("failed to build HTTP/1.1 upstream TLS client")?;
-  let negotiated_tls_config =
-    tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
-      crypto,
-      extra_root_certs,
-      &upstream.tls.ech,
-      &upstream.tls.resumption,
-      Some(tls_resumption),
-      &upstream.name,
-      Some((outbound_revocation, revocation_policy)),
-    )
-    .context("failed to build negotiated upstream TLS client")?;
+  let negotiated_tls_config = tls::build_upstream_client_config_with_policy(
+    crypto,
+    extra_root_certs,
+    &upstream.tls,
+    Some(tls_resumption),
+    &upstream.name,
+    Some((outbound_revocation, revocation_policy)),
+  )
+  .context("failed to build negotiated upstream TLS client")?;
 
   let mut h1_http = HttpConnector::new();
   h1_http.enforce_http(false);
@@ -390,7 +387,8 @@ fn build_client_pool(
   h1_http.set_nodelay(true);
   let h1_connector = HttpsConnectorBuilder::new()
     .with_tls_config(h1_tls_config)
-    .https_or_http()
+    .https_or_http();
+  let h1_connector = with_fixed_server_name(h1_connector, upstream)?
     .enable_http1()
     .wrap_connector(h1_http);
   let h1_connector = InstrumentedConnector::new(
@@ -415,7 +413,8 @@ fn build_client_pool(
   negotiated_http.set_nodelay(true);
   let negotiated_connector = HttpsConnectorBuilder::new()
     .with_tls_config(negotiated_tls_config)
-    .https_or_http()
+    .https_or_http();
+  let negotiated_connector = with_fixed_server_name(negotiated_connector, upstream)?
     .enable_http1()
     .enable_http2()
     .wrap_connector(negotiated_http);
@@ -458,6 +457,18 @@ fn build_client_pool(
     metrics,
     pool_label,
   })
+}
+
+fn with_fixed_server_name(
+  connector: HttpsConnectorBuilder<hyper_rustls::builderstates::WantsProtocols1>,
+  upstream: &UpstreamConfig,
+) -> anyhow::Result<HttpsConnectorBuilder<hyper_rustls::builderstates::WantsProtocols1>> {
+  let Some(server_name) = upstream.tls.server_name.as_deref() else {
+    return Ok(connector);
+  };
+  let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+    .with_context(|| format!("invalid TLS server name for upstream {}", upstream.name))?;
+  Ok(connector.with_server_name_resolver(FixedServerNameResolver::new(server_name)))
 }
 
 fn circuit_pool_for_upstream(

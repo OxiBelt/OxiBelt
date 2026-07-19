@@ -68,20 +68,16 @@ fn select_power_of_two_choices(
   pool: &Arc<PoolRuntime>,
   excluded_upstreams: &HashSet<&str>,
 ) -> Option<Arc<PoolServerRuntime>> {
-  let weighted = weighted_available(pool, excluded_upstreams);
-  if weighted.is_empty() {
-    return None;
-  }
-  if weighted.len() == 1 {
-    return weighted.first().cloned();
-  }
-  let first_index = next_choice(pool, weighted.len());
-  let mut second_index = next_choice(pool, weighted.len());
-  if first_index == second_index {
-    second_index = (second_index + 1) % weighted.len();
-  }
-  let first = weighted[first_index].clone();
-  let second = weighted[second_index].clone();
+  let candidates = available_candidates(pool, excluded_upstreams);
+  let first = weighted_sample(pool, &candidates, None, next_choice(pool))?;
+  let Some(second) = weighted_sample(
+    pool,
+    &candidates,
+    Some(first.server_id.as_str()),
+    next_choice(pool),
+  ) else {
+    return Some(first);
+  };
   Some(select_lower_active_score(pool, first, second))
 }
 
@@ -142,18 +138,35 @@ fn select_least_time(
     .map(|(_, server)| server)
 }
 
-pub(super) fn weighted_available(
+fn weighted_sample(
   pool: &Arc<PoolRuntime>,
-  excluded_upstreams: &HashSet<&str>,
-) -> Vec<Arc<PoolServerRuntime>> {
-  let mut result = Vec::new();
-  for (index, server) in available_candidates(pool, excluded_upstreams) {
-    let weight = effective_server_weight(pool, index, &server);
-    for _ in 0..weight {
-      result.push(server.clone());
-    }
+  candidates: &[(usize, Arc<PoolServerRuntime>)],
+  excluded_server_id: Option<&str>,
+  choice: u64,
+) -> Option<Arc<PoolServerRuntime>> {
+  let total = candidates
+    .iter()
+    .filter(|(_, server)| excluded_server_id != Some(server.server_id.as_str()))
+    .fold(0u128, |total, (index, server)| {
+      total.saturating_add(u128::from(
+        effective_server_weight(pool, *index, server).max(1),
+      ))
+    });
+  if total == 0 {
+    return None;
   }
-  result
+  let mut ticket = u128::from(choice) % total;
+  for (index, server) in candidates {
+    if excluded_server_id == Some(server.server_id.as_str()) {
+      continue;
+    }
+    let weight = u128::from(effective_server_weight(pool, *index, server).max(1));
+    if ticket < weight {
+      return Some(server.clone());
+    }
+    ticket -= weight;
+  }
+  None
 }
 
 fn available_candidates(
@@ -202,9 +215,9 @@ fn select_lower_active_score(
   }
 }
 
-fn next_choice(pool: &PoolRuntime, len: usize) -> usize {
+fn next_choice(pool: &PoolRuntime) -> u64 {
   let current = pool.chooser.fetch_add(1, Ordering::Relaxed) as u64;
-  (mix64(current) as usize) % len
+  mix64(current)
 }
 
 pub(super) fn normalized_active_score(

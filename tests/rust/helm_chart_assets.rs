@@ -39,6 +39,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["workload"]["daemonSet"]["maxUnavailable"], 1);
   assert_eq!(values["workload"]["daemonSet"]["maxSurge"], 0);
   assert_eq!(values["service"]["type"], "LoadBalancer");
+  assert!(values["service"]["additionalPorts"].is_array());
+  assert_eq!(
+    values["service"]["additionalPorts"]
+      .as_array()
+      .unwrap()
+      .len(),
+    0
+  );
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
   assert_eq!(values["operationalProfile"]["name"], "");
   assert_eq!(values["operationalProfile"]["version"], 1);
@@ -238,6 +246,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(
     schema["properties"]["networkPolicy"]["properties"]["enabled"]["type"],
     "boolean"
+  );
+  assert_eq!(
+    schema["properties"]["service"]["properties"]["additionalPorts"]["maxItems"],
+    32
+  );
+  assert_eq!(
+    schema["definitions"]["additionalServicePort"]["properties"]["targetPort"]["minimum"],
+    1024
   );
   assert_eq!(
     schema["properties"]["serviceAccount"]["properties"]["automountServiceAccountToken"]["const"],
@@ -639,6 +655,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "podDisruptionBudget requires exactly one of minAvailable or maxUnavailable",
     "oxibelt.deploymentAffinity",
     "oxibelt.validateNetworkPolicy",
+    "oxibelt.validateAdditionalServicePorts",
+    "service.additionalPorts[].targetPort must be an unprivileged numeric port",
     "networkPolicy.cilium.enabled requires networkPolicy.enabled=true",
     "kubernetes-api egress destination",
     "oxibelt.ciliumSelectorLabels",
@@ -661,6 +679,10 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   assert!(service.contains("protocol: TCP"));
   assert!(service.contains("protocol: UDP"));
   assert!(service.contains("targetPort: http3"));
+  assert!(service.contains("range $port := .Values.service.additionalPorts"));
+  assert!(service.contains("targetPort: {{ $port.targetPort }}"));
+  assert!(deployment.contains("containerPort: {{ $port.targetPort }}"));
+  assert!(daemonset.contains("containerPort: {{ $port.targetPort }}"));
 
   let pdb = read_repo("deploy/helm/oxibelt/templates/pdb.yaml");
   assert!(pdb.contains("kind: PodDisruptionBudget"));
@@ -696,6 +718,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "admin-ingress",
     "port\" \"http\"",
     "port\" \"http3\"",
+    ".Values.service.additionalPorts",
     "networkPolicy.egress.destinations",
     "policyTypes",
   ] {
@@ -742,6 +765,13 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["podAntiAffinity"]["enabled"], true);
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
   assert_eq!(values["backendResolution"], "cluster_dns");
+  assert_eq!(values["l4"]["bindAddress"], "0.0.0.0");
+  assert_eq!(values["l4"]["connectTimeoutMs"], 3000);
+  assert_eq!(values["l4"]["idleTimeoutMs"], 75000);
+  assert_eq!(values["l4"]["udp"]["maxFlows"], 8192);
+  assert_eq!(values["l4"]["udp"]["newFlowRate"], "200r/s");
+  assert_eq!(values["l4"]["udp"]["batch"], "auto");
+  assert_eq!(values["l4"]["udp"]["batchSize"], 16);
   assert_eq!(values["rollout"]["target"]["kind"], "deployment");
   assert_eq!(values["rollout"]["target"]["name"], "oxibelt");
   assert_eq!(values["rollout"]["volumeName"], "gateway-config");
@@ -750,6 +780,8 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(values.get("admin").is_none());
   assert_eq!(values["watchNamespace"], "");
   assert_eq!(values["watchAllNamespaces"], false);
+  assert!(values["statusAddresses"].is_array());
+  assert_eq!(values["statusAddresses"].as_array().unwrap().len(), 0);
   assert_eq!(
     values["serviceAccount"]["automountServiceAccountToken"],
     false
@@ -792,6 +824,12 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
     schema["properties"]["watchAllNamespaces"]["type"],
     "boolean"
   );
+  assert_eq!(schema["properties"]["statusAddresses"]["maxItems"], 16);
+  assert_eq!(schema["properties"]["statusAddresses"]["uniqueItems"], true);
+  assert_eq!(
+    schema["properties"]["l4"]["properties"]["udp"]["properties"]["maxFlows"]["maximum"],
+    1048576
+  );
   assert_eq!(
     schema["properties"]["serviceAccount"]["properties"]["automountServiceAccountToken"]["const"],
     false
@@ -820,6 +858,25 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(helpers.contains("image.digest must be an empty string or a lower-case sha256 digest"));
   assert!(deployment.contains("--backend-resolution={{ .Values.backendResolution }}"));
   assert!(deployment.contains("--status-service={{ .Values.statusService }}"));
+  assert!(deployment.contains("range $address := .Values.statusAddresses"));
+  assert!(deployment.contains("--status-address={{ $address }}"));
+  for argument in [
+    "--l4-bind-address=",
+    "--l4-connect-timeout-ms=",
+    "--l4-idle-timeout-ms=",
+    "--udp-max-flows=",
+    "--udp-new-flow-rate=",
+    "--udp-new-flow-burst=",
+    "--udp-datagram-rate=",
+    "--udp-datagram-burst=",
+    "--udp-batch=",
+    "--udp-batch-size=",
+  ] {
+    assert!(
+      deployment.contains(argument),
+      "controller deployment should contain {argument}"
+    );
+  }
   assert!(deployment.contains("replicas: {{ .Values.replicaCount }}"));
   assert!(deployment.contains("strategy:\n    type: RollingUpdate"));
   assert!(deployment.contains("maxUnavailable: 0"));
@@ -881,6 +938,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   let rbac = read_repo("deploy/helm/oxibelt-gateway-controller/templates/rbac.yaml");
   assert!(rbac.contains("gatewayclasses"));
   assert!(rbac.contains("services"));
+  assert!(rbac.contains("udproutes"));
+  assert!(rbac.contains("backendtlspolicies"));
+  assert!(rbac.contains("udproutes/status"));
+  assert!(rbac.contains("backendtlspolicies/status"));
   assert!(rbac.contains("watchAllNamespaces"));
   assert!(rbac.contains("-cluster"));
   assert!(rbac.contains("-watch"));
@@ -905,6 +966,13 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
   assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
   assert!(!rbac.contains("secrets"));
+  assert_eq!(
+    rbac
+      .matches("resources: [\"configmaps\"]\n  verbs: [\"get\"]")
+      .count(),
+    2,
+    "each namespaced and cluster-wide watch mode should grant ConfigMap get without list"
+  );
 
   let leader_role = rbac
     .split("name: {{ include \"oxibelt-gateway-controller.name\" . }}-leader-election")

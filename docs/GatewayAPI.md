@@ -21,9 +21,12 @@ The controller watches:
 - `HTTPRoute`
 - `GRPCRoute`
 - `TLSRoute`
+- `TCPRoute`
+- `UDPRoute`
+- `BackendTLSPolicy`
 - `ReferenceGrant`
 - `Service`
-- `TCPRoute` when the CRD exists, for unsupported diagnostics only
+- referenced `ConfigMap` objects containing public CA bundles
 
 Only `GatewayClass.spec.controllerName = "oxibelt.dev/gateway-controller"` is
 in scope by default. Use `--controller-name` to change that value.
@@ -59,8 +62,58 @@ token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 `[sni_forward]`; the generated include does not set operator-owned scalar
 fields such as `enabled`.
 
-`TCPRoute` is not translated in v1. The controller reports it as unsupported
-and emits no TOML.
+`TCPRoute` and `UDPRoute` attach only to same-protocol listeners and generate
+deterministic `[[stream_listeners]]` and `[[stream_upstream_pools]]` entries.
+Each supported route has one rule and core Service backend references. Service
+port protocol, parent `sectionName`/port, `allowedRoutes`, and cross-namespace
+`ReferenceGrant` authorization must all agree. An invalid route contributes no
+stream TOML; the controller never weakens it into a direct target.
+
+Raw TCP and UDP payloads bypass the HTTP router and HTTP WAF. Operators must
+expose each listener explicitly through the data-plane chart's
+`service.additionalPorts` and protect it as an application-protocol boundary.
+The controller validates against the operator-owned `--status-service`; it
+does not create or patch Services.
+
+When multiple TCPRoutes or UDPRoutes attach to the same listener, all attached
+routes receive status, but only the oldest `creationTimestamp` is translated.
+Ties are resolved by namespace/name. An invalid winner does not cause fallback
+to a newer route.
+
+## BackendTLSPolicy Mapping
+
+The stable-core subset applies to generated HTTPRoute and GRPCRoute Service
+backends. It supports exactly one same-namespace Service `targetRef`, required
+`validation.hostname`, and one of:
+
+- `wellKnownCACertificates: System`; or
+- one core ConfigMap `caCertificateRefs` entry whose `ca.crt` key is a valid,
+  bounded PEM CA bundle.
+
+The policy hostname is used for both SNI and certificate authentication while
+OxiBelt still connects to the Service address. Exclusive ConfigMap trust does
+not inherit the system or operator global trust roots. The controller fetches
+only exact referenced ConfigMaps, copies only the public `ca.crt` bytes into
+the immutable generated artifact, and binds their UID, resource version, and
+content digest into rollout proof.
+
+Multiple targets, target `sectionName`, multiple CA references,
+`subjectAltNames`, `options`, cross-namespace CA refs, Secret refs, mTLS client
+identity, and certificate/SPKI pins are unsupported. They receive explicit
+policy status and never fall back to plaintext or broader TLS trust. Gateway
+API v1 does not define a portable client-identity or pin field, and a
+`ReferenceGrant` cannot make an otherwise invalid cross-namespace policy CA
+reference valid.
+
+## UDP Safety Bounds
+
+Generated UDP listeners default to a 75-second idle timeout, 8,192 process-local
+flows, a `200r/s` new-flow rate with burst 400, a `200r/s` per-flow datagram
+rate with burst 400, automatic batching, and batch size 16. Configure these
+bounded controller-wide defaults under chart `l4.udp`. UDP flows are pinned to
+one weighted backend until idle expiry or eviction and do not survive Pod
+replacement or immutable rollout. Stateful continuity, source-IP preservation,
+UDP PROXY, BackendTLSPolicy, and arbitrary filters are not approximated.
 
 ## HTTPRoute Mapping
 
@@ -126,13 +179,16 @@ not applicable to `GRPCRoute`.
 | `HTTPRoute`/`GRPCRoute` HTTP `ExternalAuth` | Partial | HTTP subset only, explicit header allowlists, no body forwarding. |
 | `GRPCRoute` service/method/header matches | Partial | Exact service+method and service-only matches only. |
 | `TLSRoute` passthrough | Partial | Requires `tls.mode = Passthrough`; emits `sni_forward` rules. |
-| `TCPRoute` | Unsupported/status-only | Watched for status diagnostics; no TOML is emitted. |
+| `TCPRoute` | Experimental | One rule, weighted core Service backends, deterministic listener winner, and explicit operator-owned port exposure. |
+| `UDPRoute` | Experimental | Same bounded Service mapping plus process-local flow, admission, and datagram limits. |
+| `BackendTLSPolicy` | Experimental/partial | Stable-core hostname plus System or one ConfigMap `ca.crt`; extensions, Secrets, mTLS, pins, and SAN overrides are rejected. |
 
 Cross-namespace `Service` references require a `ReferenceGrant` in the target
 namespace. Without the grant, the controller emits a blocking diagnostic and
 does not apply the generated config.
 
-Gateway listener `allowedRoutes` is enforced for `HTTPRoute`, `GRPCRoute`, and `TLSRoute`
+Gateway listener `allowedRoutes` is enforced for `HTTPRoute`, `GRPCRoute`,
+`TLSRoute`, `TCPRoute`, and `UDPRoute`
 attachment. Omitted `allowedRoutes.namespaces` defaults to `Same`, so routes in
 other namespaces must be explicitly allowed with `All` or a matching
 `Selector`. Namespace selectors are evaluated from the Kubernetes `Namespace`
@@ -141,9 +197,8 @@ route is not attached.
 
 `allowedRoutes.kinds` may further restrict which Gateway API route kinds bind
 to a listener. When omitted or empty, the controller uses the listener protocol
-default: `HTTPRoute` for `HTTP` and `HTTPS`, and `TLSRoute` for passthrough
-`TLS`. HTTP and HTTPS listeners accept both `HTTPRoute` and `GRPCRoute` by
-default.
+default: `HTTPRoute` and `GRPCRoute` for `HTTP` and `HTTPS`, `TLSRoute` for
+passthrough `TLS`, `TCPRoute` for `TCP`, and `UDPRoute` for `UDP`.
 
 `ReferenceGrant.spec.to[].name` narrows a cross-namespace `Service` grant to the
 named Service. When `name` is omitted, the grant allows all Services of that
@@ -160,12 +215,13 @@ resources owned by its configured `--controller-name`.
   are published as Gateway addresses. When explicit addresses are not set,
   `--status-service namespace/name` publishes the referenced Service
   `status.loadBalancer.ingress` IPs or hostnames as Gateway addresses.
-- `HTTPRoute`, `GRPCRoute`, and `TLSRoute`: replaces only this controller's entries in
+- `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, and `UDPRoute`: replaces only this controller's entries in
   `status.parents`, preserving entries for other controllers from the observed
   object snapshot. Blocking translation diagnostics are reflected as
   `Accepted=False` or `ResolvedRefs=False`.
-- `TCPRoute`: when attached to an in-scope parent, sets
-  `Accepted=False, reason=UnsupportedKind` and emits no TOML.
+- `BackendTLSPolicy`: replaces only this controller's matching ancestor entry
+  and reports accepted, conflicted, invalid, unresolved, and unsupported
+  policy states without removing status owned by other controllers.
 
 `--dry-run` skips immutable artifact/workload mutations and Kubernetes status
 mutations.
@@ -233,9 +289,11 @@ controller does not nest one volume mount inside another.
 At reconcile time the controller:
 
 1. Polls Gateway API resources and Services from the Kubernetes API.
-2. Renders and validates one deterministic TOML file with ownership/source
-   comments; blocking diagnostics stop before publication.
-3. Computes the raw SHA-256 of the exact TOML bytes and a tagged artifact
+2. Renders and validates deterministic TOML plus any referenced public CA
+   assets with ownership/source comments. Resource-invalid fragments are
+   omitted or replaced by explicit terminal rejection; snapshot, authorization,
+   artifact, or final validation failures stop publication.
+3. Computes the raw SHA-256 of the exact TOML bytes and a tagged full-artifact
    digest, then creates or reuses an immutable ConfigMap named
    `<prefix>-<deployment-or-daemonset>-<target-name>-<full-64-hex-artifact-digest>`.
 4. Requires `oxibelt.dev/immutable-config-rollout: "true"` on the selected

@@ -5,6 +5,7 @@
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
+{{- include "oxibelt.validateAdditionalServicePorts" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
@@ -127,6 +128,11 @@ spec:
         - name: http3
           containerPort: {{ .Values.service.ports.http3.targetPort }}
           protocol: UDP
+        {{- end }}
+        {{- range $port := .Values.service.additionalPorts }}
+        - name: {{ $port.name }}
+          containerPort: {{ $port.targetPort }}
+          protocol: {{ $port.protocol }}
         {{- end }}
         - name: metrics
           containerPort: {{ .Values.metrics.service.port }}

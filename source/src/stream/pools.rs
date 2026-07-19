@@ -173,21 +173,19 @@ fn select_power_of_two_choices(
   pool: &Arc<StreamPoolRuntime>,
   network: StreamNetwork,
 ) -> Option<Arc<StreamServerRuntime>> {
-  let weighted = weighted_candidates(pool, network);
-  if weighted.is_empty() {
-    return None;
-  }
-  if weighted.len() == 1 {
-    return weighted.first().cloned();
-  }
-  let first_index = next_choice(pool, weighted.len());
-  let mut second_index = next_choice(pool, weighted.len());
-  if first_index == second_index {
-    second_index = (second_index + 1) % weighted.len();
-  }
-  let first = weighted[first_index].clone();
-  let second = weighted[second_index].clone();
-  if normalized_active_score(pool, &first) <= normalized_active_score(pool, &second) {
+  let candidates = candidates(pool, network);
+  let (first_index, first) = weighted_sample(pool, &candidates, None, next_choice(pool))?;
+  let Some((second_index, second)) = weighted_sample(
+    pool,
+    &candidates,
+    Some(first.server_id.as_str()),
+    next_choice(pool),
+  ) else {
+    return Some(first);
+  };
+  if normalized_active_score(pool, first_index, &first)
+    <= normalized_active_score(pool, second_index, &second)
+  {
     Some(first)
   } else {
     Some(second)
@@ -198,12 +196,15 @@ fn select_weighted_least_conn(
   pool: &Arc<StreamPoolRuntime>,
   network: StreamNetwork,
 ) -> Option<Arc<StreamServerRuntime>> {
-  candidates(pool, network).into_iter().min_by_key(|server| {
-    (
-      normalized_active_score(pool, server),
-      stable_hash64(&server.server_id),
-    )
-  })
+  candidates(pool, network)
+    .into_iter()
+    .min_by_key(|(index, server)| {
+      (
+        normalized_active_score(pool, *index, server),
+        stable_hash64(&server.server_id),
+      )
+    })
+    .map(|(_, server)| server)
 }
 
 fn select_rendezvous_hash(
@@ -211,22 +212,26 @@ fn select_rendezvous_hash(
   network: StreamNetwork,
   key: &str,
 ) -> Option<Arc<StreamServerRuntime>> {
-  candidates(pool, network).into_iter().max_by_key(|server| {
-    u128::from(stable_hash64_pair(key, &server.server_id).max(1))
-      * u128::from(server_config(pool, server).weight.max(1))
-  })
+  candidates(pool, network)
+    .into_iter()
+    .max_by_key(|(index, server)| {
+      u128::from(stable_hash64_pair(key, &server.server_id).max(1))
+        * u128::from(pool.config.servers[*index].weight.max(1))
+    })
+    .map(|(_, server)| server)
 }
 
 fn candidates(
   pool: &Arc<StreamPoolRuntime>,
   network: StreamNetwork,
-) -> Vec<Arc<StreamServerRuntime>> {
+) -> Vec<(usize, Arc<StreamServerRuntime>)> {
   let primary = pool
     .servers
     .iter()
+    .enumerate()
     .zip(&pool.config.servers)
-    .filter(|(runtime, config)| !config.backup && server_available(runtime, config, network))
-    .map(|(runtime, _)| runtime.clone())
+    .filter(|((_, runtime), config)| !config.backup && server_available(runtime, config, network))
+    .map(|((index, runtime), _)| (index, runtime.clone()))
     .collect::<Vec<_>>();
   if !primary.is_empty() {
     return primary;
@@ -234,40 +239,49 @@ fn candidates(
   pool
     .servers
     .iter()
+    .enumerate()
     .zip(&pool.config.servers)
-    .filter(|(runtime, config)| config.backup && server_available(runtime, config, network))
-    .map(|(runtime, _)| runtime.clone())
+    .filter(|((_, runtime), config)| config.backup && server_available(runtime, config, network))
+    .map(|((index, runtime), _)| (index, runtime.clone()))
     .collect()
 }
 
-fn weighted_candidates(
+fn weighted_sample(
   pool: &Arc<StreamPoolRuntime>,
-  network: StreamNetwork,
-) -> Vec<Arc<StreamServerRuntime>> {
-  let mut result = Vec::new();
-  for server in candidates(pool, network) {
-    for _ in 0..server_config(pool, &server).weight {
-      result.push(server.clone());
-    }
-  }
-  result
-}
-
-fn normalized_active_score(pool: &StreamPoolRuntime, server: &StreamServerRuntime) -> u128 {
-  let weight = u128::from(server_config(pool, server).weight.max(1));
-  server.active.load(Ordering::Relaxed) as u128 * 1_000 / weight
-}
-
-fn server_config<'a>(
-  pool: &'a StreamPoolRuntime,
-  server: &StreamServerRuntime,
-) -> &'a StreamUpstreamPoolServerConfig {
-  let index = pool
-    .servers
+  candidates: &[(usize, Arc<StreamServerRuntime>)],
+  excluded_server_id: Option<&str>,
+  choice: u64,
+) -> Option<(usize, Arc<StreamServerRuntime>)> {
+  let total = candidates
     .iter()
-    .position(|candidate| candidate.server_id == server.server_id)
-    .unwrap_or(0);
-  &pool.config.servers[index]
+    .filter(|(_, server)| excluded_server_id != Some(server.server_id.as_str()))
+    .fold(0u128, |total, (index, _)| {
+      total.saturating_add(u128::from(pool.config.servers[*index].weight.max(1)))
+    });
+  if total == 0 {
+    return None;
+  }
+  let mut ticket = u128::from(choice) % total;
+  for (index, server) in candidates {
+    if excluded_server_id == Some(server.server_id.as_str()) {
+      continue;
+    }
+    let weight = u128::from(pool.config.servers[*index].weight.max(1));
+    if ticket < weight {
+      return Some((*index, server.clone()));
+    }
+    ticket -= weight;
+  }
+  None
+}
+
+fn normalized_active_score(
+  pool: &StreamPoolRuntime,
+  index: usize,
+  server: &StreamServerRuntime,
+) -> u128 {
+  let weight = u128::from(pool.config.servers[index].weight.max(1));
+  server.active.load(Ordering::Relaxed) as u128 * 1_000 / weight
 }
 
 fn server_available(
@@ -288,9 +302,9 @@ fn stream_origin_scheme(network: StreamNetwork) -> &'static str {
   }
 }
 
-fn next_choice(pool: &StreamPoolRuntime, len: usize) -> usize {
+fn next_choice(pool: &StreamPoolRuntime) -> u64 {
   let value = pool.chooser.fetch_add(0x9e37_79b9, Ordering::Relaxed);
-  mix64(value as u64) as usize % len
+  mix64(value as u64)
 }
 
 fn stable_hash64(value: &str) -> u64 {
@@ -312,4 +326,56 @@ fn mix64(mut value: u64) -> u64 {
   value ^= value >> 33;
   value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
   value ^ (value >> 33)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn stream_pool_weight_biases_bounded_candidate_sampling() {
+    let pool = StreamUpstreamPoolConfig {
+      name: "udp-pool".to_string(),
+      algorithm: LoadBalancingAlgorithm::PowerOfTwoChoices,
+      hash_key: None,
+      servers: vec![
+        StreamUpstreamPoolServerConfig {
+          id: Some("weighted".to_string()),
+          origin: Url::parse("udp://127.0.0.1:5300").unwrap(),
+          weight: 3,
+          max_conns: 0,
+          backup: false,
+          state: UpstreamPoolServerState::Ready,
+        },
+        StreamUpstreamPoolServerConfig {
+          id: Some("baseline".to_string()),
+          origin: Url::parse("udp://127.0.0.1:5301").unwrap(),
+          weight: 1,
+          max_conns: 0,
+          backup: false,
+          state: UpstreamPoolServerState::Ready,
+        },
+      ],
+    };
+    let state = StreamPoolState::new(&[pool]);
+    let weighted = (0..256)
+      .filter(|_| {
+        state
+          .select(
+            "udp-pool",
+            StreamNetwork::Udp,
+            "203.0.113.10".parse().unwrap(),
+            "flow",
+          )
+          .unwrap()
+          .server_id
+          == "weighted"
+      })
+      .count();
+
+    assert!(
+      weighted > 128,
+      "higher-weight stream server should be sampled more often without weight-expanded storage"
+    );
+  }
 }

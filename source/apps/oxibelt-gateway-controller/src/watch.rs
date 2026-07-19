@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use http::Request;
 use oxibelt_control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use url::Url;
 
 use super::cli::{RunArgs, SharedArgs};
@@ -22,6 +23,8 @@ use super::translate;
 const DEFAULT_SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const DEFAULT_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 pub(super) const KUBERNETES_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const REFERENCED_CONFIG_MAP_MAX_BODY_BYTES: usize = 320 * 1024;
+const MAX_REFERENCED_CONFIG_MAPS: usize = 64;
 
 #[derive(Clone)]
 pub struct KubernetesPoller {
@@ -105,26 +108,25 @@ impl KubernetesPoller {
         .list_namespaced("/apis/gateway.networking.k8s.io/v1", "tlsroutes")
         .await?,
     );
-    match self
-      .list_namespaced("/apis/gateway.networking.k8s.io/v1", "referencegrants")
-      .await
-    {
-      Ok(grants) => objects.extend(grants),
-      Err(error) => {
-        warn!(error = %error, "Gateway API v1 ReferenceGrant list failed; trying v1beta1");
-        objects.extend(
-          self
-            .list_namespaced("/apis/gateway.networking.k8s.io/v1beta1", "referencegrants")
-            .await
-            .unwrap_or_default(),
-        );
-      }
-    }
     objects.extend(
       self
-        .list_namespaced("/apis/gateway.networking.k8s.io/v1alpha2", "tcproutes")
-        .await
-        .unwrap_or_default(),
+        .list_namespaced("/apis/gateway.networking.k8s.io/v1", "referencegrants")
+        .await?,
+    );
+    objects.extend(
+      self
+        .list_namespaced("/apis/gateway.networking.k8s.io/v1", "tcproutes")
+        .await?,
+    );
+    objects.extend(
+      self
+        .list_namespaced("/apis/gateway.networking.k8s.io/v1", "udproutes")
+        .await?,
+    );
+    objects.extend(
+      self
+        .list_namespaced("/apis/gateway.networking.k8s.io/v1", "backendtlspolicies")
+        .await?,
     );
     objects.extend(
       self
@@ -132,7 +134,52 @@ impl KubernetesPoller {
         .await?,
     );
     objects.extend(self.list_namespaced("/api/v1", "services").await?);
+    let config_maps = backend_tls_config_map_refs(&objects)?;
+    for (namespace, name) in config_maps {
+      if let Some(config_map) = self.get_config_map(&namespace, &name).await? {
+        objects.push(config_map);
+      }
+    }
     Ok(objects)
+  }
+
+  async fn get_config_map(
+    &self,
+    namespace: &str,
+    name: &str,
+  ) -> anyhow::Result<Option<KubernetesObject>> {
+    validate_kubernetes_path_segment("ConfigMap namespace", namespace)?;
+    validate_kubernetes_path_segment("ConfigMap name", name)?;
+    let path = format!("/api/v1/namespaces/{namespace}/configmaps/{name}");
+    let mut url = self.base_url.clone();
+    url.set_path(&path);
+    url.set_query(None);
+    let request = Request::builder()
+      .method(http::Method::GET)
+      .uri(uri_from_url(&url)?)
+      .header(http::header::ACCEPT, "application/json")
+      .header(http::header::AUTHORIZATION, self.bearer()?)
+      .body(empty_body())?;
+    let response = self
+      .client
+      .request(
+        request,
+        Duration::from_secs(10),
+        REFERENCED_CONFIG_MAP_MAX_BODY_BYTES,
+      )
+      .await?;
+    if response.status == http::StatusCode::NOT_FOUND {
+      return Ok(None);
+    }
+    if !response.status.is_success() {
+      bail!("Kubernetes API {path} returned {}", response.status);
+    }
+    let mut parsed = parse_list(response.body)
+      .with_context(|| format!("failed to parse Kubernetes ConfigMap from {path}"))?;
+    if parsed.len() != 1 || parsed[0].kind != "ConfigMap" {
+      bail!("Kubernetes API {path} did not return exactly one ConfigMap");
+    }
+    Ok(parsed.pop())
   }
 
   async fn list_namespaced(
@@ -255,6 +302,67 @@ fn validate_watch_namespace(namespace: Option<&str>) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn backend_tls_config_map_refs(
+  objects: &[KubernetesObject],
+) -> anyhow::Result<BTreeSet<(String, String)>> {
+  let mut refs = BTreeSet::new();
+  for policy in objects
+    .iter()
+    .filter(|object| object.kind == "BackendTLSPolicy")
+  {
+    let Some(ca_refs) = policy
+      .spec
+      .pointer("/validation/caCertificateRefs")
+      .and_then(Value::as_array)
+    else {
+      continue;
+    };
+    for ca_ref in ca_refs {
+      let group = ca_ref.get("group").and_then(Value::as_str).unwrap_or("");
+      let kind = ca_ref
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("ConfigMap");
+      let Some(name) = ca_ref.get("name").and_then(Value::as_str) else {
+        continue;
+      };
+      if group.is_empty() && kind == "ConfigMap" {
+        refs.insert((policy.namespace().to_string(), name.to_string()));
+      }
+    }
+  }
+  if refs.len() > MAX_REFERENCED_CONFIG_MAPS {
+    bail!(
+      "BackendTLSPolicy snapshot references {} ConfigMaps; maximum is {}",
+      refs.len(),
+      MAX_REFERENCED_CONFIG_MAPS
+    );
+  }
+  Ok(refs)
+}
+
+fn validate_kubernetes_path_segment(label: &str, value: &str) -> anyhow::Result<()> {
+  let valid = !value.is_empty()
+    && value.len() <= 253
+    && value != "."
+    && value != ".."
+    && value.bytes().all(|byte| {
+      byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+    })
+    && value
+      .as_bytes()
+      .first()
+      .is_some_and(u8::is_ascii_alphanumeric)
+    && value
+      .as_bytes()
+      .last()
+      .is_some_and(u8::is_ascii_alphanumeric);
+  if !valid {
+    bail!("{label} is not a valid Kubernetes DNS path segment");
+  }
+  Ok(())
+}
+
 pub async fn run_poll_loop(
   kubernetes: KubernetesPoller,
   shared: &SharedArgs,
@@ -296,22 +404,6 @@ async fn reconcile_once(
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
   let rendered = translate::translate_objects(&objects, shared)?;
   status::print_diagnostics(&rendered.diagnostics);
-  let has_errors = rendered
-    .diagnostics
-    .iter()
-    .any(|diagnostic| matches!(diagnostic.severity, super::model::DiagnosticSeverity::Error));
-  if has_errors {
-    let rollout_status = RolloutStatus::failed("TranslationFailed");
-    apply_status_patches(
-      kubernetes,
-      &objects,
-      shared,
-      &rendered.diagnostics,
-      &rollout_status,
-    )
-    .await?;
-    bail!("translation produced blocking diagnostics; refusing to apply generated config");
-  }
   let rollout_status = if shared.dry_run {
     info!("dry-run enabled; immutable ConfigMap rollout was not applied");
     RolloutStatus::pending("DryRun")
@@ -325,7 +417,7 @@ async fn reconcile_once(
     )
     .await?;
     match kubernetes
-      .reconcile_immutable_rollout(shared, args, &rendered.toml)
+      .reconcile_immutable_rollout(shared, args, &rendered.toml, &rendered.assets)
       .await
     {
       Ok(status) => status,
@@ -354,11 +446,7 @@ async fn reconcile_once(
     let fresh_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
     let fresh_rendered = translate::translate_objects(&fresh_objects, shared)?;
     if rollout_status.phase.is_committed()
-      && (fresh_rendered.toml != rendered.toml
-        || fresh_rendered
-          .diagnostics
-          .iter()
-          .any(|diagnostic| matches!(diagnostic.severity, super::model::DiagnosticSeverity::Error)))
+      && (fresh_rendered.toml != rendered.toml || fresh_rendered.assets != rendered.assets)
     {
       bail!("Gateway API resources changed before status commit; refusing stale Programmed=True");
     }
@@ -407,15 +495,23 @@ fn source_snapshot_digest(objects: &[KubernetesObject]) -> String {
   let mut proof = objects
     .iter()
     .map(|object| {
+      let data_digest = if object.data.is_empty() {
+        String::new()
+      } else {
+        let encoded = serde_json::to_vec(&object.data).unwrap_or_default();
+        let digest = Sha256::digest(encoded);
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+      };
       format!(
-        "{}/{}/{}/{}/{}/{}/{}",
+        "{}/{}/{}/{}/{}/{}/{}/{}",
         object.api_version,
         object.kind,
         object.namespace(),
         object.name(),
         object.metadata.uid.as_deref().unwrap_or(""),
         object.metadata.generation.unwrap_or_default(),
-        object.metadata.resource_version.as_deref().unwrap_or("")
+        object.metadata.resource_version.as_deref().unwrap_or(""),
+        data_digest,
       )
     })
     .collect::<Vec<_>>();

@@ -116,6 +116,8 @@ pub fn listener_default_route_kinds(
   match protocol {
     "HTTP" | "HTTPS" => &["HTTPRoute", "GRPCRoute"],
     "TLS" if tls_mode == Some("Passthrough") => &["TLSRoute"],
+    "TCP" => &["TCPRoute"],
+    "UDP" => &["UDPRoute"],
     _ => &[],
   }
 }

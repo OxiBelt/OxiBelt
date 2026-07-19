@@ -16,6 +16,9 @@ use super::{
 
 const DEFAULT_MAX_UDP_FLOWS: usize = 8192;
 const DEFAULT_UDP_RATE_LIMIT_BURST: u32 = 0;
+const MAX_UDP_FLOWS: usize = 1_048_576;
+const MAX_UDP_RATE_LIMIT_BURST: u32 = 1_048_576;
+const MAX_UDP_BATCH_SIZE: usize = 1024;
 
 impl Config {
   pub(super) fn validate_stream_upstream_pools(&self) -> anyhow::Result<()> {
@@ -63,7 +66,7 @@ impl Config {
 
   pub(super) fn validate_stream_listeners(&self) -> anyhow::Result<()> {
     let mut names = HashSet::new();
-    let mut binds = HashSet::new();
+    let mut binds = Vec::new();
     for listener in &self.stream_listeners {
       if listener.name.trim().is_empty() {
         bail!("stream listener name must not be empty");
@@ -71,13 +74,18 @@ impl Config {
       if !names.insert(listener.name.clone()) {
         bail!("duplicate stream listener name: {}", listener.name);
       }
-      if !binds.insert(listener.bind) {
+      if binds.iter().any(|(network, bind)| {
+        *network == listener.network && stream_binds_overlap(*bind, listener.bind)
+      }) {
         bail!(
-          "duplicate stream listener bind {} on listener {}",
+          "overlapping stream listener bind {} for {:?} on listener {}",
           listener.bind,
+          listener.network,
           listener.name
         );
       }
+      binds.push((listener.network, listener.bind));
+      validate_stream_listener_bind_conflicts(self, listener)?;
       if self.rejects_privileged_data_plane_ports()
         && super::workers::is_privileged_bind(listener.bind)
       {
@@ -99,10 +107,16 @@ impl Config {
           listener.name
         );
       }
-      if listener.udp_batch_size == 0 {
+      if listener.max_udp_flows > MAX_UDP_FLOWS {
         bail!(
-          "stream listener {} udp_batch_size must be greater than 0",
+          "stream listener {} max_udp_flows must not exceed {MAX_UDP_FLOWS}",
           listener.name
+        );
+      }
+      if listener.udp_batch_size == 0 || listener.udp_batch_size > MAX_UDP_BATCH_SIZE {
+        bail!(
+          "stream listener {} udp_batch_size must be between 1 and {MAX_UDP_BATCH_SIZE}",
+          listener.name,
         );
       }
       #[cfg(not(target_os = "linux"))]
@@ -113,8 +127,58 @@ impl Config {
         );
       }
       if let Some(rate) = listener.udp_datagram_rate.as_deref() {
-        crate::limits::parse_rate(rate)
+        let rate = crate::limits::parse_rate(rate)
           .with_context(|| format!("stream listener {} udp_datagram_rate", listener.name))?;
+        if !rate.per_second().is_finite() {
+          bail!(
+            "stream listener {} udp_datagram_rate must be finite",
+            listener.name
+          );
+        }
+        if listener.udp_datagram_burst == 0 {
+          bail!(
+            "stream listener {} udp_datagram_burst must be greater than 0 when udp_datagram_rate is set",
+            listener.name
+          );
+        }
+        if listener.udp_datagram_burst > MAX_UDP_RATE_LIMIT_BURST {
+          bail!(
+            "stream listener {} udp_datagram_burst must not exceed {MAX_UDP_RATE_LIMIT_BURST}",
+            listener.name
+          );
+        }
+      } else if listener.udp_datagram_burst != 0 {
+        bail!(
+          "stream listener {} udp_datagram_burst requires udp_datagram_rate",
+          listener.name
+        );
+      }
+      if let Some(rate) = listener.udp_new_flow_rate.as_deref() {
+        let rate = crate::limits::parse_rate(rate)
+          .with_context(|| format!("stream listener {} udp_new_flow_rate", listener.name))?;
+        if !rate.per_second().is_finite() {
+          bail!(
+            "stream listener {} udp_new_flow_rate must be finite",
+            listener.name
+          );
+        }
+        if listener.udp_new_flow_burst == 0 {
+          bail!(
+            "stream listener {} udp_new_flow_burst must be greater than 0 when udp_new_flow_rate is set",
+            listener.name
+          );
+        }
+        if listener.udp_new_flow_burst > MAX_UDP_RATE_LIMIT_BURST {
+          bail!(
+            "stream listener {} udp_new_flow_burst must not exceed {MAX_UDP_RATE_LIMIT_BURST}",
+            listener.name
+          );
+        }
+      } else if listener.udp_new_flow_burst != 0 {
+        bail!(
+          "stream listener {} udp_new_flow_burst requires udp_new_flow_rate",
+          listener.name
+        );
       }
       if listener.network == StreamNetwork::Udp
         && listener.proxy_protocol_egress != ProxyProtocolEgressMode::Off
@@ -158,6 +222,10 @@ pub struct StreamListenerConfig {
   #[serde(default = "default_udp_rate_limit_burst")]
   pub udp_datagram_burst: u32,
   #[serde(default)]
+  pub udp_new_flow_rate: Option<String>,
+  #[serde(default = "default_udp_rate_limit_burst")]
+  pub udp_new_flow_burst: u32,
+  #[serde(default)]
   pub udp_batch: UdpBatchMode,
   #[serde(default = "default_udp_batch_size")]
   pub udp_batch_size: usize,
@@ -165,7 +233,7 @@ pub struct StreamListenerConfig {
   pub sni_rules: Vec<StreamSniRuleConfig>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamNetwork {
   #[default]
@@ -425,6 +493,98 @@ fn stream_origin_scheme(network: StreamNetwork) -> &'static str {
     StreamNetwork::Tcp => "tcp",
     StreamNetwork::Udp => "udp",
   }
+}
+
+fn validate_stream_listener_bind_conflicts(
+  config: &Config,
+  listener: &StreamListenerConfig,
+) -> anyhow::Result<()> {
+  let mut conflicts = Vec::new();
+  match listener.network {
+    StreamNetwork::Tcp => {
+      if config.needs_https_listener() {
+        conflicts.extend(
+          config
+            .listeners
+            .https_binds
+            .iter()
+            .copied()
+            .map(|bind| ("listeners.https_binds", bind)),
+        );
+      }
+      if config.listeners.http_mode != super::HttpListenerMode::Off {
+        conflicts.extend(
+          config
+            .listeners
+            .http_binds
+            .iter()
+            .copied()
+            .map(|bind| ("listeners.http_binds", bind)),
+        );
+      }
+      if config.admin.enabled {
+        conflicts.push(("admin.bind", config.admin.bind));
+      }
+      if config.metrics.enabled {
+        conflicts.push(("metrics.bind", config.metrics.bind));
+      }
+      if config.health.enabled {
+        conflicts.push(("health.bind", config.health.bind));
+      }
+      for turn in &config.webrtc_turn_listeners {
+        conflicts.extend(
+          [turn.bind_tcp, turn.bind_tls]
+            .into_iter()
+            .flatten()
+            .map(|bind| ("webrtc_turn_listeners TCP/TLS", bind)),
+        );
+      }
+    }
+    StreamNetwork::Udp => {
+      if config.listeners.http3 {
+        conflicts.extend(
+          config
+            .listeners
+            .https_binds
+            .iter()
+            .copied()
+            .map(|bind| ("listeners HTTP/3", bind)),
+        );
+      }
+      if config.admin.enabled && config.admin.http3.enabled {
+        conflicts.push((
+          "admin.http3.bind",
+          config.admin.http3.bind.unwrap_or(config.admin.bind),
+        ));
+      }
+      conflicts.extend(
+        config
+          .webrtc_turn_listeners
+          .iter()
+          .filter_map(|turn| turn.bind_udp)
+          .map(|bind| ("webrtc_turn_listeners UDP", bind)),
+      );
+    }
+  }
+
+  if let Some((field, bind)) = conflicts
+    .into_iter()
+    .find(|(_, bind)| stream_binds_overlap(listener.bind, *bind))
+  {
+    bail!(
+      "stream listener {} {:?} bind {} overlaps {field} bind {bind}",
+      listener.name,
+      listener.network,
+      listener.bind
+    );
+  }
+  Ok(())
+}
+
+fn stream_binds_overlap(left: SocketAddr, right: SocketAddr) -> bool {
+  left.port() == right.port()
+    && left.is_ipv4() == right.is_ipv4()
+    && (left.ip() == right.ip() || left.ip().is_unspecified() || right.ip().is_unspecified())
 }
 
 fn default_max_udp_flows() -> usize {

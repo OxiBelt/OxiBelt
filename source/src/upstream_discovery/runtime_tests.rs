@@ -139,6 +139,8 @@ async fn discovered_server_noop_update_keeps_snapshot_generation() {
   let cert_dir = temp_dir.path().join("cert");
   std::fs::create_dir_all(&config_dir).expect("config dir should be created");
   std::fs::create_dir_all(&cert_dir).expect("cert dir should be created");
+  std::fs::write(config_dir.join("servers.json"), r#"{"servers":[]}"#)
+    .expect("discovery file should be written");
   let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "discovery-noop-runtime");
   let cert_name = cert_path
     .file_name()
@@ -196,6 +198,16 @@ algorithm = "power_of_two_choices"
 id = "primary"
 origin = "http://127.0.0.1:18080/origin"
 
+[[upstream_pools.discovery]]
+provider = "file"
+file = "servers.json"
+scheme = "https"
+refresh_interval_ms = 50
+
+[upstream_pools.discovery.tls]
+server_name = "backend.example.test"
+trust = "system"
+
 [[routes]]
 name = "main-route"
 hosts = ["example.test"]
@@ -216,11 +228,12 @@ upstream_pool = "app-pool"
   );
   let servers = vec![UpstreamPoolServerConfig {
     id: Some("file-alt".to_string()),
-    origin: "http://127.0.0.1:18081/alt".parse().expect("valid origin"),
+    origin: "https://127.0.0.1:18081/alt".parse().expect("valid origin"),
     weight: 1,
     max_conns: 0,
     backup: false,
     state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
     source: UpstreamPoolServerSource::File,
   }];
 
@@ -233,6 +246,19 @@ upstream_pool = "app-pool"
   .await
   .expect("first discovery update should apply");
   let snapshot_after_apply = state.snapshot();
+  let discovered = snapshot_after_apply.config.upstream_pools[0]
+    .servers
+    .iter()
+    .find(|server| server.source == UpstreamPoolServerSource::File)
+    .expect("discovered server should be active");
+  assert_eq!(
+    discovered.tls.server_name.as_deref(),
+    Some("backend.example.test")
+  );
+  assert_eq!(
+    discovered.tls.trust,
+    crate::config::UpstreamTlsTrust::System
+  );
 
   apply_discovered_servers(&state, "app-pool", UpstreamDiscoveryProvider::File, servers)
     .await

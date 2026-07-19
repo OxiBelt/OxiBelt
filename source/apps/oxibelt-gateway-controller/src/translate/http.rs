@@ -192,28 +192,35 @@ impl TranslationState {
       namespace: namespace.to_string(),
       name: name.to_string(),
     };
-    let Some(service) = self.services.get(&key) else {
+    let Some(service) = self.services.get(&key).cloned() else {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} was not found in input snapshot"),
       ));
       return None;
     };
-    let Some(port) = backend_port(backend, service) else {
+    let Some(port) = backend_port(backend, &service) else {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} does not expose the referenced port"),
       ));
       return None;
     };
+    let tls = self.backend_tls_for_service(route, &key).ok()?;
+    let scheme = if tls.is_some() {
+      "https"
+    } else {
+      service.scheme.as_str()
+    };
     let origin = format!(
       "{}://{}.{}.svc.cluster.local:{}",
-      service.scheme, service.name, service.namespace, port
+      scheme, service.name, service.namespace, port
     );
     Some(GeneratedServer {
       id: sanitize_name(&format!("{namespace}-{name}-{port}-{index}")),
       origin,
       weight,
+      tls,
     })
   }
 
@@ -246,14 +253,14 @@ impl TranslationState {
       namespace: namespace.to_string(),
       name: name.to_string(),
     };
-    let Some(service) = self.services.get(&key) else {
+    let Some(service) = self.services.get(&key).cloned() else {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} was not found in input snapshot"),
       ));
       return None;
     };
-    let Some(service_port) = backend_service_port(backend, service) else {
+    let Some(service_port) = backend_service_port(backend, &service) else {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} does not expose the referenced port"),
@@ -270,12 +277,18 @@ impl TranslationState {
         return None;
       }
     };
+    let tls = self.backend_tls_for_service(route, &key).ok()?;
     Some(GeneratedKubernetesDiscovery {
       endpoint: "https://kubernetes.default.svc".to_string(),
       namespace: service.namespace.clone(),
       service: service.name.clone(),
-      scheme: service.scheme.clone(),
+      scheme: if tls.is_some() {
+        "https".to_string()
+      } else {
+        service.scheme.clone()
+      },
       port,
+      tls,
     })
   }
 

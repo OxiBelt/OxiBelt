@@ -59,6 +59,7 @@ pub(super) async fn discover_file_servers(
         max_conns: server.max_conns,
         backup: server.backup,
         state: server.state,
+        tls: Default::default(),
         source: UpstreamPoolServerSource::File,
       })
     })

@@ -2582,23 +2582,29 @@ async fn send_one_shot_with_proxy_protocol(
   if upstream.origin.scheme() == "https" {
     let revocation_policy = state.outbound_revocation.policy_for_upstream(upstream);
     let revocation = Some((&state.outbound_revocation, revocation_policy));
-    let mut tls_config =
-      crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
-        &state.config.crypto,
-        &state.config.proxy.trusted_ca_certs,
-        &upstream.tls.ech,
-        &upstream.tls.resumption,
-        Some(&state.tls_resumption),
-        &upstream.name,
-        revocation,
-      )
-      .context("failed to build one-shot upstream TLS config")?;
+    let inherited_roots = state
+      .config
+      .proxy
+      .trusted_ca_certs
+      .iter()
+      .chain(&upstream.extra_trusted_ca_certs)
+      .cloned()
+      .collect::<Vec<_>>();
+    let mut tls_config = crate::tls::build_upstream_client_config_with_policy(
+      &state.config.crypto,
+      &inherited_roots,
+      &upstream.tls,
+      Some(&state.tls_resumption),
+      &upstream.name,
+      revocation,
+    )
+    .context("failed to build one-shot upstream TLS config")?;
     tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];
-    let Some(host) = upstream.origin.host_str() else {
+    let Some(origin_host) = upstream.origin.host_str() else {
       anyhow::bail!("upstream origin has no host");
     };
-    let host = host.to_string();
-    let server_name = rustls::pki_types::ServerName::try_from(host)
+    let server_name = upstream.tls.server_name.as_deref().unwrap_or(origin_host);
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
       .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
     let tls = tokio::time::timeout(
       timeouts.upstream_connect,

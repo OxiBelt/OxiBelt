@@ -1794,7 +1794,6 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "runs-on: ubuntu-26.04",
     "actions: read",
     "contents: read",
-    "timeout-minutes: 25",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.16.4",
     "name: Validate Helm Admin configuration",
@@ -1820,6 +1819,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "OXIBELT_DATAPLANE_DOCKER_IMAGE: oxibelt-dataplane:alpine-musl-amd64",
     "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE: oxibelt-gateway-controller:alpine-musl-amd64",
     "tests/scripts/run-kubernetes-immutable-rollout.sh",
+    "timeout-minutes: 70",
   ] {
     assert!(
       job_text.contains(expected),
@@ -1829,6 +1829,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   for expected in [
     "gateway_api_version=\"v1.6.1\"",
+    "gateway_api_commit=\"8bb74df00e56ec8f944d48c25e6c1c9c2f6848e3\"",
     "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
     "gateway_api_sha256=\"24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73\"",
     "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
@@ -1839,6 +1840,14 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "controller-image-values.yaml",
     "kind create cluster",
     "kind load docker-image",
+    "gateway-api-conformance-values.yaml",
+    "run_gateway_api_l4_conformance",
+    "-conformance-profiles=GATEWAY-TCP,GATEWAY-UDP",
+    "-skip-provisional-tests=false",
+    "GOTOOLCHAIN=auto go test -c",
+    "docker exec",
+    "implementation_version=\"$(git -C \"${repo_root}\" rev-parse --verify 'HEAD^{commit}')\"",
+    "-version=\"${implementation_version}\"",
     "kind delete cluster --name \"${cluster_name}\"",
     "docker version --format '{{.Server.Version}}'",
     "docker image inspect \"${dataplane_image}\"",
@@ -1864,6 +1873,10 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "auth can-i --quiet",
     "controller ServiceAccount unexpectedly has permission",
     "get secrets",
+    "create services",
+    "patch services",
+    "update services",
+    "delete services",
     "delete configmaps",
     "deployments.apps/not-the-target",
     "configRollout.mode=kubernetes_immutable",
@@ -1894,20 +1907,24 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     !script.contains("experimental-install.yaml"),
     "the Kubernetes v1.31 rollout must not install experimental CRDs that require newer CEL libraries"
   );
+  assert!(
+    !script.contains("-skip-tests="),
+    "the Gateway API TCP/UDP profile run must not hide incompatible conformance cases"
+  );
   for expected in [
-    r#"select(.value.name == "v1alpha2")"#,
-    "expected exactly one TCPRoute v1alpha2 CRD version",
-    "TCPRoute v1alpha2 CRD version index is not numeric",
-    r#"--patch "[{\"op\":\"test\""#,
-    r#"\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/name\",\"value\":\"v1alpha2\""#,
-    r#"{\"op\":\"replace\",\"path\":\"/spec/versions/${tcp_route_v1alpha2_index}/served\",\"value\":true}"#,
     "crd/tcproutes.gateway.networking.k8s.io",
+    "crd/udproutes.gateway.networking.k8s.io",
+    "crd/backendtlspolicies.gateway.networking.k8s.io",
   ] {
     assert!(
       script.contains(expected),
-      "the Kubernetes rollout must preserve TCPRoute status-only compatibility invariant {expected}"
+      "the Kubernetes rollout must wait for the Gateway API v1 Phase 6 CRD {expected}"
     );
   }
+  assert!(
+    !script.contains("v1alpha2") && !script.contains("kube patch crd"),
+    "the Kubernetes rollout must use served Gateway API v1 resources without mutating CRD versions"
+  );
 
   for removed in [
     "stale_config_pod_is_running_and_unready",

@@ -10,12 +10,14 @@ use http::{Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
-use hyper_rustls::HttpsConnectorBuilder;
+use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
-use crate::config::{CryptoConfig, OutboundTlsRevocationConfig, UpstreamEchConfig};
+use crate::config::{
+  CryptoConfig, OutboundTlsRevocationConfig, UpstreamEchConfig, UpstreamTlsConfig,
+};
 use crate::tls;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -80,6 +82,36 @@ impl ControlHttpClient {
     Ok(Self::from_tls_config(tls_config))
   }
 
+  pub(crate) fn new_with_upstream_policy(
+    inherited_root_certs: &[std::path::PathBuf],
+    crypto: &CryptoConfig,
+    tls_policy: &UpstreamTlsConfig,
+    revocation: &tls::OutboundRevocationRuntime,
+    policy: std::sync::Arc<OutboundTlsRevocationConfig>,
+  ) -> anyhow::Result<Self> {
+    let tls_config = tls::build_upstream_client_config_with_policy(
+      crypto,
+      inherited_root_certs,
+      tls_policy,
+      None,
+      "upstream-diagnostic",
+      Some((revocation, policy)),
+    )
+    .context("failed to build policy-aware upstream diagnostic TLS client config")?;
+    let server_name = tls_policy
+      .server_name
+      .as_deref()
+      .map(|server_name| {
+        rustls::pki_types::ServerName::try_from(server_name.to_string())
+          .context("invalid fixed upstream diagnostic TLS server name")
+      })
+      .transpose()?;
+    Ok(Self::from_tls_config_with_server_name(
+      tls_config,
+      server_name,
+    ))
+  }
+
   pub(crate) fn new_webpki_only() -> anyhow::Result<Self> {
     let crypto = CryptoConfig::default();
     Self::new_webpki_only_with_crypto(&crypto)
@@ -92,16 +124,26 @@ impl ControlHttpClient {
   }
 
   fn from_tls_config(tls_config: rustls::ClientConfig) -> Self {
+    Self::from_tls_config_with_server_name(tls_config, None)
+  }
+
+  fn from_tls_config_with_server_name(
+    tls_config: rustls::ClientConfig,
+    server_name: Option<rustls::pki_types::ServerName<'static>>,
+  ) -> Self {
     let mut http = HttpConnector::new();
     http.enforce_http(false);
     http.set_connect_timeout(Some(Duration::from_secs(5)));
     http.set_nodelay(true);
     let connector = HttpsConnectorBuilder::new()
       .with_tls_config(tls_config)
-      .https_or_http()
-      .enable_http1()
-      .enable_http2()
-      .wrap_connector(http);
+      .https_or_http();
+    let connector = if let Some(server_name) = server_name {
+      connector.with_server_name_resolver(FixedServerNameResolver::new(server_name))
+    } else {
+      connector
+    };
+    let connector = connector.enable_http1().enable_http2().wrap_connector(http);
     let mut builder = Client::builder(TokioExecutor::new());
     builder.pool_timer(TokioTimer::new());
     builder.pool_idle_timeout(Duration::from_secs(30));

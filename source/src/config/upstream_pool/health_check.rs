@@ -9,8 +9,9 @@ use super::super::route_header_policy::{
   is_reserved_route_request_header, normalize_route_action_header_name,
 };
 use super::super::{
-  ConfigSourcePaths, OutboundTlsRevocationConfig, UpstreamPoolConfig, outbound_revocation,
-  resolve_existing_local_config_file_path_with_logical, validate_optional_non_empty,
+  ConfigSourcePaths, OutboundTlsRevocationConfig, UpstreamPoolConfig, UpstreamTlsTrust,
+  outbound_revocation, resolve_existing_local_config_file_path_with_logical,
+  validate_optional_non_empty,
 };
 
 pub const HEALTH_CHECK_PROTOCOL_WIRE_VALUES: &[&str] = &["http", "grpc"];
@@ -210,6 +211,19 @@ pub(in crate::config) fn validate_pool_health_check(
   pool: &UpstreamPoolConfig,
 ) -> anyhow::Result<()> {
   let health_check = &pool.health_check;
+  if !health_check.tls.trusted_ca_certs.is_empty()
+    && pool
+      .servers
+      .iter()
+      .map(|server| server.tls.trust)
+      .chain(pool.discovery.iter().map(|discovery| discovery.tls.trust))
+      .any(|trust| trust != UpstreamTlsTrust::Inherit)
+  {
+    bail!(
+      "upstream pool {} health_check.tls.trusted_ca_certs cannot augment a server using system or exclusive trust",
+      pool.name
+    );
+  }
   if !health_check.path.starts_with('/') {
     bail!(
       "upstream pool {} health_check.path must start with '/'",

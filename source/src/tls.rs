@@ -42,6 +42,7 @@ mod redis_client;
 mod resumption;
 mod server_policy;
 mod upstream_client;
+mod upstream_policy;
 pub(crate) use cert_metadata::{
   ParsedCertificateMetadata, client_certificate_metadata, parse_certificate_metadata,
 };
@@ -88,8 +89,10 @@ pub use upstream_client::{
 };
 pub(crate) use upstream_client::{
   build_upstream_client_config_with_crypto_resumption_and_revocation,
-  build_upstream_quic_client_config_with_crypto_resumption_and_revocation,
   build_webpki_client_config_with_crypto,
+};
+pub(crate) use upstream_policy::{
+  build_upstream_client_config_with_policy, build_upstream_quic_client_config_with_policy,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {

@@ -17,6 +17,8 @@ pub struct ObjectMeta {
   pub generation: Option<i64>,
   #[serde(default, rename = "resourceVersion")]
   pub resource_version: Option<String>,
+  #[serde(default, rename = "creationTimestamp")]
+  pub creation_timestamp: Option<String>,
   #[serde(default)]
   pub uid: Option<String>,
 }
@@ -31,6 +33,8 @@ pub struct KubernetesObject {
   pub spec: Value,
   #[serde(default)]
   pub status: Value,
+  #[serde(default)]
+  pub data: BTreeMap<String, String>,
 }
 
 impl KubernetesObject {

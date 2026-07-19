@@ -144,6 +144,19 @@ service:
   type: LoadBalancer
   annotations: {}
   externalTrafficPolicy: Local
+  # Operator-owned TCP/UDP exposure for Gateway API stream listeners. The
+  # controller validates listener attachment against these numeric ports but
+  # never creates or patches Services. Names must be unique lower-case Service
+  # port names; targetPort must be an unprivileged numeric container port.
+  additionalPorts: []
+  # - name: tcp-example
+  #   protocol: TCP
+  #   port: 9000
+  #   targetPort: 9000
+  # - name: udp-example
+  #   protocol: UDP
+  #   port: 9001
+  #   targetPort: 9001
   ports:
     http:
       enabled: true

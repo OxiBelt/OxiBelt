@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 
 use crate::config::{
   Config, HealthCheckProtocol, HttpVersion, UpstreamConfig, UpstreamPoolConfig,
-  UpstreamPoolHealthCheckConfig,
+  UpstreamPoolHealthCheckConfig, UpstreamPoolServerConfig, UpstreamTlsConfig,
 };
 use crate::control_http::{ControlBody, ControlHttpClient, empty_body, full_body, uri_from_url};
 
@@ -95,9 +95,17 @@ async fn probe_direct_upstream(
   url.set_fragment(None);
   let upstream_client;
   let client = if upstream.origin.scheme() == "https" {
-    match ControlHttpClient::new_with_crypto_and_revocation(
-      &config.proxy.trusted_ca_certs,
+    let inherited_roots = config
+      .proxy
+      .trusted_ca_certs
+      .iter()
+      .chain(&upstream.extra_trusted_ca_certs)
+      .cloned()
+      .collect::<Vec<_>>();
+    match ControlHttpClient::new_with_upstream_policy(
+      &inherited_roots,
       &config.crypto,
+      &upstream.tls,
       revocation,
       revocation.policy_for_upstream(upstream),
     ) {
@@ -172,7 +180,7 @@ async fn probe_pool(
         };
       let health_client;
       let probe_client = if server.origin.scheme() == "https" {
-        match build_pool_health_probe_client(config, revocation, pool) {
+        match build_pool_health_probe_client(config, revocation, pool, server) {
           Ok(client) => {
             health_client = client;
             &health_client
@@ -203,8 +211,14 @@ async fn probe_pool(
         }
         Err(error) => push_probe_error(report, &target, error),
       }
-    } else if let Err(error) =
-      probe_connect(config, revocation, &server.origin, Duration::from_secs(3)).await
+    } else if let Err(error) = probe_connect(
+      config,
+      revocation,
+      &server.origin,
+      &server.tls,
+      Duration::from_secs(3),
+    )
+    .await
     {
       push_probe_error(report, &target, error);
     } else {
@@ -234,6 +248,7 @@ fn build_pool_health_probe_client(
   config: &Config,
   revocation: &crate::tls::OutboundRevocationRuntime,
   pool: &UpstreamPoolConfig,
+  server: &UpstreamPoolServerConfig,
 ) -> anyhow::Result<ControlHttpClient> {
   let roots = config
     .proxy
@@ -249,7 +264,13 @@ fn build_pool_health_probe_client(
     .as_ref()
     .map(|policy| Arc::new(policy.clone()))
     .unwrap_or_else(|| revocation.default_policy());
-  ControlHttpClient::new_with_crypto_and_revocation(&roots, &config.crypto, revocation, policy)
+  ControlHttpClient::new_with_upstream_policy(
+    &roots,
+    &config.crypto,
+    &server.tls,
+    revocation,
+    policy,
+  )
 }
 
 async fn probe_http_health(
@@ -318,6 +339,7 @@ async fn probe_connect(
   config: &Config,
   revocation: &crate::tls::OutboundRevocationRuntime,
   url: &url::Url,
+  tls_policy: &UpstreamTlsConfig,
   timeout: Duration,
 ) -> anyhow::Result<()> {
   let remote = resolve_url_addr(url).await?;
@@ -325,21 +347,25 @@ async fn probe_connect(
     .await
     .context("upstream connect timed out")??;
   if url.scheme() == "https" {
-    let tls_config =
-      crate::tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
-        &config.crypto,
-        &config.proxy.trusted_ca_certs,
-        &crate::config::UpstreamEchConfig::default(),
-        &crate::config::UpstreamTlsResumptionConfig::default(),
-        None,
-        "diagnostics-probe",
-        Some((revocation, revocation.default_policy())),
-      )?;
-    let host = url
+    let revocation_policy = tls_policy
+      .upstream_revocation
+      .as_ref()
+      .map(|policy| Arc::new(policy.clone()))
+      .unwrap_or_else(|| revocation.default_policy());
+    let tls_config = crate::tls::build_upstream_client_config_with_policy(
+      &config.crypto,
+      &config.proxy.trusted_ca_certs,
+      tls_policy,
+      None,
+      "diagnostics-probe",
+      Some((revocation, revocation_policy)),
+    )?;
+    let origin_host = url
       .host_str()
       .ok_or_else(|| anyhow!("upstream origin has no host: {url}"))?
       .to_string();
-    let server_name = rustls::pki_types::ServerName::try_from(host)
+    let server_name = tls_policy.server_name.as_ref().unwrap_or(&origin_host);
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.clone())
       .map_err(|error| anyhow!("invalid upstream TLS server name: {error}"))?;
     tokio::time::timeout(
       timeout,
@@ -360,36 +386,47 @@ async fn probe_h3_get(
 ) -> anyhow::Result<http::StatusCode> {
   let url = &upstream.origin;
   let remote = resolve_url_addr(url).await?;
-  let quic_config =
-    crate::tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
-      &config.crypto,
-      &config.proxy.trusted_ca_certs,
-      &upstream.tls.ech,
-      &config.quic,
-      &upstream.tls.resumption,
-      None,
-      &upstream.name,
-      Some((revocation, revocation.policy_for_upstream(upstream))),
-    )?;
+  let inherited_roots = config
+    .proxy
+    .trusted_ca_certs
+    .iter()
+    .chain(&upstream.extra_trusted_ca_certs)
+    .cloned()
+    .collect::<Vec<_>>();
+  let quic_config = crate::tls::build_upstream_quic_client_config_with_policy(
+    &config.crypto,
+    &inherited_roots,
+    &upstream.tls,
+    &config.quic,
+    None,
+    &upstream.name,
+    Some((revocation, revocation.policy_for_upstream(upstream))),
+  )?;
   let endpoint = crate::quic::bind_client_endpoint(
     remote,
     &config.quic,
     config.source_paths.cert_dir.as_deref(),
   )?;
-  let host = url
+  let origin_host = url
     .host_str()
     .ok_or_else(|| anyhow!("upstream origin has no host: {url}"))?
     .to_string();
+  let server_name = upstream
+    .tls
+    .server_name
+    .as_ref()
+    .unwrap_or(&origin_host)
+    .clone();
   let timeout = Duration::from_millis(timeout_ms);
   let quinn_connection = tokio::time::timeout(
     timeout,
     endpoint
-      .connect_with(quic_config, remote, &host)
-      .with_context(|| format!("failed to start upstream HTTP/3 connection to {host}"))?,
+      .connect_with(quic_config, remote, &server_name)
+      .with_context(|| format!("failed to start upstream HTTP/3 connection to {server_name}"))?,
   )
   .await
   .context("upstream HTTP/3 connect timed out")?
-  .with_context(|| format!("failed to connect upstream HTTP/3 to {host}"))?;
+  .with_context(|| format!("failed to connect upstream HTTP/3 to {server_name}"))?;
   let h3_connection = h3_quinn::Connection::new(quinn_connection);
   let (mut driver, mut send_request): (_, h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>) =
     h3::client::builder()

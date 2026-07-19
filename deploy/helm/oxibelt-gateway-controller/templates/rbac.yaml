@@ -76,14 +76,17 @@ metadata:
   name: {{ include "oxibelt-gateway-controller.name" . }}-watch
 rules:
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes"]
+  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes", "udproutes", "backendtlspolicies"]
   verbs: ["list"]
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status"]
+  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status", "backendtlspolicies/status"]
   verbs: ["patch"]
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["list"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -106,14 +109,17 @@ metadata:
   namespace: {{ $watchNamespace | quote }}
 rules:
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes"]
+  resources: ["gateways", "httproutes", "grpcroutes", "tlsroutes", "referencegrants", "tcproutes", "udproutes", "backendtlspolicies"]
   verbs: ["list"]
 - apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status"]
+  resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status", "backendtlspolicies/status"]
   verbs: ["patch"]
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["list"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

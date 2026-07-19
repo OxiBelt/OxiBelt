@@ -15,6 +15,8 @@ mod common {
 
 #[path = "fixtures.rs"]
 mod fixtures;
+#[path = "tests/l4.rs"]
+mod l4_tests;
 #[path = "policy_tests.rs"]
 mod policy_tests;
 
@@ -27,6 +29,16 @@ fn args() -> SharedArgs {
     watch_namespace: None,
     status_address: Vec::new(),
     status_service: None,
+    l4_bind_address: std::net::Ipv4Addr::UNSPECIFIED.into(),
+    l4_connect_timeout_ms: 3000,
+    l4_idle_timeout_ms: 75_000,
+    udp_max_flows: 8192,
+    udp_new_flow_rate: "200r/s".to_string(),
+    udp_new_flow_burst: 400,
+    udp_datagram_rate: "200r/s".to_string(),
+    udp_datagram_burst: 400,
+    udp_batch: crate::cli::UdpBatchMode::Auto,
+    udp_batch_size: 16,
     backend_resolution: crate::cli::BackendResolution::ClusterDns,
     dry_run: false,
     health_bind: None,
@@ -156,7 +168,7 @@ fn tls_route_generates_sni_forward_rule() {
 }
 
 #[test]
-fn tcproute_is_status_only_warning() {
+fn unattached_tcproute_is_visible_without_emitting_stream_config() {
   let rendered = translate_objects(&objects(TCP_ROUTE_FIXTURE), &args()).expect("translate");
 
   assert_eq!(rendered.diagnostics.len(), 1);
@@ -164,6 +176,8 @@ fn tcproute_is_status_only_warning() {
     rendered.diagnostics[0].severity,
     DiagnosticSeverity::Warning
   );
+  assert!(rendered.diagnostics[0].message.contains("not attached"));
+  assert!(!rendered.toml.contains("[[stream_listeners]]"));
   assert!(!rendered.toml.contains("[[routes]]"));
 }
 
@@ -478,6 +492,121 @@ fn equivalent_kubernetes_input_order_keeps_the_generated_content_digest_stable()
     crate::rollout::digest_content(second.toml.as_bytes()),
     "the immutable artifact content digest must not depend on Kubernetes list order"
   );
+}
+
+#[test]
+fn backend_tls_policy_system_roots_sets_fixed_sni_and_https() {
+  let raw = format!(
+    "{}\n---\n{}",
+    HTTP_FIXTURE,
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: {name: app-tls, namespace: default}
+spec:
+  targetRefs:
+  - {group: "", kind: Service, name: app}
+  validation:
+    hostname: backend.example.test
+    wellKnownCACertificates: System
+"#
+  );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(
+    rendered
+      .toml
+      .contains("origin = \"https://app.default.svc.cluster.local:8080\"")
+  );
+  assert!(rendered.toml.contains("[upstream_pools.servers.tls]"));
+  assert!(
+    rendered
+      .toml
+      .contains("server_name = \"backend.example.test\"")
+  );
+  assert!(rendered.toml.contains("trust = \"system\""));
+  assert!(rendered.assets.is_empty());
+}
+
+#[test]
+fn backend_tls_policy_config_map_ca_is_content_addressed() {
+  let raw = format!(
+    "{}\n---\n{}",
+    HTTP_FIXTURE,
+    r#"apiVersion: v1
+kind: ConfigMap
+metadata: {name: app-ca, namespace: default}
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ZmFrZQ==
+    -----END CERTIFICATE-----
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: {name: app-tls, namespace: default}
+spec:
+  targetRefs:
+  - {group: "", kind: Service, name: app}
+  validation:
+    hostname: backend.example.test
+    caCertificateRefs:
+    - {group: "", kind: ConfigMap, name: app-ca}
+"#
+  );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert_eq!(rendered.assets.len(), 1);
+  let asset = &rendered.assets[0];
+  assert!(asset.data_key.starts_with("gateway-api-ca-"));
+  assert!(asset.managed_path.starts_with("gateway-api-ca/"));
+  assert!(rendered.toml.contains("trust = \"exclusive\""));
+  assert!(rendered.toml.contains(&asset.managed_path));
+}
+
+#[test]
+fn conflicting_backend_tls_policies_fail_closed_without_shipping_unused_ca() {
+  let raw = format!(
+    "{}\n---\n{}",
+    HTTP_FIXTURE,
+    r#"apiVersion: v1
+kind: ConfigMap
+metadata: {name: app-ca, namespace: default}
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ZmFrZQ==
+    -----END CERTIFICATE-----
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: first
+  namespace: default
+  creationTimestamp: "2026-01-01T00:00:00Z"
+spec:
+  targetRefs: [{group: "", kind: Service, name: app}]
+  validation:
+    hostname: first.example.test
+    caCertificateRefs: [{group: "", kind: ConfigMap, name: app-ca}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: second
+  namespace: default
+  creationTimestamp: "2026-01-02T00:00:00Z"
+spec:
+  targetRefs: [{group: "", kind: Service, name: app}]
+  validation:
+    hostname: second.example.test
+    wellKnownCACertificates: System
+"#
+  );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(has_error_containing(&rendered, "Conflicted"));
+  assert!(!rendered.toml.contains("[[routes]]"));
+  assert!(rendered.assets.is_empty());
 }
 
 fn generated_toml_validates(rendered_toml: &str) {

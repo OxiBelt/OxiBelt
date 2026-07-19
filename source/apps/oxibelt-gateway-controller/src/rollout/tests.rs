@@ -179,6 +179,45 @@ fn artifact_digest_is_stable_and_separates_path_from_content_digest() {
 }
 
 #[test]
+fn ca_assets_are_digest_bound_and_projected_into_the_certificate_root() {
+  let content = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+  let digest = digest_content(content.as_bytes());
+  let asset = ConfigArtifactAsset {
+    data_key: format!("gateway-api-ca-{digest}.pem"),
+    managed_path: format!("gateway-api-ca/{digest}.pem"),
+    content: content.to_string(),
+  };
+  let artifact = ConfigArtifact::new_with_assets(
+    &target(),
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+    vec![asset.clone()],
+  )
+  .expect("asset bundle");
+  let manifest = artifact.manifest(&target());
+  assert_eq!(manifest["data"][&asset.data_key], content);
+
+  let prior = RolloutState::from_workload(&workload());
+  let state = RolloutState::new_attempt(&artifact, &prior, 1);
+  let patch = build_workload_patch(&workload(), &target(), &artifact, &state)
+    .expect("asset-aware workload patch");
+  assert!(patch.operations.iter().any(|operation| {
+    operation["value"]["projected"]["sources"][1]["configMap"]["items"]
+      .as_array()
+      .is_some_and(|items| {
+        items
+          .iter()
+          .any(|item| item["key"] == asset.data_key && item["path"] == asset.managed_path)
+      })
+  }));
+  assert!(patch.operations.iter().any(|operation| {
+    operation["value"]["mountPath"] == "/etc/oxibelt/cert/gateway-api-ca"
+      && operation["value"]["subPath"] == "gateway-api-ca"
+      && operation["value"]["readOnly"] == true
+  }));
+}
+
+#[test]
 fn artifact_names_and_ownership_labels_are_scoped_to_the_target_kind() {
   let deployment = target();
   let mut daemon_set = deployment.clone();

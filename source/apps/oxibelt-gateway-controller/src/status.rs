@@ -14,6 +14,10 @@ use super::rollout_status::RolloutStatus;
 const CONDITION_TRUE: &str = "True";
 const CONDITION_FALSE: &str = "False";
 
+#[path = "status/attachment.rs"]
+mod attachment;
+#[path = "status/backend_tls.rs"]
+mod backend_tls;
 #[cfg(test)]
 #[path = "status/tests.rs"]
 mod tests;
@@ -78,12 +82,14 @@ pub fn build_status_patches(
         patches.push(gateway_patch(
           object,
           gateways.get(&object.key()).expect("checked gateway key"),
+          objects,
+          &namespace_labels,
           &status_addresses,
           rollout_status,
           &now,
         ));
       }
-      "GRPCRoute" | "HTTPRoute" | "TLSRoute" | "TCPRoute" => {
+      "GRPCRoute" | "HTTPRoute" | "TLSRoute" | "TCPRoute" | "UDPRoute" => {
         if let Some(patch) = route_patch(
           object,
           args,
@@ -96,6 +102,12 @@ pub fn build_status_patches(
           patches.push(patch);
         }
       }
+      "BackendTLSPolicy" => patches.push(backend_tls::patch(
+        object,
+        args,
+        &diagnostics_by_object,
+        &now,
+      )),
       _ => {}
     }
   }
@@ -128,6 +140,8 @@ fn gateway_class_patch(object: &KubernetesObject, now: &str) -> StatusPatch {
 fn gateway_patch(
   object: &KubernetesObject,
   gateway: &GatewaySummary,
+  objects: &[KubernetesObject],
+  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   status_addresses: &[Value],
   rollout_status: &RolloutStatus,
   now: &str,
@@ -140,6 +154,7 @@ fn gateway_patch(
       listener_status(
         listener,
         &listener_conflicts,
+        attachment::attached_route_count(objects, object, listener, namespace_labels),
         rollout_status,
         object.metadata.generation,
         now,
@@ -235,18 +250,14 @@ fn parse_service_ref(value: &str) -> Option<(&str, &str)> {
 
 fn listener_status(
   listener: &ListenerSummary,
-  conflicts: &HashSet<(Option<u16>, String, Option<String>)>,
+  conflicts: &HashSet<String>,
+  attached_routes: usize,
   rollout_status: &RolloutStatus,
   generation: Option<i64>,
   now: &str,
 ) -> Value {
   let supported_kinds = listener_supported_kinds(listener);
-  let conflict_key = (
-    listener.port,
-    listener.protocol.clone(),
-    listener.hostname.clone(),
-  );
-  let conflicted = conflicts.contains(&conflict_key);
+  let conflicted = conflicts.contains(&listener.name);
   let accepted = !supported_kinds.is_empty() && !conflicted;
   let programmed = rollout_status.programmed(accepted);
   let supported_kinds = supported_kinds
@@ -261,7 +272,7 @@ fn listener_status(
   json!({
     "name": listener.name,
     "supportedKinds": supported_kinds,
-    "attachedRoutes": 0,
+    "attachedRoutes": attached_routes,
     "conditions": [
       condition(
         "Accepted",
@@ -369,34 +380,30 @@ fn route_parent_status(
   status: (&HashMap<String, Vec<&Diagnostic>>, &RolloutStatus),
   now: &str,
 ) -> Value {
-  if object.kind == "TCPRoute" {
-    return json!({
-      "parentRef": normalized_parent_ref(parent),
-      "controllerName": controller_name,
-      "conditions": [
-        condition("Accepted", CONDITION_FALSE, "UnsupportedKind", "TCPRoute is unsupported by OxiBelt Gateway API controller v1", object.metadata.generation, now),
-        condition("ResolvedRefs", CONDITION_TRUE, "ResolvedRefs", "References were not translated because TCPRoute is unsupported", object.metadata.generation, now),
-        condition("Programmed", CONDITION_FALSE, "UnsupportedKind", "TCPRoute is status-only in OxiBelt Gateway API controller v1", object.metadata.generation, now),
-      ]
-    });
-  }
-
   let (diagnostics, rollout_status) = status;
   let object_ref = model_object_ref(object);
   let object_errors = diagnostics.get(&object_ref).cloned().unwrap_or_default();
-  let listener_matches = route_has_matching_listener(object, parent, gateway, namespace_labels);
-  let has_error = object_errors
-    .iter()
-    .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
-  let error_reason = route_error_reason(&object_errors);
-  let resolved_refs = !object_errors.iter().any(|diagnostic| {
-    diagnostic.message.contains("ReferenceGrant")
-      || diagnostic.message.contains("was not found")
-      || diagnostic.message.contains("does not expose")
-      || diagnostic.message.contains("references")
+  let listener_matches =
+    attachment::route_has_matching_listener(object, parent, gateway, namespace_labels);
+  let has_reference_error = object_errors.iter().any(|diagnostic| {
+    matches!(diagnostic.severity, DiagnosticSeverity::Error)
+      && is_reference_error(&diagnostic.message)
   });
-  let accepted = listener_matches && !has_error;
-  let programmed = rollout_status.programmed(accepted);
+  let not_programmed_by_precedence = object_errors.iter().any(|diagnostic| {
+    diagnostic
+      .message
+      .contains("Accepted but not Programmed because older")
+  });
+  let error_reason = route_error_reason(&object_errors);
+  let resolved_refs = !has_reference_error;
+  let has_nonreference_error = object_errors.iter().any(|diagnostic| {
+    matches!(diagnostic.severity, DiagnosticSeverity::Error)
+      && !is_reference_error(&diagnostic.message)
+  });
+  let accepted = listener_matches && !has_nonreference_error;
+  let programmed =
+    rollout_status.programmed(accepted && resolved_refs && !not_programmed_by_precedence);
+  let resolved_reason = resolved_refs_reason(&object_errors);
   json!({
     "parentRef": normalized_parent_ref(parent),
     "controllerName": controller_name,
@@ -424,7 +431,7 @@ fn route_parent_status(
       condition(
         "ResolvedRefs",
         bool_status(resolved_refs),
-        if resolved_refs { "ResolvedRefs" } else { "RefNotPermitted" },
+        if resolved_refs { "ResolvedRefs" } else { resolved_reason },
         if resolved_refs {
           "Route references are resolved"
         } else {
@@ -436,8 +443,12 @@ fn route_parent_status(
       condition(
         "Programmed",
         bool_status(programmed.programmed),
-        programmed.reason,
-        &programmed.message,
+        if not_programmed_by_precedence { "NotProgrammed" } else { programmed.reason },
+        if not_programmed_by_precedence {
+          "An older TCPRoute/UDPRoute owns this listener; the route remains Accepted"
+        } else {
+          &programmed.message
+        },
         object.metadata.generation,
         now,
       )
@@ -466,6 +477,29 @@ fn route_error_reason(errors: &[&Diagnostic]) -> &'static str {
     return "UnsupportedValue";
   }
   "InvalidRoute"
+}
+
+fn is_reference_error(message: &str) -> bool {
+  message.contains("ReferenceGrant")
+    || message.contains("backend Service")
+    || message.contains("backendRef")
+    || message.contains("status Service")
+}
+
+fn resolved_refs_reason(errors: &[&Diagnostic]) -> &'static str {
+  if errors
+    .iter()
+    .any(|diagnostic| diagnostic.message.contains("ReferenceGrant"))
+  {
+    "RefNotPermitted"
+  } else if errors
+    .iter()
+    .any(|diagnostic| diagnostic.message.contains("protocol"))
+  {
+    "UnsupportedProtocol"
+  } else {
+    "BackendNotFound"
+  }
 }
 
 fn accepted_gateway_classes(objects: &[KubernetesObject], args: &SharedArgs) -> HashSet<String> {
@@ -520,41 +554,6 @@ fn listener_supported_kinds(listener: &ListenerSummary) -> &'static [&'static st
   gateway_policy::listener_default_route_kinds(&listener.protocol, listener.tls_mode.as_deref())
 }
 
-fn route_has_matching_listener(
-  route: &KubernetesObject,
-  parent: &Value,
-  gateway: &GatewaySummary,
-  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
-) -> bool {
-  let section_name = string_at(parent, &["sectionName"]);
-  gateway.listeners.iter().any(|listener| {
-    if section_name.is_some() && Some(listener.name.as_str()) != section_name {
-      return false;
-    }
-    (match route.kind.as_str() {
-      "GRPCRoute" | "HTTPRoute" => matches!(listener.protocol.as_str(), "HTTP" | "HTTPS"),
-      "TLSRoute" => {
-        listener.protocol == "TLS" && listener.tls_mode.as_deref() == Some("Passthrough")
-      }
-      "TCPRoute" => true,
-      _ => false,
-    }) && matches!(
-      gateway_policy::listener_allows_route(
-        &listener.allowed_routes,
-        route,
-        parent
-          .get("namespace")
-          .and_then(Value::as_str)
-          .unwrap_or(route.namespace()),
-        &listener.protocol,
-        listener.tls_mode.as_deref(),
-        namespace_labels,
-      ),
-      RoutePolicyDecision::Allowed
-    )
-  })
-}
-
 fn preserved_parent_statuses(object: &KubernetesObject, controller_name: &str) -> Vec<Value> {
   object
     .status
@@ -600,6 +599,9 @@ fn normalized_parent_ref(parent: &Value) -> Value {
       Value::String(section_name.to_string()),
     );
   }
+  if let Some(port) = u16_at(parent, &["port"]) {
+    out.insert("port".to_string(), Value::Number(port.into()));
+  }
   Value::Object(out)
 }
 
@@ -618,23 +620,30 @@ fn parent_ref_is_gateway(parent: &Value) -> bool {
   group == gateway_policy::GATEWAY_GROUP && kind == "Gateway"
 }
 
-fn listener_conflicts(
-  listeners: &[ListenerSummary],
-) -> HashSet<(Option<u16>, String, Option<String>)> {
-  let mut counts = BTreeMap::new();
-  for listener in listeners {
-    *counts
-      .entry((
-        listener.port,
-        listener.protocol.clone(),
-        listener.hostname.clone(),
-      ))
-      .or_insert(0_usize) += 1;
+fn listener_conflicts(listeners: &[ListenerSummary]) -> HashSet<String> {
+  let mut conflicts = HashSet::new();
+  for (index, left) in listeners.iter().enumerate() {
+    for right in listeners.iter().skip(index + 1) {
+      if listener_pair_conflicts(left, right) {
+        conflicts.insert(left.name.clone());
+        conflicts.insert(right.name.clone());
+      }
+    }
   }
-  counts
-    .into_iter()
-    .filter_map(|(key, count)| (count > 1).then_some(key))
-    .collect()
+  conflicts
+}
+
+fn listener_pair_conflicts(left: &ListenerSummary, right: &ListenerSummary) -> bool {
+  if left.port != right.port {
+    return false;
+  }
+  if left.protocol == "UDP" || right.protocol == "UDP" {
+    return left.protocol == "UDP" && right.protocol == "UDP";
+  }
+  if left.protocol == "TCP" || right.protocol == "TCP" {
+    return true;
+  }
+  left.protocol == right.protocol && left.hostname == right.hostname
 }
 
 fn listener_condition_status<'a>(listener: &'a Value, condition_type: &str) -> Option<&'a str> {
@@ -658,10 +667,8 @@ fn diagnostics_by_object(diagnostics: &[Diagnostic]) -> HashMap<String, Vec<&Dia
 }
 
 fn api_prefix_for_route(object: &KubernetesObject) -> &'static str {
-  match object.kind.as_str() {
-    "TCPRoute" => "/apis/gateway.networking.k8s.io/v1alpha2",
-    _ => "/apis/gateway.networking.k8s.io/v1",
-  }
+  let _ = object;
+  "/apis/gateway.networking.k8s.io/v1"
 }
 
 fn resource_for_route(object: &KubernetesObject) -> &'static str {
@@ -670,6 +677,7 @@ fn resource_for_route(object: &KubernetesObject) -> &'static str {
     "GRPCRoute" => "grpcroutes",
     "TLSRoute" => "tlsroutes",
     "TCPRoute" => "tcproutes",
+    "UDPRoute" => "udproutes",
     _ => "routes",
   }
 }

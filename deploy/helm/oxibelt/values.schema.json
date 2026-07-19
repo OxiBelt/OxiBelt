@@ -134,6 +134,22 @@
         { "type": "integer", "minimum": 0, "maximum": 999999999 },
         { "type": "string", "pattern": "^(0|[1-9][0-9]?|100)%$" }
       ]
+    },
+    "additionalServicePort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "protocol", "port", "targetPort"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 15,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "protocol": { "type": "string", "enum": ["TCP", "UDP"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "targetPort": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+      }
     }
   },
   "properties": {
@@ -215,7 +231,14 @@
     "service": {
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] }
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "externalTrafficPolicy": { "type": "string", "enum": ["", "Cluster", "Local"] },
+        "additionalPorts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/definitions/additionalServicePort" }
+        }
       }
     },
     "kubernetesDiscovery": {

@@ -381,11 +381,20 @@ include = ["conf.d/*.toml"]
 
 This is the expected immutable rollout target for
 `oxibelt-gateway-controller`. The controller publishes
-`conf.d/gateway-api.generated.toml` as a single-file mount from an immutable
-Kubernetes ConfigMap; it does not write the config root through Admin
-`POST /admin/v1/files/sync`. The controller-generated file contains only route,
-upstream-pool, and SNI forwarding rule arrays; operator-owned listener, TLS,
-Admin/IPM, and scalar `[sni_forward]` settings stay in the base config.
+`conf.d/gateway-api.generated.toml` plus any digest-bound public CA assets from
+an immutable Kubernetes ConfigMap; it does not write the config root through
+Admin `POST /admin/v1/files/sync`. The controller-generated file can contain
+HTTP/gRPC route and pool arrays, raw TCP/UDP stream listener and pool arrays,
+Gateway HTTP external auth, and SNI forwarding rules. Operator-owned base
+HTTP/HTTPS listeners, downstream TLS, Admin/IPM, public Service ports, and
+scalar `[sni_forward]` settings stay in the base config.
+For controller-generated L4 listeners, expose operator-approved sockets with
+data-chart `service.additionalPorts[]` (`name`, `TCP|UDP`, Service `port`, and
+numeric unprivileged `targetPort`) and configure controller-chart `l4` bounds.
+The controller chart also accepts at most 16 unique `statusAddresses`; each is
+passed as one `--status-address`. See [Gateway API](GatewayAPI.md) and
+[Kubernetes Deployment](KubernetesDeployment.md) for attachment, RBAC, and
+NetworkPolicy requirements.
 The managed file path must be a safe nested relative `.toml` path so its parent
 is present beneath the read-only config root; a root-level generated filename,
 path traversal, or an unsafe path segment is rejected by the paired Helm
@@ -3240,6 +3249,12 @@ max_conns = 1024
 backup = false
 state = "ready" # ready | drain | down | maintenance
 
+[upstream_pools.servers.tls]
+server_name = "app.internal.example"
+trust = "exclusive" # inherit | system | exclusive
+trusted_ca_certs = ["app-ca.pem"]
+trusted_ca_sha256 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+
 [[upstream_pools.discovery]]
 provider = "file"
 file = "discovery/app-pool.json"
@@ -3337,13 +3352,25 @@ failure_policy = "fail_closed"
 
 Pool names and upstream names are separate namespaces. `algorithm` defaults to `power_of_two_choices`. HTTP pools support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, `rendezvous_ip_hash`, `ewma`, `least_time`, and `sticky_cookie`. `algorithm = "sticky_cookie"` selects an upstream by a signed affinity cookie when present, otherwise it uses `sticky_cookie.fallback_algorithm` and emits `Set-Cookie`; the fallback must be one of the non-sticky modern algorithms. Legacy names such as `round_robin`, `least_conn`, `least_connections`, `random`, `hash`, and `ip_hash` are rejected by default and must be migrated explicitly. With `[config] lb_policy_compat_profile = "nginx"` or `"caddy"`, OxiBelt converts `least_conn` and `least_connections` to `weighted_least_conn`, and `ip_hash` to `rendezvous_ip_hash`, across HTTP pools, sticky-cookie fallbacks, TURN pools, and WAF `set_load_balancing_policy` actions. The profile does not convert `round_robin`, `random`, or `hash`; those names fail with diagnostics because they do not have exact OxiBelt equivalents. Prefer running `oxibeltctl config lb-policy-compat source/config/oxibelt.toml --profile nginx --format text` or `--format json`, updating the TOML to canonical policy names, and then returning `lb_policy_compat_profile` to `strict`. The cookie HMAC secret comes from `sticky_cookie.secret_env` when set, from `[shared_state].sticky_sessions_backend` when configured, or from a process-local generated secret. Pool servers must use `http://` or `https://`, server IDs must be unique within a pool, and server weights must be greater than zero.
 
+Each HTTPS `[[upstream_pools.servers]]` and HTTPS
+`[[upstream_pools.discovery]]` may define a nested `tls` table. `server_name`
+overrides the connection authority only for SNI and certificate authentication.
+`trust = "inherit"` preserves the global proxy trust behavior, `system` uses
+only system/WebPKI roots, and `exclusive` requires nonempty
+`trusted_ca_certs` without adding global or system roots. CA paths resolve
+under the certificate root. `trusted_ca_sha256` must contain one lower-case
+SHA-256 digest for every CA file; startup and reload fail on missing files or a
+digest mismatch. Plain HTTP servers/discovery reject a nondefault TLS table.
+This per-member policy is used by forwarding and active probes. Health-check
+extra roots cannot augment members using `system` or `exclusive` trust.
+
 `upstream_pools.health_check` defaults remain compatible with existing configs: HTTP active checks use `GET /healthz`, `expected_status = [200, 204]`, `interval_ms = 5000`, `timeout_ms = 1000`, and thresholds `healthy_threshold = 2` / `unhealthy_threshold = 3`. `mode = "passive"` records passive request results only; `mode = "active"` schedules background probes when `enabled = true`. For HTTP probes, `method`, `path`, `health_port`, `health_host`, `headers`, and `body` build the probe request. `health_port` changes only the TCP connect port. `health_host` changes only the HTTP `Host` header; TLS SNI and hostname verification still use the probe URI host from the pool server origin. Header names and values must be valid HTTP fields, and OxiBelt rejects reserved hop-by-hop, forwarding identity, and `Host` headers in `headers`; use `health_host` for Host.
 
 HTTP health success is `(expected_status OR expected_status_ranges) AND expected_body_regex when configured`. Status codes and inclusive status ranges must be valid HTTP statuses, and ranges require `start <= end`. `expected_body_regex` is compiled during config validation and matches only the first `body_match_max_bytes` bytes collected from the response. `body_match_max_bytes`, `interval_ms`, `timeout_ms`, and nonzero thresholds must be greater than zero. `jitter_ms` adds up to that many milliseconds to each active schedule interval to avoid synchronized probes. `rise` and `fall` are TOML aliases for `healthy_threshold` and `unhealthy_threshold`; configuring an alias and its canonical field together is invalid.
 
 `protocol = "grpc"` preserves the gRPC health checking wire format: OxiBelt sends `POST /grpc.health.v1.Health/Check` over HTTP/2 with the configured `grpc_service` and checks `grpc_expected_statuses`. `health_port`, `health_host`, custom non-reserved headers, timeout, interval, thresholds, jitter, and health-check TLS policy still apply. HTTP body regex matching is not supported for gRPC health checks.
 
-`upstream_pools.health_check.tls.trusted_ca_certs` is health-check only. These roots are resolved under the cert directory, appended to `proxy.trusted_ca_certs` for active health and diagnostics probes, and tracked as runtime reload files. They do not change normal upstream-pool forwarding trust. `upstream_pools.health_check.tls.upstream_revocation` can override outbound OCSP/CRLite policy for health-check HTTPS clients only. OxiBelt does not expose an insecure skip-verify mode for health checks.
+`upstream_pools.health_check.tls.trusted_ca_certs` is health-check only. These roots are resolved under the cert directory, appended to `proxy.trusted_ca_certs` for active health and diagnostics probes only when the selected member inherits trust, and tracked as runtime reload files. They cannot augment a member whose `tls.trust` is `system` or `exclusive`, and they do not change normal upstream-pool forwarding trust. `upstream_pools.health_check.tls.upstream_revocation` can override outbound OCSP/CRLite policy for health-check HTTPS clients only. OxiBelt does not expose an insecure skip-verify mode for health checks.
 
 Pool server `state` controls new request selection. `ready` accepts traffic. `drain`, `down`, and `maintenance` stop new selection while already selected in-flight requests finish naturally. `slow_start` and `outlier_ejection` are opt-in and disabled by default. When slow start is enabled, newly added, discovered, or recovered servers ramp from `min_weight_percent` to full effective weight over `duration_ms` across all pool algorithms, including sticky fallback, rendezvous, EWMA, and least-time scoring. When outlier ejection is enabled, passive retry/health failures can temporarily exclude a server after `consecutive_failures`; the ejection duration starts at `base_ejection_ms`, backs off per ejection count, and is capped by `max_ejection_ms`. If no ready, healthy, non-ejected server remains, OxiBelt preserves the existing fail-closed upstream-pool response.
 
@@ -3635,13 +3662,15 @@ network = "udp"
 bind = "0.0.0.0:10443"
 upstream_pool = "edge-quic"
 max_udp_flows = 4096
+udp_new_flow_rate = "200r/s"
+udp_new_flow_burst = 400
 udp_datagram_rate = "200r/s"
 udp_datagram_burst = 400
 udp_batch = "auto" # auto | off | required
 udp_batch_size = 16
 ```
 
-Each `[[stream_upstream_pools.servers]]` origin must use `tcp://host:port` or `udp://host:port`. A stream listener or SNI rule must set exactly one of `target` or `upstream_pool`; a listener may omit its default only when it has SNI rules, in which case no-SNI or unparseable flows fail closed without displacing established UDP flows. UDP listeners reject `proxy_protocol_egress`, pin each downstream client flow to one selected upstream until idle expiry or capacity eviction, and use `max_udp_flows` to cap process-local flow state. Capacity eviction only happens after a new UDP flow is routable, admitted by connection limits, and ready to insert. `udp_datagram_rate` and `udp_datagram_burst` apply per pinned downstream UDP flow. `udp_batch = "auto"` uses Linux `recvmmsg(2)`/`sendmmsg(2)` batches when available and falls back to the existing Tokio `UdpSocket` path; `required` is Linux-only and fails on batch backend errors.
+Each `[[stream_upstream_pools.servers]]` origin must use `tcp://host:port` or `udp://host:port`. A stream listener or SNI rule must set exactly one of `target` or `upstream_pool`; a listener may omit its default only when it has SNI rules, in which case no-SNI or unparseable flows fail closed without displacing established UDP flows. UDP listeners reject `proxy_protocol_egress`, pin each downstream client flow to one selected upstream until idle expiry or capacity eviction, and use `max_udp_flows` to cap process-local flow state. `udp_new_flow_rate` and `udp_new_flow_burst` bound admission of previously unseen peer flows before per-flow allocation. Capacity eviction only happens after a new UDP flow is routable, admitted by connection limits and the new-flow limit, and ready to insert. `udp_datagram_rate` and `udp_datagram_burst` apply per pinned downstream UDP flow. `udp_batch = "auto"` uses Linux `recvmmsg(2)`/`sendmmsg(2)` batches when available and falls back to the existing Tokio `UdpSocket` path; `required` is Linux-only and fails on batch backend errors. UDP flow state is process-local and does not survive restart or Pod replacement.
 
 Stream SNI routing is passthrough classification only. OxiBelt peeks bounded TCP TLS ClientHello bytes or QUIC Initial CRYPTO frames when rules are configured, selects the first matching exact or wildcard server name rule, and forwards the untouched stream/datagrams to the chosen target. Flows without visible TLS or QUIC SNI use the listener default if present. Use `[sni_forward]` instead when TLS or QUIC traffic on `listeners.https_binds` must be selected by visible SNI before local HTTP termination.
 

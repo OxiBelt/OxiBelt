@@ -17,6 +17,9 @@
 {{- if .Values.service.ports.http3.enabled -}}
 {{- $publicPorts = append $publicPorts (dict "port" "http3" "protocol" "UDP") -}}
 {{- end -}}
+{{- range $port := .Values.service.additionalPorts -}}
+{{- $publicPorts = append $publicPorts (dict "port" $port.name "protocol" $port.protocol) -}}
+{{- end -}}
 {{- $publicIngress := list -}}
 {{- if and (gt (len $publicPorts) 0) (or $public.allowAll (gt (len $public.from) 0)) -}}
 {{- $publicRule := dict "ports" $publicPorts -}}

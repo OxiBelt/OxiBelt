@@ -100,6 +100,7 @@ impl DirectH2Pools {
 
 struct DirectH2Pool {
   origin: DirectH2Origin,
+  tls_server_name: Option<String>,
   connect_timeout: Duration,
   idle_timeout: Duration,
   max_lifetime: Duration,
@@ -251,6 +252,7 @@ impl DirectH2Pool {
       max_streams_per_slot.clamp(1, DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT);
     Some(tls_config.transpose().map(|tls_config| Self {
       origin,
+      tls_server_name: upstream.tls.server_name.clone(),
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
       max_lifetime: Duration::from_millis(upstream.max_lifetime_ms),
@@ -492,7 +494,10 @@ impl DirectH2Pool {
     let sender = if let Some(tls_config) = &self.tls_config {
       connect_tls_h2(
         tls_config.clone(),
-        self.origin.host.clone(),
+        self
+          .tls_server_name
+          .clone()
+          .unwrap_or_else(|| self.origin.host.clone()),
         stream,
         &self.http2_config,
         self.connect_timeout,

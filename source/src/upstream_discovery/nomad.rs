@@ -153,6 +153,7 @@ fn nomad_service_entry_to_server(
     max_conns: 0,
     backup: false,
     state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
     source: UpstreamPoolServerSource::Nomad,
   })
 }
@@ -239,6 +240,7 @@ mod tests {
       update_debounce_ms: 250,
       refresh_interval_ms: 30_000,
       min_ttl_ms: 1_000,
+      tls: Default::default(),
     }
   }
 

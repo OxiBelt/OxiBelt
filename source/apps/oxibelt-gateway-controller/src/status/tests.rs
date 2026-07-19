@@ -7,6 +7,16 @@ fn args() -> SharedArgs {
     watch_namespace: None,
     status_address: vec!["203.0.113.10".to_string()],
     status_service: None,
+    l4_bind_address: std::net::Ipv4Addr::UNSPECIFIED.into(),
+    l4_connect_timeout_ms: 3000,
+    l4_idle_timeout_ms: 75_000,
+    udp_max_flows: 8192,
+    udp_new_flow_rate: "200r/s".to_string(),
+    udp_new_flow_burst: 400,
+    udp_datagram_rate: "200r/s".to_string(),
+    udp_datagram_burst: 400,
+    udp_batch: crate::cli::UdpBatchMode::Auto,
+    udp_batch_size: 16,
     backend_resolution: crate::cli::BackendResolution::ClusterDns,
     dry_run: false,
     health_bind: None,
@@ -134,7 +144,7 @@ status:
 }
 
 #[test]
-fn tcproute_status_marks_parent_unsupported() {
+fn tcproute_status_accepts_matching_v1_parent() {
   let objects = vec![
     object(
       r#"
@@ -163,7 +173,7 @@ spec:
     ),
     object(
       r#"
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 kind: TCPRoute
 metadata:
   name: passthrough
@@ -182,11 +192,93 @@ spec:
     .expect("route patch");
   assert_eq!(
     route.status["parents"][0]["conditions"][0]["reason"],
-    "UnsupportedKind"
+    "Accepted"
   );
   assert_eq!(
     route.status["parents"][0]["conditions"][0]["status"],
+    CONDITION_TRUE
+  );
+}
+
+#[test]
+fn competing_tcp_routes_are_attached_and_only_the_oldest_is_programmed() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - {name: tcp, protocol: TCP, port: 9000}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: oldest, namespace: default}
+spec:
+  parentRefs:
+  - {name: edge, sectionName: tcp}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: younger, namespace: default}
+spec:
+  parentRefs:
+  - {name: edge, sectionName: tcp}
+"#,
+    ),
+  ];
+  let diagnostics = vec![Diagnostic::warning(
+    "TCPRoute/default/younger",
+    "route is Accepted but not Programmed because older default/oldest owns the listener",
+  )];
+  let patches = build_status_patches(&objects, &args(), &diagnostics, &committed_rollout());
+
+  let gateway = patches
+    .iter()
+    .find(|patch| patch.resource == "gateways")
+    .expect("gateway patch");
+  assert_eq!(gateway.status["listeners"][0]["attachedRoutes"], 2);
+
+  let oldest = patches
+    .iter()
+    .find(|patch| patch.resource == "tcproutes" && patch.name == "oldest")
+    .expect("oldest route patch");
+  assert_eq!(
+    oldest.status["parents"][0]["conditions"][2]["status"],
+    CONDITION_TRUE
+  );
+
+  let younger = patches
+    .iter()
+    .find(|patch| patch.resource == "tcproutes" && patch.name == "younger")
+    .expect("younger route patch");
+  assert_eq!(
+    younger.status["parents"][0]["conditions"][0]["status"],
+    CONDITION_TRUE
+  );
+  assert_eq!(
+    younger.status["parents"][0]["conditions"][2]["status"],
     CONDITION_FALSE
+  );
+  assert_eq!(
+    younger.status["parents"][0]["conditions"][2]["reason"],
+    "NotProgrammed"
   );
 }
 

@@ -28,8 +28,27 @@ managedConfigPath: conf.d/gateway-api.generated.toml
 watchNamespace: ""
 watchAllNamespaces: false
 statusService: ""
+# Explicit Gateway addresses take precedence over statusService. Each entry is
+# passed as one --status-address argument; keep the list bounded and free of
+# credentials because it is published in Gateway status.
+statusAddresses: []
 backendResolution: cluster_dns
 dryRun: false
+
+# Controller-owned bounds used only for generated TCPRoute and UDPRoute stream
+# listeners. Listener ports still come from the operator-owned status Service.
+l4:
+  bindAddress: 0.0.0.0
+  connectTimeoutMs: 3000
+  idleTimeoutMs: 75000
+  udp:
+    maxFlows: 8192
+    newFlowRate: 200r/s
+    newFlowBurst: 400
+    datagramRate: 200r/s
+    datagramBurst: 400
+    batch: auto # auto | off | required
+    batchSize: 16
 
 serviceAccount:
   # The controller receives only the explicit projection rendered below.

@@ -231,7 +231,10 @@ also disabled, but it always gets the same explicit 3600-second token/CA
 projection because reconciliation calls the Kubernetes API. By default the
 chart passes `--watch-namespace=<controller release namespace>` and grants
 only the namespace GET needed for that scope plus a namespaced Gateway API
-read Role. Set `watchNamespace` to another single namespace when required.
+read Role. That Role lists the supported Gateway routes, BackendTLSPolicy,
+ReferenceGrant, and Services; patches only their status subresources; and can
+`get` but not list referenced ConfigMaps. It has no Secret access. Set
+`watchNamespace` to another single namespace when required.
 Set `watchAllNamespaces: true` only for an intentional cluster-wide
 controller; it is mutually exclusive with `watchNamespace` and changes the
 Gateway API read Role and namespace access to cluster-wide. Existing
@@ -246,8 +249,9 @@ upgrade. Enable it only after mapping every intended data-plane dependency.
 The chart then selects only this release's OxiBelt Pods and renders a portable
 Kubernetes `NetworkPolicy` baseline:
 
-- public ingress is limited to the enabled named `http`, `https`, and `http3`
-  ports. Set `ingress.public.allowAll: true` for an Internet-facing edge, or
+- public ingress is limited to the enabled named `http`, `https`, `http3`, and
+  `service.additionalPorts` ports. Set `ingress.public.allowAll: true` for an
+  Internet-facing edge, or
   use nonempty `ingress.public.from` peers for a private ingress boundary.
 - metrics ingress is limited to the named `metrics` port and the explicitly
   configured monitoring peers.
@@ -546,8 +550,11 @@ rollout:
 The controller chart has no Admin URL, Admin token, client certificate, or
 Secret permission. It uses only its projected Kubernetes API token and
 `kube-root-ca.crt` CA. Its default Gateway API read Role is scoped to the
-controller release namespace and permits list operations plus status patching;
-the cluster role is limited to GatewayClass list/status patch and an exact
+controller release namespace and permits list operations plus status patching.
+BackendTLSPolicy public-CA resolution adds ConfigMap `get` without ConfigMap
+`list`; Secret-backed client identity is unsupported. The watched Gateway API
+set includes v1 TCPRoute, UDPRoute, and BackendTLSPolicy. The cluster role is
+limited to GatewayClass list/status patch and an exact
 namespace GET. Its target-namespace Role gets and creates ConfigMaps, lists
 Pods and, for a Deployment target, ReplicaSets, and gets and patches only the
 named Deployment or DaemonSet. It neither watches nor deletes target-namespace
@@ -556,6 +563,54 @@ revisions are preserved for named rollback; their retention is operator
 controlled rather than controller garbage collected. ConfigMap access is still
 namespace scoped because content-addressed artifact names are known only at
 runtime.
+
+TCPRoute and UDPRoute listeners are exposed only through operator-owned
+data-plane ports. Declare each port in the paired data-plane chart and point
+`statusService` at that Service:
+
+```yaml
+# deploy/helm/oxibelt values
+service:
+  additionalPorts:
+  - name: gateway-tcp
+    protocol: TCP
+    port: 9000
+    targetPort: 9000
+  - name: gateway-udp
+    protocol: UDP
+    port: 9001
+    targetPort: 9001
+```
+
+Names are unique lower-case Service port names, the list is limited to 32,
+and `targetPort` must be a numeric unprivileged container port. TCP and UDP
+may share a numeric port, but the same transport cannot reuse a Service or
+container socket. The data chart renders these ports consistently into the
+Service, Deployment or DaemonSet, and enabled NetworkPolicy. The controller
+does not mutate that Service.
+
+The controller chart exposes bounded generated-listener defaults under `l4`:
+
+```yaml
+statusService: oxibelt/oxibelt
+statusAddresses: []
+l4:
+  bindAddress: 0.0.0.0
+  connectTimeoutMs: 3000
+  idleTimeoutMs: 75000
+  udp:
+    maxFlows: 8192
+    newFlowRate: 200r/s
+    newFlowBurst: 400
+    datagramRate: 200r/s
+    datagramBurst: 400
+    batch: auto
+    batchSize: 16
+```
+
+`statusAddresses` emits repeated explicit `--status-address` values and takes
+precedence in controller behavior over Service-derived addresses. UDP flow
+state is Pod-local and is reset during Pod replacement or rollout.
 
 The controller chart defaults to two replicas with `RollingUpdate`
 (`maxUnavailable: 0`, `maxSurge: 1`), a `minAvailable: 1` PDB, and preferred

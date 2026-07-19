@@ -70,6 +70,12 @@ fn discovered_servers_unchanged(
     .iter()
     .find(|pool| pool.name == pool_name)
     .ok_or_else(|| anyhow!("unknown upstream pool {pool_name}"))?;
+  let discovery_tls = pool
+    .discovery
+    .iter()
+    .find(|discovery| discovery_source(discovery.provider) == source)
+    .map(|discovery| discovery.tls.clone())
+    .ok_or_else(|| anyhow!("upstream pool {pool_name} has no matching discovery policy"))?;
   let previous_states = pool
     .servers
     .iter()
@@ -82,6 +88,7 @@ fn discovered_servers_unchanged(
     let server_id = upstream_pool_server_id(index, server);
     server.id = Some(server_id.clone());
     server.source = source;
+    server.tls = discovery_tls.clone();
     if let Some(state) = previous_states.get(&server_id) {
       server.state = *state;
     } else if server.state != UpstreamPoolServerState::Ready {
@@ -230,6 +237,7 @@ fn dns_ip_server(
     max_conns: 0,
     backup: false,
     state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
     source: UpstreamPoolServerSource::Dns,
   })
 }

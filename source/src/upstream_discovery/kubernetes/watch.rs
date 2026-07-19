@@ -465,6 +465,7 @@ mod tests {
       update_debounce_ms: 250,
       refresh_interval_ms: 30_000,
       min_ttl_ms: 1_000,
+      tls: Default::default(),
     }
   }
 

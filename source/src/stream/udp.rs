@@ -4,13 +4,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::{StreamListenerConfig, StreamNetwork, UdpBatchMode};
@@ -20,7 +20,7 @@ use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::sni_forward::quic::extract_initial_sni;
 use crate::state::AppHandle;
 use crate::stream::sni::select_stream_route;
-use crate::stream::target::{ResolvedStreamTarget, resolve_stream_route_target};
+use crate::stream::target::resolve_stream_route_target;
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
@@ -47,16 +47,21 @@ pub(super) async fn serve_udp_listener(
   state: AppHandle,
   mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
-  _connections: TaskRegistry,
+  connections: TaskRegistry,
 ) -> anyhow::Result<()> {
   let bind = socket.local_addr()?;
   info!(name = %config.name, bind = %bind, "UDP stream listener started");
   let socket = Arc::new(socket);
   let mut flows: HashMap<SocketAddr, UdpFlowSession> = HashMap::new();
   let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
-  let mut expire = tokio::time::interval(Duration::from_secs(5));
+  let expiry_interval = Duration::from_millis(config.idle_timeout_ms.div_ceil(2).clamp(10, 5_000));
+  let mut expire = tokio::time::interval(expiry_interval);
   let mut udp_batch = udp_batch_enabled(config.udp_batch);
   let mut quiescing = *quiesce.borrow();
+  let mut new_flow_rate = udp_rate_bucket(
+    config.udp_new_flow_rate.as_deref(),
+    config.udp_new_flow_burst,
+  );
 
   loop {
     tokio::select! {
@@ -65,16 +70,23 @@ pub(super) async fn serve_udp_listener(
         if changed.is_err() || *quiesce.borrow() {
           quiescing = true;
           info!(name = %config.name, bind = %bind, "UDP stream listener quiesced");
+          if flows.is_empty() {
+            return Ok(());
+          }
         }
       }
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
           info!(name = %config.name, bind = %bind, "UDP stream listener stopped");
         }
+        force_shutdown_udp_flows(&mut flows, &state, &config.name);
         return Ok(());
       }
       _ = expire.tick() => {
         expire_udp_flows(&mut flows, Duration::from_millis(config.idle_timeout_ms), &state, &config.name);
+        if quiescing && flows.is_empty() {
+          return Ok(());
+        }
       }
       received = recv_udp_datagrams(&socket, &mut buffer, &config, udp_batch) => {
         let datagrams = match received {
@@ -84,10 +96,26 @@ pub(super) async fn serve_udp_listener(
             udp_batch = false;
             continue;
           }
-          Err(error) => return Err(error).context("failed to receive UDP stream datagram"),
+          Err(error) => {
+            force_shutdown_udp_flows(&mut flows, &state, &config.name);
+            return Err(error).context("failed to receive UDP stream datagram");
+          }
         };
         for (peer_addr, datagram) in datagrams {
-          if let Err(error) = proxy_udp_datagram(&socket, &mut flows, &config, &state, peer_addr, &datagram, !quiescing).await {
+          if let Err(error) = (UdpProxyContext {
+            downstream: &socket,
+            config: &config,
+            state: &state,
+            connections: &connections,
+          })
+          .proxy_datagram(
+            &mut flows,
+            &mut new_flow_rate,
+            peer_addr,
+            &datagram,
+            !quiescing,
+          ).await {
+            state.snapshot().metrics.record_stream_udp_datagram_dropped(&config.name);
             warn!(name = %config.name, peer = %peer_addr, error = %error, "UDP stream datagram failed");
           }
         }
@@ -122,10 +150,10 @@ async fn recv_udp_datagrams(
 
 struct UdpFlowSession {
   upstream: Arc<UdpSocket>,
-  upstream_task: JoinHandle<()>,
+  cancel: watch::Sender<bool>,
   target_label: String,
   route_name: String,
-  last_activity: Instant,
+  activity: Arc<UdpActivity>,
   rate: Option<UdpRateBucket>,
   _selection: Option<crate::stream::pools::StreamPoolSelection>,
   _connection_permit: ConnectionPermit,
@@ -134,179 +162,262 @@ struct UdpFlowSession {
 
 impl Drop for UdpFlowSession {
   fn drop(&mut self) {
-    self.upstream_task.abort();
+    let _ = self.cancel.send(true);
   }
 }
 
 struct UdpRateBucket {
   tokens: f64,
   last: Instant,
+  per_second: f64,
 }
 
-async fn proxy_udp_datagram(
-  downstream: &Arc<UdpSocket>,
-  flows: &mut HashMap<SocketAddr, UdpFlowSession>,
-  config: &StreamListenerConfig,
-  state: &AppHandle,
-  peer_addr: SocketAddr,
-  datagram: &[u8],
-  allow_new_flow: bool,
-) -> anyhow::Result<()> {
-  expire_udp_flows(
-    flows,
-    Duration::from_millis(config.idle_timeout_ms),
-    state,
-    &config.name,
-  );
-  let known_flow = flows.contains_key(&peer_addr);
-  if !udp_flow_admitted(allow_new_flow, known_flow) {
-    return Ok(());
+struct UdpActivity {
+  started: Instant,
+  last_millis: AtomicU64,
+}
+
+impl UdpActivity {
+  fn new() -> Self {
+    Self {
+      started: Instant::now(),
+      last_millis: AtomicU64::new(0),
+    }
   }
-  if !known_flow {
-    let Some((route_name, resolved)) =
-      classify_udp_flow(config, state, peer_addr, datagram).await?
-    else {
+
+  fn touch(&self) {
+    let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    self.last_millis.store(elapsed, Ordering::Relaxed);
+  }
+
+  fn idle_for(&self) -> Duration {
+    let now = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    Duration::from_millis(now.saturating_sub(self.last_millis.load(Ordering::Relaxed)))
+  }
+
+  fn last_millis(&self) -> u64 {
+    self.last_millis.load(Ordering::Relaxed)
+  }
+}
+
+struct UdpProxyContext<'a> {
+  downstream: &'a Arc<UdpSocket>,
+  config: &'a StreamListenerConfig,
+  state: &'a AppHandle,
+  connections: &'a TaskRegistry,
+}
+
+impl UdpProxyContext<'_> {
+  async fn proxy_datagram(
+    &self,
+    flows: &mut HashMap<SocketAddr, UdpFlowSession>,
+    new_flow_rate: &mut Option<UdpRateBucket>,
+    peer_addr: SocketAddr,
+    datagram: &[u8],
+    allow_new_flow: bool,
+  ) -> anyhow::Result<()> {
+    let downstream = self.downstream;
+    let config = self.config;
+    let state = self.state;
+    let connections = self.connections;
+    let known_flow = flows.contains_key(&peer_addr);
+    if !udp_flow_admitted(allow_new_flow, known_flow) {
+      let metrics = &state.snapshot().metrics;
+      metrics.record_stream_udp_flow_admission_rejection(&config.name);
+      metrics.record_stream_udp_datagram_dropped(&config.name);
       return Ok(());
-    };
-    let permit = acquire_udp_flow_permit(state, peer_addr).await?;
-    let upstream = Arc::new(UdpSocket::bind(client_bind_addr(resolved.addr)).await?);
-    upstream.connect(resolved.addr).await?;
-    let upstream_reader = upstream.clone();
-    let downstream_writer = downstream.clone();
-    let target_label = resolved.label;
-    let listener_name = config.name.clone();
-    let upstream_udp_batch = udp_batch_enabled(config.udp_batch);
-    let upstream_udp_batch_required = config.udp_batch == UdpBatchMode::Required;
-    let udp_batch_size = config.udp_batch_size;
-    let upstream_task = tokio::spawn(async move {
-      let mut buf = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
-      let mut upstream_udp_batch = upstream_udp_batch;
-      loop {
-        if upstream_udp_batch {
-          match crate::stream::udp_batch::recv_connected_batch(
-            &upstream_reader,
-            udp_batch_size,
-            MAX_UDP_DATAGRAM_BYTES,
-          )
-          .await
-          {
-            Ok(datagrams) if !datagrams.is_empty() => {
-              let sent =
-                crate::stream::udp_batch::sendmmsg_to(&downstream_writer, peer_addr, &datagrams)
-                  .await
-                  .unwrap_or(0);
-              for datagram in datagrams.iter().skip(sent) {
-                if downstream_writer
-                  .send_to(datagram, peer_addr)
-                  .await
-                  .is_err()
-                {
+    }
+    if !known_flow {
+      let Some(route) = classify_udp_route(config, datagram) else {
+        state
+          .snapshot()
+          .metrics
+          .record_stream_udp_datagram_dropped(&config.name);
+        return Ok(());
+      };
+      if !udp_rate_allows(new_flow_rate.as_mut(), config.udp_new_flow_burst) {
+        let metrics = &state.snapshot().metrics;
+        metrics.record_stream_udp_flow_admission_rejection(&config.name);
+        metrics.record_stream_udp_datagram_dropped(&config.name);
+        return Ok(());
+      }
+      let route_name = route.name.to_string();
+      let resolved =
+        resolve_stream_route_target(state, StreamNetwork::Udp, route.target, peer_addr).await?;
+      let permit = match acquire_udp_flow_permit(state, peer_addr).await {
+        Ok(permit) => permit,
+        Err(error) => {
+          state
+            .snapshot()
+            .metrics
+            .record_stream_udp_flow_admission_rejection(&config.name);
+          return Err(error);
+        }
+      };
+      let upstream = Arc::new(UdpSocket::bind(client_bind_addr(resolved.addr)).await?);
+      upstream.connect(resolved.addr).await?;
+      let upstream_reader = upstream.clone();
+      let downstream_writer = downstream.clone();
+      let target_label = resolved.label;
+      let listener_name = config.name.clone();
+      let upstream_listener_name = listener_name.clone();
+      let metrics = state.snapshot().metrics.clone();
+      let activity = Arc::new(UdpActivity::new());
+      let upstream_activity = activity.clone();
+      let upstream_udp_batch = udp_batch_enabled(config.udp_batch);
+      let upstream_udp_batch_required = config.udp_batch == UdpBatchMode::Required;
+      let udp_batch_size = config.udp_batch_size;
+      let (cancel, mut cancelled) = watch::channel(false);
+      connections.spawn(async move {
+        let mut buf = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
+        let mut upstream_udp_batch = upstream_udp_batch;
+        loop {
+          if upstream_udp_batch {
+            let received = tokio::select! {
+              biased;
+              changed = cancelled.changed() => {
+                if changed.is_err() || *cancelled.borrow() {
                   return;
                 }
+                continue;
+              }
+              received = crate::stream::udp_batch::recv_connected_batch(
+                &upstream_reader,
+                udp_batch_size,
+                MAX_UDP_DATAGRAM_BYTES,
+              ) => received,
+            };
+            match received {
+              Ok(datagrams) if !datagrams.is_empty() => {
+                let sent =
+                  crate::stream::udp_batch::sendmmsg_to(&downstream_writer, peer_addr, &datagrams)
+                    .await
+                    .unwrap_or(0);
+                let sent = sent.min(datagrams.len());
+                let mut forwarded = datagrams[..sent].iter().map(Vec::len).sum::<usize>();
+                for datagram in datagrams.iter().skip(sent) {
+                  if downstream_writer
+                    .send_to(datagram, peer_addr)
+                    .await
+                    .is_err()
+                  {
+                    metrics.record_stream_udp_datagram_dropped(&upstream_listener_name);
+                    return;
+                  }
+                  forwarded = forwarded.saturating_add(datagram.len());
+                }
+                upstream_activity.touch();
+                metrics.add_stream_bytes("udp", forwarded as u64);
+                continue;
+              }
+              Ok(_) => continue,
+              Err(_) if upstream_udp_batch_required => return,
+              Err(_) => upstream_udp_batch = false,
+            }
+          }
+          let received = tokio::select! {
+            biased;
+            changed = cancelled.changed() => {
+              if changed.is_err() || *cancelled.borrow() {
+                return;
               }
               continue;
             }
-            Ok(_) => continue,
-            Err(_) if upstream_udp_batch_required => return,
-            Err(_) => upstream_udp_batch = false,
-          }
-        }
-        match upstream_reader.recv(&mut buf).await {
-          Ok(len) => {
-            if downstream_writer
-              .send_to(&buf[..len], peer_addr)
-              .await
-              .is_err()
-            {
-              break;
+            received = upstream_reader.recv(&mut buf) => received,
+          };
+          match received {
+            Ok(len) => {
+              if downstream_writer
+                .send_to(&buf[..len], peer_addr)
+                .await
+                .is_err()
+              {
+                metrics.record_stream_udp_datagram_dropped(&upstream_listener_name);
+                break;
+              }
+              upstream_activity.touch();
+              metrics.add_stream_bytes("udp", len as u64);
             }
+            Err(_) => break,
           }
-          Err(_) => break,
+        }
+      });
+      let introspection_guard = state
+        .snapshot()
+        .runtime_introspection
+        .guard(RuntimeCounter::StreamListenerUdpFlow);
+      info!(
+        name = %listener_name,
+        peer = %peer_addr,
+        route = %route_name,
+        target = %target_label,
+        "UDP stream flow started"
+      );
+      while flows.len() >= config.max_udp_flows {
+        let Some(oldest) = oldest_flow(flows) else {
+          break;
+        };
+        if let Some(session) = flows.remove(&oldest) {
+          let metrics = &state.snapshot().metrics;
+          metrics.record_stream_session_end("udp", &config.name, &session.route_name, false);
+          metrics.record_stream_udp_flow_evicted(&config.name);
         }
       }
-    });
-    let introspection_guard = state
-      .snapshot()
-      .runtime_introspection
-      .guard(RuntimeCounter::StreamListenerUdpFlow);
-    info!(
-      name = %listener_name,
-      peer = %peer_addr,
-      route = %route_name,
-      target = %target_label,
-      "UDP stream flow started"
-    );
-    while flows.len() >= config.max_udp_flows {
-      let Some(oldest) = oldest_flow(flows) else {
-        break;
-      };
-      if let Some(session) = flows.remove(&oldest) {
-        state.snapshot().metrics.record_stream_session_end(
-          "udp",
-          &config.name,
-          &session.route_name,
-          false,
-        );
-      }
-    }
-    flows.insert(
-      peer_addr,
-      UdpFlowSession {
-        upstream,
-        upstream_task,
-        target_label,
-        route_name,
-        last_activity: Instant::now(),
-        rate: config.udp_datagram_rate.as_ref().map(|_| UdpRateBucket {
-          tokens: f64::from(config.udp_datagram_burst),
-          last: Instant::now(),
-        }),
-        _selection: resolved.selection,
-        _connection_permit: permit,
-        _introspection_guard: introspection_guard,
-      },
-    );
-  }
-
-  if let Some(session) = flows.get_mut(&peer_addr) {
-    if !udp_rate_allows(config, session) {
+      flows.insert(
+        peer_addr,
+        UdpFlowSession {
+          upstream,
+          cancel,
+          target_label,
+          route_name,
+          activity,
+          rate: udp_rate_bucket(
+            config.udp_datagram_rate.as_deref(),
+            config.udp_datagram_burst,
+          ),
+          _selection: resolved.selection,
+          _connection_permit: permit,
+          _introspection_guard: introspection_guard,
+        },
+      );
       state
         .snapshot()
         .metrics
-        .record_stream_udp_rate_limited(&config.name);
-      return Ok(());
+        .record_stream_udp_flow_created(&config.name);
     }
-    session.upstream.send(datagram).await?;
-    session.last_activity = Instant::now();
-    state
-      .snapshot()
-      .metrics
-      .add_stream_bytes("udp", datagram.len() as u64);
+
+    if let Some(session) = flows.get_mut(&peer_addr) {
+      if !udp_rate_allows(session.rate.as_mut(), config.udp_datagram_burst) {
+        let metrics = &state.snapshot().metrics;
+        metrics.record_stream_udp_rate_limited(&config.name);
+        metrics.record_stream_udp_datagram_dropped(&config.name);
+        return Ok(());
+      }
+      session.upstream.send(datagram).await?;
+      session.activity.touch();
+      state
+        .snapshot()
+        .metrics
+        .add_stream_bytes("udp", datagram.len() as u64);
+    }
+    Ok(())
   }
-  Ok(())
 }
 
 fn udp_flow_admitted(allow_new_flow: bool, known_flow: bool) -> bool {
   allow_new_flow || known_flow
 }
 
-async fn classify_udp_flow(
-  config: &StreamListenerConfig,
-  state: &AppHandle,
-  peer_addr: SocketAddr,
+fn classify_udp_route<'a>(
+  config: &'a StreamListenerConfig,
   datagram: &[u8],
-) -> anyhow::Result<Option<(String, ResolvedStreamTarget)>> {
+) -> Option<crate::stream::sni::StreamRoute<'a>> {
   let sni = if config.sni_rules.is_empty() {
     None
   } else {
     extract_initial_sni(datagram).ok().and_then(|(sni, _)| sni)
   };
-  let Some(route) = select_stream_route(config, sni.as_deref()) else {
-    return Ok(None);
-  };
-  let resolved =
-    resolve_stream_route_target(state, StreamNetwork::Udp, route.target, peer_addr).await?;
-  Ok(Some((route.name.to_string(), resolved)))
+  select_stream_route(config, sni.as_deref())
 }
 
 async fn acquire_udp_flow_permit(
@@ -325,21 +436,23 @@ async fn acquire_udp_flow_permit(
     .map_err(|status| anyhow::anyhow!("UDP stream flow rejected with status {status}"))
 }
 
-fn udp_rate_allows(config: &StreamListenerConfig, session: &mut UdpFlowSession) -> bool {
-  let Some(rate) = config.udp_datagram_rate.as_deref() else {
+fn udp_rate_bucket(rate: Option<&str>, burst: u32) -> Option<UdpRateBucket> {
+  let per_second = crate::limits::parse_rate(rate?).ok()?.per_second();
+  Some(UdpRateBucket {
+    tokens: f64::from(burst),
+    last: Instant::now(),
+    per_second,
+  })
+}
+
+fn udp_rate_allows(bucket: Option<&mut UdpRateBucket>, burst: u32) -> bool {
+  let Some(bucket) = bucket else {
     return true;
-  };
-  let Some(bucket) = session.rate.as_mut() else {
-    return true;
-  };
-  let Ok(rate) = crate::limits::parse_rate(rate) else {
-    return false;
   };
   let now = Instant::now();
   let elapsed = now.duration_since(bucket.last).as_secs_f64();
   bucket.last = now;
-  bucket.tokens =
-    (bucket.tokens + elapsed * rate.per_second()).min(f64::from(config.udp_datagram_burst.max(1)));
+  bucket.tokens = (bucket.tokens + elapsed * bucket.per_second).min(f64::from(burst.max(1)));
   if bucket.tokens < 1.0 {
     return false;
   }
@@ -353,12 +466,9 @@ fn expire_udp_flows(
   state: &AppHandle,
   listener_name: &str,
 ) {
-  let now = Instant::now();
   let expired = flows
     .iter()
-    .filter_map(|(peer, session)| {
-      (now.duration_since(session.last_activity) >= idle_timeout).then_some(*peer)
-    })
+    .filter_map(|(peer, session)| (session.activity.idle_for() >= idle_timeout).then_some(*peer))
     .collect::<Vec<_>>();
   for peer in expired {
     if let Some(session) = flows.remove(&peer) {
@@ -369,20 +479,29 @@ fn expire_udp_flows(
         target = %session.target_label,
         "UDP stream flow expired"
       );
-      state.snapshot().metrics.record_stream_session_end(
-        "udp",
-        listener_name,
-        &session.route_name,
-        true,
-      );
+      let metrics = &state.snapshot().metrics;
+      metrics.record_stream_session_end("udp", listener_name, &session.route_name, true);
+      metrics.record_stream_udp_flow_expired(listener_name);
     }
+  }
+}
+
+fn force_shutdown_udp_flows(
+  flows: &mut HashMap<SocketAddr, UdpFlowSession>,
+  state: &AppHandle,
+  listener_name: &str,
+) {
+  let metrics = &state.snapshot().metrics;
+  metrics.record_stream_udp_flows_forced_shutdown(listener_name, flows.len());
+  for (_, session) in flows.drain() {
+    metrics.record_stream_session_end("udp", listener_name, &session.route_name, false);
   }
 }
 
 fn oldest_flow(flows: &HashMap<SocketAddr, UdpFlowSession>) -> Option<SocketAddr> {
   flows
     .iter()
-    .min_by_key(|(_, session)| session.last_activity)
+    .min_by_key(|(_, session)| session.activity.last_millis())
     .map(|(peer, _)| *peer)
 }
 
@@ -444,7 +563,9 @@ mod tests {
       proxy_protocol_egress: ProxyProtocolEgressMode::Off,
       max_udp_flows,
       udp_datagram_rate: None,
-      udp_datagram_burst: 1,
+      udp_datagram_burst: 0,
+      udp_new_flow_rate: None,
+      udp_new_flow_burst: 0,
       udp_batch: crate::config::UdpBatchMode::Auto,
       udp_batch_size: 16,
       sni_rules: vec![StreamSniRuleConfig {
@@ -461,15 +582,13 @@ mod tests {
 
   async fn seeded_udp_flow(state: &AppHandle, route_name: &str) -> anyhow::Result<UdpFlowSession> {
     let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
-    let upstream_task = tokio::spawn(async {
-      std::future::pending::<()>().await;
-    });
+    let (cancel, _cancelled) = watch::channel(false);
     Ok(UdpFlowSession {
       upstream,
-      upstream_task,
+      cancel,
       target_label: "127.0.0.1:443".to_string(),
       route_name: route_name.to_string(),
-      last_activity: Instant::now(),
+      activity: Arc::new(UdpActivity::new()),
       rate: None,
       _selection: None,
       _connection_permit: acquire_udp_flow_permit(state, "127.0.0.1:49152".parse()?).await?,
@@ -488,12 +607,18 @@ mod tests {
     let attacker_peer: SocketAddr = "127.0.0.1:49153".parse()?;
     let downstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
     let mut flows = HashMap::from([(victim_peer, seeded_udp_flow(&state, "tenant-a").await?)]);
+    let connections = TaskRegistry::default();
+    let mut new_flow_rate = None;
 
-    proxy_udp_datagram(
-      &downstream,
+    UdpProxyContext {
+      downstream: &downstream,
+      config: &config,
+      state: &state,
+      connections: &connections,
+    }
+    .proxy_datagram(
       &mut flows,
-      &config,
-      &state,
+      &mut new_flow_rate,
       attacker_peer,
       b"not a QUIC Initial",
       true,
@@ -511,10 +636,75 @@ mod tests {
     Ok(())
   }
 
+  #[tokio::test]
+  async fn datagram_hot_path_leaves_expiry_to_interval_sweep() -> anyhow::Result<()> {
+    let state = app_handle().await;
+    let config = sni_only_udp_listener(1);
+    let victim_peer: SocketAddr = "127.0.0.1:49152".parse()?;
+    let attacker_peer: SocketAddr = "127.0.0.1:49153".parse()?;
+    let downstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+    let mut victim = seeded_udp_flow(&state, "tenant-a").await?;
+    victim.activity = Arc::new(UdpActivity {
+      started: Instant::now() - Duration::from_secs(2),
+      last_millis: AtomicU64::new(0),
+    });
+    let mut flows = HashMap::from([(victim_peer, victim)]);
+    let connections = TaskRegistry::default();
+    let mut new_flow_rate = None;
+
+    UdpProxyContext {
+      downstream: &downstream,
+      config: &config,
+      state: &state,
+      connections: &connections,
+    }
+    .proxy_datagram(
+      &mut flows,
+      &mut new_flow_rate,
+      attacker_peer,
+      b"not a QUIC Initial",
+      true,
+    )
+    .await?;
+
+    assert!(
+      flows.contains_key(&victim_peer),
+      "per-datagram processing must not scan the complete flow table"
+    );
+    expire_udp_flows(&mut flows, Duration::from_secs(1), &state, &config.name);
+    assert!(
+      flows.is_empty(),
+      "the listener interval sweep must still reap idle flows"
+    );
+    Ok(())
+  }
+
   #[test]
   fn quiescing_udp_listener_keeps_existing_flow_and_rejects_new_peer() {
     assert!(udp_flow_admitted(false, true));
     assert!(!udp_flow_admitted(false, false));
     assert!(udp_flow_admitted(true, false));
+  }
+
+  #[test]
+  fn listener_new_flow_bucket_is_bounded_and_refills() {
+    let mut bucket = UdpRateBucket {
+      tokens: 1.0,
+      last: Instant::now(),
+      per_second: 10.0,
+    };
+    assert!(udp_rate_allows(Some(&mut bucket), 1));
+    assert!(!udp_rate_allows(Some(&mut bucket), 1));
+    bucket.last = Instant::now() - Duration::from_secs(1);
+    assert!(udp_rate_allows(Some(&mut bucket), 1));
+    assert!(bucket.tokens <= 1.0);
+  }
+
+  #[test]
+  fn upstream_activity_prevents_downstream_only_idle_expiry() {
+    let activity = UdpActivity::new();
+    std::thread::sleep(Duration::from_millis(2));
+    activity.touch();
+    assert!(activity.idle_for() < Duration::from_millis(20));
   }
 }

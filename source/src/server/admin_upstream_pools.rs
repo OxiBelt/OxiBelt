@@ -227,6 +227,7 @@ async fn admin_add_pool_server(
       max_conns: body.max_conns,
       backup: body.backup,
       state: body.state,
+      tls: Default::default(),
       source: UpstreamPoolServerSource::Admin,
     };
     if server.weight == 0 {

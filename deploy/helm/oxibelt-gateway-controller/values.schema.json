@@ -42,8 +42,38 @@
     },
     "watchAllNamespaces": { "type": "boolean" },
     "statusService": { "type": "string" },
+    "statusAddresses": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+    },
     "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
     "dryRun": { "type": "boolean" },
+    "l4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindAddress", "connectTimeoutMs", "idleTimeoutMs", "udp"],
+      "properties": {
+        "bindAddress": { "type": "string", "enum": ["0.0.0.0", "::"] },
+        "connectTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "idleTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+        "udp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxFlows", "newFlowRate", "newFlowBurst", "datagramRate", "datagramBurst", "batch", "batchSize"],
+          "properties": {
+            "maxFlows": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "newFlowRate": { "type": "string", "pattern": "^[1-9][0-9]*(r/s|r/m)$" },
+            "newFlowBurst": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "datagramRate": { "type": "string", "pattern": "^[1-9][0-9]*(r/s|r/m)$" },
+            "datagramBurst": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "batch": { "type": "string", "enum": ["auto", "off", "required"] },
+            "batchSize": { "type": "integer", "minimum": 1, "maximum": 1024 }
+          }
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,

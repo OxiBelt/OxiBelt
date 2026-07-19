@@ -65,6 +65,9 @@ mod tls;
 mod turn;
 mod turn_queue;
 mod upstream_pool;
+mod upstream_tls;
+#[cfg(test)]
+mod upstream_tls_tests;
 mod workers;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use admin_workload_identity::*;
@@ -127,6 +130,7 @@ pub use tls::*;
 use turn::RawWebRtcTurnListenerConfig;
 pub use turn::*;
 pub use upstream_pool::*;
+pub use upstream_tls::*;
 pub use workers::*;
 pub use {access_log::*, admin_audit::*, admin_mutations::*, admin_operations::*};
 
@@ -847,6 +851,9 @@ impl Config {
       for path in pool.resolve_discovery_paths(&path_roots.config_dir)? {
         self.source_paths.remember_discovery_file(path);
       }
+      for path in pool.resolve_tls_paths(&path_roots.cert_dir)? {
+        self.source_paths.remember_runtime_file(path);
+      }
       pool.resolve_health_check_paths(&path_roots.cert_dir, &mut self.source_paths)?;
     }
     for listener in &mut self.webrtc_turn_listeners {
@@ -1073,6 +1080,15 @@ impl Config {
             "upstream pool {} server origin must use http:// or https://, got {}",
             pool.name,
             server.origin
+          );
+        }
+        server
+          .tls
+          .validate(&format!("{} server {server_id}", pool.name))?;
+        if server.origin.scheme() == "http" && server.tls != UpstreamTlsConfig::default() {
+          bail!(
+            "upstream pool {} server {server_id} cannot configure tls for an http:// origin",
+            pool.name
           );
         }
         if server.weight == 0 {
@@ -3599,9 +3615,21 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "websocket",
       "webtransport",
     ][..],
-    "upstreams.tls" => &["ech", "resumption", "upstream_revocation"][..],
-    "upstreams.tls.ech" => &["config_list_file", "mode"][..],
-    "upstreams.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
+    "upstreams.tls" | "upstream_pools.servers.tls" | "upstream_pools.discovery.tls" => &[
+      "ech",
+      "resumption",
+      "server_name",
+      "trust",
+      "trusted_ca_certs",
+      "trusted_ca_sha256",
+      "upstream_revocation",
+    ][..],
+    "upstreams.tls.ech" | "upstream_pools.servers.tls.ech" | "upstream_pools.discovery.tls.ech" => {
+      &["config_list_file", "mode"][..]
+    }
+    "upstreams.tls.resumption"
+    | "upstream_pools.servers.tls.resumption"
+    | "upstream_pools.discovery.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
     "upstreams.tls.upstream_revocation" => outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.ocsp" => outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
@@ -3638,6 +3666,7 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "service",
       "token_env",
       "token_file",
+      "tls",
       "update_debounce_ms",
       "watch",
       "watch_timeout_seconds",
@@ -3698,7 +3727,15 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "upstream_pools.health_check.tls.upstream_revocation.crlite.managed" => {
       crlite::CRLITE_MANAGED_CONFIG_KEYS
     }
-    "upstream_pools.servers" => &["backup", "id", "max_conns", "origin", "state", "weight"][..],
+    "upstream_pools.servers" => &[
+      "backup",
+      "id",
+      "max_conns",
+      "origin",
+      "state",
+      "tls",
+      "weight",
+    ][..],
     "upstream_pools.circuit_breaker" | "routes.circuit_breaker" => &[
       "max_active_requests",
       "max_pending_requests",
@@ -3862,6 +3899,8 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
       "udp_datagram_rate",
       "udp_batch",
       "udp_batch_size",
+      "udp_new_flow_burst",
+      "udp_new_flow_rate",
       "upstream_pool",
     ][..],
     "stream_listeners.sni_rules" => &[
@@ -5302,6 +5341,17 @@ impl UpstreamPoolConfig {
     }
     Ok(resolved_paths)
   }
+
+  fn resolve_tls_paths(&mut self, cert_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut resolved_paths = Vec::new();
+    for server in &mut self.servers {
+      resolved_paths.extend(server.tls.resolve_relative_paths(cert_dir)?);
+    }
+    for discovery in &mut self.discovery {
+      resolved_paths.extend(discovery.tls.resolve_relative_paths(cert_dir)?);
+    }
+    Ok(resolved_paths)
+  }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -5389,6 +5439,8 @@ pub struct UpstreamPoolServerConfig {
   pub backup: bool,
   #[serde(default)]
   pub state: UpstreamPoolServerState,
+  #[serde(default)]
+  pub tls: UpstreamTlsConfig,
   #[serde(skip)]
   pub source: UpstreamPoolServerSource,
 }
@@ -5443,71 +5495,6 @@ impl UpstreamPoolServerSource {
       Self::Nomad => "nomad",
       Self::Admin => "admin",
     }
-  }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct UpstreamTlsConfig {
-  #[serde(default)]
-  pub ech: UpstreamEchConfig,
-  #[serde(default)]
-  pub resumption: UpstreamTlsResumptionConfig,
-  #[serde(default)]
-  pub upstream_revocation: Option<OutboundTlsRevocationConfig>,
-}
-
-impl UpstreamTlsConfig {
-  fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut source_paths = Vec::new();
-    self.ech.config_list_file = self
-      .ech
-      .config_list_file
-      .take()
-      .map(|path| {
-        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
-          "upstreams.tls.ech.config_list_file",
-          base_dir,
-          &path,
-        )?;
-        source_paths.push(logical);
-        Ok::<PathBuf, anyhow::Error>(resolved)
-      })
-      .transpose()?;
-    Ok(source_paths)
-  }
-
-  fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {
-    if self.resumption.mode == UpstreamTlsResumptionMode::Enabled
-      && self.resumption.session_cache_size == 0
-    {
-      bail!(
-        "upstream {} tls.resumption.session_cache_size must be greater than 0 when resumption is enabled",
-        upstream_name
-      );
-    }
-    match self.ech.mode {
-      UpstreamEchMode::Disabled | UpstreamEchMode::Grease => {
-        if self.ech.config_list_file.is_some() {
-          bail!(
-            "upstream {} tls.ech.config_list_file is only valid when tls.ech.mode = \"config_list\"",
-            upstream_name
-          );
-        }
-      }
-      UpstreamEchMode::ConfigList => {
-        if self.ech.config_list_file.is_none() {
-          bail!(
-            "upstream {} tls.ech.config_list_file is required when tls.ech.mode = \"config_list\"",
-            upstream_name
-          );
-        }
-      }
-    }
-    if let Some(revocation) = &self.upstream_revocation {
-      revocation.validate(&format!("upstream {upstream_name} tls.upstream_revocation"))?;
-    }
-
-    Ok(())
   }
 }
 

@@ -155,6 +155,30 @@ assert_contains "${work_dir}/explicit_destination.yaml" "kubernetes.io/metadata.
 assert_contains "${work_dir}/explicit_destination.yaml" "port: 8443"
 assert_contains "${work_dir}/explicit_destination.yaml" "endPort: 8450"
 
+render additional_l4_ports \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.ingress.public.allowAll=true \
+  --set-json 'service.additionalPorts=[{"name":"tcp-example","protocol":"TCP","port":9000,"targetPort":9000},{"name":"udp-example","protocol":"UDP","port":9001,"targetPort":9001}]'
+for expected in \
+  "name: tcp-example" \
+  "containerPort: 9000" \
+  "port: tcp-example" \
+  "name: udp-example" \
+  "containerPort: 9001" \
+  "port: udp-example"; do
+  assert_contains "${work_dir}/additional_l4_ports.yaml" "${expected}"
+done
+assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: TCP"
+assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: UDP"
+
+expect_failure_contains additional_port_privileged \
+  "minimum: got 443, want 1,024" \
+  --set-json 'service.additionalPorts=[{"name":"bad-tcp","protocol":"TCP","port":9000,"targetPort":443}]'
+expect_failure_contains additional_port_duplicate_name \
+  "service.additionalPorts must not reuse port name \"tcp-example\"" \
+  --skip-schema-validation \
+  --set-json 'service.additionalPorts=[{"name":"tcp-example","protocol":"TCP","port":9000,"targetPort":9000},{"name":"tcp-example","protocol":"TCP","port":9001,"targetPort":9001}]'
+
 render cilium_fqdn \
   --set networkPolicy.enabled=true \
   --set networkPolicy.cilium.enabled=true \

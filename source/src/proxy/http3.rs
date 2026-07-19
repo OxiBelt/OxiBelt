@@ -636,12 +636,19 @@ pub(crate) async fn forward_one_shot_request(
   state
     .metrics
     .record_http_upstream_client_pool_miss("h3", "https", "primary");
-  let quic_config = tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+  let inherited_roots = state
+    .config
+    .proxy
+    .trusted_ca_certs
+    .iter()
+    .chain(&upstream.extra_trusted_ca_certs)
+    .cloned()
+    .collect::<Vec<_>>();
+  let quic_config = tls::build_upstream_quic_client_config_with_policy(
     &state.config.crypto,
-    &state.config.proxy.trusted_ca_certs,
-    &upstream.tls.ech,
+    &inherited_roots,
+    &upstream.tls,
     &state.config.quic,
-    &upstream.tls.resumption,
     Some(&state.tls_resumption),
     &upstream.name,
     Some((
@@ -650,7 +657,12 @@ pub(crate) async fn forward_one_shot_request(
     )),
   )
   .with_context(|| format!("failed to build upstream QUIC client for {}", upstream.name))?;
-  let (server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+  let (origin_server_name, remote_addr) = resolve_upstream_addr(&upstream.origin).await?;
+  let server_name = upstream
+    .tls
+    .server_name
+    .clone()
+    .unwrap_or(origin_server_name);
   let connection_admission = state
     .circuit_breakers
     .admit_upstream_connection(None, Instant::now().checked_add(timeouts.upstream_connect))
@@ -846,12 +858,19 @@ async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
 ) -> anyhow::Result<web_transport_quinn::Session> {
-  let quic_config = tls::build_upstream_quic_client_config_with_crypto_resumption_and_revocation(
+  let inherited_roots = state
+    .config
+    .proxy
+    .trusted_ca_certs
+    .iter()
+    .chain(&prepared.upstream.extra_trusted_ca_certs)
+    .cloned()
+    .collect::<Vec<_>>();
+  let quic_config = tls::build_upstream_quic_client_config_with_policy(
     &state.config.crypto,
-    &state.config.proxy.trusted_ca_certs,
-    &prepared.upstream.tls.ech,
+    &inherited_roots,
+    &prepared.upstream.tls,
     &state.config.quic,
-    &prepared.upstream.tls.resumption,
     Some(&state.tls_resumption),
     &prepared.upstream.name,
     Some((
@@ -872,7 +891,13 @@ async fn connect_upstream_webtransport(
   if !prepared.protocols.is_empty() {
     request = request.with_protocols(prepared.protocols.clone());
   }
-  let (server_name, remote_addr) = resolve_upstream_addr(&prepared.target_url).await?;
+  let (origin_server_name, remote_addr) = resolve_upstream_addr(&prepared.target_url).await?;
+  let server_name = prepared
+    .upstream
+    .tls
+    .server_name
+    .clone()
+    .unwrap_or(origin_server_name);
   let endpoint = crate::quic::bind_client_endpoint(
     remote_addr,
     &state.config.quic,

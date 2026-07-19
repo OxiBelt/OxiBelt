@@ -33,12 +33,21 @@ impl KubernetesPoller {
     shared: &SharedArgs,
     args: &RunArgs,
     generated_toml: &str,
+    generated_assets: &[super::translate::RenderedAsset],
   ) -> anyhow::Result<RolloutStatus> {
     let target = RolloutTarget::from_args(args)?;
-    let candidate = ConfigArtifact::new(
+    let candidate = ConfigArtifact::new_with_assets(
       &target,
       &shared.managed_config_path,
       generated_toml.to_string(),
+      generated_assets
+        .iter()
+        .map(|asset| super::rollout::ConfigArtifactAsset {
+          data_key: asset.data_key.clone(),
+          managed_path: asset.managed_path.clone(),
+          content: asset.content.clone(),
+        })
+        .collect(),
     )?;
     let workload = self.get_required_json(&target.workload_path()).await?;
     validate_rollout_opt_in(&workload)?;

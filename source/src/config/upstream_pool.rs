@@ -10,7 +10,7 @@ use url::Url;
 
 use super::{
   DnsDiscoveryRecordType, LoadBalancingAlgorithm, UpstreamDiscoveryProvider, UpstreamPoolConfig,
-  validate_optional_non_empty,
+  UpstreamTlsConfig, validate_optional_non_empty,
 };
 
 mod health_check;
@@ -94,6 +94,8 @@ pub struct UpstreamPoolDiscoveryConfig {
   pub refresh_interval_ms: u64,
   #[serde(default = "super::default_discovery_min_ttl_ms")]
   pub min_ttl_ms: u64,
+  #[serde(default)]
+  pub tls: UpstreamTlsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -278,6 +280,18 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
       bail!(
         "upstream pool {} discovery watch_timeout_seconds and update_debounce_ms must be greater than 0",
         pool.name
+      );
+    }
+    discovery
+      .tls
+      .validate(&format!("{} {:?} discovery", pool.name, discovery.provider))?;
+    if discovery.scheme == super::DiscoveryUpstreamScheme::Http
+      && discovery.tls != UpstreamTlsConfig::default()
+    {
+      bail!(
+        "upstream pool {} {:?} discovery cannot configure tls when scheme = \"http\"",
+        pool.name,
+        discovery.provider
       );
     }
     match discovery.provider {

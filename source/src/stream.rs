@@ -72,23 +72,49 @@ impl StreamListenerTask {
         shutdown,
         connections,
         graceful_timeout,
-        tasks,
+        mut tasks,
+        config,
         ..
       } = self;
       let _ = quiesce.send(true);
+      if config.network == StreamNetwork::Tcp {
+        let _ = shutdown.send(true);
+      }
+      if tokio::time::timeout(
+        graceful_timeout,
+        wait_for_stream_tasks(&mut tasks, &connections),
+      )
+      .await
+      .is_ok()
+      {
+        return;
+      }
+
       let _ = shutdown.send(true);
-      let wait_connections = connections.clone();
-      let wait = async {
-        for task in tasks {
-          let _ = task.await;
-        }
-        wait_connections.wait_idle().await;
-      };
-      if tokio::time::timeout(graceful_timeout, wait).await.is_err() {
+      if config.network == StreamNetwork::Tcp {
         connections.abort_all();
+      }
+      if tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_stream_tasks(&mut tasks, &connections),
+      )
+      .await
+      .is_err()
+      {
+        connections.abort_all();
+        for task in tasks {
+          task.abort();
+        }
       }
     })
   }
+}
+
+async fn wait_for_stream_tasks(tasks: &mut [JoinHandle<()>], connections: &TaskRegistry) {
+  for task in tasks {
+    let _ = task.await;
+  }
+  connections.wait_idle().await;
 }
 
 impl BoundStreamListener {

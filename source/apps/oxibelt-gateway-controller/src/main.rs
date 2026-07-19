@@ -57,7 +57,6 @@ async fn run() -> anyhow::Result<()> {
     Command::Render(args) => {
       let objects = render::load_objects(&args.input)?;
       let rendered = translate::translate_objects(&objects, &cli.shared)?;
-      render::write_rendered(&args.output, &rendered.toml)?;
       status::print_diagnostics(&rendered.diagnostics);
       if rendered
         .diagnostics
@@ -66,6 +65,7 @@ async fn run() -> anyhow::Result<()> {
       {
         bail!("translation produced blocking diagnostics");
       }
+      render::write_rendered(&args.output, &rendered.toml)?;
     }
     Command::Run(args) => {
       let controller_health = health::ControllerHealth::default();

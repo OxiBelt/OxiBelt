@@ -53,6 +53,9 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str("weight = ");
       out.push_str(&server.weight.to_string());
       out.push('\n');
+      if let Some(tls) = &server.tls {
+        render_backend_tls(&mut out, "upstream_pools.servers.tls", tls);
+      }
     }
     for discovery in &pool.discoveries {
       out.push_str("\n[[upstream_pools.discovery]]\n");
@@ -84,6 +87,81 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str("kubernetes_resource = \"endpoint_slice\"\n");
       out.push_str("watch = true\n");
       out.push_str("token_file = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\n");
+      if let Some(tls) = &discovery.tls {
+        render_backend_tls(&mut out, "upstream_pools.discovery.tls", tls);
+      }
+    }
+    out.push('\n');
+  }
+
+  for pool in state.stream_pools.values() {
+    out.push_str("# Source: ");
+    out.push_str(&pool.source);
+    out.push('\n');
+    out.push_str("[[stream_upstream_pools]]\n");
+    out.push_str("name = ");
+    out.push_str(&toml_string(&pool.name));
+    out.push('\n');
+    for server in &pool.servers {
+      out.push_str("\n[[stream_upstream_pools.servers]]\n");
+      out.push_str("id = ");
+      out.push_str(&toml_string(&server.id));
+      out.push('\n');
+      out.push_str("origin = ");
+      out.push_str(&toml_string(&server.origin));
+      out.push('\n');
+      out.push_str("weight = ");
+      out.push_str(&server.weight.to_string());
+      out.push('\n');
+    }
+    out.push('\n');
+  }
+
+  for listener in state.stream_listeners.values() {
+    out.push_str("# Source: ");
+    out.push_str(&listener.source);
+    out.push('\n');
+    out.push_str("[[stream_listeners]]\n");
+    out.push_str("name = ");
+    out.push_str(&toml_string(&listener.name));
+    out.push('\n');
+    out.push_str("network = ");
+    out.push_str(&toml_string(&listener.network));
+    out.push('\n');
+    out.push_str("bind = ");
+    out.push_str(&toml_string(&listener.bind));
+    out.push('\n');
+    out.push_str("upstream_pool = ");
+    out.push_str(&toml_string(&listener.upstream_pool));
+    out.push('\n');
+    out.push_str("connect_timeout_ms = ");
+    out.push_str(&args.l4_connect_timeout_ms.to_string());
+    out.push('\n');
+    out.push_str("idle_timeout_ms = ");
+    out.push_str(&args.l4_idle_timeout_ms.to_string());
+    out.push('\n');
+    if listener.network == "udp" {
+      out.push_str("max_udp_flows = ");
+      out.push_str(&args.udp_max_flows.to_string());
+      out.push('\n');
+      out.push_str("udp_new_flow_rate = ");
+      out.push_str(&toml_string(&args.udp_new_flow_rate));
+      out.push('\n');
+      out.push_str("udp_new_flow_burst = ");
+      out.push_str(&args.udp_new_flow_burst.to_string());
+      out.push('\n');
+      out.push_str("udp_datagram_rate = ");
+      out.push_str(&toml_string(&args.udp_datagram_rate));
+      out.push('\n');
+      out.push_str("udp_datagram_burst = ");
+      out.push_str(&args.udp_datagram_burst.to_string());
+      out.push('\n');
+      out.push_str("udp_batch = ");
+      out.push_str(&toml_string(args.udp_batch.as_str()));
+      out.push('\n');
+      out.push_str("udp_batch_size = ");
+      out.push_str(&args.udp_batch_size.to_string());
+      out.push('\n');
     }
     out.push('\n');
   }
@@ -247,6 +325,25 @@ fn toml_string_array(values: &[String]) -> String {
   }
   text.push(']');
   text
+}
+
+fn render_backend_tls(out: &mut String, table: &str, tls: &super::GeneratedBackendTls) {
+  out.push('\n');
+  out.push('[');
+  out.push_str(table);
+  out.push_str("]\nserver_name = ");
+  out.push_str(&toml_string(&tls.server_name));
+  out.push_str("\ntrust = ");
+  out.push_str(&toml_string(&tls.trust));
+  out.push('\n');
+  if !tls.trusted_ca_certs.is_empty() {
+    out.push_str("trusted_ca_certs = ");
+    out.push_str(&toml_string_array(&tls.trusted_ca_certs));
+    out.push('\n');
+    out.push_str("trusted_ca_sha256 = ");
+    out.push_str(&toml_string_array(&tls.trusted_ca_sha256));
+    out.push('\n');
+  }
 }
 
 fn render_header_modifier(out: &mut String, name: &str, modifier: &super::HeaderModifierAction) {

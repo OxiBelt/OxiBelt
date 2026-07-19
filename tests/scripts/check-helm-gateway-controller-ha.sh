@@ -72,6 +72,16 @@ for expected in \
   "--leader-election-lease-duration-seconds=15" \
   "--leader-election-renew-deadline-seconds=10" \
   "--leader-election-retry-period-seconds=2" \
+  "--l4-bind-address=0.0.0.0" \
+  "--l4-connect-timeout-ms=3000" \
+  "--l4-idle-timeout-ms=75000" \
+  "--udp-max-flows=8192" \
+  "--udp-new-flow-rate=200r/s" \
+  "--udp-new-flow-burst=400" \
+  "--udp-datagram-rate=200r/s" \
+  "--udp-datagram-burst=400" \
+  "--udp-batch=auto" \
+  "--udp-batch-size=16" \
   "apiVersion: coordination.k8s.io/v1" \
   "kind: Lease" \
   "resources: [\"leases\"]" \
@@ -96,6 +106,29 @@ grep -F -- 'name: oxibelt-gateway-controller-leader-election' "${role_document}"
   || die "named leader-election Role did not render"
 grep -F -- '- "oxibelt-gateway-controller"' "${role_document}" >/dev/null \
   || die "leader-election Role does not bind the exact selected Lease name"
+for expected in \
+  '"tcproutes", "udproutes", "backendtlspolicies"' \
+  '"tcproutes/status", "udproutes/status", "backendtlspolicies/status"' \
+  'resources: ["configmaps"]' \
+  'verbs: ["get"]'; do
+  grep -F -- "${expected}" "${role_document}" >/dev/null \
+    || die "Gateway API watch RBAC is missing: ${expected}"
+done
+if grep -F -- 'resources: ["secrets"]' "${role_document}" >/dev/null; then
+  die "Gateway API watch RBAC must not grant Secret access"
+fi
+if grep -F -- 'verbs: ["get", "list"]' "${role_document}" >/dev/null; then
+  die "Gateway API CA reads must not grant ConfigMap list"
+fi
+
+status_document="${work_dir}/status-addresses.yaml"
+helm template controller-ha "${chart_dir}" --namespace control \
+  --set-json 'statusAddresses=["203.0.113.10","gateway.example.test"]' \
+  --show-only templates/deployment.yaml >"${status_document}"
+grep -F -- '--status-address=203.0.113.10' "${status_document}" >/dev/null \
+  || die "explicit IP status address did not render"
+grep -F -- '--status-address=gateway.example.test' "${status_document}" >/dev/null \
+  || die "explicit hostname status address did not render"
 
 expect_failure() {
   local name="$1"

@@ -223,6 +223,7 @@ fn parse_etcd_server(
       max_conns: 0,
       backup: false,
       state: UpstreamPoolServerState::Ready,
+      tls: Default::default(),
       source: UpstreamPoolServerSource::Etcd,
     });
   }
@@ -248,6 +249,7 @@ fn parse_etcd_server(
     max_conns: server.max_conns,
     backup: server.backup,
     state: server.state,
+    tls: Default::default(),
     source: UpstreamPoolServerSource::Etcd,
   })
 }
@@ -278,6 +280,7 @@ fn discovered_host_server(
     max_conns: 0,
     backup: false,
     state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
     source,
   })
 }

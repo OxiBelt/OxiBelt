@@ -11,8 +11,11 @@ use super::rollout::{
   LEASE_UID_ANNOTATION, MANAGED_PATH_ANNOTATION, RolloutState, RolloutTarget, annotation,
 };
 
+#[path = "rollout_patch/generated_source.rs"]
+mod generated_source;
 #[path = "rollout_patch/volume.rs"]
 mod volume;
+use generated_source::validate_generated_source;
 use volume::patch_projected_volume;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -361,51 +364,6 @@ fn parse_base_config_map(
     Value::Object(projected_source),
     default_mode,
   ))
-}
-
-fn validate_generated_source(
-  source: &Value,
-  managed_path: &str,
-  expected_revision: &str,
-) -> anyhow::Result<()> {
-  let config_map = exact_config_map_source(source, "generated")?
-    .as_object()
-    .context("immutable rollout generated ConfigMap source must be an object")?;
-  validate_object_keys(
-    config_map,
-    &["name", "items"],
-    "immutable rollout generated ConfigMap source",
-  )?;
-  if config_map.get("name").and_then(Value::as_str) != Some(expected_revision) {
-    bail!(
-      "immutable rollout generated ConfigMap source is not owned by the recorded desired revision"
-    );
-  }
-  let data_key = Path::new(managed_path)
-    .file_name()
-    .and_then(|value| value.to_str())
-    .context("managed configuration path must name a UTF-8 file")?;
-  let items = config_map
-    .get("items")
-    .and_then(Value::as_array)
-    .context("immutable rollout generated ConfigMap source items must be an array")?;
-  if items.len() != 1 {
-    bail!("immutable rollout generated ConfigMap source must contain exactly one item");
-  }
-  let item = items[0]
-    .as_object()
-    .context("immutable rollout generated ConfigMap source item must be an object")?;
-  validate_object_keys(
-    item,
-    &["key", "path"],
-    "immutable rollout generated ConfigMap source item",
-  )?;
-  if item.get("key").and_then(Value::as_str) != Some(data_key)
-    || item.get("path").and_then(Value::as_str) != Some(managed_path)
-  {
-    bail!("immutable rollout generated ConfigMap source item does not match the managed path");
-  }
-  Ok(())
 }
 
 pub fn validate_immutable_base_config(

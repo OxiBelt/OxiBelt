@@ -1,5 +1,4 @@
-//! TLS resumption state and cache partitioning.
-//! Resumption keys include transport and auth identity so tickets cannot cross trust boundaries.
+//! TLS resumption cache keys include transport and auth identity so tickets cannot cross trust boundaries.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -16,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{
   TlsClientAuthConfig, TlsCryptoProvider, TlsServerResumptionConfig, TlsServerResumptionMode,
   UpstreamEchConfig, UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig,
-  UpstreamTlsResumptionMode,
+  UpstreamTlsResumptionMode, UpstreamTlsTrust,
 };
 
 use super::certificate_io::{load_certs, read_existing_file};
@@ -438,6 +437,7 @@ pub(super) fn upstream_client_config_key(
   tls_provider: TlsCryptoProvider,
   upstream_name: &str,
   extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
 ) -> anyhow::Result<TlsClientConfigKey> {
@@ -445,7 +445,7 @@ pub(super) fn upstream_client_config_key(
     scope,
     tls_provider,
     upstream_name: upstream_name.to_string(),
-    roots_identity: upstream_roots_identity(extra_root_certificates)?,
+    roots_identity: upstream_roots_identity(extra_root_certificates, trust)?,
     ech_identity: upstream_ech_identity(ech)?,
     mode: resumption.mode,
     session_cache_size: resumption.session_cache_size,
@@ -476,9 +476,12 @@ pub(super) fn client_auth_identity(client_auth: &TlsClientAuthConfig) -> anyhow:
   Ok(hex_encode(&context.finalize()))
 }
 
-fn upstream_roots_identity(paths: &[std::path::PathBuf]) -> anyhow::Result<String> {
+fn upstream_roots_identity(
+  paths: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
+) -> anyhow::Result<String> {
   let mut context = Sha256::new();
-  context.update(b"webpki-roots");
+  context.update(format!("trust:{trust:?}").as_bytes());
   for path in paths {
     for cert in load_certs(path)? {
       context.update(path.to_string_lossy().as_bytes());

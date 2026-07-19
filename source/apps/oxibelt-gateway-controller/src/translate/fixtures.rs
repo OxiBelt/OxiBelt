@@ -520,7 +520,7 @@ spec:
 "#;
 
 pub(super) const TCP_ROUTE_FIXTURE: &str = r#"
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 kind: TCPRoute
 metadata:
   name: tcp
