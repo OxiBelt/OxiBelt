@@ -5,10 +5,12 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use http::Request;
-use oxibelt_control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
+use oxibelt_control_http::{
+  ControlHttpClient, ControlHttpResponseBodyLimitError, empty_body, full_body, uri_from_url,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use super::cli::{RunArgs, SharedArgs};
@@ -160,14 +162,33 @@ impl KubernetesPoller {
       .header(http::header::ACCEPT, "application/json")
       .header(http::header::AUTHORIZATION, self.bearer()?)
       .body(empty_body())?;
-    let response = self
+    let response = match self
       .client
       .request(
         request,
         Duration::from_secs(10),
         REFERENCED_CONFIG_MAP_MAX_BODY_BYTES,
       )
-      .await?;
+      .await
+    {
+      Ok(response) => response,
+      Err(error) => {
+        if let Some(limit_error) = error.downcast_ref::<ControlHttpResponseBodyLimitError>()
+          && (limit_error.status().is_success()
+            || limit_error.status() == http::StatusCode::NOT_FOUND)
+        {
+          warn!(
+            namespace,
+            name,
+            status = %limit_error.status(),
+            max_body_bytes = limit_error.max_body_bytes(),
+            "referenced BackendTLSPolicy ConfigMap response exceeded the bounded body limit"
+          );
+          return Ok(None);
+        }
+        return Err(error);
+      }
+    };
     if response.status == http::StatusCode::NOT_FOUND {
       return Ok(None);
     }
@@ -327,7 +348,12 @@ fn backend_tls_config_map_refs(
         continue;
       };
       if group.is_empty() && kind == "ConfigMap" {
-        refs.insert((policy.namespace().to_string(), name.to_string()));
+        let namespace = policy.namespace();
+        if validate_kubernetes_path_segment("ConfigMap namespace", namespace).is_ok()
+          && validate_kubernetes_path_segment("ConfigMap name", name).is_ok()
+        {
+          refs.insert((namespace.to_string(), name.to_string()));
+        }
       }
     }
   }
@@ -537,173 +563,5 @@ fn read_bearer_token(path: &Path) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn namespace_snapshot_path_respects_a_scoped_watch_namespace() {
-    assert_eq!(
-      namespace_snapshot_path(Some("edge")),
-      "/api/v1/namespaces/edge"
-    );
-    assert_eq!(namespace_snapshot_path(None), "/api/v1/namespaces");
-  }
-
-  #[test]
-  fn watch_namespace_must_be_a_kubernetes_dns_label() {
-    assert!(validate_watch_namespace(None).is_ok());
-    assert!(validate_watch_namespace(Some("edge-a")).is_ok());
-    assert!(validate_watch_namespace(Some("outside/../namespace")).is_err());
-    assert!(
-      validate_watch_namespace(Some(
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      ))
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn parse_list_accepts_typed_kubernetes_list_envelopes() {
-    let gateway_classes = parse_list(Bytes::from_static(
-      br#"{
-        "apiVersion": "gateway.networking.k8s.io/v1",
-        "kind": "GatewayClassList",
-        "metadata": {"resourceVersion": "1"},
-        "items": [{
-          "apiVersion": "gateway.networking.k8s.io/v1",
-          "kind": "GatewayClass",
-          "metadata": {"name": "oxibelt"}
-        }]
-      }"#,
-    ))
-    .expect("GatewayClassList should parse");
-    assert_eq!(gateway_classes.len(), 1);
-    assert_eq!(gateway_classes[0].kind, "GatewayClass");
-    assert_eq!(gateway_classes[0].name(), "oxibelt");
-
-    let namespaces = parse_list(Bytes::from_static(
-      br#"{
-        "apiVersion": "v1",
-        "kind": "NamespaceList",
-        "metadata": {"resourceVersion": "2"},
-        "items": [{
-          "metadata": {"name": "default"},
-          "spec": {"finalizers": ["kubernetes"]},
-          "status": {"phase": "Active"}
-        }]
-      }"#,
-    ))
-    .expect("NamespaceList should supply omitted item TypeMeta");
-    assert_eq!(namespaces.len(), 1);
-    assert_eq!(namespaces[0].api_version, "v1");
-    assert_eq!(namespaces[0].kind, "Namespace");
-    assert_eq!(namespaces[0].name(), "default");
-
-    let services = parse_list(Bytes::from_static(
-      br#"{
-        "apiVersion": "v1",
-        "kind": "ServiceList",
-        "metadata": {"resourceVersion": "3"},
-        "items": [{
-          "metadata": {"name": "backend", "namespace": "default"},
-          "spec": {"ports": [{"port": 8080}]}
-        }]
-      }"#,
-    ))
-    .expect("ServiceList should supply omitted item TypeMeta");
-    assert_eq!(services.len(), 1);
-    assert_eq!(services[0].api_version, "v1");
-    assert_eq!(services[0].kind, "Service");
-    assert_eq!(services[0].name(), "backend");
-
-    let generic = parse_list(Bytes::from_static(
-      br#"{
-        "apiVersion": "v1",
-        "kind": "List",
-        "items": [{
-          "apiVersion": "v1",
-          "kind": "ConfigMap",
-          "metadata": {"name": "base-config"}
-        }]
-      }"#,
-    ))
-    .expect("generic List should parse");
-    assert_eq!(generic.len(), 1);
-    assert_eq!(generic[0].kind, "ConfigMap");
-  }
-
-  #[test]
-  fn parse_list_rejects_conflicting_typed_item_metadata() {
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{
-          "apiVersion": "v1",
-          "kind": "ServiceList",
-          "items": [{
-            "apiVersion": "apps/v1",
-            "kind": "Service",
-            "metadata": {"name": "backend"}
-          }]
-        }"#,
-      ))
-      .is_err()
-    );
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{
-          "apiVersion": "v1",
-          "kind": "ServiceList",
-          "items": [{
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {"name": "backend"}
-          }]
-        }"#,
-      ))
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn parse_list_rejects_malformed_list_envelopes() {
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{"apiVersion":"v1","kind":"List","metadata":{}}"#
-      ))
-      .is_err()
-    );
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":{}}"#
-      ))
-      .is_err()
-    );
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{"kind":"ServiceList","metadata":{},"items":[]}"#
-      ))
-      .is_err()
-    );
-    assert!(
-      parse_list(Bytes::from_static(
-        br#"{"apiVersion":"v1","kind":"List","items":[{"metadata":{"name":"missing-type-meta"}}]}"#
-      ))
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn parse_list_keeps_named_custom_kind_ending_in_list_as_an_object() {
-    let objects = parse_list(Bytes::from_static(
-      br#"{
-        "apiVersion": "example.test/v1",
-        "kind": "AllowList",
-        "metadata": {"name": "edge"}
-      }"#,
-    ))
-    .expect("named custom resource should parse");
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].kind, "AllowList");
-    assert_eq!(objects[0].name(), "edge");
-  }
-}
+#[path = "watch/tests.rs"]
+mod tests;

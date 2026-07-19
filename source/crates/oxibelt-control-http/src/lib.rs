@@ -12,7 +12,7 @@ use anyhow::{Context, anyhow, bail};
 use bytes::Bytes;
 use http::{Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty, Full, Limited};
+use http_body_util::{BodyExt, Empty, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -41,6 +41,34 @@ pub struct ControlHttpStreamResponse {
   pub headers: http::HeaderMap,
   pub body: Incoming,
 }
+
+#[derive(Debug)]
+pub struct ControlHttpResponseBodyLimitError {
+  status: http::StatusCode,
+  max_body_bytes: usize,
+}
+
+impl ControlHttpResponseBodyLimitError {
+  pub const fn status(&self) -> http::StatusCode {
+    self.status
+  }
+
+  pub const fn max_body_bytes(&self) -> usize {
+    self.max_body_bytes
+  }
+}
+
+impl std::fmt::Display for ControlHttpResponseBodyLimitError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "control-plane HTTP response body exceeded the {} byte limit (status {})",
+      self.max_body_bytes, self.status
+    )
+  }
+}
+
+impl std::error::Error for ControlHttpResponseBodyLimitError {}
 
 impl ControlHttpClient {
   /// Build a client with WebPKI roots plus explicitly supplied PEM roots.
@@ -136,12 +164,22 @@ async fn collect_response(
   max_body_bytes: usize,
 ) -> anyhow::Result<ControlHttpResponse> {
   let (parts, body) = response.into_parts();
+  let status = parts.status;
   let collected = Limited::new(body, max_body_bytes)
     .collect()
     .await
-    .map_err(|error| anyhow!("control-plane HTTP response body failed: {error}"))?;
+    .map_err(|error| {
+      if error.downcast_ref::<LengthLimitError>().is_some() {
+        anyhow::Error::new(ControlHttpResponseBodyLimitError {
+          status,
+          max_body_bytes,
+        })
+      } else {
+        anyhow!("control-plane HTTP response body failed: {error}")
+      }
+    })?;
   Ok(ControlHttpResponse {
-    status: parts.status,
+    status,
     headers: parts.headers,
     body: collected.to_bytes(),
   })
@@ -202,6 +240,25 @@ mod tests {
       .expect("response should complete");
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, Bytes::from_static(b"ok"));
+  }
+
+  #[tokio::test]
+  async fn response_body_limit_error_preserves_status_and_limit() {
+    let uri = spawn_delayed_body_server(Duration::ZERO, b"oversized").await;
+    let client = ControlHttpClient::new(&[]).expect("control HTTP client should build");
+    let request = Request::builder()
+      .uri(uri)
+      .body(empty_body())
+      .expect("request should build");
+    let error = client
+      .request(request, Duration::from_secs(1), 4)
+      .await
+      .expect_err("oversized response body should fail");
+    let limit_error = error
+      .downcast_ref::<ControlHttpResponseBodyLimitError>()
+      .expect("body limit error should retain its concrete type");
+    assert_eq!(limit_error.status(), StatusCode::OK);
+    assert_eq!(limit_error.max_body_bytes(), 4);
   }
 
   async fn spawn_delayed_body_server(body_delay: Duration, body: &'static [u8]) -> Uri {
