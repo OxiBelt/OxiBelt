@@ -1986,6 +1986,12 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "-conformance-profiles=GATEWAY-TCP,GATEWAY-UDP",
     "-skip-provisional-tests=false",
     "GOTOOLCHAIN=auto go test -c",
+    "node_work_dir=\"/opt/oxibelt-gateway-api-conformance-${run_id}\"",
+    "node_binary=\"${node_work_dir}/conformance.test\"",
+    "node_report=\"${node_work_dir}/report.yaml\"",
+    "docker exec \"${node}\" install -d -m 0700 -- \"${node_work_dir}\"",
+    "docker exec \"${node}\" test -x \"${node_binary}\"",
+    "docker exec \"${node}\" test -s \"${node_report}\"",
     "docker exec",
     "implementation_version=\"$(git -C \"${repo_root}\" rev-parse --verify 'HEAD^{commit}')\"",
     "-version=\"${implementation_version}\"",
@@ -2066,6 +2072,16 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     !script.contains("v1alpha2") && !script.contains("kube patch crd"),
     "the Kubernetes rollout must use served Gateway API v1 resources without mutating CRD versions"
   );
+
+  for mounted_path in [
+    "/tmp/oxibelt-gateway-api-conformance",
+    "/var/oxibelt-gateway-api-conformance",
+  ] {
+    assert!(
+      !script.contains(mounted_path),
+      "Gateway API conformance artifacts must stay on the Kind node root filesystem instead of runtime mount {mounted_path}"
+    );
+  }
 
   for removed in [
     "stale_config_pod_is_running_and_unready",

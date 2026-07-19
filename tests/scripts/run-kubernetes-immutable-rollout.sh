@@ -441,8 +441,9 @@ run_gateway_api_l4_conformance() {
   local source_dir="${work_dir}/gateway-api-source"
   local binary="${work_dir}/gateway-api-conformance.test"
   local node="${cluster_name}-control-plane"
-  local node_binary="/tmp/oxibelt-gateway-api-conformance-${run_id}.test"
-  local node_report="/tmp/oxibelt-gateway-api-conformance-${run_id}.yaml"
+  local node_work_dir="/opt/oxibelt-gateway-api-conformance-${run_id}"
+  local node_binary="${node_work_dir}/conformance.test"
+  local node_report="${node_work_dir}/report.yaml"
   local implementation_version
 
   implementation_version="$(git -C "${repo_root}" rev-parse --verify 'HEAD^{commit}')"
@@ -487,7 +488,13 @@ EOF
     GOTOOLCHAIN=auto go test -c -o "${binary}" ./conformance
   )
 
+  # Kind mounts /tmp as a noexec tmpfs and /var from a Docker-managed volume.
+  # Docker archive transfers address the node root filesystem beneath those
+  # mounts, so stage executable and report artifacts under rootfs-backed /opt.
+  docker exec "${node}" install -d -m 0700 -- "${node_work_dir}"
   docker cp "${binary}" "${node}:${node_binary}"
+  docker exec "${node}" test -x "${node_binary}" \
+    || die "Gateway API conformance binary is not executable in the Kind node"
   docker exec \
     --env KUBECONFIG=/etc/kubernetes/admin.conf \
     "${node}" \
@@ -503,6 +510,8 @@ EOF
     -project=OxiBelt \
     -url=https://github.com/OxiBelt/OxiBelt \
     -version="${implementation_version}"
+  docker exec "${node}" test -s "${node_report}" \
+    || die "Gateway API conformance report is missing or empty in the Kind node"
   docker cp "${node}:${node_report}" "${work_dir}/gateway-api-conformance-report.yaml"
 }
 

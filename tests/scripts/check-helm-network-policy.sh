@@ -171,8 +171,11 @@ done
 assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: TCP"
 assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: UDP"
 
-expect_failure_contains additional_port_privileged \
-  "minimum: got 443, want 1,024" \
+expect_failure additional_port_privileged_schema \
+  --set-json 'service.additionalPorts=[{"name":"bad-tcp","protocol":"TCP","port":9000,"targetPort":443}]'
+expect_failure_contains additional_port_privileged_helper \
+  "service.additionalPorts[].targetPort must be an unprivileged numeric port from 1024 through 65535" \
+  --skip-schema-validation \
   --set-json 'service.additionalPorts=[{"name":"bad-tcp","protocol":"TCP","port":9000,"targetPort":443}]'
 expect_failure_contains additional_port_duplicate_name \
   "service.additionalPorts must not reuse port name \"tcp-example\"" \
