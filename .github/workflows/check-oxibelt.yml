@@ -296,8 +296,8 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1
         run: cargo +nightly-2026-07-16 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked -- --test-threads=1
 
-  test-riscv64-qemu:
-    name: Test (riscv64 via QEMU, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
+  check-riscv64-cross:
+    name: Check (riscv64 cross, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
     runs-on: ubuntu-26.04
     if: github.actor != 'dependabot[bot]'
     permissions:
@@ -315,19 +315,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: riscv64
-
       - name: Install Rust toolchain
+        if: matrix.target == 'riscv64gc-unknown-linux-gnu'
         run: |
           rustup toolchain install ${{ matrix.rust_version }} --profile minimal
           rustup default ${{ matrix.rust_version }}
           rustup target add riscv64gc-unknown-linux-gnu --toolchain ${{ matrix.rust_version }}
-          rustup target add riscv64gc-unknown-linux-musl --toolchain ${{ matrix.rust_version }}
 
-      - name: Install RISC-V cross toolchain
+      - name: Install RISC-V GNU cross toolchain
+        if: matrix.target == 'riscv64gc-unknown-linux-gnu'
         run: |
           sudo apt-get update
           packages=(
@@ -339,28 +335,38 @@ jobs:
             ninja-build
             perl
           )
-
-          if [[ "${{ matrix.target }}" == "riscv64gc-unknown-linux-musl" ]]; then
-            packages+=(
-              clang
-              libclang-dev
-            )
-          fi
-
           sudo apt-get install -y --no-install-recommends "${packages[@]}"
 
-      - name: Cargo check for RISC-V target (${{ matrix.target }})
+      - name: Cargo check for RISC-V GNU target
+        if: matrix.target == 'riscv64gc-unknown-linux-gnu'
         env:
           AR_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-ar
           CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
           CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
-          AR_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-ar
-          CC_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-gcc
-          CXX_riscv64gc_unknown_linux_musl: riscv64-linux-gnu-g++
           BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu
         run: |
           cargo check --all-targets --locked --target ${{ matrix.target }}
+
+      - name: Pre-pull Docker BuildKit image
+        if: matrix.target == 'riscv64gc-unknown-linux-musl'
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        if: matrix.target == 'riscv64gc-unknown-linux-musl'
+
+      - name: Cargo check for RISC-V musl target
+        if: matrix.target == 'riscv64gc-unknown-linux-musl'
+        run: |
+          docker buildx build \
+            --platform linux/riscv64 \
+            --target riscv64-musl-check \
+            --build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64 \
+            --build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-c12165aa \
+            --progress plain \
+            -f source/ops/Dockerfile.alpine \
+            .
 
   generate-test-matrices:
     name: Generate integration test matrices
@@ -368,7 +374,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:
@@ -450,7 +456,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:
@@ -484,7 +490,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:
@@ -533,7 +539,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:
@@ -586,7 +592,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -652,7 +658,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -689,7 +695,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -728,7 +734,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     strategy:
@@ -738,17 +744,10 @@ jobs:
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-26.04-arm
-            qemu_platforms: ""
 
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
-
-      - name: Setup QEMU
-        if: matrix.qemu_platforms != ''
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: ${{ matrix.qemu_platforms }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
@@ -778,18 +777,13 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
 
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
-
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: riscv64
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
@@ -998,7 +992,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:
@@ -1224,7 +1218,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
-      - test-riscv64-qemu
+      - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
     permissions:

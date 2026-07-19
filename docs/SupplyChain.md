@@ -199,6 +199,34 @@ bundles enable file-based verification, but the release contract does not
 provide a complete registry-only or air-gapped verification system; operators
 must provision the image and verifier trust material for those environments.
 
+## RISC-V build trust boundary
+
+The `linux/riscv64` images are built on `linux/amd64` without QEMU or `binfmt`
+runtime emulation. The Rust builder copies only `/x-tools` from a
+manifest-digest-pinned `cross-rs` toolchain image. Before Cargo runs, the build
+fails closed unless the toolchain has the expected compiler digest and version,
+target triple, and linker version. The immutable image digest is recorded with
+its exact `cross-rs` source revision in the Dockerfile and integrity tests. The
+build does not invoke the `cross` CLI, inherit its QEMU runner, mount a Docker
+socket, or run a nested container.
+
+The Alpine runtime remains a signed Alpine/musl filesystem rather than a
+host-built approximation. A build-platform Alpine stage copies an unexecuted
+RISC-V seed and uses its target repositories and signing keys with
+`apk --root --arch riscv64 --no-scripts`. Untrusted packages are not allowed.
+The target package database, CA bundle, fixed users, directories, ownership,
+and modes are validated before a copy-only final image is created, so no
+RISC-V executable runs during rootfs construction.
+
+CI validates RISC-V compilation, static ELF linkage, image architecture,
+executable and package inventories, image metadata, SBOMs, and attestations. It
+does not start a RISC-V container or claim emulated runtime coverage. A valid
+RISC-V attestation therefore authenticates the released artifact and build
+workflow under the documented policy; it is not evidence that every runtime
+path was exercised on RISC-V hardware. Updating the pinned cross-toolchain
+image or its expected identity is a supply-chain boundary change that requires
+review and synchronized integrity-test updates.
+
 ## SBOM coverage
 
 Each platform attestation carries the CycloneDX document produced from that

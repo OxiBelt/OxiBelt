@@ -6,6 +6,8 @@ ARG OXIBELT_REVISION=unknown
 ARG OXIBELT_CREATED=1970-01-01T00:00:00Z
 ARG OXIBELT_SOURCE=https://github.com/OxiBelt/OxiBelt
 ARG OXIBELT_REF_NAME=0.0.0
+ARG OXIBELT_RUST_BUILDER_STAGE=builder-native
+ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM ${OXIBELT_NODE_IMAGE} AS person-proof-ui
 
@@ -19,12 +21,7 @@ RUN corepack enable && \
 COPY ui/person-proof ./ui/person-proof
 RUN --network=none pnpm --filter @oxibelt/person-proof-ui build
 
-FROM ${RUST_BUILDER_IMAGE} AS builder
-
-ARG TARGETARCH
-ARG OXIBELT_RUST_TARGET=
-ARG OXIBELT_RUST_TARGET_CPU=
-ARG OXIBELT_REVISION
+FROM --platform=$BUILDPLATFORM ${RUST_BUILDER_IMAGE} AS builder-base
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -37,6 +34,50 @@ RUN apt-get update && \
       perl \
       pkg-config && \
     rm -rf /var/lib/apt/lists/*
+
+FROM builder-base AS builder-native
+
+# cross-rs source revision: 1d07d3f9cc465c435256f1aabc1d18024517891a
+# Copy only the compiler/sysroot. In particular, do not inherit the cross-rs
+# emulator helpers or its Cargo runner environment.
+FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:c12165aac0b52abaee935d0be8ceaa93f63a0f0447597811377417e3120f2247 AS riscv64-cross-toolchain
+
+FROM builder-base AS builder-riscv64
+
+ARG BUILDARCH
+
+COPY --from=riscv64-cross-toolchain /x-tools /x-tools
+COPY source/ops/riscv64-musl-toolchain.cmake /opt/oxibelt/riscv64-musl-toolchain.cmake
+
+ENV PATH="/x-tools/riscv64-unknown-linux-musl/bin:${PATH}" \
+    AR_riscv64gc_unknown_linux_musl="riscv64-unknown-linux-musl-ar" \
+    CC_riscv64gc_unknown_linux_musl="riscv64-unknown-linux-musl-gcc" \
+    CXX_riscv64gc_unknown_linux_musl="riscv64-unknown-linux-musl-g++" \
+    CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER="riscv64-unknown-linux-musl-gcc" \
+    CMAKE_TOOLCHAIN_FILE_riscv64gc_unknown_linux_musl="/opt/oxibelt/riscv64-musl-toolchain.cmake" \
+    BINDGEN_EXTRA_CLANG_ARGS_riscv64gc_unknown_linux_musl="--sysroot=/x-tools/riscv64-unknown-linux-musl/riscv64-unknown-linux-musl/sysroot/"
+
+RUN if [ "${BUILDARCH}" != "amd64" ]; then \
+      echo "the pinned RISC-V cross compiler requires BUILDARCH=amd64" >&2; \
+      exit 1; \
+    fi && \
+    compiler=/x-tools/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-gcc && \
+    linker=/x-tools/riscv64-unknown-linux-musl/bin/riscv64-unknown-linux-musl-ld && \
+    test "$("${compiler}" -dumpfullversion)" = "14.3.0" && \
+    test "$("${compiler}" -dumpmachine)" = "riscv64-unknown-linux-musl" && \
+    test "$("${linker}" --version | sed -n '1p')" = "GNU ld (crosstool-NG UNKNOWN) 2.45" && \
+    test "$(sha256sum "${compiler}" | awk '{print $1}')" = \
+      "3fe20d705129f8ba4ae6be393fd4c484479f688f576af78c0ff2bb10e59d5f86"
+
+FROM ${OXIBELT_RUST_BUILDER_STAGE} AS builder
+
+ARG BUILDARCH
+ARG TARGETARCH
+ARG OXIBELT_RUST_BUILDER_STAGE
+ARG OXIBELT_RUST_CACHE_ID=native
+ARG OXIBELT_RUST_TARGET=
+ARG OXIBELT_RUST_TARGET_CPU=
+ARG OXIBELT_REVISION
 
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
@@ -65,6 +106,10 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
     fi && \
     case "${rust_target}" in \
       x86_64-unknown-linux-musl) \
+        if [ "${BUILDARCH}" != "amd64" ] || [ "${OXIBELT_RUST_BUILDER_STAGE}" != "builder-native" ]; then \
+          echo "x86_64 musl builds require the native AMD64 builder" >&2; \
+          exit 1; \
+        fi; \
         case "${OXIBELT_RUST_TARGET_CPU}" in \
           ""|x86-64-v2|x86-64-v3|x86-64-v4) ;; \
           *) echo "unsupported OXIBELT_RUST_TARGET_CPU=${OXIBELT_RUST_TARGET_CPU}" >&2; exit 1 ;; \
@@ -76,6 +121,10 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
         fi \
         ;; \
       aarch64-unknown-linux-musl) \
+        if [ "${BUILDARCH}" != "arm64" ] || [ "${OXIBELT_RUST_BUILDER_STAGE}" != "builder-native" ]; then \
+          echo "AArch64 musl builds require the native ARM64 builder" >&2; \
+          exit 1; \
+        fi; \
         if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
           echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
           exit 1; \
@@ -84,12 +133,14 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
         ;; \
       riscv64gc-unknown-linux-musl) \
+        if [ "${BUILDARCH}" != "amd64" ] || [ "${OXIBELT_RUST_BUILDER_STAGE}" != "builder-riscv64" ]; then \
+          echo "RISC-V musl builds require the cross-rs AMD64 builder" >&2; \
+          exit 1; \
+        fi; \
         if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
           echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
           exit 1; \
         fi; \
-        export CC_riscv64gc_unknown_linux_musl=musl-gcc; \
-        export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
         export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-feature=+crt-static" \
         ;; \
       *) echo "unsupported OXIBELT_RUST_TARGET=${rust_target}" >&2; exit 1 ;; \
@@ -97,121 +148,106 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
     rustup target add "${rust_target}" && \
     printf '%s' "${rust_target}" >/tmp/oxibelt-rust-target && \
     printf 'export OXIBELT_BUILD_RUST_TARGET=%s\n' "${rust_target}" >/tmp/oxibelt-build-env && \
-    env | grep -E '^(CC_|CARGO_TARGET_)' | sed 's/^/export /' >>/tmp/oxibelt-build-env
+    env | grep -E '^(AR_|CC_|CXX_|CARGO_TARGET_|CMAKE_TOOLCHAIN_FILE_|BINDGEN_EXTRA_CLANG_ARGS_)' | \
+      sed 's/^/export /' >>/tmp/oxibelt-build-env
+
+FROM builder AS riscv64-musl-check
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
+    . /tmp/oxibelt-build-env && \
+    test "${OXIBELT_BUILD_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" && \
+    cargo check --all-targets --locked --target "${OXIBELT_BUILD_RUST_TARGET}"
 
 FROM builder AS controller-builder
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibelt-gateway-controller --bin oxibelt-gateway-controller --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt-gateway-controller" /tmp/oxibelt-gateway-controller && \
-    if readelf -l /tmp/oxibelt-gateway-controller | grep -q 'Requesting program interpreter'; then \
-      echo "controller binary must be statically linked" >&2; \
-      exit 1; \
-    fi
+    sh source/ops/verify-static-elf.sh /tmp/oxibelt-gateway-controller \
+      "${OXIBELT_BUILD_RUST_TARGET}" "controller binary"
 
 FROM builder AS keysigner-builder
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibelt-keysigner --bin oxibelt-keysigner --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt-keysigner" /tmp/oxibelt-keysigner && \
-    if readelf -l /tmp/oxibelt-keysigner | grep -q 'Requesting program interpreter'; then \
-      echo "keysigner binary must be statically linked" >&2; \
-      exit 1; \
-    fi
+    sh source/ops/verify-static-elf.sh /tmp/oxibelt-keysigner \
+      "${OXIBELT_BUILD_RUST_TARGET}" "keysigner binary"
 
 FROM builder AS netport-builder
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibelt-netport-switcher --bin oxibelt-netport-switcher --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt-netport-switcher" /tmp/oxibelt-netport-switcher && \
-    if readelf -l /tmp/oxibelt-netport-switcher | grep -q 'Requesting program interpreter'; then \
-      echo "netport switcher binary must be statically linked" >&2; \
-      exit 1; \
-    fi
+    sh source/ops/verify-static-elf.sh /tmp/oxibelt-netport-switcher \
+      "${OXIBELT_BUILD_RUST_TARGET}" "netport switcher binary"
 
 FROM builder AS tools-builder
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibeltctl --bin oxibeltctl --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibeltctl" /tmp/oxibeltctl && \
-    if readelf -l /tmp/oxibeltctl | grep -q 'Requesting program interpreter'; then \
-      echo "tools binary must be statically linked" >&2; \
-      exit 1; \
-    fi
+    sh source/ops/verify-static-elf.sh /tmp/oxibeltctl \
+      "${OXIBELT_BUILD_RUST_TARGET}" "tools binary"
 
 FROM builder AS runtime-builder
 
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibelt --bin oxibelt --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt" /tmp/oxibelt && \
-    if readelf -l /tmp/oxibelt | grep -q 'Requesting program interpreter'; then \
-      echo "data-plane binary must be statically linked" >&2; \
-      exit 1; \
-    fi
+    sh source/ops/verify-static-elf.sh /tmp/oxibelt \
+      "${OXIBELT_BUILD_RUST_TARGET}" "data-plane binary"
 
 FROM builder AS strict-dataplane-builder
 
 COPY --from=person-proof-ui /repo/source/assets/person-proof-challenge.html ./source/assets/person-proof-challenge.html
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/repo/target,sharing=locked \
+    --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     cargo build --locked --release -p oxibelt-dataplane-strict --bin oxibelt-dataplane-strict \
       --no-default-features --target "${OXIBELT_BUILD_RUST_TARGET}" && \
     install -m 0755 "target/${OXIBELT_BUILD_RUST_TARGET}/release/oxibelt-dataplane-strict" \
       /tmp/oxibelt-dataplane-strict && \
-    if readelf -l /tmp/oxibelt-dataplane-strict | grep -q 'Requesting program interpreter'; then \
-      echo "strict data-plane binary must be statically linked" >&2; \
-      exit 1; \
-    fi && \
+    sh source/ops/verify-static-elf.sh /tmp/oxibelt-dataplane-strict \
+      "${OXIBELT_BUILD_RUST_TARGET}" "strict data-plane binary" && \
     printf '%s\n' 'oxibelt:x:10001:10001:OxiBelt strict data plane:/nonexistent:/sbin/nologin' \
       >/tmp/oxibelt-strict-passwd && \
     printf '%s\n' 'oxibelt:x:10001:' >/tmp/oxibelt-strict-group && \
     chmod 0644 /tmp/oxibelt-strict-passwd /tmp/oxibelt-strict-group
 
-FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime
+FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime-seed
 
-RUN apk --no-cache upgrade && \
-    apk add --no-cache ca-certificates libgcc libssl3 && \
-    rm -rf /var/cache/apk/* && \
-    addgroup -S -g 10001 oxibelt && \
-    adduser -S -D -H -u 10001 -G oxibelt oxibelt && \
-    addgroup -S -g 10002 oxibelt-keysigner && \
-    adduser -S -D -H -u 10002 -G oxibelt-keysigner oxibelt-keysigner && \
-    mkdir -p /app /etc/oxibelt/config /etc/oxibelt/cert /etc/oxibelt/oxirule \
-      /run/oxibelt-keysigner /var/cache/oxibelt && \
-    chown oxibelt:oxibelt /var/cache/oxibelt && \
-    chown oxibelt-keysigner:oxibelt-keysigner /run/oxibelt-keysigner && \
-    chmod 0755 /app /etc/oxibelt /etc/oxibelt/config /etc/oxibelt/cert \
-      /etc/oxibelt/oxirule /var/cache/oxibelt && \
-    chmod 0770 /run/oxibelt-keysigner
+# Assemble the target Alpine filesystem as data on the native build platform.
+# The target seed is never executed, so this path needs no binary-format handler.
+FROM --platform=$BUILDPLATFORM ${OXIBELT_RUNTIME_IMAGE} AS runtime-preparer
 
-COPY source/config/oxibelt.toml /etc/oxibelt/config/oxibelt.toml
-RUN chmod 0644 /etc/oxibelt/config/oxibelt.toml
+ARG TARGETARCH
+
+COPY --from=runtime-seed / /opt/oxibelt-rootfs
+COPY source/config/oxibelt.toml /tmp/oxibelt.toml
+COPY source/ops/prepare-alpine-rootfs.sh /tmp/prepare-alpine-rootfs.sh
+RUN sh /tmp/prepare-alpine-rootfs.sh \
+      /opt/oxibelt-rootfs "${TARGETARCH}" /tmp/oxibelt.toml
+
+FROM scratch AS runtime
+
+COPY --from=runtime-preparer /opt/oxibelt-rootfs/ /
 
 FROM runtime AS strict-runtime
 
-# Derive the strict default from the compatibility example while removing every
-# Admin TOML table. The strict executable also rejects Admin configuration at
-# startup and reload, so this build step cannot weaken the runtime boundary.
-RUN awk '\
-      /^[[:space:]]*\[\[?[[:space:]]*admin([[:space:]]*[.][^][]+)*[[:space:]]*\]\]?[[:space:]]*(#.*)?$/ { drop_admin = 1; next } \
-      /^[[:space:]]*\[/ { drop_admin = 0 } \
-      !drop_admin { print } \
-    ' /etc/oxibelt/config/oxibelt.toml >/tmp/oxibelt-strict.toml && \
-    ! grep -Eq '^[[:space:]]*\[\[?[[:space:]]*admin([[:space:]]*[.]|[[:space:]]*\])' /tmp/oxibelt-strict.toml && \
-    install -m 0644 /tmp/oxibelt-strict.toml /etc/oxibelt/config/oxibelt.toml && \
-    rm -f /tmp/oxibelt-strict.toml
+COPY --from=runtime-preparer /opt/oxibelt-strict.toml /etc/oxibelt/config/oxibelt.toml
 
 FROM scratch AS role-metadata
 

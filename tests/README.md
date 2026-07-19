@@ -8,8 +8,8 @@
 - `scripts/build-docker-integration-helper-images-artifact.sh`: builds the Docker integration helper images once for CI and writes a loadable tar artifact containing the mock upstream, DNS, Kubernetes, PQ probe, protocol probe, PostgreSQL, and Valkey images.
 - `scripts/build-external-benchmark-image-artifact.sh`: builds the reusable h2load/oha/wrk external benchmark image as `oxibelt/external-benchmarks:ci` and writes `oxibelt-external-benchmark-image.tar` for CI.
 - `scripts/select-amd64-docker-image-artifact.sh`: selects the best loadable AMD64 Docker artifact for the current Linux runner from `/proc/cpuinfo`, or validates a required target such as `x86-64-v3` for benchmark jobs.
-- `riscv64gc-unknown-linux-musl` builds need `clang/libclang`, and either a native `riscv64gc-unknown-linux-musl` toolchain or `riscv64-linux-musl-gcc`
-- RISC-V Docker image artifacts use `rust:1.97.0-trixie` as the builder because the official `rust:1.97.0-alpine3.24` image is not published for `riscv64`; the runtime image is still Alpine/musl.
+- `riscv64gc-unknown-linux-musl` image builds run on `linux/amd64` and copy only `/x-tools` from a manifest-digest-pinned `cross-rs` toolchain image into the build-platform Rust builder. The build verifies the expected compiler digest, version, target triple, and linker before Cargo runs; it does not invoke the `cross` CLI, copy its QEMU runner, mount a Docker socket, or register `binfmt` handlers.
+- RISC-V Docker image artifacts remain Alpine/musl. Their signed target Alpine seed is assembled with build-platform `apk --root --arch riscv64 --no-scripts`, preserving the target repositories, signing keys, package database, CA bundle, users, and filesystem layout without executing a RISC-V binary.
 - `scripts/run-proxy-integration.sh`: generates fresh TLS certificates for every run, validates HTTP and HTTPS proxying through Docker, probes `X25519` plus `X25519MLKEM768` TLS negotiation against the current server, and exercises HTTPS upstream proxying with ECH GREASE enabled
 - `scripts/run-remote-signer-dos.sh`: starts the Docker runtime `oxibelt-keysigner` with token-file auth, signer UID `10002`, proxy/probe UID `10001`, a shared signer socket group, and a low file-descriptor limit; it validates that unauthenticated idle Unix-socket clients are closed by signer-side IPC limits while authenticated `describe_key` requests continue to succeed.
 - `scripts/run-proxy-integration-matrix.sh`: materializes one Rust-cataloged Docker integration case and validates it in Docker. Cases are grouped by configuration validity, HTTP listener modes, limits, identity/PROXY protocol handling, upstream pools, cache, metrics/health endpoints, routing, proxy headers, upstream TLS, remote signer downstream TLS, SNI forwarding, access-log export, database mitigation queues, WAF request/response behavior, helper behavior, Person proof, protocol startup behavior, and hot reload behavior.
@@ -48,13 +48,16 @@ attestations, verify exact workflow/source/subject/predicate/timestamp policy,
 and gate platform promotion. The attestation jobs do not push Cosign signatures,
 SBOMs, or bundles to GHCR.
 
-The top-level release workflow waits for all 25 role/architecture rows and publishes
+The top-level release workflow waits for all 30 role/architecture rows and publishes
 the canonical multi-architecture index from the `amd64` (x86-64-v3), `arm64`,
 and `riscv64` digests for each role. It cross-checks those child digests against
 their platform SBOMs, composes a CycloneDX 1.7 index SBOM that points to the
 separate platform inventories, and gates index alias promotion on GitHub
-attestation verification. QEMU is used only for the RISC-V image;
-AMD64 and ARM64 build natively on their release runners. Build tags matching
+attestation verification. RISC-V artifacts use digest-pinned `cross-rs`
+cross-compilation and signed Alpine rootfs assembly without QEMU or `binfmt`;
+their validation covers compilation, static linking, image structure, and
+metadata rather than emulated runtime execution. AMD64 and ARM64 build natively
+on their release runners. Build tags matching
 `major.minor.patch-build.<8 hex chars>` may publish from tag push events;
 stable and `major.minor.patch-beta.N` tags publish from GitHub release or
 manual dispatch events. Workflow integrity tests in

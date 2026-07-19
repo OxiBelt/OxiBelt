@@ -326,23 +326,18 @@ jobs:
           - artifact_arch: amd64v2
             platform: linux/amd64
             runner: ubuntu-26.04
-            qemu_platforms: ""
           - artifact_arch: amd64
             platform: linux/amd64
             runner: ubuntu-26.04
-            qemu_platforms: ""
           - artifact_arch: amd64v4
             platform: linux/amd64
             runner: ubuntu-26.04
-            qemu_platforms: ""
           - artifact_arch: arm64
             platform: linux/arm64
             runner: ubuntu-26.04-arm
-            qemu_platforms: ""
           - artifact_arch: riscv64
             platform: linux/riscv64
             runner: ubuntu-26.04
-            qemu_platforms: riscv64
     uses: ./.github/workflows/release-image-arch.yml
     with:
       artifact_arch: ${{ matrix.artifact_arch }}
@@ -352,7 +347,6 @@ jobs:
       image: ${{ matrix.image }}
       platform: ${{ matrix.platform }}
       runner: ${{ matrix.runner }}
-      qemu_platforms: ${{ matrix.qemu_platforms }}
       release_ref: ${{ needs.validate.outputs.release_ref }}
       release_created: ${{ needs.validate.outputs.created }}
       release_kind: ${{ needs.validate.outputs.kind }}

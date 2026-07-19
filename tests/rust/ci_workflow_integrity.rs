@@ -78,7 +78,7 @@ const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
 const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "test",
   "rust-advisory-checks",
-  "test-riscv64-qemu",
+  "check-riscv64-cross",
   "fuzz-smoke",
   "unsafe-validation",
 ];
@@ -89,7 +89,7 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "rust-advisory-checks",
   "fuzz-smoke",
   "unsafe-validation",
-  "test-riscv64-qemu",
+  "check-riscv64-cross",
 ];
 const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
 
@@ -655,7 +655,7 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 }
 
 #[test]
-fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
+fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   let dockerfile = dockerfile_text();
   let script = docker_image_artifact_build_script_text();
   let workspace_manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
@@ -666,7 +666,12 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
   for expected in [
     "ARG RUST_BUILDER_IMAGE=rust:1.97.0-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
+    "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
+    "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
     "ARG TARGETARCH",
+    "FROM --platform=$BUILDPLATFORM ${RUST_BUILDER_IMAGE} AS builder-base",
+    "FROM builder-base AS builder-native",
+    "FROM ${OXIBELT_RUST_BUILDER_STAGE} AS builder",
     "amd64) rust_target=x86_64-unknown-linux-musl",
     "arm64) rust_target=aarch64-unknown-linux-musl",
     "riscv64) rust_target=riscv64gc-unknown-linux-musl",
@@ -674,8 +679,6 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
     "CC_aarch64_unknown_linux_musl=musl-gcc",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
-    "CC_riscv64gc_unknown_linux_musl=musl-gcc",
-    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
     "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=\"-Ctarget-feature=+crt-static\"",
     "cargo build --locked --release",
     "--target \"${OXIBELT_BUILD_RUST_TARGET}\"",
@@ -691,6 +694,9 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
+    "rust_builder_stage=\"builder-riscv64\"",
+    "OXIBELT_RUST_BUILDER_STAGE=${rust_builder_stage}",
+    "OXIBELT_RUST_CACHE_ID=${rust_build_cache_key}",
   ] {
     assert!(
       script.contains(expected),
@@ -703,6 +709,37 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
     "RISC-V musl builds should not reintroduce a shared libgcc workaround"
   );
 
+  for expected in [
+    "FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:c12165aac0b52abaee935d0be8ceaa93f63a0f0447597811377417e3120f2247 AS riscv64-cross-toolchain",
+    "1d07d3f9cc465c435256f1aabc1d18024517891a",
+    "FROM builder-base AS builder-riscv64",
+    "COPY --from=riscv64-cross-toolchain /x-tools /x-tools",
+    "COPY source/ops/riscv64-musl-toolchain.cmake /opt/oxibelt/riscv64-musl-toolchain.cmake",
+    "14.3.0",
+    "riscv64-unknown-linux-musl",
+    "GNU ld (crosstool-NG UNKNOWN) 2.45",
+    "3fe20d705129f8ba4ae6be393fd4c484479f688f576af78c0ff2bb10e59d5f86",
+    "AS riscv64-musl-check",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "RISC-V musl builds should pin and verify the cross toolchain contract: {expected}"
+    );
+  }
+
+  for forbidden in [
+    "CROSS_TARGET_RUNNER",
+    "QEMU_LD_PREFIX",
+    "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER",
+    "tonistiigi/binfmt",
+    "--privileged",
+  ] {
+    assert!(
+      !dockerfile.contains(forbidden) && !script.contains(forbidden),
+      "RISC-V cross compilation must not reintroduce an emulator or privileged runtime: {forbidden}"
+    );
+  }
+
   assert!(
     cli_manifest.contains(
       "cfg(all(target_arch = \"aarch64\", target_os = \"linux\", target_env = \"musl\"))"
@@ -711,6 +748,93 @@ fn alpine_runtime_uses_a_glibc_builder_for_explicit_musl_targets() {
         .contains("openssl-sys = { version = \"0.9.117\", features = [\"vendored\"] }"),
     "ARM64 musl should build a target-compatible vendored OpenSSL"
   );
+}
+
+#[test]
+fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
+  let dockerfile = dockerfile_text();
+  let rootfs_script = source_file_text("source/ops/prepare-alpine-rootfs.sh");
+
+  for expected in [
+    "FROM ${OXIBELT_RUNTIME_IMAGE} AS runtime-seed",
+    "FROM --platform=$BUILDPLATFORM ${OXIBELT_RUNTIME_IMAGE} AS runtime-preparer",
+    "COPY --from=runtime-seed / /opt/oxibelt-rootfs",
+    "source/ops/prepare-alpine-rootfs.sh",
+    "FROM scratch AS runtime",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "runtime image should preserve emulator-free target rootfs assembly: {expected}"
+    );
+  }
+
+  for expected in [
+    "/etc/alpine-release",
+    "/etc/apk/repositories",
+    "/etc/apk/keys",
+    "/lib/apk/db/installed",
+    "amd64) apk_arch=x86_64",
+    "arm64) apk_arch=aarch64",
+    "riscv64) apk_arch=riscv64",
+    "--root",
+    "--arch",
+    "--no-scripts",
+    "--no-cache",
+    "upgrade",
+    "ca-certificates",
+    "libgcc",
+    "libssl3",
+    "$4 == 10001 || $4 == 10002",
+  ] {
+    assert!(
+      rootfs_script.contains(expected),
+      "rootfs preparation should validate and preserve the signed Alpine contract: {expected}"
+    );
+  }
+
+  for forbidden in ["--allow-untrusted", "\nchroot ", "\neval ", "qemu-"] {
+    assert!(
+      !rootfs_script.contains(forbidden),
+      "rootfs preparation must not weaken package trust or execute target code: {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn riscv64_cmake_toolchain_is_sysrooted_and_emulator_free() {
+  let toolchain = source_file_text("source/ops/riscv64-musl-toolchain.cmake");
+
+  for expected in [
+    "CMAKE_SYSTEM_NAME Linux",
+    "CMAKE_SYSTEM_PROCESSOR riscv64",
+    "OXIBELT_RISCV64_TOOLCHAIN_PREFIX",
+    "${OXIBELT_RISCV64_TOOLCHAIN_PREFIX}gcc",
+    "${OXIBELT_RISCV64_TOOLCHAIN_PREFIX}g++",
+    "${OXIBELT_RISCV64_TOOLCHAIN_PREFIX}ar",
+    "${OXIBELT_RISCV64_TOOLCHAIN_PREFIX}ranlib",
+    "${OXIBELT_RISCV64_TOOLCHAIN_PREFIX}strip",
+    "CMAKE_SYSROOT",
+    "CMAKE_FIND_ROOT_PATH",
+    "-march=rv64gc",
+    "-mabi=lp64d",
+    "-mcmodel=medany",
+  ] {
+    assert!(
+      toolchain.contains(expected),
+      "RISC-V CMake toolchain should preserve {expected}"
+    );
+  }
+  for forbidden in [
+    "CMAKE_CROSSCOMPILING_EMULATOR",
+    "qemu-",
+    "/usr/include",
+    "/usr/lib",
+  ] {
+    assert!(
+      !toolchain.contains(forbidden),
+      "RISC-V CMake toolchain must remain target-sysrooted and emulator-free: {forbidden}"
+    );
+  }
 }
 
 #[test]
@@ -787,12 +911,12 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     "COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl",
     "COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner",
     "COPY --from=netport-builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher",
-    "controller binary must be statically linked",
-    "keysigner binary must be statically linked",
-    "netport switcher binary must be statically linked",
-    "tools binary must be statically linked",
-    "data-plane binary must be statically linked",
-    "strict data-plane binary must be statically linked",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibelt-gateway-controller",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibelt-keysigner",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibelt-netport-switcher",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibeltctl",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibelt ",
+    "sh source/ops/verify-static-elf.sh /tmp/oxibelt-dataplane-strict",
   ] {
     assert!(
       dockerfile.contains(expected),
@@ -800,10 +924,27 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     );
   }
   assert_eq!(
-    dockerfile.matches("Requesting program interpreter").count(),
+    dockerfile
+      .matches("sh source/ops/verify-static-elf.sh")
+      .count(),
     6,
-    "every release binary should retain its static-link guard"
+    "every release binary should retain its shared ELF identity and static-link guard"
   );
+
+  let elf_guard = source_file_text("source/ops/verify-static-elf.sh");
+  for expected in [
+    "Advanced Micro Devices X86-64",
+    "AArch64",
+    "RISC-V",
+    "expected ELF64",
+    "PT_INTERP is present",
+    "DT_NEEDED is present",
+  ] {
+    assert!(
+      elf_guard.contains(expected),
+      "static ELF guard should preserve {expected}"
+    );
+  }
 
   for (role, expected_binaries) in [
     (
@@ -1288,7 +1429,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
   let mut security_relevant_jobs = vec![
     "test",
     "rust-advisory-checks",
-    "test-riscv64-qemu",
+    "check-riscv64-cross",
     "unsafe-validation",
     "generate-test-matrices",
     "linux-target-builds",
@@ -2954,11 +3095,11 @@ fn tokio_runtime_builders_use_explicit_startup_stack_size() {
 }
 
 #[test]
-fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
+fn riscv64_cross_checks_and_image_build_run_without_emulation() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
-  let qemu_job = jobs
-    .get("test-riscv64-qemu")
+  let cross_job = jobs
+    .get("check-riscv64-cross")
     .expect("workflow should keep the RISC-V compile-check job");
   let riscv64_image_job = jobs
     .get("docker-alpine-musl-image-riscv64")
@@ -2970,6 +3111,7 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
     .find("  docker-alpine-musl-image-riscv64:")
     .expect("workflow should define the RISC-V image job");
   let other_job = &workflow[other_start..riscv_start];
+  let cross_job_text = workflow_job_text(&workflow, "check-riscv64-cross");
   let riscv64_job = workflow_job_text(&workflow, "docker-alpine-musl-image-riscv64");
 
   assert!(
@@ -2977,12 +3119,23 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
       && workflow.contains("riscv64gc-unknown-linux-musl"),
     "RISC-V cargo check coverage should keep both GNU and musl targets"
   );
+  for expected in [
+    "Cargo check for RISC-V GNU target",
+    "cargo check --all-targets --locked --target ${{ matrix.target }}",
+    "BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu",
+    "Cargo check for RISC-V musl target",
+    "--platform linux/riscv64",
+    "--target riscv64-musl-check",
+    "--build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-c12165aa",
+    "--build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64",
+  ] {
+    assert!(
+      cross_job_text.contains(expected),
+      "RISC-V cross-check job should preserve {expected}"
+    );
+  }
   assert!(
-    workflow.contains("BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu"),
-    "RISC-V musl cargo check should expose the cross libc sysroot to bindgen"
-  );
-  assert!(
-    qemu_job.needs.is_empty(),
+    cross_job.needs.is_empty(),
     "RISC-V cargo check should stay independent of Docker image jobs"
   );
   assert_eq!(
@@ -3004,6 +3157,34 @@ fn riscv64_docker_image_artifact_runs_on_push_pr_schedule_and_manual() {
       && workflow.contains("name: oxibelt-alpine-musl-riscv64-image"),
     "RISC-V Docker image job should build and upload the riscv64 artifact"
   );
+  assert!(
+    !cross_job_text.contains("qemu") && !riscv64_job.contains("qemu"),
+    "RISC-V checks and image builds must not install or invoke emulation"
+  );
+}
+
+#[test]
+fn build_and_release_workflows_do_not_expose_qemu_or_binfmt() {
+  let workflows = [
+    ("check", workflow_text()),
+    ("release", release_workflow_text()),
+    ("release architecture", release_image_arch_workflow_text()),
+  ];
+
+  for (name, workflow) in workflows {
+    for forbidden in [
+      "docker/setup-qemu-action",
+      "tonistiigi/binfmt",
+      "qemu_platforms",
+      "Setup QEMU",
+      "--privileged",
+    ] {
+      assert!(
+        !workflow.contains(forbidden),
+        "{name} workflow must not retain the emulation boundary {forbidden}"
+      );
+    }
+  }
 }
 
 #[test]
@@ -3468,7 +3649,6 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "image:",
     "platform:",
     "runner:",
-    "qemu_platforms:",
     "release_ref:",
     "release_created:",
     "release_kind:",
@@ -3554,7 +3734,16 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "format: cyclonedx",
     "-raw.cdx.json",
     "Validate release binaries",
+    "container_id=\"$(docker create \"${IMAGE_REF}\")\"",
     "docker cp",
+    "expected_machine=\"Advanced Micro Devices X86-64\"",
+    "expected_machine=\"AArch64\"",
+    "expected_machine=\"RISC-V\"",
+    "readelf -hW \"${binary_path}\"",
+    "readelf -lW \"${binary_path}\"",
+    "readelf -dW \"${binary_path}\"",
+    "must not request a program interpreter",
+    "must not declare dynamic shared-library dependencies",
     "select(.role == $role) | .binaries[]",
     "{schemaVersion: 1, binaries: $binaries}",
     "Validate and enrich platform SBOM",
@@ -3574,6 +3763,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     scan_job_text.matches("version: v0.72.0").count(),
     2,
     "release workflow should run one vulnerability scan and one CycloneDX inventory scan"
+  );
+  assert!(
+    !scan_job_text.contains("docker start") && !scan_job_text.contains("docker run"),
+    "release binary validation must inspect copied files without starting target containers"
   );
   for removed in [
     "packages: read",
@@ -4121,7 +4314,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
-    setup_count, 8,
+    setup_count, 9,
     "workflow should keep pre-pull coverage aligned with every Buildx setup"
   );
   assert_eq!(

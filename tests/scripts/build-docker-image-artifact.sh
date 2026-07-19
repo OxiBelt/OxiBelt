@@ -79,6 +79,8 @@ node_builder_image="node:24-alpine3.24"
 runtime_image="alpine:3.24"
 rust_target=""
 rust_target_cpu=""
+rust_builder_stage="builder-native"
+rust_build_cache_key=""
 oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/Cargo.toml" | head -n 1)}"
 oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)}"
 oxibelt_created="${OXIBELT_DOCKER_IMAGE_CREATED:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
@@ -93,6 +95,7 @@ case "${artifact_arch}" in
     fi
     rust_target="x86_64-unknown-linux-musl"
     rust_target_cpu="x86-64-v2"
+    rust_build_cache_key="x86_64-musl-x86-64-v2"
     ;;
   amd64)
     if [[ "${platform}" != "linux/amd64" ]]; then
@@ -101,6 +104,7 @@ case "${artifact_arch}" in
     fi
     rust_target="x86_64-unknown-linux-musl"
     rust_target_cpu="x86-64-v3"
+    rust_build_cache_key="x86_64-musl-x86-64-v3"
     ;;
   amd64v4)
     if [[ "${platform}" != "linux/amd64" ]]; then
@@ -109,6 +113,7 @@ case "${artifact_arch}" in
     fi
     rust_target="x86_64-unknown-linux-musl"
     rust_target_cpu="x86-64-v4"
+    rust_build_cache_key="x86_64-musl-x86-64-v4"
     ;;
   arm64)
     if [[ "${platform}" != "linux/arm64" ]]; then
@@ -116,6 +121,7 @@ case "${artifact_arch}" in
       exit 2
     fi
     rust_target="aarch64-unknown-linux-musl"
+    rust_build_cache_key="aarch64-musl-native"
     ;;
   riscv64)
     if [[ "${platform}" != "linux/riscv64" ]]; then
@@ -123,6 +129,8 @@ case "${artifact_arch}" in
       exit 2
     fi
     rust_target="riscv64gc-unknown-linux-musl"
+    rust_builder_stage="builder-riscv64"
+    rust_build_cache_key="riscv64gc-musl-cross-rs-c12165aa"
     ;;
   *)
     usage
@@ -160,6 +168,8 @@ docker buildx build \
   --build-arg "RUST_BUILDER_IMAGE=${rust_builder_image}" \
   --build-arg "OXIBELT_NODE_IMAGE=${node_builder_image}" \
   --build-arg "OXIBELT_RUNTIME_IMAGE=${runtime_image}" \
+  --build-arg "OXIBELT_RUST_BUILDER_STAGE=${rust_builder_stage}" \
+  --build-arg "OXIBELT_RUST_CACHE_ID=${rust_build_cache_key}" \
   --build-arg "OXIBELT_RUST_TARGET=${rust_target}" \
   --build-arg "OXIBELT_RUST_TARGET_CPU=${rust_target_cpu}" \
   --build-arg "OXIBELT_VERSION=${oxibelt_version}" \

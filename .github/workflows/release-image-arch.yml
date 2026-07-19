@@ -24,10 +24,6 @@ on:
       runner:
         required: true
         type: string
-      qemu_platforms:
-        required: false
-        type: string
-        default: ""
       release_ref:
         required: true
         type: string
@@ -102,12 +98,6 @@ jobs:
         run: |
           set -euo pipefail
           cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
-
-      - name: Setup QEMU
-        if: inputs.qemu_platforms != ''
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: ${{ inputs.qemu_platforms }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
@@ -353,10 +343,36 @@ jobs:
           trap cleanup EXIT
 
           inventory='[]'
+          case "${OXIBELT_ARTIFACT_ARCH}" in
+            amd64v2|amd64|amd64v4) expected_machine="Advanced Micro Devices X86-64" ;;
+            arm64) expected_machine="AArch64" ;;
+            riscv64) expected_machine="RISC-V" ;;
+            *)
+              echo "unsupported release artifact architecture: ${OXIBELT_ARTIFACT_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+
           while read -r binary; do
             install_path="/usr/local/bin/${binary}"
             docker cp "${container_id}:${install_path}" "${binary_root}/${binary}"
-            digest="$(sha256sum "${binary_root}/${binary}" | awk '{print $1}')"
+            binary_path="${binary_root}/${binary}"
+            elf_class="$(readelf -hW "${binary_path}" | awk -F: '/^[[:space:]]*Class:/{sub(/^[[:space:]]*/, "", $2); print $2}')"
+            elf_machine="$(readelf -hW "${binary_path}" | awk -F: '/^[[:space:]]*Machine:/{sub(/^[[:space:]]*/, "", $2); print $2}')"
+            if [[ "${elf_class}" != "ELF64" || "${elf_machine}" != "${expected_machine}" ]]; then
+              echo "${install_path} is ${elf_class}/${elf_machine}, expected ELF64/${expected_machine}" >&2
+              exit 1
+            fi
+            if readelf -lW "${binary_path}" | grep -F ' INTERP ' >/dev/null; then
+              echo "${install_path} must not request a program interpreter" >&2
+              exit 1
+            fi
+            if readelf -dW "${binary_path}" | grep -F '(NEEDED)' >/dev/null; then
+              echo "${install_path} must not declare dynamic shared-library dependencies" >&2
+              exit 1
+            fi
+
+            digest="$(sha256sum "${binary_path}" | awk '{print $1}')"
             inventory="$(jq -c \
               --arg name "${binary}" \
               --arg path "${install_path}" \
