@@ -546,6 +546,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 
 {{- define "oxibelt.validateOperationalProfile" -}}
+{{- include "oxibelt.validateAutoscaling" . -}}
 {{- include "oxibelt.validatePublicTls" . -}}
 {{- include "oxibelt.validateQuicHostKey" . -}}
 {{- include "oxibelt.validateLifecycle" . -}}
