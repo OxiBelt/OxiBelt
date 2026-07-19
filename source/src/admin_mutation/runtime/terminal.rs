@@ -82,6 +82,7 @@ impl AdminMutationRuntime {
     let store = self.store()?;
     let mut tx = store.pool().begin().await?;
     let terminal_audit_record_id = staged.insert(&mut tx).await?;
+    let path = command.path_and_query.split('?').next().unwrap_or_default();
     let safe_response = if state == MutationState::Committed
       && command.execution_model == ClusterExecutionModel::SharedStaged
     {
@@ -90,6 +91,31 @@ impl AdminMutationRuntime {
         .context("committed shared rollout is missing its exact applied publication")?
         .safe_response
         .context("committed shared rollout is missing its safe response")?
+    } else if state == MutationState::Committed
+      && path == "/admin/v1/config/secret-references/update"
+    {
+      let reference_set_digest: String = sqlx::query_scalar(
+        "SELECT validation_digest FROM oxibelt_admin_mutation_targets
+          WHERE namespace=$1 AND request_id=$2 ORDER BY instance_id ASC LIMIT 1",
+      )
+      .bind(store.namespace())
+      .bind(&record.request_id)
+      .fetch_one(&mut *tx)
+      .await?;
+      json!({
+        "ok": true,
+        "request_id": record.request_id,
+        "config_logical_revision": record.new_revision,
+        "reference_set_digest": reference_set_digest,
+        "runtime_snapshot_revision": record.new_revision,
+        "target_revision": format!(
+          "cluster:{}:{}",
+          record.cluster_id.as_deref().unwrap_or_default(),
+          record.new_revision
+        ),
+        "state": state,
+        "token_recoverable": false,
+      })
     } else {
       json!({
         "ok": state == MutationState::Committed,

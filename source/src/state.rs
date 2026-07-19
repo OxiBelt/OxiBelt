@@ -34,6 +34,7 @@ use crate::runtime_health::RuntimeHealth;
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
 };
+use crate::secret_activation::SecretReferenceRuntime;
 use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
 use crate::stream::pools::StreamPoolState;
@@ -46,13 +47,16 @@ use http::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 mod alt_svc;
+mod generation;
 pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
 mod runtime_services;
+mod secret_references;
 mod stream_pool_update;
 mod upstream_clients;
 pub(crate) use alt_svc::{AltSvcHeaderValues, build_alt_svc_header_values};
+use generation::next_upstream_pool_generation;
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
 use stream_pool_update::next_stream_pool_generation;
@@ -63,6 +67,7 @@ pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
 #[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,
+  pub(crate) secret_references: SecretReferenceRuntime,
   pub(crate) effective_direct_h1_io: RuntimeDirectH1IoMode,
   pub route_table: RouteTable,
   pub(crate) sni_forward: SniForwardTable,
@@ -465,9 +470,11 @@ impl AppSnapshot {
       &upstream_uri_parts_by_index,
     );
 
+    let secret_references = secret_references::build(&config, previous)?;
     config.rollout.mark_applied();
     Ok(Self {
       config,
+      secret_references,
       effective_direct_h1_io,
       route_table,
       sni_forward,
@@ -642,8 +649,10 @@ impl AppSnapshot {
       &upstream_uri_parts_by_index,
     );
 
+    let secret_references = secret_references::build(&config, Some(previous))?;
     Ok(Self {
       config,
+      secret_references,
       effective_direct_h1_io,
       route_table,
       sni_forward,
@@ -701,17 +710,6 @@ impl AppSnapshot {
     })
   }
 }
-fn next_upstream_pool_generation(config: &Config, previous: Option<&AppSnapshot>) -> u64 {
-  let Some(previous) = previous else {
-    return 0;
-  };
-  if config.upstream_pools == previous.config.upstream_pools {
-    previous.upstream_pool_generation
-  } else {
-    previous.upstream_pool_generation.saturating_add(1)
-  }
-}
-
 fn effective_direct_h1_io_for_backend(
   config: &Config,
   runtime_backend: RuntimeBackendSnapshot,

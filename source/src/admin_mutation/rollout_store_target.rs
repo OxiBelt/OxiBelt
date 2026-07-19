@@ -21,6 +21,11 @@ pub(crate) async fn transition_target_fenced(
     "invalid fenced target transition"
   );
   for (name, value) in [
+    (
+      "validation_revision",
+      transition.validation_revision.as_deref(),
+    ),
+    ("validation_digest", transition.validation_digest.as_deref()),
     ("applied_revision", transition.applied_revision.as_deref()),
     ("applied_digest", transition.applied_digest.as_deref()),
     ("restored_revision", transition.restored_revision.as_deref()),
@@ -49,6 +54,28 @@ pub(crate) async fn transition_target_fenced(
       && row.try_get::<i64, _>("assignment_epoch")? == transition.assignment_epoch,
     "target assignment was fenced"
   );
+  if transition.next_state == TargetState::Validated {
+    let validation_revision = transition
+      .validation_revision
+      .as_deref()
+      .context("validated target must provide its runtime revision")?;
+    let validation_digest = transition
+      .validation_digest
+      .as_deref()
+      .context("validated target must provide its reference-set digest")?;
+    ensure!(
+      validation_revision == row.try_get::<String, _>("new_revision")?,
+      "validated target runtime revision does not match the durable mutation"
+    );
+    ensure!(
+      validation_digest.len() == 71
+        && validation_digest.starts_with("sha256:")
+        && validation_digest[7..]
+          .bytes()
+          .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) }),
+      "validated target reference-set digest is invalid"
+    );
+  }
   if matches!(
     transition.next_state,
     TargetState::Applying | TargetState::RollingBack
@@ -124,19 +151,23 @@ pub(crate) async fn transition_target_fenced(
     "UPDATE oxibelt_admin_mutation_targets SET state=$4,state_version=state_version+1,
             boot_id=$5,instance_epoch=$6,
             effect_started_at=CASE WHEN $7 THEN COALESCE(effect_started_at,now()) ELSE effect_started_at END,
-            applied_revision=COALESCE($8,applied_revision),applied_digest=COALESCE($9,applied_digest),
-            restored_revision=COALESCE($10,restored_revision),restored_digest=COALESCE($11,restored_digest),
-            error_code=$12,updated_at=now()
-      WHERE namespace=$1 AND request_id=$2 AND instance_id=$3 AND state_version=$13",
+            validation_revision=COALESCE($8,validation_revision),
+            validation_digest=COALESCE($9,validation_digest),
+            applied_revision=COALESCE($10,applied_revision),applied_digest=COALESCE($11,applied_digest),
+            restored_revision=COALESCE($12,restored_revision),restored_digest=COALESCE($13,restored_digest),
+            error_code=$14,updated_at=now()
+      WHERE namespace=$1 AND request_id=$2 AND instance_id=$3 AND state_version=$15",
   ).bind(store.namespace()).bind(request_id).bind(&member.instance_id).bind(transition.next_state.as_str())
     .bind(&member.boot_id).bind(member.instance_epoch).bind(transition.effect_started)
+    .bind(&transition.validation_revision).bind(&transition.validation_digest)
     .bind(&transition.applied_revision).bind(&transition.applied_digest)
     .bind(&transition.restored_revision).bind(&transition.restored_digest).bind(&transition.error_code)
     .bind(transition.expected_state_version).execute(&mut *tx).await?;
   ensure!(result.rows_affected() == 1, "target transition was fenced");
   let selected = sqlx::query(
     "SELECT instance_id,state,state_version,assignment_epoch,boot_id,instance_epoch,
-            effect_started_at::text AS effect_started_at,applied_revision,applied_digest,
+            effect_started_at::text AS effect_started_at,validation_revision,validation_digest,
+            applied_revision,applied_digest,
             restored_revision,restored_digest,error_code,updated_at::text AS updated_at
        FROM oxibelt_admin_mutation_targets WHERE namespace=$1 AND request_id=$2 AND instance_id=$3",
   )

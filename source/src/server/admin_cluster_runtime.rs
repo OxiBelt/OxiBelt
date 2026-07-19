@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
@@ -202,15 +202,16 @@ async fn process_member_work(
   let command = runtime.fetch_cluster_command(&record).await?;
   match work.target.state {
     TargetState::Validating => match executor.validate(&command).await {
-      Ok(_) => {
+      Ok(operation) => {
+        let evidence = operation.validation_evidence();
         transition(
           runtime,
           &work.request_id,
           &work.target,
           TargetState::Validated,
           false,
-          None,
-          None,
+          Some(evidence.revision),
+          Some(evidence.digest),
           None,
           None,
           None,
@@ -282,6 +283,7 @@ async fn apply_assigned(
     .validate(command)
     .await
     .map_err(anyhow::Error::new)?;
+  ensure_validation_evidence(target, &operation)?;
   if operation.is_shared_staged() {
     return apply_shared_observation(runtime, executor, publisher, record, target, &operation)
       .await;
@@ -398,9 +400,14 @@ async fn recover_applying(
   target: &RolloutTarget,
 ) -> anyhow::Result<()> {
   let operation = executor
-    .validate(command)
+    .validate_recovery(
+      command,
+      target.validation_revision.as_deref(),
+      target.validation_digest.as_deref(),
+    )
     .await
     .map_err(anyhow::Error::new)?;
+  ensure_validation_evidence(target, &operation)?;
   if operation.is_shared_staged() {
     return recover_shared(runtime, executor, publisher, record, target, &operation).await;
   }
@@ -415,7 +422,7 @@ async fn recover_applying(
       &encrypted.prior_digest,
     )
     .map_err(anyhow::Error::new)?;
-  match executor.recover(&checkpoint, command).await {
+  match executor.recover(&checkpoint, &operation).await {
     RecoveryOutcome::CandidateApplied(evidence) => {
       publish_head(
         runtime,
@@ -537,9 +544,14 @@ async fn rollback_assigned(
     .await;
   }
   let operation = executor
-    .validate(command)
+    .validate_recovery(
+      command,
+      target.validation_revision.as_deref(),
+      target.validation_digest.as_deref(),
+    )
     .await
     .map_err(anyhow::Error::new)?;
+  ensure_validation_evidence(target, &operation)?;
   if operation.is_shared_staged() {
     return observe_shared_rollback(runtime, executor, publisher, record, target, &operation).await;
   }
@@ -613,4 +625,18 @@ async fn rollback_assigned(
       .await
     }
   }
+}
+
+fn ensure_validation_evidence(
+  target: &RolloutTarget,
+  operation: &super::admin_cluster_executor::ValidatedOperation,
+) -> anyhow::Result<()> {
+  ensure!(
+    operation.matches_validation_evidence(
+      target.validation_revision.as_deref(),
+      target.validation_digest.as_deref(),
+    ),
+    "operation validation evidence changed after the durable member acknowledgement"
+  );
+  Ok(())
 }

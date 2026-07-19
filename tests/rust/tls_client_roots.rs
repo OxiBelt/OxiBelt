@@ -879,6 +879,8 @@ fn remote_tls_config(
       token_file: None,
       token_file_reload_path: None,
       token_file_reload_base_dir: None,
+      token_file_sha256: None,
+      token_material_pinned: false,
       token_reload_interval_ms: 1000,
       connect_timeout_ms: 5000,
       sign_timeout_ms: 5000,

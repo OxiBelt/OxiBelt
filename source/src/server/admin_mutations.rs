@@ -79,6 +79,7 @@ pub(super) async fn response(
       method,
       path,
       None,
+      None,
       authentication.authenticated_with_break_glass(),
     )
     .await
@@ -106,16 +107,6 @@ pub(super) async fn response(
   let admission = if runtime.cluster_mode() {
     let checks = match authorization_checks(method, path, &bytes, &authorization.actor.principal) {
       Ok(checks) => checks,
-      Err(error)
-        if error
-          .to_string()
-          .contains("secret_reference_activation_unavailable") =>
-      {
-        return text_response(
-          StatusCode::CONFLICT,
-          "secret reference activation is unavailable",
-        );
-      }
       Err(error) => {
         warn!(error = %error, "cluster mutation route validation failed");
         return text_response(StatusCode::BAD_REQUEST, "invalid cluster mutation request");
@@ -217,13 +208,14 @@ pub(super) async fn response(
   let replayable_request = hyper::Request::from_parts(parts, Full::new(bytes));
   let mut response = dispatch_protected(
     replayable_request,
-    state,
+    state.clone(),
     admin_control,
     authorization,
     authentication.authenticated_with_break_glass(),
     method,
     path,
     &execution.request_id,
+    &execution.new_revision,
   )
   .await;
   let status = response.status();
@@ -231,7 +223,7 @@ pub(super) async fn response(
     .finish(
       &execution,
       status,
-      safe_terminal_response(path, status, &execution.request_id),
+      safe_terminal_response(path, status, &execution.request_id, &state),
       &audit,
       &snapshot.admin_audit,
     )
@@ -268,6 +260,7 @@ async fn dispatch_protected(
   method: &Method,
   path: &str,
   mutation_request_id: &str,
+  mutation_logical_revision: &str,
 ) -> Response<ProxyBody> {
   if admin_mutation_resources::handles(method, path) {
     return admin_mutation_resources::response(
@@ -278,6 +271,7 @@ async fn dispatch_protected(
       method,
       path,
       Some(mutation_request_id),
+      Some(mutation_logical_revision),
       authenticated_with_break_glass,
     )
     .await
@@ -577,11 +571,28 @@ fn admission_error_response(error: &MutationAdmissionError) -> Response<ProxyBod
   )
 }
 
-fn safe_terminal_response(path: &str, status: StatusCode, request_id: &str) -> Option<Value> {
+fn safe_terminal_response(
+  path: &str,
+  status: StatusCode,
+  request_id: &str,
+  state: &AppHandle,
+) -> Option<Value> {
   let mut response = json!({
     "ok": status.is_success(),
     "token_recoverable": false,
   });
+  if path == "/admin/v1/config/secret-references/update"
+    && status.is_success()
+    && let Some(binding) = state.snapshot().secret_references.binding()
+    && binding.mutation_request_id == request_id
+  {
+    response["request_id"] = Value::String(binding.mutation_request_id.clone());
+    response["config_logical_revision"] = Value::String(binding.config_logical_revision.clone());
+    response["reference_set_digest"] = Value::String(binding.reference_set_digest.clone());
+    response["runtime_snapshot_revision"] =
+      Value::String(binding.runtime_snapshot_revision.clone());
+    response["target_revision"] = Value::String(binding.target_revision.clone());
+  }
   if path == "/admin/v1/break-glass/activations" && status.is_success() {
     response["activation_id"] = Value::String(request_id.to_string());
   }

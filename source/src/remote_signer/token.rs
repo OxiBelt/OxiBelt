@@ -8,18 +8,30 @@ use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use subtle::ConstantTimeEq;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug)]
 pub(super) struct RemoteSignerTokenProvider {
   inner: Arc<Mutex<RemoteSignerTokenState>>,
 }
 
-#[derive(Debug)]
 struct RemoteSignerTokenState {
   source: RemoteSignerTokenSource,
-  token: [u8; 32],
+  token: Zeroizing<[u8; 32]>,
   reload_interval: Duration,
   next_reload: Option<Instant>,
+}
+
+impl std::fmt::Debug for RemoteSignerTokenState {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("RemoteSignerTokenState")
+      .field("source", &self.source)
+      .field("token", &"[REDACTED]")
+      .field("reload_interval", &self.reload_interval)
+      .field("next_reload", &self.next_reload)
+      .finish()
+  }
 }
 
 #[derive(Debug)]
@@ -41,7 +53,7 @@ impl RemoteSignerTokenProvider {
         source: RemoteSignerTokenSource::Env {
           name: "test-static-token".to_string(),
         },
-        token,
+        token: Zeroizing::new(token),
         reload_interval: Duration::from_secs(1),
         next_reload: None,
       })),
@@ -54,6 +66,24 @@ impl RemoteSignerTokenProvider {
     token_env: &str,
     reload_interval: Duration,
   ) -> anyhow::Result<Self> {
+    Self::from_sources_with_reload(
+      token_file,
+      token_file_reload_base_dir,
+      None,
+      token_env,
+      reload_interval,
+      true,
+    )
+  }
+
+  pub(super) fn from_sources_with_reload(
+    token_file: Option<PathBuf>,
+    token_file_reload_base_dir: Option<PathBuf>,
+    token_file_sha256: Option<&str>,
+    token_env: &str,
+    reload_interval: Duration,
+    reload_file: bool,
+  ) -> anyhow::Result<Self> {
     if reload_interval.is_zero() {
       bail!("remote signer token reload interval must be greater than 0");
     }
@@ -61,14 +91,18 @@ impl RemoteSignerTokenProvider {
     let now = Instant::now();
     let (source, token, next_reload) = match token_file {
       Some(path) => {
-        let token = load_token_from_file(&path, token_file_reload_base_dir.as_deref())?;
+        let token = load_token_from_file(
+          &path,
+          token_file_reload_base_dir.as_deref(),
+          token_file_sha256,
+        )?;
         (
           RemoteSignerTokenSource::File {
             path,
             reload_base_dir: token_file_reload_base_dir,
           },
           token,
-          Some(next_reload_after(now, reload_interval)),
+          reload_file.then(|| next_reload_after(now, reload_interval)),
         )
       }
       None => (
@@ -83,7 +117,7 @@ impl RemoteSignerTokenProvider {
     Ok(Self {
       inner: Arc::new(Mutex::new(RemoteSignerTokenState {
         source,
-        token,
+        token: Zeroizing::new(token),
         reload_interval,
         next_reload,
       })),
@@ -93,19 +127,18 @@ impl RemoteSignerTokenProvider {
   pub(super) fn current_token(&self) -> [u8; 32] {
     let mut state = self.lock_state();
     state.refresh_if_due();
-    state.token
+    *state.token
   }
 
   pub(super) fn force_refresh(&self) {
     let mut state = self.lock_state();
-    state.refresh_file_token(true);
+    if state.next_reload.is_some() {
+      state.refresh_file_token(true);
+    }
   }
 
   pub(super) fn reloadable(&self) -> bool {
-    matches!(
-      &self.lock_state().source,
-      RemoteSignerTokenSource::File { .. }
-    )
+    self.lock_state().next_reload.is_some()
   }
 
   pub(super) fn source_label(&self) -> String {
@@ -142,9 +175,9 @@ impl RemoteSignerTokenState {
       return;
     };
     let now = Instant::now();
-    match load_token_from_file(path, reload_base_dir.as_deref()) {
+    match load_token_from_file(path, reload_base_dir.as_deref(), None) {
       Ok(token) => {
-        self.token = token;
+        self.token = Zeroizing::new(token);
         self.next_reload = Some(next_reload_after(now, self.reload_interval));
       }
       Err(error) => {
@@ -176,10 +209,21 @@ fn load_token_from_env(env_name: &str) -> anyhow::Result<[u8; 32]> {
   parse_token_value(env_name, raw.trim())
 }
 
-fn load_token_from_file(path: &Path, reload_base_dir: Option<&Path>) -> anyhow::Result<[u8; 32]> {
+fn load_token_from_file(
+  path: &Path,
+  reload_base_dir: Option<&Path>,
+  expected_sha256: Option<&str>,
+) -> anyhow::Result<[u8; 32]> {
   let read_path = resolve_token_file_read_path(path, reload_base_dir)?;
-  let raw = std::fs::read_to_string(&read_path)
-    .with_context(|| format!("failed to read {}", path.display()))?;
+  let raw =
+    std::fs::read(&read_path).with_context(|| format!("failed to read {}", path.display()))?;
+  if let Some(expected) = expected_sha256 {
+    let actual = lowercase_hex(&crate::crypto::sha256(&raw));
+    if actual.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
+      bail!("remote signer token file digest does not match the activated pin");
+    }
+  }
+  let raw = std::str::from_utf8(&raw).context("remote signer token file must contain UTF-8")?;
   parse_token_value(&path.display().to_string(), raw.trim())
 }
 
@@ -196,7 +240,12 @@ fn resolve_token_file_read_path(
       base_dir.display()
     )
   })?;
-  let canonical_path = path.canonicalize().with_context(|| {
+  let candidate = if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    canonical_base_dir.join(path)
+  };
+  let canonical_path = candidate.canonicalize().with_context(|| {
     format!(
       "failed to resolve remote signer token file {}",
       path.display()
@@ -224,6 +273,15 @@ fn parse_token_value(field: &str, raw: &str) -> anyhow::Result<[u8; 32]> {
   decoded
     .try_into()
     .map_err(|_| anyhow!("{field} must contain exactly 32 bytes"))
+}
+
+fn lowercase_hex(value: &[u8]) -> String {
+  let mut output = String::with_capacity(value.len() * 2);
+  for byte in value {
+    use std::fmt::Write as _;
+    let _ = write!(output, "{byte:02x}");
+  }
+  output
 }
 
 pub(super) fn token_to_wire(token: &[u8; 32]) -> String {

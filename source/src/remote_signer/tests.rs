@@ -151,6 +151,40 @@ fn token_file_provider_reloads_and_preserves_last_good_token() {
 }
 
 #[test]
+fn pinned_token_file_is_verified_at_the_consumer_read() {
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let token_file = temp_dir.path().join("keysigner-token.b64");
+  write_token_file(&token_file, &TEST_TOKEN);
+  let raw = std::fs::read(&token_file).expect("token fixture should be readable");
+  let expected = crate::crypto::sha256(&raw)
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect::<String>();
+  let provider = RemoteSignerTokenProvider::from_sources_with_reload(
+    Some(PathBuf::from("keysigner-token.b64")),
+    Some(temp_dir.path().to_path_buf()),
+    Some(&expected),
+    "UNUSED_TOKEN_ENV",
+    Duration::from_millis(1),
+    false,
+  )
+  .expect("matching token pin should load");
+  assert_eq!(provider.current_token(), TEST_TOKEN);
+  assert!(!provider.reloadable());
+
+  let error = RemoteSignerTokenProvider::from_sources_with_reload(
+    Some(token_file),
+    None,
+    Some(&"0".repeat(64)),
+    "UNUSED_TOKEN_ENV",
+    Duration::from_millis(1),
+    false,
+  )
+  .expect_err("mismatched token pin must fail before activation");
+  assert!(error.to_string().contains("digest"));
+}
+
+#[test]
 fn token_file_provider_follows_symlink_retargets_with_base_guard() {
   let temp_dir = tempfile::tempdir().expect("temp dir should create");
   let token_file = temp_dir.path().join("keysigner-token.b64");

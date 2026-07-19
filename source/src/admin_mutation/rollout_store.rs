@@ -166,6 +166,8 @@ pub(crate) struct RolloutTarget {
   pub(crate) boot_id: Option<String>,
   pub(crate) instance_epoch: Option<i64>,
   pub(crate) effect_started_at: Option<String>,
+  pub(crate) validation_revision: Option<String>,
+  pub(crate) validation_digest: Option<String>,
   pub(crate) applied_revision: Option<String>,
   pub(crate) applied_digest: Option<String>,
   pub(crate) restored_revision: Option<String>,
@@ -440,7 +442,8 @@ pub(crate) async fn load_targets(
 ) -> anyhow::Result<Vec<RolloutTarget>> {
   let rows = sqlx::query(
     "SELECT instance_id, state, state_version, assignment_epoch, boot_id, instance_epoch,
-            effect_started_at::text AS effect_started_at, applied_revision, applied_digest,
+            effect_started_at::text AS effect_started_at, validation_revision, validation_digest,
+            applied_revision, applied_digest,
             restored_revision, restored_digest, error_code, updated_at::text AS updated_at
        FROM oxibelt_admin_mutation_targets
       WHERE namespace = $1 AND request_id = $2 ORDER BY instance_id ASC",
@@ -559,7 +562,8 @@ async fn select_target_tx(
 ) -> anyhow::Result<sqlx::postgres::PgRow> {
   sqlx::query(
     "SELECT instance_id, state, state_version, assignment_epoch, boot_id, instance_epoch,
-            effect_started_at::text AS effect_started_at, applied_revision, applied_digest,
+            effect_started_at::text AS effect_started_at, validation_revision, validation_digest,
+            applied_revision, applied_digest,
             restored_revision, restored_digest, error_code, updated_at::text AS updated_at
        FROM oxibelt_admin_mutation_targets
       WHERE namespace = $1 AND request_id = $2 AND instance_id = $3",
@@ -581,6 +585,8 @@ fn target_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<RolloutTarget>
     boot_id: row.try_get("boot_id")?,
     instance_epoch: row.try_get("instance_epoch")?,
     effect_started_at: row.try_get("effect_started_at")?,
+    validation_revision: row.try_get("validation_revision")?,
+    validation_digest: row.try_get("validation_digest")?,
     applied_revision: row.try_get("applied_revision")?,
     applied_digest: row.try_get("applied_digest")?,
     restored_revision: row.try_get("restored_revision")?,

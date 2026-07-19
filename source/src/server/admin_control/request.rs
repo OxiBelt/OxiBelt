@@ -4,6 +4,8 @@
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
+use crate::secret_activation::SecretReferenceUpdateRequest;
+
 use super::{AdminControlResponse, ControlPlaneConfigPermissions};
 
 pub(in crate::server) enum AdminControlCommand {
@@ -24,6 +26,18 @@ pub(in crate::server) enum AdminControlCommand {
     actor: String,
     if_match: Option<String>,
     respond: oneshot::Sender<AdminControlResponse>,
+  },
+  ActivateSecretReference {
+    actor: String,
+    if_match: Option<String>,
+    mutation_request_id: String,
+    logical_revision: Option<String>,
+    expected_reference_set_digest: Option<String>,
+    request: SecretReferenceUpdateRequest,
+    respond: oneshot::Sender<AdminControlResponse>,
+  },
+  ExpireSecretRollback {
+    runtime_snapshot_revision: String,
   },
   SyncFiles {
     actor: String,

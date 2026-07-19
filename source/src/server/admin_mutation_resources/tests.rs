@@ -44,6 +44,7 @@ fn secret_reference_allowlist_excludes_control_plane_backends() {
 #[test]
 fn file_and_environment_references_have_distinct_pinning_rules() {
   let file = SecretReferenceUpdateRequest {
+    schema_version: 1,
     field: "tls.remote_signer.token_file".to_string(),
     reference: "signer/token.b64".to_string(),
     sha256: Some("b".repeat(64)),
@@ -51,6 +52,7 @@ fn file_and_environment_references_have_distinct_pinning_rules() {
   assert!(validate_secret_reference(&file).is_ok());
 
   let mut environment = SecretReferenceUpdateRequest {
+    schema_version: 1,
     field: "tls.remote_signer.token_env".to_string(),
     reference: "OXIBELT_KEYSIGNER_TOKEN_NEXT".to_string(),
     sha256: None,

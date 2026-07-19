@@ -24,6 +24,7 @@ pub(crate) enum CheckpointOperation {
   FileSync,
   DownstreamTlsReload,
   KeyRotation,
+  SecretReference,
 }
 
 #[derive(Clone)]

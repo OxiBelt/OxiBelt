@@ -208,6 +208,21 @@ impl ClusterMutationCommand {
     sha256_digest(&self.body)
   }
 
+  pub(crate) fn mutation_identity(&self) -> anyhow::Result<(String, String, String)> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      MUTATION_HEADER,
+      HeaderValue::from_str(&self.mutation_header)
+        .context("encrypted mutation envelope is not a valid header value")?,
+    );
+    let envelope = parse_mutation_header(&headers)?;
+    Ok((
+      envelope.unsigned.request_id,
+      envelope.unsigned.target.cluster_id,
+      envelope.unsigned.target.membership_revision,
+    ))
+  }
+
   pub(crate) fn into_plaintext(self) -> anyhow::Result<MutationArtifactPlaintext> {
     let signed_content_digest = self.signed_content_digest();
     let wire = ClusterMutationCommandWire {
@@ -449,12 +464,10 @@ fn execution_model(method: &Method, path_and_query: &str) -> anyhow::Result<Clus
         | "/admin/v1/files/sync"
         | "/admin/v1/tls/downstream/reload"
         | "/admin/v1/keys/rotate"
+        | "/admin/v1/config/secret-references/update"
     )
   {
     return Ok(ClusterExecutionModel::PerMember);
-  }
-  if path == "/admin/v1/config/secret-references/update" {
-    bail!("secret_reference_activation_unavailable");
   }
   if (path.starts_with("/admin/v1/ipm/")
     && matches!(*method, Method::POST | Method::PATCH | Method::DELETE)

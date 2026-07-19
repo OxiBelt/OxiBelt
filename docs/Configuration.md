@@ -842,6 +842,12 @@ OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, ce
 
 Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signing keys out of the OxiBelt process/container when possible. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to certificate chains and remote signing capability, but it should not also contain private keys or the DNS/ACME credentials needed to mint arbitrary new certificates. A compromised OxiBelt process that still has signer socket and token access may request signatures while that access remains valid, so socket permissions, peer UID/GID allowlists, token rotation, and process isolation remain important.
 
+When `tls.remote_signer.token_file` is selected through the atomic secret-reference
+Admin endpoint, OxiBelt pins the resolved token to that immutable runtime snapshot.
+That instance changes tokens only through another activation, rollback, full config
+load, or restart. Startup configurations that were not atomically activated retain
+their configured file-reload behavior.
+
 ## QUIC Sections
 
 ```toml
@@ -2266,14 +2272,14 @@ request owns a cancellation-safe rendezvous through every forward phase. Owner
 loss fails before an effect or initiates rollback; an origin crash prevents
 forward takeover and reaches rollback after the durable phase timeout rather
 than committing a credential whose token cannot be returned. Configuration,
-file, downstream-TLS, and key changes are applied per member. IPM and
+file, downstream-TLS, key, and secret-reference changes are applied per member. IPM and
 break-glass changes use a staged PostgreSQL mutation published once after all
 members validate; the deterministic canary observes it first, then every
 remaining member observes the same revision and digest before terminal commit.
 Failure restores the encrypted before-image once, and an unprovable restoration
-becomes `indeterminate`. Typed secret reference
-activation remains unavailable and returns
-`409 secret_reference_activation_unavailable`.
+becomes `indeterminate`. Secret-reference validation additionally persists each
+member's reference-set digest and assigned runtime revision; any mismatch fails
+before the canary can apply.
 
 Protected requests carry unpadded base64url JSON in
 `X-OxiBelt-Mutation`. The strict envelope contains `version`, `signer_id`, a
@@ -2297,9 +2303,26 @@ and unresolved prior outcomes return `409`.
 contained key path and reloads downstream TLS; raw private-key values are
 rejected. Admin TLS, QUIC host-key, and remote-signer activation are not
 supported by this endpoint. `POST /admin/v1/config/secret-references/update`
-validates its typed environment/file-reference allowlist and rejects raw secret
-values, but the running configuration has no atomic override slot. It therefore
-returns `409 secret_reference_activation_unavailable` without changing state.
+activates one schema-version-1 typed environment or contained-file reference.
+The request uses `field`, `reference`, and, for a file, a required lowercase
+`sha256`; `schema_version` defaults to `1`. Raw values,
+absolute/traversing paths, symlinks, unsupported fields, oversized values, and
+mismatched file digests fail closed. The endpoint re-resolves the complete
+active reference set, rebuilds an immutable runtime candidate, validates
+dependent certificate/key/CA material and configured HTTPS connectivity, then
+performs one atomic snapshot compare-and-swap. Readers retain their complete old
+snapshot or acquire the complete new one. Candidate failure or a competing
+activation leaves the old snapshot active.
+
+Successful metadata binds the mutation request, logical config revision, keyed
+reference-set digest, runtime snapshot revision, and instance or cluster rollout
+target. Only those redacted values may enter receipts, audit records, logs, and
+metrics. `admin_cluster` requires every configured member to report the same
+reference-set digest and runtime revision before canary apply. A prior snapshot
+is retained for the larger of the connection-drain and rollout timeout windows,
+remains available to rollback during that grace, and is then dropped. Owned
+candidate buffers and replaced remote-signer tokens are zeroized on drop; memory
+copied into TLS or HTTP libraries is not claimed to be zeroized.
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
@@ -2581,7 +2604,9 @@ status. This bounded read view is diagnostic; terminal mutation commit is the
 authoritative convergence proof. `POST /admin/v1/keys/rotate` verifies and
 reloads only the configured default or SNI downstream TLS key path. `POST
 /admin/v1/config/secret-references/update` validates the allowlisted reference
-shape but returns `409` because atomic activation is unavailable. Break-glass activation is
+shape, preflights the complete runtime candidate, and atomically activates it.
+The response contains only bound revisions and a keyed reference-set digest;
+Kubernetes immutable rollout mode returns an immutable-rollout conflict. Break-glass activation is
 exposed through `GET /admin/v1/break-glass/activations/self`,
 `POST /admin/v1/break-glass/activations`, and
 `POST /admin/v1/break-glass/activations/{id}/revoke`.

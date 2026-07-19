@@ -29,6 +29,7 @@ fn checkpoint_operation(kind: OperationKind) -> CheckpointOperation {
     OperationKind::FileSync => CheckpointOperation::FileSync,
     OperationKind::DownstreamTlsReload => CheckpointOperation::DownstreamTlsReload,
     OperationKind::KeyRotation => CheckpointOperation::KeyRotation,
+    OperationKind::SecretReference => CheckpointOperation::SecretReference,
     OperationKind::SharedStaged => CheckpointOperation::ConfigLoad,
   }
 }

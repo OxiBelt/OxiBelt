@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tracing::warn;
 use url::form_urlencoded;
+use zeroize::Zeroizing;
 
 use crate::config::{
   Config, ExternalAuthClaimHeader, ExternalAuthConfig, ExternalAuthFailPolicy, ExternalAuthProvider,
@@ -43,8 +44,8 @@ struct ExternalAuthProviderRuntime {
 
 #[derive(Clone)]
 struct ClientCredentials {
-  id: String,
-  secret: String,
+  id: Zeroizing<String>,
+  secret: Zeroizing<String>,
 }
 
 pub enum ExternalAuthOutcome {
@@ -316,14 +317,16 @@ fn build_provider_runtime(
     .collect::<anyhow::Result<Vec<_>>>()?;
   let client_credentials = match (&config.client_id_env, &config.client_secret_env) {
     (Some(id_env), Some(secret_env)) => Some(ClientCredentials {
-      id: std::env::var(id_env)
-        .with_context(|| format!("failed to read external_auth {} client_id_env", config.name))?,
-      secret: std::env::var(secret_env).with_context(|| {
+      id: Zeroizing::new(
+        std::env::var(id_env)
+          .with_context(|| format!("failed to read external_auth {} client_id_env", config.name))?,
+      ),
+      secret: Zeroizing::new(std::env::var(secret_env).with_context(|| {
         format!(
           "failed to read external_auth {} client_secret_env",
           config.name
         )
-      })?,
+      })?),
     }),
     _ => None,
   };
@@ -514,10 +517,14 @@ fn claim_to_string(value: Option<&JsonValue>) -> Option<String> {
 }
 
 fn basic_auth(credentials: &ClientCredentials) -> String {
-  let raw = format!("{}:{}", credentials.id, credentials.secret);
+  let raw = Zeroizing::new(format!(
+    "{}:{}",
+    credentials.id.as_str(),
+    credentials.secret.as_str()
+  ));
   format!(
     "Basic {}",
-    base64::engine::general_purpose::STANDARD.encode(raw)
+    base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
   )
 }
 

@@ -364,6 +364,8 @@ mod tests {
       boot_id: Some("boot-a".to_string()),
       instance_epoch: Some(1),
       effect_started_at: effect_started.then(|| "2026-07-18T00:00:00Z".to_string()),
+      validation_revision: None,
+      validation_digest: None,
       applied_revision: None,
       applied_digest: None,
       restored_revision: None,

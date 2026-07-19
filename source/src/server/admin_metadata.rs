@@ -75,6 +75,7 @@ fn capabilities_response(
     "admin_operation_webtransport": snapshot.config.admin.operations.webtransport,
     "admin_audit": snapshot.config.admin.audit.enabled,
     "admin_mutation_replay": snapshot.config.admin.mutations.mode.enabled(),
+    "atomic_secret_reference_activation": !snapshot.config.rollout.is_immutable(),
   });
   debug_assert_capability_feature_keys(&features);
   let workload_identity = &snapshot.config.admin.workload_identity;

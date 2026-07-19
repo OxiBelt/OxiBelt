@@ -24,6 +24,12 @@ pub struct TlsRemoteSignerConfig {
   pub token_file_reload_path: Option<PathBuf>,
   #[serde(skip)]
   pub token_file_reload_base_dir: Option<PathBuf>,
+  /// Runtime-only digest pin for an Admin-activated token file.
+  #[serde(skip)]
+  pub token_file_sha256: Option<String>,
+  /// Runtime-only: an Admin activation pins the resolved token to its immutable snapshot.
+  #[serde(skip)]
+  pub token_material_pinned: bool,
   #[serde(default = "default_tls_remote_signer_token_reload_interval_ms")]
   pub token_reload_interval_ms: u64,
   #[serde(default = "default_tls_remote_signer_connect_timeout_ms")]
@@ -46,6 +52,8 @@ impl Default for TlsRemoteSignerConfig {
       token_file: None,
       token_file_reload_path: None,
       token_file_reload_base_dir: None,
+      token_file_sha256: None,
+      token_material_pinned: false,
       token_reload_interval_ms: default_tls_remote_signer_token_reload_interval_ms(),
       connect_timeout_ms: default_tls_remote_signer_connect_timeout_ms(),
       sign_timeout_ms: default_tls_remote_signer_sign_timeout_ms(),

@@ -101,7 +101,23 @@ fn classify_validation(
     .iter()
     .all(|target| matches!(target.state, TargetState::Validated | TargetState::Applying))
   {
-    RolloutDirective::ApplyCanary(deterministic_canary(&record.request_id, members))
+    let validation_matches = targets.iter().all(|target| {
+      target.validation_revision.as_deref() == Some(record.new_revision.as_str())
+        && target.validation_digest.is_some()
+    });
+    let validation_digest = targets
+      .first()
+      .and_then(|target| target.validation_digest.as_deref());
+    let validation_converged = validation_matches
+      && validation_digest.is_some()
+      && targets
+        .iter()
+        .all(|target| target.validation_digest.as_deref() == validation_digest);
+    if validation_converged {
+      RolloutDirective::ApplyCanary(deterministic_canary(&record.request_id, members))
+    } else {
+      RolloutDirective::FailBeforeApply("rollout_validation_evidence_mismatch")
+    }
   } else {
     let pending = targets
       .iter()

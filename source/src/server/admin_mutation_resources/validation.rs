@@ -10,6 +10,7 @@ use super::{
   BreakGlassActivationRequest, KeyRotationRequest, KeyRotationTarget, SecretReferenceField,
   SecretReferenceUpdateRequest, constant_time_ascii_eq,
 };
+use crate::secret_activation::SECRET_REFERENCE_SCHEMA_VERSION;
 
 const MAX_PINNED_KEY_BYTES: u64 = 1024 * 1024;
 
@@ -34,7 +35,11 @@ pub(super) fn validate_key_rotation(body: &KeyRotationRequest) -> Result<(), &'s
 pub(super) fn validate_secret_reference(
   body: &SecretReferenceUpdateRequest,
 ) -> Result<SecretReferenceField, &'static str> {
-  let field = SecretReferenceField::parse(&body.field)?;
+  if body.schema_version != SECRET_REFERENCE_SCHEMA_VERSION {
+    return Err("secret reference schema_version is unsupported");
+  }
+  let field = SecretReferenceField::parse(&body.field)
+    .map_err(|_| "secret reference field is not allowlisted")?;
   validate_safe_reference(&body.reference)?;
   if field.is_file() {
     validate_relative_path(&body.reference)?;

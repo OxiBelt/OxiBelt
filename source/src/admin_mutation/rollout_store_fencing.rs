@@ -1,9 +1,8 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Transaction};
+use std::collections::BTreeSet;
 
 use super::{HeartbeatUpdate, TargetState};
 use crate::admin_mutation::ledger::{MutationState, validate_identifier};
@@ -65,6 +64,8 @@ pub(crate) struct FencedTargetTransition {
   pub(crate) assignment_epoch: i64,
   pub(crate) next_state: TargetState,
   pub(crate) effect_started: bool,
+  pub(crate) validation_revision: Option<String>,
+  pub(crate) validation_digest: Option<String>,
   pub(crate) applied_revision: Option<String>,
   pub(crate) applied_digest: Option<String>,
   pub(crate) restored_revision: Option<String>,

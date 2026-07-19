@@ -267,3 +267,82 @@ token_validity_seconds = 60
   );
   assert!(snapshot.request_path_features.person_proof_api);
 }
+
+#[tokio::test]
+async fn secret_material_retires_only_after_configured_grace() {
+  const TEST_NAME: &str =
+    "server::admin_control::tests::secret_material_retires_only_after_configured_grace";
+  if common::run_test_in_subprocess_with_env(
+    TEST_NAME,
+    &[
+      ("OXIBELT_GRACE_CLIENT_ID", "grace-client"),
+      ("OXIBELT_GRACE_OLD_SECRET", "old-grace-private"),
+    ],
+  ) {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("secret-retirement-grace");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "secret-retirement-grace");
+  let raw = format!(
+    "{}\n{}",
+    common::minimal_config_toml(&cert_path, &key_path),
+    r#"
+[[external_auth]]
+name = "oidc"
+provider = "o_auth2"
+endpoint = "http://127.0.0.1:9/introspect"
+client_id_env = "OXIBELT_GRACE_CLIENT_ID"
+client_secret_env = "OXIBELT_GRACE_OLD_SECRET"
+"#
+  );
+  let mut config: Config = toml::from_str(&raw).expect("retirement config should parse");
+  config.runtime.drain.graceful_timeout_ms = 40;
+  config.runtime.drain.long_connection_close_delay_ms = 75;
+  config
+    .validate()
+    .expect("retirement config should validate");
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("retirement snapshot should build");
+  let material = snapshot
+    .secret_references
+    .material_lifetime_probe()
+    .expect("configured secret material should have a lifetime probe");
+
+  let before = Instant::now();
+  let (runtime_revision, expires_at) =
+    snapshot_mutation::rollback_retirement_metadata(&snapshot, true);
+  let after = Instant::now();
+  let runtime_revision = runtime_revision.expect("secret rollback must be revision-bound");
+  let expires_at = expires_at.expect("secret rollback must have an expiry");
+  let expected_grace = Duration::from_millis(75);
+  assert!(expires_at >= before + expected_grace);
+  assert!(expires_at <= after + expected_grace);
+
+  let mut rollback = Some(RollbackSnapshot {
+    snapshot,
+    effective_config: None,
+    secret_runtime_revision: Some(runtime_revision.clone()),
+    expires_at: Some(expires_at),
+  });
+  assert!(!expire_secret_rollback_if_due(
+    &mut rollback,
+    "wrong-runtime-revision",
+    expires_at
+  ));
+  assert!(!expire_secret_rollback_if_due(
+    &mut rollback,
+    &runtime_revision,
+    expires_at - Duration::from_nanos(1)
+  ));
+  assert!(material.upgrade().is_some());
+  assert!(expire_secret_rollback_if_due(
+    &mut rollback,
+    &runtime_revision,
+    expires_at
+  ));
+  assert!(rollback.is_none());
+  assert!(material.upgrade().is_none());
+}

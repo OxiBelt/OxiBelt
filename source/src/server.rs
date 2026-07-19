@@ -120,6 +120,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "admin_operation_webtransport",
   "admin_audit",
   "admin_mutation_replay",
+  "atomic_secret_reference_activation",
 ];
 pub const ADMIN_OPERATION_KIND_WIRE_VALUES: &[&str] = &[
   "cache_warm",
@@ -603,6 +604,22 @@ async fn admin_response_inner(
       &path,
     )
     .await;
+  }
+
+  if method == ::http::Method::POST && path == "/admin/v1/config/secret-references/update" {
+    return admin_mutation_resources::response(
+      request,
+      state.clone(),
+      admin_control.clone(),
+      &authorization,
+      &method,
+      &path,
+      None,
+      None,
+      authenticated_with_break_glass,
+    )
+    .await
+    .unwrap_or_else(|| text_response(StatusCode::NOT_FOUND, "not found"));
   }
 
   if path == "/admin/v1/audit" {

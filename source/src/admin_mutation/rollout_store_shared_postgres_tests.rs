@@ -157,6 +157,8 @@ async fn postgres_shared_publication_is_checkpointed_and_consumed_once() {
         assignment_epoch: coordinator.coordinator_epoch,
         next_state: TargetState::Validated,
         effect_started: false,
+        validation_revision: Some("r-2".to_string()),
+        validation_digest: Some(candidate_digest.clone()),
         applied_revision: None,
         applied_digest: None,
         restored_revision: None,

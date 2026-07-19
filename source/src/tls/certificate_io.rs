@@ -2,8 +2,21 @@ use std::fs;
 
 use anyhow::{Context, anyhow, bail};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::sign::CertifiedKey;
 
-use crate::config::{OcspConfig, OcspMode, canonicalize_existing_file};
+use crate::config::{CryptoConfig, OcspConfig, OcspMode, canonicalize_existing_file};
+
+pub(crate) fn validate_local_certificate_key_pair(
+  cert_chain: &std::path::Path,
+  private_key: &std::path::Path,
+  crypto: &CryptoConfig,
+) -> anyhow::Result<()> {
+  let certs = load_certs(cert_chain)?;
+  let key = load_private_key(private_key)?;
+  let provider = super::provider::crypto_provider(crypto)?;
+  CertifiedKey::from_der(certs, key, &provider)?;
+  Ok(())
+}
 
 pub(in crate::tls) fn load_certs(
   path: &std::path::Path,

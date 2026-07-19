@@ -120,6 +120,8 @@ pub(super) fn statements() -> &'static [&'static str] {
        boot_id text NULL,
        instance_epoch bigint NULL,
        effect_started_at timestamptz NULL,
+       validation_revision text NULL,
+       validation_digest text NULL,
        applied_revision text NULL,
        applied_digest text NULL,
        restored_revision text NULL,
@@ -277,6 +279,10 @@ pub(super) fn statements() -> &'static [&'static str] {
        ADD COLUMN IF NOT EXISTS instance_epoch bigint NULL",
     "ALTER TABLE oxibelt_admin_mutation_targets
        ADD COLUMN IF NOT EXISTS effect_started_at timestamptz NULL",
+    "ALTER TABLE oxibelt_admin_mutation_targets
+       ADD COLUMN IF NOT EXISTS validation_revision text NULL",
+    "ALTER TABLE oxibelt_admin_mutation_targets
+       ADD COLUMN IF NOT EXISTS validation_digest text NULL",
     "ALTER TABLE oxibelt_admin_mutation_targets
        ADD COLUMN IF NOT EXISTS restored_revision text NULL",
     "ALTER TABLE oxibelt_admin_mutation_targets

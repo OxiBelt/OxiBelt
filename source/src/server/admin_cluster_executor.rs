@@ -24,6 +24,8 @@ mod file_authorization;
 use file_authorization::derive_file_checks;
 mod key_rotation;
 use key_rotation::{decode_key_rotation, validate_key_rotation_state};
+mod operation_validation;
+mod secret_reference;
 mod shared_staged;
 use shared_staged::decode_shared_operation;
 pub(crate) use shared_staged::{
@@ -46,6 +48,7 @@ enum OperationKind {
   FileSync,
   DownstreamTlsReload,
   KeyRotation,
+  SecretReference,
   SharedStaged,
 }
 
@@ -57,6 +60,8 @@ pub(crate) struct ValidatedOperation {
   operational_precondition_revision: String,
   candidate_revision: String,
   candidate_digest: String,
+  validation_digest: String,
+  mutation_request_id: String,
   body: Zeroizing<Vec<u8>>,
   permissions: ControlPlaneConfigPermissions,
   file_apply: Option<AdminApplyMode>,
@@ -75,6 +80,7 @@ impl fmt::Debug for ValidatedOperation {
       )
       .field("candidate_revision", &self.candidate_revision)
       .field("candidate_digest", &self.candidate_digest)
+      .field("validation_digest", &self.validation_digest)
       .field("body_len", &self.body.len())
       .finish_non_exhaustive()
   }
@@ -83,6 +89,22 @@ impl fmt::Debug for ValidatedOperation {
 impl ValidatedOperation {
   pub(crate) fn candidate_evidence(&self) -> ExecutionEvidence {
     candidate_evidence(self)
+  }
+
+  pub(crate) fn validation_evidence(&self) -> ExecutionEvidence {
+    ExecutionEvidence {
+      revision: self.candidate_revision.clone(),
+      digest: self.validation_digest.clone(),
+    }
+  }
+
+  pub(crate) fn matches_validation_evidence(
+    &self,
+    revision: Option<&str>,
+    digest: Option<&str>,
+  ) -> bool {
+    revision == Some(self.candidate_revision.as_str())
+      && digest == Some(self.validation_digest.as_str())
   }
 
   pub(crate) fn is_shared_staged(&self) -> bool {
@@ -141,61 +163,6 @@ impl std::error::Error for ExecutionError {}
 impl AdminClusterExecutor {
   pub(crate) fn new(state: AppHandle, control: AdminControlHandle) -> Self {
     Self { state, control }
-  }
-
-  pub(crate) async fn validate(
-    &self,
-    command: &ClusterMutationCommand,
-  ) -> Result<ValidatedOperation, ExecutionError> {
-    let path = command.path_and_query.split('?').next().unwrap_or_default();
-    let (kind, checks, file_apply) =
-      derive_operation(&command.method, path, command.body(), &command.principal)
-        .map_err(|error| rejected(error.to_string()))?;
-    if !command.authorization.matches_checks(&checks) {
-      return Err(rejected(
-        "authenticated authorization evidence does not match the recovered Admin operation",
-      ));
-    }
-    if path.starts_with("/admin/v1/break-glass/") && !command.actor.authenticated_with_break_glass {
-      return Err(rejected(
-        "break-glass mutation requires authenticated break-glass credential evidence",
-      ));
-    }
-    if (kind == OperationKind::SharedStaged)
-      != (command.execution_model == ClusterExecutionModel::SharedStaged)
-    {
-      return Err(rejected(
-        "cluster execution model does not match the typed operation",
-      ));
-    }
-    let permissions = ControlPlaneConfigPermissions {
-      admin_update_config: command.authorization.admin_update_config,
-      ipm_update_config: command.authorization.ipm_update_config,
-    };
-    let candidate_digest = command.signed_content_digest();
-    let shared = if kind == OperationKind::SharedStaged {
-      let (evidence, _) =
-        decode_shared_operation(&command.method, path, command.body(), &command.principal)
-          .map_err(|error| rejected(error.to_string()))?;
-      Some(evidence.attach(command, path, &candidate_digest))
-    } else {
-      None
-    };
-    self
-      .validate_candidate(kind, command.body(), permissions)
-      .await?;
-    Ok(ValidatedOperation {
-      kind,
-      actor: command.actor.ipm_actor(),
-      previous_revision: command.expected_previous_revision.clone(),
-      operational_precondition_revision: command.precondition_revision.clone(),
-      candidate_revision: command.new_revision.clone(),
-      candidate_digest,
-      body: Zeroizing::new(command.body().to_vec()),
-      permissions,
-      file_apply,
-      shared,
-    })
   }
 
   pub(crate) async fn checkpoint(
@@ -302,9 +269,29 @@ impl AdminClusterExecutor {
           .reload_downstream_tls(operation.actor.name.clone(), if_match)
           .await
       }
+      OperationKind::SecretReference => {
+        secret_reference::apply(&self.control, operation, if_match).await?
+      }
       OperationKind::SharedStaged => return Err(shared_staged_required()),
     };
     require_success(response.status, &response.body)?;
+    if operation.kind == OperationKind::SecretReference {
+      let digest = response
+        .body
+        .get("reference_set_digest")
+        .and_then(|value| value.as_str());
+      let runtime_revision = response
+        .body
+        .get("runtime_snapshot_revision")
+        .and_then(|value| value.as_str());
+      if digest != Some(operation.validation_digest.as_str())
+        || runtime_revision != Some(operation.candidate_revision.as_str())
+      {
+        return Err(indeterminate(
+          "secret activation result does not match validated rollout evidence",
+        ));
+      }
+    }
     self
       .observe(operation, &candidate_evidence(operation))
       .await
@@ -335,6 +322,9 @@ impl AdminClusterExecutor {
       OperationKind::FileSync => {}
       OperationKind::KeyRotation => validate_key_rotation_state(&self.state, &operation.body)
         .map_err(|error| indeterminate(error.to_string()))?,
+      OperationKind::SecretReference => {
+        secret_reference::observe(&self.state, operation)?;
+      }
       OperationKind::ConfigRollback | OperationKind::DownstreamTlsReload => {}
       OperationKind::SharedStaged => return Err(shared_staged_required()),
     }
@@ -398,17 +388,13 @@ impl AdminClusterExecutor {
   pub(crate) async fn recover(
     &self,
     checkpoint: &MutationCheckpoint,
-    command: &ClusterMutationCommand,
+    operation: &ValidatedOperation,
   ) -> RecoveryOutcome {
-    let operation = match self.validate(command).await {
-      Ok(operation) => operation,
-      Err(error) => return RecoveryOutcome::Indeterminate(error.to_string()),
-    };
-    if let Err(error) = self.verify_checkpoint(&operation, checkpoint) {
+    if let Err(error) = self.verify_checkpoint(operation, checkpoint) {
       return RecoveryOutcome::Indeterminate(error.to_string());
     }
     if operation.kind == OperationKind::SharedStaged {
-      return operation.shared.map_or_else(
+      return operation.shared.clone().map_or_else(
         || RecoveryOutcome::Indeterminate("shared operation was not decoded".to_string()),
         RecoveryOutcome::SharedStaged,
       );
@@ -422,7 +408,7 @@ impl AdminClusterExecutor {
       )
       .is_ok()
       {
-        return RecoveryOutcome::CandidateApplied(candidate_evidence(&operation));
+        return RecoveryOutcome::CandidateApplied(candidate_evidence(operation));
       }
       if admin_control::file_sync::verify_cluster_file_state(
         checkpoint.files(),
@@ -449,6 +435,25 @@ impl AdminClusterExecutor {
           .to_string(),
       );
     }
+    if operation.kind == OperationKind::SecretReference {
+      if self
+        .observe(operation, &candidate_evidence(operation))
+        .await
+        .is_ok()
+      {
+        return RecoveryOutcome::CandidateApplied(candidate_evidence(operation));
+      }
+      if checkpoint
+        .snapshot()
+        .is_some_and(|snapshot| self.state.snapshot().config == snapshot.config)
+      {
+        return RecoveryOutcome::PreviousRestored(previous_evidence(checkpoint));
+      }
+      return RecoveryOutcome::Indeterminate(
+        "secret-reference state matches neither candidate nor authenticated before-image"
+          .to_string(),
+      );
+    }
     if checkpoint
       .snapshot()
       .is_some_and(|snapshot| self.state.snapshot().config == snapshot.config)
@@ -466,7 +471,8 @@ impl AdminClusterExecutor {
     kind: OperationKind,
     body: &[u8],
     permissions: ControlPlaneConfigPermissions,
-  ) -> Result<(), ExecutionError> {
+    command: &ClusterMutationCommand,
+  ) -> Result<Option<String>, ExecutionError> {
     let active = self.state.snapshot();
     match kind {
       OperationKind::ConfigLoad => {
@@ -497,9 +503,14 @@ impl AdminClusterExecutor {
       }
       OperationKind::KeyRotation => validate_key_rotation_state(&self.state, body)
         .map_err(|error| rejected(error.to_string()))?,
+      OperationKind::SecretReference => {
+        return secret_reference::validate(&self.state, command)
+          .await
+          .map(Some);
+      }
       OperationKind::SharedStaged => {}
     }
-    Ok(())
+    Ok(None)
   }
 
   fn verify_checkpoint(
@@ -576,7 +587,8 @@ fn derive_operation(
       (OperationKind::FileSync, Some(request.apply))
     }
     "/admin/v1/config/secret-references/update" => {
-      bail!("secret_reference_activation_unavailable")
+      secret_reference::authorization_checks(body, &mut checks)?;
+      (OperationKind::SecretReference, None)
     }
     value if value.starts_with("/admin/v1/ipm/") || value.starts_with("/admin/v1/break-glass/") => {
       let (_, derived) = decode_shared_operation(method, value, body, principal)?;

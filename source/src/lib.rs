@@ -54,6 +54,7 @@ pub mod routes;
 pub mod runtime;
 pub(crate) mod runtime_health;
 pub mod runtime_introspection;
+pub(crate) mod secret_activation;
 pub mod server;
 pub mod shared_state;
 pub(crate) mod sni_forward;

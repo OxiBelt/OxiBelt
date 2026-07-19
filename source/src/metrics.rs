@@ -1,10 +1,8 @@
-//! Prometheus metrics registration and update helpers.
-//! Label values are constrained at call sites so exported series remain low-cardinality.
+//! Prometheus metrics registration with low-cardinality labels constrained at call sites.
+use http::StatusCode;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
-use http::StatusCode;
 
 use crate::cache::CacheStats;
 use crate::config::{MetricsConfig, MetricsDetail};
@@ -24,6 +22,7 @@ mod pool;
 mod shared_state;
 mod shared_state_api;
 pub(crate) use shared_state_api::SharedStatePoolStatus;
+mod secret_activation;
 mod sni_forward;
 mod stream;
 mod upstream_client;
@@ -60,6 +59,7 @@ pub struct Metrics {
   request_mirror_errors_total: AtomicU64,
   request_mirror_skips_total: AtomicU64,
   admin_audit: admin_audit::AdminAuditMetrics,
+  secret_activation: secret_activation::SecretActivationMetrics,
   mitigation_queued_total: AtomicU64,
   mitigation_dropped_total: AtomicU64,
   mitigation_write_errors_total: AtomicU64,
@@ -583,6 +583,7 @@ impl Metrics {
     );
     auth::append_auth_and_mirror_metrics(&mut output, self);
     self.append_admin_audit_prometheus(&mut output);
+    self.append_secret_activation_prometheus(&mut output);
     append_metric(
       &mut output,
       "oxibelt_mitigation_queued_total",

@@ -16,6 +16,7 @@ use hyper_util::rt::{TokioExecutor, TokioTimer};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use url::Url;
+use zeroize::Zeroizing;
 
 use crate::config::ExternalCacheHandlerConfig;
 use crate::tls;
@@ -38,7 +39,7 @@ pub(crate) struct ExternalCacheLookupHit {
 pub(crate) struct ExternalCacheHttpClient {
   client: Client<hyper_rustls::HttpsConnector<HttpConnector>, ExternalHttpBody>,
   endpoint: Url,
-  token: Option<String>,
+  token: Option<Zeroizing<String>>,
   request_timeout: Duration,
   max_metadata_bytes: usize,
   max_body_bytes: usize,
@@ -83,7 +84,7 @@ impl ExternalCacheHttpClient {
         if token.is_empty() {
           bail!("cache external handler {} token_env is empty", config.name);
         }
-        Some(token)
+        Some(Zeroizing::new(token))
       }
       None => None,
     };
@@ -216,7 +217,7 @@ impl ExternalCacheHttpClient {
     if let Some(token) = &self.token {
       builder = builder.header(
         http::header::AUTHORIZATION,
-        http::HeaderValue::from_str(&format!("Bearer {token}"))
+        http::HeaderValue::from_str(&format!("Bearer {}", token.as_str()))
           .context("external cache bearer token is not header-safe")?,
       );
     }

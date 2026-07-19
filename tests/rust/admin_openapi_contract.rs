@@ -315,21 +315,14 @@ fn high_risk_mutations_declare_signed_replay_contract() {
       );
     }
 
-    if path == "/admin/v1/config/secret-references/update" {
-      assert!(
-        operation["responses"].get("200").is_none() && operation["responses"].get("201").is_none(),
-        "secret-reference activation must remain fail-closed until an atomic runtime slot exists"
-      );
-    } else {
-      let success = operation["responses"]
-        .get("200")
-        .or_else(|| operation["responses"].get("201"))
-        .unwrap_or_else(|| panic!("{method} {path} must document a terminal success"));
-      assert_eq!(
-        success["$ref"], "#/components/responses/MutationResult",
-        "{method} {path} must use the mutation result headers"
-      );
-    }
+    let success = operation["responses"]
+      .get("200")
+      .or_else(|| operation["responses"].get("201"))
+      .unwrap_or_else(|| panic!("{method} {path} must document a terminal success"));
+    assert_eq!(
+      success["$ref"], "#/components/responses/MutationResult",
+      "{method} {path} must use the mutation result headers"
+    );
   }
 
   let parameter = &spec["components"]["parameters"]["MutationEnvelope"];

@@ -9,6 +9,7 @@ use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::CertificateDer;
 use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
+pub(crate) use self::certificate_io::validate_local_certificate_key_pair;
 use self::certificate_io::{end_entity_cert, load_certs, load_private_key};
 use self::negotiation::{
   downstream_crypto_provider_for_policy, downstream_crypto_provider_for_tls12,

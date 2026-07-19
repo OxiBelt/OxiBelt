@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::config::IpmBreakGlassAccessMode;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
+use crate::secret_activation::{SecretReferenceField, SecretReferenceUpdateRequest};
 use crate::state::AppHandle;
 
 use super::admin::json_response;
@@ -59,15 +60,6 @@ struct KeyRotationRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SecretReferenceUpdateRequest {
-  field: String,
-  reference: String,
-  #[serde(default)]
-  sha256: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct BreakGlassActivationRequest {
   ttl_seconds: u64,
   #[serde(default)]
@@ -77,69 +69,6 @@ struct BreakGlassActivationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyRequest {}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-enum SecretReferenceField {
-  TlsRemoteSignerTokenEnv,
-  TlsRemoteSignerTokenFile,
-  IpmCredentialBearerTokenEnv(String),
-  ExternalAuthClientIdEnv(String),
-  ExternalAuthClientSecretEnv(String),
-  UpstreamDiscoveryTokenEnv(String),
-  CacheExternalTokenEnv(String),
-  TurnRestSharedSecretEnv(String),
-  TurnStaticPasswordEnv { listener: String, username: String },
-}
-
-impl SecretReferenceField {
-  fn parse(raw: &str) -> Result<Self, &'static str> {
-    match raw {
-      "tls.remote_signer.token_env" => return Ok(Self::TlsRemoteSignerTokenEnv),
-      "tls.remote_signer.token_file" => return Ok(Self::TlsRemoteSignerTokenFile),
-      _ => {}
-    }
-    let parts = raw.split('/').collect::<Vec<_>>();
-    match parts.as_slice() {
-      ["ipm.credentials", name, "bearer_token_env"] => {
-        checked_component(name).map(Self::IpmCredentialBearerTokenEnv)
-      }
-      ["external_auth", name, "client_id_env"] => {
-        checked_component(name).map(Self::ExternalAuthClientIdEnv)
-      }
-      ["external_auth", name, "client_secret_env"] => {
-        checked_component(name).map(Self::ExternalAuthClientSecretEnv)
-      }
-      ["upstream_pools", name, "discovery", "token_env"] => {
-        checked_component(name).map(Self::UpstreamDiscoveryTokenEnv)
-      }
-      ["cache.external.handlers", name, "token_env"] => {
-        checked_component(name).map(Self::CacheExternalTokenEnv)
-      }
-      [
-        "webrtc_turn_listeners",
-        name,
-        "auth",
-        "rest_shared_secret_env",
-      ] => checked_component(name).map(Self::TurnRestSharedSecretEnv),
-      [
-        "webrtc_turn_listeners",
-        listener,
-        "auth",
-        "static_credentials",
-        username,
-        "password_env",
-      ] => Ok(Self::TurnStaticPasswordEnv {
-        listener: checked_component(listener)?,
-        username: checked_component(username)?,
-      }),
-      _ => Err("secret reference field is not allowlisted"),
-    }
-  }
-
-  const fn is_file(&self) -> bool {
-    matches!(self, Self::TlsRemoteSignerTokenFile)
-  }
-}
 
 pub(super) fn handles(method: &Method, path: &str) -> bool {
   matches!(
@@ -160,6 +89,7 @@ pub(super) async fn response<B>(
   method: &Method,
   path: &str,
   mutation_request_id: Option<&str>,
+  mutation_logical_revision: Option<&str>,
   authenticated_with_break_glass: bool,
 ) -> Option<Response<ProxyBody>>
 where
@@ -170,9 +100,16 @@ where
     (&Method::POST, "/admin/v1/keys/rotate") => {
       Some(rotate_key_response(request, state, admin_control, authorization).await)
     }
-    (&Method::POST, "/admin/v1/config/secret-references/update") => {
-      Some(update_secret_reference_response(request, admin_control, authorization).await)
-    }
+    (&Method::POST, "/admin/v1/config/secret-references/update") => Some(
+      update_secret_reference_response(
+        request,
+        admin_control,
+        authorization,
+        mutation_request_id,
+        mutation_logical_revision,
+      )
+      .await,
+    ),
     (&Method::GET, "/admin/v1/break-glass/activations/self") => {
       Some(break_glass_self_response(state, authorization, authenticated_with_break_glass).await)
     }
@@ -259,11 +196,28 @@ async fn update_secret_reference_response<B>(
   request: hyper::Request<B>,
   admin_control: AdminControlHandle,
   authorization: &AdminAuthorization<'_>,
+  mutation_request_id: Option<&str>,
+  mutation_logical_revision: Option<&str>,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = Bytes>,
   B::Error: std::error::Error + Send + Sync + 'static,
 {
+  let mutation_request_id = match mutation_request_id {
+    Some(request_id) => request_id.to_string(),
+    None => match crate::secret_activation::new_local_request_id() {
+      Ok(request_id) => request_id,
+      Err(error) => {
+        return json_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          &json!({
+            "error": "secret reference activation failed",
+            "code": error.code(),
+          }),
+        );
+      }
+    },
+  };
   let if_match = match required_if_match(request.headers()) {
     Ok(value) => value,
     Err(response) => return response,
@@ -288,26 +242,26 @@ where
   if !authorization.is_allowed("config:UpdateSecretReference", &resource) {
     return text_response(StatusCode::FORBIDDEN, "forbidden");
   }
+  if matches!(field, SecretReferenceField::IpmCredentialBearerTokenEnv(_))
+    && !authorization.is_allowed("ipm:UpdateConfig", "config")
+  {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
   if let Some(response) = check_config_if_match(&admin_control, &if_match).await {
     return response;
   }
 
-  // The running configuration has no atomic override slot for these references.
-  // Accepting the JSON without installing it would create a false success, while
-  // mutating process environment or rebuilding redacted TOML would be unsafe.
-  let kind = if field.is_file() {
-    "file"
-  } else {
-    "environment"
-  };
-  json_response(
-    StatusCode::CONFLICT,
-    &json!({
-      "error": "secret reference cannot be activated by the running configuration",
-      "code": "secret_reference_activation_unavailable",
-      "reference_kind": kind,
-    }),
-  )
+  admin_control
+    .activate_secret_reference(
+      authorization.actor.name.clone(),
+      Some(if_match),
+      mutation_request_id,
+      mutation_logical_revision.map(str::to_string),
+      None,
+      body,
+    )
+    .await
+    .into_http()
 }
 
 async fn break_glass_self_response(
@@ -637,14 +591,6 @@ const fn hex_nibble(byte: u8) -> u8 {
     b'a'..=b'f' => byte - b'a' + 10,
     _ => 0,
   }
-}
-
-fn checked_component(raw: &str) -> Result<String, &'static str> {
-  validate_name(raw)?;
-  if raw.contains('/') {
-    return Err("secret reference field component is invalid");
-  }
-  Ok(raw.to_string())
 }
 
 fn constant_time_ascii_eq(left: &[u8], right: &[u8]) -> bool {

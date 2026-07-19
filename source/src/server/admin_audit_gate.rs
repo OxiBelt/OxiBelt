@@ -115,10 +115,11 @@ pub(super) fn mutation_durability_scope(
   {
     return Some(("cache.purge", "cache"));
   }
-  if path == "/admin/v1/operations" && *method == Method::POST
-    || path.starts_with("/admin/v1/operations/") && *method == Method::DELETE
-  {
+  if path == "/admin/v1/operations" && *method == Method::POST {
     return Some(("operations.write", "operations"));
+  }
+  if path.starts_with("/admin/v1/operations/") && *method == Method::DELETE {
+    return Some(("operations.lifecycle", "operations"));
   }
   let exact = match (method, path) {
     (&Method::POST, "/admin/v1/config/load") => Some(("config.load", "config")),
@@ -229,6 +230,11 @@ mod tests {
         "break_glass.revoke",
       ),
       (Method::POST, "/admin/v1/operations", "operations.write"),
+      (
+        Method::DELETE,
+        "/admin/v1/operations/id",
+        "operations.lifecycle",
+      ),
       (Method::POST, "/admin/v1/cache/warm", "cache.warm"),
       (Method::POST, "/admin/v1/cache/purge", "cache.purge"),
       (

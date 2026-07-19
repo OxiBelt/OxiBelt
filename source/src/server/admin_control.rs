@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ::http::StatusCode;
 use anyhow::{anyhow, bail};
@@ -13,6 +14,9 @@ use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::proxy::http::response::text_response;
 use crate::reload::{reload_downstream_tls_paths, validate_full_reload_runtime_compatibility};
 use crate::routes::RouteTable;
+use crate::secret_activation::{
+  SecretActivationError, SecretReferenceUpdateRequest, build_candidate_snapshot,
+};
 use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::waf::WafEngine;
 
@@ -22,6 +26,7 @@ pub(crate) mod checkpoint;
 pub(super) mod file_sync;
 mod load_scope;
 mod request;
+mod snapshot_mutation;
 #[cfg(test)]
 mod tests;
 mod tls_reload;
@@ -30,6 +35,10 @@ pub(super) use load_scope::{ControlPlaneConfigPermissions, validate_control_plan
 pub(super) use request::{
   AdminApplyMode, AdminConfigPayload, AdminControlCommand, AdminFileOperation,
   AdminFileOperationKind, AdminFileRoot, AdminFilesSyncRequest,
+};
+use snapshot_mutation::{
+  apply_config_load, apply_config_rollback, apply_downstream_tls_reload,
+  apply_secret_reference_activation, install_snapshot,
 };
 
 pub(super) const ADMIN_CONFIG_BODY_LIMIT: usize = 1024 * 1024;
@@ -60,6 +69,8 @@ struct AdminControlState {
 pub(super) struct RollbackSnapshot {
   snapshot: AppSnapshot,
   effective_config: Option<String>,
+  secret_runtime_revision: Option<String>,
+  expires_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -149,6 +160,28 @@ impl AdminControlHandle {
       .await
   }
 
+  pub(super) async fn activate_secret_reference(
+    &self,
+    actor: String,
+    if_match: Option<String>,
+    mutation_request_id: String,
+    logical_revision: Option<String>,
+    expected_reference_set_digest: Option<String>,
+    request: SecretReferenceUpdateRequest,
+  ) -> AdminControlResponse {
+    self
+      .request(|respond| AdminControlCommand::ActivateSecretReference {
+        actor,
+        if_match,
+        mutation_request_id,
+        logical_revision,
+        expected_reference_set_digest,
+        request,
+        respond,
+      })
+      .await
+  }
+
   pub(super) async fn sync_files(
     &self,
     actor: String,
@@ -185,6 +218,16 @@ impl AdminControlHandle {
       )
     })
   }
+
+  fn schedule_secret_rollback_expiry(&self, runtime_snapshot_revision: String, grace: Duration) {
+    let sender = self.sender.clone();
+    tokio::spawn(async move {
+      tokio::time::sleep(grace).await;
+      let _ = sender.send(AdminControlCommand::ExpireSecretRollback {
+        runtime_snapshot_revision,
+      });
+    });
+  }
 }
 
 impl AdminControlResponse {
@@ -210,6 +253,16 @@ impl AdminControlResponse {
     Self {
       status,
       body: json!({ "error": message.into(), "details": details }),
+    }
+  }
+
+  fn secret_error(status: StatusCode, error: SecretActivationError) -> Self {
+    Self {
+      status,
+      body: json!({
+        "error": "secret reference activation failed",
+        "code": error.code(),
+      }),
     }
   }
 
@@ -284,6 +337,41 @@ pub(super) async fn handle_admin_control_command(
         apply_downstream_tls_reload(&actor, if_match, state, listeners, control, rollback).await;
       let _ = respond.send(response);
     }
+    AdminControlCommand::ActivateSecretReference {
+      actor,
+      if_match,
+      mutation_request_id,
+      logical_revision,
+      expected_reference_set_digest,
+      request,
+      respond,
+    } => {
+      let response = apply_secret_reference_activation(
+        &actor,
+        if_match,
+        mutation_request_id,
+        logical_revision,
+        expected_reference_set_digest,
+        request,
+        state,
+        listeners,
+        control,
+        rollback,
+      )
+      .await;
+      let _ = respond.send(response);
+    }
+    AdminControlCommand::ExpireSecretRollback {
+      runtime_snapshot_revision,
+    } => {
+      if expire_secret_rollback_if_due(rollback, &runtime_snapshot_revision, Instant::now()) {
+        control.state.lock().await.rollback_available = false;
+        info!(
+          runtime_snapshot_revision,
+          "retired secret-reference rollback snapshot"
+        );
+      }
+    }
     AdminControlCommand::SyncFiles {
       actor,
       control_plane_permissions,
@@ -308,223 +396,19 @@ pub(super) async fn handle_admin_control_command(
   }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn apply_config_load(
-  actor: &str,
-  control_plane_permissions: ControlPlaneConfigPermissions,
-  if_match: Option<String>,
-  raw: String,
-  state: &AppHandle,
-  listeners: &mut ListenerSupervisor,
-  control: &AdminControlHandle,
-  runtime_overrides: &RuntimeOverrides,
+fn expire_secret_rollback_if_due(
   rollback: &mut Option<RollbackSnapshot>,
-) -> AdminControlResponse {
-  if let Err(response) = check_if_match(control, if_match).await {
-    return response;
-  }
-  let active = state.snapshot();
-  let mut config = match Config::load_admin_inline_toml(&raw, &active.config) {
-    Ok(config) => config,
-    Err(error) => {
-      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-    }
-  };
-  if let Err(response) =
-    validate_control_plane_config_scope(control_plane_permissions, &active.config, &config)
-  {
-    record_operation(
-      control,
-      "config_load",
-      "rejected",
-      Some(
-        response
-          .body
-          .get("error")
-          .and_then(|value| value.as_str())
-          .unwrap_or("admin or IPM configuration changes require additional permissions")
-          .to_string(),
-      ),
-    )
-    .await;
-    return response;
-  }
-  for warning in config.apply_runtime_overrides(runtime_overrides) {
-    warn!("{warning}");
-  }
-  if let Err(error) = config.validate() {
-    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-  }
-  if let Err(error) = validate_full_reload_runtime_compatibility(&active.config, &config) {
-    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-  }
-  let effective = match Config::load_admin_inline_effective_toml_redacted(&raw, &active.config)
-    .and_then(|value| toml::to_string_pretty(&value).map_err(Into::into))
-  {
-    Ok(value) => Some(value),
-    Err(error) => {
-      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-    }
-  };
-  let snapshot = match AppSnapshot::new_with_previous(config, Some(active.as_ref())).await {
-    Ok(snapshot) => snapshot,
-    Err(error) => {
-      record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-    }
-  };
-  if let Err(error) = install_snapshot(
-    snapshot,
-    state,
-    listeners,
-    Some(rollback),
-    control,
-    effective,
-  )
-  .await
-  {
-    record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
-    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-  }
-  info!(actor, "admin config load applied");
-  record_operation(control, "config_load", "applied", None).await;
-  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
-}
-
-async fn apply_config_rollback(
-  actor: &str,
-  control_plane_permissions: ControlPlaneConfigPermissions,
-  if_match: Option<String>,
-  state: &AppHandle,
-  listeners: &mut ListenerSupervisor,
-  control: &AdminControlHandle,
-  rollback: &mut Option<RollbackSnapshot>,
-) -> AdminControlResponse {
-  if let Err(response) = check_if_match(control, if_match).await {
-    return response;
-  }
-  let Some(previous) = rollback.as_ref() else {
-    return AdminControlResponse::error(StatusCode::CONFLICT, "no rollback snapshot is available");
-  };
-  let current = state.snapshot().as_ref().clone();
-  if let Err(response) = validate_control_plane_config_scope(
-    control_plane_permissions,
-    &current.config,
-    &previous.snapshot.config,
-  ) {
-    record_operation(
-      control,
-      "config_rollback",
-      "rejected",
-      Some(
-        response
-          .body
-          .get("error")
-          .and_then(|value| value.as_str())
-          .unwrap_or("admin or IPM configuration changes require additional permissions")
-          .to_string(),
-      ),
-    )
-    .await;
-    return response;
-  }
-  let Some(previous) = rollback.take() else {
-    return AdminControlResponse::error(
-      StatusCode::CONFLICT,
-      "rollback snapshot became unavailable",
-    );
-  };
-  let current_effective = control.state.lock().await.effective_config.clone();
-  let pending = match listeners.prepare(&previous.snapshot).await {
-    Ok(pending) => pending,
-    Err(error) => {
-      *rollback = Some(previous);
-      record_operation(
-        control,
-        "config_rollback",
-        "rejected",
-        Some(error.to_string()),
-      )
-      .await;
-      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-    }
-  };
-  state.replace(previous.snapshot);
-  let active = state.snapshot();
-  listeners.commit(pending, active.as_ref(), state.clone());
-  *rollback = Some(RollbackSnapshot {
-    snapshot: current,
-    effective_config: current_effective,
+  runtime_snapshot_revision: &str,
+  now: Instant,
+) -> bool {
+  let due = rollback.as_ref().is_some_and(|snapshot| {
+    snapshot.secret_runtime_revision.as_deref() == Some(runtime_snapshot_revision)
+      && snapshot.expires_at.is_some_and(|deadline| now >= deadline)
   });
-  control.state.lock().await.rollback_available = true;
-  advance_revision(control, previous.effective_config).await;
-  info!(actor, "admin config rollback applied");
-  record_operation(control, "config_rollback", "applied", None).await;
-  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
-}
-
-async fn apply_downstream_tls_reload(
-  actor: &str,
-  if_match: Option<String>,
-  state: &AppHandle,
-  listeners: &mut ListenerSupervisor,
-  control: &AdminControlHandle,
-  rollback: &mut Option<RollbackSnapshot>,
-) -> AdminControlResponse {
-  if let Err(response) = check_if_match(control, if_match).await {
-    return response;
+  if due {
+    *rollback = None;
   }
-  let active = state.snapshot();
-  let mut config = active.config.clone();
-  if let Err(error) = reload_downstream_tls_paths(&mut config) {
-    record_operation(
-      control,
-      "tls_downstream_reload",
-      "rejected",
-      Some(error.to_string()),
-    )
-    .await;
-    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-  }
-  let (crlite, ocsp_staple, tls_server_config, quic_server_config) =
-    match tls_reload::build_downstream_tls_reload_configs(&config, active.as_ref()).await {
-      Ok(configs) => configs,
-      Err(error) => {
-        record_operation(
-          control,
-          "tls_downstream_reload",
-          "rejected",
-          Some(error.to_string()),
-        )
-        .await;
-        return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-      }
-    };
-  let mut snapshot = active.as_ref().clone();
-  snapshot.config = config;
-  snapshot.crlite = crlite;
-  snapshot.ocsp_staple = ocsp_staple;
-  snapshot.tls_server_config = tls_server_config;
-  snapshot.quic_server_config = quic_server_config;
-  if let Err(error) =
-    install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
-  {
-    record_operation(
-      control,
-      "tls_downstream_reload",
-      "rejected",
-      Some(error.to_string()),
-    )
-    .await;
-    return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
-  }
-  info!(actor, "admin downstream TLS reload applied");
-  record_operation(control, "tls_downstream_reload", "applied", None).await;
-  AdminControlResponse::ok(json!({ "ok": true, "revision": current_revision(control).await }))
+  due
 }
 
 async fn apply_full_from_files(
@@ -624,31 +508,6 @@ fn build_oxirule_reload_snapshot(
   snapshot.waf = waf;
   snapshot.request_path_features = request_path_features;
   snapshot
-}
-
-async fn install_snapshot(
-  snapshot: AppSnapshot,
-  state: &AppHandle,
-  listeners: &mut ListenerSupervisor,
-  rollback: Option<&mut Option<RollbackSnapshot>>,
-  control: &AdminControlHandle,
-  effective_config: Option<String>,
-) -> anyhow::Result<()> {
-  let active = state.snapshot();
-  let pending = listeners.prepare(&snapshot).await?;
-  let previous_effective = control.state.lock().await.effective_config.clone();
-  if let Some(rollback) = rollback {
-    *rollback = Some(RollbackSnapshot {
-      snapshot: active.as_ref().clone(),
-      effective_config: previous_effective,
-    });
-    control.state.lock().await.rollback_available = true;
-  }
-  state.replace(snapshot);
-  let active = state.snapshot();
-  listeners.commit(pending, active.as_ref(), state.clone());
-  advance_revision(control, effective_config).await;
-  Ok(())
 }
 
 async fn check_if_match(

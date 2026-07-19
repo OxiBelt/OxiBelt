@@ -886,7 +886,7 @@
           "config"
         ],
         "operationId": "updateSecretReference",
-        "summary": "Validate one allowlisted secret reference and fail closed because atomic runtime activation is unavailable.",
+        "summary": "Preflight and atomically activate one allowlisted secret reference as a complete runtime snapshot.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -898,7 +898,10 @@
         "requestBody": {
           "$ref": "#/components/requestBodies/SecretReferenceUpdateRequest"
         },
-          "responses": {
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MutationResult"
+          },
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
@@ -6878,6 +6881,14 @@
           "reference"
         ],
         "properties": {
+          "schema_version": {
+            "type": "integer",
+            "enum": [
+              1
+            ],
+            "default": 1,
+            "description": "Secret-reference activation request schema version."
+          },
           "field": {
             "type": "string",
             "description": "Allowlisted typed configuration reference; arbitrary TOML paths are forbidden."

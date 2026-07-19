@@ -127,14 +127,16 @@ impl RemoteSignerClient {
   fn from_config(config: &TlsRemoteSignerConfig) -> anyhow::Result<Self> {
     Ok(Self {
       socket_path: config.socket_path.clone(),
-      token_provider: RemoteSignerTokenProvider::from_sources(
+      token_provider: RemoteSignerTokenProvider::from_sources_with_reload(
         config
           .token_file_reload_path
           .clone()
           .or_else(|| config.token_file.clone()),
         config.token_file_reload_base_dir.clone(),
+        config.token_file_sha256.as_deref(),
         &config.token_env,
         Duration::from_millis(config.token_reload_interval_ms),
+        !config.token_material_pinned,
       )?,
       connect_timeout: Duration::from_millis(config.connect_timeout_ms),
       sign_timeout: Duration::from_millis(config.sign_timeout_ms),

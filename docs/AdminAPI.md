@@ -253,13 +253,14 @@ proved, the receipt becomes `indeterminate` and further protected writes remain
 blocked. Member and coordinator authority is fenced by cluster, membership,
 instance, boot, database epoch/lease, logical revision, and artifact digest;
 restart recovery uses the durable assignments rather than an in-memory queue.
-Configuration, file, downstream-TLS, and key operations execute per member.
+Configuration, file, downstream-TLS, key, and secret-reference operations execute per member.
 IPM and break-glass updates are staged once in PostgreSQL, published after every
 member validates, observed by the deterministic canary before the remaining
 members, and committed only after every exact member ACKs the published
 revision and digest. Failure restores the encrypted before-image once; an
-unprovable restoration is `indeterminate`. The typed secret-reference endpoint
-retains its documented fail-closed `409` behavior.
+unprovable restoration is `indeterminate`. For secret references, every member
+resolves and preflights the complete candidate set and durably reports the same
+reference-set digest and assigned runtime revision before canary selection.
 
 `GET /admin/v1/config/instances` reports the configured membership, membership
 revision, durable authority state, a safe blocking reason, active rollout
@@ -332,13 +333,35 @@ response header. It neither rotates again nor stores or re-emits the token.
 downstream TLS key path. It verifies a digest-pinned, pre-provisioned file and
 reloads downstream TLS; it does not accept private-key bytes. Admin TLS, QUIC
 host-key, and remote-signer activation are not advertised by this release.
-`POST /admin/v1/config/secret-references/update` validates its typed allowlist
-and rejects raw secret values, but no atomic runtime activation slot exists, so
-the current endpoint is fail-closed and returns `409` without changing state. In
+`POST /admin/v1/config/secret-references/update` accepts schema version `1`
+(omission defaults to `1`), one typed allowlisted `field`, and an environment
+variable name or contained file `reference`; file references also require a
+lowercase SHA-256 pin. It rejects raw secret values. OxiBelt resolves the full
+active reference set into protected candidate-owned buffers, validates size and
+type, rebuilds dependent TLS and client runtimes, validates certificate lifetime,
+SAN coverage, CA parsing, and key pairing, and performs a bounded TLS handshake
+for an affected configured HTTPS provider. Only a complete candidate is installed
+with one compare-and-swap operation. A failure or competing mutation leaves the
+old snapshot active.
+
+A successful response and replay-safe receipt contain only `request_id`,
+`config_logical_revision`, `reference_set_digest`,
+`runtime_snapshot_revision`, and `target_revision`; references, environment
+values, file paths, and plaintext material are not returned or written to the
+mutation ledger. Stable `secret_*` error codes identify the rejected phase
+without provider details. The prior snapshot remains rollback-capable for a
+bounded connection-drain grace period and is then dropped. In Kubernetes
+immutable rollout mode the endpoint returns `409 immutable_rollout_conflict`. In
 `[ipm.break_glass] access_mode = "two_factor_activation"`, an inactive
 break-glass credential can access only its self-status and activation route;
 activation additionally requires a signer bound to that principal and creates
 a bounded database-timed grant. Replaying an activation never extends it.
+
+Prometheus exposes fixed, unlabeled
+`oxibelt_secret_reference_activation_applied_total`,
+`oxibelt_secret_reference_activation_rejected_total`, and
+`oxibelt_secret_reference_activation_rollback_total` counters. They contain no
+field, provider, reference, path, or material labels.
 
 ## Person Proof Administration
 

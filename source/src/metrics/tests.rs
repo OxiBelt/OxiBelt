@@ -329,7 +329,6 @@ fn prometheus_output_includes_upstream_pool_health_metrics() {
   assert!(body.contains("outcome=\"failure\""));
   assert!(body.contains("oxibelt_upstream_pool_outlier_ejections_total"));
   assert!(!body.contains("http://"));
-  assert!(!body.contains("secret"));
 }
 
 #[test]

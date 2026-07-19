@@ -33,6 +33,12 @@ pub(super) async fn transition(
   restored_digest: Option<String>,
   error_code: Option<&str>,
 ) -> anyhow::Result<()> {
+  let (validation_revision, validation_digest, applied_revision, applied_digest) =
+    if next_state == TargetState::Validated {
+      (applied_revision, applied_digest, None, None)
+    } else {
+      (None, None, applied_revision, applied_digest)
+    };
   runtime
     .cluster_transition_target(
       request_id,
@@ -42,6 +48,8 @@ pub(super) async fn transition(
         assignment_epoch: target.assignment_epoch,
         next_state,
         effect_started,
+        validation_revision,
+        validation_digest,
         applied_revision,
         applied_digest,
         restored_revision,

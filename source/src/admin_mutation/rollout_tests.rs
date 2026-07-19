@@ -2,6 +2,13 @@ use super::*;
 use sqlx::postgres::PgPoolOptions;
 
 fn target(instance_id: &str, state: TargetState) -> RolloutTarget {
+  let validated = matches!(
+    state,
+    TargetState::Validated
+      | TargetState::ApplyAssigned
+      | TargetState::Applying
+      | TargetState::Acked
+  );
   RolloutTarget {
     instance_id: instance_id.to_string(),
     state,
@@ -10,6 +17,8 @@ fn target(instance_id: &str, state: TargetState) -> RolloutTarget {
     boot_id: None,
     instance_epoch: None,
     effect_started_at: None,
+    validation_revision: validated.then(|| "r-2".to_string()),
+    validation_digest: validated.then(|| "sha256:digest".to_string()),
     applied_revision: None,
     applied_digest: None,
     restored_revision: None,
@@ -96,6 +105,29 @@ fn validation_all_precedes_deterministic_canary() {
   assert_eq!(
     canary,
     deterministic_canary("00000000-0000-4000-8000-000000000001", &members())
+  );
+}
+
+#[test]
+fn member_secret_reference_digest_mismatch_fails_before_canary() {
+  let members = members();
+  let mut targets = members
+    .iter()
+    .map(|member| target(member, TargetState::Validated))
+    .collect::<Vec<_>>();
+  targets[1].validation_digest = Some(format!("sha256:{}", "a".repeat(64)));
+
+  assert_eq!(
+    classify(
+      &record(MutationState::Validating),
+      &targets,
+      true,
+      false,
+      false,
+      false,
+      &members,
+    ),
+    RolloutDirective::FailBeforeApply("rollout_validation_evidence_mismatch")
   );
 }
 
