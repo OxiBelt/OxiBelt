@@ -77,8 +77,10 @@ async fn run() -> anyhow::Result<()> {
       let identity = leader_election::process_identity()?;
       let leadership = leader_election::Leadership::new(election_config.clone());
       let kubernetes = kubernetes.with_leadership(leadership.clone());
-      let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-      let signal_tx = shutdown_tx.clone();
+      // Reconciliation must finish before election cleanup releases the Lease,
+      // so no already-authorized Kubernetes mutation can follow the handoff.
+      let (signal_tx, reconcile_shutdown_rx) = tokio::sync::watch::channel(false);
+      let (election_shutdown_tx, election_shutdown_rx) = tokio::sync::watch::channel(false);
       tokio::spawn(async move {
         shutdown_signal().await;
         let _ = signal_tx.send(true);
@@ -89,7 +91,7 @@ async fn run() -> anyhow::Result<()> {
         identity,
         leadership.clone(),
         controller_health.clone(),
-        shutdown_rx.clone(),
+        election_shutdown_rx,
       ));
       let reconcile_result = watch::run_poll_loop(
         kubernetes,
@@ -97,11 +99,10 @@ async fn run() -> anyhow::Result<()> {
         args,
         controller_health,
         leadership.clone(),
-        shutdown_rx,
+        reconcile_shutdown_rx,
       )
       .await;
-      leadership.revoke();
-      let _ = shutdown_tx.send(true);
+      let _ = election_shutdown_tx.send(true);
       election.await.context("leader-election task failed")??;
       reconcile_result?;
     }

@@ -119,11 +119,27 @@ impl Leadership {
     }
   }
 
-  pub fn revoke(&self) {
+  fn revoke(&self) {
     if let Ok(mut state) = self.state.write() {
       state.term = None;
       state.confirmed_at = None;
     }
+  }
+
+  fn revoke_for_shutdown_release(&self) -> anyhow::Result<Option<LeaseReleasePermit>> {
+    let mut state = self
+      .state
+      .write()
+      .map_err(|_| anyhow::anyhow!("leader authority lock is poisoned"))?;
+    let term = state.term.take();
+    let confirmed_at = state.confirmed_at.take();
+    let Some((term, confirmed_at)) = term.zip(confirmed_at) else {
+      return Ok(None);
+    };
+    if confirmed_at.elapsed() >= self.config.renew_deadline {
+      return Ok(None);
+    }
+    Ok(Some(LeaseReleasePermit { term }))
   }
 
   pub fn is_leader(&self) -> bool {
@@ -166,6 +182,11 @@ impl WritePermit {
   pub fn term(&self) -> &LeadershipTerm {
     &self.term
   }
+}
+
+#[derive(Debug)]
+struct LeaseReleasePermit {
+  term: LeadershipTerm,
 }
 
 #[derive(Debug)]
@@ -259,13 +280,19 @@ pub async fn run_leader_election(
     }
   }
 
-  if let Ok(permit) = leadership.write_permit()
-    && let Err(error) = release_lease(&kubernetes, &config, &leadership, &permit).await
-  {
-    warn!(error = %error, lease = %config.lease_name, "failed to release Lease; expiry will fence the old term");
-  }
-  leadership.revoke();
+  let release_permit = leadership.revoke_for_shutdown_release();
   health.mark_election(false, false, None);
+  match release_permit {
+    Ok(Some(permit)) => {
+      if let Err(error) = release_lease(&kubernetes, &config, permit).await {
+        warn!(error = %error, lease = %config.lease_name, "failed to release Lease; expiry will fence the old term");
+      }
+    }
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, lease = %config.lease_name, "failed to capture shutdown Lease release authority; expiry will fence the old term");
+    }
+  }
   Ok(())
 }
 
@@ -439,12 +466,10 @@ async fn patch_lease(
 async fn release_lease(
   kubernetes: &KubernetesPoller,
   config: &LeaderElectionConfig,
-  leadership: &Leadership,
-  permit: &WritePermit,
+  permit: LeaseReleasePermit,
 ) -> anyhow::Result<()> {
-  leadership.validate(permit)?;
-  validate_write_permit(kubernetes, leadership, permit).await?;
   let lease = get_lease(kubernetes, config).await?;
+  validate_lease_term(&lease, &permit.term)?;
   let patch = json!([
     {"op":"test", "path":"/metadata/resourceVersion", "value":required_string(&lease, "/metadata/resourceVersion")?},
     {"op":"test", "path":"/metadata/uid", "value":permit.term.lease_uid},
@@ -463,17 +488,24 @@ pub async fn validate_write_permit(
 ) -> anyhow::Result<()> {
   leadership.validate(permit)?;
   let lease = get_lease(kubernetes, &leadership.config).await?;
-  if required_string(&lease, "/metadata/uid")? != permit.term.lease_uid
-    || required_string(&lease, "/spec/holderIdentity")? != permit.term.holder_identity
+  if let Err(error) = validate_lease_term(&lease, &permit.term) {
+    leadership.revoke();
+    return Err(error);
+  }
+  leadership.validate(permit)
+}
+
+fn validate_lease_term(lease: &Value, term: &LeadershipTerm) -> anyhow::Result<()> {
+  if required_string(lease, "/metadata/uid")? != term.lease_uid
+    || required_string(lease, "/spec/holderIdentity")? != term.holder_identity
     || lease
       .pointer("/spec/leaseTransitions")
       .and_then(Value::as_u64)
-      != Some(permit.term.leader_epoch)
+      != Some(term.leader_epoch)
   {
-    leadership.revoke();
     bail!("fresh Lease read no longer proves this process's leadership term");
   }
-  leadership.validate(permit)
+  Ok(())
 }
 
 async fn lease_request(

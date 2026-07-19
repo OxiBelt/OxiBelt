@@ -38,6 +38,13 @@ fn a_replaced_or_expired_term_invalidates_late_writes() {
   assert!(leadership.validate(&old).is_err());
   leadership.revoke();
   assert!(leadership.write_permit().is_err());
+  assert!(
+    leadership
+      .revoke_for_shutdown_release()
+      .expect("plain revocation should remain readable")
+      .is_none(),
+    "plain revocation must not mint shutdown release authority"
+  );
 }
 
 #[test]
@@ -178,6 +185,116 @@ async fn leader_acquisition_and_renewal_keep_one_epoch() {
       .as_str()
       .expect("renewTime string"),
   );
+}
+
+#[tokio::test]
+async fn shutdown_revokes_local_writes_before_releasing_the_lease() {
+  let held = json!({
+    "apiVersion":"coordination.k8s.io/v1",
+    "kind":"Lease",
+    "metadata":{"name":"oxibelt", "namespace":"controllers", "uid":"lease-uid", "resourceVersion":"7"},
+    "spec":{"holderIdentity":"pod-a", "leaseDurationSeconds":15, "leaseTransitions":4}
+  });
+  let released = json!({
+    "apiVersion":"coordination.k8s.io/v1",
+    "kind":"Lease",
+    "metadata":{"name":"oxibelt", "namespace":"controllers", "uid":"lease-uid", "resourceVersion":"8"},
+    "spec":{"holderIdentity":null, "leaseDurationSeconds":15, "leaseTransitions":4}
+  });
+  let (base_url, server, first_request, continue_response) =
+    spawn_gated_json_server(vec![("200 OK", held), ("200 OK", released)]).await;
+  let token = TokenFile::new();
+  let poller = test_poller(base_url, token.path.clone());
+  let leadership = Leadership::new(config());
+  leadership.confirm(LeadershipTerm {
+    lease_uid: "lease-uid".to_string(),
+    leader_epoch: 4,
+    holder_identity: "pod-a".to_string(),
+  });
+  let (_, shutdown) = tokio::sync::watch::channel(true);
+  let election = tokio::spawn(run_leader_election(
+    poller,
+    config(),
+    "pod-a".to_string(),
+    leadership.clone(),
+    ControllerHealth::default(),
+    shutdown,
+  ));
+
+  tokio::time::timeout(Duration::from_secs(2), first_request)
+    .await
+    .expect("release should reach the mock Lease API without waiting for expiry")
+    .expect("release should reach the mock Lease API");
+  assert!(
+    leadership.write_permit().is_err(),
+    "shutdown must revoke ordinary writer authority before Lease release"
+  );
+  continue_response
+    .send(())
+    .expect("mock Lease API should continue the release");
+  election
+    .await
+    .expect("leader-election task should finish")
+    .expect("leader-election shutdown should succeed");
+  let requests = tokio::time::timeout(Duration::from_secs(2), server)
+    .await
+    .expect("mock Lease API should not wait for another request")
+    .expect("mock Lease API should finish");
+
+  assert_eq!(requests.len(), 2);
+  assert_eq!(requests[0].method, "GET");
+  assert_eq!(requests[1].method, "PATCH");
+  assert_eq!(
+    requests[1].content_type.as_deref(),
+    Some("application/json-patch+json")
+  );
+  let release_patch: Value = serde_json::from_slice(&requests[1].body).expect("release JSON Patch");
+  assert_eq!(
+    release_patch,
+    json!([
+      {"op":"test", "path":"/metadata/resourceVersion", "value":"7"},
+      {"op":"test", "path":"/metadata/uid", "value":"lease-uid"},
+      {"op":"test", "path":"/spec/holderIdentity", "value":"pod-a"},
+      {"op":"test", "path":"/spec/leaseTransitions", "value":4},
+      {"op":"replace", "path":"/spec/holderIdentity", "value":null}
+    ])
+  );
+}
+
+#[tokio::test]
+async fn shutdown_release_refuses_to_clear_a_successor_term() {
+  let successor = json!({
+    "apiVersion":"coordination.k8s.io/v1",
+    "kind":"Lease",
+    "metadata":{"name":"oxibelt", "namespace":"controllers", "uid":"replacement-lease-uid", "resourceVersion":"8"},
+    "spec":{"holderIdentity":"pod-b", "leaseDurationSeconds":15, "leaseTransitions":5}
+  });
+  let (base_url, server) = spawn_json_server(vec![("200 OK", successor)]).await;
+  let token = TokenFile::new();
+  let poller = test_poller(base_url, token.path.clone());
+  let leadership = Leadership::new(config());
+  leadership.confirm(LeadershipTerm {
+    lease_uid: "lease-uid".to_string(),
+    leader_epoch: 4,
+    holder_identity: "pod-a".to_string(),
+  });
+  let permit = leadership
+    .revoke_for_shutdown_release()
+    .expect("shutdown revocation should succeed")
+    .expect("current leader should receive release authority");
+
+  assert!(leadership.write_permit().is_err());
+  let error = release_lease(&poller, &config(), permit)
+    .await
+    .expect_err("a successor leadership term must not be cleared");
+  assert!(
+    format!("{error:#}").contains("no longer proves this process's leadership term"),
+    "unexpected release error: {error:#}"
+  );
+  assert!(leadership.write_permit().is_err());
+  let requests = server.await.expect("mock Lease API should finish");
+  assert_eq!(requests.len(), 1);
+  assert_eq!(requests[0].method, "GET");
 }
 
 #[tokio::test]
@@ -406,6 +523,53 @@ async fn spawn_json_server(
   (
     Url::parse(&format!("http://{address}")).expect("mock URL"),
     handle,
+  )
+}
+
+async fn spawn_gated_json_server(
+  responses: Vec<(&'static str, Value)>,
+) -> (
+  Url,
+  tokio::task::JoinHandle<Vec<CapturedRequest>>,
+  oneshot::Receiver<()>,
+  oneshot::Sender<()>,
+) {
+  let listener = TcpListener::bind(("127.0.0.1", 0))
+    .await
+    .expect("gated mock Lease API should bind");
+  let address = listener.local_addr().expect("gated mock Lease API address");
+  let (first_request_tx, first_request_rx) = oneshot::channel();
+  let (continue_tx, continue_rx) = oneshot::channel();
+  let handle = tokio::spawn(async move {
+    let mut requests = Vec::with_capacity(responses.len());
+    let mut first_request_tx = Some(first_request_tx);
+    let mut continue_rx = Some(continue_rx);
+    for (index, (status, value)) in responses.into_iter().enumerate() {
+      let (mut stream, _) = listener.accept().await.expect("mock API should accept");
+      requests.push(read_request(&mut stream).await);
+      if index == 0 {
+        if let Some(first_request_tx) = first_request_tx.take() {
+          let _ = first_request_tx.send(());
+        }
+        if let Some(continue_rx) = continue_rx.take() {
+          let _ = continue_rx.await;
+        }
+      }
+      write_response(
+        &mut stream,
+        status,
+        &serde_json::to_vec(&value).expect("JSON"),
+        false,
+      )
+      .await;
+    }
+    requests
+  });
+  (
+    Url::parse(&format!("http://{address}")).expect("mock URL"),
+    handle,
+    first_request_rx,
+    continue_tx,
   )
 }
 
