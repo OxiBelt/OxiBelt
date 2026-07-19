@@ -585,10 +585,6 @@ jobs:
               raise SystemExit(f"{image_tar} has unexpected exposed ports: {exposed}")
           PY
 
-          if [[ "${OXIBELT_IMAGE_ROLE}" == "dataplane-strict" ]]; then
-            python3 tests/scripts/validate-strict-dataplane-image.py "${IMAGE_TAR}"
-          fi
-
       - name: Push canonical arch-specific GHCR tag
         id: publish
         env:

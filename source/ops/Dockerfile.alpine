@@ -153,6 +153,8 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
 
 FROM builder AS riscv64-musl-check
 
+COPY tests/rust ./tests/rust
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \

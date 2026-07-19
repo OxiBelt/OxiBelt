@@ -3097,6 +3097,7 @@ fn tokio_runtime_builders_use_explicit_startup_stack_size() {
 #[test]
 fn riscv64_cross_checks_and_image_build_run_without_emulation() {
   let workflow = workflow_text();
+  let alpine_dockerfile = source_file_text("source/ops/Dockerfile.alpine");
   let jobs = parse_jobs(&workflow);
   let cross_job = jobs
     .get("check-riscv64-cross")
@@ -3113,11 +3114,44 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
   let other_job = &workflow[other_start..riscv_start];
   let cross_job_text = workflow_job_text(&workflow, "check-riscv64-cross");
   let riscv64_job = workflow_job_text(&workflow, "docker-alpine-musl-image-riscv64");
+  let shared_builder_start = alpine_dockerfile
+    .find("FROM ${OXIBELT_RUST_BUILDER_STAGE} AS builder")
+    .expect("Alpine Dockerfile should define the shared Rust builder stage");
+  let riscv64_check_start = alpine_dockerfile
+    .find("FROM builder AS riscv64-musl-check")
+    .expect("Alpine Dockerfile should define the RISC-V musl check stage");
+  let riscv64_check_end = alpine_dockerfile[riscv64_check_start + 1..]
+    .find("\nFROM ")
+    .map_or(alpine_dockerfile.len(), |offset| {
+      riscv64_check_start + 1 + offset
+    });
+  let shared_builder_stage = &alpine_dockerfile[shared_builder_start..riscv64_check_start];
+  let riscv64_check_stage = &alpine_dockerfile[riscv64_check_start..riscv64_check_end];
+  let test_copy = "COPY tests/rust ./tests/rust";
+  let test_copy_position = riscv64_check_stage
+    .find(test_copy)
+    .expect("RISC-V musl check stage should copy repository integration-test targets");
+  let cargo_check_position = riscv64_check_stage
+    .find("cargo check --all-targets --locked")
+    .expect("RISC-V musl check stage should compile all targets");
 
   assert!(
     workflow.contains("riscv64gc-unknown-linux-gnu")
       && workflow.contains("riscv64gc-unknown-linux-musl"),
     "RISC-V cargo check coverage should keep both GNU and musl targets"
+  );
+  assert!(
+    !shared_builder_stage.contains(test_copy),
+    "shared Rust builder should not copy integration tests and invalidate every image cache"
+  );
+  assert_eq!(
+    alpine_dockerfile.matches(test_copy).count(),
+    1,
+    "only the RISC-V musl check stage should copy integration tests"
+  );
+  assert!(
+    test_copy_position < cargo_check_position,
+    "RISC-V musl check stage should copy integration tests before checking all targets"
   );
   for expected in [
     "Cargo check for RISC-V GNU target",
@@ -3687,6 +3721,16 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "reusable build job should include {expected}"
     );
   }
+  let strict_validation_position = build_job_text
+    .find("tests/scripts/validate-strict-dataplane-image.py")
+    .expect("reusable build job should validate strict dataplane images");
+  let artifact_upload_position = build_job_text
+    .find("Upload Docker image artifact")
+    .expect("reusable build job should upload its validated image artifact");
+  assert!(
+    strict_validation_position < artifact_upload_position,
+    "strict dataplane validation should run before the unprivileged build uploads its artifact"
+  );
   assert!(
     !build_job_text.contains("ref: ${{ inputs.release_ref }}"),
     "reusable build checkout must not re-resolve the mutable release ref"
@@ -3807,6 +3851,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Checkout release revision",
     "actions/checkout",
     "tests/scripts/build-docker-image-artifact.sh",
+    "tests/scripts/validate-strict-dataplane-image.py",
   ] {
     assert!(!publish_job_text.contains(removed));
   }
