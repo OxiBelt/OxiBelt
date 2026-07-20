@@ -1,0 +1,11 @@
+# Cache metadata and key-template vocabulary.
+version="version=1"
+policy="policy="
+partition="partition="
+base_key="base_key="
+variant_key="variant_key="
+body_file="body_file="
+header="header="
+vary="vary="
+query="query:"
+cookie="cookie:"

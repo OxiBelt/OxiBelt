@@ -546,6 +546,28 @@ fn weaken_strong_etag(headers: &mut HeaderMap) {
   }
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_body_coding(data: &[u8]) {
+  const MAX_ENCODED_BYTES: usize = 16 * 1024;
+  const MAX_DECODED_BYTES: usize = 64 * 1024;
+  let data = &data[..data.len().min(MAX_ENCODED_BYTES)];
+  let encoding = match data.first().copied().unwrap_or_default() % 4 {
+    0 => WafHttpBodyEncoding::Gzip,
+    1 => WafHttpBodyEncoding::Deflate,
+    2 => WafHttpBodyEncoding::Br,
+    _ => WafHttpBodyEncoding::Zstd,
+  };
+  let raw = Bytes::copy_from_slice(data.get(1..).unwrap_or_default());
+
+  let _ = expansion_ratio_exceeded(data.len(), raw.len(), 16);
+  let _ = decode_body_sync(raw.clone(), encoding, MAX_DECODED_BYTES);
+  if let Ok(encoded) = encode_body_sync(raw.clone(), encoding)
+    && let Ok(decoded) = decode_body_sync(encoded, encoding, MAX_DECODED_BYTES)
+  {
+    assert_eq!(decoded, raw, "content-coding round trip changed bytes");
+  }
+}
+
 #[cfg(test)]
 mod test_support;
 

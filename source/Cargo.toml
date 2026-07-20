@@ -164,6 +164,14 @@ name = "ci_workflow_integrity"
 path = "../tests/rust/ci_workflow_integrity.rs"
 
 [[test]]
+name = "fuzz_program_contract"
+path = "../tests/rust/fuzz_program_contract.rs"
+
+[[test]]
+name = "fuzz_regressions"
+path = "../tests/rust/fuzz_regressions.rs"
+
+[[test]]
 name = "unsafe_code_policy"
 path = "../tests/rust/unsafe_code_policy.rs"
 

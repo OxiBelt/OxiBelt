@@ -43,6 +43,15 @@ const DYNAMIC_POLICY_LIST: AdminListSpec = AdminListSpec {
   allowed_filters: &["source", "name", "enabled"],
 };
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode_dynamic_policy_mutation(selector: u8, data: &[u8]) {
+  match selector % 3 {
+    0 => drop(serde_json::from_slice::<DynamicPolicyAdminCreate>(data)),
+    1 => drop(serde_json::from_slice::<DynamicPolicyAdminPatch>(data)),
+    _ => drop(serde_json::from_slice::<DynamicPolicyAdminImport>(data)),
+  }
+}
+
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
 }

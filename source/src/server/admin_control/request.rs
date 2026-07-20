@@ -110,3 +110,15 @@ pub(in crate::server) enum AdminFileRoot {
 fn default_config_format() -> String {
   "toml".to_string()
 }
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode_mutation_body(selector: u8, data: &[u8]) {
+  match selector % 2 {
+    0 => {
+      let _ = serde_json::from_slice::<AdminConfigPayload>(data);
+    }
+    _ => {
+      let _ = serde_json::from_slice::<AdminFilesSyncRequest>(data);
+    }
+  }
+}

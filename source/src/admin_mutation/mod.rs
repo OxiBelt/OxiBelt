@@ -58,6 +58,14 @@ pub use verifier::{SignerBinding, SignerRegistry, VerifiedMutation};
 
 pub const MUTATION_HEADER: &str = "x-oxibelt-mutation";
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_cluster_rollout(data: &[u8]) {
+  const MAX_FRAME_BYTES: usize = 32 * 1024;
+  let data = &data[..data.len().min(MAX_FRAME_BYTES)];
+  cluster_command::fuzz_decode_frame(data);
+  rollout::fuzz_classify_rollout(data);
+}
+
 #[cfg(test)]
 mod artifact_postgres_tests;
 #[cfg(test)]

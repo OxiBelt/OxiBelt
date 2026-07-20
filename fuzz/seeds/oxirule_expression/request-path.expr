@@ -1,0 +1,1 @@
+Request.Http.Method == 'POST' && Request.Http.Path.startsWith('/admin')

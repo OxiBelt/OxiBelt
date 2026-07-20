@@ -1,0 +1,4 @@
+GET /ready?probe=1 HTTP/1.1
+Host: example.test
+Connection: keep-alive
+

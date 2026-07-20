@@ -1,0 +1,9 @@
+# WebSocket frame and upgrade vocabulary.
+upgrade="websocket"
+fin="FIN"
+text="TEXT"
+binary="BINARY"
+continuation="CONTINUATION"
+ping="PING"
+pong="PONG"
+close="CLOSE"

@@ -1,0 +1,11 @@
+# Protected Admin mutation and rollout JSON fields.
+request_id="\"request_id\":"
+revision="\"revision\":"
+expected_revision="\"expected_revision\":"
+config="\"config_toml\":"
+members="\"members\":"
+prepared="\"prepared\":"
+committed="\"committed\":"
+true="true"
+false="false"
+null="null"

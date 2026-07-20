@@ -1,0 +1,6 @@
+:method CONNECT
+:protocol webtransport
+:scheme https
+:authority example.test
+:path /session
+sec-webtransport-http3-draft: draft02

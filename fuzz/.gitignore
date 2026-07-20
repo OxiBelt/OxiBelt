@@ -1,3 +1,5 @@
 artifacts/
 corpus/
+coverage/
 target/
+.cmin-*/

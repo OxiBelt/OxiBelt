@@ -128,6 +128,36 @@ mod plain_http;
 mod pod_lifecycle_tests;
 mod prefixed_io;
 mod process_signals;
+
+#[cfg(all(feature = "admin-runtime", feature = "fuzzing"))]
+pub(crate) fn fuzz_admin_json_mutation(input: &[u8]) {
+  const MAX_ADMIN_JSON_BYTES: usize = 32 * 1024;
+  let Some((&selector, body)) = input
+    .get(..input.len().min(MAX_ADMIN_JSON_BYTES))
+    .and_then(|bounded| bounded.split_first())
+  else {
+    return;
+  };
+  if matches!(selector, b'{' | b'[') {
+    admin_control::fuzz_decode_mutation_body(0, input);
+    admin_control::fuzz_decode_mutation_body(1, input);
+    for resource_selector in 0..4 {
+      admin_mutation_resources::fuzz_decode_mutation_body(resource_selector, input);
+    }
+    for ipm_selector in 0..9 {
+      admin_ipm::fuzz_decode_mutation_body(ipm_selector, input);
+    }
+    for policy_selector in 0..3 {
+      admin::fuzz_decode_dynamic_policy_mutation(policy_selector, input);
+    }
+  }
+  match selector % 4 {
+    0 => admin_control::fuzz_decode_mutation_body(selector / 4, body),
+    1 => admin_mutation_resources::fuzz_decode_mutation_body(selector / 4, body),
+    2 => admin_ipm::fuzz_decode_mutation_body(selector / 4, body),
+    _ => admin::fuzz_decode_dynamic_policy_mutation(selector / 4, body),
+  }
+}
 mod public_dispatch;
 #[cfg(test)]
 mod reload_tests;

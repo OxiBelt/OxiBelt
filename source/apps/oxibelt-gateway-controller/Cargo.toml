@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 autobins = false
 
+[features]
+default = []
+fuzzing = []
+
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true

@@ -70,6 +70,30 @@ struct BreakGlassActivationRequest {
 #[serde(deny_unknown_fields)]
 struct EmptyRequest {}
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode_mutation_body(selector: u8, data: &[u8]) {
+  match selector % 4 {
+    0 => {
+      if let Ok(body) = serde_json::from_slice::<KeyRotationRequest>(data) {
+        let _ = validate_key_rotation(&body);
+      }
+    }
+    1 => {
+      if let Ok(body) = serde_json::from_slice::<SecretReferenceUpdateRequest>(data) {
+        let _ = validate_secret_reference(&body);
+      }
+    }
+    2 => {
+      if let Ok(body) = serde_json::from_slice::<BreakGlassActivationRequest>(data) {
+        let _ = validate_break_glass_activation(&body, 86_400);
+      }
+    }
+    _ => {
+      let _ = serde_json::from_slice::<EmptyRequest>(data);
+    }
+  }
+}
+
 pub(super) fn handles(method: &Method, path: &str) -> bool {
   matches!(
     (method, path),

@@ -1,0 +1,11 @@
+# HTTP and WebTransport request semantics.
+get="GET"
+post="POST"
+connect="CONNECT"
+host="Host:"
+connection="Connection:"
+upgrade="Upgrade:"
+forwarded="Forwarded:"
+authority=":authority"
+protocol=":protocol"
+webtransport="webtransport"

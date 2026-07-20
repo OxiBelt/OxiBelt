@@ -1,0 +1,220 @@
+version = 1
+
+[program]
+max_seed_files_per_target = 128
+max_seed_bytes_per_target = 524288
+max_cached_corpus_files_per_target = 2048
+max_cached_corpus_bytes_per_target = 67108864
+pr_runs = 256
+campaign_seconds = 900
+input_timeout_seconds = 10
+rss_limit_mb = 3072
+allocation_limit_mb = 512
+pr_leak_detection = false
+campaign_leak_detection = true
+
+[[target]]
+name = "turn_protocol"
+owner = "TURN protocol and edge listener maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes interpreted as bounded STUN messages, TURN ChannelData, attributes, and authentication material."
+invariants = ["parsing and validation never panic", "round trips preserve the bounded protocol representation", "malformed lengths and attributes fail closed"]
+unsupported_states = ["live UDP or TCP sockets", "relay allocation", "external credential lookup"]
+seed_dir = "fuzz/seeds/turn_protocol"
+dictionary = "fuzz/dictionaries/turn.dict"
+coverage_landmarks = ["source/src/turn/protocol.rs:parse_stun", "source/src/turn/protocol.rs:parse_channel_data"]
+regression_path = "tests/fixtures/fuzz-regressions/turn_protocol"
+leak_policy = "enabled"
+
+[[target]]
+name = "tls_client_hello"
+owner = "TLS and SNI forwarding maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes interpreted as raw and TLS-record-framed ClientHello messages."
+invariants = ["record reassembly remains bounded", "SNI normalization rejects invalid names", "malformed handshakes never panic"]
+unsupported_states = ["live TLS handshakes", "private keys", "remote signers"]
+seed_dir = "fuzz/seeds/tls_client_hello"
+dictionary = "fuzz/dictionaries/tls.dict"
+coverage_landmarks = ["source/src/sni_forward/client_hello.rs:tls_record_client_hello_sni", "source/src/sni_forward/client_hello.rs:raw_client_hello_sni"]
+regression_path = "tests/fixtures/fuzz-regressions/tls_client_hello"
+leak_policy = "enabled"
+
+[[target]]
+name = "http_semantics"
+owner = "HTTP proxy semantics maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes mapped to bounded methods, URIs, hosts, authorities, versions, and header maps."
+invariants = ["hop-by-hop fields do not cross the upstream boundary", "URI rewriting stays bounded and valid", "ambiguous host and authority inputs fail closed"]
+unsupported_states = ["network I/O", "upstream connection reuse", "streaming bodies"]
+seed_dir = "fuzz/seeds/http_semantics"
+dictionary = "fuzz/dictionaries/http.dict"
+coverage_landmarks = ["source/src/proxy/http/headers.rs:add_forwarded_headers", "source/src/proxy/http/uri.rs:rewrite_uri"]
+regression_path = "tests/fixtures/fuzz-regressions/http_semantics"
+leak_policy = "enabled"
+
+[[target]]
+name = "http3_webtransport"
+owner = "HTTP/3 and WebTransport maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes mapped to bounded HTTP/3 request metadata, early-data state, and WebTransport protocol headers."
+invariants = ["extended CONNECT classification is deterministic", "early-data decisions fail closed", "protocol token parsing stays bounded"]
+unsupported_states = ["live QUIC connections", "WebTransport session tasks", "datagram forwarding"]
+seed_dir = "fuzz/seeds/http3_webtransport"
+dictionary = "fuzz/dictionaries/http.dict"
+coverage_landmarks = ["source/src/proxy/http3.rs:is_webtransport_request", "source/src/proxy/http/webtransport.rs:parse_webtransport_protocols"]
+regression_path = "tests/fixtures/fuzz-regressions/http3_webtransport"
+leak_policy = "enabled"
+
+[[target]]
+name = "websocket_frame"
+owner = "WebSocket and stream WAF maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes mapped to at most eight bounded WebSocket data and control frames."
+invariants = ["frame parsing and ownership never panic", "control-frame limits remain enforced", "WAF inspection consumes only bounded prefixes"]
+unsupported_states = ["live upgraded connections", "unbounded message reassembly", "background session tasks"]
+seed_dir = "fuzz/seeds/websocket_frame"
+dictionary = "fuzz/dictionaries/websocket.dict"
+coverage_landmarks = ["source/src/fuzzing.rs:exercise_websocket_frame", "source/src/proxy/stream_waf.rs:read_owned_frame"]
+regression_path = "tests/fixtures/fuzz-regressions/websocket_frame"
+leak_policy = "enabled"
+
+[[target]]
+name = "webrtc_turn"
+owner = "WebRTC TURN authentication maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes mapped to bounded STUN and TURN authentication, nonce, fingerprint, and address cases."
+invariants = ["authentication failures remain fail closed", "nonce and integrity checks are deterministic", "address decoding never escapes input bounds"]
+unsupported_states = ["live relay listeners", "database-backed credentials", "network allocation"]
+seed_dir = "fuzz/seeds/webrtc_turn"
+dictionary = "fuzz/dictionaries/turn.dict"
+coverage_landmarks = ["source/src/turn/auth.rs:validate_message", "source/src/turn/protocol.rs:verify_message_integrity"]
+regression_path = "tests/fixtures/fuzz-regressions/webrtc_turn"
+leak_policy = "enabled"
+
+[[target]]
+name = "syscall_boundaries"
+owner = "Runtime hardening and unsafe-code maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted bytes mapped only to reversible ABI conversion, batching, access-mask, socket-option, and file-offset planning."
+invariants = ["numeric conversions reject overflow", "batch plans remain within fixed limits", "no process-wide syscall is invoked"]
+unsupported_states = ["applying Landlock rules", "changing process socket state", "performing filesystem or network I/O"]
+seed_dir = "fuzz/seeds/syscall_boundaries"
+coverage_landmarks = ["source/src/hardening/syscalls.rs:landlock_handled_access_fs", "source/src/tcp_hop/syscalls.rs:tcp_info_layout"]
+regression_path = "tests/fixtures/fuzz-regressions/syscall_boundaries"
+leak_policy = "enabled"
+
+[[target]]
+name = "native_config"
+owner = "Native configuration loader maintainers"
+max_input_bytes = 65536
+input_contract = "Untrusted bytes describe an in-memory graph of at most eight TOML documents of at most 8 KiB each."
+invariants = ["include traversal and cycles fail closed", "glob expansion is sorted and deterministic", "merge conflicts preserve origin diagnostics"]
+unsupported_states = ["host filesystem access", "environment-variable lookup", "runtime configuration publication"]
+seed_dir = "fuzz/seeds/native_config"
+dictionary = "fuzz/dictionaries/native_config.dict"
+coverage_landmarks = ["source/src/config/loader.rs:load_virtual_toml_document", "source/src/config/loader.rs:merge_toml_values"]
+regression_path = "tests/fixtures/fuzz-regressions/native_config"
+leak_policy = "enabled"
+
+[[target]]
+name = "oxirule_expression"
+owner = "OxiRule parser and compiler maintainers"
+max_input_bytes = 8192
+input_contract = "Untrusted UTF-8 or lossy text parsed and analyzed against fixed Request, Response, and Stream schemas."
+invariants = ["invalid syntax produces bounded diagnostics", "successful ASTs analyze without panic", "phase restrictions fail closed"]
+unsupported_states = ["rule execution", "request or response body access", "external function side effects"]
+seed_dir = "fuzz/seeds/oxirule_expression"
+dictionary = "fuzz/dictionaries/oxirule_expression.dict"
+coverage_landmarks = ["source/src/waf/expression.rs:parse", "source/src/waf/expression.rs:analyze_with_profile"]
+regression_path = "tests/fixtures/fuzz-regressions/oxirule_expression"
+leak_policy = "enabled"
+
+[[target]]
+name = "admin_json_mutations"
+owner = "Admin mutation API maintainers"
+max_input_bytes = 32768
+input_contract = "Untrusted JSON selected for deserialization into every protected Admin mutation request schema."
+invariants = ["unknown or malformed fields fail deterministically", "validation remains bounded", "no mutation handler or storage adapter is reached"]
+unsupported_states = ["Admin routing", "database access", "configuration publication"]
+seed_dir = "fuzz/seeds/admin_json_mutations"
+dictionary = "fuzz/dictionaries/admin_json.dict"
+coverage_landmarks = ["source/src/server/admin_control/request.rs:fuzz_decode_mutation_body", "source/src/server/admin_mutation_resources.rs:fuzz_decode_mutation_body"]
+regression_path = "tests/fixtures/fuzz-regressions/admin_json_mutations"
+leak_policy = "enabled"
+
+[[target]]
+name = "admin_mutation_envelope"
+owner = "Admin mutation authentication maintainers"
+max_input_bytes = 8192
+input_contract = "Untrusted header values and bounded generated envelopes parsed through canonical base64url, strict JSON, encoding, and transcript binding."
+invariants = ["duplicate or noncanonical headers fail closed", "body and context digests remain bound", "signature representations have exact lengths"]
+unsupported_states = ["private signing keys", "cryptographic signature verification", "Admin handlers"]
+seed_dir = "fuzz/seeds/admin_mutation_envelope"
+dictionary = "fuzz/dictionaries/admin_envelope.dict"
+coverage_landmarks = ["source/src/admin_mutation/envelope.rs:parse_mutation_header", "source/src/admin_mutation/envelope.rs:mutation_transcript"]
+regression_path = "tests/fixtures/fuzz-regressions/admin_mutation_envelope"
+leak_policy = "enabled"
+
+[[target]]
+name = "cluster_rollout_state"
+owner = "Admin cluster rollout maintainers"
+max_input_bytes = 32768
+input_contract = "Untrusted framed cluster commands and bounded synthetic rollout state for at most sixteen unique members."
+invariants = ["frame lengths and metadata limits fail closed", "rollout classification is deterministic", "partial convergence never commits"]
+unsupported_states = ["PostgreSQL storage", "runtime snapshot replacement", "remote member communication"]
+seed_dir = "fuzz/seeds/cluster_rollout_state"
+dictionary = "fuzz/dictionaries/admin_json.dict"
+coverage_landmarks = ["source/src/admin_mutation/cluster_command.rs:decode_frame", "source/src/admin_mutation/rollout_state.rs:classify"]
+regression_path = "tests/fixtures/fuzz-regressions/cluster_rollout_state"
+leak_policy = "enabled"
+
+[[target]]
+name = "http_body_coding"
+owner = "HTTP WAF body coding maintainers"
+max_input_bytes = 16384
+input_contract = "Untrusted bytes selected for bounded gzip, deflate, Brotli, and Zstandard encode/decode operations."
+invariants = ["decoded output never exceeds 64 KiB", "expansion-ratio limits fail closed", "valid bounded round trips preserve bytes"]
+unsupported_states = ["streaming request bodies", "background blocking tasks", "network I/O"]
+seed_dir = "fuzz/seeds/http_body_coding"
+coverage_landmarks = ["source/src/proxy/http/waf_body_coding.rs:decode_body_sync", "source/src/proxy/http/waf_body_coding.rs:expansion_ratio_exceeded"]
+regression_path = "tests/fixtures/fuzz-regressions/http_body_coding"
+leak_policy = "enabled"
+
+[[target]]
+name = "cache_metadata_key"
+owner = "HTTP response cache maintainers"
+max_input_bytes = 32768
+input_contract = "Untrusted metadata text, external-cache JSON, key templates, query/header/cookie values, and vary material."
+invariants = ["metadata parsing never reads cache files", "path and variant binding fail closed", "key expansion is deterministic and bounded"]
+unsupported_states = ["cache filesystem writes", "backend cache clients", "fill coordination"]
+seed_dir = "fuzz/seeds/cache_metadata_key"
+dictionary = "fuzz/dictionaries/cache.dict"
+coverage_landmarks = ["source/src/cache/metadata.rs:decode_metadata_text", "source/src/cache/key.rs:expanded_cache_key"]
+regression_path = "tests/fixtures/fuzz-regressions/cache_metadata_key"
+leak_policy = "enabled"
+
+[[target]]
+name = "gateway_api_translation"
+owner = "Gateway Controller maintainers"
+max_input_bytes = 65536
+input_contract = "Untrusted JSON or YAML containing at most sixteen Kubernetes objects translated with fixed controller arguments."
+invariants = ["unsupported and conflicting resources produce deterministic diagnostics", "generated TOML reparses", "translation never contacts Kubernetes"]
+unsupported_states = ["Kubernetes clients and watches", "leader election", "filesystem rendering"]
+seed_dir = "fuzz/seeds/gateway_api_translation"
+dictionary = "fuzz/dictionaries/gateway_api.dict"
+coverage_landmarks = ["source/apps/oxibelt-gateway-controller/src/model.rs:from_value", "source/apps/oxibelt-gateway-controller/src/translate.rs:translate_objects"]
+regression_path = "tests/fixtures/fuzz-regressions/gateway_api_translation"
+leak_policy = "enabled"
+
+[[target]]
+name = "tls_certificate_metadata"
+owner = "TLS client-certificate metadata maintainers"
+max_input_bytes = 131072
+input_contract = "Untrusted bytes split into at most four in-memory DER certificate candidates of at most 64 KiB each."
+invariants = ["DER length parsing stays bounded", "name and SAN normalization is deterministic", "fingerprints remain available when metadata parsing fails"]
+unsupported_states = ["private keys", "certificate file loading", "live TLS servers"]
+seed_dir = "fuzz/seeds/tls_certificate_metadata"
+dictionary = "fuzz/dictionaries/tls.dict"
+coverage_landmarks = ["source/src/tls/cert_metadata.rs:parse_certificate_metadata", "source/src/tls/cert_metadata.rs:client_certificate_metadata"]
+regression_path = "tests/fixtures/fuzz-regressions/tls_certificate_metadata"
+leak_policy = "enabled"

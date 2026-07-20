@@ -1,0 +1,9 @@
+# TLS handshake, SNI, ALPN, and certificate metadata tokens.
+client_hello="ClientHello"
+server_name="server_name"
+example_dns="example.test"
+alpn_h2="h2"
+alpn_h1="http/1.1"
+certificate="CERTIFICATE"
+subject_alt_name="subjectAltName"
+spiffe="spiffe://"

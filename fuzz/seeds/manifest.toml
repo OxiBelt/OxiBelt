@@ -1,0 +1,133 @@
+version = 1
+
+# Every seed is repository-authored from public protocol syntax or OxiBelt's
+# documented interfaces. Seeds are intentionally small, non-secret, and safe
+# to publish. Hashes make review-time replacement explicit.
+
+[[seed]]
+target = "turn_protocol"
+path = "fuzz/seeds/turn_protocol/binding-request.tokens"
+sha256 = "3b00b9a8f782f8193cdfb1446be5d1456dedbaf9d92836df0dbd5dcc778eff22"
+origin = "Repository-authored STUN and TURN vocabulary derived from public RFC field names."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "tls_client_hello"
+path = "fuzz/seeds/tls_client_hello/sni-alpn.tokens"
+sha256 = "4ecd0861951ad8b178cae8dc7fee6eeee548ad6cc6c38aac9e5e94b11e3d9740"
+origin = "Repository-authored synthetic ClientHello vocabulary using the reserved .test suffix."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "http_semantics"
+path = "fuzz/seeds/http_semantics/basic-request.http"
+sha256 = "6b50163d9b3a6b37d9d2b439d991af5f926257d27789df39166bfd6d24ffe123"
+origin = "Repository-authored synthetic HTTP request using the reserved .test suffix."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "http3_webtransport"
+path = "fuzz/seeds/http3_webtransport/extended-connect.headers"
+sha256 = "f9e448d3c3acb932333c218f3d40377b26adec966f1eab8c9316db9bd88a6035"
+origin = "Repository-authored synthetic WebTransport extended CONNECT metadata."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "websocket_frame"
+path = "fuzz/seeds/websocket_frame/text-control.tokens"
+sha256 = "ac8a220e5d8966356707e5a21db96e0b1ec9e7be0ec0ec4fb8601d7f34633f8b"
+origin = "Repository-authored WebSocket frame-sequence vocabulary."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "webrtc_turn"
+path = "fuzz/seeds/webrtc_turn/long-term-auth.tokens"
+sha256 = "cfd724b6c278c0be3ef82f06409874187112ed7b546c357d6e4965b5f6072ef7"
+origin = "Repository-authored STUN and TURN authentication vocabulary derived from public RFC field names."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "syscall_boundaries"
+path = "fuzz/seeds/syscall_boundaries/numeric-boundaries.txt"
+sha256 = "5965d06777365f60805d6e76ef4d132bee9fca45d204f2fa24f11b3966d53ffa"
+origin = "Repository-authored public integer boundary values."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "native_config"
+path = "fuzz/seeds/native_config/includes.toml"
+sha256 = "46be97648a4f0ca40b8b84609ebfdc00c6f85964b46f53501c5f40ddd2162d41"
+origin = "Repository-authored two-document virtual TOML include graph using the fuzz seed framing."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "oxirule_expression"
+path = "fuzz/seeds/oxirule_expression/request-path.expr"
+sha256 = "d98e8518746101673a40bb332907a4f1c39730db940c7c6f1b8c8565c6a47980"
+origin = "Repository-authored expression using the public OxiRule schema documented in docs/OxiRule.md."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "admin_json_mutations"
+path = "fuzz/seeds/admin_json_mutations/config-payload.json"
+sha256 = "dbbd5b076b20d88bf546cec78b79e12e769cc7a7653f3e258a86eb51b554331c"
+origin = "Repository-authored synthetic Admin config mutation with no credentials."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "admin_mutation_envelope"
+path = "fuzz/seeds/admin_mutation_envelope/unsigned-envelope.json"
+sha256 = "4f6683547a0ed30e5ae52ef39be4221872df48484d9bb6bd571e7d4bd6f947cb"
+origin = "Repository-authored unsigned mutation metadata with zero digest and synthetic identifiers."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "cluster_rollout_state"
+path = "fuzz/seeds/cluster_rollout_state/rollout-frame.json"
+sha256 = "97a4f1b41cecb9c8adc6f232e69af1553e142edbd0bf8ffb40de3dbdf225f7e5"
+origin = "Repository-authored synthetic two-member rollout state."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "http_body_coding"
+path = "fuzz/seeds/http_body_coding/identity.txt"
+sha256 = "4036c9e1f9c2ab3589ef77780e8d1f0dd57358affdae777f4d41da6e150268df"
+origin = "Repository-authored bounded cleartext compression input."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "cache_metadata_key"
+path = "fuzz/seeds/cache_metadata_key/metadata.txt"
+sha256 = "7960ac62c338611ca540fe18e5ccbbe8c53d27293013b92a16e141a088119d57"
+origin = "Repository-authored cache metadata using synthetic base64-encoded values."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "gateway_api_translation"
+path = "fuzz/seeds/gateway_api_translation/gateway-route.json"
+sha256 = "a410aec4fa1fbf34ae58b40d51cda4d18b8e3429878966294037eeb9720a9f6b"
+origin = "Repository-authored minimal Gateway API object using no cluster identifiers."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "tls_certificate_metadata"
+path = "fuzz/seeds/tls_certificate_metadata/der-shape.tokens"
+sha256 = "2a5530b1d2f2ad4dad72fe8adfb02e94b2f54b60a187de3515c0e9ba3a1dd924"
+origin = "Repository-authored certificate-metadata vocabulary containing no certificate or private key."
+license = "Apache-2.0"
+classification = "non-secret"

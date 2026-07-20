@@ -198,3 +198,114 @@ fn target_state(targets: &[RolloutTarget], instance_id: &str) -> Option<TargetSt
     .find(|target| target.instance_id == instance_id)
     .map(|target| target.state)
 }
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_classify(data: &[u8]) {
+  const MAX_MEMBERS: usize = 16;
+  let byte = |index: usize| data.get(index).copied().unwrap_or_default();
+  let state = match byte(0) % 13 {
+    0 => MutationState::Claimed,
+    1 => MutationState::Validating,
+    2 => MutationState::Applying,
+    3 => MutationState::CanaryApplying,
+    4 => MutationState::CanaryHealthy,
+    5 => MutationState::Expanding,
+    6 => MutationState::FullyApplied,
+    7 => MutationState::Committed,
+    8 => MutationState::Failed,
+    9 => MutationState::RollingBack,
+    10 => MutationState::RolledBack,
+    11 => MutationState::RollbackFailed,
+    _ => MutationState::Indeterminate,
+  };
+  let record = MutationRecord {
+    request_id: format!("fuzz-{:02x}", byte(1)),
+    fingerprint: "fuzz-fingerprint".to_string(),
+    principal: "fuzz-principal".to_string(),
+    signer_id: "fuzz-signer".to_string(),
+    action: "fuzz:Apply".to_string(),
+    resource: "config/fuzz".to_string(),
+    expected_previous_revision: "revision-old".to_string(),
+    new_revision: "revision-new".to_string(),
+    content_digest: "sha256:fuzz".to_string(),
+    cluster_id: Some("fuzz-cluster".to_string()),
+    membership_revision: Some("fuzz-membership".to_string()),
+    state,
+    http_status: None,
+    safe_response: None,
+    error_code: None,
+    audit_record_id: 1,
+    terminal_audit_record_id: None,
+    terminal_audit_confirmed: false,
+    issued_at: "2026-01-01T00:00:00Z".to_string(),
+    expires_at: "2026-01-01T00:05:00Z".to_string(),
+    created_at: "2026-01-01T00:00:00Z".to_string(),
+    updated_at: "2026-01-01T00:00:00Z".to_string(),
+  };
+  let count = usize::from(byte(2) % MAX_MEMBERS as u8).saturating_add(1);
+  let members = (0..count)
+    .map(|index| format!("member-{index:02}"))
+    .collect::<Vec<_>>();
+  let targets = members
+    .iter()
+    .enumerate()
+    .map(|(index, member)| RolloutTarget {
+      instance_id: member.clone(),
+      state: match byte(index.saturating_add(3)) % 11 {
+        0 => TargetState::Pending,
+        1 => TargetState::Validating,
+        2 => TargetState::Validated,
+        3 => TargetState::ApplyAssigned,
+        4 => TargetState::Applying,
+        5 => TargetState::Acked,
+        6 => TargetState::Nacked,
+        7 => TargetState::RollbackAssigned,
+        8 => TargetState::RollingBack,
+        9 => TargetState::RolledBack,
+        _ => TargetState::RollbackFailed,
+      },
+      state_version: i64::from(byte(index.saturating_add(19))),
+      assignment_epoch: i64::from(byte(index.saturating_add(35))),
+      boot_id: None,
+      instance_epoch: None,
+      effect_started_at: (byte(index.saturating_add(51)) & 1 == 1)
+        .then(|| "2026-01-01T00:00:01Z".to_string()),
+      validation_revision: Some("revision-new".to_string()),
+      validation_digest: Some("sha256:validation".to_string()),
+      applied_revision: None,
+      applied_digest: None,
+      restored_revision: None,
+      restored_digest: None,
+      error_code: None,
+      updated_at: "2026-01-01T00:00:01Z".to_string(),
+    })
+    .collect::<Vec<_>>();
+  let arguments = (
+    byte(67) & 1 == 1,
+    byte(68) & 1 == 1,
+    byte(69) & 1 == 1,
+    byte(70) & 1 == 1,
+  );
+  let first = classify(
+    &record,
+    &targets,
+    arguments.0,
+    arguments.1,
+    arguments.2,
+    arguments.3,
+    &members,
+  );
+  let second = classify(
+    &record,
+    &targets,
+    arguments.0,
+    arguments.1,
+    arguments.2,
+    arguments.3,
+    &members,
+  );
+  assert_eq!(
+    first, second,
+    "rollout classification was not deterministic"
+  );
+}

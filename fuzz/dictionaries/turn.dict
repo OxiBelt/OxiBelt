@@ -1,0 +1,10 @@
+# STUN and TURN methods, attributes, and framing markers.
+binding="BINDING"
+allocate="ALLOCATE"
+channel_data="CHANNEL-DATA"
+username="USERNAME"
+realm="REALM"
+nonce="NONCE"
+integrity="MESSAGE-INTEGRITY"
+fingerprint="FINGERPRINT"
+xor_address="XOR-MAPPED-ADDRESS"

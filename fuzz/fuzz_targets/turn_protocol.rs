@@ -16,8 +16,10 @@ use oxibelt::turn::protocol::{
 const MAX_ATTRS: usize = 8;
 const MAX_ATTR_VALUE_BYTES: usize = 64;
 const MAX_CHANNEL_PAYLOAD_BYTES: usize = 128;
+const MAX_RAW_BYTES: usize = 4096;
 
 fuzz_target!(|data: &[u8]| {
+    let data = &data[..data.len().min(MAX_RAW_BYTES)];
     exercise_raw_parsers(data);
     exercise_generated_stun(data);
     exercise_generated_channel_data(data);

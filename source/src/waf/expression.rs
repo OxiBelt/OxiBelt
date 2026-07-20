@@ -244,6 +244,26 @@ fn validate_strict_source(input: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_parse_and_analyze(input: &[u8]) {
+  const MAX_EXPRESSION_BYTES: usize = 8 * 1024;
+  let input = &input[..input.len().min(MAX_EXPRESSION_BYTES)];
+  let Ok(input) = std::str::from_utf8(input) else {
+    return;
+  };
+  let Ok(expression) = Parser::new(input).parse() else {
+    return;
+  };
+  let functions = FunctionMap::new();
+  for phase in [WafPhase::Request, WafPhase::Response, WafPhase::Stream] {
+    if let Ok(analyzed) = expression.analyze_for_phase_with_functions(phase, &functions, None) {
+      let _ = analyzed.verified_root();
+      let _ = analyzed.body_need();
+      let _ = analyzed.function_calls();
+    }
+  }
+}
+
 fn consume_single_quoted_string(
   input: &str,
   chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,

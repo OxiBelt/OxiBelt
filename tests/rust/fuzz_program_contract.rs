@@ -1,0 +1,819 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+const EXPECTED_TARGETS: &[&str] = &[
+  "admin_json_mutations",
+  "admin_mutation_envelope",
+  "cache_metadata_key",
+  "cluster_rollout_state",
+  "gateway_api_translation",
+  "http3_webtransport",
+  "http_body_coding",
+  "http_semantics",
+  "native_config",
+  "oxirule_expression",
+  "syscall_boundaries",
+  "tls_certificate_metadata",
+  "tls_client_hello",
+  "turn_protocol",
+  "webrtc_turn",
+  "websocket_frame",
+];
+
+#[derive(Debug)]
+struct Target {
+  name: String,
+  owner: String,
+  max_input_bytes: u64,
+  input_contract: String,
+  invariants: Vec<String>,
+  unsupported_states: Vec<String>,
+  seed_dir: String,
+  dictionary: Option<String>,
+  coverage_landmarks: Vec<String>,
+  regression_path: String,
+  leak_policy: String,
+}
+
+#[derive(Debug)]
+struct Seed {
+  target: String,
+  path: String,
+  sha256: String,
+  origin: String,
+  license: String,
+  classification: String,
+}
+
+fn repo_root() -> PathBuf {
+  PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .parent()
+    .expect("source crate should live below the repository root")
+    .to_path_buf()
+}
+
+fn read_repo_file(path: &str) -> String {
+  fs::read_to_string(repo_root().join(path))
+    .unwrap_or_else(|error| panic!("{path} should be readable: {error}"))
+}
+
+fn parse_repo_toml(path: &str) -> toml::Value {
+  toml::from_str(&read_repo_file(path))
+    .unwrap_or_else(|error| panic!("{path} should contain valid TOML: {error}"))
+}
+
+fn required_string(table: &toml::Table, field: &str, context: &str) -> String {
+  table
+    .get(field)
+    .and_then(toml::Value::as_str)
+    .filter(|value| !value.trim().is_empty())
+    .unwrap_or_else(|| panic!("{context} must define nonempty `{field}`"))
+    .to_string()
+}
+
+fn required_strings(table: &toml::Table, field: &str, context: &str) -> Vec<String> {
+  let values = table
+    .get(field)
+    .and_then(toml::Value::as_array)
+    .unwrap_or_else(|| panic!("{context} must define array `{field}`"));
+  assert!(!values.is_empty(), "{context} `{field}` must not be empty");
+  values
+    .iter()
+    .map(|value| {
+      value
+        .as_str()
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or_else(|| panic!("{context} `{field}` entries must be nonempty strings"))
+        .to_string()
+    })
+    .collect()
+}
+
+fn catalog() -> (toml::Table, BTreeMap<String, Target>) {
+  let document = parse_repo_toml("fuzz/targets.toml");
+  assert_eq!(
+    document.get("version").and_then(toml::Value::as_integer),
+    Some(1),
+    "fuzz/targets.toml must use catalog version 1"
+  );
+  let program = document
+    .get("program")
+    .and_then(toml::Value::as_table)
+    .expect("fuzz/targets.toml must define [program]")
+    .clone();
+  let tables = document
+    .get("target")
+    .and_then(toml::Value::as_array)
+    .expect("fuzz/targets.toml must define [[target]] entries");
+  let mut targets = BTreeMap::new();
+  for value in tables {
+    let table = value
+      .as_table()
+      .expect("each [[target]] entry must be a table");
+    let name = required_string(table, "name", "fuzz target");
+    let context = format!("fuzz target {name}");
+    let target = Target {
+      name: name.clone(),
+      owner: required_string(table, "owner", &context),
+      max_input_bytes: table
+        .get("max_input_bytes")
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or_else(|| panic!("{context} must define positive `max_input_bytes`")),
+      input_contract: required_string(table, "input_contract", &context),
+      invariants: required_strings(table, "invariants", &context),
+      unsupported_states: required_strings(table, "unsupported_states", &context),
+      seed_dir: required_string(table, "seed_dir", &context),
+      dictionary: table
+        .get("dictionary")
+        .map(|_| required_string(table, "dictionary", &context)),
+      coverage_landmarks: required_strings(table, "coverage_landmarks", &context),
+      regression_path: required_string(table, "regression_path", &context),
+      leak_policy: required_string(table, "leak_policy", &context),
+    };
+    assert!(
+      targets.insert(name.clone(), target).is_none(),
+      "duplicate fuzz target {name}"
+    );
+  }
+  (program, targets)
+}
+
+fn seed_manifest() -> Vec<Seed> {
+  let document = parse_repo_toml("fuzz/seeds/manifest.toml");
+  assert_eq!(
+    document.get("version").and_then(toml::Value::as_integer),
+    Some(1),
+    "fuzz/seeds/manifest.toml must use version 1"
+  );
+  document
+    .get("seed")
+    .and_then(toml::Value::as_array)
+    .expect("fuzz/seeds/manifest.toml must define [[seed]] entries")
+    .iter()
+    .map(|value| {
+      let table = value.as_table().expect("each [[seed]] must be a table");
+      let path = required_string(table, "path", "fuzz seed");
+      let context = format!("fuzz seed {path}");
+      Seed {
+        target: required_string(table, "target", &context),
+        path,
+        sha256: required_string(table, "sha256", &context),
+        origin: required_string(table, "origin", &context),
+        license: required_string(table, "license", &context),
+        classification: required_string(table, "classification", &context),
+      }
+    })
+    .collect()
+}
+
+fn string_set<'a>(items: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+  items.map(str::to_string).collect()
+}
+
+fn assert_safe_relative_path(path: &str, context: &str) {
+  let path = Path::new(path);
+  assert!(!path.is_absolute(), "{context} must be repository-relative");
+  assert!(
+    path
+      .components()
+      .all(|component| matches!(component, Component::Normal(_))),
+    "{context} must not contain empty, current, parent, root, or prefix components"
+  );
+}
+
+fn table_integer(program: &toml::Table, key: &str) -> i64 {
+  program
+    .get(key)
+    .and_then(toml::Value::as_integer)
+    .unwrap_or_else(|| panic!("fuzz program must define integer `{key}`"))
+}
+
+#[test]
+fn catalog_defines_the_complete_bounded_program() {
+  let (program, targets) = catalog();
+  assert_eq!(
+    targets.keys().cloned().collect::<BTreeSet<_>>(),
+    string_set(EXPECTED_TARGETS.iter().copied()),
+    "the fuzz catalog must preserve all sixteen Phase 10 targets"
+  );
+
+  assert_eq!(table_integer(&program, "max_seed_files_per_target"), 128);
+  assert_eq!(
+    table_integer(&program, "max_seed_bytes_per_target"),
+    524_288
+  );
+  assert_eq!(
+    table_integer(&program, "max_cached_corpus_files_per_target"),
+    2_048
+  );
+  assert_eq!(
+    table_integer(&program, "max_cached_corpus_bytes_per_target"),
+    67_108_864
+  );
+  assert_eq!(table_integer(&program, "pr_runs"), 256);
+  assert_eq!(table_integer(&program, "campaign_seconds"), 900);
+  assert_eq!(table_integer(&program, "input_timeout_seconds"), 10);
+  assert_eq!(table_integer(&program, "rss_limit_mb"), 3_072);
+  assert_eq!(table_integer(&program, "allocation_limit_mb"), 512);
+  assert_eq!(
+    program
+      .get("pr_leak_detection")
+      .and_then(toml::Value::as_bool),
+    Some(false)
+  );
+  assert_eq!(
+    program
+      .get("campaign_leak_detection")
+      .and_then(toml::Value::as_bool),
+    Some(true)
+  );
+
+  for target in targets.values() {
+    assert_eq!(target.name.trim(), target.name);
+    assert!(
+      target
+        .name
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+      "target {} must use a shell-safe lowercase name",
+      target.name
+    );
+    assert!(
+      (1..=131_072).contains(&target.max_input_bytes),
+      "target {} must have a bounded input at or below 128 KiB",
+      target.name
+    );
+    assert!(
+      target.owner.len() >= 12,
+      "target {} must identify an owner",
+      target.name
+    );
+    assert!(
+      target.input_contract.len() >= 24,
+      "target {} must document its input contract",
+      target.name
+    );
+    assert!(
+      target.invariants.len() >= 2,
+      "target {} must document multiple invariants",
+      target.name
+    );
+    assert!(
+      target.unsupported_states.len() >= 2,
+      "target {} must document unsupported states",
+      target.name
+    );
+    assert_eq!(target.seed_dir, format!("fuzz/seeds/{}", target.name));
+    assert_eq!(
+      target.regression_path,
+      format!("tests/fixtures/fuzz-regressions/{}", target.name)
+    );
+    assert_eq!(
+      target.leak_policy, "enabled",
+      "campaign leak detection exceptions require rationale, expiry, and tracking issue metadata"
+    );
+    for landmark in &target.coverage_landmarks {
+      let (source_path, symbol) = landmark
+        .split_once(':')
+        .unwrap_or_else(|| panic!("coverage landmark {landmark} must use path:symbol"));
+      assert_safe_relative_path(source_path, "coverage landmark path");
+      assert!(
+        repo_root().join(source_path).is_file(),
+        "coverage landmark source {source_path} should exist"
+      );
+      assert!(
+        !symbol.trim().is_empty(),
+        "coverage landmark symbol must not be empty"
+      );
+    }
+    if let Some(dictionary) = &target.dictionary {
+      assert_safe_relative_path(dictionary, "dictionary path");
+      assert!(dictionary.starts_with("fuzz/dictionaries/"));
+      assert!(dictionary.ends_with(".dict"));
+    }
+  }
+}
+
+#[test]
+fn cargo_bins_and_ci_matrices_match_the_catalog() {
+  let (_, targets) = catalog();
+  let expected = targets.keys().cloned().collect::<BTreeSet<_>>();
+  let cargo = parse_repo_toml("fuzz/Cargo.toml");
+  let bins = cargo
+    .get("bin")
+    .and_then(toml::Value::as_array)
+    .expect("fuzz/Cargo.toml should define [[bin]] entries");
+  let cargo_names = bins
+    .iter()
+    .map(|value| {
+      let table = value.as_table().expect("fuzz bin should be a table");
+      let name = required_string(table, "name", "fuzz bin");
+      assert_eq!(
+        required_string(table, "path", &format!("fuzz bin {name}")),
+        format!("fuzz_targets/{name}.rs")
+      );
+      assert_eq!(
+        table.get("test").and_then(toml::Value::as_bool),
+        Some(false)
+      );
+      assert_eq!(table.get("doc").and_then(toml::Value::as_bool), Some(false));
+      assert_eq!(
+        table.get("bench").and_then(toml::Value::as_bool),
+        Some(false)
+      );
+      name
+    })
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    cargo_names, expected,
+    "fuzz Cargo bins must match the catalog"
+  );
+
+  let check_workflow = read_repo_file(".github/workflows/check-oxibelt.yml");
+  let sustained_workflow = read_repo_file(".github/workflows/fuzz-sustained.yml");
+  assert_eq!(
+    job_matrix_targets(&check_workflow, "fuzz-smoke"),
+    expected,
+    "pull-request fuzz matrix must match the catalog"
+  );
+  assert_eq!(
+    job_matrix_targets(&sustained_workflow, "fuzz-sustained"),
+    targets.keys().cloned().collect(),
+    "sustained fuzz matrix must match the catalog"
+  );
+}
+
+fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+  let marker = format!("\n  {job}:\n");
+  let start = workflow
+    .find(&marker)
+    .unwrap_or_else(|| panic!("workflow should define job `{job}`"))
+    + 1;
+  let remainder = &workflow[start..];
+  let end = remainder
+    .match_indices("\n  ")
+    .find_map(|(offset, _)| {
+      let line = remainder[offset + 1..].lines().next()?;
+      (line.starts_with("  ")
+        && !line.starts_with("   ")
+        && line.ends_with(':')
+        && !line.trim_start().starts_with('-'))
+      .then_some(offset)
+    })
+    .unwrap_or(remainder.len());
+  &remainder[..end]
+}
+
+fn job_matrix_targets(workflow: &str, job: &str) -> BTreeSet<String> {
+  let block = job_block(workflow, job);
+  let marker = "        fuzz_target:\n";
+  let start = block
+    .find(marker)
+    .unwrap_or_else(|| panic!("job `{job}` should define matrix.fuzz_target"))
+    + marker.len();
+  block[start..]
+    .lines()
+    .take_while(|line| line.starts_with("          - "))
+    .map(|line| line.trim_start_matches("          - ").trim().to_string())
+    .collect()
+}
+
+#[test]
+fn reviewed_seeds_are_complete_bounded_and_non_secret() {
+  let (program, targets) = catalog();
+  let max_files = usize::try_from(table_integer(&program, "max_seed_files_per_target"))
+    .expect("seed file limit should fit usize");
+  let max_bytes = u64::try_from(table_integer(&program, "max_seed_bytes_per_target"))
+    .expect("seed byte limit should be positive");
+  let seeds = seed_manifest();
+  let mut paths = BTreeSet::new();
+  let mut by_target: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+
+  for seed in &seeds {
+    let target = targets.get(&seed.target).unwrap_or_else(|| {
+      panic!(
+        "seed {} references unknown target {}",
+        seed.path, seed.target
+      )
+    });
+    assert_safe_relative_path(&seed.path, "seed path");
+    assert!(
+      seed.path.starts_with(&format!("{}/", target.seed_dir)),
+      "seed {} must stay in {}",
+      seed.path,
+      target.seed_dir
+    );
+    assert!(
+      paths.insert(seed.path.clone()),
+      "duplicate seed path {}",
+      seed.path
+    );
+    let metadata = fs::symlink_metadata(repo_root().join(&seed.path))
+      .unwrap_or_else(|error| panic!("seed {} should exist: {error}", seed.path));
+    assert!(
+      !metadata.file_type().is_symlink(),
+      "seed {} must not be a symlink",
+      seed.path
+    );
+    assert!(
+      metadata.is_file(),
+      "seed {} must be a regular file",
+      seed.path
+    );
+    assert!(
+      metadata.len() <= target.max_input_bytes,
+      "seed {} exceeds target {} input limit",
+      seed.path,
+      seed.target
+    );
+    assert_eq!(
+      seed.license, "Apache-2.0",
+      "seed {} must have a compatible license",
+      seed.path
+    );
+    assert_eq!(
+      seed.classification, "non-secret",
+      "seed {} must be classified non-secret",
+      seed.path
+    );
+    assert!(
+      seed.origin.len() >= 24,
+      "seed {} must record meaningful provenance",
+      seed.path
+    );
+    assert!(
+      seed.sha256.len() == 64 && seed.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+      "seed {} must record a SHA-256 digest",
+      seed.path
+    );
+    let bytes = fs::read(repo_root().join(&seed.path))
+      .unwrap_or_else(|error| panic!("seed {} should be readable: {error}", seed.path));
+    let actual = Sha256::digest(&bytes)
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect::<String>();
+    assert_eq!(
+      actual, seed.sha256,
+      "seed {} digest must match reviewed bytes",
+      seed.path
+    );
+    let lower = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+    for forbidden in [
+      "begin private key",
+      "begin rsa private key",
+      "authorization: bearer",
+      "aws_secret_access_key",
+      "private_token",
+    ] {
+      assert!(
+        !lower.contains(forbidden),
+        "seed {} contains forbidden secret marker",
+        seed.path
+      );
+    }
+    let summary = by_target.entry(seed.target.clone()).or_default();
+    summary.0 += 1;
+    summary.1 += metadata.len();
+  }
+
+  for target in targets.keys() {
+    let (count, bytes) = by_target.get(target).copied().unwrap_or_default();
+    assert!(count > 0, "target {target} must have a reviewed seed");
+    assert!(
+      count <= max_files,
+      "target {target} exceeds reviewed seed file limit"
+    );
+    assert!(
+      bytes <= max_bytes,
+      "target {target} exceeds reviewed seed byte limit"
+    );
+  }
+
+  let actual = repository_files_below("fuzz/seeds")
+    .into_iter()
+    .filter(|path| path != "fuzz/seeds/manifest.toml")
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    actual, paths,
+    "every reviewed seed file must have manifest provenance"
+  );
+}
+
+#[test]
+fn dictionaries_are_small_valid_and_catalogued() {
+  let (_, targets) = catalog();
+  let expected = targets
+    .values()
+    .filter_map(|target| target.dictionary.clone())
+    .collect::<BTreeSet<_>>();
+  let actual = repository_files_below("fuzz/dictionaries");
+  assert_eq!(
+    actual, expected,
+    "dictionary files must be referenced by the target catalog"
+  );
+
+  for path in actual {
+    assert_safe_relative_path(&path, "dictionary path");
+    let metadata = fs::symlink_metadata(repo_root().join(&path))
+      .unwrap_or_else(|error| panic!("dictionary {path} should exist: {error}"));
+    assert!(
+      !metadata.file_type().is_symlink(),
+      "dictionary {path} must not be a symlink"
+    );
+    assert!(
+      metadata.is_file(),
+      "dictionary {path} must be a regular file"
+    );
+    assert!(
+      metadata.len() <= 65_536,
+      "dictionary {path} must not exceed 64 KiB"
+    );
+    let contents = read_repo_file(&path);
+    let mut token_count = 0;
+    for (index, line) in contents.lines().enumerate() {
+      let line = line.trim();
+      if line.is_empty() || line.starts_with('#') {
+        continue;
+      }
+      let (_, token) = line
+        .split_once('=')
+        .unwrap_or_else(|| panic!("dictionary {path}:{} must use name=\"token\"", index + 1));
+      assert!(
+        token.starts_with('"') && token.ends_with('"') && token.len() >= 2,
+        "dictionary {path}:{} must quote its token",
+        index + 1
+      );
+      token_count += 1;
+    }
+    assert!(token_count > 0, "dictionary {path} must contain tokens");
+  }
+}
+
+fn repository_files_below(relative: &str) -> BTreeSet<String> {
+  let root = repo_root();
+  let start = root.join(relative);
+  let mut pending = vec![start];
+  let mut files = BTreeSet::new();
+  while let Some(directory) = pending.pop() {
+    let entries = fs::read_dir(&directory)
+      .unwrap_or_else(|error| panic!("{} should be readable: {error}", directory.display()));
+    for entry in entries {
+      let entry = entry.expect("directory entry should be readable");
+      let metadata = fs::symlink_metadata(entry.path())
+        .unwrap_or_else(|error| panic!("{} should have metadata: {error}", entry.path().display()));
+      assert!(
+        !metadata.file_type().is_symlink(),
+        "{} must not be a symlink",
+        entry.path().display()
+      );
+      if metadata.is_dir() {
+        pending.push(entry.path());
+      } else {
+        assert!(
+          metadata.is_file(),
+          "{} must be a regular file",
+          entry.path().display()
+        );
+        files.insert(
+          entry
+            .path()
+            .strip_prefix(&root)
+            .expect("file should remain under repository root")
+            .to_string_lossy()
+            .replace('\\', "/"),
+        );
+      }
+    }
+  }
+  files
+}
+
+#[test]
+fn mutable_fuzz_output_is_ignored_but_reviewed_inputs_are_not() {
+  let ignored = read_repo_file("fuzz/.gitignore");
+  assert_eq!(
+    ignored.lines().collect::<BTreeSet<_>>(),
+    BTreeSet::from([".cmin-*/", "artifacts/", "corpus/", "coverage/", "target/",]),
+    "fuzz/.gitignore must ignore only generated fuzz output"
+  );
+  for reviewed in ["seeds", "dictionaries", "targets.toml"] {
+    assert!(
+      !ignored.contains(reviewed),
+      "reviewed fuzz input {reviewed} must remain trackable"
+    );
+  }
+}
+
+#[test]
+fn workflows_enforce_bounded_least_privilege_profiles() {
+  let check = read_repo_file(".github/workflows/check-oxibelt.yml");
+  let smoke = job_block(&check, "fuzz-smoke");
+  assert_contains_all(
+    "fuzz-smoke",
+    smoke,
+    &[
+      "permissions:\n      contents: read",
+      "timeout-minutes: 45",
+      "nightly-2026-07-16",
+      "cargo-fuzz --version 0.13.2",
+      "tests/scripts/run-fuzz-target.sh smoke",
+      "LSAN_OPTIONS: detect_leaks=0",
+      "${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}",
+      "retention-days: 90",
+    ],
+  );
+
+  let sustained = read_repo_file(".github/workflows/fuzz-sustained.yml");
+  assert_contains_all(
+    "fuzz-sustained workflow",
+    &sustained,
+    &[
+      "schedule:",
+      "cron: \"17 3 * * *\"",
+      "workflow_dispatch:",
+      "cancel-in-progress: false",
+    ],
+  );
+  let campaign = job_block(&sustained, "fuzz-sustained");
+  assert_contains_all(
+    "fuzz-sustained job",
+    campaign,
+    &[
+      "permissions:\n      contents: read",
+      "max-parallel: 4",
+      "timeout-minutes: 120",
+      "nightly-2026-07-16",
+      "cargo-fuzz --version 0.13.2",
+      "tests/scripts/run-fuzz-target.sh campaign",
+      "LSAN_OPTIONS: detect_leaks=1",
+      "${{ runner.temp }}/oxibelt-fuzz-corpus/${{ matrix.fuzz_target }}",
+      "retention-days: 30",
+      "retention-days: 90",
+    ],
+  );
+  assert!(
+    campaign
+      .contains("github.ref == format('refs/heads/{0}', github.event.repository.default_branch)")
+      || campaign.contains("github.ref_name == github.event.repository.default_branch"),
+    "the sustained campaign must run only for the canonical default branch"
+  );
+
+  for (name, contents) in [("fuzz-smoke", smoke), ("fuzz-sustained", campaign)] {
+    for forbidden in [
+      "contents: write",
+      "issues: write",
+      "pull-requests: write",
+      "git commit",
+      "git push",
+      "docker ",
+      "docker-rootful",
+    ] {
+      assert!(
+        !contents.contains(forbidden),
+        "{name} must not contain `{forbidden}`"
+      );
+    }
+  }
+
+  let runner = read_repo_file("tests/scripts/run-fuzz-target.sh");
+  assert_contains_all(
+    "fuzz runner",
+    &runner,
+    &[
+      "set -Eeuo pipefail",
+      "umask 077",
+      "readonly FUZZ_NIGHTLY=\"nightly-2026-07-16\"",
+      "readonly MAX_SEED_FILES=128",
+      "readonly MAX_SEED_BYTES=524288",
+      "readonly MAX_CORPUS_FILES=2048",
+      "readonly MAX_CORPUS_BYTES=67108864",
+      "readonly MAX_ARTIFACT_FILES=8",
+      "readonly FUZZ_TIMEOUT_SECONDS=10",
+      "readonly FUZZ_RSS_LIMIT_MB=3072",
+      "readonly FUZZ_MALLOC_LIMIT_MB=512",
+      "-runs=256",
+      "-max_total_time=$duration_seconds",
+      "-max_len=$max_input_bytes",
+      "-timeout=$FUZZ_TIMEOUT_SECONDS",
+      "-rss_limit_mb=$FUZZ_RSS_LIMIT_MB",
+      "-malloc_limit_mb=$FUZZ_MALLOC_LIMIT_MB",
+      "-print_final_stats=1",
+      "-detect_leaks=0",
+      "-detect_leaks=1",
+      "configure_sanitizer_environment 0",
+      "configure_sanitizer_environment 1",
+      "cargo_target_dir",
+      "coverage_search_roots",
+      "metadata --no-deps --format-version 1",
+      "cmin_staging",
+      "cmin_replacement",
+      "cmin_backup",
+      "-artifact_prefix=$artifact_dir/",
+      "readonly artifact_dir=\"$runner_temp/oxibelt-fuzz-artifacts/$target\"",
+      "readonly persistent_corpus=\"$runner_temp/oxibelt-fuzz-corpus/$target\"",
+      "assert_no_symlinks",
+      "mktemp -d",
+      "timeout --signal=TERM --kill-after=15s 300s",
+    ],
+  );
+  for forbidden in [
+    "eval ",
+    "curl ",
+    "wget ",
+    "docker ",
+    "docker-rootful",
+    "git commit",
+    "git push",
+    "gh issue",
+  ] {
+    assert!(
+      !runner.contains(forbidden),
+      "fuzz runner must not contain `{forbidden}`"
+    );
+  }
+}
+
+#[test]
+fn fuzz_target_wrappers_do_not_gain_side_effect_apis() {
+  let (_, targets) = catalog();
+  let wrappers = repository_files_below("fuzz/fuzz_targets");
+  let expected = targets
+    .keys()
+    .map(|name| format!("fuzz/fuzz_targets/{name}.rs"))
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    wrappers, expected,
+    "one wrapper must exist for each catalog target"
+  );
+
+  for path in wrappers {
+    let source = read_repo_file(&path);
+    assert!(
+      source.contains("fuzz_target!"),
+      "{path} must define a libFuzzer entry point"
+    );
+    for forbidden in [
+      "std::fs",
+      "tokio::fs",
+      "std::process",
+      "Command::",
+      "TcpStream",
+      "TcpListener",
+      "UdpSocket",
+      "UnixStream",
+      "sqlx::",
+      "kube::Client",
+      "set_var(",
+      "remove_var(",
+      "libc::",
+      "nix::",
+      "unsafe {",
+      "unsafe fn",
+    ] {
+      assert!(
+        !source.contains(forbidden),
+        "{path} must not use side-effect API `{forbidden}`"
+      );
+    }
+  }
+}
+
+#[test]
+fn fuzzing_documentation_covers_the_operational_lifecycle() {
+  let docs = read_repo_file("docs/Fuzzing.md");
+  assert_contains_all(
+    "docs/Fuzzing.md",
+    &docs,
+    &[
+      "## Program catalog and ownership",
+      "## Setup and local runs",
+      "## Seeds, dictionaries, and corpus promotion",
+      "## Coverage evidence",
+      "## Crash triage and regressions",
+      "tests/scripts/run-fuzz-target.sh smoke",
+      "tests/scripts/run-fuzz-target.sh campaign",
+      "tests/fixtures/fuzz-regressions/<target>/",
+      "SECURITY.md",
+      "Automation never commits a generated corpus or opens a public issue.",
+    ],
+  );
+  for target in EXPECTED_TARGETS {
+    assert!(
+      docs.contains(&format!("`{target}`")),
+      "docs must describe target {target}"
+    );
+  }
+}
+
+fn assert_contains_all(context: &str, contents: &str, needles: &[&str]) {
+  for needle in needles {
+    assert!(
+      contents.contains(needle),
+      "{context} must contain `{needle}`"
+    );
+  }
+}

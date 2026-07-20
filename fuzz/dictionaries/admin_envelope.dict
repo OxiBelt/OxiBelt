@@ -1,0 +1,10 @@
+# Signed Admin mutation envelope fields and canonical encodings.
+request_id="request_id"
+actor="actor"
+timestamp="timestamp"
+old_revision="old_revision"
+new_revision="new_revision"
+content_digest="content_digest"
+target="target"
+signature="signature"
+sha256="sha256:"

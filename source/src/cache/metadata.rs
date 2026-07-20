@@ -92,6 +92,20 @@ pub(super) fn decode_metadata(path: &Path, disk_dir: &Path) -> anyhow::Result<St
   }
   let raw = std::fs::read_to_string(path)
     .with_context(|| format!("failed to read cache metadata {}", path.display()))?;
+  decode_metadata_text(&raw, metadata_stem, disk_dir)
+}
+
+/// Decodes cache metadata after the filesystem wrapper has established the
+/// trusted metadata stem and cache root.
+///
+/// Keeping text parsing separate lets recovery tests and fuzzing exercise the
+/// attacker-controlled representation without granting the parser filesystem
+/// access.
+pub(super) fn decode_metadata_text(
+  raw: &str,
+  metadata_stem: &str,
+  disk_dir: &Path,
+) -> anyhow::Result<StoredEntry> {
   let mut values: HashMap<&str, Vec<String>> = HashMap::new();
   for line in raw.lines() {
     let Some((key, value)) = line.split_once('=') else {
@@ -243,4 +257,50 @@ fn base64_decode(value: &str) -> anyhow::Result<Vec<u8>> {
   base64::engine::general_purpose::STANDARD_NO_PAD
     .decode(value)
     .context("invalid base64 cache metadata")
+}
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_decode_metadata(raw: &str) {
+  const FUZZ_CACHE_ROOT: &str = "/oxibelt-fuzz-cache";
+  let variant_key = raw.lines().find_map(|line| {
+    let encoded = line.strip_prefix("variant_key=")?;
+    unb64(encoded).ok()
+  });
+  let stem = variant_key
+    .as_deref()
+    .map(cache_file_name)
+    .unwrap_or_else(|| "0".repeat(64));
+  let _ = decode_metadata_text(raw, &stem, Path::new(FUZZ_CACHE_ROOT));
+  let _ = decode_metadata_text(raw, &"f".repeat(64), Path::new(FUZZ_CACHE_ROOT));
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn text_decoder_preserves_the_filesystem_binding() {
+    let variant_key = "variant-key";
+    let stem = cache_file_name(variant_key);
+    let raw = [
+      "version=1".to_string(),
+      format!("policy={}", b64(b"default")),
+      format!("partition={}", b64(b"tenant")),
+      format!("base_key={}", b64(b"https://cache.example.test/item")),
+      format!("variant_key={}", b64(variant_key.as_bytes())),
+      format!("scheme={}", b64(b"https")),
+      format!("host={}", b64(b"cache.example.test")),
+      format!("uri={}", b64(b"/item")),
+      "status=200".to_string(),
+      "expires_at=1893456000".to_string(),
+      "stored_at=1767225600".to_string(),
+      "size=4".to_string(),
+      "security_headers_neutral=true".to_string(),
+    ]
+    .join("\n");
+    let decoded = decode_metadata_text(&raw, &stem, Path::new("/cache"))
+      .expect("bounded metadata should decode");
+    assert_eq!(decoded.variant_key, variant_key);
+    assert!(decode_metadata_text(&raw, &"f".repeat(64), Path::new("/cache")).is_err());
+  }
 }

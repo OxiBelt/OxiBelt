@@ -41,6 +41,11 @@ use snapshot_mutation::{
   apply_secret_reference_activation, install_snapshot,
 };
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode_mutation_body(selector: u8, data: &[u8]) {
+  request::fuzz_decode_mutation_body(selector, data);
+}
+
 pub(super) const ADMIN_CONFIG_BODY_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone)]

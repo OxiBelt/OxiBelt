@@ -316,7 +316,11 @@ pub(crate) async fn fuzz_websocket_frame(raw: &[u8], max_payload_bytes: usize) {
   let (read, write) = tokio::io::split(reader);
   let (mut reader, _writer) = after_handshake_split(read, write, Role::Server);
   configure_reader(&mut reader, max_payload_bytes);
-  let _ = read_owned_frame(&mut reader).await;
+  for _ in 0..8 {
+    if read_owned_frame(&mut reader).await.is_err() {
+      break;
+    }
+  }
   let _ = inspect_prefix(raw, max_payload_bytes);
 }
 

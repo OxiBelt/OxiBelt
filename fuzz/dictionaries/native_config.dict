@@ -1,0 +1,9 @@
+# Native TOML and include-loader vocabulary.
+include="include"
+server="[server]"
+listeners="[listeners]"
+routes="[[routes]]"
+glob="*.toml"
+parent="../"
+array="[]"
+table="{}"

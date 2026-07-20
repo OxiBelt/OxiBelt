@@ -87,6 +87,11 @@ mod validation_limits;
 mod validation_proxy;
 mod validation_services;
 mod workers;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_native_config(input: &[u8]) {
+  loader::fuzz_virtual_toml_documents(input);
+}
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use admin_workload_identity::*;
 pub use cache_external::{

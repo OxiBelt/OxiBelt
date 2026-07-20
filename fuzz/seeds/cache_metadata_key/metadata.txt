@@ -1,0 +1,17 @@
+version=1
+policy=c2VlZA==
+partition=ZGVmYXVsdA==
+base_key=R0VUOi9hc3NldA==
+variant_key=dmFyaWFudA==
+scheme=aHR0cHM=
+host=ZXhhbXBsZS50ZXN0
+uri=L2Fzc2V0
+body_file=dmFyaWFudC5ib2R5
+status=200
+expires_at=1
+stale_if_error_until=0
+stale_while_revalidate_until=0
+must_revalidate=false
+stored_at=1
+size=0
+security_headers_neutral=true

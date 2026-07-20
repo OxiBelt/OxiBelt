@@ -9,7 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-oxibelt = { path = "../source", features = ["fuzzing"] }
+oxibelt = { path = "../source", features = ["fuzzing", "mutation-pqc"] }
+oxibelt-gateway-controller = { path = "../source/apps/oxibelt-gateway-controller", features = ["fuzzing"] }
 
 [lints]
 workspace = true
@@ -59,6 +60,69 @@ bench = false
 [[bin]]
 name = "syscall_boundaries"
 path = "fuzz_targets/syscall_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native_config"
+path = "fuzz_targets/native_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oxirule_expression"
+path = "fuzz_targets/oxirule_expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admin_json_mutations"
+path = "fuzz_targets/admin_json_mutations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "admin_mutation_envelope"
+path = "fuzz_targets/admin_mutation_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cluster_rollout_state"
+path = "fuzz_targets/cluster_rollout_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_body_coding"
+path = "fuzz_targets/http_body_coding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_metadata_key"
+path = "fuzz_targets/cache_metadata_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gateway_api_translation"
+path = "fuzz_targets/gateway_api_translation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_certificate_metadata"
+path = "fuzz_targets/tls_certificate_metadata.rs"
 test = false
 doc = false
 bench = false

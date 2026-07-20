@@ -1,0 +1,12 @@
+# OxiRule parser and schema vocabulary.
+request="Request."
+response="Response."
+stream="Stream."
+http_path="Http.Path"
+headers="Headers"
+starts_with="startsWith("
+contains="contains("
+and="&&"
+or="||"
+not="!"
+null="null"

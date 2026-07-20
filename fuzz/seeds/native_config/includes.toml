@@ -1,0 +1,10 @@
+@@document main.toml
+include = ["routes/*.toml"]
+
+[server]
+workers = 1
+
+@@document routes/a.toml
+[[routes]]
+name = "seed-route"
+path_prefix = "/seed"

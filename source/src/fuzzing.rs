@@ -7,6 +7,17 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, Request};
 use md5::{Digest, Md5};
 use url::Url;
 
+mod admin;
+mod parsers;
+
+pub use admin::{
+  exercise_admin_json_mutations, exercise_admin_mutation_envelope, exercise_cluster_rollout_state,
+};
+pub use parsers::{
+  exercise_cache_metadata_key, exercise_http_body_coding, exercise_native_config,
+  exercise_oxirule_expression, exercise_tls_certificate_metadata,
+};
+
 use crate::config::{
   ForwardedHeaderMode, HttpVersion, SniForwardClientHelloParseMethod, TurnAuthConfig, TurnAuthMode,
   TurnStaticCredentialConfig,
@@ -143,10 +154,14 @@ pub fn exercise_websocket_frame(data: &[u8]) {
   let mut input = FuzzInput::new(data);
   let limit = input.usize(2048).saturating_add(1);
   let generated = websocket_frame(&mut input);
+  let generated_sequence = (0..input.usize(8).saturating_add(1))
+    .flat_map(|_| websocket_frame(&mut input))
+    .collect::<Vec<_>>();
   let runtime = websocket_runtime();
   runtime.block_on(async {
     crate::proxy::stream_waf::fuzz_websocket_frame(data, limit).await;
     crate::proxy::stream_waf::fuzz_websocket_frame(&generated, limit).await;
+    crate::proxy::stream_waf::fuzz_websocket_frame(&generated_sequence, limit).await;
   });
 }
 

@@ -96,6 +96,11 @@ use evaluator_helpers::*;
 use evaluator_member::*;
 use evaluator_values::*;
 use expression::{Expr, Parser};
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_expression(input: &[u8]) {
+  expression::fuzz_parse_and_analyze(input);
+}
 pub use external_files::validate_external_rule_group_file;
 pub use functions::WafFunctionConfig;
 use functions::{FunctionMap, compile_global_functions, compile_route_functions};

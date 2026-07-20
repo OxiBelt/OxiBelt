@@ -548,3 +548,20 @@ fn decode_frame(encoded: &[u8]) -> anyhow::Result<(ClusterMutationCommandOwned, 
     .context("cluster command metadata is invalid")?;
   Ok((wire, &encoded[body_offset..]))
 }
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_decode_frame(data: &[u8]) {
+  let _ = decode_frame(data);
+  if data.first() == Some(&b'{') && data.len() <= MAX_COMMAND_METADATA_BYTES {
+    let mut framed = Vec::with_capacity(
+      FRAME_DOMAIN
+        .len()
+        .saturating_add(4)
+        .saturating_add(data.len()),
+    );
+    framed.extend_from_slice(FRAME_DOMAIN);
+    framed.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    framed.extend_from_slice(data);
+    let _ = decode_frame(&framed);
+  }
+}

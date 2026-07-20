@@ -25,6 +25,11 @@ use super::admin_ipm_list::{
   ipm_binding_page, ipm_credential_page, ipm_policy_page, ipm_principal_page,
 };
 use super::admin_resource;
+
+#[cfg(feature = "fuzzing")]
+mod fuzzing;
+#[cfg(feature = "fuzzing")]
+pub(crate) use fuzzing::fuzz_decode_mutation_body;
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
 }

@@ -403,6 +403,218 @@ fn toml_type_name(value: &toml::Value) -> &'static str {
   }
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_virtual_toml_documents(data: &[u8]) {
+  const MAX_TOTAL_BYTES: usize = 64 * 1024;
+  let data = &data[..data.len().min(MAX_TOTAL_BYTES)];
+  let Some((entry, documents)) = decode_text_virtual_documents(data)
+    .or_else(|| decode_virtual_documents(data))
+    .or_else(|| decode_single_virtual_document(data))
+  else {
+    return;
+  };
+  let first = load_virtual_toml_document(&entry, &documents, &mut Vec::new());
+  let second = load_virtual_toml_document(&entry, &documents, &mut Vec::new());
+  match (first, second) {
+    (Ok(first), Ok(second)) => {
+      assert_eq!(
+        first.0, second.0,
+        "virtual include loading was not deterministic"
+      );
+      assert_eq!(
+        first.1, second.1,
+        "virtual include order was not deterministic"
+      );
+      let _: Result<super::Config, _> = first.0.try_into();
+    }
+    (Err(first), Err(second)) => {
+      assert_eq!(
+        first.to_string(),
+        second.to_string(),
+        "virtual include errors were not deterministic"
+      );
+    }
+    _ => panic!("virtual include loading changed result for identical input"),
+  }
+}
+
+#[cfg(feature = "fuzzing")]
+fn decode_text_virtual_documents(data: &[u8]) -> Option<(PathBuf, HashMap<PathBuf, String>)> {
+  const ROOT: &str = "/oxibelt-fuzz-config";
+  const MARKER: &str = "@@document ";
+  const MAX_DOCUMENT_BYTES: usize = 8 * 1024;
+  let raw = std::str::from_utf8(data).ok()?;
+  if !raw.starts_with(MARKER) {
+    return None;
+  }
+  let mut entry = None;
+  let mut current_path = None;
+  let mut current_document = String::new();
+  let mut documents = HashMap::new();
+  for line in raw.lines() {
+    if let Some(name) = line.strip_prefix(MARKER) {
+      if let Some(path) = current_path.take() {
+        if current_document.len() > MAX_DOCUMENT_BYTES {
+          return None;
+        }
+        documents.insert(path, std::mem::take(&mut current_document));
+      }
+      let path = Path::new(ROOT).join(safe_virtual_relative_path(name.trim())?);
+      entry.get_or_insert_with(|| path.clone());
+      current_path = Some(path);
+    } else {
+      current_document.push_str(line);
+      current_document.push('\n');
+    }
+  }
+  if let Some(path) = current_path {
+    if current_document.len() > MAX_DOCUMENT_BYTES {
+      return None;
+    }
+    documents.insert(path, current_document);
+  }
+  (documents.len() <= 8).then_some((entry?, documents))
+}
+
+#[cfg(feature = "fuzzing")]
+fn decode_single_virtual_document(data: &[u8]) -> Option<(PathBuf, HashMap<PathBuf, String>)> {
+  const ENTRY: &str = "/oxibelt-fuzz-config/main.toml";
+  let raw = std::str::from_utf8(data).ok()?;
+  let entry = PathBuf::from(ENTRY);
+  Some((entry.clone(), HashMap::from([(entry, raw.to_string())])))
+}
+
+#[cfg(feature = "fuzzing")]
+fn decode_virtual_documents(data: &[u8]) -> Option<(PathBuf, HashMap<PathBuf, String>)> {
+  const ROOT: &str = "/oxibelt-fuzz-config";
+  const MAX_DOCUMENTS: usize = 8;
+  const MAX_DOCUMENT_BYTES: usize = 8 * 1024;
+  const MAX_NAME_BYTES: usize = 64;
+
+  let mut offset = 0_usize;
+  let count = usize::from(*data.get(offset)? % MAX_DOCUMENTS as u8).saturating_add(1);
+  offset += 1;
+  let mut documents = HashMap::new();
+  let mut entry = None;
+  for _ in 0..count {
+    let name_len = usize::from(*data.get(offset)?).min(MAX_NAME_BYTES);
+    offset += 1;
+    let name_end = offset.checked_add(name_len)?;
+    let name = std::str::from_utf8(data.get(offset..name_end)?).ok()?;
+    offset = name_end;
+    let length_bytes: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    offset += 2;
+    let document_len = usize::from(u16::from_be_bytes(length_bytes)).min(MAX_DOCUMENT_BYTES);
+    let document_end = offset.checked_add(document_len)?;
+    let raw = std::str::from_utf8(data.get(offset..document_end)?).ok()?;
+    offset = document_end;
+    let relative = safe_virtual_relative_path(name)?;
+    let path = Path::new(ROOT).join(relative);
+    if entry.is_none() {
+      entry = Some(path.clone());
+    }
+    documents.insert(path, raw.to_string());
+  }
+  Some((entry?, documents))
+}
+
+#[cfg(feature = "fuzzing")]
+fn safe_virtual_relative_path(raw: &str) -> Option<PathBuf> {
+  let path = Path::new(raw);
+  if raw.is_empty()
+    || path.is_absolute()
+    || path
+      .components()
+      .any(|component| !matches!(component, std::path::Component::Normal(_)))
+  {
+    return None;
+  }
+  Some(path.to_path_buf())
+}
+
+#[cfg(feature = "fuzzing")]
+fn load_virtual_toml_document(
+  path: &Path,
+  documents: &HashMap<PathBuf, String>,
+  stack: &mut Vec<PathBuf>,
+) -> anyhow::Result<(toml::Value, Vec<PathBuf>)> {
+  const ROOT: &str = "/oxibelt-fuzz-config";
+  if !path.starts_with(ROOT) {
+    bail!("virtual configuration path escaped its root");
+  }
+  if let Some(index) = stack.iter().position(|entry| entry == path) {
+    let mut cycle = stack[index..]
+      .iter()
+      .map(|entry| entry.display().to_string())
+      .collect::<Vec<_>>();
+    cycle.push(path.display().to_string());
+    bail!(
+      "configuration include cycle detected: {}",
+      cycle.join(" -> ")
+    );
+  }
+  let raw = documents
+    .get(path)
+    .ok_or_else(|| anyhow!("virtual configuration document is missing"))?;
+  stack.push(path.to_path_buf());
+  let mut value: toml::Value = toml::from_str(raw)?;
+  let includes = take_include_entries(&mut value, path)?;
+  let origin_kind = if stack.len() == 1 {
+    ConfigOriginKind::Entry
+  } else {
+    ConfigOriginKind::Include
+  };
+  let value_origins = index_document_origins(&value, path, origin_kind);
+  let base_dir = path.parent().unwrap_or_else(|| Path::new(ROOT));
+  let mut merged = toml::Value::Table(toml::map::Map::new());
+  let mut merged_origins = ConfigOriginIndex::new();
+  let mut files = vec![path.to_path_buf()];
+
+  for include in includes {
+    if include.trim().is_empty() || Path::new(&include).is_absolute() {
+      bail!("virtual configuration include is invalid");
+    }
+    let pattern_path = base_dir.join(&include);
+    if pattern_path
+      .components()
+      .any(|component| matches!(component, std::path::Component::ParentDir))
+      || !pattern_path.starts_with(ROOT)
+    {
+      bail!("virtual configuration include escaped its root");
+    }
+    let pattern = glob::Pattern::new(pattern_path.to_string_lossy().as_ref())?;
+    let mut matches = documents
+      .keys()
+      .filter(|candidate| pattern.matches_path(candidate))
+      .cloned()
+      .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    if matches.is_empty() && !has_glob_pattern(&include) {
+      bail!("virtual configuration include is missing");
+    }
+    for included_path in matches {
+      let (included, included_files) =
+        load_virtual_toml_document(&included_path, documents, stack)?;
+      files.extend(included_files);
+      let included_origins =
+        index_document_origins(&included, &included_path, ConfigOriginKind::Include);
+      merge_toml_values(
+        &mut merged,
+        included,
+        "",
+        &mut merged_origins,
+        included_origins,
+      )?;
+    }
+  }
+  merge_toml_values(&mut merged, value, "", &mut merged_origins, value_origins)?;
+  stack.pop();
+  files.sort();
+  files.dedup();
+  Ok((merged, files))
+}
+
 pub(super) fn absolute_config_path(path: &Path) -> anyhow::Result<PathBuf> {
   if path.is_absolute() {
     Ok(path.to_path_buf())
@@ -467,4 +679,31 @@ fn canonicalize_local_config_file_with_overrides(
   }
 
   Ok(canonical_path)
+}
+
+#[cfg(all(test, feature = "fuzzing"))]
+mod fuzz_tests {
+  use super::*;
+
+  #[test]
+  fn virtual_documents_expand_sorted_includes_without_filesystem_access() {
+    let raw = b"@@document main.toml\ninclude = ['routes/*.toml']\n[server]\nworkers = 1\n@@document routes/b.toml\n[[routes]]\nname = 'b'\n@@document routes/a.toml\n[[routes]]\nname = 'a'\n";
+    let (entry, documents) =
+      decode_text_virtual_documents(raw).expect("virtual documents should decode");
+    let (value, files) = load_virtual_toml_document(&entry, &documents, &mut Vec::new())
+      .expect("virtual includes should load");
+    assert_eq!(files.len(), 3);
+    let routes = value
+      .get("routes")
+      .and_then(toml::Value::as_array)
+      .expect("routes should merge as an array");
+    assert_eq!(
+      routes[0].get("name").and_then(toml::Value::as_str),
+      Some("a")
+    );
+    assert_eq!(
+      routes[1].get("name").and_then(toml::Value::as_str),
+      Some("b")
+    );
+  }
 }

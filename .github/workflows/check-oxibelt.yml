@@ -216,6 +216,7 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
@@ -230,32 +231,43 @@ jobs:
           - websocket_frame
           - webrtc_turn
           - syscall_boundaries
+          - native_config
+          - oxirule_expression
+          - admin_json_mutations
+          - admin_mutation_envelope
+          - cluster_rollout_state
+          - http_body_coding
+          - cache_metadata_key
+          - gateway_api_translation
+          - tls_certificate_metadata
 
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
-      - name: Install Rust toolchain
+      - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly --profile minimal
+          rustup toolchain install nightly-2026-07-16 --profile minimal
 
-      - name: Install cargo-fuzz
-        run: cargo +stable install cargo-fuzz --locked
+      - name: Install pinned cargo-fuzz
+        run: |
+          cargo +nightly-2026-07-16 install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +nightly-2026-07-16 fuzz --version)" = "cargo-fuzz 0.13.2"
 
       - name: Run fuzz smoke (${{ matrix.fuzz_target }})
         env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
           LSAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -runs=256
+        run: tests/scripts/run-fuzz-target.sh smoke ${{ matrix.fuzz_target }}
 
       - name: Upload fuzz artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: oxibelt-${{ matrix.fuzz_target }}-fuzz-artifacts
-          path: fuzz/artifacts/${{ matrix.fuzz_target }}
+          path: ${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}
           if-no-files-found: ignore
-          retention-days: 0
+          retention-days: 90
 
   unsafe-validation:
     name: Unsafe validation (${{ matrix.check }})

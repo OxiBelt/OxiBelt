@@ -23,6 +23,11 @@ use super::store::MutationStore;
 mod state;
 use state::classify;
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_classify_rollout(data: &[u8]) {
+  state::fuzz_classify(data);
+}
+
 const CAPABILITY_VERSION: &str = "admin-mutation-rollout-v1";
 
 #[derive(Debug, Clone)]

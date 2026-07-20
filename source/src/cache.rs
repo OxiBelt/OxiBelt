@@ -69,6 +69,38 @@ pub(crate) use streaming::{CacheStreamingInsert, CacheStreamingInsertDecision};
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_metadata_and_key(data: &[u8]) {
+  const MAX_INPUT_BYTES: usize = 32 * 1024;
+  let data = &data[..data.len().min(MAX_INPUT_BYTES)];
+  let raw = String::from_utf8_lossy(data);
+  metadata::fuzz_decode_metadata(&raw);
+
+  let mut parts = raw.splitn(6, '\n');
+  let template = parts.next().unwrap_or("{scheme}://{host}{uri}");
+  let scheme = parts.next().unwrap_or("https");
+  let host = parts.next().unwrap_or("cache.example.test");
+  let uri_text = parts.next().unwrap_or("/resource?variant=one");
+  let cookie = parts.next().unwrap_or("session=fuzz; variant=one");
+  let header = parts.next().unwrap_or("fuzz");
+  let uri = uri_text
+    .parse::<Uri>()
+    .unwrap_or_else(|_| Uri::from_static("/"));
+  let mut headers = HeaderMap::new();
+  if let Ok(value) = HeaderValue::from_str(cookie) {
+    headers.insert(http::header::COOKIE, value);
+  }
+  if let Ok(value) = HeaderValue::from_str(header) {
+    headers.insert(HeaderName::from_static("x-fuzz-variant"), value);
+  }
+  let expanded = expanded_cache_key(template, scheme, host, &uri, &headers);
+  let vary = [VaryMatcher {
+    name: "x-fuzz-variant".to_string(),
+    value: header.to_string(),
+  }];
+  let _ = variant_key("fuzz", &expanded, &vary);
+}
 #[derive(Debug, Clone)]
 pub struct Revalidation {
   pub entry: CacheEntry,

@@ -1,0 +1,170 @@
+name: Sustained fuzzing
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sustained-fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  fuzz-sustained:
+    name: Sustained fuzz (${{ matrix.fuzz_target }})
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        fuzz_target:
+          - turn_protocol
+          - tls_client_hello
+          - http_semantics
+          - http3_webtransport
+          - websocket_frame
+          - webrtc_turn
+          - syscall_boundaries
+          - native_config
+          - oxirule_expression
+          - admin_json_mutations
+          - admin_mutation_envelope
+          - cluster_rollout_state
+          - http_body_coding
+          - cache_metadata_key
+          - gateway_api_translation
+          - tls_certificate_metadata
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install nightly-2026-07-16 --profile minimal --component llvm-tools-preview
+
+      - name: Install pinned cargo-fuzz
+        run: |
+          cargo +nightly-2026-07-16 install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +nightly-2026-07-16 fuzz --version)" = "cargo-fuzz 0.13.2"
+
+      - name: Restore bounded target corpus
+        id: corpus-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # 6.1.0
+        with:
+          path: ${{ runner.temp }}/oxibelt-fuzz-corpus/${{ matrix.fuzz_target }}
+          key: oxibelt-fuzz-${{ runner.os }}-${{ matrix.fuzz_target }}-${{ github.sha }}
+          restore-keys: |
+            oxibelt-fuzz-${{ runner.os }}-${{ matrix.fuzz_target }}-
+
+      - name: Run fifteen-minute campaign (${{ matrix.fuzz_target }})
+        id: campaign
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          LSAN_OPTIONS: detect_leaks=1
+        run: tests/scripts/run-fuzz-target.sh campaign ${{ matrix.fuzz_target }} 900
+
+      - name: Minimize failure artifacts
+        id: minimize
+        if: always()
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          LSAN_OPTIONS: detect_leaks=1
+        run: tests/scripts/run-fuzz-target.sh minimize ${{ matrix.fuzz_target }} 900
+
+      - name: Minimize and bound corpus
+        id: cmin
+        if: always()
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          LSAN_OPTIONS: detect_leaks=1
+        run: tests/scripts/run-fuzz-target.sh cmin ${{ matrix.fuzz_target }} 900
+
+      - name: Generate source coverage
+        id: coverage
+        if: always() && steps.cmin.outcome == 'success'
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          LSAN_OPTIONS: detect_leaks=1
+        run: tests/scripts/run-fuzz-target.sh coverage ${{ matrix.fuzz_target }} 900
+
+      - name: Build reproduction report
+        id: report
+        if: always()
+        continue-on-error: true
+        run: tests/scripts/run-fuzz-target.sh report ${{ matrix.fuzz_target }} 900
+
+      - name: Save minimized target corpus
+        if: steps.campaign.outcome == 'success' && steps.cmin.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # 6.1.0
+        with:
+          path: ${{ runner.temp }}/oxibelt-fuzz-corpus/${{ matrix.fuzz_target }}
+          key: oxibelt-fuzz-${{ runner.os }}-${{ matrix.fuzz_target }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-${{ matrix.fuzz_target }}-coverage
+          path: |
+            fuzz/coverage/${{ matrix.fuzz_target }}
+            ${{ runner.temp }}/oxibelt-fuzz-failures/${{ matrix.fuzz_target }}/reproduction.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload reviewed corpus candidate
+        if: steps.campaign.outcome == 'success' && steps.cmin.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-${{ matrix.fuzz_target }}-corpus-candidate
+          path: ${{ runner.temp }}/oxibelt-fuzz-corpus/${{ matrix.fuzz_target }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload failure evidence
+        if: >-
+          steps.campaign.outcome != 'success' ||
+          steps.minimize.outcome != 'success' ||
+          steps.cmin.outcome != 'success' ||
+          steps.coverage.outcome != 'success' ||
+          steps.report.outcome != 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-${{ matrix.fuzz_target }}-failure-evidence
+          path: |
+            ${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}
+            ${{ runner.temp }}/oxibelt-fuzz-failures/${{ matrix.fuzz_target }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Propagate campaign and evidence failures
+        if: always()
+        env:
+          CAMPAIGN_OUTCOME: ${{ steps.campaign.outcome }}
+          MINIMIZE_OUTCOME: ${{ steps.minimize.outcome }}
+          CMIN_OUTCOME: ${{ steps.cmin.outcome }}
+          COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+        run: |
+          failed=0
+          for outcome in "$CAMPAIGN_OUTCOME" "$MINIMIZE_OUTCOME" "$CMIN_OUTCOME" "$COVERAGE_OUTCOME" "$REPORT_OUTCOME"; do
+            if [[ "$outcome" != "success" ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
