@@ -9,6 +9,7 @@ mod runtime_durable;
 mod runtime_durable_prepare;
 mod runtime_durable_recovery;
 mod runtime_durable_support;
+mod runtime_durable_terminal;
 mod state_machine;
 mod store;
 mod stream;

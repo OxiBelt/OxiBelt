@@ -4,6 +4,15 @@ use anyhow::bail;
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, read_token};
 
+#[path = "audit_verify.rs"]
+mod audit_verify;
+#[path = "audit_verify_evidence.rs"]
+mod audit_verify_evidence;
+#[path = "audit_verify_postgres.rs"]
+mod audit_verify_postgres;
+#[cfg(test)]
+#[path = "audit_verify_tests.rs"]
+mod audit_verify_tests;
 #[path = "cli.rs"]
 mod cli;
 #[path = "config_compat.rs"]
@@ -70,23 +79,30 @@ use plan::plan_command;
 
 #[tokio::main]
 async fn main() {
-  if let Err(error) = run().await {
-    eprintln!("{error:#}");
-    std::process::exit(1);
+  match run().await {
+    Ok(code) if code != 0 => std::process::exit(code),
+    Ok(_) => {}
+    Err(error) => {
+      eprintln!("{error:#}");
+      std::process::exit(1);
+    }
   }
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<i32> {
   let cli = Cli::parse();
   oxibelt::tls::install_default_provider()?;
+  if let Some(code) = audit_verify::run_local_if_requested(&cli.command, cli.admin.output).await? {
+    return Ok(code);
+  }
   if doctor::run_local_if_requested(&cli.command).await? {
-    return Ok(());
+    return Ok(0);
   }
   if rulepack::run_local_if_requested(&cli.command).await? {
-    return Ok(());
+    return Ok(0);
   }
   if config_compat::run_local_if_requested(&cli.command)? {
-    return Ok(());
+    return Ok(0);
   }
   let client = build_client(&cli.admin)?;
   let mutation_signer = mutation_signer::MutationSigner::from_args(&cli.admin.mutation)?;
@@ -98,7 +114,7 @@ async fn run() -> anyhow::Result<()> {
   )
   .await?
   {
-    return Ok(());
+    return Ok(0);
   }
   let request = plan_command(&client, &cli.command).await?;
   let response = mutation_signer::request_json(
@@ -120,7 +136,7 @@ async fn run() -> anyhow::Result<()> {
       }
       bail!("Admin request failed with {}", response.status);
     }
-    return Ok(());
+    return Ok(0);
   }
   print_response(&response, cli.admin.output, &request.filter)?;
   if response.status == http::StatusCode::FORBIDDEN {
@@ -129,7 +145,7 @@ async fn run() -> anyhow::Result<()> {
   if !response.status.is_success() {
     bail!("Admin request failed with {}", response.status);
   }
-  Ok(())
+  Ok(0)
 }
 
 fn build_client(args: &AdminArgs) -> anyhow::Result<AdminClient> {

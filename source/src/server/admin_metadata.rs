@@ -74,6 +74,7 @@ fn capabilities_response(
     "admin_http3": snapshot.config.admin.http3.enabled,
     "admin_operation_webtransport": snapshot.config.admin.operations.webtransport,
     "admin_audit": snapshot.config.admin.audit.enabled,
+    "admin_audit_anchoring": snapshot.config.admin.audit.anchor.enabled,
     "admin_mutation_replay": snapshot.config.admin.mutations.mode.enabled(),
     "atomic_secret_reference_activation": !snapshot.config.rollout.is_immutable(),
   });
@@ -86,6 +87,7 @@ fn capabilities_response(
       "api_version": ADMIN_API_VERSION,
       "package_version": env!("CARGO_PKG_VERSION"),
       "features": features,
+      "audit_anchoring": snapshot.admin_audit.anchor_status(),
       "operation_persistence": operations.persistence_status(),
       "authentication": {
         "mtls_workload_identity": {

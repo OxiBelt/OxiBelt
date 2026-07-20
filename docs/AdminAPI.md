@@ -33,6 +33,14 @@ or configured Admin features, active mTLS workload-identity binding mode, and
 request-size limits used by the Admin API.
 `features.admin_mutation_replay` is true when `[admin.mutations]` is in
 `optional` or `required` mode.
+`features.admin_audit_anchoring` is true when external audit anchoring is
+configured. The top-level `audit_anchoring` object reports `enabled`, the
+effective `policy` (`disabled`, `best_effort`, or `required`), runtime `state`
+(`disabled`, `healthy`, `degraded`, or `failed`), optional
+`last_anchored_sequence`, and bounded local `pending_checkpoints` and
+`pending_bytes`. These values expose operational progress without returning
+the authority URL, credentials, signer socket/token, event content, or key
+material.
 `/admin/v1/version` reports the API version, package name, and package version.
 Admin listener responses include `X-OxiBelt-Request-Id` and
 `X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
@@ -89,6 +97,138 @@ tokens, certificates, signatures, keys, and arbitrary internal errors are not
 stored. Query filters are `limit`, `outcome`, `actor`, `principal`, `service`,
 `operation`, `request_id`, `path_prefix`, and `before_id`.
 
+## Independent audit-anchor verification
+
+`oxibeltctl audit verify` is a local verification workflow; it does not call
+the Admin listener and does not use an Admin bearer credential. It opens one
+read-only connection to the local Admin audit PostgreSQL database and one to
+the external checkpoint authority, verifies the local event hash chains,
+validates every checkpoint's Ed25519 signature and predecessor/sequence
+continuity, checks the authority head, and proves checkpoint chain heads exist
+in the corresponding local chain. It also compares the result with a durable
+verifier witness so rollback of checkpoints seen by a previous verification
+run is detectable.
+
+The expected-stream manifest is deployment-owned evidence. It must name every
+replica/stream that should exist; do not derive this set from the authority
+being verified. Its schema is:
+
+```json
+{
+  "schema_version": "oxibelt.admin.audit.expected-streams/v1",
+  "namespace": "oxibelt",
+  "streams": [
+    {
+      "stream_id": "sha256:<64-lowercase-hex>",
+      "instance_id": "edge-0",
+      "cluster_id": "edge-admin",
+      "accepted_epoch_history": [
+        {
+          "membership_epoch": "membership-41",
+          "deployment_epoch": "deploy-2026-07-18"
+        }
+      ],
+      "membership_epoch": "membership-42",
+      "deployment_epoch": "deploy-2026-07-19",
+      "signing_key_schedule": [
+        {
+          "key_id": "audit-anchor-2026-07",
+          "first_checkpoint_ordinal": 1,
+          "last_checkpoint_ordinal": 812
+        },
+        {
+          "key_id": "audit-anchor-2026-08",
+          "first_checkpoint_ordinal": 813
+        }
+      ]
+    }
+  ]
+}
+```
+
+`accepted_epoch_history` is optional and contains at most 1024 unique
+membership/deployment pairs ordered oldest to newest. The top-level
+`membership_epoch` and `deployment_epoch` are the current pair and must not be
+duplicated in the history. Checkpoints may remain in one stream across those
+declared transitions, but their epoch position may only stay the same or move
+forward; an undeclared or backward transition is invalid. Preserve every
+historical pair still represented by retained checkpoints. For standalone
+instances, omit `cluster_id` and use the literal `single_instance` membership
+epoch. Supply every trusted checkpoint key during an overlap/rotation window.
+Each key file must contain exactly 32 raw Ed25519 public-key bytes, and its
+`KEY_ID` must match checkpoint metadata.
+
+`signing_key_schedule` is required, deployment-owned policy. It contains at
+most 1024 non-overlapping, ordinal-contiguous ranges beginning at checkpoint
+ordinal 1. Every non-final range has an inclusive
+`last_checkpoint_ordinal`; only the final range may remain open. A key ID may
+appear once, so a retired key cannot be reactivated. Before rotation, record
+the current witnessed authority ordinal as the old key's inclusive end and
+activate the new key at the next ordinal in both the manifest and deployment.
+Merely retaining an old public key for historical verification does not
+authorize it for new checkpoints.
+
+If the local audit chain uses `hmac_sha256`, also supply every retained local
+integrity key as `--trusted-hmac-key KEY_ID=FILE`. Each file contains exactly
+32 raw secret bytes, must not be accessible by group or other users, and is
+used only to authenticate the local event tags; it is separate from the public
+checkpoint-signing trust set. Missing historical HMAC material makes the
+report `incomplete`, while a mismatched tag makes it `invalid`. Keep these
+files on the verifier host or its secret provider, not on the checkpoint
+authority.
+
+```sh
+export OXIBELT_AUDIT_VERIFY_LOCAL_POSTGRES_URL='postgresql://...'
+export OXIBELT_AUDIT_VERIFY_ANCHOR_POSTGRES_URL='postgresql://...'
+
+oxibeltctl --output json audit verify \
+  --expected-streams /secure/audit/expected-streams.json \
+  --trusted-key audit-anchor-2026-07=/secure/audit/audit-anchor-2026-07.pub \
+  --trusted-hmac-key audit-local-2026-07=/secure/audit/audit-local-2026-07.hmac \
+  --witness /independent-witness/oxibelt-audit-witness.json \
+  --initialize-witness
+```
+
+The default URL environment names shown above can be replaced with
+`--local-postgres-url-env ENV` and `--anchor-postgres-url-env ENV`. Connection
+URLs should use independent least-privilege database roles and verified TLS;
+avoid putting passwords in shell history. Store the witness on retained,
+access-controlled storage outside both the OxiBelt host/local database and the
+checkpoint authority's administration/backup boundary.
+
+The verifier refuses to load more than 1,000,000 local events, 100,000 external
+checkpoints, or 512 MiB of serialized evidence across the manifest by default.
+It also defaults to rejecting a local event larger than 128 KiB or a checkpoint
+larger than 64 KiB in SQL before transferring the oversized value. Query page
+size is clamped by the remaining row and byte budgets and by a 64 MiB page
+budget. `--max-events`, `--max-checkpoints`, and `--max-evidence-bytes` may
+raise the global bounds for a larger retained history after sizing the
+independent verifier. Set `--max-event-bytes` to at least the producing
+deployment's `admin.audit.spool.max_event_bytes` when that value exceeds the
+default; `--max-checkpoint-bytes` similarly adjusts the checkpoint row bound.
+Anchored producers cap `admin.audit.spool.max_event_bytes` at the verifier's
+64 MiB maximum. All five limits remain mandatory and bounded; SQL also caps
+each transferred value by the remaining global budget and the 64 MiB page
+budget before the verifier materializes it.
+
+The first trusted run requires `--initialize-witness`. Initialization refuses
+to replace an existing witness and occurs only after all other verification
+succeeds. Later runs omit that flag and atomically advance the witness only for
+a fully `valid` report. Reports use schema
+`oxibelt.admin.audit.verification/v1` and status `valid`, `incomplete`, or
+`invalid`; both `incomplete` and `invalid` exit with status `2` and leave the
+witness unchanged. Missing streams/events/checkpoints are incomplete evidence,
+while malformed content, identity/epoch mismatch, signature failure,
+continuity failure, authority-head conflict, or witness rollback are invalid.
+Run verification on a regular schedule and after incident, restore, membership,
+deployment, or key-rotation events.
+
+Adding a stream to the operator-owned manifest authorizes witness expansion
+only after that stream's local genesis chain, scheduled signing key, checkpoint
+continuity, current epoch, and authority head all verify. The existing witness
+heads are preserved. Removing a stream that is still present in the witness is
+invalid, which prevents a rollout from silently deleting historical coverage.
+
 ## Long-Running Operations
 
 Admin operations can run control-plane work asynchronously without changing
@@ -117,6 +257,13 @@ snapshots include a stable versioned receipt. A crash with ambiguous side
 effects is recovered according to the operation's declared recovery class and
 becomes `indeterminate` when success cannot be proved; it is never synthesized
 as success.
+
+When external audit anchoring is required, a terminal journal update remains
+internal until the exact lifecycle audit event is covered by an authority
+receipt. Poll, list, replay, and event-stream views remain nonterminal and omit
+the result, error, and terminal receipt during that interval. Restart recovery
+promotes the visibility marker from durable local outbox evidence without
+rerunning operation work.
 
 Supported async kinds are `cache_warm`, `oxirule_replay`,
 `diagnostics_preflight`, `support_bundle`, `dynamic_policy_import`,
@@ -329,6 +476,12 @@ revision and digest under current fencing evidence. `rollback_failed` means a
 member explicitly failed restoration; `indeterminate` means OxiBelt could not
 prove either the candidate or previous revision cluster-wide. Neither state is
 automatically retried or treated as success.
+
+When external audit anchoring is required, a durable terminal mutation remains
+externally visible as `anchor_pending` with its HTTP status, result, and error
+fields withheld until the exact terminal audit event is covered by a durable
+authority receipt. Exact retries remain in progress during this interval and
+never expose or replay a successful response early.
 
 Credential creation and rotation return plaintext token material only from the
 first successful execution. An exact replay returns only the reduced safe

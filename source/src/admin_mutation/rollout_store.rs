@@ -19,6 +19,8 @@ use super::store::MutationStore;
 
 #[path = "rollout_store_fencing.rs"]
 mod fencing;
+#[path = "rollout_store_fencing_evidence.rs"]
+mod fencing_evidence;
 #[path = "rollout_store_heads.rs"]
 mod heads;
 #[path = "rollout_store_payload.rs"]
@@ -68,6 +70,7 @@ const ACQUIRE_COORDINATOR_LEASE_SQL: &str = "UPDATE oxibelt_admin_mutations AS m
           coordinator_lease_expires_at = now() + make_interval(secs => $4::double precision)
      FROM oxibelt_admin_instance_heartbeats heartbeat
     WHERE mutation.namespace = $1 AND mutation.request_id = $2
+      AND mutation.admission_audit_confirmed_at IS NOT NULL
       AND mutation.state NOT IN
         ('committed', 'failed', 'rolled_back', 'rollback_failed', 'indeterminate')
       AND ((mutation.coordinator_instance_id = $3

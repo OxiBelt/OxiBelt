@@ -62,7 +62,7 @@ async fn postgres_atomicity_test_body() {
   );
 
   Box::pin(async {
-    let staged_audit = audit_runtime
+    let mut staged_audit = audit_runtime
       .stage_critical_mutation(mutation_audit_event(&claim, StatusCode::OK, "applied"))
       .await
       .expect("stage terminal audit");
@@ -81,12 +81,16 @@ async fn postgres_atomicity_test_body() {
         safe_response: Some(json!({ "ok": true, "token_recoverable": false })),
         error_code: None,
         terminal_audit_record_id,
+        audit_anchor_required: false,
       },
     )
     .await
     .expect("stage terminal mutation commit");
     tx.commit().await.expect("terminal transaction commit");
-    staged_audit.publish();
+    staged_audit
+      .publish()
+      .await
+      .expect("publish terminal audit");
     assert_eq!(
       terminal_record.terminal_audit_record_id,
       Some(terminal_audit_record_id)
@@ -153,7 +157,7 @@ async fn rolled_back_terminal_audit_does_not_update_the_receipt(
     ClaimOutcome::Claimed(_)
   ));
 
-  let staged_audit = audit_runtime
+  let mut staged_audit = audit_runtime
     .stage_critical_mutation(mutation_audit_event(
       &claim,
       StatusCode::INTERNAL_SERVER_ERROR,
@@ -176,6 +180,7 @@ async fn rolled_back_terminal_audit_does_not_update_the_receipt(
       safe_response: None,
       error_code: Some("mutation_indeterminate".to_string()),
       terminal_audit_record_id: audit_id,
+      audit_anchor_required: false,
     },
   )
   .await
@@ -255,6 +260,7 @@ async fn committed_parent_is_required_before_break_glass_is_active(store: &Mutat
         safe_response: Some(json!({ "ok": true, "token_recoverable": false })),
         error_code: None,
         terminal_audit_record_id: 202,
+        audit_anchor_required: false,
       },
     )
     .await
@@ -292,6 +298,7 @@ async fn indeterminate_result_keeps_the_resource_reserved(store: &MutationStore)
         safe_response: None,
         error_code: Some("mutation_indeterminate".to_string()),
         terminal_audit_record_id: 302,
+        audit_anchor_required: false,
       },
     )
     .await

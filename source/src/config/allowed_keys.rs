@@ -111,6 +111,7 @@ pub(super) const ADMIN_CONFIG_KEYS: &[&str] = &[
 
 pub(super) const ADMIN_AUDIT_CONFIG_KEYS: &[&str] = &[
   "acknowledgement",
+  "anchor",
   "backend",
   "enabled",
   "export",
@@ -131,6 +132,32 @@ pub(super) const ADMIN_AUDIT_SPOOL_CONFIG_KEYS: &[&str] = &[
 ];
 
 pub(super) const ADMIN_AUDIT_INTEGRITY_CONFIG_KEYS: &[&str] = &["hmac_key_env", "hmac_key_id"];
+
+pub(super) const ADMIN_AUDIT_ANCHOR_CONFIG_KEYS: &[&str] = &[
+  "deployment_epoch_env",
+  "enabled",
+  "max_pending_bytes",
+  "max_pending_checkpoints",
+  "record_interval",
+  "signer",
+  "sink",
+  "time_interval_ms",
+];
+
+pub(super) const ADMIN_AUDIT_ANCHOR_SINK_CONFIG_KEYS: &[&str] =
+  &["authority_id", "backend", "kind", "submit_timeout_ms"];
+
+pub(super) const ADMIN_AUDIT_ANCHOR_SIGNER_CONFIG_KEYS: &[&str] = &[
+  "connect_timeout_ms",
+  "key_id",
+  "kind",
+  "public_key_file",
+  "sign_timeout_ms",
+  "socket_path",
+  "token_env",
+  "token_file",
+  "token_reload_interval_ms",
+];
 
 pub(super) const ADMIN_WORKLOAD_IDENTITY_CONFIG_KEYS: &[&str] = &[
   "bearer_mode",

@@ -180,6 +180,74 @@ cluster specific; the chart does not invent or install a generic profile.
 Apply an operator-tested policy through Pod annotations or admission only after
 verifying probes, TLS/QUIC, reload, and graceful drain behavior.
 
+### External Admin audit anchoring
+
+The chart does not create or administer the external checkpoint authority,
+database roles, audit-only keysigner, private key, verifier witness, or
+expected-stream inventory. Provision those as independent security boundaries
+and install `deploy/postgres/admin-audit-anchor-v1.sql` with the least-privilege
+grants documented in [Configuration.md](Configuration.md). The anchor database
+must use a separate PostgreSQL `[[shared_state.backends]]` entry and credential
+from the local Admin audit/mutation database.
+
+An audit-only keysigner needs a writable, `noexec`/`nosuid` Unix-socket volume
+shared with the OxiBelt container, a read-only Secret projection containing its
+Ed25519 private key and IPC token, a distinct UID/GID, and a peer UID/GID
+allowlist. OxiBelt receives the socket, its own token projection, and the raw
+32-byte public-key pin, not the private key. The chart has no generic
+`extraContainers` surface; add this narrowly scoped sidecar through a reviewed
+parent chart or workload overlay, then use `extraVolumes` and
+`extraVolumeMounts` for the OxiBelt half of the socket and public material.
+Do not place the checkpoint private key in `config.inline`, a ConfigMap, the
+standalone OxiBelt container, or the verifier Pod.
+
+Set `OXIBELT_DEPLOYMENT_EPOCH` through `extraEnv` to an immutable, non-secret
+rollout identifier. In `kubernetes_immutable` mode the chart already supplies
+`OXIBELT_INSTANCE_ID` from the Pod UID. In other modes, add the same Downward
+API mapping through `extraEnv`. A Pod UID stays stable across container
+restarts and changes on Pod replacement, deliberately creating a new stream.
+Keep replaced/retired Pod streams in the verifier's expected-stream manifest
+for at least the audit and incident-retention period; otherwise deleting a Pod
+could also delete its expectation. A deployment epoch should stay unchanged
+for restarts of one deployed revision and change with an intentional rollout.
+Add each replacement Pod stream with a signing-key schedule beginning at
+checkpoint ordinal 1. The verifier expands an existing witness only after the
+new stream's complete genesis, local chain, checkpoint signature, epoch, and
+authority-head evidence verifies; retained stream heads cannot be removed from
+the manifest. During signer rotation, close each active stream's old key range
+at its witnessed head and begin the new unique key ID at the next ordinal.
+
+```yaml
+extraEnv:
+  - name: OXIBELT_INSTANCE_ID
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.uid
+  - name: OXIBELT_DEPLOYMENT_EPOCH
+    value: deploy-2026-07-19
+```
+
+When the portable NetworkPolicy is enabled, add the local Admin audit
+PostgreSQL destination and the separate authority PostgreSQL destination as
+distinct `shared-state` egress entries with exact peers and TCP ports. The Unix
+signer socket needs no network egress. Place the authority in a separate
+namespace/account/cluster or equivalent external administrative boundary;
+namespace separation alone is not independent if the same principals can
+rewrite both databases and backups.
+
+Required anchoring marks Admin audit readiness-critical. Readiness therefore
+returns `503` when signing, authority submission, receipt verification,
+continuity, or pending-capacity guarantees cannot be met; liveness remains
+process-only. Ensure the authority and signer are available before rolling out
+a required configuration, and choose checkpoint intervals, retention, and
+disruption budgets that keep the possible uncheckpointed tail inside the
+deployment's evidence policy. Best-effort anchoring may remain ready while
+reporting a degraded capability state and retry backlog. Monitor the anchoring
+metrics in [Observability.md](Observability.md) and run
+`oxibeltctl audit verify` from an independently administered CronJob or
+external scheduler whose read-only credentials and retained witness are not
+mounted into OxiBelt.
+
 ### ServiceAccount credentials and Kubernetes discovery
 
 The data-plane chart and every rendered data-plane Pod set

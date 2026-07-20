@@ -11,6 +11,7 @@ mod rollout;
 mod rollout_store;
 mod runtime;
 mod store;
+mod store_anchor;
 mod verifier;
 
 pub(crate) use cluster_command::{
@@ -22,12 +23,16 @@ pub use envelope::{
   UnsignedMutationEnvelope, encode_mutation_header, mutation_transcript, parse_mutation_header,
 };
 pub use error::{MutationProtocolError, MutationProtocolErrorKind};
+#[cfg(test)]
+pub(crate) use ledger::{ClaimOutcome, MutationClaim};
 pub(crate) use ledger::{MutationRecord, MutationState};
 pub use response::{
   IDEMPOTENT_REPLAY_HEADER, MUTATION_REQUEST_ID_HEADER, MUTATION_REVISION_HEADER,
   MutationResponseMetadata, attach_mutation_response_headers,
 };
 pub(crate) use rollout::RolloutDirective;
+#[cfg(test)]
+pub(crate) use rollout_store::load_recoverable_mutations;
 pub(crate) use rollout_store::{
   CoordinatorFence, FencedCoordinatorTransaction, FencedTargetTransition, MemberFence, MemberWork,
   ResourceHeadUpdate, RolloutTarget, RolloutTransitionPlan, SharedPublicationClaim,
@@ -38,12 +43,16 @@ pub(crate) use rollout_store::{
 };
 pub(crate) use runtime::{
   AdminMutationRuntime, ClusterHeartbeatTask, MutationAdmission, MutationAdmissionError,
-  MutationConflict,
+  MutationConflict, configured_target,
 };
 pub(crate) use store::{
   BreakGlassMutationCheckpoint, capture_break_glass_checkpoint_tx,
   create_break_glass_activation_tx, restore_break_glass_checkpoint_tx,
   revoke_break_glass_activation_tx,
+};
+#[cfg(test)]
+pub(crate) use store::{
+  MutationStore, StoreRolloutMode, claim_tx_with_mode, init_postgres as init_mutation_postgres,
 };
 pub use verifier::{SignerBinding, SignerRegistry, VerifiedMutation};
 

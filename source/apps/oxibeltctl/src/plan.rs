@@ -50,11 +50,16 @@ pub(crate) async fn plan_command(
 ) -> anyhow::Result<RequestPlan> {
   match command {
     Command::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
-    Command::Audit(args) => get(
-      &admin_audit_endpoint(args),
-      "admin:ReadAudit",
-      "audit/admin",
-    ),
+    Command::Audit(args) => {
+      if args.command.is_some() {
+        bail!("Admin audit verifier must run before Admin request planning");
+      }
+      get(
+        &admin_audit_endpoint(args),
+        "admin:ReadAudit",
+        "audit/admin",
+      )
+    }
     Command::Doctor(args) => crate::doctor_plan::plan_doctor(args),
     Command::SupportBundle(args) => plan_support_bundle(args),
     Command::Runtime(command) => plan_runtime(command),

@@ -9,7 +9,8 @@ use serde::Deserialize;
 use anyhow::bail;
 
 use super::{
-  Config, SharedStateBackendKind, default_admin_audit_queue_capacity, validate_optional_non_empty,
+  AdminAuditAnchorConfig, Config, SharedStateBackendKind, default_admin_audit_queue_capacity,
+  validate_optional_non_empty,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,7 @@ pub struct AdminAuditConfig {
   pub export: AdminAuditExportConfig,
   pub spool: AdminAuditSpoolConfig,
   pub integrity: AdminAuditIntegrityConfig,
+  pub anchor: AdminAuditAnchorConfig,
 }
 
 impl Default for AdminAuditConfig {
@@ -39,6 +41,7 @@ impl Default for AdminAuditConfig {
       export: AdminAuditExportConfig::default(),
       spool: AdminAuditSpoolConfig::default(),
       integrity: AdminAuditIntegrityConfig::default(),
+      anchor: AdminAuditAnchorConfig::default(),
     }
   }
 }
@@ -82,6 +85,7 @@ impl<'de> Deserialize<'de> for AdminAuditConfig {
       export,
       spool: raw.spool,
       integrity: raw.integrity,
+      anchor: raw.anchor,
     })
   }
 }
@@ -108,6 +112,8 @@ struct RawAdminAuditConfig {
   spool: AdminAuditSpoolConfig,
   #[serde(default)]
   integrity: AdminAuditIntegrityConfig,
+  #[serde(default)]
+  anchor: AdminAuditAnchorConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -287,6 +293,7 @@ pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 20] = [
 
 impl Config {
   pub(super) fn validate_admin_audit_config_fields(&self) -> anyhow::Result<()> {
+    self.validate_admin_audit_anchor_fields()?;
     validate_optional_non_empty("admin.audit.backend", self.admin.audit.backend.as_deref())?;
     validate_optional_non_empty(
       "admin.audit.store.backend",
@@ -367,6 +374,7 @@ impl Config {
   }
 
   pub(super) fn validate_admin_audit_runtime(&self) -> anyhow::Result<()> {
+    self.validate_admin_audit_anchor()?;
     if !self.admin.audit.enabled {
       return Ok(());
     }

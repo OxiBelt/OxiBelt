@@ -17,6 +17,7 @@ use crate::waf::WafConfig;
 
 mod access_log;
 mod admin_audit;
+mod admin_audit_anchor;
 mod admin_legacy;
 mod admin_mutations;
 mod admin_operations;
@@ -132,7 +133,9 @@ pub use turn::*;
 pub use upstream_pool::*;
 pub use upstream_tls::*;
 pub use workers::*;
-pub use {access_log::*, admin_audit::*, admin_mutations::*, admin_operations::*};
+pub use {
+  access_log::*, admin_audit::*, admin_audit_anchor::*, admin_mutations::*, admin_operations::*,
+};
 
 /// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
 #[derive(Debug, Clone, PartialEq)]
@@ -592,6 +595,7 @@ impl Config {
     self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
     self.source_paths.oxirule_dir = Some(path_roots.oxirule_dir.clone());
     self.resolve_admin_mutation_signer_paths(&path_roots.config_dir)?;
+    self.resolve_admin_audit_anchor_paths(&path_roots.cert_dir)?;
     let (tls_cert_chain, tls_cert_chain_logical) =
       resolve_existing_local_config_file_path_with_logical(
         "tls.cert_chain",
@@ -3196,6 +3200,9 @@ fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> {
     "admin.audit.export" => &["enabled", "required_sinks", "sinks"][..],
     "admin.audit.spool" => allowed_keys::ADMIN_AUDIT_SPOOL_CONFIG_KEYS,
     "admin.audit.integrity" => allowed_keys::ADMIN_AUDIT_INTEGRITY_CONFIG_KEYS,
+    "admin.audit.anchor" => allowed_keys::ADMIN_AUDIT_ANCHOR_CONFIG_KEYS,
+    "admin.audit.anchor.sink" => allowed_keys::ADMIN_AUDIT_ANCHOR_SINK_CONFIG_KEYS,
+    "admin.audit.anchor.signer" => allowed_keys::ADMIN_AUDIT_ANCHOR_SIGNER_CONFIG_KEYS,
     "admin.operations" => &[
       "artifact_key_env",
       "artifact_max_bytes",

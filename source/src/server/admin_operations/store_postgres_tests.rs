@@ -164,6 +164,7 @@ async fn fenced_owner_and_stable_terminal_receipt_survive_reload() {
           terminal_audit_record_id: 1,
           safe_error_class: None,
           error_code: None,
+          audit_anchor_required: false,
         },
       )
       .await
@@ -184,6 +185,7 @@ async fn fenced_owner_and_stable_terminal_receipt_survive_reload() {
         terminal_audit_record_id: 1,
         safe_error_class: None,
         error_code: None,
+        audit_anchor_required: false,
       },
     )
     .await
@@ -308,6 +310,7 @@ async fn idempotency_capacity_cancellation_and_pruning_are_atomic() {
       requested.revision,
       receipt,
       2,
+      false,
     )
     .await
     .expect("cancel operation")
@@ -382,6 +385,7 @@ async fn cancellation_wins_completion_revision_race() {
           terminal_audit_record_id: 3,
           safe_error_class: None,
           error_code: None,
+          audit_anchor_required: false,
         },
       )
       .await
@@ -398,6 +402,7 @@ async fn cancellation_wins_completion_revision_race() {
         terminal_audit_record_id: 4,
         safe_error_class: Some("cancelled".to_string()),
         error_code: Some("operation_cancelled".to_string()),
+        audit_anchor_required: false,
       },
     )
     .await
@@ -473,6 +478,7 @@ async fn completed_work_wins_late_cancellation_after_revision_retry() {
         terminal_audit_record_id: 5,
         safe_error_class: None,
         error_code: None,
+        audit_anchor_required: false,
       },
     )
     .await
@@ -561,15 +567,22 @@ async fn unsupported_non_resumable_recovery_requires_indeterminate_receipt() {
   assert_eq!(recovery.requires_terminalization.len(), 1);
   assert_eq!(recovery.requires_terminalization[0].schema_version, 2);
   let receipt = br#"{"schema_version":1,"state":"indeterminate"}"#;
+  let terminal_update = TerminalUpdate {
+    state: AdminOperationState::Indeterminate,
+    result: None,
+    receipt: receipt.to_vec(),
+    terminal_audit_record_id: 5,
+    safe_error_class: Some("indeterminate".to_string()),
+    error_code: Some("unsupported_operation_checkpoint_version".to_string()),
+    audit_anchor_required: false,
+  };
   let mut tx = journal.pool().begin().await.expect("terminal transaction");
   let terminal = journal
     .mark_incomplete_indeterminate_tx(
       &mut tx,
       &running.operation_id,
       running.revision,
-      receipt,
-      5,
-      "unsupported_operation_checkpoint_version",
+      &terminal_update,
     )
     .await
     .expect("mark indeterminate")

@@ -2054,6 +2054,216 @@ must be standard base64 encoding of exactly 32 bytes and key material is
 held in zeroizing memory and cleared when released. Existing PostgreSQL rows remain queryable as
 `legacy-v0` with unavailable v1 occurrence/integrity fields represented as
 `null`; OxiBelt does not fabricate hashes for historical data.
+Changing between SHA-256 and HMAC-SHA256, or changing `hmac_key_id`, starts a
+new event chain at sequence zero after startup anchoring drains the prior
+chain's candidate. Retain the previous HMAC key under its historical ID for
+independent verification of retained evidence; chain restart never rewrites
+old events.
+
+`[admin.audit.anchor]` optionally seals contiguous ranges of the local v1
+event chain into signed `oxibelt.admin.audit.checkpoint/v1` checkpoints and
+submits them to a separately administered PostgreSQL authority. The authority
+receives chain and deployment metadata, the sequence range, chain head,
+checkpoint predecessor, Ed25519 key ID, signature, and checkpoint digest. It
+does not receive Admin event payloads, actor identity, request summaries,
+credentials, or signing keys. This boundary makes later deletion or rewriting
+of already anchored local evidence detectable without turning the authority
+into a second Admin audit query store.
+
+Anchoring requires all of the following:
+
+- enabled PostgreSQL `[admin.audit.store]` acknowledgement with
+  `acknowledgement = "postgres"`;
+- enabled shared state, a stable nonempty value in
+  `shared_state.instance_id_env`, and a nonempty deployment epoch in
+  `deployment_epoch_env`;
+- an anchor sink backend that names a PostgreSQL `[[shared_state.backends]]`
+  entry different from the Admin audit store backend;
+- a stable configured `authority_id` that exactly matches the external
+  authority's `authority_info()` result; and
+- a purpose-bound `oxibelt-keysigner` socket, an Ed25519 checkpoint key, a raw
+  32-byte pinned public-key file, and a separate 32-byte base64 IPC token.
+
+The dual-PostgreSQL boundary is mandatory, not a naming convention. OxiBelt
+rejects two differently named backends when their resolved PostgreSQL targets
+identify the same database. Use separate connection URLs, login roles,
+databases, owners, and backup/administration policy for the local audit store
+and checkpoint authority.
+Activation and every submission also compare the live PostgreSQL database name
+and postmaster identity, so DNS, loopback, Unix-socket, and connection-URL
+aliases cannot collapse the two configured backends onto one database.
+
+The instance ID must remain stable for one replica across process restarts.
+The deployment epoch must remain stable for all restarts of the same deployed
+artifact/configuration epoch and change deliberately when the operator starts
+a new deployment epoch. Fixed-member cluster checkpoints also bind the
+configured cluster and membership epoch. The stream ID is a deterministic,
+domain-separated SHA-256 digest of namespace, optional cluster ID, and instance
+ID, so deployment inventory can state the exact expected stream set without
+trusting the checkpoint authority to enumerate it.
+
+`record_interval` defaults to `1024` events and may be `1` to `1000000`.
+`time_interval_ms` defaults to `60000` and may be `1000` to `3600000`; the
+worker seals a nonempty candidate when either threshold is due. The local
+PostgreSQL outbox and the audit event are updated in one transaction.
+`max_pending_checkpoints` defaults to `1024` and may be `2` to `65536`;
+`max_pending_bytes` defaults to 16 MiB and may be 128 KiB to 256 MiB. Anchored
+deployments additionally limit `admin.audit.spool.max_event_bytes` to 64 MiB
+so an independent verifier can configure a matching bounded per-event limit.
+Pending signed checkpoints form an ordered predecessor chain and are never
+evicted to admit a new checkpoint. If that bounded outbox is full or the next
+checkpoint cannot yet be signed, the fixed-size candidate metadata keeps
+advancing to the latest local chain head; after capacity recovers, one
+checkpoint coalesces that
+continuous outage range. This does not grow outbox rows or bytes, while
+`anchor_lag_sequences` exposes the increasing assurance gap. `submit_timeout_ms`
+defaults to `5000` and may be `100` to `60000`.
+
+For `best_effort` audit, authority submission failures make anchoring degraded,
+increment bounded-label metrics, and retain pending evidence for retry. For a
+durable audit mode, the anchor is readiness-critical and required events do not
+report success until their checkpoint has an external authority receipt. A
+capacity, signer, authority, receipt, or continuity failure therefore rejects
+required work and fails readiness. `admin.mutations.mode = "required"` also
+requires anchoring to be enabled so a protected mutation cannot report success
+with only evidence inside the mutation/audit database boundary. Anchor and
+signer settings are restart-only.
+
+Install the authority schema from
+`deploy/postgres/admin-audit-anchor-v1.sql` while connected as a dedicated
+authority owner (prefer a `NOLOGIN` owner selected by a narrowly privileged
+installer with `SET ROLE`). Set the immutable authority ID in that same `psql`
+session after selecting the owner role:
+
+```sh
+psql "$OXIBELT_AUDIT_ANCHOR_OWNER_URL" --set ON_ERROR_STOP=1 \
+  --command "SET ROLE oxibelt_anchor_owner" \
+  --command "SET oxibelt.anchor_authority_id = 'production-audit-authority-1'" \
+  --file deploy/postgres/admin-audit-anchor-v1.sql
+```
+
+Create the runtime and verifier login roles separately, then grant only the
+function surfaces each role needs (replace the example role names with
+operator-managed identifiers):
+
+```sql
+GRANT USAGE ON SCHEMA oxibelt_audit_anchor_v1
+  TO oxibelt_anchor_runtime, oxibelt_anchor_verifier;
+GRANT EXECUTE ON FUNCTION oxibelt_audit_anchor_v1.authority_info()
+  TO oxibelt_anchor_runtime, oxibelt_anchor_verifier;
+GRANT EXECUTE ON FUNCTION oxibelt_audit_anchor_v1.append_checkpoint(jsonb),
+  oxibelt_audit_anchor_v1.lookup_checkpoint(text, text, bigint)
+  TO oxibelt_anchor_runtime;
+GRANT EXECUTE ON FUNCTION oxibelt_audit_anchor_v1.checkpoints(text, text),
+  oxibelt_audit_anchor_v1.head(text, text)
+  TO oxibelt_anchor_verifier;
+```
+
+Do not grant either role direct table privileges. Keep the authority on a
+separate failure, administration, backup, and credential boundary from the
+OxiBelt host and local Admin audit database. Protect both database connections
+with verified TLS, restrict runtime authority egress, retain authority backups,
+and give the independent verifier read-only URLs that use the verifier role.
+
+The checkpoint signer must use a dedicated socket, token, identity, peer
+allowlist, and key set. A keysigner daemon is purpose-exclusive: activation is
+rejected if one process loads both TLS and audit checkpoint keys, even when
+their IDs and key material differ. `--audit-checkpoint-key` accepts
+`KEY_ID=ED25519_PRIVATE_KEY_PEM`; it does not expose that key through the TLS
+signing request purpose. The configured pin is the corresponding raw 32-byte
+Ed25519 public key, not PEM or DER.
+
+Rotate a checkpoint key only after writes have been quiet for at least one
+configured `time_interval_ms`, `pending_checkpoints` and `pending_bytes` are
+both zero, and the verifier has recorded the current authority head in its
+independent witness. The quiet interval lets the background worker seal and
+submit any in-progress candidate, which is durable but is not yet counted as
+an outbox checkpoint. Then deploy the new signer key, `key_id`, and public-key
+pin as one restart-only change, while retaining both old and new public keys in
+the verifier trust set for every retained checkpoint. OxiBelt refuses to sign a
+pending checkpoint whose embedded key ID differs from the active signer; if a
+restart occurs mid-rotation, restore the prior signer configuration, drain the
+outbox, and repeat the rotation. Never relabel a pending checkpoint with the
+new key ID.
+
+Checkpoint-key rotation is separate from local audit HMAC rotation. When
+`admin.audit.integrity.hmac_key_id` changes, retain each historical raw
+32-byte HMAC key on the independent verifier and pass it with
+`oxibeltctl audit verify --trusted-hmac-key KEY_ID=FILE` for as long as local
+events under that key are retained. Keep each verifier key file owner-only;
+missing historical HMAC material produces an `incomplete` report and a tag
+that fails verification produces `invalid`.
+
+```sh
+oxibelt-keysigner \
+  --socket /run/oxibelt-audit-keysigner/signer.sock \
+  --audit-checkpoint-key audit-anchor-2026-07=/run/secrets/audit-anchor.ed25519.pem \
+  --token-env OXIBELT_AUDIT_KEYSIGNER_TOKEN \
+  --allow-peer-uid 10001
+```
+
+An enabled configuration has this shape:
+
+```toml
+[shared_state]
+enabled = true
+namespace = "oxibelt"
+instance_id_env = "OXIBELT_INSTANCE_ID"
+
+[[shared_state.backends]]
+name = "audit-local"
+kind = "postgres"
+connection_url_env = "OXIBELT_ADMIN_AUDIT_POSTGRES_URL"
+
+[[shared_state.backends]]
+name = "audit-anchor"
+kind = "postgres"
+connection_url_env = "OXIBELT_AUDIT_ANCHOR_POSTGRES_URL"
+
+[admin]
+enabled = true
+
+[admin.audit]
+enabled = true
+mode = "durable_required"
+acknowledgement = "postgres"
+
+[admin.audit.store]
+enabled = true
+kind = "postgres"
+backend = "audit-local"
+
+[admin.audit.anchor]
+enabled = true
+record_interval = 1024
+time_interval_ms = 60000
+deployment_epoch_env = "OXIBELT_DEPLOYMENT_EPOCH"
+max_pending_checkpoints = 1024
+max_pending_bytes = 16777216
+
+[admin.audit.anchor.sink]
+kind = "postgres"
+backend = "audit-anchor"
+authority_id = "production-audit-authority-1"
+submit_timeout_ms = 5000
+
+[admin.audit.anchor.signer]
+kind = "keysigner"
+socket_path = "/run/oxibelt-audit-keysigner/signer.sock"
+key_id = "audit-anchor-2026-07"
+public_key_file = "admin-audit/audit-anchor-2026-07.ed25519.pub"
+token_env = "OXIBELT_AUDIT_KEYSIGNER_TOKEN"
+# token_file = "admin-audit/keysigner-token.b64"
+token_reload_interval_ms = 1000
+connect_timeout_ms = 250
+sign_timeout_ms = 1000
+```
+
+Relative signer public-key and token files resolve under the configured
+certificate directory. `token_file`, when set, takes precedence over
+`token_env`, is reloadable, and must contain standard base64 for exactly 32
+bytes. A signer-reported public key that differs from `public_key_file` fails
+activation.
 
 `[admin.audit.export]` can route events to the Access Log Admin source, which
 projects OCSF or ECS JSON to stdout or OTLP according to
@@ -2186,10 +2396,12 @@ records supplied envelopes while preserving compatibility for callers that do
 not send one; `required` rejects a protected request without
 `X-OxiBelt-Mutation`. Both active modes require `backend` to name a PostgreSQL
 shared-state backend and require durable Admin audit coverage for all nine
-protected action IDs with the durable store on that same backend. A local
-fsynced audit acknowledgement does not replace the P1-13 PostgreSQL replay
-ledger or its transactional critical audit records; protected mutations still
-fail closed when that PostgreSQL authority is unavailable.
+protected action IDs with the durable store on that same backend. `required`
+also requires `[admin.audit.anchor].enabled = true` and external authority
+evidence before reporting protected-mutation success. A local fsynced audit
+acknowledgement does not replace the P1-13 PostgreSQL replay ledger or its
+transactional critical audit records; protected mutations still fail closed
+when either required PostgreSQL authority is unavailable.
 Expiry and retention are evaluated with PostgreSQL time. The retention window
 must cover the maximum validity and clock-skew windows, and a live request or
 terminal receipt is never evicted to admit another request.

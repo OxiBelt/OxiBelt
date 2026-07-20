@@ -67,6 +67,7 @@ pub(crate) async fn cluster_admit_tx(
   exact: &ExactMembership,
   admission_member: &MemberFence,
   sealed: &SealedArtifact,
+  audit_anchor_required: bool,
 ) -> anyhow::Result<ClusterAdmission> {
   ensure!(
     store.rollout_mode() == StoreRolloutMode::AdminCluster,
@@ -84,8 +85,14 @@ pub(crate) async fn cluster_admit_tx(
       && claim.expected_previous_revision == exact.baseline_revision,
     "cluster admission does not match the exact live baseline"
   );
-  let outcome =
-    claim_tx_with_mode(tx, store.namespace(), StoreRolloutMode::AdminCluster, claim).await?;
+  let outcome = claim_tx_with_mode(
+    tx,
+    store.namespace(),
+    StoreRolloutMode::AdminCluster,
+    claim,
+    audit_anchor_required,
+  )
+  .await?;
   let ClaimOutcome::Claimed(record) = &outcome else {
     return Ok(ClusterAdmission {
       outcome,

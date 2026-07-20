@@ -52,6 +52,8 @@ impl OperationJournal {
           SET state = $7, revision = revision + 1, terminal_result = $8::jsonb,
               terminal_receipt = $9, terminal_audit_record_id = $10,
               safe_error_class = $11, error_code = $12, owner_worker_id = NULL,
+              terminal_audit_confirmed_at = CASE
+                WHEN $14 THEN NULL ELSE clock_timestamp() END,
               owner_boot_id = NULL, lease_expires_at = NULL, updated_at = now(),
               retention_until = now() + make_interval(secs => retention_seconds::double precision)
         WHERE namespace = $1 AND operation_id = $2 AND owner_worker_id = $3
@@ -73,6 +75,7 @@ impl OperationJournal {
     .bind(&terminal.safe_error_class)
     .bind(&terminal.error_code)
     .bind(allowed_predecessors)
+    .bind(terminal.audit_anchor_required)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else { return Ok(None) };
@@ -155,6 +158,7 @@ impl OperationJournal {
     expected_revision: u64,
     receipt: &[u8],
     terminal_audit_record_id: i64,
+    audit_anchor_required: bool,
   ) -> anyhow::Result<Option<JournalOperation>> {
     validate_text("operation_id", operation_id, 256)?;
     validate_terminal_material(
@@ -207,6 +211,8 @@ impl OperationJournal {
           SET state = 'cancelled', revision = revision + 1, terminal_receipt = $4,
               terminal_audit_record_id = $5, safe_error_class = 'cancelled',
               error_code = 'operation_cancelled', updated_at = now(),
+              terminal_audit_confirmed_at = CASE
+                WHEN $6 THEN NULL ELSE clock_timestamp() END,
               retention_until = now() + make_interval(secs => retention_seconds::double precision)
         WHERE namespace = $1 AND operation_id = $2 AND revision = $3
           AND state = 'cancellation_requested' AND owner_worker_id IS NULL RETURNING {}",
@@ -217,6 +223,7 @@ impl OperationJournal {
     .bind(i64::try_from(current.revision)?)
     .bind(receipt)
     .bind(terminal_audit_record_id)
+    .bind(audit_anchor_required)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else { return Ok(None) };
@@ -242,11 +249,16 @@ impl OperationJournal {
     tx: &mut Transaction<'_, Postgres>,
     operation_id: &str,
     expected_revision: u64,
-    receipt: &[u8],
-    terminal_audit_record_id: i64,
-    error_code: &str,
+    terminal: &TerminalUpdate,
   ) -> anyhow::Result<Option<JournalOperation>> {
-    validate_terminal_material(receipt, terminal_audit_record_id, Some(error_code), None)?;
+    terminal.validate()?;
+    ensure!(
+      terminal.state == AdminOperationState::Indeterminate
+        && terminal.result.is_none()
+        && terminal.safe_error_class.as_deref() == Some("indeterminate")
+        && terminal.error_code.is_some(),
+      "incomplete operation recovery requires an indeterminate terminal update"
+    );
     let statement = operation_select(
       "WHERE namespace = $1 AND operation_id = $2 AND revision = $3
          AND state NOT IN ('succeeded','failed','cancelled','indeterminate') FOR UPDATE",
@@ -291,6 +303,8 @@ impl OperationJournal {
       "UPDATE oxibelt_admin_operations
           SET state = 'indeterminate', revision = revision + 1, terminal_receipt = $4,
               terminal_audit_record_id = $5, safe_error_class = 'indeterminate', error_code = $6,
+              terminal_audit_confirmed_at = CASE
+                WHEN $7 THEN NULL ELSE clock_timestamp() END,
               owner_worker_id = NULL, owner_boot_id = NULL, lease_expires_at = NULL,
               updated_at = now(),
               retention_until = now() + make_interval(secs => retention_seconds::double precision)
@@ -302,9 +316,10 @@ impl OperationJournal {
     .bind(&self.namespace)
     .bind(operation_id)
     .bind(i64::try_from(current.revision)?)
-    .bind(receipt)
-    .bind(terminal_audit_record_id)
-    .bind(error_code)
+    .bind(&terminal.receipt)
+    .bind(terminal.terminal_audit_record_id)
+    .bind(&terminal.error_code)
+    .bind(terminal.audit_anchor_required)
     .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else { return Ok(None) };
@@ -436,6 +451,7 @@ impl OperationJournal {
          SELECT namespace, operation_id FROM oxibelt_admin_operations
           WHERE namespace = $1 AND retention_until <= now()
             AND state IN ('succeeded','failed','cancelled','indeterminate')
+            AND terminal_audit_confirmed_at IS NOT NULL
           ORDER BY retention_until, operation_id FOR UPDATE SKIP LOCKED LIMIT $2
        )",
     )

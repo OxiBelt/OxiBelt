@@ -27,7 +27,7 @@ pub(super) async fn wait_for_terminal(
       .load_mutation(request_id)
       .await?
       .ok_or_else(|| anyhow::anyhow!("claimed cluster mutation disappeared"))?;
-    if record.state.is_terminal() {
+    if record.terminal_response_ready() {
       return Ok(Some(record));
     }
     if Instant::now() >= deadline {

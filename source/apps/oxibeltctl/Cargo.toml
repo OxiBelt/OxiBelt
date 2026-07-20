@@ -27,6 +27,7 @@ sequoia-openpgp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true

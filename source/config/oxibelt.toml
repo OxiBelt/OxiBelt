@@ -643,6 +643,31 @@ max_event_bytes = 65536
 # hmac_key_env = "OXIBELT_ADMIN_AUDIT_HMAC_KEY" # exactly 32 base64-encoded bytes
 # hmac_key_id = "audit-2026-07"
 
+[admin.audit.anchor]
+enabled = false
+record_interval = 1024
+time_interval_ms = 60000
+deployment_epoch_env = "OXIBELT_DEPLOYMENT_EPOCH"
+max_pending_checkpoints = 1024
+max_pending_bytes = 16777216
+
+[admin.audit.anchor.sink]
+kind = "postgres"
+# backend = "audit-anchor" # separately administered PostgreSQL shared_state backend
+# authority_id = "production-audit-anchor"
+submit_timeout_ms = 5000
+
+[admin.audit.anchor.signer]
+kind = "keysigner"
+# socket_path = "/run/oxibelt-audit-keysigner/signer.sock"
+# key_id = "audit-anchor-2026-07"
+# public_key_file = "admin-audit/audit-anchor-2026-07.ed25519.pub" # raw 32-byte Ed25519 key under source/cert
+token_env = "OXIBELT_AUDIT_KEYSIGNER_TOKEN"
+# token_file = "admin-audit/keysigner-token.b64" # alternative 32-byte base64 token under source/cert
+token_reload_interval_ms = 1000
+connect_timeout_ms = 250
+sign_timeout_ms = 1000
+
 [admin.operations]
 enabled = true
 persistence = "auto" # auto | ephemeral | postgres

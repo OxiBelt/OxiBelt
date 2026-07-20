@@ -49,7 +49,9 @@ pub(super) fn statements() -> &'static [&'static str] {
        safe_response jsonb NULL,
        error_code text NULL,
        audit_record_id bigint NOT NULL,
+       admission_audit_confirmed_at timestamptz NULL,
        terminal_audit_record_id bigint NULL,
+       terminal_audit_confirmed_at timestamptz NULL,
        coordinator_instance_id text NULL,
        coordinator_boot_id text NULL,
        coordinator_instance_epoch bigint NULL,
@@ -271,6 +273,17 @@ pub(super) fn statements() -> &'static [&'static str] {
        ADD COLUMN IF NOT EXISTS coordinator_instance_epoch bigint NULL",
     "ALTER TABLE oxibelt_admin_mutations
        ADD COLUMN IF NOT EXISTS coordinator_epoch bigint NOT NULL DEFAULT 0",
+    "ALTER TABLE oxibelt_admin_mutations
+       ADD COLUMN IF NOT EXISTS admission_audit_confirmed_at timestamptz NULL",
+    "ALTER TABLE oxibelt_admin_mutations
+       ADD COLUMN IF NOT EXISTS terminal_audit_confirmed_at timestamptz NULL",
+    "UPDATE oxibelt_admin_mutations
+        SET admission_audit_confirmed_at = COALESCE(
+              admission_audit_confirmed_at, created_at),
+            terminal_audit_confirmed_at = CASE
+              WHEN terminal_audit_record_id IS NOT NULL
+              THEN COALESCE(terminal_audit_confirmed_at, updated_at)
+              ELSE terminal_audit_confirmed_at END",
     "ALTER TABLE oxibelt_admin_mutation_targets
        ADD COLUMN IF NOT EXISTS state_version bigint NOT NULL DEFAULT 0",
     "ALTER TABLE oxibelt_admin_mutation_targets
@@ -386,7 +399,7 @@ pub(super) fn statements() -> &'static [&'static str] {
        ON oxibelt_admin_break_glass_activations
          (namespace, principal, expires_at) WHERE revoked_at IS NULL",
     "INSERT INTO oxibelt_admin_schema_migrations(component, version)
-       VALUES ('admin_mutation', 2) ON CONFLICT DO NOTHING",
+       VALUES ('admin_mutation', 3) ON CONFLICT DO NOTHING",
   ]
 }
 
@@ -433,6 +446,8 @@ mod tests {
       "ADD COLUMN IF NOT EXISTS coordinator_boot_id",
       "ADD COLUMN IF NOT EXISTS coordinator_instance_epoch",
       "ADD COLUMN IF NOT EXISTS coordinator_epoch",
+      "ADD COLUMN IF NOT EXISTS terminal_audit_confirmed_at",
+      "ADD COLUMN IF NOT EXISTS admission_audit_confirmed_at",
       "ADD COLUMN IF NOT EXISTS admission_instance_id",
       "ADD COLUMN IF NOT EXISTS admission_boot_id",
       "ADD COLUMN IF NOT EXISTS admission_instance_epoch",

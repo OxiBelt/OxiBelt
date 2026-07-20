@@ -156,6 +156,7 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "admin_http3",
   "admin_operation_webtransport",
   "admin_audit",
+  "admin_audit_anchoring",
   "admin_mutation_replay",
   "atomic_secret_reference_activation",
 ];

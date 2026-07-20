@@ -520,13 +520,18 @@ fn in_progress_response_for_execution(request_id: &str, revision: &str) -> Respo
 }
 
 fn in_progress_response(record: &MutationRecord) -> Response<ProxyBody> {
+  let state = if record.terminal_anchor_pending() {
+    "anchor_pending"
+  } else {
+    record.state.as_str()
+  };
   let mut response = json_response(
     StatusCode::CONFLICT,
     &json!({
       "error": "mutation outcome is not terminal",
       "code": "mutation_in_progress",
       "request_id": record.request_id,
-      "state": record.state,
+      "state": state,
     }),
   );
   attach_in_progress_headers(&mut response, &record.request_id);
@@ -635,6 +640,12 @@ async fn receipt_response(
   } else {
     json!([])
   };
+  let anchor_pending = record.terminal_anchor_pending();
+  let visible_state = if anchor_pending {
+    "anchor_pending"
+  } else {
+    record.state.as_str()
+  };
   json_response(
     StatusCode::OK,
     &json!({
@@ -650,12 +661,12 @@ async fn receipt_response(
         "cluster_id": record.cluster_id,
         "membership_revision": record.membership_revision,
       },
-      "state": record.state,
-      "phase": record.state,
+      "state": visible_state,
+      "phase": visible_state,
       "members": members,
-      "http_status": record.http_status,
-      "result": record.safe_response,
-      "error_code": record.error_code,
+      "http_status": (!anchor_pending).then_some(record.http_status).flatten(),
+      "result": (!anchor_pending).then_some(record.safe_response).flatten(),
+      "error_code": (!anchor_pending).then_some(record.error_code).flatten(),
       "issued_at": record.issued_at,
       "expires_at": record.expires_at,
       "created_at": record.created_at,

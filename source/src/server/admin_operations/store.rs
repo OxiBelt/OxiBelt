@@ -15,6 +15,8 @@ use super::types::{
   AdminOperationState,
 };
 
+#[path = "store_anchor.rs"]
+mod anchor;
 #[path = "store_rows.rs"]
 mod rows;
 #[path = "store_schema.rs"]
@@ -125,6 +127,7 @@ pub(in crate::server) struct JournalOperation {
     reason = "retained for enforcing audit correlation and receipt replay"
   )]
   pub terminal_audit_record_id: Option<i64>,
+  pub terminal_audit_confirmed: bool,
   pub safe_error_class: Option<String>,
   pub error_code: Option<String>,
   pub created_at_unix_ms: u64,
@@ -170,6 +173,7 @@ pub(in crate::server) struct TerminalUpdate {
   pub terminal_audit_record_id: i64,
   pub safe_error_class: Option<String>,
   pub error_code: Option<String>,
+  pub audit_anchor_required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -386,36 +390,6 @@ impl OperationJournal {
       .iter()
       .map(operation_from_row)
       .collect()
-  }
-
-  pub async fn events_since(
-    &self,
-    operation_id: &str,
-    after_revision: u64,
-    limit: i64,
-  ) -> anyhow::Result<Vec<JournalEvent>> {
-    validate_text("operation_id", operation_id, 256)?;
-    ensure!(
-      (1..=10_000).contains(&limit),
-      "event limit must be between 1 and 10000"
-    );
-    let after_revision = i64::try_from(after_revision)?;
-    sqlx::query(
-      "SELECT revision, event, state, progress::text AS progress, payload::text AS payload,
-              floor(extract(epoch FROM created_at) * 1000)::bigint AS created_at_ms
-         FROM oxibelt_admin_operation_events
-        WHERE namespace = $1 AND operation_id = $2 AND revision > $3
-        ORDER BY revision ASC LIMIT $4",
-    )
-    .bind(&self.namespace)
-    .bind(operation_id)
-    .bind(after_revision)
-    .bind(limit)
-    .fetch_all(&self.pool)
-    .await?
-    .iter()
-    .map(event_from_row)
-    .collect()
   }
 
   pub async fn queue(

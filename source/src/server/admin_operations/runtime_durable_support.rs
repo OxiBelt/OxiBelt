@@ -27,30 +27,44 @@ pub(super) fn encode_hex(bytes: &[u8]) -> String {
 }
 
 pub(super) fn snapshot_from_journal(operation: &JournalOperation) -> AdminOperationSnapshot {
-  let terminal_receipt = operation
-    .terminal_receipt
-    .as_deref()
-    .and_then(|bytes| serde_json::from_slice(bytes).ok());
-  let error_class = operation
-    .safe_error_class
-    .as_deref()
-    .and_then(|value| AdminOperationSafeErrorClass::from_str(value).ok());
+  let terminal_visible = !operation.state.is_terminal() || operation.terminal_audit_confirmed;
+  let visible_state = if terminal_visible {
+    operation.state
+  } else {
+    // The durable execution result is internal until its exact audit event is
+    // externally anchored. Keep public snapshots nonterminal in the interim.
+    AdminOperationState::Running
+  };
+  let terminal_receipt = terminal_visible
+    .then(|| {
+      operation
+        .terminal_receipt
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+    })
+    .flatten();
+  let error_class = terminal_visible
+    .then(|| {
+      operation
+        .safe_error_class
+        .as_deref()
+        .and_then(|value| AdminOperationSafeErrorClass::from_str(value).ok())
+    })
+    .flatten();
   AdminOperationSnapshot {
     id: operation.operation_id.clone(),
     kind: operation.kind,
-    state: operation.state,
+    state: visible_state,
     schema_version: operation.schema_version,
     revision: operation.revision,
     durability: AdminOperationDurability::Durable,
     recovery_class: operation.recovery_class,
     created_at_unix_ms: operation.created_at_unix_ms,
     updated_at_unix_ms: Some(operation.updated_at_unix_ms),
-    started_at_unix_ms: operation
-      .state
+    started_at_unix_ms: visible_state
       .owns_execution_lease()
       .then_some(operation.updated_at_unix_ms),
-    finished_at_unix_ms: operation
-      .state
+    finished_at_unix_ms: visible_state
       .is_receiptable_terminal()
       .then_some(operation.updated_at_unix_ms),
     expires_at_unix_ms: Some(operation.expires_at_unix_ms),
@@ -68,10 +82,16 @@ pub(super) fn snapshot_from_journal(operation: &JournalOperation) -> AdminOperat
       .progress
       .clone()
       .and_then(|value| serde_json::from_value(value).ok()),
-    result: operation.terminal_result.clone(),
-    error: operation.error_code.clone(),
+    result: terminal_visible
+      .then(|| operation.terminal_result.clone())
+      .flatten(),
+    error: terminal_visible
+      .then(|| operation.error_code.clone())
+      .flatten(),
     error_class,
-    error_code: operation.error_code.clone(),
+    error_code: terminal_visible
+      .then(|| operation.error_code.clone())
+      .flatten(),
     terminal_receipt,
   }
 }

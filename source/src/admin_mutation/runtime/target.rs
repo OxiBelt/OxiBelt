@@ -32,7 +32,7 @@ impl AdminMutationRuntime {
   }
 }
 
-pub(super) fn configured_target(config: &Config) -> MutationTarget {
+pub(crate) fn configured_target(config: &Config) -> MutationTarget {
   let rollout = &config.admin.mutations.rollout;
   if rollout.mode.is_cluster() {
     return MutationTarget {

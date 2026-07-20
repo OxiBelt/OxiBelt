@@ -599,6 +599,7 @@ fn dynamic_policy_list_builds_pagination_query_endpoint() {
 #[test]
 fn admin_audit_builds_query_endpoint() {
   let command = Command::Audit(AdminAuditArgs {
+    command: None,
     outcome: Some("rejected".to_string()),
     actor: Some("ops-token".to_string()),
     principal: Some("ops".to_string()),

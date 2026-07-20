@@ -20,6 +20,28 @@ type SleepFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 pub(super) async fn connect_pool(
   backend: &SharedStateBackendConfig,
 ) -> anyhow::Result<Pool<Postgres>> {
+  let options = connect_options(backend)?;
+  PgPoolOptions::new()
+    .max_connections(backend.max_connections)
+    .acquire_timeout(Duration::from_millis(backend.connect_timeout_ms))
+    .connect_with(options)
+    .await
+    .map_err(Into::into)
+}
+
+pub(super) fn connect_lazy_pool(
+  backend: &SharedStateBackendConfig,
+) -> anyhow::Result<Pool<Postgres>> {
+  let options = connect_options(backend)?;
+  Ok(
+    PgPoolOptions::new()
+      .max_connections(backend.max_connections)
+      .acquire_timeout(Duration::from_millis(backend.connect_timeout_ms))
+      .connect_lazy_with(options),
+  )
+}
+
+fn connect_options(backend: &SharedStateBackendConfig) -> anyhow::Result<PgConnectOptions> {
   let connection_url =
     backend.connection_url_with_prefix(&format!("shared_state.backends.{}", backend.name))?;
   let mut options = PgConnectOptions::from_str(&connection_url)?
@@ -34,12 +56,7 @@ pub(super) async fn connect_pool(
       .ssl_client_cert(client_cert)
       .ssl_client_key(client_key);
   }
-  PgPoolOptions::new()
-    .max_connections(backend.max_connections)
-    .acquire_timeout(Duration::from_millis(backend.connect_timeout_ms))
-    .connect_with(options)
-    .await
-    .map_err(Into::into)
+  Ok(options)
 }
 
 fn pg_ssl_mode(mode: DatabaseTlsMode) -> PgSslMode {
@@ -157,20 +174,39 @@ pub(super) async fn run_database_writer(
   pool: Pool<Postgres>,
   namespace: String,
   mut receiver: mpsc::Receiver<AdminAuditEvent>,
+  anchor: super::anchor::AuditAnchorRuntime,
   metrics: std::sync::Arc<Metrics>,
 ) {
   while let Some(event) = receiver.recv().await {
-    insert_record_with_retry(&pool, &namespace, &event).await;
+    insert_record_with_retry(&pool, &namespace, &event, &anchor).await;
     metrics.record_admin_audit_event(&event.outcome, "postgres");
   }
 }
 
-async fn insert_record_with_retry(pool: &Pool<Postgres>, namespace: &str, event: &AdminAuditEvent) {
+async fn insert_record_with_retry(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+  event: &AdminAuditEvent,
+  anchor: &super::anchor::AuditAnchorRuntime,
+) {
   retry_insert_loop(
-    || Box::pin(insert_record(pool, namespace, event)),
+    || Box::pin(insert_record_with_anchor(pool, namespace, event, anchor)),
     |delay| Box::pin(tokio::time::sleep(delay)),
   )
   .await;
+}
+
+async fn insert_record_with_anchor(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+  event: &AdminAuditEvent,
+  anchor: &super::anchor::AuditAnchorRuntime,
+) -> anyhow::Result<()> {
+  let mut tx = pool.begin().await?;
+  insert_record_returning_id_tx(&mut tx, namespace, event).await?;
+  let outcome = anchor.record_event_tx(&mut tx, event, false).await?;
+  tx.commit().await?;
+  anchor.after_event(event, outcome, false).await
 }
 
 async fn retry_insert_loop<'a, A, S>(mut attempt: A, mut sleep: S)
@@ -200,16 +236,6 @@ fn retry_delay(failures: u32) -> Duration {
   let exponent = failures.min(6);
   let millis = 50_u64.saturating_mul(1_u64 << exponent);
   Duration::from_millis(millis.min(5_000))
-}
-
-async fn insert_record(
-  pool: &Pool<Postgres>,
-  namespace: &str,
-  event: &AdminAuditEvent,
-) -> anyhow::Result<()> {
-  insert_record_returning_id(pool, namespace, event)
-    .await
-    .map(|_| ())
 }
 
 pub(super) async fn insert_record_returning_id(

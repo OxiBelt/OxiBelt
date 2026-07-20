@@ -120,10 +120,11 @@ pub(crate) enum RuntimeTaskKind {
   AdminMutationHeartbeat,
   AdminMutationMember,
   AdminMutationCoordinator,
+  AdminAuditAnchor,
 }
 
 impl RuntimeTaskKind {
-  pub(crate) const ALL: [Self; 13] = [
+  pub(crate) const ALL: [Self; 14] = [
     Self::HttpConnection,
     Self::AdminConnection,
     Self::OpsConnection,
@@ -137,6 +138,7 @@ impl RuntimeTaskKind {
     Self::AdminMutationHeartbeat,
     Self::AdminMutationMember,
     Self::AdminMutationCoordinator,
+    Self::AdminAuditAnchor,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -156,6 +158,7 @@ impl RuntimeTaskKind {
       Self::AdminMutationHeartbeat => "admin_mutation_heartbeat",
       Self::AdminMutationMember => "admin_mutation_member",
       Self::AdminMutationCoordinator => "admin_mutation_coordinator",
+      Self::AdminAuditAnchor => "admin_audit_anchor",
     }
   }
 }

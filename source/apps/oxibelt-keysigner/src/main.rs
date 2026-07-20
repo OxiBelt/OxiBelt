@@ -10,13 +10,20 @@ use oxibelt::remote_signer::{
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-keysigner")]
-#[command(about = "OxiBelt IPC remote TLS private-key signer")]
+#[command(about = "OxiBelt purpose-bound IPC private-key signer")]
 struct Cli {
   #[arg(long, value_name = "PATH")]
   socket: PathBuf,
 
   #[arg(long = "key", value_name = "KEY_ID=PRIVATE_KEY_PEM", value_parser = parse_key)]
   keys: Vec<(String, PathBuf)>,
+
+  #[arg(
+    long = "audit-checkpoint-key",
+    value_name = "KEY_ID=ED25519_PRIVATE_KEY_PEM",
+    value_parser = parse_audit_checkpoint_key
+  )]
+  audit_checkpoint_keys: Vec<(String, PathBuf)>,
 
   #[arg(long, default_value = "OXIBELT_KEYSIGNER_TOKEN")]
   token_env: String,
@@ -50,19 +57,22 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   oxibelt::tls::install_default_provider()?;
-  remote_signer::serve(SignerServerConfig {
-    socket_path: cli.socket,
-    socket_mode: cli.socket_mode,
-    keys: cli.keys,
-    token_env: cli.token_env,
-    token_file: cli.token_file,
-    token_reload_interval: Duration::from_millis(cli.token_reload_interval_ms),
-    max_connections: cli.max_connections,
-    io_timeout: Duration::from_millis(cli.io_timeout_ms),
-    allow_peer_uids: cli.allow_peer_uids,
-    allow_peer_gids: cli.allow_peer_gids,
-    allow_tls12_unstructured_signing: cli.allow_tls12_unstructured_signing,
-  })
+  remote_signer::serve_with_audit_checkpoint_keys(
+    SignerServerConfig {
+      socket_path: cli.socket,
+      socket_mode: cli.socket_mode,
+      keys: cli.keys,
+      token_env: cli.token_env,
+      token_file: cli.token_file,
+      token_reload_interval: Duration::from_millis(cli.token_reload_interval_ms),
+      max_connections: cli.max_connections,
+      io_timeout: Duration::from_millis(cli.io_timeout_ms),
+      allow_peer_uids: cli.allow_peer_uids,
+      allow_peer_gids: cli.allow_peer_gids,
+      allow_tls12_unstructured_signing: cli.allow_tls12_unstructured_signing,
+    },
+    cli.audit_checkpoint_keys,
+  )
   .await
 }
 
@@ -75,6 +85,19 @@ fn parse_key(value: &str) -> anyhow::Result<(String, PathBuf)> {
   }
   if path.trim().is_empty() {
     bail!("--key private key path must not be empty");
+  }
+  Ok((key_id.to_string(), PathBuf::from(path)))
+}
+
+fn parse_audit_checkpoint_key(value: &str) -> anyhow::Result<(String, PathBuf)> {
+  let Some((key_id, path)) = value.split_once('=') else {
+    bail!("--audit-checkpoint-key must use KEY_ID=ED25519_PRIVATE_KEY_PEM");
+  };
+  if key_id.trim().is_empty() {
+    bail!("--audit-checkpoint-key key id must not be empty");
+  }
+  if path.trim().is_empty() {
+    bail!("--audit-checkpoint-key private key path must not be empty");
   }
   Ok((key_id.to_string(), PathBuf::from(path)))
 }
@@ -102,4 +125,33 @@ fn parse_nonzero_u64(value: &str) -> anyhow::Result<u64> {
     bail!("value must be greater than 0");
   }
   Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cli_accepts_an_audit_only_keyset() {
+    let cli = Cli::try_parse_from([
+      "oxibelt-keysigner",
+      "--socket",
+      "/run/oxibelt/audit.sock",
+      "--audit-checkpoint-key",
+      "audit-2026=/run/keys/audit.pem",
+      "--audit-checkpoint-key",
+      "audit-next=/run/keys/audit-next.pem",
+    ])
+    .expect("audit-only CLI should parse");
+
+    assert!(cli.keys.is_empty());
+    assert_eq!(cli.audit_checkpoint_keys.len(), 2);
+  }
+
+  #[test]
+  fn audit_checkpoint_key_rejects_missing_id_or_path() {
+    assert!(parse_audit_checkpoint_key("=/run/keys/audit.pem").is_err());
+    assert!(parse_audit_checkpoint_key("audit=").is_err());
+    assert!(parse_audit_checkpoint_key("audit").is_err());
+  }
 }

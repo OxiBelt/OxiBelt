@@ -47,6 +47,7 @@ fn record(state: MutationState) -> MutationRecord {
     error_code: None,
     audit_record_id: 1,
     terminal_audit_record_id: None,
+    terminal_audit_confirmed: false,
     issued_at: String::new(),
     expires_at: String::new(),
     created_at: String::new(),

@@ -222,6 +222,7 @@ pub(crate) struct MutationRecord {
   pub(crate) error_code: Option<String>,
   pub(crate) audit_record_id: i64,
   pub(crate) terminal_audit_record_id: Option<i64>,
+  pub(crate) terminal_audit_confirmed: bool,
   pub(crate) issued_at: String,
   pub(crate) expires_at: String,
   pub(crate) created_at: String,
@@ -229,10 +230,18 @@ pub(crate) struct MutationRecord {
 }
 
 impl MutationRecord {
+  pub(crate) const fn terminal_response_ready(&self) -> bool {
+    self.state.is_terminal() && self.terminal_audit_confirmed
+  }
+
+  pub(crate) const fn terminal_anchor_pending(&self) -> bool {
+    self.state.is_terminal() && !self.terminal_audit_confirmed
+  }
+
   pub(crate) fn classify_existing_claim(self, claim: &MutationClaim) -> ClaimOutcome {
     if self.fingerprint != claim.fingerprint || self.principal != claim.principal {
       ClaimOutcome::RequestConflict
-    } else if self.state.is_terminal() {
+    } else if self.terminal_response_ready() {
       ClaimOutcome::Replay(self)
     } else {
       ClaimOutcome::InProgress(self)
@@ -259,6 +268,9 @@ pub(crate) struct TerminalMutation {
   pub(crate) safe_response: Option<Value>,
   pub(crate) error_code: Option<String>,
   pub(crate) terminal_audit_record_id: i64,
+  /// Required anchoring leaves the terminal receipt hidden until the external
+  /// checkpoint receipt is durable and the confirmation marker is promoted.
+  pub(crate) audit_anchor_required: bool,
 }
 
 impl TerminalMutation {
@@ -383,6 +395,7 @@ mod tests {
       safe_response: None,
       error_code: None,
       terminal_audit_record_id: 42,
+      audit_anchor_required: false,
     };
     assert!(applying.validate().is_err());
 
@@ -392,6 +405,7 @@ mod tests {
       safe_response: None,
       error_code: None,
       terminal_audit_record_id: 0,
+      audit_anchor_required: false,
     };
     assert!(missing_audit.validate().is_err());
   }

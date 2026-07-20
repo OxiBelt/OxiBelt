@@ -6717,6 +6717,7 @@
               "canary_healthy",
               "expanding",
               "fully_applied",
+              "anchor_pending",
               "committed",
               "failed",
               "rolling_back",
@@ -8229,6 +8230,7 @@
           "package_version",
           "features",
           "operation_persistence",
+          "audit_anchoring",
           "authentication",
           "limits"
         ],
@@ -8255,10 +8257,11 @@
               "stream_pool_runtime_control",
               "admin_operations",
               "admin_http3",
-        "admin_operation_webtransport",
-        "admin_audit",
-        "admin_mutation_replay",
-        "atomic_secret_reference_activation"
+              "admin_operation_webtransport",
+              "admin_audit",
+              "admin_audit_anchoring",
+              "admin_mutation_replay",
+              "atomic_secret_reference_activation"
             ],
             "properties": {
               "config_load": {
@@ -8300,15 +8303,18 @@
               "admin_operation_webtransport": {
                 "type": "boolean"
               },
-        "admin_audit": {
-          "type": "boolean"
-        },
-        "admin_mutation_replay": {
-          "type": "boolean"
-        },
-        "atomic_secret_reference_activation": {
-          "type": "boolean"
-        }
+              "admin_audit": {
+                "type": "boolean"
+              },
+              "admin_audit_anchoring": {
+                "type": "boolean"
+              },
+              "admin_mutation_replay": {
+                "type": "boolean"
+              },
+              "atomic_secret_reference_activation": {
+                "type": "boolean"
+              }
             },
             "additionalProperties": false
           },
@@ -8346,6 +8352,9 @@
               }
             },
             "additionalProperties": false
+          },
+          "audit_anchoring": {
+            "$ref": "#/components/schemas/AdminAuditAnchoringStatus"
           },
           "authentication": {
             "type": "object",
@@ -8399,6 +8408,55 @@
               }
             },
             "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminAuditAnchoringStatus": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "policy",
+          "state",
+          "last_anchored_sequence",
+          "pending_checkpoints",
+          "pending_bytes"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "policy": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "best_effort",
+              "required"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "healthy",
+              "degraded",
+              "failed"
+            ]
+          },
+          "last_anchored_sequence": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "pending_checkpoints": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending_bytes": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "additionalProperties": false

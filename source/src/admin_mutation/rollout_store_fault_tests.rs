@@ -593,6 +593,7 @@ fn terminal(state: MutationState, error: &str, audit_id: i64) -> TerminalMutatio
     safe_response: Some(json!({"ok": false})),
     error_code: Some(error.to_string()),
     terminal_audit_record_id: audit_id,
+    audit_anchor_required: false,
   }
 }
 

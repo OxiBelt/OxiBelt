@@ -2,7 +2,9 @@
 
 use anyhow::{Context, bail, ensure};
 use base64::Engine as _;
+use futures_util::TryStreamExt as _;
 use serde_json::Value;
+use sqlx::{Pool, Postgres, Row};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
@@ -161,6 +163,106 @@ impl IntegrityChain {
   }
 }
 
+pub(super) async fn restore_postgres_chain(
+  pool: &Pool<Postgres>,
+  namespace: &str,
+  instance_id: &str,
+  hmac_key: Option<AuditHmacKey>,
+) -> anyhow::Result<IntegrityChain> {
+  let latest = sqlx::query(
+    "SELECT integrity->>'chain_id' AS chain_id, event_payload::text AS event_payload
+       FROM oxibelt_admin_audit
+      WHERE namespace=$1 AND instance_id=$2
+        AND integrity IS NOT NULL AND event_payload IS NOT NULL
+      ORDER BY id DESC
+      LIMIT 1",
+  )
+  .bind(namespace)
+  .bind(instance_id)
+  .fetch_optional(pool)
+  .await
+  .context("failed to locate the current Admin audit integrity chain")?;
+  let Some(latest) = latest else {
+    return IntegrityChain::new(hmac_key);
+  };
+  let chain_id: String = latest.try_get("chain_id")?;
+  validate_chain_id(&chain_id)?;
+  let latest_payload: String = latest.try_get("event_payload")?;
+  let latest_event: AdminAuditEvent = serde_json::from_str(&latest_payload)
+    .context("latest stored Admin audit event payload is not valid JSON")?;
+  ensure!(
+    latest_event.instance_id == instance_id,
+    "latest stored Admin audit event instance identity changed"
+  );
+  let latest_envelope = latest_event
+    .integrity
+    .as_ref()
+    .context("latest stored Admin audit event is missing integrity metadata")?;
+  ensure!(
+    latest_envelope.chain_id == chain_id,
+    "latest stored Admin audit event chain identity changed"
+  );
+  let configured_authority_matches = match hmac_key.as_ref() {
+    Some(key) => {
+      latest_envelope.algorithm == IntegrityAlgorithm::HmacSha256
+        && latest_envelope.key_id.as_deref() == Some(key.key_id())
+    }
+    None => {
+      latest_envelope.algorithm == IntegrityAlgorithm::Sha256 && latest_envelope.key_id.is_none()
+    }
+  };
+  if !configured_authority_matches {
+    return IntegrityChain::new(hmac_key);
+  }
+  let mut rows = sqlx::query(
+    "SELECT event_payload::text AS event_payload
+       FROM oxibelt_admin_audit
+      WHERE namespace=$1 AND instance_id=$2
+        AND integrity->>'chain_id'=$3 AND event_payload IS NOT NULL
+      ORDER BY ((integrity->>'sequence')::bigint) ASC, id ASC",
+  )
+  .bind(namespace)
+  .bind(instance_id)
+  .bind(&chain_id)
+  .fetch(pool);
+  let mut verifier = IntegrityVerifier::restore(
+    chain_id.clone(),
+    0,
+    &hex_encode(&GENESIS_HASH),
+    hmac_key.clone(),
+  )?;
+  let mut previous_hash = hex_encode(&GENESIS_HASH);
+  let mut next_sequence = 0_u64;
+  while let Some(row) = rows
+    .try_next()
+    .await
+    .context("failed to stream the current Admin audit integrity chain")?
+  {
+    let payload: String = row.try_get("event_payload")?;
+    let event: AdminAuditEvent = serde_json::from_str(&payload)
+      .context("stored Admin audit event payload is not valid JSON")?;
+    let envelope = event
+      .integrity
+      .as_ref()
+      .context("stored Admin audit event is missing integrity metadata")?;
+    ensure!(
+      event.instance_id == instance_id,
+      "stored Admin audit event instance identity changed"
+    );
+    verifier.verify_and_advance(&unsigned_event_value(&event)?, envelope)?;
+    previous_hash.clone_from(&envelope.event_hash);
+    next_sequence = envelope
+      .sequence
+      .checked_add(1)
+      .context("Admin audit integrity sequence is exhausted")?;
+  }
+  ensure!(
+    next_sequence > 0,
+    "current Admin audit integrity chain has no recoverable events"
+  );
+  IntegrityChain::restore(chain_id, next_sequence, &previous_hash, hmac_key)
+}
+
 impl AdminAuditRuntime {
   pub(super) async fn persist_direct_postgres_event(
     &self,
@@ -173,8 +275,25 @@ impl AdminAuditRuntime {
     let mut current = self.direct_integrity.lock().await;
     let mut staged = current.clone();
     let event = self.seal_with_chain(event, &mut staged)?;
-    store::insert_record_returning_id(&durable.pool, &durable.namespace, &event).await?;
+    let required =
+      event.durable_required || self.requires_durability(event.durability_action.as_deref());
+    let mut tx = durable.pool.begin().await?;
+    store::insert_record_returning_id_tx(&mut tx, &durable.namespace, &event).await?;
+    let outcome = self
+      .anchor
+      .record_event_tx(&mut tx, &event, required)
+      .await?;
+    if required
+      && matches!(
+        outcome,
+        super::anchor::AnchorCandidateOutcome::CapacityExceeded
+      )
+    {
+      anyhow::bail!("Admin audit anchor pending capacity is exhausted");
+    }
+    tx.commit().await?;
     *current = staged;
+    self.anchor.after_event(&event, outcome, required).await?;
     Ok(event)
   }
 

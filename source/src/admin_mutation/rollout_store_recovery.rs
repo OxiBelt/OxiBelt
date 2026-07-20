@@ -57,6 +57,7 @@ pub(crate) async fn load_recoverable_mutations(
     "SELECT request_id,state,state_version,coordinator_epoch,
             COALESCE(coordinator_lease_expires_at>now(),false) AS coordinator_lease_live
        FROM oxibelt_admin_mutations WHERE namespace=$1 AND rollout_mode='admin_cluster'
+        AND admission_audit_confirmed_at IS NOT NULL
         AND state NOT IN('committed','failed','rolled_back','rollback_failed','indeterminate')
       ORDER BY updated_at,request_id LIMIT $2",
   )
@@ -96,6 +97,7 @@ pub(crate) async fn load_member_work(
        FROM oxibelt_admin_mutation_targets target JOIN oxibelt_admin_mutations mutation USING(namespace,request_id)
       WHERE target.namespace=$1 AND target.instance_id=$2 AND mutation.cluster_id=$3
         AND mutation.membership_revision=$4 AND mutation.rollout_mode='admin_cluster'
+        AND mutation.admission_audit_confirmed_at IS NOT NULL
         AND mutation.state NOT IN('committed','failed','rolled_back','rollback_failed','indeterminate')
         AND target.state IN('validating','apply_assigned','applying','rollback_assigned','rolling_back')
       ORDER BY target.updated_at,mutation.request_id LIMIT $5",

@@ -125,8 +125,20 @@ impl AdminMutationRuntime {
       if !exact {
         return Ok(MutationAdmission::Conflict(MutationConflict::RequestId));
       }
+      if audit_runtime.anchoring_enabled() {
+        let retry_intent = audit.critical_mutation_event(
+          &unsigned.request_id,
+          StatusCode::ACCEPTED,
+          "attempted",
+          None,
+        );
+        audit_runtime
+          .persist_critical_mutation(retry_intent)
+          .await
+          .context("failed to anchor replayed cluster mutation audit intent")?;
+      }
       audit.mark_critical_mutation_lifecycle_managed();
-      return Ok(if record.state.is_terminal() {
+      return Ok(if record.terminal_response_ready() {
         MutationAdmission::Replay(record)
       } else {
         MutationAdmission::InProgress(record)
@@ -184,7 +196,7 @@ impl AdminMutationRuntime {
       "attempted",
       None,
     );
-    let staged_audit = audit_runtime.stage_critical_mutation(intent).await?;
+    let mut staged_audit = audit_runtime.stage_critical_mutation(intent).await?;
     let mut tx = store.pool().begin().await.map_err(anyhow::Error::from)?;
     let audit_record_id = staged_audit.insert(&mut tx).await?;
     let claim = MutationClaim {
@@ -232,15 +244,30 @@ impl AdminMutationRuntime {
       .artifact_cipher()?
       .seal(&binding, command.into_plaintext()?)?;
     let admission_member = self.cluster_controller_ref()?.member_fence().await?;
-    let admission =
-      cluster_admit_tx(&mut tx, store, &claim, &exact, &admission_member, &sealed).await?;
+    let admission = cluster_admit_tx(
+      &mut tx,
+      store,
+      &claim,
+      &exact,
+      &admission_member,
+      &sealed,
+      audit_runtime.anchoring_required(),
+    )
+    .await?;
     let registered = token_producing && matches!(&admission.outcome, ClaimOutcome::Claimed(_));
     let winner_response =
       registered.then(|| self.register_shared_winner_response(&unsigned.request_id));
     tx.commit()
       .await
       .context("failed to commit cluster mutation admission")?;
-    staged_audit.publish();
+    staged_audit.publish().await?;
+    if audit_runtime.anchoring_required() && matches!(&admission.outcome, ClaimOutcome::Claimed(_))
+    {
+      store
+        .confirm_admission_audit(&unsigned.request_id, audit_record_id)
+        .await
+        .context("failed to promote anchored cluster mutation admission")?;
+    }
     if admission.artifact.is_some() {
       audit.mark_critical_mutation_lifecycle_managed();
     }

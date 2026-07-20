@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Context as _;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
 use tracing::warn;
@@ -19,17 +18,17 @@ use super::runtime::{
   AdminOperationWorkResult,
 };
 use super::runtime_durable_support::{
-  event_from_journal, receipt_bytes, request_fingerprint, snapshot_from_journal, terminal_event,
+  event_from_journal, request_fingerprint, snapshot_from_journal, terminal_event,
   terminal_or_cancel_event, terminal_outcome, unavailable,
 };
+use super::runtime_durable_terminal::terminal_cancel_error;
 use super::types::{
   ADMIN_OPERATION_SCHEMA_VERSION, AdminOperationEvent, AdminOperationProgress,
   AdminOperationSafeErrorClass, AdminOperationSnapshot, AdminOperationState,
 };
 use super::{
-  CancelOutcome, InsertOutcome, JournalOperation, LeaseGuard, NewJournalOperation,
-  OperationArtifactBinding, OperationArtifactCipher, OperationJournal, TerminalUpdate,
-  WorkerIdentity,
+  CancelOutcome, InsertOutcome, LeaseGuard, NewJournalOperation, OperationArtifactBinding,
+  OperationArtifactCipher, OperationJournal, WorkerIdentity,
 };
 use crate::server::admin_auth::AdminActor;
 
@@ -136,7 +135,7 @@ impl DurableOperationRuntime {
       1,
       None,
     );
-    let staged = self
+    let mut staged = self
       .audit
       .stage_critical_mutation(accepted_event)
       .await
@@ -157,6 +156,38 @@ impl DurableOperationRuntime {
         drop(tx);
         drop(staged);
         let operation = if existing.state == AdminOperationState::Accepted {
+          if self.audit.anchoring_enabled() {
+            let retry_event = self.audit.operation_lifecycle_event(
+              &existing.operation_id,
+              existing.kind.as_str(),
+              &existing.actor,
+              &existing.principal,
+              &existing.request_id,
+              AdminOperationState::Accepted.as_str(),
+              existing.revision,
+              None,
+            );
+            let mut retry_audit = self
+              .audit
+              .stage_critical_mutation(retry_event)
+              .await
+              .map_err(unavailable)?;
+            let mut retry_tx = self
+              .journal
+              .pool()
+              .begin()
+              .await
+              .map_err(|error| unavailable(error.into()))?;
+            retry_audit
+              .insert(&mut retry_tx)
+              .await
+              .map_err(unavailable)?;
+            retry_tx
+              .commit()
+              .await
+              .map_err(|error| unavailable(error.into()))?;
+            retry_audit.publish().await.map_err(unavailable)?;
+          }
           self
             .journal
             .queue(&existing.operation_id, existing.revision)
@@ -189,16 +220,31 @@ impl DurableOperationRuntime {
       return Err(AdminOperationError::Unavailable);
     }
     let _accepted_audit_id = staged.insert(&mut tx).await.map_err(unavailable)?;
-    let queued = self
-      .journal
-      .queue_tx(&mut tx, &operation_id, accepted.revision)
-      .await
-      .map_err(unavailable)?
-      .ok_or(AdminOperationError::Unavailable)?;
+    let queued = if self.audit.anchoring_enabled() {
+      None
+    } else {
+      Some(
+        self
+          .journal
+          .queue_tx(&mut tx, &operation_id, accepted.revision)
+          .await
+          .map_err(unavailable)?
+          .ok_or(AdminOperationError::Unavailable)?,
+      )
+    };
     tx.commit()
       .await
       .map_err(|error| unavailable(error.into()))?;
-    staged.publish();
+    staged.publish().await.map_err(unavailable)?;
+    let queued = match queued {
+      Some(queued) => queued,
+      None => self
+        .journal
+        .queue(&operation_id, accepted.revision)
+        .await
+        .map_err(unavailable)?
+        .ok_or(AdminOperationError::Unavailable)?,
+    };
     let snapshot = snapshot_from_journal(&queued);
     self
       .spawn_local_work(runtime, operation_id, snapshot.clone(), work)
@@ -572,7 +618,7 @@ impl DurableOperationRuntime {
       .map_err(unavailable)?
       .ok_or(AdminOperationError::NotFound)?;
     if current.state.is_terminal() {
-      return Err(AdminOperationError::AlreadyTerminal);
+      return Err(terminal_cancel_error(current.terminal_audit_confirmed));
     }
     let mut expected_revision = current.revision;
     let mut remaining_attempts = 8_u8;
@@ -593,7 +639,9 @@ impl DurableOperationRuntime {
       }
     };
     let operation = match outcome {
-      CancelOutcome::Terminal(_) => return Err(AdminOperationError::AlreadyTerminal),
+      CancelOutcome::Terminal(operation) => {
+        return Err(terminal_cancel_error(operation.terminal_audit_confirmed));
+      }
       CancelOutcome::Requested(operation) | CancelOutcome::AlreadyRequested(operation) => operation,
       CancelOutcome::RevisionConflict(_) => unreachable!("revision conflicts are retried above"),
     };
@@ -620,69 +668,5 @@ impl DurableOperationRuntime {
       .publish_durable(snapshot.clone(), terminal_or_cancel_event(snapshot.state))
       .await;
     Ok(snapshot)
-  }
-
-  async fn finish_with_audit(
-    &self,
-    initial_guard: &LeaseGuard,
-    state: AdminOperationState,
-    result: Option<Value>,
-    error_class: Option<AdminOperationSafeErrorClass>,
-    error_code: Option<&str>,
-  ) -> anyhow::Result<Option<JournalOperation>> {
-    for _ in 0..4 {
-      let current = self
-        .journal
-        .load(&initial_guard.operation_id)
-        .await?
-        .context("leased Admin operation disappeared")?;
-      let Some(guard) = current.lease_guard() else {
-        return Ok(None);
-      };
-      if guard.worker_id != initial_guard.worker_id
-        || guard.boot_id != initial_guard.boot_id
-        || guard.lease_epoch != initial_guard.lease_epoch
-      {
-        return Ok(None);
-      }
-      let revision = guard.expected_revision.saturating_add(1);
-      let event = self.audit.operation_lifecycle_event(
-        &current.operation_id,
-        current.kind.as_str(),
-        &current.actor,
-        &current.principal,
-        &current.request_id,
-        state.as_str(),
-        revision,
-        error_code,
-      );
-      let staged = self.audit.stage_critical_mutation(event).await?;
-      let mut tx = self.journal.pool().begin().await?;
-      let audit_id = staged.insert(&mut tx).await?;
-      let receipt = receipt_bytes(
-        &current,
-        state,
-        revision,
-        result.as_ref(),
-        error_class,
-        error_code,
-        audit_id,
-      )?;
-      let terminal = TerminalUpdate {
-        state,
-        result: result.clone(),
-        receipt,
-        terminal_audit_record_id: audit_id,
-        safe_error_class: error_class.map(|value| value.as_str().to_string()),
-        error_code: error_code.map(str::to_string),
-      };
-      let updated = self.journal.finish_tx(&mut tx, &guard, &terminal).await?;
-      if let Some(updated) = updated {
-        tx.commit().await?;
-        staged.publish();
-        return Ok(Some(updated));
-      }
-    }
-    Ok(None)
   }
 }

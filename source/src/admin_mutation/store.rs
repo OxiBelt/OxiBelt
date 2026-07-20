@@ -171,7 +171,8 @@ impl MutationStore {
   pub(crate) async fn claim(&self, claim: &MutationClaim) -> anyhow::Result<ClaimOutcome> {
     claim.validate()?;
     let mut tx = self.pool.begin().await?;
-    let result = claim_tx_with_mode(&mut tx, &self.namespace, self.rollout_mode, claim).await?;
+    let result =
+      claim_tx_with_mode(&mut tx, &self.namespace, self.rollout_mode, claim, false).await?;
     tx.commit().await?;
     Ok(result)
   }
@@ -223,6 +224,7 @@ impl MutationStore {
            WHERE namespace = $1
              AND retention_until < now()
              AND state IN ('committed', 'failed', 'rolled_back')
+             AND terminal_audit_confirmed_at IS NOT NULL
              AND NOT EXISTS (
                SELECT 1 FROM oxibelt_admin_mutation_revisions revision
                 WHERE revision.namespace = oxibelt_admin_mutations.namespace
@@ -262,17 +264,23 @@ pub(crate) struct LogicalRevision {
 
 pub(crate) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   let mut tx = pool.begin().await?;
+  // Acquire the legacy v2 key first so rolling upgrades serialize with older
+  // binaries, then the version-independent key used by current migrations.
   sqlx::query(
     "SELECT pg_advisory_xact_lock(hashtextextended('oxibelt-admin-mutation-schema-v2', 0))",
   )
   .execute(&mut *tx)
   .await
   .context("failed to acquire Admin mutation schema migration lock")?;
+  sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('oxibelt-admin-mutation-schema', 0))")
+    .execute(&mut *tx)
+    .await
+    .context("failed to acquire stable Admin mutation schema migration lock")?;
   let statements = schema::statements();
   sqlx::query(statements[0]).execute(&mut *tx).await?;
   let applied: bool = sqlx::query_scalar(
     "SELECT EXISTS(SELECT 1 FROM oxibelt_admin_schema_migrations
-      WHERE component='admin_mutation' AND version=2)",
+      WHERE component='admin_mutation' AND version=3)",
   )
   .fetch_one(&mut *tx)
   .await?;
@@ -290,6 +298,7 @@ pub(crate) async fn claim_tx_with_mode(
   namespace: &str,
   rollout_mode: StoreRolloutMode,
   claim: &MutationClaim,
+  audit_anchor_required: bool,
 ) -> anyhow::Result<ClaimOutcome> {
   claim.validate()?;
   ensure!(
@@ -362,11 +371,12 @@ pub(crate) async fn claim_tx_with_mode(
        (namespace, request_id, fingerprint, principal, signer_id, action, resource,
         expected_previous_revision, new_revision, content_digest, cluster_id,
         membership_revision, rollout_mode, audit_record_id, issued_at, expires_at,
-        retention_until)
+        retention_until, admission_audit_confirmed_at)
      VALUES
        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
         $15::timestamptz, $16::timestamptz,
-        $16::timestamptz + make_interval(secs => $17::double precision))
+        $16::timestamptz + make_interval(secs => $17::double precision),
+        CASE WHEN $18 THEN NULL ELSE clock_timestamp() END)
      ON CONFLICT (namespace, request_id) DO NOTHING",
   )
   .bind(namespace)
@@ -386,6 +396,7 @@ pub(crate) async fn claim_tx_with_mode(
   .bind(&claim.issued_at)
   .bind(&claim.expires_at)
   .bind(claim.retention_seconds as f64)
+  .bind(audit_anchor_required)
   .execute(&mut **tx)
   .await?;
 
@@ -550,6 +561,8 @@ async fn finish_tx_inner(
     "UPDATE oxibelt_admin_mutations
         SET state = $3, http_status = $4, safe_response = $5::jsonb,
             error_code = $6, terminal_audit_record_id = $7,
+            terminal_audit_confirmed_at = CASE
+              WHEN $8 THEN NULL ELSE clock_timestamp() END,
             coordinator_instance_id = NULL, coordinator_boot_id = NULL,
             coordinator_instance_epoch = NULL, coordinator_lease_expires_at = NULL,
             state_version=state_version+1,
@@ -563,6 +576,7 @@ async fn finish_tx_inner(
   .bind(safe_response)
   .bind(&terminal.error_code)
   .bind(terminal.terminal_audit_record_id)
+  .bind(terminal.audit_anchor_required)
   .execute(&mut **tx)
   .await?;
   let row = select_mutation(&mut **tx, namespace, request_id, false)
@@ -609,6 +623,7 @@ where
             expected_previous_revision, new_revision, content_digest, cluster_id,
             membership_revision, rollout_mode, state, http_status, safe_response::text AS safe_response,
             error_code, audit_record_id, terminal_audit_record_id,
+            terminal_audit_confirmed_at IS NOT NULL AS terminal_audit_confirmed,
             issued_at::text AS issued_at, expires_at::text AS expires_at,
             created_at::text AS created_at, updated_at::text AS updated_at
        FROM oxibelt_admin_mutations
@@ -624,6 +639,7 @@ where
               expected_previous_revision, new_revision, content_digest, cluster_id,
               membership_revision, rollout_mode, state, http_status, safe_response::text AS safe_response,
               error_code, audit_record_id, terminal_audit_record_id,
+              terminal_audit_confirmed_at IS NOT NULL AS terminal_audit_confirmed,
               issued_at::text AS issued_at, expires_at::text AS expires_at,
               created_at::text AS created_at, updated_at::text AS updated_at
          FROM oxibelt_admin_mutations
@@ -660,6 +676,7 @@ fn mutation_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<MutationReco
     error_code: row.try_get("error_code")?,
     audit_record_id: row.try_get("audit_record_id")?,
     terminal_audit_record_id: row.try_get("terminal_audit_record_id")?,
+    terminal_audit_confirmed: row.try_get("terminal_audit_confirmed")?,
     issued_at: row.try_get("issued_at")?,
     expires_at: row.try_get("expires_at")?,
     created_at: row.try_get("created_at")?,

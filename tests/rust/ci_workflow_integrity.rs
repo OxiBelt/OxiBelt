@@ -438,6 +438,11 @@ fn admin_operation_postgres_script_text() -> String {
     .expect("Admin operation PostgreSQL script should be readable")
 }
 
+fn admin_audit_anchor_postgres_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-admin-audit-anchor-postgres.sh"))
+    .expect("Admin audit anchor PostgreSQL script should be readable")
+}
+
 fn kubernetes_immutable_rollout_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-immutable-rollout.sh"))
     .expect("Kubernetes immutable rollout script should be readable")
@@ -1441,6 +1446,7 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
     "docker-integration-helper-images",
     "admin-mutation-postgres",
     "admin-operation-postgres",
+    "admin-audit-anchor-postgres",
     "kubernetes-immutable-rollout",
     "kubernetes-pod-lifecycle",
     "kubernetes-network-policy",
@@ -1609,6 +1615,89 @@ fn admin_operation_postgres_ci_is_mandatory_bounded_and_rootless() {
     assert!(
       !script.contains(forbidden),
       "Admin operation PostgreSQL harness must not use {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn admin_audit_anchor_postgres_harness_is_dual_database_bounded_and_rootless() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("admin-audit-anchor-postgres")
+    .expect("workflow should define the Admin audit anchor PostgreSQL job");
+  let job_text = workflow_job_text(&workflow, "admin-audit-anchor-postgres");
+  let script = admin_audit_anchor_postgres_script_text();
+
+  assert_eq!(
+    job.needs,
+    expected_needs(&["docker-integration-helper-images"]),
+    "Admin audit anchor tests should use the build-validated PostgreSQL image"
+  );
+  for expected in [
+    "name: Admin audit external anchor PostgreSQL",
+    "runs-on: ubuntu-26.04",
+    "timeout-minutes: 45",
+    "actions: read",
+    "contents: read",
+    "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
+    "OXIBELT_REQUIRE_ADMIN_AUDIT_ANCHOR_POSTGRES_TESTS: \"1\"",
+    "tests/scripts/run-admin-audit-anchor-postgres.sh",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Admin audit anchor PostgreSQL job should preserve {expected}"
+    );
+  }
+
+  for expected in [
+    "set -euo pipefail",
+    "postgres:18-alpine",
+    "local_container=",
+    "authority_container=",
+    "docker_publish_args=(--publish 127.0.0.1::5432)",
+    "docker_publish_args=()",
+    "od -An -N \"${bytes}\" -tx1 /dev/urandom",
+    "deploy/postgres/admin-audit-anchor-v1.sql",
+    "anchor_authority_id=",
+    "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
+    "GRANT EXECUTE ON FUNCTION oxibelt_audit_anchor_v1.append_checkpoint(jsonb)",
+    "GRANT EXECUTE ON FUNCTION oxibelt_audit_anchor_v1.checkpoints(text,text)",
+    "OXIBELT_REQUIRE_ADMIN_AUDIT_ANCHOR_POSTGRES_TESTS=1",
+    "OXIBELT_TEST_ADMIN_AUDIT_LOCAL_POSTGRES_URL=",
+    "OXIBELT_TEST_ADMIN_AUDIT_ANCHOR_RUNTIME_POSTGRES_URL=",
+    "OXIBELT_TEST_ADMIN_AUDIT_ANCHOR_VERIFIER_POSTGRES_URL=",
+    "timeout --signal=TERM 35m",
+    "cargo test --all-features --locked -p oxibelt --lib",
+    "'admin_audit::anchor::postgres_tests::' -- --test-threads=1",
+    "docker rm --force --volumes \"${local_container}\"",
+    "docker rm --force --volumes \"${authority_container}\"",
+    "trap cleanup EXIT",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Admin audit anchor PostgreSQL harness should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    script.matches("docker run --detach").count(),
+    2,
+    "the local audit database and external authority must use separate containers"
+  );
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker volume prune",
+    "docker network prune",
+    "--privileged",
+    "--network host",
+    "eval ",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Admin audit anchor PostgreSQL harness must not use {forbidden}"
     );
   }
 }
@@ -2888,8 +2977,8 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + 2,
-    "each Docker integration job plus both Admin PostgreSQL durability jobs should download the helper image artifact"
+    DOCKER_INTEGRATION_JOBS.len() + 3,
+    "each Docker integration job plus all three Admin PostgreSQL durability jobs should download the helper image artifact"
   );
   assert_eq!(
     workflow
@@ -2910,7 +2999,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
-      DOCKER_INTEGRATION_JOBS.len() + 2
+      DOCKER_INTEGRATION_JOBS.len() + 3
     } else {
       DOCKER_INTEGRATION_JOBS.len()
     };

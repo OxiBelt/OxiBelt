@@ -17,6 +17,7 @@ use crate::access_log::AccessLogSinks;
 use crate::config::{AdminAuditAcknowledgement, AdminAuditExportSink, AdminAuditMode, Config};
 use crate::metrics::Metrics;
 
+pub mod anchor;
 mod critical;
 mod event;
 mod handle;
@@ -39,6 +40,7 @@ pub struct AdminAuditRuntime {
   required_actions: Arc<HashSet<String>>,
   instance_id: Arc<str>,
   direct_integrity: Arc<tokio::sync::Mutex<integrity::IntegrityChain>>,
+  anchor: anchor::AuditAnchorRuntime,
   max_event_bytes: usize,
   metrics: Arc<Metrics>,
 }
@@ -77,6 +79,7 @@ impl AdminAuditRuntime {
       required_actions: Arc::new(HashSet::new()),
       instance_id: Arc::from("disabled"),
       direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      anchor: anchor::AuditAnchorRuntime::disabled(),
       max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
@@ -109,6 +112,7 @@ impl AdminAuditRuntime {
       required_actions: Arc::new(HashSet::new()),
       instance_id: Arc::from("test-instance"),
       direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      anchor: anchor::AuditAnchorRuntime::disabled(),
       max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
@@ -125,15 +129,18 @@ impl AdminAuditRuntime {
       required_actions: Arc::new(HashSet::new()),
       instance_id: Arc::from("test-instance"),
       direct_integrity: Arc::new(tokio::sync::Mutex::new(fallback_integrity_chain())),
+      anchor: anchor::AuditAnchorRuntime::disabled(),
       max_event_bytes: 64 * 1024,
       metrics: Arc::new(Metrics::default()),
     }
   }
 
-  pub async fn new(
+  pub(crate) async fn new(
     config: &Config,
     access_logs: AccessLogSinks,
     metrics: Arc<Metrics>,
+    runtime_health: Arc<crate::runtime_health::RuntimeHealth>,
+    runtime_generation: u64,
   ) -> anyhow::Result<Self> {
     if !config.admin.enabled {
       return Ok(Self {
@@ -147,6 +154,7 @@ impl AdminAuditRuntime {
         direct_integrity: Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
           None,
         )?)),
+        anchor: anchor::AuditAnchorRuntime::disabled(),
         max_event_bytes: config.admin.audit.spool.max_event_bytes,
         metrics,
       });
@@ -165,6 +173,7 @@ impl AdminAuditRuntime {
         direct_integrity: Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
           None,
         )?)),
+        anchor: anchor::AuditAnchorRuntime::disabled(),
         max_event_bytes: config.admin.audit.spool.max_event_bytes,
         metrics,
       });
@@ -195,9 +204,6 @@ impl AdminAuditRuntime {
       )?),
       _ => None,
     };
-    let direct_integrity = Arc::new(tokio::sync::Mutex::new(integrity::IntegrityChain::new(
-      hmac_key.clone(),
-    )?));
     let instance_id = std::env::var(&config.shared_state.instance_id_env)
       .ok()
       .filter(|value| !value.trim().is_empty())
@@ -217,6 +223,7 @@ impl AdminAuditRuntime {
     } else {
       None
     };
+    let mut store_receiver = None;
     let store = if config.admin.audit.store.enabled {
       let backend_name = config
         .admin
@@ -239,12 +246,7 @@ impl AdminAuditRuntime {
         .context("failed to initialize admin audit PostgreSQL tables")?;
       let (sender, receiver) = mpsc::channel(config.admin.audit.queue_capacity);
       let namespace = config.shared_state.namespace.clone();
-      tokio::spawn(store::run_database_writer(
-        pool.clone(),
-        namespace.clone(),
-        receiver,
-        metrics.clone(),
-      ));
+      store_receiver = Some(receiver);
       info!(
         backend = backend_name,
         mode = ?mode,
@@ -264,6 +266,39 @@ impl AdminAuditRuntime {
       );
       None
     };
+    let direct_chain = if let Some(store) = &store {
+      let restored = integrity::restore_postgres_chain(
+        &store.pool,
+        &store.namespace,
+        &instance_id,
+        hmac_key.clone(),
+      )
+      .await;
+      if restored.is_err() && config.admin.audit.anchor.enabled {
+        metrics.record_admin_audit_anchor_verification_failure("local_chain");
+      }
+      restored.context("failed to restore the current Admin audit integrity chain")?
+    } else {
+      integrity::IntegrityChain::new(hmac_key.clone())?
+    };
+    let direct_integrity = Arc::new(tokio::sync::Mutex::new(direct_chain));
+    let anchor = if config.admin.audit.anchor.enabled {
+      let local_pool = store
+        .as_ref()
+        .context("Admin audit anchoring requires a PostgreSQL audit store")?
+        .pool
+        .clone();
+      anchor::AuditAnchorRuntime::new(
+        config,
+        local_pool,
+        metrics.clone(),
+        runtime_health,
+        runtime_generation,
+      )
+      .await?
+    } else {
+      anchor::AuditAnchorRuntime::disabled()
+    };
     let runtime = Self {
       store,
       spool,
@@ -281,6 +316,7 @@ impl AdminAuditRuntime {
       ),
       instance_id: Arc::from(instance_id),
       direct_integrity,
+      anchor,
       max_event_bytes: config.admin.audit.spool.max_event_bytes,
       metrics,
     };
@@ -288,7 +324,24 @@ impl AdminAuditRuntime {
       let metrics = runtime.metrics.clone();
       tokio::spawn(run_spool_drainer(spool, store, metrics));
     }
+    if let (Some(receiver), Some(store)) = (store_receiver, runtime.store.clone()) {
+      tokio::spawn(store::run_database_writer(
+        store.pool,
+        store.namespace,
+        receiver,
+        runtime.anchor.clone(),
+        runtime.metrics.clone(),
+      ));
+    }
     Ok(runtime)
+  }
+
+  pub(crate) fn anchor_status(&self) -> anchor::AuditAnchorStatus {
+    self.anchor.status()
+  }
+
+  pub(crate) fn anchoring_enabled(&self) -> bool {
+    self.anchor.enabled()
   }
 
   pub(crate) fn reserve(&self) -> anyhow::Result<AdminAuditReservation> {

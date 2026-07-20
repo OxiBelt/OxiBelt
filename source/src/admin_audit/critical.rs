@@ -14,10 +14,11 @@ pub(crate) struct StagedCriticalAudit<'a> {
   event: AdminAuditEvent,
   staged_chain: IntegrityChain,
   live_chain: MutexGuard<'a, IntegrityChain>,
+  anchor_outcome: Option<super::anchor::AnchorCandidateOutcome>,
 }
 
 impl StagedCriticalAudit<'_> {
-  pub(crate) async fn insert(&self, tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<i64> {
+  pub(crate) async fn insert(&mut self, tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<i64> {
     let durable = self
       .runtime
       .store
@@ -29,12 +30,35 @@ impl StagedCriticalAudit<'_> {
         .runtime
         .record_required_persistence_failure("postgres_unavailable");
     }
-    result
+    let id = result?;
+    let outcome = self
+      .runtime
+      .anchor
+      .record_event_tx(tx, &self.event, true)
+      .await?;
+    if matches!(
+      outcome,
+      super::anchor::AnchorCandidateOutcome::CapacityExceeded
+    ) && self.runtime.anchor.required()
+    {
+      anyhow::bail!("Admin audit anchor pending capacity is exhausted");
+    }
+    self.anchor_outcome = Some(outcome);
+    Ok(id)
   }
 
-  pub(crate) fn publish(mut self) {
+  pub(crate) async fn publish(mut self) -> anyhow::Result<()> {
     *self.live_chain = self.staged_chain;
     self.runtime.publish_postgres_event(&self.event);
+    let outcome = self
+      .anchor_outcome
+      .take()
+      .context("critical Admin audit anchor outcome is unavailable")?;
+    self
+      .runtime
+      .anchor
+      .after_event(&self.event, outcome, self.runtime.anchor.required())
+      .await
   }
 }
 
@@ -68,6 +92,7 @@ impl AdminAuditRuntime {
       direct_integrity: std::sync::Arc::new(tokio::sync::Mutex::new(
         super::fallback_integrity_chain(),
       )),
+      anchor: super::anchor::AuditAnchorRuntime::disabled(),
       max_event_bytes: 64 * 1024,
       metrics,
     })
@@ -75,6 +100,10 @@ impl AdminAuditRuntime {
 
   pub(crate) fn critical_postgres_pool(&self) -> Option<Pool<Postgres>> {
     self.store.as_ref().map(|store| store.pool.clone())
+  }
+
+  pub(crate) fn anchoring_required(&self) -> bool {
+    self.anchor.required()
   }
 
   pub(crate) async fn stage_critical_mutation(
@@ -101,6 +130,7 @@ impl AdminAuditRuntime {
       event,
       staged_chain,
       live_chain,
+      anchor_outcome: None,
     })
   }
 
@@ -230,14 +260,14 @@ impl AdminAuditRuntime {
       .store
       .as_ref()
       .ok_or_else(|| anyhow::anyhow!("critical Admin mutation audit store is unavailable"))?;
-    let staged = self.stage_critical_mutation(event).await?;
+    let mut staged = self.stage_critical_mutation(event).await?;
     let mut tx = durable.pool.begin().await?;
     let record_id = staged.insert(&mut tx).await?;
     if let Err(error) = tx.commit().await {
       self.record_required_persistence_failure("postgres_unavailable");
       return Err(error.into());
     }
-    staged.publish();
+    staged.publish().await?;
     Ok(record_id)
   }
 }

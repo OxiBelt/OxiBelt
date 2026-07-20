@@ -34,6 +34,18 @@ const REQUIRED_REJECTION_REASONS: [&str; 5] = [
   "integrity_failure",
 ];
 const REPLAY_OUTCOMES: [&str; 2] = ["persisted", "failed"];
+const ANCHOR_FAILURE_REASONS: [&str; 5] = [
+  "capacity_exhausted",
+  "signer_unavailable",
+  "authority_unavailable",
+  "continuity_failure",
+  "worker_failure",
+];
+const ANCHOR_VERIFICATION_REASONS: [&str; 3] = [
+  "local_chain",
+  "checkpoint_signature",
+  "checkpoint_continuity",
+];
 
 #[derive(Debug, Default)]
 pub(super) struct AdminAuditMetrics {
@@ -49,6 +61,13 @@ pub(super) struct AdminAuditMetrics {
   spool_events: AtomicU64,
   spool_bytes: AtomicU64,
   workload_identity_authentication: [AtomicU64; WORKLOAD_IDENTITY_AUTH_OUTCOMES.len()],
+  anchor_submissions_total: AtomicU64,
+  anchor_failures: [AtomicU64; ANCHOR_FAILURE_REASONS.len()],
+  anchor_verification_failures: [AtomicU64; ANCHOR_VERIFICATION_REASONS.len()],
+  anchor_last_sequence: AtomicU64,
+  anchor_lag_sequences: AtomicU64,
+  anchor_pending_checkpoints: AtomicU64,
+  anchor_pending_bytes: AtomicU64,
 }
 
 impl Metrics {
@@ -138,6 +157,65 @@ impl Metrics {
       return;
     };
     self.admin_audit.workload_identity_authentication[index].fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_admin_audit_anchor_submission(&self, outcome: &str) {
+    if outcome == "persisted" {
+      self
+        .admin_audit
+        .anchor_submissions_total
+        .fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  pub fn record_admin_audit_anchor_submission_failure(&self, reason: &str) {
+    let normalized = match reason {
+      "capacity_exhausted" => "capacity_exhausted",
+      "signer_unavailable" => "signer_unavailable",
+      "continuity_failure" => "continuity_failure",
+      "worker_failure" => "worker_failure",
+      _ => "authority_unavailable",
+    };
+    if let Some(index) = ANCHOR_FAILURE_REASONS
+      .iter()
+      .position(|candidate| *candidate == normalized)
+    {
+      self.admin_audit.anchor_failures[index].fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  pub fn record_admin_audit_anchor_verification_failure(&self, reason: &str) {
+    if let Some(index) = ANCHOR_VERIFICATION_REASONS
+      .iter()
+      .position(|candidate| *candidate == reason)
+    {
+      self.admin_audit.anchor_verification_failures[index].fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  pub fn set_admin_audit_anchor_last_sequence(&self, sequence: u64) {
+    self
+      .admin_audit
+      .anchor_last_sequence
+      .store(sequence, Ordering::Relaxed);
+  }
+
+  pub fn set_admin_audit_anchor_lag(&self, sequences: u64) {
+    self
+      .admin_audit
+      .anchor_lag_sequences
+      .store(sequences, Ordering::Relaxed);
+  }
+
+  pub fn set_admin_audit_anchor_pending(&self, checkpoints: u64, bytes: u64) {
+    self
+      .admin_audit
+      .anchor_pending_checkpoints
+      .store(checkpoints, Ordering::Relaxed);
+    self
+      .admin_audit
+      .anchor_pending_bytes
+      .store(bytes, Ordering::Relaxed);
   }
 
   pub(super) fn append_admin_audit_prometheus(&self, output: &mut String) {
@@ -239,6 +317,63 @@ impl Metrics {
         self.admin_audit.workload_identity_authentication[index].load(Ordering::Relaxed),
       );
     }
+    append_labeled_counter(
+      output,
+      "oxibelt_admin_audit_anchor_submissions_total",
+      &[("outcome", "persisted")],
+      self
+        .admin_audit
+        .anchor_submissions_total
+        .load(Ordering::Relaxed),
+    );
+    for (index, reason) in ANCHOR_FAILURE_REASONS.iter().enumerate() {
+      append_labeled_counter(
+        output,
+        "oxibelt_admin_audit_anchor_submission_failures_total",
+        &[("reason", reason)],
+        self.admin_audit.anchor_failures[index].load(Ordering::Relaxed),
+      );
+    }
+    for (index, reason) in ANCHOR_VERIFICATION_REASONS.iter().enumerate() {
+      append_labeled_counter(
+        output,
+        "oxibelt_admin_audit_anchor_verification_failures_total",
+        &[("reason", reason)],
+        self.admin_audit.anchor_verification_failures[index].load(Ordering::Relaxed),
+      );
+    }
+    append_gauge(
+      output,
+      "oxibelt_admin_audit_anchor_last_sequence",
+      self
+        .admin_audit
+        .anchor_last_sequence
+        .load(Ordering::Relaxed),
+    );
+    append_gauge(
+      output,
+      "oxibelt_admin_audit_anchor_lag_sequences",
+      self
+        .admin_audit
+        .anchor_lag_sequences
+        .load(Ordering::Relaxed),
+    );
+    append_gauge(
+      output,
+      "oxibelt_admin_audit_anchor_pending_checkpoints",
+      self
+        .admin_audit
+        .anchor_pending_checkpoints
+        .load(Ordering::Relaxed),
+    );
+    append_gauge(
+      output,
+      "oxibelt_admin_audit_anchor_pending_bytes",
+      self
+        .admin_audit
+        .anchor_pending_bytes
+        .load(Ordering::Relaxed),
+    );
   }
 }
 
@@ -289,4 +424,24 @@ fn append_labeled_counter(output: &mut String, name: &str, labels: &[(&str, &str
   output.push_str("} ");
   output.push_str(&value.to_string());
   output.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn anchor_verification_failure_reasons_are_exported() {
+    let metrics = Metrics::default();
+    for reason in ANCHOR_VERIFICATION_REASONS {
+      metrics.record_admin_audit_anchor_verification_failure(reason);
+    }
+    let mut output = String::new();
+    metrics.append_admin_audit_prometheus(&mut output);
+    for reason in ANCHOR_VERIFICATION_REASONS {
+      assert!(output.contains(&format!(
+        "oxibelt_admin_audit_anchor_verification_failures_total{{reason=\"{reason}\"}} 1"
+      )));
+    }
+  }
 }

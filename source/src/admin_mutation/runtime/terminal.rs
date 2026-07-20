@@ -78,7 +78,7 @@ impl AdminMutationRuntime {
     );
     let event =
       audit.critical_mutation_event(&record.request_id, status, outcome, error_code.as_deref());
-    let staged = audit_runtime.stage_critical_mutation(event).await?;
+    let mut staged = audit_runtime.stage_critical_mutation(event).await?;
     let store = self.store()?;
     let mut tx = store.pool().begin().await?;
     let terminal_audit_record_id = staged.insert(&mut tx).await?;
@@ -131,10 +131,17 @@ impl AdminMutationRuntime {
       safe_response: Some(safe_response),
       error_code,
       terminal_audit_record_id,
+      audit_anchor_required: audit_runtime.anchoring_required(),
     };
     let finished = guarded_cluster_finish_tx(&mut tx, store, fence, &terminal).await?;
     tx.commit().await?;
-    staged.publish();
+    staged.publish().await?;
+    if audit_runtime.anchoring_required() {
+      store
+        .confirm_terminal_audit(&record.request_id, terminal_audit_record_id)
+        .await
+        .context("failed to promote anchored cluster mutation receipt")?;
+    }
     Ok(finished)
   }
 
@@ -184,7 +191,7 @@ impl AdminMutationRuntime {
     let error = (!matches!(state, MutationState::Committed))
       .then(|| status.canonical_reason().unwrap_or("mutation failed"));
     let event = audit.critical_mutation_event(&execution.request_id, status, outcome, error);
-    let staged_audit = audit_runtime
+    let mut staged_audit = audit_runtime
       .stage_critical_mutation(event)
       .await
       .context("failed to stage critical mutation terminal audit")?;
@@ -204,6 +211,7 @@ impl AdminMutationRuntime {
         safe_response,
         error_code,
         terminal_audit_record_id,
+        audit_anchor_required: audit_runtime.anchoring_required(),
       },
     )
     .await
@@ -218,7 +226,13 @@ impl AdminMutationRuntime {
       audit_runtime.record_required_persistence_failure("postgres_unavailable");
       return Err(error).context("failed to commit Admin mutation receipt and terminal audit");
     }
-    staged_audit.publish();
+    staged_audit.publish().await?;
+    if audit_runtime.anchoring_required() {
+      store
+        .confirm_terminal_audit(&execution.request_id, terminal_audit_record_id)
+        .await
+        .context("failed to promote anchored Admin mutation receipt")?;
+    }
     Ok(record)
   }
 }

@@ -373,6 +373,7 @@ async fn postgres_cluster_fences_every_phase_and_commits_only_exact_acks() {
       safe_response: Some(json!({"ok": true, "token_recoverable": false})),
       error_code: None,
       terminal_audit_record_id: 9001,
+      audit_anchor_required: false,
     },
   )
   .await
@@ -459,6 +460,7 @@ async fn postgres_cluster_fences_every_phase_and_commits_only_exact_acks() {
       safe_response: None,
       error_code: Some("mutation_indeterminate".to_string()),
       terminal_audit_record_id: 9002,
+      audit_anchor_required: false,
     },
   )
   .await

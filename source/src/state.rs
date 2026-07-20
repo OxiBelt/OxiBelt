@@ -362,9 +362,15 @@ impl AppSnapshot {
       .then_some(admin_access_logs);
       previous.admin_audit.clone_with_export(export)
     } else {
-      AdminAuditRuntime::new(&config, admin_access_logs, metrics.clone())
-        .await
-        .context("failed to build admin audit runtime")?
+      AdminAuditRuntime::new(
+        &config,
+        admin_access_logs,
+        metrics.clone(),
+        runtime_health.clone(),
+        runtime_generation,
+      )
+      .await
+      .context("failed to build admin audit runtime")?
     };
     #[cfg(feature = "admin-runtime")]
     let prior_admin_mutations = previous.map(|value| (&value.config, &value.admin_mutations));

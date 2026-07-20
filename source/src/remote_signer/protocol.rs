@@ -99,12 +99,24 @@ pub(super) enum RemoteSignerRequest {
     context: SignContext,
     message: String,
   },
+  DescribeAuditCheckpointKey {
+    token: String,
+    key_id: String,
+  },
+  SignAuditCheckpointDigest {
+    token: String,
+    key_id: String,
+    digest: String,
+  },
 }
 
 impl RemoteSignerRequest {
   pub(super) fn token(&self) -> &str {
     match self {
-      Self::DescribeKey { token, .. } | Self::Sign { token, .. } => token,
+      Self::DescribeKey { token, .. }
+      | Self::Sign { token, .. }
+      | Self::DescribeAuditCheckpointKey { token, .. }
+      | Self::SignAuditCheckpointDigest { token, .. } => token,
     }
   }
 }
@@ -118,6 +130,14 @@ pub(super) enum RemoteSignerResponse {
     schemes: Vec<u16>,
   },
   Sign {
+    signature: String,
+  },
+  DescribeAuditCheckpointKey {
+    public_key: String,
+    algorithm: String,
+    signing_domain: String,
+  },
+  SignAuditCheckpointDigest {
     signature: String,
   },
   Error {

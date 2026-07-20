@@ -23,6 +23,200 @@ fn tls13_server_certificate_verify_detection_is_strict() {
 }
 
 #[test]
+fn audit_checkpoint_requests_are_purpose_bound_and_sign_only_domain_bound_digests() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let tls_key_path = temp_dir.path().join("tls-ed25519.pem");
+  let audit_key_path = temp_dir.path().join("audit-ed25519.pem");
+  write_test_ed25519_private_key(&tls_key_path);
+  write_test_ed25519_private_key(&audit_key_path);
+  let tls_keys = load_server_keys(&[("tls-key".to_string(), tls_key_path)])
+    .expect("Ed25519 key should load for TLS");
+  let audit_keys = load_audit_checkpoint_keys(&[("audit-key".to_string(), audit_key_path)])
+    .expect("Ed25519 key should load for audit checkpoints");
+  let token_provider = test_token_provider();
+
+  assert!(matches!(
+    process_request_with_audit_keys(
+      RemoteSignerRequest::DescribeKey {
+        token: test_token(),
+        key_id: "audit-key".to_string(),
+      },
+      &tls_keys,
+      &audit_keys,
+      &token_provider,
+      true,
+    ),
+    RemoteSignerResponse::Error { code, .. } if code == "unknown_key"
+  ));
+  assert!(matches!(
+    process_request_with_audit_keys(
+      RemoteSignerRequest::DescribeAuditCheckpointKey {
+        token: test_token(),
+        key_id: "tls-key".to_string(),
+      },
+      &tls_keys,
+      &audit_keys,
+      &token_provider,
+      true,
+    ),
+    RemoteSignerResponse::Error { code, .. } if code == "unknown_audit_checkpoint_key"
+  ));
+
+  let digest = [0x5au8; 32];
+  let response = process_request_with_audit_keys(
+    RemoteSignerRequest::SignAuditCheckpointDigest {
+      token: test_token(),
+      key_id: "audit-key".to_string(),
+      digest: base64::engine::general_purpose::STANDARD.encode(digest),
+    },
+    &tls_keys,
+    &audit_keys,
+    &token_provider,
+    true,
+  );
+  let RemoteSignerResponse::SignAuditCheckpointDigest { signature } = response else {
+    panic!("valid audit digest should produce a purpose-specific signature");
+  };
+  let signature = base64::engine::general_purpose::STANDARD
+    .decode(signature)
+    .expect("signature should decode");
+  aws_lc_rs::signature::UnparsedPublicKey::new(
+    &aws_lc_rs::signature::ED25519,
+    audit_keys["audit-key"].public_key,
+  )
+  .verify(&audit_checkpoint::signing_message(&digest), &signature)
+  .expect("signature must cover the fixed audit domain and digest");
+}
+
+#[test]
+fn audit_checkpoint_digest_rejects_non_32_byte_inputs() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let key_path = temp_dir.path().join("audit-ed25519.pem");
+  write_test_ed25519_private_key(&key_path);
+  let audit_keys = load_audit_checkpoint_keys(&[("audit-key".to_string(), key_path)])
+    .expect("Ed25519 key should load for audit checkpoints");
+  let token_provider = test_token_provider();
+
+  for digest in [
+    "not-base64".to_string(),
+    base64::engine::general_purpose::STANDARD.encode([0u8; 31]),
+    base64::engine::general_purpose::STANDARD.encode([0u8; 33]),
+  ] {
+    assert!(matches!(
+      process_request_with_audit_keys(
+        RemoteSignerRequest::SignAuditCheckpointDigest {
+          token: test_token(),
+          key_id: "audit-key".to_string(),
+          digest,
+        },
+        &HashMap::new(),
+        &audit_keys,
+        &token_provider,
+        false,
+      ),
+      RemoteSignerResponse::Error { code, .. } if code == "invalid_audit_checkpoint_digest"
+    ));
+  }
+}
+
+#[test]
+fn server_rejects_empty_and_mixed_purpose_keysets() {
+  assert!(validate_server_key_sets(&HashMap::new(), &HashMap::new()).is_err());
+
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let key_path = temp_dir.path().join("shared-ed25519.pem");
+  write_test_ed25519_private_key(&key_path);
+  let tls_keys =
+    load_server_keys(&[("shared".to_string(), key_path.clone())]).expect("TLS key should load");
+  let audit_keys = load_audit_checkpoint_keys(&[("shared".to_string(), key_path.clone())])
+    .expect("audit key should load");
+  let error = validate_server_key_sets(&tls_keys, &audit_keys)
+    .expect_err("one authentication boundary must not span purposes");
+  assert!(error.to_string().contains("purpose-exclusive"));
+
+  let tls_keys = load_server_keys(&[("tls-key".to_string(), key_path.clone())])
+    .expect("TLS key should load under a distinct id");
+  let audit_keys = load_audit_checkpoint_keys(&[("audit-key".to_string(), key_path)])
+    .expect("audit key should load under a distinct id");
+  let error = validate_server_key_sets(&tls_keys, &audit_keys)
+    .expect_err("distinct key material still requires isolated daemons");
+  assert!(error.to_string().contains("purpose-exclusive"));
+}
+
+#[tokio::test]
+async fn async_audit_client_connects_to_an_audit_only_daemon() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let socket_path = temp_dir.path().join("audit-signer.sock");
+  let key_path = temp_dir.path().join("audit-ed25519.pem");
+  let token_path = temp_dir.path().join("token.b64");
+  write_test_ed25519_private_key(&key_path);
+  write_token_file(&token_path, &TEST_TOKEN);
+  let config = SignerServerConfig {
+    socket_path: socket_path.clone(),
+    socket_mode: 0o600,
+    keys: Vec::new(),
+    token_env: "UNUSED_TOKEN_ENV".to_string(),
+    token_file: Some(token_path.clone()),
+    token_reload_interval: Duration::from_millis(10),
+    max_connections: 4,
+    io_timeout: Duration::from_secs(1),
+    allow_peer_uids: Vec::new(),
+    allow_peer_gids: Vec::new(),
+    allow_tls12_unstructured_signing: false,
+  };
+  let server = tokio::spawn(serve_with_audit_checkpoint_keys(
+    config,
+    vec![("audit-key".to_string(), key_path)],
+  ));
+  for _ in 0..100 {
+    if socket_path.exists() {
+      break;
+    }
+    assert!(
+      !server.is_finished(),
+      "audit-only daemon exited before bind"
+    );
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(1)).await;
+  }
+  assert!(
+    socket_path.exists(),
+    "audit-only daemon must bind its socket"
+  );
+
+  let client = AuditCheckpointSigner::connect(AuditCheckpointSignerConfig {
+    socket_path,
+    key_id: "audit-key".to_string(),
+    token_env: "UNUSED_TOKEN_ENV".to_string(),
+    token_file: Some(token_path),
+    token_file_reload_base_dir: None,
+    token_reload_interval: Duration::from_millis(10),
+    connect_timeout: Duration::from_secs(1),
+    sign_timeout: Duration::from_secs(1),
+  })
+  .await
+  .expect("audit client should activate against an audit-only daemon");
+  assert_eq!(client.key_id(), "audit-key");
+  assert_eq!(client.public_key().len(), 32);
+
+  let digest = [0xa5; 32];
+  let signature = client
+    .sign_digest(&digest)
+    .await
+    .expect("digest signing should succeed");
+  aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, client.public_key())
+    .verify(&audit_checkpoint::signing_message(&digest), &signature)
+    .expect("client signature must verify under the described raw key");
+
+  server.abort();
+  let _ = server.await;
+}
+
+#[test]
 fn pooled_client_reuses_socket_for_describe_key_then_sign() {
   let (client, connects) = test_client(1, Duration::from_secs(5));
   let mut request_kinds = Vec::new();
@@ -467,5 +661,22 @@ fn request_kind(request: &RemoteSignerRequest) -> &'static str {
   match request {
     RemoteSignerRequest::DescribeKey { .. } => "describe_key",
     RemoteSignerRequest::Sign { .. } => "sign",
+    RemoteSignerRequest::DescribeAuditCheckpointKey { .. } => "describe_audit_checkpoint_key",
+    RemoteSignerRequest::SignAuditCheckpointDigest { .. } => "sign_audit_checkpoint_digest",
   }
+}
+
+fn write_test_ed25519_private_key(path: &std::path::Path) {
+  let mut der = vec![
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+  ];
+  let mut seed = [0u8; 32];
+  getrandom::fill(&mut seed).expect("test Ed25519 seed should generate");
+  der.extend_from_slice(&seed);
+  let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+  std::fs::write(
+    path,
+    format!("-----BEGIN PRIVATE KEY-----\n{encoded}\n-----END PRIVATE KEY-----\n"),
+  )
+  .expect("test Ed25519 private key should write");
 }

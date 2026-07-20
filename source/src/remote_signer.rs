@@ -26,15 +26,27 @@ use protocol::{
   read_sync_frame, write_async_frame_with_timeout, write_sync_frame,
 };
 
+mod audit_checkpoint;
 mod keys;
 mod pool;
 mod protocol;
+mod requests;
 #[cfg(test)]
 mod tests;
 mod token;
 
-use keys::{PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_server_keys};
-use token::{RemoteSignerTokenProvider, request_token_is_valid, token_to_wire};
+pub use audit_checkpoint::{
+  AUDIT_CHECKPOINT_SIGNING_DOMAIN, AuditCheckpointSigner, AuditCheckpointSignerConfig,
+};
+
+use keys::{
+  AuditCheckpointKey, PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_audit_checkpoint_keys,
+  load_server_keys,
+};
+#[cfg(test)]
+use requests::process_request;
+use requests::process_request_with_audit_keys;
+use token::{RemoteSignerTokenProvider, token_to_wire};
 
 pub const DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS: u64 = 5_000;
@@ -353,6 +365,13 @@ pub struct SignerServerConfig {
 }
 
 pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
+  serve_with_audit_checkpoint_keys(config, Vec::new()).await
+}
+
+pub async fn serve_with_audit_checkpoint_keys(
+  config: SignerServerConfig,
+  audit_checkpoint_keys: Vec<(String, PathBuf)>,
+) -> anyhow::Result<()> {
   if config.max_connections == 0 {
     bail!("remote signer max_connections must be greater than 0");
   }
@@ -375,7 +394,11 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
     &config.token_env,
     config.token_reload_interval,
   )?;
-  let keys = Arc::new(load_server_keys(&config.keys)?);
+  let keys = load_server_keys(&config.keys)?;
+  let audit_checkpoint_keys = load_audit_checkpoint_keys(&audit_checkpoint_keys)?;
+  validate_server_key_sets(&keys, &audit_checkpoint_keys)?;
+  let keys = Arc::new(keys);
+  let audit_checkpoint_keys = Arc::new(audit_checkpoint_keys);
   let listener = bind_listener(&config.socket_path, config.socket_mode)?;
   let max_connections = config.max_connections;
   let io_timeout = config.io_timeout;
@@ -383,14 +406,22 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
   info!(
     socket_path = %config.socket_path.display(),
     token_source = %token_provider.source_label(),
-    keys = keys.len(),
+    tls_keys = keys.len(),
+    audit_checkpoint_keys = audit_checkpoint_keys.len(),
     max_connections,
     io_timeout_ms = io_timeout.as_millis(),
-    "remote TLS private-key signer listening"
+    "remote private-key signer listening"
   );
 
-  let allow_peer_uids = Arc::new(config.allow_peer_uids);
-  let allow_peer_gids = Arc::new(config.allow_peer_gids);
+  let connection_context = SignerConnectionContext {
+    keys,
+    audit_checkpoint_keys,
+    token_provider,
+    allow_peer_uids: Arc::new(config.allow_peer_uids),
+    allow_peer_gids: Arc::new(config.allow_peer_gids),
+    io_timeout,
+    allow_tls12_unstructured_signing,
+  };
   let connection_permits = Arc::new(Semaphore::new(max_connections));
   loop {
     let (stream, _) = listener.accept().await?;
@@ -402,46 +433,54 @@ pub async fn serve(config: SignerServerConfig) -> anyhow::Result<()> {
       }
       Err(TryAcquireError::Closed) => bail!("remote signer connection limiter closed"),
     };
-    let keys = keys.clone();
-    let token_provider = token_provider.clone();
-    let allow_peer_uids = allow_peer_uids.clone();
-    let allow_peer_gids = allow_peer_gids.clone();
+    let context = connection_context.clone();
     tokio::spawn(async move {
       let _permit = permit;
-      if let Err(error) = handle_connection(
-        stream,
-        keys,
-        token_provider,
-        allow_peer_uids,
-        allow_peer_gids,
-        io_timeout,
-        allow_tls12_unstructured_signing,
-      )
-      .await
-      {
+      if let Err(error) = handle_connection(stream, context).await {
         warn!("remote signer connection failed: {error}");
       }
     });
   }
 }
 
-async fn handle_connection(
-  mut stream: TokioUnixStream,
+fn validate_server_key_sets(
+  keys: &HashMap<String, ServerKey>,
+  audit_checkpoint_keys: &HashMap<String, AuditCheckpointKey>,
+) -> anyhow::Result<()> {
+  if keys.is_empty() && audit_checkpoint_keys.is_empty() {
+    bail!("remote signer requires at least one --key or --audit-checkpoint-key entry");
+  }
+  if !keys.is_empty() && !audit_checkpoint_keys.is_empty() {
+    bail!(
+      "remote signer daemons are purpose-exclusive; TLS and audit checkpoint keys require separate sockets, tokens, and peer allowlists"
+    );
+  }
+  Ok(())
+}
+
+#[derive(Clone)]
+struct SignerConnectionContext {
   keys: Arc<HashMap<String, ServerKey>>,
+  audit_checkpoint_keys: Arc<HashMap<String, AuditCheckpointKey>>,
   token_provider: RemoteSignerTokenProvider,
   allow_peer_uids: Arc<Vec<u32>>,
   allow_peer_gids: Arc<Vec<u32>>,
   io_timeout: Duration,
   allow_tls12_unstructured_signing: bool,
+}
+
+async fn handle_connection(
+  mut stream: TokioUnixStream,
+  context: SignerConnectionContext,
 ) -> anyhow::Result<()> {
-  if !peer_is_allowed(&stream, &allow_peer_uids, &allow_peer_gids)? {
+  if !peer_is_allowed(&stream, &context.allow_peer_uids, &context.allow_peer_gids)? {
     write_async_frame_with_timeout(
       &mut stream,
       &RemoteSignerResponse::Error {
         code: "forbidden_peer".to_string(),
         message: "peer credentials are not allowed".to_string(),
       },
-      io_timeout,
+      context.io_timeout,
     )
     .await?;
     return Ok(());
@@ -449,18 +488,19 @@ async fn handle_connection(
 
   loop {
     let request: RemoteSignerRequest =
-      match read_async_frame_with_timeout(&mut stream, io_timeout).await {
+      match read_async_frame_with_timeout(&mut stream, context.io_timeout).await {
         Ok(request) => request,
         Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
         Err(error) => return Err(error),
       };
-    let response = process_request(
+    let response = process_request_with_audit_keys(
       request,
-      &keys,
-      &token_provider,
-      allow_tls12_unstructured_signing,
+      &context.keys,
+      &context.audit_checkpoint_keys,
+      &context.token_provider,
+      context.allow_tls12_unstructured_signing,
     );
-    match write_async_frame_with_timeout(&mut stream, &response, io_timeout).await {
+    match write_async_frame_with_timeout(&mut stream, &response, context.io_timeout).await {
       Ok(()) => {}
       Err(error) if remote_signer_peer_closed(&error) => return Ok(()),
       Err(error) => return Err(error),
@@ -480,89 +520,6 @@ fn remote_signer_peer_closed(error: &anyhow::Error) -> bool {
       )
     })
   })
-}
-
-fn process_request(
-  request: RemoteSignerRequest,
-  keys: &HashMap<String, ServerKey>,
-  token_provider: &RemoteSignerTokenProvider,
-  allow_tls12_unstructured_signing: bool,
-) -> RemoteSignerResponse {
-  let token = token_provider.current_token();
-  if !request_token_is_valid(request.token(), &token) {
-    return RemoteSignerResponse::Error {
-      code: "unauthorized".to_string(),
-      message: "invalid signer token".to_string(),
-    };
-  }
-
-  match request {
-    RemoteSignerRequest::DescribeKey { key_id, .. } => match keys.get(&key_id) {
-      Some(key) => RemoteSignerResponse::DescribeKey {
-        public_key: base64::engine::general_purpose::STANDARD.encode(&key.public_key),
-        algorithm: signature_algorithm_name(key.algorithm).to_string(),
-        schemes: key.schemes.iter().copied().map(u16::from).collect(),
-      },
-      None => RemoteSignerResponse::Error {
-        code: "unknown_key".to_string(),
-        message: "unknown key id".to_string(),
-      },
-    },
-    RemoteSignerRequest::Sign {
-      key_id,
-      scheme,
-      context,
-      message,
-      ..
-    } => {
-      let Some(key) = keys.get(&key_id) else {
-        return RemoteSignerResponse::Error {
-          code: "unknown_key".to_string(),
-          message: "unknown key id".to_string(),
-        };
-      };
-      let Ok(message) = decode_base64("signing message", &message) else {
-        return RemoteSignerResponse::Error {
-          code: "invalid_request".to_string(),
-          message: "signing message must be base64".to_string(),
-        };
-      };
-      match context {
-        SignContext::Tls13ServerCertificateVerify => {
-          if !is_tls13_server_certificate_verify_message(&message) {
-            return RemoteSignerResponse::Error {
-              code: "invalid_tls13_message".to_string(),
-              message: "message is not a TLS 1.3 server CertificateVerify input".to_string(),
-            };
-          }
-        }
-        SignContext::Tls12Unstructured => {
-          if !allow_tls12_unstructured_signing {
-            return RemoteSignerResponse::Error {
-              code: "tls12_disabled".to_string(),
-              message: "TLS 1.2 unstructured signing is disabled".to_string(),
-            };
-          }
-        }
-      }
-      let scheme = SignatureScheme::from(scheme);
-      let Some(signer) = key.key.choose_scheme(&[scheme]) else {
-        return RemoteSignerResponse::Error {
-          code: "unsupported_scheme".to_string(),
-          message: "key does not support requested signature scheme".to_string(),
-        };
-      };
-      match signer.sign(&message) {
-        Ok(signature) => RemoteSignerResponse::Sign {
-          signature: base64::engine::general_purpose::STANDARD.encode(signature),
-        },
-        Err(error) => RemoteSignerResponse::Error {
-          code: "signing_failed".to_string(),
-          message: error.to_string(),
-        },
-      }
-    }
-  }
 }
 
 fn bind_listener(path: &Path, mode: u32) -> anyhow::Result<UnixListener> {

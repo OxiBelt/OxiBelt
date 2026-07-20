@@ -29,7 +29,8 @@ use super::{
   MUTATION_HEADER, MutationProtocolError, MutationProtocolErrorKind, SignerBinding, SignerRegistry,
 };
 pub(crate) use cluster_heartbeat::ClusterHeartbeatTask;
-use target::{configured_target, digest_parts, ensure_cluster_member};
+pub(crate) use target::configured_target;
+use target::{digest_parts, ensure_cluster_member};
 
 const EMPTY_DIGEST: &str =
   "sha256:0000000000000000000000000000000000000000000000000000000000000000";

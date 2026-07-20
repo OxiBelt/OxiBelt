@@ -37,6 +37,17 @@ impl OperationJournal {
         sqlx::query(*statement).execute(&mut *tx).await?;
       }
     }
+    let anchor_visibility_upgraded: bool = sqlx::query_scalar(
+      "SELECT EXISTS(SELECT 1 FROM oxibelt_admin_schema_migrations
+        WHERE component = 'admin_operations' AND version = 3)",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if !anchor_visibility_upgraded {
+      for statement in anchor_visibility_upgrade_statements() {
+        sqlx::query(*statement).execute(&mut *tx).await?;
+      }
+    }
     tx.commit().await?;
     Ok(())
   }
@@ -77,6 +88,7 @@ pub(super) fn statements() -> &'static [&'static str] {
        terminal_result jsonb NULL,
        terminal_receipt bytea NULL,
        terminal_audit_record_id bigint NULL,
+       terminal_audit_confirmed_at timestamptz NULL,
        safe_error_class text NULL,
        error_code text NULL,
        retention_seconds integer NOT NULL,
@@ -186,6 +198,19 @@ pub(super) fn upgrade_statements() -> &'static [&'static str] {
   ]
 }
 
+pub(super) fn anchor_visibility_upgrade_statements() -> &'static [&'static str] {
+  &[
+    "ALTER TABLE oxibelt_admin_operations
+       ADD COLUMN IF NOT EXISTS terminal_audit_confirmed_at timestamptz NULL",
+    "UPDATE oxibelt_admin_operations
+        SET terminal_audit_confirmed_at=updated_at
+      WHERE terminal_audit_record_id IS NOT NULL
+        AND terminal_audit_confirmed_at IS NULL",
+    "INSERT INTO oxibelt_admin_schema_migrations(component, version)
+       VALUES ('admin_operations', 3) ON CONFLICT DO NOTHING",
+  ]
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -205,6 +230,7 @@ mod tests {
       "checkpoint_artifact_id",
       "terminal_receipt",
       "terminal_audit_record_id",
+      "terminal_audit_confirmed_at",
       "retention_until",
       "retention_seconds",
     ] {
@@ -240,6 +266,11 @@ mod tests {
       upgrade_statements()
         .last()
         .is_some_and(|statement| statement.contains("admin_operations', 2"))
+    );
+    assert!(
+      anchor_visibility_upgrade_statements()
+        .last()
+        .is_some_and(|statement| statement.contains("admin_operations', 3"))
     );
   }
 }

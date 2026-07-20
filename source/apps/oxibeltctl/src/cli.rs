@@ -4,6 +4,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
 use url::Url;
 
+#[path = "audit_cli.rs"]
+mod audit_cli;
 #[path = "auth_cli.rs"]
 mod auth_cli;
 #[path = "config_compat_cli.rs"]
@@ -16,6 +18,7 @@ mod ipm_cli;
 mod mutation_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
+pub(crate) use audit_cli::*;
 pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
 pub(crate) use doctor_cli::*;
@@ -90,28 +93,6 @@ pub(crate) enum Command {
   Ipm(IpmCommand),
   Auth(AuthCommand),
   Files(FilesCommand),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AdminAuditArgs {
-  #[arg(long)]
-  pub(crate) outcome: Option<String>,
-  #[arg(long)]
-  pub(crate) actor: Option<String>,
-  #[arg(long)]
-  pub(crate) principal: Option<String>,
-  #[arg(long)]
-  pub(crate) service: Option<String>,
-  #[arg(long)]
-  pub(crate) operation: Option<String>,
-  #[arg(long = "request-id")]
-  pub(crate) request_id: Option<String>,
-  #[arg(long = "path-prefix")]
-  pub(crate) path_prefix: Option<String>,
-  #[arg(long = "before-id")]
-  pub(crate) before_id: Option<i64>,
-  #[arg(long, default_value_t = 100)]
-  pub(crate) limit: i64,
 }
 
 #[derive(Debug, Args)]

@@ -7,12 +7,12 @@ use anyhow::Context as _;
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
-use super::JournalOperation;
 use super::runtime_durable::DurableOperationRuntime;
 use super::runtime_durable_support::receipt_bytes;
 use super::types::{
   ADMIN_OPERATION_SCHEMA_VERSION, AdminOperationSafeErrorClass, AdminOperationState,
 };
+use super::{JournalOperation, TerminalUpdate};
 
 impl DurableOperationRuntime {
   pub(super) fn spawn_recovery_sweeper(&self) {
@@ -50,7 +50,7 @@ impl DurableOperationRuntime {
       revision,
       Some("operation_cancelled"),
     );
-    let staged = self.audit.stage_critical_mutation(event).await?;
+    let mut staged = self.audit.stage_critical_mutation(event).await?;
     let mut tx = self.journal.pool().begin().await?;
     let audit_id = staged.insert(&mut tx).await?;
     let receipt = receipt_bytes(
@@ -62,7 +62,7 @@ impl DurableOperationRuntime {
       Some("operation_cancelled"),
       audit_id,
     )?;
-    let updated = self
+    let mut updated = self
       .journal
       .cancel_unstarted_tx(
         &mut tx,
@@ -70,11 +70,23 @@ impl DurableOperationRuntime {
         current.revision,
         &receipt,
         audit_id,
+        self.audit.anchoring_required(),
       )
       .await?
       .context("unstarted Admin operation cancellation lost its revision race")?;
     tx.commit().await?;
-    staged.publish();
+    staged.publish().await?;
+    if self.audit.anchoring_required() {
+      self
+        .journal
+        .confirm_terminal_audit(&current.operation_id, audit_id)
+        .await?;
+      updated = self
+        .journal
+        .load(&current.operation_id)
+        .await?
+        .context("confirmed cancelled Admin operation disappeared")?;
+    }
     Ok(updated)
   }
 
@@ -123,7 +135,7 @@ impl DurableOperationRuntime {
       revision,
       Some(error_code),
     );
-    let staged = self.audit.stage_critical_mutation(event).await?;
+    let mut staged = self.audit.stage_critical_mutation(event).await?;
     let mut tx = self.journal.pool().begin().await?;
     let audit_id = staged.insert(&mut tx).await?;
     let receipt = receipt_bytes(
@@ -135,22 +147,35 @@ impl DurableOperationRuntime {
       Some(error_code),
       audit_id,
     )?;
-    let updated = self
+    let terminal = TerminalUpdate {
+      state,
+      result: None,
+      receipt,
+      terminal_audit_record_id: audit_id,
+      safe_error_class: Some(
+        AdminOperationSafeErrorClass::Indeterminate
+          .as_str()
+          .to_string(),
+      ),
+      error_code: Some(error_code.to_string()),
+      audit_anchor_required: self.audit.anchoring_required(),
+    };
+    let mut updated = self
       .journal
-      .mark_incomplete_indeterminate_tx(
-        &mut tx,
-        &current.operation_id,
-        current.revision,
-        &receipt,
-        audit_id,
-        error_code,
-      )
+      .mark_incomplete_indeterminate_tx(&mut tx, &current.operation_id, current.revision, &terminal)
       .await?;
     if updated.is_none() {
       return Ok(None);
     }
     tx.commit().await?;
-    staged.publish();
+    staged.publish().await?;
+    if self.audit.anchoring_required() {
+      self
+        .journal
+        .confirm_terminal_audit(&current.operation_id, audit_id)
+        .await?;
+      updated = self.journal.load(&current.operation_id).await?;
+    }
     Ok(updated)
   }
 }
