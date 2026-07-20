@@ -294,7 +294,7 @@ fn schema_diagnostics(entry: &Path, document: &NativeConfigDocument) -> Vec<Conf
   {
     let strict = strict_unknown_fields(&document.value);
     let mut unknown = Vec::new();
-    super::collect_unknown_keys(&document.value, "", &mut unknown);
+    super::shape::collect_unknown_keys(&document.value, "", &mut unknown);
     let mut diagnostics = unknown
       .into_iter()
       .map(|field_path| ConfigDiagnostic {

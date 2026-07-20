@@ -3,12 +3,148 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::bail;
+use anyhow::{Context, anyhow, bail};
 
 use super::{
-  RULEPACK_FILE_SUFFIX, RouteWafConfig, WafConfig, WafRulepackSummary, load_external_rule,
-  load_external_rule_groups, resolve_rule_group_file_paths, resolve_rule_path, rulepacks,
+  ExternalRuleFile, ExternalRuleGroupFile, RULEPACK_FILE_SUFFIX, RouteWafConfig, WafConditionMerge,
+  WafConfig, WafRuleConfig, WafRuleGroupConfig, WafRulepackSummary,
+  resolve_existing_local_config_file_path_with_logical, rulepacks, validate_rule_group_scope,
 };
+
+fn resolve_rule_group_file_paths(
+  field_name: &str,
+  base_dir: &Path,
+  paths: &[PathBuf],
+) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+  if paths.is_empty() {
+    return Ok((Vec::new(), Vec::new()));
+  }
+  let canonical_base = base_dir
+    .canonicalize()
+    .with_context(|| format!("failed to resolve OxiRule directory {}", base_dir.display()))?;
+  let mut resolved = Vec::new();
+  let mut logical = Vec::new();
+  for path in paths {
+    if path_has_glob_pattern(path)? {
+      let pattern_path = crate::config::resolve_local_config_file_path(field_name, base_dir, path)?;
+      let pattern = pattern_path.to_str().ok_or_else(|| {
+        anyhow!(
+          "{field_name} entry is not valid UTF-8: {}",
+          pattern_path.display()
+        )
+      })?;
+      let mut matched = Vec::new();
+      for candidate in glob::glob(pattern)
+        .with_context(|| format!("invalid {field_name} glob {}", path.display()))?
+      {
+        let candidate = candidate
+          .with_context(|| format!("failed to expand {field_name} glob {}", path.display()))?;
+        if candidate.is_file() {
+          let canonical = crate::config::canonicalize_existing_file(field_name, &candidate)?;
+          if !canonical.starts_with(&canonical_base) {
+            bail!("{field_name} entries must stay within the OxiRule directory");
+          }
+          matched.push((canonical, candidate));
+        }
+      }
+      matched.sort_by(|left, right| left.0.cmp(&right.0));
+      for (canonical, candidate) in matched {
+        resolved.push(canonical);
+        logical.push(candidate);
+      }
+    } else {
+      let (canonical, candidate) =
+        resolve_existing_local_config_file_path_with_logical(field_name, base_dir, path)?;
+      resolved.push(canonical);
+      logical.push(candidate);
+    }
+  }
+  Ok((resolved, logical))
+}
+
+fn path_has_glob_pattern(path: &Path) -> anyhow::Result<bool> {
+  let value = path.to_str().ok_or_else(|| {
+    anyhow!(
+      "OxiRule group file path is not valid UTF-8: {}",
+      path.display()
+    )
+  })?;
+  Ok(value.chars().any(|ch| matches!(ch, '*' | '?' | '[')))
+}
+
+fn load_external_rule_groups(
+  scope: &str,
+  paths: &[PathBuf],
+) -> anyhow::Result<Vec<WafRuleGroupConfig>> {
+  let mut groups = Vec::new();
+  for path in paths {
+    let raw = std::fs::read_to_string(path)
+      .with_context(|| format!("failed to read OxiRule group file {}", path.display()))?;
+    let external: ExternalRuleGroupFile = toml::from_str(&raw)
+      .with_context(|| format!("failed to parse OxiRule group file {}", path.display()))?;
+    if external.rule_groups.is_empty() {
+      bail!(
+        "{scope} OxiRule group file {} must contain at least one [[rule_groups]] entry",
+        path.display()
+      );
+    }
+    groups.extend(external.rule_groups);
+  }
+  Ok(groups)
+}
+
+pub fn validate_external_rule_group_file(raw: &str) -> anyhow::Result<()> {
+  let external: ExternalRuleGroupFile =
+    toml::from_str(raw).context("failed to parse OxiRule group file")?;
+  if external.rule_groups.is_empty() {
+    bail!("OxiRule group file must contain at least one [[rule_groups]] entry");
+  }
+  validate_rule_group_scope("OxiRule group file", &external.rule_groups)
+}
+
+fn resolve_rule_path(rule: &mut WafRuleConfig, base_dir: &Path) -> anyhow::Result<()> {
+  rule.path = rule
+    .path
+    .take()
+    .map(|path| {
+      let (resolved, logical) =
+        resolve_existing_local_config_file_path_with_logical("WAF rule path", base_dir, &path)?;
+      rule.loaded_from_logical_path = Some(logical);
+      Ok::<PathBuf, anyhow::Error>(resolved)
+    })
+    .transpose()?;
+  Ok(())
+}
+
+fn load_external_rule(rule: &mut WafRuleConfig) -> anyhow::Result<()> {
+  let Some(path) = rule.path.take() else {
+    return Ok(());
+  };
+
+  if rule.when.is_some()
+    || rule.merge_condition_as != WafConditionMerge::And
+    || !rule.groups.is_empty()
+    || !rule.actions.is_empty()
+  {
+    bail!(
+      "WAF rule {} external path cannot be combined with inline when, merge_condition_as, groups, or actions",
+      rule.name
+    );
+  }
+
+  let raw = std::fs::read_to_string(&path)
+    .with_context(|| format!("failed to read WAF rule file {}", path.display()))?;
+  let external: ExternalRuleFile = toml::from_str(&raw)
+    .with_context(|| format!("failed to parse WAF rule file {}", path.display()))?;
+
+  rule.when = external.when;
+  rule.merge_condition_as = external.merge_condition_as;
+  rule.groups = external.groups;
+  rule.local_rule_groups = external.rule_groups;
+  rule.actions = external.actions;
+  rule.loaded_from_path = Some(path);
+  Ok(())
+}
 
 impl WafConfig {
   pub fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {

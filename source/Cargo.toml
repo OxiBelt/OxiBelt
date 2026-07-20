@@ -184,6 +184,10 @@ name = "package_boundaries"
 path = "../tests/rust/package_boundaries.rs"
 
 [[test]]
+name = "module_decomposition_contract"
+path = "../tests/rust/module_decomposition_contract.rs"
+
+[[test]]
 name = "feature_status_contract"
 path = "../tests/rust/feature_status_contract.rs"
 

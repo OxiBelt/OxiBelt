@@ -142,6 +142,27 @@ Keep module boundaries explicit:
 - HTTP forwarding behavior should remain in proxy-focused modules.
 - Configuration parsing should remain in configuration-focused modules.
 
+Keep dependencies directed toward side-effect-free policy and representation
+code:
+
+- Parsers and normalizers may build typed representations, but must not perform
+  filesystem, network, database, runtime-state, or Admin-routing operations.
+- WAF evaluators may consume compiled plans, but must not load configuration or
+  external files.
+- Configuration modules must not depend on proxy request handling or runtime
+  snapshot ownership.
+- Data-plane request paths must not depend on Admin HTTP routing, CLI packages,
+  or Kubernetes controller packages.
+- Storage adapters must expose narrow mechanics and must not own cache, rate,
+  or failure policy.
+- Observability must consume bounded, redacted projections instead of reaching
+  into credentials, raw request headers, URIs, or bodies.
+
+Responsibility modules on HTTP, WAF, cache, and other request hot paths should
+use concrete stack-owned orchestration. A decomposition must not introduce
+trait-object dispatch, boxed futures, locks, channels, tasks, or unconditional
+request cloning merely to cross a new module boundary.
+
 When adding a new Rust file or module, choose a responsibility-focused name,
 add tests for new behavior, update technical documentation when behavior is
 user-visible, and avoid generic utility modules unless the shared

@@ -1097,6 +1097,10 @@ fn source_structure_job_stays_independent() {
     "source-structure should keep running Rust module size checks"
   );
   assert!(
+    workflow.contains("cargo test -p oxibelt --test module_decomposition_contract --locked"),
+    "source-structure should enforce Rust module dependency boundaries"
+  );
+  assert!(
     workflow.contains("bash tests/scripts/check-cargo-package-boundaries.sh"),
     "source-structure should enforce the data-plane Cargo package boundary"
   );

@@ -90,6 +90,9 @@ jobs:
           rustup toolchain install 1.97.0 --profile minimal
           rustup default 1.97.0
 
+      - name: Rust module dependency boundaries
+        run: cargo test -p oxibelt --test module_decomposition_contract --locked
+
       - name: Data-plane Cargo package boundary
         run: bash tests/scripts/check-cargo-package-boundaries.sh
 
