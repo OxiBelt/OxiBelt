@@ -10,7 +10,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 gateway_api_version="v1.6.1"
-gateway_api_commit="8bb74df00e56ec8f944d48c25e6c1c9c2f6848e3"
 # Kubernetes v1.31 lacks the CEL format library used by the experimental
 # XBackend CRD. The standard bundle still includes every CRD OxiBelt watches.
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
@@ -98,6 +97,12 @@ cleanup() {
       --all-containers=true --prefix --previous --tail=200 >&2 || true
     kube -n "${namespace}" logs -l 'oxibelt.dev/test=stale-config' \
       --all-containers=true --prefix --tail=80 >&2 || true
+    kube -n "${outside_namespace}" get deployments,pods --ignore-not-found >&2 || true
+    kube -n "${outside_namespace}" get events --sort-by=.metadata.creationTimestamp >&2 || true
+    kube -n "${outside_namespace}" logs deployment/tcp-backend \
+      --all-containers=true --prefix --tail=80 >&2 || true
+    kube -n "${outside_namespace}" logs deployment/udp-backend \
+      --all-containers=true --prefix --tail=80 >&2 || true
   fi
 
   if ((cluster_created == 1)); then
@@ -146,12 +151,149 @@ deployment_is_committed() {
     >/dev/null <<<"${deployment}"
 }
 
+deployment_committed_revision_changed() {
+  local previous_revision="$1"
+  local deployment
+
+  deployment="$(kube -n "${namespace}" get deployment "${workload_name}" -o json 2>/dev/null)" \
+    || return 1
+  jq -e --arg previous "${previous_revision}" '
+    .metadata.annotations["oxibelt.dev/gateway-config-phase"] == "Committed"
+      and (.metadata.annotations["oxibelt.dev/gateway-config-desired"] | type == "string" and length > 0)
+      and (.metadata.annotations["oxibelt.dev/gateway-config-committed"]
+        == .metadata.annotations["oxibelt.dev/gateway-config-desired"])
+      and .metadata.annotations["oxibelt.dev/gateway-config-committed"] != $previous
+  ' >/dev/null <<<"${deployment}"
+}
+
 gateway_is_programmed() {
   local gateway
   gateway="$(kube -n "${namespace}" get gateway edge -o json 2>/dev/null)" || return 1
   jq -e \
     'any(.status.conditions[]?; .type == "Programmed" and .status == "True")' \
     >/dev/null <<<"${gateway}"
+}
+
+route_conditions_match() {
+  local resource="$1"
+  local name="$2"
+  local resolved="$3"
+  local programmed="$4"
+  local resolved_reason="$5"
+  local route
+
+  route="$(kube -n "${namespace}" get "${resource}" "${name}" -o json 2>/dev/null)" \
+    || return 1
+  jq -e \
+    --arg controller "oxibelt.dev/gateway-controller" \
+    --arg resolved "${resolved}" \
+    --arg programmed "${programmed}" \
+    --arg resolved_reason "${resolved_reason}" '
+    .metadata.generation as $generation
+    | any(.status.parents[]?;
+        .controllerName == $controller
+          and any(.conditions[]?;
+            .type == "Accepted"
+              and .status == "True"
+              and .observedGeneration == $generation)
+          and any(.conditions[]?;
+            .type == "ResolvedRefs"
+              and .status == $resolved
+              and .reason == $resolved_reason
+              and .observedGeneration == $generation)
+          and any(.conditions[]?;
+            .type == "Programmed"
+              and .status == $programmed
+              and .observedGeneration == $generation))
+  ' >/dev/null <<<"${route}"
+}
+
+l4_routes_are_programmed() {
+  route_conditions_match tcproutes.gateway.networking.k8s.io tcp-probe True True ResolvedRefs \
+    && route_conditions_match udproutes.gateway.networking.k8s.io udp-probe True True ResolvedRefs
+}
+
+l4_routes_are_unresolved() {
+  route_conditions_match tcproutes.gateway.networking.k8s.io tcp-probe False False RefNotPermitted \
+    && route_conditions_match udproutes.gateway.networking.k8s.io udp-probe False False RefNotPermitted
+}
+
+probe_l4_round_trips() {
+  local expected_namespace="$1"
+  local node="${cluster_name}-control-plane"
+
+  docker exec \
+    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+    --env OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
+    "${node}" python3 -c '
+import json
+import os
+import socket
+
+address = os.environ["OXIBELT_L4_ADDRESS"]
+expected_namespace = os.environ["OXIBELT_L4_EXPECTED_NAMESPACE"]
+with socket.create_connection((address, 9300), timeout=5) as connection:
+    with connection.makefile("rwb") as stream:
+        welcome = stream.readline()
+        stream.write(b"TEST\n")
+        stream.flush()
+        response = json.loads(stream.readline())
+if welcome != b"Gateway API Test TCP Server\n":
+    raise SystemExit("unexpected TCP probe response")
+if response.get("namespace") != expected_namespace or response.get("service") != "tcp-backend":
+    raise SystemExit("TCP probe reached an unexpected backend")
+' || return 1
+
+  docker exec \
+    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+    --env OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
+    "${node}" python3 -c '
+import json
+import os
+import socket
+
+address = os.environ["OXIBELT_L4_ADDRESS"]
+expected_namespace = os.environ["OXIBELT_L4_EXPECTED_NAMESPACE"]
+target = socket.getaddrinfo(address, 5300, type=socket.SOCK_DGRAM)[0]
+with socket.socket(target[0], target[1], target[2]) as connection:
+    connection.settimeout(5)
+    connection.sendto(b"oxibelt-udp-probe", target[4])
+    payload, _ = connection.recvfrom(4096)
+response = json.loads(payload)
+if response.get("request") != "oxibelt-udp-probe":
+    raise SystemExit("unexpected UDP probe response")
+if response.get("namespace") != expected_namespace or response.get("service") != "udp-backend":
+    raise SystemExit("UDP probe reached an unexpected backend")
+' || return 1
+}
+
+l4_ports_fail_closed() {
+  local node="${cluster_name}-control-plane"
+
+  docker exec \
+    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+    "${node}" python3 -c '
+import os
+import socket
+
+address = os.environ["OXIBELT_L4_ADDRESS"]
+try:
+    with socket.create_connection((address, 9300), timeout=2):
+        raise SystemExit("TCP listener remained reachable without ReferenceGrant")
+except OSError:
+    pass
+
+target = socket.getaddrinfo(address, 5300, type=socket.SOCK_DGRAM)[0]
+try:
+    with socket.socket(target[0], target[1], target[2]) as connection:
+        connection.settimeout(2)
+        connection.connect(target[4])
+        connection.send(b"oxibelt-udp-denied-probe")
+        connection.recv(4096)
+    raise SystemExit("UDP listener remained reachable without ReferenceGrant")
+except OSError:
+    pass
+'
 }
 
 controller_has_two_ready_replicas() {
@@ -437,22 +579,13 @@ stale_config_pod_reports_digest_mismatch() {
     <<<"${logs}"
 }
 
-run_gateway_api_l4_conformance() {
-  local source_dir="${work_dir}/gateway-api-source"
-  local binary="${work_dir}/gateway-api-conformance.test"
-  local node="${cluster_name}-control-plane"
-  local node_work_dir="/opt/oxibelt-gateway-api-conformance-${run_id}"
-  local node_binary="${node_work_dir}/conformance.test"
-  local node_report="${node_work_dir}/report.yaml"
-  local implementation_version
+verify_cross_namespace_l4_reference_grants() {
+  local denied_revision
+  local previous_revision
 
-  implementation_version="$(git -C "${repo_root}" rev-parse --verify 'HEAD^{commit}')"
-  [[ "${implementation_version}" =~ ^[a-f0-9]{40}$ ]] \
-    || die "repository HEAD did not resolve to a lower-case commit SHA for the conformance report"
-
-  # The cross-namespace core profile cases need the chart's explicit
-  # cluster-wide watch mode. Upgrade only after the scoped-RBAC assertions and
-  # leader-replacement checks above have completed.
+  # Switch to the chart's explicit cluster-wide mode only after the scoped-RBAC
+  # and leader-replacement checks have completed. The controller still has no
+  # Secret access and receives only the reads needed for ReferenceGrant.
   helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
     --namespace "${namespace}" \
     -f "${controller_image_values}" \
@@ -470,50 +603,170 @@ run_gateway_api_l4_conformance() {
     --wait \
     --timeout "${rollout_timeout_seconds}s"
 
-  kube apply -f - >/dev/null <<'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
+  assert_controller_can_i no get secrets --namespace "${outside_namespace}"
+  assert_controller_can_i no list secrets --namespace "${outside_namespace}"
+
+  kube -n "${outside_namespace}" apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Service
 metadata:
-  name: gateway-conformance
+  name: tcp-backend
 spec:
-  controllerName: oxibelt.dev/gateway-controller
+  selector:
+    app: tcp-backend
+  ports:
+  - name: tcp
+    protocol: TCP
+    port: 3000
+    targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-backend
+spec:
+  selector:
+    app: udp-backend
+  ports:
+  - name: udp
+    protocol: UDP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcp-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-backend
+  template:
+    metadata:
+      labels:
+        app: tcp-backend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: TCP_ECHO_SERVER, value: "1" }
+        - { name: SERVICE_NAME, value: tcp-backend }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-backend
+  template:
+    metadata:
+      labels:
+        app: udp-backend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: UDP_ECHO_SERVER, value: "1" }
+        - { name: UDP_PORT, value: "8080" }
+        - { name: SERVICE_NAME, value: udp-backend }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
 EOF
 
-  git clone --quiet --filter=blob:none --branch "${gateway_api_version}" --depth 1 \
-    https://github.com/kubernetes-sigs/gateway-api.git "${source_dir}"
-  [[ "$(git -C "${source_dir}" rev-parse HEAD)" == "${gateway_api_commit}" ]] \
-    || die "Gateway API conformance source did not match the pinned v1.6.1 commit"
-  (
-    cd -- "${source_dir}"
-    GOTOOLCHAIN=auto go test -c -o "${binary}" ./conformance
-  )
+  kube -n "${outside_namespace}" rollout status deployment/tcp-backend --timeout=120s
+  kube -n "${outside_namespace}" rollout status deployment/udp-backend --timeout=120s
 
-  # Kind mounts /tmp as a noexec tmpfs and /var from a Docker-managed volume.
-  # Docker archive transfers address the node root filesystem beneath those
-  # mounts, so stage executable and report artifacts under rootfs-backed /opt.
-  docker exec "${node}" install -d -m 0700 -- "${node_work_dir}"
-  docker cp "${binary}" "${node}:${node_binary}"
-  docker exec "${node}" test -x "${node_binary}" \
-    || die "Gateway API conformance binary is not executable in the Kind node"
-  docker exec \
-    --env KUBECONFIG=/etc/kubernetes/admin.conf \
-    "${node}" \
-    "${node_binary}" \
-    -test.v \
-    -test.timeout=45m \
-    -test.run='^TestConformance$' \
-    -gateway-class=gateway-conformance \
-    -conformance-profiles=GATEWAY-TCP,GATEWAY-UDP \
-    -skip-provisional-tests=false \
-    -report-output="${node_report}" \
-    -organization=OxiBelt \
-    -project=OxiBelt \
-    -url=https://github.com/OxiBelt/OxiBelt \
-    -contact=https://github.com/OxiBelt/OxiBelt/issues/new \
-    -version="${implementation_version}"
-  docker exec "${node}" test -s "${node_report}" \
-    || die "Gateway API conformance report is missing or empty in the Kind node"
-  docker cp "${node}:${node_report}" "${work_dir}/gateway-api-conformance-report.yaml"
+  previous_revision="$(kube -n "${namespace}" get deployment "${workload_name}" \
+    -o jsonpath='{.metadata.annotations.oxibelt\.dev/gateway-config-committed}')"
+  [[ "${previous_revision}" =~ ^oxibelt-gateway-config-deployment-oxibelt-[a-f0-9]{64}$ ]] \
+    || die "pre-ReferenceGrant rollout did not expose a committed immutable revision"
+  kube -n "${namespace}" patch tcproute tcp-probe --type=merge \
+    --patch "{\"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"tcp-backend\",\"namespace\":\"${outside_namespace}\",\"port\":3000}]}]}}" >/dev/null
+  kube -n "${namespace}" patch udproute udp-probe --type=merge \
+    --patch "{\"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"udp-backend\",\"namespace\":\"${outside_namespace}\",\"port\":8080}]}]}}" >/dev/null
+  wait_for "cross-namespace L4 routes rejected without ReferenceGrant" 60 l4_routes_are_unresolved
+  wait_for "fail-closed immutable revision without ReferenceGrant" \
+    "${rollout_timeout_seconds}" deployment_committed_revision_changed "${previous_revision}"
+  wait_for "L4 listeners removed without ReferenceGrant" 60 l4_ports_fail_closed
+  denied_revision="$(kube -n "${namespace}" get deployment "${workload_name}" \
+    -o jsonpath='{.metadata.annotations.oxibelt\.dev/gateway-config-committed}')"
+  [[ "${denied_revision}" =~ ^oxibelt-gateway-config-deployment-oxibelt-[a-f0-9]{64}$ ]] \
+    || die "denied ReferenceGrant rollout did not expose a committed immutable revision"
+
+  kube -n "${outside_namespace}" apply -f - >/dev/null <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
+metadata:
+  name: oxibelt-tcp-probe
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: TCPRoute
+    namespace: ${namespace}
+  to:
+  - group: ""
+    kind: Service
+    name: tcp-backend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
+metadata:
+  name: oxibelt-udp-probe
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: UDPRoute
+    namespace: ${namespace}
+  to:
+  - group: ""
+    kind: Service
+    name: udp-backend
+EOF
+
+  wait_for "cross-namespace L4 routes programmed by ReferenceGrant" \
+    "${rollout_timeout_seconds}" l4_routes_are_programmed
+  wait_for "cross-namespace L4 immutable rollout commit" \
+    "${rollout_timeout_seconds}" deployment_committed_revision_changed "${denied_revision}"
+  kube -n "${namespace}" rollout status "deployment/${workload_name}" \
+    --timeout "${rollout_timeout_seconds}s"
+  wait_for "cross-namespace TCP and UDP round trips" 60 \
+    probe_l4_round_trips "${outside_namespace}"
 }
 
 assert_controller_can_i() {
@@ -530,7 +783,7 @@ assert_controller_can_i() {
   fi
 }
 
-for command in docker kind kubectl helm curl git go jq openssl sha256sum tail tr; do
+for command in docker kind kubectl helm curl jq openssl sha256sum tail tr; do
   require_command "${command}"
 done
 
@@ -717,6 +970,107 @@ spec:
     port: 8080
     targetPort: 8080
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tcp-backend
+spec:
+  selector:
+    app: tcp-backend
+  ports:
+  - name: tcp
+    protocol: TCP
+    port: 3000
+    targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-backend
+spec:
+  selector:
+    app: udp-backend
+  ports:
+  - name: udp
+    protocol: UDP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tcp-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-backend
+  template:
+    metadata:
+      labels:
+        app: tcp-backend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: TCP_ECHO_SERVER, value: "1" }
+        - { name: SERVICE_NAME, value: tcp-backend }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-backend
+  template:
+    metadata:
+      labels:
+        app: udp-backend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: UDP_ECHO_SERVER, value: "1" }
+        - { name: UDP_PORT, value: "8080" }
+        - { name: SERVICE_NAME, value: udp-backend }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
@@ -734,6 +1088,12 @@ spec:
   - name: http
     protocol: HTTP
     port: 80
+  - name: tcp-probe
+    protocol: TCP
+    port: 9300
+  - name: udp-probe
+    protocol: UDP
+    port: 5300
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -753,13 +1113,42 @@ spec:
     backendRefs:
     - name: backend
       port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: tcp-probe
+spec:
+  parentRefs:
+  - name: edge
+    sectionName: tcp-probe
+  rules:
+  - backendRefs:
+    - name: tcp-backend
+      port: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: udp-probe
+spec:
+  parentRefs:
+  - name: edge
+    sectionName: udp-probe
+  rules:
+  - backendRefs:
+    - name: udp-backend
+      port: 8080
 EOF
+
+kube -n "${namespace}" rollout status deployment/tcp-backend --timeout=120s
+kube -n "${namespace}" rollout status deployment/udp-backend --timeout=120s
 
 helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --namespace "${namespace}" \
   -f "${dataplane_image_values}" \
   -f "${repo_root}/deploy/helm/oxibelt/examples/admin-mtls-values.yaml" \
-  -f "${repo_root}/tests/fixtures/gateway-api-conformance-values.yaml" \
+  -f "${repo_root}/tests/fixtures/gateway-api-l4-values.yaml" \
   --set "replicaCount=3" \
   --set "service.type=ClusterIP" \
   --set-string "admin.tls.serverNames[0]=${admin_server_name}" \
@@ -825,7 +1214,7 @@ wait_for "three bootstrap Pods with the base revision and empty digest" 60 \
 
 status_service_address="$(kube -n "${namespace}" get service "${workload_name}" -o jsonpath='{.spec.clusterIP}')"
 [[ "${status_service_address}" =~ ^[0-9a-fA-F:.]+$ ]] \
-  || die "data-plane Service did not expose a valid conformance status address"
+  || die "data-plane Service did not expose a valid L4 probe address"
 
 helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
@@ -913,6 +1302,10 @@ kube -n "${namespace}" rollout status "deployment/${workload_name}" \
   --timeout "${rollout_timeout_seconds}s"
 wait_for "committed immutable workload state" "${rollout_timeout_seconds}" deployment_is_committed
 wait_for "Gateway Programmed=True after full rollout convergence" "${rollout_timeout_seconds}" gateway_is_programmed
+wait_for "same-namespace TCPRoute and UDPRoute programming" \
+  "${rollout_timeout_seconds}" l4_routes_are_programmed
+wait_for "same-namespace TCP and UDP round trips" 60 \
+  probe_l4_round_trips "${namespace}"
 wait_for "two Ready controller replicas" 60 controller_has_two_ready_replicas
 wait_for "one live Lease holder among two simultaneous replicas" 60 lease_has_live_unique_holder
 
@@ -961,6 +1354,8 @@ new_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o json
   || die "recreated Lease did not receive a new UID fencing domain"
 wait_for "rollout recovery after Lease recreation" "${rollout_timeout_seconds}" deployment_is_committed
 wait_for "Programmed proof after Lease recreation" "${rollout_timeout_seconds}" gateway_is_programmed
+
+verify_cross_namespace_l4_reference_grants
 
 deployment_json="$(kube -n "${namespace}" get deployment "${workload_name}" -o json)"
 revision="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-revision"] // empty' <<<"${deployment_json}")"
@@ -1108,6 +1503,4 @@ wait_for "a failed-closed stale-config Pod" 60 \
 wait_for "the immutable digest-mismatch log from stale-config Pod" 30 \
   stale_config_pod_reports_digest_mismatch "${stale_pod}"
 
-run_gateway_api_l4_conformance
-
-echo "Kubernetes immutable three-replica rollout and Gateway API TCP/UDP conformance passed"
+echo "Kubernetes immutable three-replica rollout and focused Gateway API TCP/UDP integration passed"

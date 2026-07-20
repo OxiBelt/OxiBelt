@@ -1,0 +1,7 @@
+# Operator-owned TCP/UDP exposure for the focused Gateway API L4 rollout
+# probe. The controller maps Gateway listener ports to these numeric
+# targetPorts but never creates or mutates the data-plane Service or workload.
+service:
+  additionalPorts:
+    - { name: tcp-probe, protocol: TCP, port: 9300, targetPort: 19300 }
+    - { name: udp-probe, protocol: UDP, port: 5300, targetPort: 15300 }

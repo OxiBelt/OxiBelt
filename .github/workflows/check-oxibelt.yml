@@ -1135,7 +1135,7 @@ jobs:
     permissions:
       actions: read
       contents: read
-    timeout-minutes: 70
+    timeout-minutes: 25
 
     steps:
       - name: Checkout

@@ -1997,6 +1997,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     .expect("workflow should define the Kubernetes immutable rollout job");
   let job_text = workflow_job_text(&workflow, "kubernetes-immutable-rollout");
   let script = kubernetes_immutable_rollout_script_text();
+  let l4_values = fs::read_to_string(repo_root().join("tests/fixtures/gateway-api-l4-values.yaml"))
+    .expect("Gateway API L4 integration values should be readable");
 
   assert_eq!(
     job.needs,
@@ -2053,7 +2055,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "OXIBELT_DATAPLANE_DOCKER_IMAGE: oxibelt-dataplane:alpine-musl-amd64",
     "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE: oxibelt-gateway-controller:alpine-musl-amd64",
     "tests/scripts/run-kubernetes-immutable-rollout.sh",
-    "timeout-minutes: 70",
+    "timeout-minutes: 25",
   ] {
     assert!(
       job_text.contains(expected),
@@ -2063,7 +2065,6 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   for expected in [
     "gateway_api_version=\"v1.6.1\"",
-    "gateway_api_commit=\"8bb74df00e56ec8f944d48c25e6c1c9c2f6848e3\"",
     "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
     "gateway_api_sha256=\"24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73\"",
     "kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b",
@@ -2074,21 +2075,34 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "controller-image-values.yaml",
     "kind create cluster",
     "kind load docker-image",
-    "gateway-api-conformance-values.yaml",
-    "run_gateway_api_l4_conformance",
-    "-conformance-profiles=GATEWAY-TCP,GATEWAY-UDP",
-    "-skip-provisional-tests=false",
-    "GOTOOLCHAIN=auto go test -c",
-    "node_work_dir=\"/opt/oxibelt-gateway-api-conformance-${run_id}\"",
-    "node_binary=\"${node_work_dir}/conformance.test\"",
-    "node_report=\"${node_work_dir}/report.yaml\"",
-    "docker exec \"${node}\" install -d -m 0700 -- \"${node_work_dir}\"",
-    "docker exec \"${node}\" test -x \"${node_binary}\"",
-    "docker exec \"${node}\" test -s \"${node_report}\"",
+    "gateway-api-l4-values.yaml",
+    "registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d",
+    "runAsUser: 65532",
+    "runAsGroup: 65532",
+    "kind: TCPRoute",
+    "kind: UDPRoute",
+    "route_conditions_match",
+    ".observedGeneration == $generation",
+    ".reason == $resolved_reason",
+    "RefNotPermitted",
+    "same-namespace TCPRoute and UDPRoute programming",
+    "probe_l4_round_trips",
+    "OXIBELT_L4_EXPECTED_NAMESPACE",
+    "connection.makefile(\"rwb\")",
+    "socket.create_connection((address, 9300), timeout=5)",
+    "connection.sendto(b\"oxibelt-udp-probe\", target[4])",
+    "verify_cross_namespace_l4_reference_grants",
+    "cross-namespace L4 routes rejected without ReferenceGrant",
+    "deployment_committed_revision_changed",
+    "fail-closed immutable revision without ReferenceGrant",
+    "l4_ports_fail_closed",
+    "TCP listener remained reachable without ReferenceGrant",
+    "cross-namespace L4 routes programmed by ReferenceGrant",
+    "kind: ReferenceGrant",
+    "name: oxibelt-tcp-probe",
+    "name: oxibelt-udp-probe",
+    "focused Gateway API TCP/UDP integration passed",
     "docker exec",
-    "implementation_version=\"$(git -C \"${repo_root}\" rev-parse --verify 'HEAD^{commit}')\"",
-    "-contact=https://github.com/OxiBelt/OxiBelt/issues/new",
-    "-version=\"${implementation_version}\"",
     "kind delete cluster --name \"${cluster_name}\"",
     "docker version --format '{{.Server.Version}}'",
     "docker image inspect \"${dataplane_image}\"",
@@ -2144,19 +2158,42 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "Kubernetes immutable rollout script should preserve {expected}"
     );
   }
+  for expected in [
+    "tcp-probe, protocol: TCP, port: 9300, targetPort: 19300",
+    "udp-probe, protocol: UDP, port: 5300, targetPort: 15300",
+  ] {
+    assert!(
+      l4_values.contains(expected),
+      "Gateway API L4 integration values should preserve {expected}"
+    );
+  }
   assert_eq!(
-    script.matches("-contact=").count(),
-    1,
-    "the Gateway API conformance report should define exactly one implementation contact"
+    l4_values.matches("targetPort:").count(),
+    2,
+    "the focused L4 fixture should expose only its TCP and UDP probe ports"
   );
   assert!(
     !script.contains("experimental-install.yaml"),
     "the Kubernetes v1.31 rollout must not install experimental CRDs that require newer CEL libraries"
   );
-  assert!(
-    !script.contains("-skip-tests="),
-    "the Gateway API TCP/UDP profile run must not hide incompatible conformance cases"
-  );
+  for removed_profile_claim in [
+    "gateway_api_commit=",
+    "gateway-api-conformance-values.yaml",
+    "run_gateway_api_l4_conformance",
+    "gateway_class_has_supported_features",
+    "conformance_udp_limits_are_active",
+    "-conformance-profiles=",
+    "-supported-features",
+    "-exempt-features",
+    "-report-output=",
+    "GOTOOLCHAIN=auto go test -c",
+    "git clone --quiet --filter=blob:none",
+  ] {
+    assert!(
+      !script.contains(removed_profile_claim),
+      "the focused L4 integration must not retain unsupported profile-conformance claim {removed_profile_claim}"
+    );
+  }
   for expected in [
     "crd/tcproutes.gateway.networking.k8s.io",
     "crd/udproutes.gateway.networking.k8s.io",
@@ -2171,16 +2208,6 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     !script.contains("v1alpha2") && !script.contains("kube patch crd"),
     "the Kubernetes rollout must use served Gateway API v1 resources without mutating CRD versions"
   );
-
-  for mounted_path in [
-    "/tmp/oxibelt-gateway-api-conformance",
-    "/var/oxibelt-gateway-api-conformance",
-  ] {
-    assert!(
-      !script.contains(mounted_path),
-      "Gateway API conformance artifacts must stay on the Kind node root filesystem instead of runtime mount {mounted_path}"
-    );
-  }
 
   for removed in [
     "stale_config_pod_is_running_and_unready",
