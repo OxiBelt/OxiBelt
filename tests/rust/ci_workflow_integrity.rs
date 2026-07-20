@@ -2083,6 +2083,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "docker exec \"${node}\" test -s \"${node_report}\"",
     "docker exec",
     "implementation_version=\"$(git -C \"${repo_root}\" rev-parse --verify 'HEAD^{commit}')\"",
+    "-contact=https://github.com/OxiBelt/OxiBelt/issues/new",
     "-version=\"${implementation_version}\"",
     "kind delete cluster --name \"${cluster_name}\"",
     "docker version --format '{{.Server.Version}}'",
@@ -2139,6 +2140,11 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "Kubernetes immutable rollout script should preserve {expected}"
     );
   }
+  assert_eq!(
+    script.matches("-contact=").count(),
+    1,
+    "the Gateway API conformance report should define exactly one implementation contact"
+  );
   assert!(
     !script.contains("experimental-install.yaml"),
     "the Kubernetes v1.31 rollout must not install experimental CRDs that require newer CEL libraries"

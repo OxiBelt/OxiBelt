@@ -509,6 +509,7 @@ EOF
     -organization=OxiBelt \
     -project=OxiBelt \
     -url=https://github.com/OxiBelt/OxiBelt \
+    -contact=https://github.com/OxiBelt/OxiBelt/issues/new \
     -version="${implementation_version}"
   docker exec "${node}" test -s "${node_report}" \
     || die "Gateway API conformance report is missing or empty in the Kind node"
