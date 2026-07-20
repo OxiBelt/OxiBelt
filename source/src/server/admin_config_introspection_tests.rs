@@ -1,0 +1,252 @@
+use ::http::StatusCode;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use serde_json::json;
+
+use crate::config::{
+  Config, ConfigOriginKind, ConfigValueOrigin, IpmPolicyConfig, IpmPolicyEffect,
+  IpmPolicyStatementConfig,
+};
+use crate::ipm::{IpmActor, IpmRequestContext, IpmRuntime};
+use crate::state::{AppHandle, AppSnapshot};
+
+use super::admin_auth::{AdminActor, AdminAuthorization};
+use super::admin_control::{self, AdminControlHandle};
+use super::admin_ops::admin_config_response;
+
+mod common {
+  include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tests/rust/common/mod.rs"
+  ));
+}
+
+fn actor_and_ipm(action: &str) -> (AdminActor, IpmRuntime) {
+  let actor = IpmActor {
+    name: "deployer-token".to_string(),
+    principal: "deployer".to_string(),
+    subject: "deployer@example.com".to_string(),
+    groups: vec!["ops".to_string()],
+  };
+  let policy = IpmPolicyConfig {
+    name: "test".to_string(),
+    version: "2026-05-23".to_string(),
+    statements: vec![IpmPolicyStatementConfig {
+      effect: IpmPolicyEffect::Allow,
+      actions: vec![action.to_string()],
+      resources: vec!["*".to_string()],
+      conditions: Vec::new(),
+    }],
+  };
+  let ipm = IpmRuntime::test_with_actor_policy("oxibelt", actor.clone(), policy);
+  (actor, ipm)
+}
+
+async fn test_state(name: &str) -> (common::TempDir, AppHandle, String, String) {
+  let temp_dir = common::TempDir::new(name);
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), name);
+  let candidate = common::minimal_config_toml_with_paths(
+    cert_path.file_name().unwrap().to_str().unwrap(),
+    key_path.file_name().unwrap().to_str().unwrap(),
+  );
+  let effective = common::minimal_config_toml(&cert_path, &key_path);
+  let config_path = temp_dir.path().join("oxibelt.toml");
+  std::fs::write(&config_path, &candidate).expect("config should be written");
+  let mut config: Config = toml::from_str(&effective).expect("config should decode");
+  config.validate().expect("config should validate");
+  config.source_paths.config_entry = Some(config_path.clone());
+  config.source_paths.config_dir = Some(temp_dir.path().to_path_buf());
+  config.source_paths.cert_dir = Some(temp_dir.path().to_path_buf());
+  config.source_paths.oxirule_dir = Some(temp_dir.path().to_path_buf());
+  config.source_paths.config_files = vec![config_path.clone()];
+  for field_path in ["logging.level", "tls.private_key"] {
+    config.source_paths.field_origins.insert(
+      field_path.to_string(),
+      ConfigValueOrigin {
+        kind: ConfigOriginKind::Entry,
+        file: Some(config_path.clone()),
+        line: None,
+        column: None,
+      },
+    );
+  }
+  let snapshot = AppSnapshot::new(config)
+    .await
+    .expect("snapshot should initialize");
+  (temp_dir, AppHandle::new(snapshot), candidate, effective)
+}
+
+#[tokio::test]
+async fn config_explain_reads_the_redacted_active_config_and_source_origin() {
+  let (_temp_dir, state, _raw, effective) = test_state("admin-config-explain").await;
+  let (control, _receiver) = AdminControlHandle::new(Some(effective));
+  let (actor, ipm) = actor_and_ipm("config:GetEffective");
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let request = hyper::Request::builder()
+    .method(::http::Method::GET)
+    .uri("/admin/v1/config/explain?field_path=logging.level")
+    .body(Full::new(Bytes::new()))
+    .expect("request should build");
+
+  let response = admin_config_response(
+    request,
+    state.clone(),
+    control.clone(),
+    &authorization,
+    &::http::Method::GET,
+    "/admin/v1/config/explain",
+  )
+  .await;
+
+  assert_eq!(response.status(), StatusCode::OK);
+  let body = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response should collect")
+    .to_bytes();
+  let body: serde_json::Value = serde_json::from_slice(&body).expect("response should be JSON");
+  assert_eq!(body["field_path"], "logging.level");
+  assert_eq!(body["effective_value"], "info");
+  assert_eq!(body["source"]["kind"], "entry");
+  assert_eq!(body["source"]["file"], "oxibelt.toml");
+  assert_eq!(body["constraints"]["secret_class"], "none");
+  assert!(!body["source"]["file"].as_str().unwrap().starts_with('/'));
+
+  let request = hyper::Request::builder()
+    .method(::http::Method::GET)
+    .uri("/admin/v1/config/explain?field_path=tls.private_key")
+    .body(Full::new(Bytes::new()))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state,
+    control,
+    &authorization,
+    &::http::Method::GET,
+    "/admin/v1/config/explain",
+  )
+  .await;
+  let status = response.status();
+  let body = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response should collect")
+    .to_bytes();
+  assert_eq!(
+    status,
+    StatusCode::OK,
+    "unexpected explain response: {}",
+    String::from_utf8_lossy(&body)
+  );
+  let body: serde_json::Value = serde_json::from_slice(&body).expect("response should be JSON");
+  assert_eq!(body["redacted"], true);
+  assert!(body.get("effective_value").is_none());
+  assert_eq!(body["constraints"]["secret_class"], "file_reference");
+}
+
+#[tokio::test]
+async fn config_explain_requires_get_effective_permission() {
+  let (_temp_dir, state, _raw, effective) = test_state("admin-config-explain-auth").await;
+  let (control, _receiver) = AdminControlHandle::new(Some(effective));
+  let (actor, ipm) = actor_and_ipm("config:GetStatus");
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let request = hyper::Request::builder()
+    .method(::http::Method::GET)
+    .uri("/admin/v1/config/explain?field_path=logging.level")
+    .body(Full::new(Bytes::new()))
+    .expect("request should build");
+
+  let response = admin_config_response(
+    request,
+    state,
+    control,
+    &authorization,
+    &::http::Method::GET,
+    "/admin/v1/config/explain",
+  )
+  .await;
+
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
+  let (_temp_dir, state, candidate, _effective) = test_state("admin-config-validate-report").await;
+  let (control, _receiver) = admin_control::AdminControlHandle::new(None);
+  let (actor, ipm) = actor_and_ipm("config:Validate");
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+
+  let body = serde_json::to_vec(&json!({ "format": "toml", "config": candidate }))
+    .expect("request should serialize");
+  let request = hyper::Request::builder()
+    .method(::http::Method::POST)
+    .uri("/admin/v1/config/validate")
+    .body(Full::new(Bytes::from(body)))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state.clone(),
+    control.clone(),
+    &authorization,
+    &::http::Method::POST,
+    "/admin/v1/config/validate",
+  )
+  .await;
+  let status = response.status();
+  let body = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response should collect")
+    .to_bytes();
+  assert_eq!(
+    status,
+    StatusCode::OK,
+    "unexpected validation response: {}",
+    String::from_utf8_lossy(&body)
+  );
+  let body: serde_json::Value = serde_json::from_slice(&body).expect("response should be JSON");
+  assert_eq!(body["report_schema_version"], 1);
+  assert_eq!(body["ok"], true);
+  assert_eq!(body["diagnostics"], json!([]));
+
+  let secret = "do-not-return-this-secret";
+  let invalid = format!("[logging]\nlevel = \"{secret}\" trailing\n");
+  let body = serde_json::to_vec(&json!({ "format": "toml", "config": invalid }))
+    .expect("request should serialize");
+  let request = hyper::Request::builder()
+    .method(::http::Method::POST)
+    .uri("/admin/v1/config/validate")
+    .body(Full::new(Bytes::from(body)))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state,
+    control,
+    &authorization,
+    &::http::Method::POST,
+    "/admin/v1/config/validate",
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+  let body = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response should collect")
+    .to_bytes();
+  let encoded = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+  assert!(!encoded.contains(secret));
+  let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
+  assert_eq!(body["details"]["config_report"]["report_schema_version"], 1);
+  assert_eq!(body["details"]["config_report"]["ok"], false);
+  assert_eq!(
+    body["details"]["config_report"]["diagnostics"][0]["severity"],
+    "fatal"
+  );
+}

@@ -1,0 +1,8 @@
+[[rule]]
+include = [
+  "source/config/**/*.toml",
+  "deploy/helm/oxibelt/examples/**/*.toml",
+]
+
+[rule.schema]
+path = "source/assets/oxibelt-config-v1.schema.json"

@@ -60,6 +60,10 @@ mod admin_cluster_runtime;
 #[cfg(feature = "admin-runtime")]
 mod admin_config_diff;
 #[cfg(feature = "admin-runtime")]
+mod admin_config_introspection;
+#[cfg(all(test, feature = "admin-runtime"))]
+mod admin_config_introspection_tests;
+#[cfg(feature = "admin-runtime")]
 mod admin_control;
 #[cfg(feature = "admin-runtime")]
 mod admin_diagnostics;
@@ -618,6 +622,7 @@ async fn admin_response_inner(
 
   if path == "/admin/v1/config/status"
     || path == "/admin/v1/config/effective"
+    || path == "/admin/v1/config/explain"
     || path == "/admin/v1/config/validate"
     || path == "/admin/v1/config/diff"
     || path == "/admin/v1/config/load"

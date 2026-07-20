@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use super::ConfigOriginIndex;
+
 /// Source-file metadata retained for diagnostics and reload-aware admin responses.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConfigSourcePaths {
@@ -8,6 +10,7 @@ pub struct ConfigSourcePaths {
   pub cert_dir: Option<PathBuf>,
   pub oxirule_dir: Option<PathBuf>,
   pub config_files: Vec<PathBuf>,
+  pub field_origins: ConfigOriginIndex,
   pub runtime_files: Vec<PathBuf>,
   pub discovery_files: Vec<PathBuf>,
   pub downstream_tls_files: Vec<PathBuf>,

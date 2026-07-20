@@ -14,7 +14,8 @@ use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminActor, AdminAuthorization};
 use super::{
-  admin, admin_body::collect_admin_json_body, admin_control, file_sync_path, rollout_identity,
+  admin, admin_body::collect_admin_json_body, admin_config_introspection, admin_control,
+  file_sync_path, rollout_identity,
 };
 
 mod oxirule_devtools;
@@ -186,6 +187,60 @@ where
         None => text_response(StatusCode::NOT_FOUND, "effective config is unavailable"),
       }
     }
+    (&::http::Method::GET, "/admin/v1/config/explain") => {
+      if !authorization.is_allowed("config:GetEffective", "*") {
+        return permission_denied(authorization.actor, "config:GetEffective");
+      }
+      let field_path =
+        match admin_config_introspection::ConfigFieldPath::parse_query(request.uri().query()) {
+          Ok(field_path) => field_path,
+          Err(error) => {
+            return admin::json_response(
+              StatusCode::BAD_REQUEST,
+              &admin_config_introspection::explain_query_failure(error),
+            );
+          }
+        };
+      let Some((revision, _etag, config)) = admin_control.effective_config().await else {
+        return text_response(StatusCode::NOT_FOUND, "effective config is unavailable");
+      };
+      let effective = match toml::from_str::<toml::Value>(&config) {
+        Ok(effective) => effective,
+        Err(error) => {
+          warn!(error = %error, "failed to parse active redacted effective config");
+          return text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "effective config is unavailable",
+          );
+        }
+      };
+      let Some(value) = field_path.value(&effective) else {
+        return admin::json_response(
+          StatusCode::NOT_FOUND,
+          &admin_config_introspection::explain_not_found(field_path.as_str()),
+        );
+      };
+      let snapshot = state.snapshot();
+      let origin = snapshot
+        .config
+        .source_paths
+        .field_origins
+        .get(field_path.as_str());
+      admin::json_response(
+        StatusCode::OK,
+        &admin_config_introspection::explain_success(
+          &field_path,
+          value,
+          origin,
+          snapshot.config.source_paths.config_entry.as_deref(),
+          if revision > 1 {
+            crate::config::ConfigOriginKind::Admin
+          } else {
+            crate::config::ConfigOriginKind::Default
+          },
+        ),
+      )
+    }
     (&::http::Method::POST, "/admin/v1/config/validate") => {
       if !authorization.is_allowed("config:Validate", "*") {
         return permission_denied(authorization.actor, "config:Validate");
@@ -202,13 +257,20 @@ where
       match Config::load_admin_inline_toml(&payload.config, &active.config)
         .and_then(|config| config.validate().map(|()| config))
       {
-        Ok(_) => admin::json_response(StatusCode::OK, &json!({ "ok": true })),
+        Ok(_) => admin::json_response(
+          StatusCode::OK,
+          &admin_config_introspection::validation_success(),
+        ),
         Err(error) => {
           let error = error.to_string();
-          validation_failed(authorization.actor, "config.validate", &error);
+          validation_failed(
+            authorization.actor,
+            "config.validate",
+            "configuration validation failed",
+          );
           admin::json_response(
             StatusCode::BAD_REQUEST,
-            &json!({ "ok": false, "error": error }),
+            &admin_config_introspection::validation_failure(&error),
           )
         }
       }

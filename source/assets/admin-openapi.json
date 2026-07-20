@@ -727,6 +727,49 @@
         }
       }
     },
+    "/admin/v1/config/explain": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "explainEffectiveConfigField",
+        "summary": "Explain one field from the redacted active effective configuration.",
+        "parameters": [
+          {
+            "name": "field_path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9_-]+(?:\\[[0-9]+\\])*(?:\\.[A-Za-z0-9_-]+(?:\\[[0-9]+\\])*)*$"
+            },
+            "description": "Bounded canonical dotted native configuration path. Array elements use numeric indexes, for example routes[0].name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ConfigExplainReport"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/admin/v1/config/validate": {
       "post": {
         "tags": [
@@ -739,7 +782,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "$ref": "#/components/responses/ConfigValidationReport"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -4725,8 +4768,16 @@
                 "config"
               ],
               "properties": {
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "toml"
+                  ],
+                  "default": "toml"
+                },
                 "config": {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 1048576
                 }
               },
               "additionalProperties": false
@@ -5696,6 +5747,42 @@
       }
     },
     "responses": {
+      "ConfigValidationReport": {
+        "description": "Stable machine-readable validation report for an include-free Admin TOML candidate. Production file/include validation remains a local tooling operation.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConfigValidationReport"
+            }
+          }
+        }
+      },
+      "ConfigExplainReport": {
+        "description": "Secret-safe explanation of one field from the active redacted configuration snapshot.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ConfigExplainReport"
+            }
+          }
+        }
+      },
       "DiagnosticsReport": {
         "description": "Versioned OxiBelt production preflight report.",
         "headers": {
@@ -7353,6 +7440,250 @@
         },
         "additionalProperties": false
       },
+      "ConfigDiagnosticSource": {
+        "type": "object",
+        "required": [
+          "kind",
+          "file"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "include",
+              "profile",
+              "default",
+              "computed",
+              "runtime_override",
+              "admin"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Logical path relative to the configuration entry directory; absolute host paths are not returned."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigDiagnostic": {
+        "type": "object",
+        "required": [
+          "code",
+          "severity",
+          "stage",
+          "field_path",
+          "source",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "warning",
+              "deprecation",
+              "unsupported",
+              "fatal"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "parse",
+              "include",
+              "schema",
+              "decode",
+              "semantic",
+              "migration"
+            ]
+          },
+          "field_path": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ConfigDiagnosticSource"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "suggestions": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string"
+            }
+          },
+          "replacement": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigValidationReport": {
+        "type": "object",
+        "required": [
+          "report_schema_version",
+          "native_schema_epoch",
+          "ok",
+          "diagnostics"
+        ],
+        "properties": {
+          "report_schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "native_schema_epoch": {
+            "type": "integer",
+            "const": 1
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "diagnostics": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/ConfigDiagnostic"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigExplainSource": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "entry",
+              "include",
+              "profile",
+              "default",
+              "computed",
+              "runtime_override",
+              "admin"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Logical path relative to the configuration entry directory; absolute host paths are not returned."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigExplainConstraints": {
+        "type": "object",
+        "required": [
+          "schema",
+          "introduced_epoch",
+          "secret_class",
+          "config_activation",
+          "reference_activation"
+        ],
+        "properties": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "introduced_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deprecated_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "replacement": {
+            "type": "string"
+          },
+          "secret_class": {
+            "type": "string",
+            "enum": [
+              "none",
+              "literal",
+              "environment_reference",
+              "file_reference",
+              "credential_bearing_url"
+            ]
+          },
+          "config_activation": {
+            "$ref": "#/components/schemas/NativeConfigActivation"
+          },
+          "reference_activation": {
+            "$ref": "#/components/schemas/NativeConfigActivation"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigActivation": {
+        "type": "string",
+        "enum": [
+          "full_reload",
+          "oxi_rule_reload",
+          "downstream_tls_reload",
+          "restart_required",
+          "conditional",
+          "none"
+        ]
+      },
+      "ConfigExplainReport": {
+        "type": "object",
+        "required": [
+          "report_schema_version",
+          "native_schema_epoch",
+          "ok",
+          "field_path",
+          "source",
+          "redacted",
+          "constraints"
+        ],
+        "properties": {
+          "report_schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "native_schema_epoch": {
+            "type": "integer",
+            "const": 1
+          },
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "field_path": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "source": {
+            "$ref": "#/components/schemas/ConfigExplainSource"
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "effective_value": {
+            "description": "Omitted whenever the field is classified as secret-bearing or its effective value was redacted."
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/ConfigExplainConstraints"
+          }
+        },
+        "additionalProperties": false
+      },
       "OperationalProfileStatus": {
         "description": "Built-in operational profile selected by the active configuration. This field is omitted when no profile is selected.",
         "type": "object",
@@ -7484,6 +7815,18 @@
           },
           "details": {
             "type": "object",
+            "properties": {
+              "config_report": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ConfigValidationReport"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConfigExplainReport"
+                  }
+                ]
+              }
+            },
             "additionalProperties": true
           }
         },

@@ -17,6 +17,18 @@ mod audit_verify_tests;
 mod cli;
 #[path = "config_compat.rs"]
 mod config_compat;
+#[path = "config_explain.rs"]
+mod config_explain;
+#[path = "config_migrate.rs"]
+mod config_migrate;
+#[path = "config_migrate_transform.rs"]
+mod config_migrate_transform;
+#[path = "config_output.rs"]
+mod config_output;
+#[path = "config_schema.rs"]
+mod config_schema;
+#[path = "config_validate.rs"]
+mod config_validate;
 #[path = "doctor.rs"]
 mod doctor;
 #[path = "doctor_plan.rs"]
@@ -92,6 +104,21 @@ async fn main() {
 async fn run() -> anyhow::Result<i32> {
   let cli = Cli::parse();
   oxibelt::tls::install_default_provider()?;
+  if let Some(code) = config_schema::run_if_requested(&cli.command, cli.admin.output)? {
+    return Ok(code);
+  }
+  if let Some(code) = config_explain::run_local_if_requested(&cli.command, cli.admin.output)? {
+    return Ok(code);
+  }
+  if let Some(code) = config_migrate::run_if_requested(&cli.command, cli.admin.output)? {
+    return Ok(code);
+  }
+  let prepared_validation =
+    match config_validate::prepare_if_requested(&cli.command, cli.admin.output)? {
+      config_validate::ValidationDispatch::NotRequested => None,
+      config_validate::ValidationDispatch::Complete(code) => return Ok(code),
+      config_validate::ValidationDispatch::Remote(prepared) => Some(prepared),
+    };
   if let Some(code) = audit_verify::run_local_if_requested(&cli.command, cli.admin.output).await? {
     return Ok(code);
   }
@@ -115,6 +142,22 @@ async fn run() -> anyhow::Result<i32> {
   .await?
   {
     return Ok(0);
+  }
+  if let Some(prepared) = prepared_validation {
+    let request = prepared.request_plan();
+    let response = mutation_signer::request_json(
+      &client,
+      mutation_signer.as_ref(),
+      request.method,
+      &request.endpoint,
+      request.body,
+      request.if_match.as_deref(),
+    )
+    .await?;
+    if response.status == http::StatusCode::FORBIDDEN {
+      print_permission_hint(&request.permission);
+    }
+    return prepared.finish(&response, cli.admin.output);
   }
   let request = plan_command(&client, &cli.command).await?;
   let response = mutation_signer::request_json(

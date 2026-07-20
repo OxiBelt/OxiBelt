@@ -202,12 +202,18 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
   match &command.command {
     ConfigSubcommand::Status => get("/admin/v1/config/status", "config:GetStatus", "*"),
     ConfigSubcommand::Effective => get("/admin/v1/config/effective", "config:GetEffective", "*"),
-    ConfigSubcommand::Validate(args) => config_file_post(
-      "/admin/v1/config/validate",
-      &args.file,
-      "config:Validate",
-      None,
-    ),
+    ConfigSubcommand::Explain(args) if args.file.is_none() => {
+      if args.field_path.trim().is_empty() {
+        bail!("config explain field path must not be empty");
+      }
+      let mut query = url::form_urlencoded::Serializer::new(String::new());
+      query.append_pair("field_path", &args.field_path);
+      get(
+        &format!("/admin/v1/config/explain?{}", query.finish()),
+        "config:GetEffective",
+        "*",
+      )
+    }
     ConfigSubcommand::Diff(args) => {
       config_file_post("/admin/v1/config/diff", &args.file, "config:Diff", None)
     }
@@ -230,9 +236,11 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
         etag,
       )
     }
-    ConfigSubcommand::LbPolicyCompat(_) => {
-      bail!("config lb-policy-compat is a local-only command")
-    }
+    ConfigSubcommand::Schema(_)
+    | ConfigSubcommand::Validate(_)
+    | ConfigSubcommand::Explain(_)
+    | ConfigSubcommand::Migrate(_)
+    | ConfigSubcommand::LbPolicyCompat(_) => bail!("requested config command is local-only"),
   }
 }
 

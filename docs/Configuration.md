@@ -27,6 +27,73 @@ Validate a configuration without starting listeners:
 oxibelt --config source/config/oxibelt.toml --check
 ```
 
+For editor completion and automation, the build-validated JSON Schema for the
+current native configuration epoch is
+[`source/assets/oxibelt-config-v1.schema.json`](../source/assets/oxibelt-config-v1.schema.json).
+The repository [`.taplo.toml`](../.taplo.toml) associates that schema with the
+example and native TOML configuration directories. Print the exact embedded
+schema with:
+
+```sh
+oxibeltctl config schema --epoch 1
+```
+
+Run local production parsing, include expansion, structural checks, and the
+authoritative Rust semantic validator with stable JSON diagnostics:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+Without `--local-only`, validation remains local-first and then sends the
+merged, include-free TOML to the authenticated Admin
+`POST /admin/v1/config/validate` endpoint. A local fatal result is never sent.
+Diagnostics carry `report_schema_version`, `native_schema_epoch`, severity,
+stage, source file, canonical field path, and bounded spelling suggestions.
+Warnings and deprecations do not fail validation; `unsupported` and `fatal`
+diagnostics do.
+
+Explain one local field, including its effective source and schema/lifecycle
+metadata, with:
+
+```sh
+oxibeltctl config explain tls.private_key \
+  --file /etc/oxibelt/config/oxibelt.toml
+```
+
+Omit `--file` to explain the active redacted Admin configuration through
+`GET /admin/v1/config/explain`. Literal secrets, secret references, and values
+already redacted by the effective-config boundary are never returned.
+
+Native schema epochs are monotonic. Epoch 1 is the current public contract;
+its artifact is immutable for incompatible shape changes. Additive optional
+fields and metadata corrections may be published within an epoch, while a
+field removal, incompatible type change, or incompatible required-field change
+requires a new epoch and an explicit migration. The diagnostics report schema
+is versioned independently. JSON Schema provides structural/editor guidance;
+`Config::load` plus `Config::validate` remains authoritative for cross-field,
+path, security, and runtime semantics.
+
+The only automatic migration currently supported is the explicit legacy epoch
+0 to epoch 1 transform:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+```
+
+Migration preserves comments and formatting through `toml_edit`, rejects
+ambiguous or conflicting transformations, emits a deterministic report, and
+validates an in-memory overlay with production path semantics before writing.
+The default output is a new sibling directory named
+`<config-directory>.migrated-v1`; existing output is never overwritten. Only
+TOML documents in the include graph are copied. Certificates, keys, and rule
+assets remain at the original roots, so the result is a review/overlay tree,
+not a self-contained runnable layout until the operator supplies the referenced
+assets. Re-running the transform on canonical input is idempotent.
+
 Run the ordered startup runtime diagnostic without serving traffic:
 
 ```sh

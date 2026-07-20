@@ -1100,6 +1100,10 @@ fn source_structure_job_stays_independent() {
     workflow.contains("bash tests/scripts/check-cargo-package-boundaries.sh"),
     "source-structure should enforce the data-plane Cargo package boundary"
   );
+  assert!(
+    workflow.contains("bash tests/scripts/check-native-config-schema.sh"),
+    "source-structure should enforce native configuration schema drift"
+  );
 }
 
 #[test]

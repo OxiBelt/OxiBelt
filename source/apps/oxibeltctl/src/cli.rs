@@ -130,12 +130,48 @@ pub(crate) struct ConfigCommand {
 pub(crate) enum ConfigSubcommand {
   Status,
   Effective,
-  Validate(FileArg),
+  Schema(ConfigSchemaArgs),
+  Validate(ConfigValidateArgs),
+  Explain(ConfigExplainArgs),
+  Migrate(ConfigMigrateArgs),
   Diff(FileArg),
   Apply(ConfigApplyArgs),
   Rollback(EtagsArgs),
   #[command(name = "lb-policy-compat")]
   LbPolicyCompat(ConfigLbPolicyCompatArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigSchemaArgs {
+  #[arg(long, default_value_t = 1)]
+  pub(crate) epoch: u32,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigValidateArgs {
+  pub(crate) file: PathBuf,
+  #[arg(long)]
+  pub(crate) local_only: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigExplainArgs {
+  pub(crate) field_path: String,
+  #[arg(long, value_name = "FILE")]
+  pub(crate) file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigMigrateArgs {
+  pub(crate) file: PathBuf,
+  #[arg(long = "from")]
+  pub(crate) from_epoch: u32,
+  #[arg(long = "to")]
+  pub(crate) to_epoch: u32,
+  #[arg(long, value_name = "DIR")]
+  pub(crate) output_dir: Option<PathBuf>,
+  #[arg(long)]
+  pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Args)]

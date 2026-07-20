@@ -1,7 +1,6 @@
 //! Configuration parsing and validation for every runtime boundary.
 //! This module keeps defaults explicit before listeners, proxying, WAF, and admin code consume them.
 
-#[cfg(feature = "admin-runtime")]
 use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
@@ -42,9 +41,12 @@ mod limits;
 mod listener;
 mod loader;
 mod logging;
+mod native_config;
+mod native_schema;
 mod operational_profile;
 mod outbound_revocation;
 mod overload;
+mod provenance;
 mod quic;
 mod rate_limit;
 mod retry;
@@ -96,13 +98,15 @@ use limits::{
 };
 pub use listener::{HttpListenerMode, ListenerConfig, ProxyProtocolConfig, ProxyProtocolVersion};
 use listener::{RawListenerConfig, validate_bind_list, validate_bind_lists_do_not_overlap};
-#[cfg(feature = "admin-runtime")]
 use loader::load_toml_with_includes_and_overrides;
 use loader::{absolute_config_path, load_toml_with_includes};
 pub use logging::*;
+pub use native_config::*;
+pub use native_schema::*;
 pub use operational_profile::OperationalProfile;
 pub use outbound_revocation::*;
 pub use overload::*;
+pub use provenance::{ConfigOriginIndex, ConfigOriginKind, ConfigValueOrigin};
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use rate_limit::*;
@@ -378,6 +382,7 @@ impl Config {
       .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
     config.source_paths.config_entry = Some(absolute_config_path(path)?);
     config.source_paths.config_files = loaded.files;
+    config.source_paths.field_origins = loaded.origins;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
     config.normalize_loaded_waf_lb_policy_compat()?;
@@ -386,7 +391,6 @@ impl Config {
     Ok(config)
   }
 
-  #[cfg(feature = "admin-runtime")]
   pub(crate) fn load_with_config_file_overrides(
     path: &Path,
     overrides: &HashMap<PathBuf, Option<String>>,
@@ -401,6 +405,7 @@ impl Config {
       .with_context(|| format!("failed to decode merged TOML from {}", path.display()))?;
     config.source_paths.config_entry = Some(absolute_config_path(path)?);
     config.source_paths.config_files = loaded.files;
+    config.source_paths.field_origins = loaded.origins;
     config.resolve_relative_paths(&path_roots)?;
     config.load_external_waf_rules()?;
     config.normalize_loaded_waf_lb_policy_compat()?;

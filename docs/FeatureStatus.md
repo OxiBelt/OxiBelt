@@ -23,6 +23,7 @@ Lifecycle states are intentionally limited:
 
 | Feature ID | Status | Surface | Contract notes |
 | --- | --- | --- | --- |
+| `native-config-schema-tooling` | `supported` | Config/CLI/Admin API | Epoch-1 JSON Schema, Taplo association, stable local-first validation diagnostics, redacted field explanation, and explicit deterministic epoch-0-to-1 migration are implemented. Rust semantic validation remains authoritative. |
 | `downstream-http-protocols` | `supported` | Data plane | Downstream HTTP/1.1, HTTP/2, and HTTP/3 are implemented. |
 | `upstream-http-protocols` | `supported` | Data plane | Upstream HTTP/1.1, HTTPS HTTP/2, h2c, HTTP/3, WebSocket, and WebTransport forwarding are implemented. |
 | `route-matchers` | `supported` | Config/data plane | Routes support host, path prefix, `match.methods`, `match.headers`, `match.queries`, `match.path.exact`, `match.path.prefix`, `match.path.regex`, `match.source_cidrs`, `match.protocols`, and TLS client-certificate matchers. Protocol values: `http`, `http1`, `http2`, `http3`, `websocket`, `webtransport`. |

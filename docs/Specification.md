@@ -437,6 +437,25 @@ Configuration includes are resolved relative to the file that declares them. Run
 
 Relative paths must be normalized, must not contain `.` or `..` components, and must resolve to existing regular files under the correct purpose-specific directory.
 
+Native TOML has a build-validated, machine-readable JSON Schema identified by
+an integer epoch. The schema supplies structural types, selected enums and
+bounds, deprecation/replacement annotations, secret-reference classification,
+and activation metadata. It is generated from the same checked key metadata
+used by strict unknown-field validation, and CI compares the generator output
+byte-for-byte with the embedded versioned artifact. The schema is intentionally
+not a replacement for production validation: include expansion, operational
+profile expansion, relative-path confinement, typed decoding, and cross-field
+security checks remain `Config::load` and `Config::validate` responsibilities.
+
+Configuration diagnostics and schema epochs evolve independently. Within an
+epoch, incompatible structural changes are prohibited. Therefore,
+incompatible shape changes require a new epoch and explicit migration.
+Migration is local,
+deterministic, comment-preserving where `toml_edit` permits,
+ambiguity-rejecting, and validated against the original path roots before a
+separate review tree is published. Admin explain operations consume the
+already redacted effective configuration and never recover secret material.
+
 ## Non-Goals and Reserved Work
 
 OxiBelt intentionally leaves these out of scope by design:

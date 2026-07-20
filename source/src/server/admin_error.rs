@@ -321,6 +321,33 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn finalize_preserves_structured_config_reports_in_error_details() {
+    let audit = AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().expect("peer address"),
+      "http",
+      &Method::POST,
+      "/admin/v1/config/validate",
+      None,
+    );
+    let response = json_response(
+      StatusCode::BAD_REQUEST,
+      &crate::server::admin_config_introspection::validation_failure(
+        "configuration validation failed",
+      ),
+    );
+    let response = finalize_response(response, &audit).await;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(
+      body["error"]["details"]["config_report"]["report_schema_version"],
+      1
+    );
+    assert_eq!(body["error"]["details"]["config_report"]["ok"], false);
+  }
+
+  #[tokio::test]
   async fn finalize_preserves_only_switching_protocols_informational() {
     let audit = AdminAuditHandle::new(
       "127.0.0.1:12345".parse().expect("peer address"),

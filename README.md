@@ -169,7 +169,7 @@ the complete contract and boundaries.
 ## Documentation
 
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
-- [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, validation, and examples.
+- [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, machine-readable schema, validation, migration, and examples.
 - [Operational-profile contract](docs/Configuration.md#operational-profiles):
   `edge-secure-medium` v1 syntax, protected defaults, required inputs, Helm
   companion values, and compatibility rules.
@@ -192,6 +192,7 @@ source/                         Integrated data-plane and Admin runtime crate
 source/apps/                    Controller, CLI, keysigner, and netport binaries
 source/crates/                  Shared external-control protocol and HTTP crates
 source/assets/                  Build-validated embedded runtime assets
+source/assets/oxibelt-config-v1.schema.json  Native TOML JSON Schema epoch 1
 source/src/proxy/http.rs         HTTP reverse proxy behavior
 source/src/tls.rs                TLS configuration and client/server setup
 source/src/config.rs             Configuration loading and validation

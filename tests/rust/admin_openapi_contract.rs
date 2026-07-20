@@ -116,6 +116,124 @@ fn admin_error_responses_use_json_envelope_and_headers() {
 }
 
 #[test]
+fn config_tooling_models_match_the_admin_runtime_contract() {
+  let spec = openapi();
+
+  let payload =
+    &spec["components"]["requestBodies"]["ConfigPayload"]["content"]["application/json"]["schema"];
+  assert_eq!(
+    json_string_set(&payload["required"], "ConfigPayload.required"),
+    BTreeSet::from(["config".to_string()])
+  );
+  let payload_fields = payload["properties"]
+    .as_object()
+    .expect("ConfigPayload.properties must be an object")
+    .keys()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    payload_fields,
+    BTreeSet::from(["config".to_string(), "format".to_string()])
+  );
+  assert_eq!(payload["properties"]["format"]["default"], "toml");
+  assert_eq!(payload["properties"]["config"]["maxLength"], 1_048_576);
+  assert_eq!(
+    json_string_set(
+      &payload["properties"]["format"]["enum"],
+      "ConfigPayload.format.enum"
+    ),
+    BTreeSet::from(["toml".to_string()])
+  );
+
+  let validate = &spec["paths"]["/admin/v1/config/validate"]["post"];
+  assert_eq!(
+    validate["responses"]["200"]["$ref"],
+    "#/components/responses/ConfigValidationReport"
+  );
+  let validation = &spec["components"]["schemas"]["ConfigValidationReport"];
+  assert_eq!(
+    validation["properties"]["report_schema_version"]["const"],
+    1
+  );
+  assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
+
+  let explain = &spec["paths"]["/admin/v1/config/explain"]["get"];
+  assert_eq!(
+    explain["responses"]["200"]["$ref"],
+    "#/components/responses/ConfigExplainReport"
+  );
+  let parameters = explain["parameters"]
+    .as_array()
+    .expect("config explain parameters must be an array");
+  assert_eq!(parameters.len(), 1);
+  assert_eq!(parameters[0]["name"], "field_path");
+  assert_eq!(parameters[0]["in"], "query");
+  assert_eq!(parameters[0]["required"], true);
+  assert_eq!(parameters[0]["schema"]["maxLength"], 512);
+  let explain_report = &spec["components"]["schemas"]["ConfigExplainReport"];
+  assert_eq!(
+    explain_report["properties"]["report_schema_version"]["const"],
+    1
+  );
+  assert_eq!(
+    explain_report["properties"]["native_schema_epoch"]["const"],
+    1
+  );
+  assert_eq!(explain_report["properties"]["ok"]["const"], true);
+  assert_eq!(
+    explain_report["properties"]["constraints"]["$ref"],
+    "#/components/schemas/ConfigExplainConstraints"
+  );
+
+  let diagnostic = &spec["components"]["schemas"]["ConfigDiagnostic"];
+  assert_eq!(
+    json_string_set(
+      &diagnostic["properties"]["severity"]["enum"],
+      "ConfigDiagnostic.severity.enum"
+    ),
+    BTreeSet::from([
+      "deprecation".to_string(),
+      "fatal".to_string(),
+      "unsupported".to_string(),
+      "warning".to_string(),
+    ])
+  );
+  assert_eq!(
+    json_string_set(
+      &spec["components"]["schemas"]["ConfigExplainConstraints"]["properties"]["secret_class"]["enum"],
+      "ConfigExplainConstraints.secret_class.enum"
+    ),
+    BTreeSet::from([
+      "credential_bearing_url".to_string(),
+      "environment_reference".to_string(),
+      "file_reference".to_string(),
+      "literal".to_string(),
+      "none".to_string(),
+    ])
+  );
+
+  let report_variants = spec["components"]["schemas"]["AdminError"]["properties"]["details"]
+    ["properties"]["config_report"]["oneOf"]
+    .as_array()
+    .expect("AdminError.details.config_report must enumerate report contracts")
+    .iter()
+    .map(|entry| {
+      entry["$ref"]
+        .as_str()
+        .expect("config report variant must be a reference")
+        .to_string()
+    })
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    report_variants,
+    BTreeSet::from([
+      "#/components/schemas/ConfigExplainReport".to_string(),
+      "#/components/schemas/ConfigValidationReport".to_string(),
+    ])
+  );
+}
+
+#[test]
 fn immutable_rollout_status_and_mutation_boundaries_are_documented() {
   let spec = openapi();
   let status = &spec["paths"]["/admin/v1/config/status"]["get"];
@@ -883,6 +1001,7 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("get", "/admin/v1/config/status"),
     ("get", "/admin/v1/config/instances"),
     ("get", "/admin/v1/config/effective"),
+    ("get", "/admin/v1/config/explain"),
     ("post", "/admin/v1/config/validate"),
     ("post", "/admin/v1/config/diff"),
     ("post", "/admin/v1/config/load"),

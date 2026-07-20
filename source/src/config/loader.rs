@@ -6,11 +6,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 
-use super::{canonicalize_local_config_file_target, resolve_local_config_file_path};
+use super::provenance::{index_document_origins, shift_array_origins};
+use super::{
+  ConfigOriginIndex, ConfigOriginKind, canonicalize_local_config_file_target,
+  resolve_local_config_file_path,
+};
 
 pub(super) struct LoadedToml {
   pub(super) value: toml::Value,
   pub(super) files: Vec<PathBuf>,
+  pub(super) origins: ConfigOriginIndex,
 }
 
 pub(super) fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml> {
@@ -18,7 +23,6 @@ pub(super) fn load_toml_with_includes(path: &Path) -> anyhow::Result<LoadedToml>
   load_toml_document(path, &HashMap::new(), &mut stack)
 }
 
-#[cfg(feature = "admin-runtime")]
 pub(super) fn load_toml_with_includes_and_overrides(
   path: &Path,
   overrides: &HashMap<PathBuf, Option<String>>,
@@ -71,17 +75,30 @@ fn load_toml_document(
   let mut value: toml::Value = toml::from_str(&raw)
     .with_context(|| format!("failed to parse TOML from {}", absolute_path.display()))?;
   let include_entries = take_include_entries(&mut value, &absolute_path)?;
+  let origin_kind = if stack.len() == 1 {
+    ConfigOriginKind::Entry
+  } else {
+    ConfigOriginKind::Include
+  };
+  let value_origins = index_document_origins(&value, &canonical_path, origin_kind);
   let base_dir = absolute_path.parent().unwrap_or_else(|| Path::new("."));
 
   let mut merged = toml::Value::Table(toml::map::Map::new());
+  let mut merged_origins = ConfigOriginIndex::new();
   for entry in include_entries {
     for include_path in expand_include_entry(&entry, base_dir, &absolute_path, overrides)? {
       let included = load_toml_document(&include_path, overrides, stack)?;
       files.extend(included.files);
-      merge_toml_values(&mut merged, included.value, "")?;
+      merge_toml_values(
+        &mut merged,
+        included.value,
+        "",
+        &mut merged_origins,
+        included.origins,
+      )?;
     }
   }
-  merge_toml_values(&mut merged, value, "")?;
+  merge_toml_values(&mut merged, value, "", &mut merged_origins, value_origins)?;
 
   stack.pop();
   files.sort();
@@ -89,6 +106,7 @@ fn load_toml_document(
   Ok(LoadedToml {
     value: merged,
     files,
+    origins: merged_origins,
   })
 }
 
@@ -322,6 +340,19 @@ fn merge_toml_values(
   target: &mut toml::Value,
   source: toml::Value,
   key_path: &str,
+  target_origins: &mut ConfigOriginIndex,
+  mut source_origins: ConfigOriginIndex,
+) -> anyhow::Result<()> {
+  merge_toml_value_tree(target, source, key_path, &mut source_origins)?;
+  target_origins.extend(source_origins);
+  Ok(())
+}
+
+fn merge_toml_value_tree(
+  target: &mut toml::Value,
+  source: toml::Value,
+  key_path: &str,
+  source_origins: &mut ConfigOriginIndex,
 ) -> anyhow::Result<()> {
   match (target, source) {
     (toml::Value::Table(target), toml::Value::Table(source)) => {
@@ -333,7 +364,7 @@ fn merge_toml_values(
         };
 
         if let Some(existing) = target.get_mut(&key) {
-          merge_toml_values(existing, value, &child_path)?;
+          merge_toml_value_tree(existing, value, &child_path, source_origins)?;
         } else {
           target.insert(key, value);
         }
@@ -341,6 +372,7 @@ fn merge_toml_values(
       Ok(())
     }
     (toml::Value::Array(target), toml::Value::Array(mut source)) => {
+      shift_array_origins(source_origins, key_path, target.len());
       target.append(&mut source);
       Ok(())
     }

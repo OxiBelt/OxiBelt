@@ -93,6 +93,9 @@ jobs:
       - name: Data-plane Cargo package boundary
         run: bash tests/scripts/check-cargo-package-boundaries.sh
 
+      - name: Native configuration schema drift
+        run: bash tests/scripts/check-native-config-schema.sh
+
       - name: Enable pinned pnpm
         run: |
           corepack enable

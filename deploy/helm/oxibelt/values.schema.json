@@ -540,7 +540,12 @@
           "not": { "const": "gateway-config-directory" }
         },
         "mountPath": { "type": "string", "minLength": 1 },
-        "inline": { "type": "string" }
+        "inline": {
+          "type": "string",
+          "contentMediaType": "application/toml",
+          "x-oxibelt-native-schema": "../../../source/assets/oxibelt-config-v1.schema.json",
+          "x-oxibelt-native-schema-epoch": 1
+        }
       }
     },
     "configRollout": {

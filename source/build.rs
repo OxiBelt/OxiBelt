@@ -3,14 +3,15 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "admin-runtime")]
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const PERSON_PROOF_ASSET: &str = "assets/person-proof-challenge.html";
+const NATIVE_CONFIG_SCHEMA_ASSET: &str = "assets/oxibelt-config-v1.schema.json";
 #[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_ASSET: &str = "assets/admin-openapi.json";
 const PERSON_PROOF_OUTPUT: &str = "person-proof-challenge.html";
+const NATIVE_CONFIG_SCHEMA_OUTPUT: &str = "oxibelt-config-v1.schema.json";
 #[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_OUTPUT: &str = "admin-openapi.json";
 
@@ -54,22 +55,33 @@ fn embed_validated_assets() {
   let out_dir =
     PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide the build-script OUT_DIR"));
   let person_proof_path = manifest_dir.join(PERSON_PROOF_ASSET);
+  let native_config_schema_path = manifest_dir.join(NATIVE_CONFIG_SCHEMA_ASSET);
   #[cfg(feature = "admin-runtime")]
   let admin_openapi_path = manifest_dir.join(ADMIN_OPENAPI_ASSET);
 
   println!("cargo:rerun-if-changed={}", person_proof_path.display());
+  println!(
+    "cargo:rerun-if-changed={}",
+    native_config_schema_path.display()
+  );
   #[cfg(feature = "admin-runtime")]
   println!("cargo:rerun-if-changed={}", admin_openapi_path.display());
   println!("cargo:rerun-if-env-changed=OXIBELT_SOURCE_REVISION");
 
   let person_proof = read_asset(&person_proof_path, "Person Proof challenge");
   validate_person_proof_asset(&person_proof);
+  let native_config_schema = read_asset(&native_config_schema_path, "native configuration schema");
+  validate_native_config_schema(&native_config_schema);
   #[cfg(feature = "admin-runtime")]
   let admin_openapi = read_asset(&admin_openapi_path, "Admin OpenAPI document");
   #[cfg(feature = "admin-runtime")]
   validate_admin_openapi(&admin_openapi);
 
   write_embedded_asset(&out_dir.join(PERSON_PROOF_OUTPUT), &person_proof);
+  write_embedded_asset(
+    &out_dir.join(NATIVE_CONFIG_SCHEMA_OUTPUT),
+    &native_config_schema,
+  );
   #[cfg(feature = "admin-runtime")]
   write_embedded_asset(&out_dir.join(ADMIN_OPENAPI_OUTPUT), &admin_openapi);
 
@@ -86,6 +98,63 @@ fn embed_validated_assets() {
     "cargo:rustc-env=OXIBELT_SOURCE_REVISION={}",
     source_revision()
   );
+}
+
+fn validate_native_config_schema(bytes: &[u8]) {
+  assert!(
+    (1024..=2 * 1024 * 1024).contains(&bytes.len()),
+    "native configuration schema must be between 1 KiB and 2 MiB"
+  );
+  let document: Value =
+    serde_json::from_slice(bytes).expect("native configuration schema must be valid UTF-8 JSON");
+  assert_eq!(
+    document.get("$schema").and_then(Value::as_str),
+    Some("http://json-schema.org/draft-07/schema#"),
+    "native configuration schema must declare JSON Schema Draft 7"
+  );
+  assert_eq!(
+    document
+      .get("x-oxibelt-schema-version")
+      .and_then(Value::as_u64),
+    Some(1),
+    "native configuration schema version must match the supported epoch"
+  );
+  assert_eq!(
+    document
+      .get("additionalProperties")
+      .and_then(Value::as_bool),
+    Some(false),
+    "native configuration schema must reject unknown root fields"
+  );
+  assert!(
+    document.pointer("/properties/config").is_some()
+      && document.pointer("/properties/listeners").is_some()
+      && document.pointer("/properties/tls").is_some(),
+    "native configuration schema must cover the core config, listener, and TLS sections"
+  );
+  reject_external_schema_references(&document);
+}
+
+fn reject_external_schema_references(value: &Value) {
+  match value {
+    Value::Object(object) => {
+      if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        assert!(
+          reference.starts_with('#'),
+          "native configuration schema must not use external references"
+        );
+      }
+      for child in object.values() {
+        reject_external_schema_references(child);
+      }
+    }
+    Value::Array(items) => {
+      for child in items {
+        reject_external_schema_references(child);
+      }
+    }
+    _ => {}
+  }
 }
 
 fn read_asset(path: &Path, label: &str) -> Vec<u8> {
