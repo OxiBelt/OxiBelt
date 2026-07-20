@@ -367,7 +367,6 @@ impl AppSnapshot {
         admin_access_logs,
         metrics.clone(),
         runtime_health.clone(),
-        runtime_generation,
       )
       .await
       .context("failed to build admin audit runtime")?

@@ -86,6 +86,14 @@ impl AdminAuditRuntime {
   }
 
   #[cfg(test)]
+  pub(crate) fn test_with_anchor(anchor: anchor::AuditAnchorRuntime) -> Self {
+    Self {
+      anchor,
+      ..Self::disabled()
+    }
+  }
+
+  #[cfg(test)]
   pub(crate) fn test_with_sender(sender: mpsc::Sender<AdminAuditEvent>) -> Self {
     Self::test_with_sender_and_mode(sender, AdminAuditMode::DurableRequired)
   }
@@ -140,7 +148,6 @@ impl AdminAuditRuntime {
     access_logs: AccessLogSinks,
     metrics: Arc<Metrics>,
     runtime_health: Arc<crate::runtime_health::RuntimeHealth>,
-    runtime_generation: u64,
   ) -> anyhow::Result<Self> {
     if !config.admin.enabled {
       return Ok(Self {
@@ -288,14 +295,7 @@ impl AdminAuditRuntime {
         .context("Admin audit anchoring requires a PostgreSQL audit store")?
         .pool
         .clone();
-      anchor::AuditAnchorRuntime::new(
-        config,
-        local_pool,
-        metrics.clone(),
-        runtime_health,
-        runtime_generation,
-      )
-      .await?
+      anchor::AuditAnchorRuntime::new(config, local_pool, metrics.clone(), runtime_health).await?
     } else {
       anchor::AuditAnchorRuntime::disabled()
     };
@@ -342,6 +342,14 @@ impl AdminAuditRuntime {
 
   pub(crate) fn anchoring_enabled(&self) -> bool {
     self.anchor.enabled()
+  }
+
+  pub(crate) fn activate_runtime_generation(&self, generation: u64) {
+    self.anchor.activate_runtime_generation(generation);
+  }
+
+  pub(crate) fn retire_runtime_generation(&self) {
+    self.anchor.retire_runtime_generation();
   }
 
   pub(crate) fn reserve(&self) -> anyhow::Result<AdminAuditReservation> {

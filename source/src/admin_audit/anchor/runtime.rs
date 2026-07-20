@@ -1,7 +1,7 @@
 //! Runtime signing, submission, recovery, and health policy.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
@@ -42,7 +42,7 @@ struct AuditAnchorInner {
   required: bool,
   metrics: Arc<Metrics>,
   health: Arc<RuntimeHealth>,
-  generation: u64,
+  health_generation: Mutex<Option<u64>>,
   state: AtomicU8,
   last_observed_sequence: AtomicU64,
   last_anchored_sequence: AtomicU64,
@@ -73,7 +73,6 @@ impl AuditAnchorRuntime {
     local_pool: Pool<Postgres>,
     metrics: Arc<Metrics>,
     health: Arc<RuntimeHealth>,
-    generation: u64,
   ) -> anyhow::Result<Self> {
     let anchor = &config.admin.audit.anchor;
     if !anchor.enabled {
@@ -190,7 +189,7 @@ impl AuditAnchorRuntime {
       required,
       metrics,
       health,
-      generation,
+      health_generation: Mutex::new(None),
       state: AtomicU8::new(STATE_HEALTHY),
       last_observed_sequence: AtomicU64::new(u64::MAX),
       last_anchored_sequence: AtomicU64::new(u64::MAX),
@@ -217,6 +216,18 @@ impl AuditAnchorRuntime {
     }
     runtime.spawn_worker();
     Ok(runtime)
+  }
+
+  pub(crate) fn activate_runtime_generation(&self, generation: u64) {
+    if let Some(inner) = &self.inner {
+      inner.activate_runtime_generation(generation);
+    }
+  }
+
+  pub(crate) fn retire_runtime_generation(&self) {
+    if let Some(inner) = &self.inner {
+      inner.retire_runtime_generation();
+    }
   }
 
   pub(crate) async fn record_event_tx(
@@ -623,14 +634,52 @@ impl AuditAnchorInner {
   }
 
   fn set_health(&self, state: RuntimeSubsystemState) {
+    let generation = self.health_generation_guard();
+    if let Some(generation) = *generation {
+      self.publish_health(generation, state);
+    }
+  }
+
+  fn activate_runtime_generation(&self, generation: u64) {
+    let mut active = self.health_generation_guard();
+    *active = Some(generation);
+    self.publish_health(generation, self.runtime_health_state());
+  }
+
+  fn retire_runtime_generation(&self) {
+    *self.health_generation_guard() = None;
+  }
+
+  fn health_generation_guard(&self) -> MutexGuard<'_, Option<u64>> {
+    match self.health_generation.lock() {
+      Ok(generation) => generation,
+      Err(poisoned) => {
+        self.health_generation.clear_poison();
+        self
+          .health
+          .record_lock_recovery(RuntimeSubsystem::AdminAudit);
+        poisoned.into_inner()
+      }
+    }
+  }
+
+  fn runtime_health_state(&self) -> RuntimeSubsystemState {
+    match self.state.load(Ordering::Relaxed) {
+      STATE_HEALTHY => RuntimeSubsystemState::Healthy,
+      STATE_DEGRADED => RuntimeSubsystemState::Degraded,
+      _ => RuntimeSubsystemState::Failed,
+    }
+  }
+
+  fn publish_health(&self, generation: u64, state: RuntimeSubsystemState) {
     self.health.set_subsystem_state(
-      self.generation,
+      generation,
       RuntimeSubsystem::AdminAudit,
       state,
       self.required,
     );
     self.health.set_task_state(
-      self.generation,
+      generation,
       RuntimeTaskKind::AdminAuditAnchor,
       if self.required {
         RuntimeTaskPolicy::RestartableCritical
@@ -682,22 +731,4 @@ fn stream_id(namespace: &str, cluster_id: Option<&str>, instance_id: &str) -> St
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn stream_identity_is_domain_separated_and_cluster_scoped() {
-    let standalone = stream_id("oxibelt", None, "edge-0");
-    let clustered = stream_id("oxibelt", Some("edge"), "edge-0");
-    assert!(standalone.starts_with("sha256:"));
-    assert_ne!(standalone, clustered);
-    assert_eq!(standalone, stream_id("oxibelt", None, "edge-0"));
-  }
-
-  #[test]
-  fn an_old_chain_position_never_covers_a_restarted_chain() {
-    let old = Some(("old-chain".to_string(), 99));
-    assert!(anchor_position_covers(old.as_ref(), "old-chain", 0));
-    assert!(!anchor_position_covers(old.as_ref(), "new-chain", 0));
-  }
-}
+mod tests;

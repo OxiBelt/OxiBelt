@@ -32,9 +32,7 @@ impl AppHandle {
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
     let (data_plane_drain, _) = watch::channel(false);
-    snapshot
-      .runtime_health
-      .activate_generation(snapshot.runtime_generation);
+    activate_published_snapshot(&snapshot, None);
     Self {
       current: Arc::new(ArcSwap::from_pointee(AppGeneration {
         snapshot: Arc::new(snapshot),
@@ -63,13 +61,12 @@ impl AppHandle {
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
     let (data_plane_drain, _) = watch::channel(false);
-    let health = snapshot.runtime_health.clone();
-    let generation = snapshot.runtime_generation;
+    let snapshot = Arc::new(snapshot);
     let previous = self.current.swap(Arc::new(AppGeneration {
-      snapshot: Arc::new(snapshot),
+      snapshot: snapshot.clone(),
       data_plane_drain,
     }));
-    health.activate_generation(generation);
+    activate_published_snapshot(snapshot.as_ref(), Some(previous.snapshot.as_ref()));
     let _ = previous.data_plane_drain.send(true);
   }
 
@@ -87,15 +84,13 @@ impl AppHandle {
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
-    let health = snapshot.runtime_health.clone();
-    let generation = snapshot.runtime_generation;
     let snapshot = Arc::new(snapshot);
     let (data_plane_drain, _) = watch::channel(false);
     let previous = self.current.swap(Arc::new(AppGeneration {
-      snapshot,
+      snapshot: snapshot.clone(),
       data_plane_drain,
     }));
-    health.activate_generation(generation);
+    activate_published_snapshot(snapshot.as_ref(), Some(previous.snapshot.as_ref()));
     let _ = previous.data_plane_drain.send(true);
     true
   }
@@ -111,4 +106,20 @@ impl AppHandle {
       }
     }
   }
+}
+
+fn activate_published_snapshot(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) {
+  #[cfg(not(feature = "admin-runtime"))]
+  let _ = previous;
+  #[cfg(feature = "admin-runtime")]
+  if let Some(previous) = previous {
+    previous.admin_audit.retire_runtime_generation();
+  }
+  snapshot
+    .runtime_health
+    .activate_generation(snapshot.runtime_generation);
+  #[cfg(feature = "admin-runtime")]
+  snapshot
+    .admin_audit
+    .activate_runtime_generation(snapshot.runtime_generation);
 }

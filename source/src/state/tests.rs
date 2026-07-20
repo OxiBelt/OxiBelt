@@ -121,6 +121,125 @@ async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   assert!(!*new_connection.data_plane_drain.borrow());
 }
 
+#[cfg(feature = "admin-runtime")]
+#[tokio::test]
+async fn required_admin_audit_anchor_failure_fails_readiness_after_snapshot_reload() {
+  let temp_dir = common::TempDir::new("admin-audit-anchor-health-reload");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-anchor-health-reload");
+  let config = parse_config(&common::minimal_config_toml(&cert_path, &key_path));
+  let mut initial = AppSnapshot::new(config)
+    .await
+    .expect("initial snapshot should initialize");
+  let anchor = crate::admin_audit::anchor::AuditAnchorRuntime::test_health_only(
+    initial.runtime_health.clone(),
+    true,
+  );
+  initial.admin_audit = crate::admin_audit::AdminAuditRuntime::test_with_anchor(anchor.clone());
+  let handle = AppHandle::new(initial);
+  assert!(handle.snapshot().runtime_health.is_ready());
+
+  let current = handle.snapshot();
+  let replacement = AppSnapshot::new_with_previous(current.config.clone(), Some(current.as_ref()))
+    .await
+    .expect("replacement snapshot should initialize");
+  handle.replace(replacement);
+  assert!(handle.snapshot().runtime_health.is_ready());
+
+  anchor.test_fail();
+  let active = handle.snapshot();
+  assert_eq!(active.admin_audit.anchor_status().state, "failed");
+  assert!(!active.runtime_health.is_ready());
+  let health = active.runtime_health.snapshot();
+  assert_eq!(health.failed_subsystems, vec!["admin_audit"]);
+  assert_eq!(health.failed_tasks, vec!["admin_audit_anchor"]);
+
+  anchor.test_healthy();
+  assert!(active.runtime_health.is_ready());
+}
+
+#[cfg(feature = "admin-runtime")]
+#[tokio::test]
+async fn best_effort_admin_audit_anchor_stays_ready_after_snapshot_reload() {
+  let temp_dir = common::TempDir::new("best-effort-admin-audit-anchor-health-reload");
+  let (cert_path, key_path) = common::create_self_signed_cert(
+    temp_dir.path(),
+    "best-effort-admin-audit-anchor-health-reload",
+  );
+  let config = parse_config(&common::minimal_config_toml(&cert_path, &key_path));
+  let mut initial = AppSnapshot::new(config)
+    .await
+    .expect("initial snapshot should initialize");
+  let anchor = crate::admin_audit::anchor::AuditAnchorRuntime::test_health_only(
+    initial.runtime_health.clone(),
+    false,
+  );
+  initial.admin_audit = crate::admin_audit::AdminAuditRuntime::test_with_anchor(anchor.clone());
+  let handle = AppHandle::new(initial);
+
+  let current = handle.snapshot();
+  let replacement = AppSnapshot::new_with_previous(current.config.clone(), Some(current.as_ref()))
+    .await
+    .expect("replacement snapshot should initialize");
+  handle.replace(replacement);
+  anchor.test_fail();
+
+  let active = handle.snapshot();
+  assert_eq!(active.admin_audit.anchor_status().state, "degraded");
+  assert!(active.runtime_health.is_ready());
+  let health = active.runtime_health.snapshot();
+  assert_eq!(health.degraded_subsystems, vec!["admin_audit"]);
+  assert_eq!(health.degraded_tasks, vec!["admin_audit_anchor"]);
+
+  anchor.test_healthy();
+  assert!(active.runtime_health.is_ready());
+}
+
+#[cfg(feature = "admin-runtime")]
+#[tokio::test]
+async fn snapshot_cas_replays_new_anchor_failure_and_retires_previous_anchor() {
+  let temp_dir = common::TempDir::new("admin-audit-anchor-health-cas");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-audit-anchor-health-cas");
+  let config = parse_config(&common::minimal_config_toml(&cert_path, &key_path));
+  let mut initial = AppSnapshot::new(config)
+    .await
+    .expect("initial snapshot should initialize");
+  let previous_anchor = crate::admin_audit::anchor::AuditAnchorRuntime::test_health_only(
+    initial.runtime_health.clone(),
+    true,
+  );
+  initial.admin_audit =
+    crate::admin_audit::AdminAuditRuntime::test_with_anchor(previous_anchor.clone());
+  let handle = AppHandle::new(initial);
+  let expected = handle.snapshot();
+
+  let mut replacement =
+    AppSnapshot::new_with_previous(expected.config.clone(), Some(expected.as_ref()))
+      .await
+      .expect("replacement snapshot should initialize");
+  let active_anchor = crate::admin_audit::anchor::AuditAnchorRuntime::test_health_only(
+    replacement.runtime_health.clone(),
+    true,
+  );
+  replacement.admin_audit =
+    crate::admin_audit::AdminAuditRuntime::test_with_anchor(active_anchor.clone());
+  active_anchor.test_fail();
+  assert!(expected.runtime_health.is_ready());
+  assert!(handle.replace_if_current(&expected, replacement));
+
+  let active = handle.snapshot();
+  assert_eq!(active.admin_audit.anchor_status().state, "failed");
+  assert!(!active.runtime_health.is_ready());
+  previous_anchor.test_healthy();
+  assert!(!active.runtime_health.is_ready());
+
+  let stale_candidate = expected.as_ref().clone();
+  assert!(!handle.replace_if_current(&expected, stale_candidate));
+  active_anchor.test_healthy();
+  assert!(active.runtime_health.is_ready());
+}
+
 #[tokio::test]
 async fn full_reload_rebuilds_telemetry_runtime_from_new_config() {
   let temp_dir = common::TempDir::new("telemetry-full-reload");
