@@ -441,6 +441,7 @@ fn mutation_receipts_instances_and_typed_activation_routes_are_documented() {
       "canary_healthy",
       "expanding",
       "fully_applied",
+      "anchor_pending",
       "committed",
       "failed",
       "rolling_back",
