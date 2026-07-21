@@ -77,7 +77,7 @@ jobs:
           set +e
           pnpm --dir "${audit_root}" audit --audit-level low --json >"${AUDIT_REPORT}"
           set -e
-          pnpm run dependency-admission -- \
+          pnpm run dependency-admission \
             --license-report-path "${LICENSE_REPORT}" \
             --audit-report-path "${AUDIT_REPORT}"
           pnpm audit signatures

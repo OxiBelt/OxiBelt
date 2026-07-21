@@ -2047,7 +2047,9 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "contents: read",
     "corepack install",
     "pnpm install --frozen-lockfile --ignore-scripts",
-    "pnpm run dependency-admission",
+    "pnpm run dependency-admission \\",
+    "--license-report-path \"${LICENSE_REPORT}\" \\",
+    "--audit-report-path \"${AUDIT_REPORT}\"",
     "pnpm licenses list --json --long",
     "pnpm --dir \"${audit_root}\" audit --audit-level low --json",
     "'  ignoreGhsas: []'",
@@ -2068,6 +2070,7 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "dependency-graph/snapshots",
     "gh api",
     "continue-on-error",
+    "pnpm run dependency-admission -- \\",
   ] {
     assert!(
       !job_text.contains(forbidden),
@@ -4447,7 +4450,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "corepack install",
     "pnpm install --frozen-lockfile",
-    "pnpm run dependency-admission",
+    "pnpm run dependency-admission \\",
+    "--license-report-path \"${LICENSE_REPORT}\" \\",
+    "--audit-report-path \"${AUDIT_REPORT}\"",
     "pnpm audit signatures",
     "pnpm exec tsc devops/sources/release_sbom.ts devops/sources/rebuild_recipe.ts",
     "--ignoreConfig",
@@ -4477,6 +4482,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       "release validate job should include {expected}"
     );
   }
+  assert!(
+    !validate_job_text.contains("pnpm run dependency-admission -- \\"),
+    "release dependency admission must not forward pnpm's literal separator"
+  );
 
   for expected in [
     "name: Release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})",
