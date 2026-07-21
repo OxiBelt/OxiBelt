@@ -208,11 +208,11 @@ fn catalog_defines_the_complete_bounded_program() {
   );
   assert_eq!(
     table_integer(&program, "max_working_corpus_files_per_target"),
-    8_192
+    16_384
   );
   assert_eq!(
     table_integer(&program, "max_cached_corpus_files_per_target"),
-    4_096
+    8_192
   );
   assert_eq!(
     table_integer(&program, "max_cached_corpus_bytes_per_target"),
@@ -693,8 +693,8 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "readonly FUZZ_NIGHTLY=\"nightly-2026-07-16\"",
       "readonly MAX_SEED_FILES=128",
       "readonly MAX_SEED_BYTES=524288",
-      "readonly MAX_WORKING_CORPUS_FILES=8192",
-      "readonly MAX_CACHED_CORPUS_FILES=4096",
+      "readonly MAX_WORKING_CORPUS_FILES=16384",
+      "readonly MAX_CACHED_CORPUS_FILES=8192",
       "readonly MAX_CORPUS_BYTES=67108864",
       "readonly MAX_ARTIFACT_FILES=8",
       "readonly FUZZ_TIMEOUT_SECONDS=10",
@@ -771,7 +771,7 @@ impl CminHarness {
     fs::create_dir_all(&bin_dir).expect("fake Cargo directory should be creatable");
     for index in 0..input_count {
       fs::write(
-        corpus.join(format!("input-{index:04}")),
+        corpus.join(format!("input-{index:05}")),
         [u8::try_from(index % 251).expect("corpus byte should fit")],
       )
       .expect("working corpus entry should be writable");
@@ -855,7 +855,7 @@ esac
     (0..count)
       .map(|index| {
         (
-          format!("input-{index:04}"),
+          format!("input-{index:05}"),
           vec![u8::try_from(index % 251).expect("corpus byte should fit")],
         )
       })
@@ -897,9 +897,26 @@ fn cmin_accepts_the_exact_http_semantics_regression() {
 
 #[cfg(unix)]
 #[test]
+fn cmin_accepts_the_exact_admin_json_mutations_regression() {
+  let harness = CminHarness::new(6_627);
+  let output = harness.run("reduce", 5_633);
+  assert!(
+    output.status.success(),
+    "cmin should retain the complete minimized Admin JSON corpus: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(harness.called_marker.is_file(), "fake cmin should run");
+  assert_eq!(
+    harness.corpus_snapshot(),
+    CminHarness::expected_snapshot(5_633)
+  );
+}
+
+#[cfg(unix)]
+#[test]
 fn cmin_accepts_inclusive_working_and_cached_file_limits() {
-  let harness = CminHarness::new(8_192);
-  let output = harness.run("reduce", 4_096);
+  let harness = CminHarness::new(16_384);
+  let output = harness.run("reduce", 8_192);
   assert!(
     output.status.success(),
     "cmin should accept both inclusive corpus file limits: {}",
@@ -908,23 +925,23 @@ fn cmin_accepts_inclusive_working_and_cached_file_limits() {
   assert!(harness.called_marker.is_file(), "fake cmin should run");
   assert_eq!(
     harness.corpus_snapshot(),
-    CminHarness::expected_snapshot(4_096)
+    CminHarness::expected_snapshot(8_192)
   );
 }
 
 #[cfg(unix)]
 #[test]
 fn cmin_rejects_result_above_cached_limit_without_replacing_working_corpus() {
-  let harness = CminHarness::new(4_097);
+  let harness = CminHarness::new(8_193);
   let original = harness.corpus_snapshot();
-  let output = harness.run("noop", 4_097);
+  let output = harness.run("noop", 8_193);
   assert!(harness.called_marker.is_file(), "fake cmin should run");
   assert!(
     !output.status.success(),
     "a result above the cached corpus limit must fail"
   );
   assert!(
-    String::from_utf8_lossy(&output.stderr).contains("cached corpus exceeds 4096 files"),
+    String::from_utf8_lossy(&output.stderr).contains("cached corpus exceeds 8192 files"),
     "cmin should explain the retained cache bound: {}",
     String::from_utf8_lossy(&output.stderr)
   );
@@ -934,9 +951,9 @@ fn cmin_rejects_result_above_cached_limit_without_replacing_working_corpus() {
 #[cfg(unix)]
 #[test]
 fn cmin_rejects_working_corpus_above_limit_before_invoking_cargo() {
-  let harness = CminHarness::new(8_193);
+  let harness = CminHarness::new(16_385);
   let original = harness.corpus_snapshot();
-  let output = harness.run("noop", 8_193);
+  let output = harness.run("noop", 16_385);
   assert!(
     !harness.called_marker.exists(),
     "fake cmin must not run for an oversized working corpus"
@@ -946,7 +963,7 @@ fn cmin_rejects_working_corpus_above_limit_before_invoking_cargo() {
     "a corpus above the working limit must fail"
   );
   assert!(
-    String::from_utf8_lossy(&output.stderr).contains("working corpus exceeds 8192 files"),
+    String::from_utf8_lossy(&output.stderr).contains("working corpus exceeds 16384 files"),
     "cmin should explain the transient working bound: {}",
     String::from_utf8_lossy(&output.stderr)
   );
