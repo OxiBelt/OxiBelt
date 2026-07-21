@@ -87,6 +87,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
+      - name: Test release-image rebuild comparator
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py
+
       - name: Rust module size
         run: tests/scripts/check-rust-module-size.sh
 

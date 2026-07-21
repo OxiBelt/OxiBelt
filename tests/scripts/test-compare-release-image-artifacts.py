@@ -24,16 +24,32 @@ def digest(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
 
-def layer(entries: list[tuple[str, bytes, int]], mtime: int = 0) -> bytes:
+def layer(
+    entries: list[tuple[str, bytes, int]],
+    mtime: int = 0,
+    *,
+    pax_headers: dict[str, str] | None = None,
+    global_pax_headers: dict[str, str] | None = None,
+    uname: str = "",
+    gname: str = "",
+) -> bytes:
     output = io.BytesIO()
-    with tarfile.open(fileobj=output, mode="w") as archive:
+    with tarfile.open(
+        fileobj=output,
+        mode="w",
+        format=tarfile.PAX_FORMAT,
+        pax_headers=global_pax_headers,
+    ) as archive:
         for name, content, mode in entries:
             member = tarfile.TarInfo(name)
             member.size = len(content)
             member.mode = mode
             member.uid = 10001
             member.gid = 10001
+            member.uname = uname
+            member.gname = gname
             member.mtime = mtime
+            member.pax_headers = dict(pax_headers or {})
             archive.addfile(member, io.BytesIO(content))
     return output.getvalue()
 
@@ -126,9 +142,21 @@ class ComparatorTest(unittest.TestCase):
         *,
         layer_mtime: int = 0,
         created: str = "2026-07-21T00:00:00Z",
+        pax_headers: dict[str, str] | None = None,
+        global_pax_headers: dict[str, str] | None = None,
+        uname: str = "",
+        gname: str = "",
     ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
         image = self.root / f"{prefix}.tar"
-        config_digest = docker_archive(image, layer(entries, layer_mtime), created)
+        layer_value = layer(
+            entries,
+            layer_mtime,
+            pax_headers=pax_headers,
+            global_pax_headers=global_pax_headers,
+            uname=uname,
+            gname=gname,
+        )
+        config_digest = docker_archive(image, layer_value, created)
         image_digest = digest(image.read_bytes() + b"manifest")
         contract = self.root / f"{prefix}-contract.json"
         value = {
@@ -229,6 +257,115 @@ class ComparatorTest(unittest.TestCase):
         result, receipt = self.compare(published, rebuilt)
 
         self.assertEqual(result.returncode, 1)
+        self.assertEqual(receipt["outcome"], "mismatch")
+        self.assertIn("filesystem", receipt["differences"])
+
+    def test_extended_pax_metadata_drift_is_a_mismatch(self) -> None:
+        metadata = (
+            "LIBARCHIVE.xattr.security.capability",
+            "SCHILY.xattr.security.capability",
+            "SCHILY.acl.access",
+            "SCHILY.fflags",
+            "RHT.security.selinux",
+            "atime",
+            "ctime",
+            "VENDOR.security.label",
+        )
+        for index, key in enumerate(metadata):
+            with self.subTest(key=key):
+                published = self.artifact(
+                    f"published-pax-{index}",
+                    [("app/oxibelt", b"binary", 0o755)],
+                    pax_headers={key: "published-value"},
+                )
+                rebuilt = self.artifact(
+                    f"rebuilt-pax-{index}",
+                    [("app/oxibelt", b"binary", 0o755)],
+                )
+
+                result, receipt = self.compare(published, rebuilt)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(receipt["outcome"], "mismatch")
+                self.assertIn("filesystem", receipt["differences"])
+
+    def test_identical_pax_metadata_with_mtime_drift_is_normalized(self) -> None:
+        entries = [("app/oxibelt", b"binary", 0o755)]
+        published = self.artifact(
+            "published-pax-mtime",
+            entries,
+            pax_headers={
+                "LIBARCHIVE.xattr.security.capability": "same-value",
+                "mtime": "1.25",
+            },
+        )
+        rebuilt = self.artifact(
+            "rebuilt-pax-mtime",
+            entries,
+            pax_headers={
+                "LIBARCHIVE.xattr.security.capability": "same-value",
+                "mtime": "2.5",
+            },
+        )
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(receipt["outcome"], "normalized_equivalent")
+
+    def test_conflicting_pax_namespace_order_is_a_mismatch(self) -> None:
+        entries = [("app/oxibelt", b"binary", 0o755)]
+        published = self.artifact(
+            "published-pax-order",
+            entries,
+            pax_headers={
+                "SCHILY.xattr.security.capability": "schily-value",
+                "LIBARCHIVE.xattr.security.capability": "libarchive-value",
+            },
+        )
+        rebuilt = self.artifact(
+            "rebuilt-pax-order",
+            entries,
+            pax_headers={
+                "LIBARCHIVE.xattr.security.capability": "libarchive-value",
+                "SCHILY.xattr.security.capability": "schily-value",
+            },
+        )
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(receipt["outcome"], "mismatch")
+        self.assertIn("filesystem", receipt["differences"])
+
+    def test_global_pax_metadata_is_unverifiable(self) -> None:
+        published = self.artifact(
+            "published-global-pax",
+            [("app/oxibelt", b"binary", 0o755)],
+            global_pax_headers={"SCHILY.xattr.security.capability": "capability"},
+        )
+        rebuilt = self.artifact(
+            "rebuilt-global-pax", [("app/oxibelt", b"binary", 0o755)]
+        )
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(receipt["outcome"], "unverifiable")
+        self.assertIn("global PAX", receipt["differences"][0])
+
+    def test_owner_name_drift_is_a_mismatch(self) -> None:
+        entries = [("app/oxibelt", b"binary", 0o755)]
+        published = self.artifact(
+            "published-owner", entries, uname="release", gname="release"
+        )
+        rebuilt = self.artifact(
+            "rebuilt-owner", entries, uname="builder", gname="builder"
+        )
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(receipt["outcome"], "mismatch")
         self.assertIn("filesystem", receipt["differences"])
 

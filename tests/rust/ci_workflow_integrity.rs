@@ -1195,6 +1195,49 @@ fn source_structure_job_stays_independent() {
 }
 
 #[test]
+fn release_image_rebuild_comparator_regressions_are_ci_gated() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let steps = parsed["jobs"]["source-structure"]["steps"]
+    .as_array()
+    .expect("source-structure should define steps");
+  let command = "python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py";
+  let matching_steps = steps
+    .iter()
+    .enumerate()
+    .filter(|(_, step)| step["run"].as_str() == Some(command))
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    matching_steps.len(),
+    1,
+    "source-structure should run the release-image rebuild comparator regression suite exactly once"
+  );
+  let (position, step) = matching_steps[0];
+  assert_eq!(
+    step["name"].as_str(),
+    Some("Test release-image rebuild comparator")
+  );
+  assert_eq!(
+    step["env"],
+    serde_json::json!({"PYTHONDONTWRITEBYTECODE": "1"})
+  );
+  let checkout_position = steps
+    .iter()
+    .position(|step| {
+      step["uses"]
+        .as_str()
+        .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+    })
+    .expect("source-structure should check out the repository");
+  assert!(
+    checkout_position < position,
+    "the release-image rebuild comparator tests require the checked-out repository"
+  );
+}
+
+#[test]
 fn check_workflow_entry_jobs_skip_dependabot() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);

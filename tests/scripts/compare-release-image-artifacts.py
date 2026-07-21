@@ -28,6 +28,10 @@ NORMALIZATION = (
     "filesystem-mtime",
     "oci-created-and-history-timestamps",
 )
+PAX_HEADERS_ALREADY_REPRESENTED = frozenset(
+    {"path", "linkpath", "size", "uid", "gid", "uname", "gname"}
+)
+PAX_HEADERS_NORMALIZED = frozenset({"mtime"})
 OUTPUT_FIELDS = {
     "image_tar",
     "image_tar_sha256",
@@ -49,12 +53,14 @@ class FileRecord:
     mode: int
     uid: int
     gid: int
+    uname: str
+    gname: str
     link: str | None
     content_sha256: str | None
     size: int
     device_major: int
     device_minor: int
-    xattrs: tuple[tuple[str, str], ...]
+    pax_metadata: tuple[tuple[str, str], ...]
 
 
 def safe_path(name: str, description: str) -> str:
@@ -193,12 +199,13 @@ def member_kind(member: tarfile.TarInfo) -> str:
     raise ComparisonError(f"unsupported layer member type for {member.name!r}")
 
 
-def xattrs(member: tarfile.TarInfo) -> tuple[tuple[str, str], ...]:
-    result: dict[str, str] = {}
-    for key, value in member.pax_headers.items():
-        if key.startswith("SCHILY.xattr."):
-            result[key.removeprefix("SCHILY.xattr.")] = value
-    return tuple(sorted(result.items()))
+def pax_metadata(member: tarfile.TarInfo) -> tuple[tuple[str, str], ...]:
+    excluded = PAX_HEADERS_ALREADY_REPRESENTED | PAX_HEADERS_NORMALIZED
+    return tuple(
+        (key, value)
+        for key, value in member.pax_headers.items()
+        if key not in excluded
+    )
 
 
 def remove_path(filesystem: dict[str, FileRecord], path: str) -> None:
@@ -229,6 +236,10 @@ def apply_layer(
             backing.seek(0)
             with tarfile.open(fileobj=backing, mode="r:*") as archive:
                 members = archive_members(archive, f"layer {index}")
+                if archive.pax_headers:
+                    raise ComparisonError(
+                        f"layer {index} contains unsupported global PAX headers"
+                    )
                 opaque_directories: set[str] = set()
                 whiteouts: set[str] = set()
                 regular_members: list[tarfile.TarInfo] = []
@@ -273,12 +284,14 @@ def apply_layer(
                         mode=member.mode,
                         uid=member.uid,
                         gid=member.gid,
+                        uname=member.uname,
+                        gname=member.gname,
                         link=link,
                         content_sha256=digest,
                         size=member.size if kind == "file" else 0,
                         device_major=member.devmajor,
                         device_minor=member.devminor,
-                        xattrs=xattrs(member),
+                        pax_metadata=pax_metadata(member),
                     )
     except (OSError, tarfile.TarError) as error:
         raise ComparisonError(f"invalid filesystem layer {index}: {error}") from error
