@@ -3803,6 +3803,115 @@ fn production_role_images_cover_every_role_architecture_and_bind_artifacts() {
 }
 
 #[test]
+fn pr_non_benchmark_summary_executes_only_trusted_helper() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check workflow should parse as YAML");
+  let summary_job = &parsed["jobs"]["pr-non-benchmark-summary"];
+  let steps = summary_job["steps"]
+    .as_array()
+    .expect("terminal non-benchmark summary should define steps");
+  let step_names = steps
+    .iter()
+    .map(|step| {
+      step["name"]
+        .as_str()
+        .expect("terminal non-benchmark summary steps should have names")
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(
+    step_names,
+    vec![
+      "Checkout trusted non-benchmark summary helper",
+      "Build non-benchmark validation summary",
+      "Upload non-benchmark validation summary",
+      "Enforce non-benchmark validation result",
+    ],
+    "terminal non-benchmark summary should contain only the trusted checkout and summary steps"
+  );
+  let checkout_steps = steps
+    .iter()
+    .enumerate()
+    .filter(|(_, step)| {
+      step["uses"]
+        .as_str()
+        .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+    })
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    summary_job["permissions"],
+    serde_json::json!({"contents": "read"}),
+    "terminal summary should retain exact read-only repository permissions"
+  );
+  assert_eq!(
+    checkout_steps.len(),
+    1,
+    "terminal summary should perform exactly one trusted repository checkout"
+  );
+  let (checkout_position, checkout) = checkout_steps[0];
+  assert_eq!(
+    checkout["name"].as_str(),
+    Some("Checkout trusted non-benchmark summary helper")
+  );
+  assert_eq!(
+    checkout["uses"].as_str(),
+    Some("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0")
+  );
+  assert_eq!(
+    checkout["with"],
+    serde_json::json!({
+      "repository": "${{ github.repository }}",
+      "ref": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}",
+      "path": "trusted-non-benchmark-summary",
+      "persist-credentials": false,
+      "sparse-checkout": "tests/scripts/summarize-ci-needs.sh",
+      "sparse-checkout-cone-mode": false
+    }),
+    "terminal summary should load only the helper from the immutable PR base revision"
+  );
+
+  let summarize_position = steps
+    .iter()
+    .position(|step| step["id"].as_str() == Some("summarize"))
+    .expect("terminal summary should define its summarization step");
+  assert!(
+    checkout_position < summarize_position,
+    "trusted helper checkout should precede summary execution"
+  );
+  let summarize_run = steps[summarize_position]["run"]
+    .as_str()
+    .expect("terminal summary should execute a shell script");
+  assert_eq!(
+    summarize_run.matches("summarize-ci-needs.sh").count(),
+    1,
+    "terminal summary should invoke exactly one summarize-ci-needs.sh helper"
+  );
+  assert!(
+    summarize_run.contains(
+      "bash \"${GITHUB_WORKSPACE}/trusted-non-benchmark-summary/tests/scripts/summarize-ci-needs.sh\""
+    ),
+    "terminal summary should execute the helper only from its isolated trusted checkout"
+  );
+  for forbidden in [
+    "bash tests/scripts/summarize-ci-needs.sh",
+    "bash ./tests/scripts/summarize-ci-needs.sh",
+    "${GITHUB_WORKSPACE}/tests/scripts/summarize-ci-needs.sh",
+  ] {
+    assert!(
+      !summarize_run.contains(forbidden),
+      "terminal summary must not execute a PR-controlled helper via {forbidden}"
+    );
+  }
+  let summary_job_json =
+    serde_json::to_string(summary_job).expect("terminal summary job should serialize");
+  assert!(
+    !summary_job_json.contains("github.event.pull_request.head.sha"),
+    "terminal summary must not load executable content from the pull request head"
+  );
+}
+
+#[test]
 fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
   let workflow = workflow_text();
   let parsed: serde_json::Value =
