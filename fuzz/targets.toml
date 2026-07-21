@@ -3,7 +3,8 @@ version = 1
 [program]
 max_seed_files_per_target = 128
 max_seed_bytes_per_target = 524288
-max_cached_corpus_files_per_target = 2048
+max_working_corpus_files_per_target = 8192
+max_cached_corpus_files_per_target = 4096
 max_cached_corpus_bytes_per_target = 67108864
 pr_runs = 256
 campaign_seconds = 900

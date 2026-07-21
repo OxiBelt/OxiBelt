@@ -6,7 +6,8 @@ umask 077
 readonly FUZZ_NIGHTLY="nightly-2026-07-16"
 readonly MAX_SEED_FILES=128
 readonly MAX_SEED_BYTES=524288
-readonly MAX_CORPUS_FILES=2048
+readonly MAX_WORKING_CORPUS_FILES=8192
+readonly MAX_CACHED_CORPUS_FILES=4096
 readonly MAX_CORPUS_BYTES=67108864
 readonly MAX_ARTIFACT_FILES=8
 readonly FUZZ_TIMEOUT_SECONDS=10
@@ -189,6 +190,8 @@ validate_working_corpus() {
   local corpus_files corpus_bytes
   read -r corpus_files corpus_bytes < <(directory_stats "$directory")
   (( corpus_files > 0 )) || fail "mutable corpus is empty: $directory"
+  (( corpus_files <= MAX_WORKING_CORPUS_FILES )) \
+    || fail "working corpus exceeds $MAX_WORKING_CORPUS_FILES files"
   (( corpus_bytes <= MAX_CORPUS_BYTES )) || fail "corpus exceeds $MAX_CORPUS_BYTES bytes"
 }
 
@@ -198,7 +201,8 @@ validate_cached_corpus() {
 
   local corpus_files corpus_bytes
   read -r corpus_files corpus_bytes < <(directory_stats "$directory")
-  (( corpus_files <= MAX_CORPUS_FILES )) || fail "corpus exceeds $MAX_CORPUS_FILES files"
+  (( corpus_files <= MAX_CACHED_CORPUS_FILES )) \
+    || fail "cached corpus exceeds $MAX_CACHED_CORPUS_FILES files"
 }
 
 copy_reviewed_seeds() {
