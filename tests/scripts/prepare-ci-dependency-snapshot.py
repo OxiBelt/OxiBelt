@@ -105,7 +105,7 @@ def normalized_snapshot(
     if not isinstance(raw, dict):
         fail("Trivy snapshot must be a JSON object")
     detector = raw.get("detector")
-    manifests = raw.get("manifests")
+    manifests = raw.get("manifests", {})
     scanned = raw.get("scanned")
     if not isinstance(detector, dict) or not isinstance(detector.get("name"), str):
         fail("Trivy snapshot lacks detector identity")

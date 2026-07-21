@@ -445,8 +445,12 @@ fn ci_image_artifact_validator_text() -> String {
     .expect("CI image artifact validator should be readable")
 }
 
+fn dependency_snapshot_helper_path() -> PathBuf {
+  repo_root().join("tests/scripts/prepare-ci-dependency-snapshot.py")
+}
+
 fn dependency_snapshot_helper_text() -> String {
-  fs::read_to_string(repo_root().join("tests/scripts/prepare-ci-dependency-snapshot.py"))
+  fs::read_to_string(dependency_snapshot_helper_path())
     .expect("CI dependency snapshot helper should be readable")
 }
 
@@ -3941,6 +3945,166 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     !malformed_summary.exists() && !malformed_markdown.exists(),
     "malformed input must not produce misleading summary artifacts"
   );
+}
+
+#[test]
+fn dependency_snapshot_helper_normalizes_package_free_reports() {
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-dependency-snapshot-")
+    .tempdir()
+    .expect("dependency snapshot temp directory should be creatable");
+  let helper = dependency_snapshot_helper_path();
+  let revision = "0123456789abcdef0123456789abcdef01234567";
+  let git_ref = "refs/heads/main";
+  let run_id = "123";
+  let run_attempt = "1";
+  let html_url = "https://github.com/OxiBelt/OxiBelt/actions/runs/123";
+
+  let run_normalize = |label: &str, raw: &serde_json::Value| {
+    let case_dir = temp_dir.path().join(label);
+    fs::create_dir_all(&case_dir).expect("snapshot case directory should be creatable");
+    let input = case_dir.join("raw.json");
+    let snapshot = case_dir.join("dependency-snapshot-dataplane-amd64.json");
+    let contract = case_dir.join("dependency-snapshot-dataplane-amd64-contract.json");
+    fs::write(
+      &input,
+      serde_json::to_vec(raw).expect("raw Trivy snapshot fixture should serialize"),
+    )
+    .expect("raw Trivy snapshot fixture should be writable");
+    let output = Command::new("python3")
+      .arg(&helper)
+      .arg("normalize")
+      .arg("--input")
+      .arg(&input)
+      .arg("--snapshot")
+      .arg(&snapshot)
+      .arg("--contract")
+      .arg(&contract)
+      .arg("--role")
+      .arg("dataplane")
+      .arg("--artifact-arch")
+      .arg("amd64")
+      .arg("--revision")
+      .arg(revision)
+      .arg("--ref")
+      .arg(git_ref)
+      .arg("--run-id")
+      .arg(run_id)
+      .arg("--run-attempt")
+      .arg(run_attempt)
+      .arg("--html-url")
+      .arg(html_url)
+      .current_dir(repo_root())
+      .output()
+      .unwrap_or_else(|error| panic!("dependency snapshot case {label} should execute: {error}"));
+    (output, snapshot, contract)
+  };
+
+  let package_free_raw = serde_json::json!({
+    "version": 0,
+    "detector": {
+      "name": "trivy",
+      "version": "0.72.0",
+      "url": "https://github.com/aquasecurity/trivy"
+    },
+    "scanned": "2026-07-21T03:56:06Z"
+  });
+  let (output, snapshot, contract) = run_normalize("missing-manifests", &package_free_raw);
+  assert!(
+    output.status.success(),
+    "a package-free Trivy snapshot should normalize: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let normalized: serde_json::Value = serde_json::from_slice(
+    &fs::read(&snapshot).expect("normalized package-free snapshot should be readable"),
+  )
+  .expect("normalized package-free snapshot should be valid JSON");
+  assert_eq!(normalized["manifests"], serde_json::json!({}));
+  assert_eq!(
+    normalized["job"]["correlator"],
+    "oxibelt-image:dataplane:amd64"
+  );
+
+  let validation = Command::new("python3")
+    .arg(&helper)
+    .arg("validate")
+    .arg("--snapshot")
+    .arg(&snapshot)
+    .arg("--contract")
+    .arg(&contract)
+    .arg("--role")
+    .arg("dataplane")
+    .arg("--artifact-arch")
+    .arg("amd64")
+    .arg("--revision")
+    .arg(revision)
+    .arg("--ref")
+    .arg(git_ref)
+    .arg("--run-id")
+    .arg(run_id)
+    .arg("--run-attempt")
+    .arg(run_attempt)
+    .arg("--html-url")
+    .arg(html_url)
+    .current_dir(repo_root())
+    .output()
+    .expect("normalized package-free snapshot should be validatable");
+  assert!(
+    validation.status.success(),
+    "normalized package-free snapshot should pass validation: {}",
+    String::from_utf8_lossy(&validation.stderr)
+  );
+
+  let populated_manifests = serde_json::json!({
+    "oxibelt:alpine-musl-amd64 (alpine 3.24.1)": {
+      "name": "alpine",
+      "resolved": {}
+    }
+  });
+  let mut populated_raw = package_free_raw.clone();
+  populated_raw
+    .as_object_mut()
+    .expect("raw snapshot fixture should be an object")
+    .insert("manifests".to_owned(), populated_manifests.clone());
+  let (output, snapshot, _) = run_normalize("populated-manifests", &populated_raw);
+  assert!(
+    output.status.success(),
+    "a populated Trivy snapshot should normalize: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let normalized: serde_json::Value = serde_json::from_slice(
+    &fs::read(snapshot).expect("normalized populated snapshot should be readable"),
+  )
+  .expect("normalized populated snapshot should be valid JSON");
+  assert_eq!(normalized["manifests"], populated_manifests);
+
+  for (label, invalid_manifests) in [
+    ("null-manifests", serde_json::Value::Null),
+    ("array-manifests", serde_json::json!([])),
+    ("string-manifests", serde_json::json!("invalid")),
+    ("number-manifests", serde_json::json!(0)),
+  ] {
+    let mut invalid_raw = package_free_raw.clone();
+    invalid_raw
+      .as_object_mut()
+      .expect("raw snapshot fixture should be an object")
+      .insert("manifests".to_owned(), invalid_manifests);
+    let (output, snapshot, contract) = run_normalize(label, &invalid_raw);
+    assert!(
+      !output.status.success(),
+      "dependency snapshot helper should reject {label}"
+    );
+    assert!(
+      String::from_utf8_lossy(&output.stderr)
+        .contains("Trivy snapshot manifests must be an object"),
+      "dependency snapshot helper should explain {label}: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+      !snapshot.exists() && !contract.exists(),
+      "invalid snapshot input must not produce bound artifacts"
+    );
+  }
 }
 
 #[test]
