@@ -244,12 +244,15 @@ version and source revision:
 
 CI scans every role/architecture artifact separately. Release CI publishes
 per-role platform manifests and multi-architecture indexes, then creates and
-verifies GitHub API-hosted keyless SLSA provenance and CycloneDX SBOM
-attestations for every canonical digest before alias promotion. The bundles are
-not Cosign signatures or GHCR OCI referrers. Resolve, verify, approve, and
-record an immutable digest before deployment; see [Release Image Trust and
-Attestations](docs/SupplyChain.md) for exact verification commands, platform
-and index SBOM coverage, residual trust, and historical-referrer guidance.
+verifies GitHub API-hosted keyless SLSA provenance, CycloneDX SBOM, and
+deterministic rebuild-recipe attestations for every canonical digest before
+alias promotion. A separate read-only workflow rebuilds stable and beta
+artifacts from fresh tag checkouts with rootless Docker and no producer
+artifacts. The bundles are not Cosign signatures or GHCR OCI referrers.
+Resolve, verify, approve, and record an immutable digest before deployment; see
+[Release Image Trust and Attestations](docs/SupplyChain.md) for exact commands,
+rebuild receipts, SBOM coverage, residual trust, and historical-referrer
+guidance.
 
 Choose `dataplane` when the co-located Admin API or Admin mutation workflows
 are required. Choose `dataplane-strict` when configuration is delivered by
@@ -362,7 +365,8 @@ Recommended Rust checks from the repository root:
 ```sh
 cargo fmt --check
 cargo audit
-cargo deny check advisories
+cargo deny check
+cargo vet --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```

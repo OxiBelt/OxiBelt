@@ -63,7 +63,7 @@ export type ImageRoleContract = {
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 6
+  schemaVersion: 7
   image: string
   tag: string
   version: string
@@ -410,7 +410,7 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   })
 
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     image: Image,
     tag: Tag,
     version: Tag,

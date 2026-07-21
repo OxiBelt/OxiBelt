@@ -71,6 +71,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
 
 jobs:
   # Keep this job independent. If test jobs need it, a PR can intentionally
@@ -106,7 +107,7 @@ jobs:
       - name: Enable pinned pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@11.13.1 --activate
+          corepack install
 
       - name: Person proof UI asset uses pinned dependencies
         run: |
@@ -191,7 +192,7 @@ jobs:
         run: cargo test --all-features --locked loom_ -- --ignored --test-threads=1
 
   rust-advisory-checks:
-    name: Rust advisory checks
+    name: Rust dependency admission
     runs-on: ubuntu-26.04
     if: github.actor != 'dependabot[bot]'
     permissions:
@@ -206,16 +207,105 @@ jobs:
           rustup toolchain install 1.97.0 --profile minimal
           rustup default 1.97.0
 
-      - name: Install Rust advisory tools
+      - name: Install pinned Rust dependency tools
         run: |
-          cargo install cargo-audit --locked
-          cargo install cargo-deny --locked
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo install cargo-vet --version 0.10.0 --locked
 
       - name: Cargo audit
         run: cargo audit
 
-      - name: Cargo deny advisories
-        run: cargo deny check advisories
+      - name: Cargo deny complete policy
+        run: cargo deny check
+
+      - name: Cargo vet locked review evidence
+        run: cargo vet --locked
+
+  node-dependency-admission:
+    name: Node dependency admission
+    runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Validate manifests, lockfile, sources, and lifecycle policy
+        run: pnpm run dependency-admission
+
+      - name: Validate Node licenses and vulnerability policy
+        env:
+          LICENSE_REPORT: ${{ runner.temp }}/pnpm-licenses.json
+          AUDIT_REPORT: ${{ runner.temp }}/pnpm-audit.json
+        run: |
+          set -euo pipefail
+          pnpm licenses list --json --long >"${LICENSE_REPORT}"
+
+          audit_root="${RUNNER_TEMP}/pnpm-policy-neutral-audit"
+          mkdir -p "${audit_root}/devops" "${audit_root}/ui/person-proof"
+          cp package.json pnpm-lock.yaml "${audit_root}/"
+          cp devops/package.json "${audit_root}/devops/package.json"
+          cp ui/person-proof/package.json "${audit_root}/ui/person-proof/package.json"
+          node --input-type=module - "${audit_root}/pnpm-workspace.yaml" <<'NODE'
+          import { writeFileSync } from 'node:fs'
+          const workspace = [
+            'packages:',
+            '  - "devops"',
+            '  - "ui/*"',
+            'registry: "https://registry.npmjs.org/"',
+            'auditConfig:',
+            '  ignoreGhsas: []',
+            ''
+          ].join('\n')
+          writeFileSync(process.argv[2], workspace, { mode: 0o600 })
+          NODE
+          set +e
+          pnpm --dir "${audit_root}" audit --audit-level low --json >"${AUDIT_REPORT}"
+          set -e
+          pnpm run dependency-admission -- \
+            --license-report-path "${LICENSE_REPORT}" \
+            --audit-report-path "${AUDIT_REPORT}"
+
+      - name: Verify npm registry signatures
+        run: pnpm audit signatures
+
+      - name: Generate local pnpm dependency snapshot
+        env:
+          SNAPSHOT_DIR: ${{ runner.temp }}/pnpm-dependency-snapshot
+        run: |
+          set -euo pipefail
+          mkdir -p "${SNAPSHOT_DIR}"
+          snapshot="${SNAPSHOT_DIR}/pnpm-dependencies.cdx.json"
+          contract="${SNAPSHOT_DIR}/pnpm-dependencies-contract.json"
+          pnpm sbom --sbom-format cyclonedx --lockfile-only >"${snapshot}"
+          snapshot_sha256="$(sha256sum "${snapshot}" | awk '{print $1}')"
+          jq -n \
+            --arg revision "${GITHUB_SHA}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg file "pnpm-dependencies.cdx.json" \
+            --arg digest "sha256:${snapshot_sha256}" \
+            '{schema: 1, revision: $revision, ref: $ref, snapshotFile: $file, snapshotSha256: $digest}' \
+            >"${contract}"
+          jq -e '.bomFormat == "CycloneDX" and (.components | type) == "array"' "${snapshot}" >/dev/null
+
+      - name: Upload local pnpm dependency snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: pnpm-dependency-snapshot
+          path: ${{ runner.temp }}/pnpm-dependency-snapshot
+          if-no-files-found: error
+          retention-days: 7
 
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
@@ -372,11 +462,14 @@ jobs:
 
       - name: Pre-pull Docker BuildKit image
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Cargo check for RISC-V musl target
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
@@ -396,6 +489,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -478,6 +572,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -512,6 +607,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -536,10 +632,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
         run: |
@@ -565,6 +664,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -590,10 +690,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
         run: |
@@ -662,10 +765,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build comparator Docker image artifact
         run: |
@@ -697,10 +803,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build performance probe Docker image artifact
         run: |
@@ -730,10 +839,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build external benchmark Docker image artifact
         run: |
@@ -756,6 +868,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -772,10 +885,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
         run: |
@@ -803,6 +919,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -812,10 +929,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
         run: |
@@ -843,6 +963,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -879,10 +1000,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
         run: |
@@ -966,14 +1090,23 @@ jobs:
           OXIBELT_IMAGE_ROLE: ${{ matrix.role.name }}
         run: |
           artifact_dir="${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}"
+          contract="${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-artifact-contract.json"
           python3 tests/scripts/validate-ci-image-artifact.py validate \
             --image-tar "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}.tar" \
             --build-metadata "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-build-metadata.json" \
-            --contract "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-artifact-contract.json" \
+            --contract "${contract}" \
             --role "${OXIBELT_IMAGE_ROLE}" \
             --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
             --expected-revision "${GITHUB_SHA}" \
-            --expected-source "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            --expected-source "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --expected-source-tree "$(git rev-parse "${GITHUB_SHA}^{tree}")" \
+            --expected-version "$(jq -r '.version' "${contract}")" \
+            --expected-ref-name "$(jq -r '.ref_name' "${contract}")" \
+            --expected-created "$(jq -r '.created' "${contract}")" \
+            --rust-builder-image "rust:1.97.0-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9" \
+            --node-builder-image "node:24-alpine3.24@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd" \
+            --runtime-image "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b" \
+            --repo-root "${GITHUB_WORKSPACE}"
 
       - name: Validate strict data-plane image inventory
         if: matrix.role.name == 'dataplane-strict'
@@ -1211,6 +1344,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -1223,10 +1357,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker integration helper image artifact
         run: |
@@ -1471,6 +1608,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - check-riscv64-cross
       - fuzz-smoke
       - unsafe-validation
@@ -1526,6 +1664,7 @@ jobs:
     needs:
       - test
       - rust-advisory-checks
+      - node-dependency-admission
     permissions:
       contents: read
     timeout-minutes: 15
@@ -2248,6 +2387,7 @@ jobs:
       - source-structure
       - test
       - rust-advisory-checks
+      - node-dependency-admission
       - fuzz-smoke
       - unsafe-validation
       - check-riscv64-cross

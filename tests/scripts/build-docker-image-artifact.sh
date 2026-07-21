@@ -75,15 +75,16 @@ build_metadata="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-
 artifact_contract="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-artifact-contract.json"
 build_metadata_tmp=""
 rust_toolchain_version="1.97.0"
-rust_builder_image="rust:${rust_toolchain_version}-trixie"
-node_builder_image="node:24-alpine3.24"
-runtime_image="alpine:3.24"
+rust_builder_image="rust:${rust_toolchain_version}-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9"
+node_builder_image="node:24-alpine3.24@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd"
+runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 rust_target=""
 rust_target_cpu=""
 rust_builder_stage="builder-native"
 rust_build_cache_key=""
 oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/Cargo.toml" | head -n 1)}"
 oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)}"
+oxibelt_source_tree="${OXIBELT_DOCKER_IMAGE_SOURCE_TREE:-}"
 oxibelt_created="${OXIBELT_DOCKER_IMAGE_CREATED:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 oxibelt_source="${OXIBELT_DOCKER_IMAGE_SOURCE:-$(detect_oxibelt_source)}"
 oxibelt_ref_name="${OXIBELT_DOCKER_IMAGE_REF_NAME:-${oxibelt_version}}"
@@ -147,6 +148,15 @@ if [[ -z "${oxibelt_revision}" ]]; then
   oxibelt_revision="unknown"
 fi
 
+if [[ -z "${oxibelt_source_tree}" && "${oxibelt_revision}" =~ ^[0-9a-f]{40}$ ]]; then
+  oxibelt_source_tree="$(git -C "${repo_root}" rev-parse "${oxibelt_revision}^{tree}" 2>/dev/null || true)"
+fi
+
+if [[ ! "${oxibelt_source_tree}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "A full lowercase source tree is required for rebuild evidence: ${oxibelt_source_tree}" >&2
+  exit 2
+fi
+
 if [[ -z "${oxibelt_source}" ]]; then
   oxibelt_source="${default_oxibelt_source}"
 fi
@@ -193,7 +203,15 @@ python3 "${repo_root}/tests/scripts/validate-ci-image-artifact.py" create \
   --role "${role}" \
   --artifact-arch "${artifact_arch}" \
   --expected-revision "${oxibelt_revision}" \
-  --expected-source "${oxibelt_source}"
+  --expected-source "${oxibelt_source}" \
+  --expected-source-tree "${oxibelt_source_tree}" \
+  --expected-version "${oxibelt_version}" \
+  --expected-ref-name "${oxibelt_ref_name}" \
+  --expected-created "${oxibelt_created}" \
+  --rust-builder-image "${rust_builder_image}" \
+  --node-builder-image "${node_builder_image}" \
+  --runtime-image "${runtime_image}" \
+  --repo-root "${repo_root}"
 
 echo "Wrote ${image_tar}"
 echo "Wrote ${build_metadata}"

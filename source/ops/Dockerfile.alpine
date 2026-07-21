@@ -1,6 +1,6 @@
-ARG RUST_BUILDER_IMAGE=rust:1.97.0-trixie
-ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24
-ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24
+ARG RUST_BUILDER_IMAGE=rust:1.97.0-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9
+ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
+ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 ARG OXIBELT_VERSION=0.0.0
 ARG OXIBELT_REVISION=unknown
 ARG OXIBELT_CREATED=1970-01-01T00:00:00Z
@@ -16,7 +16,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY devops/package.json ./devops/package.json
 COPY ui/person-proof/package.json ./ui/person-proof/package.json
 RUN corepack enable && \
-    corepack prepare pnpm@11.13.1 --activate && \
+    corepack install && \
     pnpm install --frozen-lockfile --ignore-scripts --filter @oxibelt/person-proof-ui...
 COPY ui/person-proof ./ui/person-proof
 RUN --network=none pnpm --filter @oxibelt/person-proof-ui build

@@ -85,7 +85,8 @@ Gateway Controller
 Build System
     -> Standalone / Data-Plane / Strict Data-Plane / Controller / Tools / Keysigner Images
     -> Container Registry (exact role repositories)
-    -> GitHub Attestations API (provenance and SBOM bundles)
+    -> GitHub Attestations API (provenance, SBOM, and rebuild-recipe bundles)
+    -> Independent Rootless Rebuild (fresh tag checkout, no producer artifacts)
     -> Kubernetes Admission
 ```
 
@@ -103,11 +104,15 @@ listeners, mutations, cluster/operation workers, and the Admin OpenAPI asset at
 compile time. Controller, tools, and keysigner images have exact single-binary
 inventories. Release validation, role labels, executable inventory checks, and
 strict feature-graph checks make some cross-role packaging mistakes observable.
-Release CI also creates and verifies GitHub API-hosted keyless SLSA provenance and
-CycloneDX SBOM attestations for each canonical platform and index digest before
-promotion. The bundles authenticate the workflow identity and bind its
-statements to an immutable subject; they are not GHCR OCI referrers, proof of
-review or reproducibility, or a freshness, rollback, or vulnerability policy.
+Release CI also creates and verifies GitHub API-hosted keyless SLSA provenance,
+CycloneDX SBOM, and deterministic rebuild-recipe attestations for each
+canonical platform and index digest before promotion. A separate read-only
+workflow rebuilds stable and beta artifacts from fresh tag checkouts with
+rootless Docker and no producer artifacts. The bundles authenticate the
+workflow identity and bind its statements to an immutable subject; rebuild
+receipts distinguish exact, normalized-equivalent, mismatch, and unverifiable
+outcomes. Neither is proof of review or a freshness, rollback, or vulnerability
+policy.
 Operators must verify, approve, select, and record the intended immutable
 repository digest.
 
@@ -172,13 +177,14 @@ and an operator-tested LSM policy remain separate layers.
   providers, and build/release identities are protected outside OxiBelt. A
   compromise of those authorities can exceed the protections in this model.
 - Official images are selected from the exact documented repositories by an
-  operator-approved immutable digest. GitHub API-hosted provenance and SBOM
-  attestations are verified against the exact signer workflow, signer/source
-  revision, source ref, subject digest, predicate, and trusted timestamp. The
-  registry, release workflow, protected refs, GitHub Actions identity, and
-  approval process remain external trusted authorities. Registry freshness,
-  rollback prevention, code review, reproducibility, and vulnerability policy
-  remain operator controls.
+  operator-approved immutable digest. GitHub API-hosted provenance, SBOM, and
+  rebuild-recipe attestations are verified against the exact signer workflow,
+  signer/source revision, source ref, subject digest, predicate, and trusted
+  timestamp. Stable and beta releases also receive independent rootless rebuild
+  receipts. The registry, release workflow, protected refs, GitHub Actions
+  identity, and approval process remain external trusted authorities. Registry
+  freshness, rollback prevention, code review, byte-for-byte reproducibility,
+  and vulnerability policy remain operator controls.
 
 ### Conditional guarantees
 
@@ -248,14 +254,15 @@ strongest available policy.
   operate Redis/PostgreSQL, or protect a compromised host,
   cluster administrator, registry, upstream, frontend, or provider.
 - Release workflows publish role-specific platform images and
-  multi-architecture indexes with GitHub API-hosted keyless SLSA provenance and
-  CycloneDX SBOM attestations. Platform SBOMs carry detailed inventory; index
-  SBOMs identify the three canonical child digests and point to separate
-  platform evidence. The bundles are not GHCR OCI referrers, and OxiBelt does
-  not ship an admission policy for them. Historical registry referrers do not
-  imply current API evidence coverage, and an existing fail-closed admission
-  policy must be deliberately evaluated rather than weakened to unblock an
-  image.
+  multi-architecture indexes with GitHub API-hosted keyless SLSA provenance,
+  CycloneDX SBOM, and rebuild-recipe attestations. Platform SBOMs carry detailed
+  inventory; index evidence binds the three canonical child digests and their
+  recipes. A separate rootless workflow independently rebuilds successful
+  stable and beta releases. The bundles are not GHCR OCI referrers, and OxiBelt
+  does not ship an admission policy for them. Historical registry referrers do
+  not imply current API evidence coverage, and an existing fail-closed
+  admission policy must be deliberately evaluated rather than weakened to
+  unblock an image.
 - Experimental features may be disabled, removed, or incompatibly changed and
   have no compatibility or backport guarantee beyond `SECURITY.md`.
 
@@ -382,7 +389,7 @@ canonical references.
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Plugin or custom frontend compromise | Operator rulepack/frontend/provider/handler → policy, browser, or external data | OxiRule is declarative and bounded with no general scripting/import callback sandbox; rulepack provenance can be pinned. Custom frontend URLs are same-origin routes, provider/handler exchanges are bounded, and failures follow explicit policy. | There is no native plugin security boundary. A hostile rulepack changes policy, a frontend can steal browser-visible proof/clearance data, a provider controls proof verdicts, and an external cache can observe or forge cached objects within its authority. |
-| Compromised build pipeline | Source/dependencies/actions/runner → official image | Workflow actions are commit-pinned, release refs/tags and role metadata are validated, build and package-write jobs are separated, images are scanned, and exact-subject GitHub provenance/SBOM attestations are verified before promotion. | A compromised dependency, runner, maintainer, pinned action commit, release credential, trusted workflow, GitHub Actions identity, or registry authority can produce malicious content or plausible workflow-controlled predicate fields. A valid attestation authenticates the workflow identity and subject binding; it does not prove review, benign workflow execution, or reproducibility. |
+| Compromised build pipeline | Source/dependencies/actions/runner → official image | Rust and Node dependency admission fail on unowned policy drift; actions and base images are immutable-pinned; release refs, roles, source trees, build inputs, and executable inventories are validated; package writes are separated; and exact-subject provenance, SBOM, and rebuild-recipe attestations are verified before promotion. A separate read-only rootless workflow rebuilds stable/beta artifacts from fresh tag checkouts without producer artifacts and emits exact or normalized-equivalent receipts. | A compromised dependency admitted by policy, maintainer, pinned action or base image, GitHub identity, registry, or coordinated compromise of both producer and verifier can still produce malicious content or plausible evidence. Normalized equivalence proves the bounded semantic contract, not byte identity. Attestations and rebuild receipts do not prove review, benign source, freshness, or rollback safety. |
 | Malicious or stale container image, including role confusion | Registry/tag/deployment → running data plane or control plane | Official image scope is an exact six-repository allowlist, OCI role/source/revision labels and executable inventories are checked during release, strict data-plane builds additionally prove the Admin feature is absent, both Helm charts support immutable digests, and API attestations bind canonical platform/index digests to exact signer/source policy. | Mutable tags can select stale content before digest resolution, a custom repository can violate its declared role contract, labels and predicate contents are publisher-controlled, and API bundles are not an OxiBelt-managed Kubernetes admission gate. Exact digest and role selection, freshness, rollback controls, registry access, vulnerability policy, approval, and operator-owned admission remain operator responsibilities. Historical OCI referrers do not establish current API evidence coverage. |
 
 ### Shared-state compromise impact

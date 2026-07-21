@@ -9,6 +9,8 @@ import json
 import os
 import pathlib
 import re
+import stat
+import subprocess
 import tarfile
 import tempfile
 from typing import Any
@@ -18,6 +20,8 @@ MAXIMUM_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAXIMUM_ARCHIVE_MEMBERS = 4096
 MAXIMUM_JSON_BYTES = 8 * 1024 * 1024
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
+CREATED = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 
 ARCHITECTURES = {
     "amd64v2": {
@@ -55,6 +59,13 @@ ARCHITECTURES = {
 ROLES = {
     "standalone": {
         "prefix": "oxibelt",
+        "docker_target": "standalone",
+        "cargo_builds": [
+            {"package": "oxibelt", "binary": "oxibelt", "default_features": True},
+            {"package": "oxibelt-keysigner", "binary": "oxibelt-keysigner", "default_features": True},
+            {"package": "oxibelt-netport-switcher", "binary": "oxibelt-netport-switcher", "default_features": True},
+            {"package": "oxibeltctl", "binary": "oxibeltctl", "default_features": True},
+        ],
         "user": "10001:10001",
         "entrypoint": [
             "/usr/local/bin/oxibelt",
@@ -65,6 +76,10 @@ ROLES = {
     },
     "dataplane": {
         "prefix": "oxibelt-dataplane",
+        "docker_target": "dataplane",
+        "cargo_builds": [
+            {"package": "oxibelt", "binary": "oxibelt", "default_features": True}
+        ],
         "user": "10001:10001",
         "entrypoint": [
             "/usr/local/bin/oxibelt",
@@ -75,6 +90,14 @@ ROLES = {
     },
     "dataplane-strict": {
         "prefix": "oxibelt-dataplane-strict",
+        "docker_target": "dataplane-strict",
+        "cargo_builds": [
+            {
+                "package": "oxibelt-dataplane-strict",
+                "binary": "oxibelt-dataplane-strict",
+                "default_features": False,
+            }
+        ],
         "user": "10001:10001",
         "entrypoint": [
             "/usr/local/bin/oxibelt-dataplane-strict",
@@ -85,18 +108,38 @@ ROLES = {
     },
     "controller": {
         "prefix": "oxibelt-gateway-controller",
+        "docker_target": "controller",
+        "cargo_builds": [
+            {
+                "package": "oxibelt-gateway-controller",
+                "binary": "oxibelt-gateway-controller",
+                "default_features": True,
+            }
+        ],
         "user": "10001:10001",
         "entrypoint": ["/usr/local/bin/oxibelt-gateway-controller"],
         "ports": [],
     },
     "tools": {
         "prefix": "oxibelt-tools",
+        "docker_target": "tools",
+        "cargo_builds": [
+            {"package": "oxibeltctl", "binary": "oxibeltctl", "default_features": True}
+        ],
         "user": "10001:10001",
         "entrypoint": ["/usr/local/bin/oxibeltctl"],
         "ports": [],
     },
     "keysigner": {
         "prefix": "oxibelt-keysigner",
+        "docker_target": "keysigner",
+        "cargo_builds": [
+            {
+                "package": "oxibelt-keysigner",
+                "binary": "oxibelt-keysigner",
+                "default_features": True,
+            }
+        ],
         "user": "10002:10002",
         "entrypoint": ["/usr/local/bin/oxibelt-keysigner"],
         "ports": [],
@@ -107,18 +150,29 @@ CONTRACT_KEYS = {
     "schema",
     "revision",
     "source",
+    "source_tree",
+    "version",
+    "ref_name",
+    "created",
     "role",
     "platform",
     "artifact_arch",
     "docker_architecture",
     "rust_target",
     "target_cpu",
+    "docker_target",
+    "cargo_builds",
+    "build_parameters",
+    "source_inputs",
+    "source_inputs_sha256",
     "image_tar",
     "image_tar_sha256",
     "build_metadata",
     "config_digest",
+    "normalized_config_sha256",
     "descriptor_digest",
     "image_digest",
+    "layers",
 }
 
 
@@ -148,12 +202,73 @@ def sha256_file(path: pathlib.Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def canonical_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return content_digest(encoded)
+
+
+def rebuild_source_inputs(repo_root: pathlib.Path) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        relative_paths = result.stdout.decode("utf-8").removesuffix("\x00").split("\x00")
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:
+        fail(f"cannot enumerate rebuild source inputs: {error}")
+    if not relative_paths or relative_paths == [""]:
+        fail("rebuild source input inventory is empty")
+    inputs: dict[str, Any] = {}
+    for relative in sorted(relative_paths):
+        safe_member_name(relative)
+        path = repo_root / relative
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            # A local pre-commit validation can observe an index entry deleted
+            # by the working tree. Record the absence so it cannot compare as
+            # equivalent to a build where the file exists.
+            inputs[relative] = {"type": "absent"}
+            continue
+        except OSError as error:
+            fail(f"cannot inspect rebuild input {relative}: {error}")
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISREG(metadata.st_mode):
+            inputs[relative] = {
+                "type": "file",
+                "mode": mode,
+                "sha256": sha256_file(path),
+            }
+        elif stat.S_ISLNK(metadata.st_mode):
+            target = os.readlink(path)
+            if "\x00" in target:
+                fail(f"rebuild input symlink contains NUL: {relative}")
+            inputs[relative] = {"type": "symlink", "mode": mode, "target": target}
+        else:
+            fail(f"rebuild input must be a regular file or symlink: {relative}")
+    return inputs
+
+
 def safe_member_name(name: str) -> str:
     if "\x00" in name or "\\" in name:
         fail(f"unsafe Docker archive member name {name!r}")
     path = pathlib.PurePosixPath(name)
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         fail(f"unsafe Docker archive member name {name!r}")
+    if path.as_posix() != name.rstrip("/"):
+        fail(f"non-canonical Docker archive member name {name!r}")
     return path.as_posix()
 
 
@@ -170,8 +285,41 @@ def read_regular_member(archive: tarfile.TarFile, name: str) -> bytes:
     return stream.read()
 
 
+def hash_regular_member(archive: tarfile.TarFile, name: str) -> str:
+    try:
+        member = archive.getmember(name)
+    except KeyError:
+        fail(f"Docker archive is missing {name!r}")
+    if not member.isfile() or member.size > MAXIMUM_ARCHIVE_BYTES:
+        fail(f"Docker archive member {name!r} is not a bounded regular file")
+    stream = archive.extractfile(member)
+    if stream is None:
+        fail(f"Docker archive member {name!r} cannot be read")
+    digest = hashlib.sha256()
+    total = 0
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        total += len(block)
+        if total > member.size:
+            fail(f"Docker archive member {name!r} exceeded its declared size")
+        digest.update(block)
+    if total != member.size:
+        fail(f"Docker archive member {name!r} was truncated")
+    return f"sha256:{digest.hexdigest()}"
+
+
 def content_digest(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+
+def normalized_config_digest(config: dict[str, Any]) -> str:
+    normalized = json.loads(json.dumps(config))
+    normalized.pop("created", None)
+    history = normalized.get("history")
+    if isinstance(history, list):
+        for entry in history:
+            if isinstance(entry, dict):
+                entry.pop("created", None)
+    return canonical_digest(normalized)
 
 
 def metadata_digest(metadata: dict[str, Any], key: str) -> str:
@@ -219,7 +367,31 @@ def inspect_artifact(
     artifact_arch: str,
     revision: str,
     source: str,
+    source_tree: str,
+    version: str,
+    ref_name: str,
+    created: str,
+    rust_builder_image: str,
+    node_builder_image: str,
+    runtime_image: str,
+    repo_root: pathlib.Path,
 ) -> dict[str, Any]:
+    if GIT_OBJECT.fullmatch(revision) is None:
+        fail("expected revision must be a full lowercase Git object ID")
+    if GIT_OBJECT.fullmatch(source_tree) is None:
+        fail("expected source tree must be a full lowercase Git object ID")
+    if not version or not ref_name:
+        fail("expected version and ref name must be non-empty")
+    if CREATED.fullmatch(created) is None:
+        fail("expected creation time must be second-resolution UTC RFC 3339")
+    for description, value in (
+        ("source", source),
+        ("Rust builder image", rust_builder_image),
+        ("Node builder image", node_builder_image),
+        ("runtime image", runtime_image),
+    ):
+        if not value or any(character.isspace() for character in value):
+            fail(f"expected {description} must be a non-empty value without whitespace")
     if not image_tar.is_file():
         fail(f"missing image tar: {image_tar}")
     if image_tar.stat().st_size > MAXIMUM_ARCHIVE_BYTES:
@@ -260,6 +432,15 @@ def inspect_artifact(
             config_bytes = read_regular_member(archive, config_name)
             archive_config_digest = content_digest(config_bytes)
             config = json.loads(config_bytes)
+            layer_names = descriptor.get("Layers")
+            if not isinstance(layer_names, list) or not all(
+                isinstance(item, str) for item in layer_names
+            ):
+                fail("Docker archive manifest lacks an ordered layer list")
+            layer_paths = [safe_member_name(item) for item in layer_names]
+            if len(layer_paths) != len(set(layer_paths)):
+                fail("Docker archive manifest contains duplicate layer paths")
+            layer_digests = [hash_regular_member(archive, item) for item in layer_paths]
     except (tarfile.TarError, json.JSONDecodeError) as error:
         fail(f"invalid Docker archive: {error}")
 
@@ -270,6 +451,12 @@ def inspect_artifact(
         fail("Docker archive config path is not content addressed by its digest")
     if not isinstance(config, dict):
         fail("Docker image config must be an object")
+    rootfs = config.get("rootfs")
+    diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    if not isinstance(diff_ids, list) or len(diff_ids) != len(layer_digests):
+        fail("Docker image config rootfs diff IDs do not match the layer list")
+    if not all(isinstance(item, str) and DIGEST.fullmatch(item) for item in diff_ids):
+        fail("Docker image config contains an invalid rootfs diff ID")
 
     architecture = ARCHITECTURES[artifact_arch]
     if config.get("os") != "linux" or config.get("architecture") != architecture["docker_architecture"]:
@@ -292,6 +479,9 @@ def inspect_artifact(
     if not isinstance(labels, dict):
         fail("Docker image lacks OCI labels")
     for key, value in {
+        "org.opencontainers.image.created": created,
+        "org.opencontainers.image.version": version,
+        "org.opencontainers.image.ref.name": ref_name,
         "org.opencontainers.image.revision": revision,
         "org.opencontainers.image.source": source,
         "org.opencontainers.image.url": source,
@@ -300,22 +490,58 @@ def inspect_artifact(
         if labels.get(key) != value:
             fail(f"Docker image label {key!r} does not match the expected identity")
 
+    source_inputs = rebuild_source_inputs(repo_root)
+    build_parameters = {
+        "rust_builder_image": rust_builder_image,
+        "node_builder_image": node_builder_image,
+        "runtime_image": runtime_image,
+        "rust_builder_stage": (
+            "builder-riscv64" if artifact_arch == "riscv64" else "builder-native"
+        ),
+        "rust_target": architecture["rust_target"],
+        "rust_target_cpu": architecture["target_cpu"],
+        "docker_platform": architecture["platform"],
+        "docker_target": role_contract["docker_target"],
+        "version": version,
+        "revision": revision,
+        "created": created,
+        "source": source,
+        "ref_name": ref_name,
+    }
+    layers = [
+        {"path": path, "content_digest": digest, "diff_id": diff_id}
+        for path, digest, diff_id in zip(
+            layer_paths, layer_digests, diff_ids, strict=True
+        )
+    ]
+
     return {
-        "schema": 1,
+        "schema": 2,
         "revision": revision,
         "source": source,
+        "source_tree": source_tree,
+        "version": version,
+        "ref_name": ref_name,
+        "created": created,
         "role": role,
         "platform": architecture["platform"],
         "artifact_arch": artifact_arch,
         "docker_architecture": architecture["docker_architecture"],
         "rust_target": architecture["rust_target"],
         "target_cpu": architecture["target_cpu"],
+        "docker_target": role_contract["docker_target"],
+        "cargo_builds": role_contract["cargo_builds"],
+        "build_parameters": build_parameters,
+        "source_inputs": source_inputs,
+        "source_inputs_sha256": canonical_digest(source_inputs),
         "image_tar": expected_tar,
         "image_tar_sha256": sha256_file(image_tar),
         "build_metadata": expected_metadata,
         "config_digest": config_digest,
+        "normalized_config_sha256": normalized_config_digest(config),
         "descriptor_digest": build_descriptor_digest,
         "image_digest": image_digest,
+        "layers": layers,
     }
 
 
@@ -340,6 +566,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-arch", required=True, choices=tuple(ARCHITECTURES))
     parser.add_argument("--expected-revision", required=True)
     parser.add_argument("--expected-source", required=True)
+    parser.add_argument("--expected-source-tree", required=True)
+    parser.add_argument("--expected-version", required=True)
+    parser.add_argument("--expected-ref-name", required=True)
+    parser.add_argument("--expected-created", required=True)
+    parser.add_argument("--rust-builder-image", required=True)
+    parser.add_argument("--node-builder-image", required=True)
+    parser.add_argument("--runtime-image", required=True)
+    parser.add_argument(
+        "--repo-root",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parents[2],
+    )
     return parser.parse_args()
 
 
@@ -357,6 +595,14 @@ def main() -> None:
         args.artifact_arch,
         args.expected_revision,
         args.expected_source,
+        args.expected_source_tree,
+        args.expected_version,
+        args.expected_ref_name,
+        args.expected_created,
+        args.rust_builder_image,
+        args.node_builder_image,
+        args.runtime_image,
+        args.repo_root.resolve(),
     )
     if args.mode == "create":
         write_json(args.contract, observed)

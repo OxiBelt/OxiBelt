@@ -1,0 +1,277 @@
+name: Independently verify release rebuilds
+
+on:
+  workflow_run:
+    workflows: ["Release OxiBelt images"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact stable, beta, or build tag to verify
+        required: true
+        type: string
+      image_role:
+        description: Image role to verify
+        required: true
+        type: choice
+        options:
+          - standalone
+          - dataplane
+          - dataplane-strict
+          - controller
+          - tools
+          - keysigner
+      artifact_arch:
+        description: Architecture artifact to verify
+        required: true
+        type: choice
+        options:
+          - amd64v2
+          - amd64
+          - amd64v4
+          - arm64
+          - riscv64
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+  packages: read
+
+env:
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+
+jobs:
+  resolve:
+    name: Resolve immutable rebuild matrix
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release'))
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      release_ref: ${{ steps.plan.outputs.release_ref }}
+      revision: ${{ steps.plan.outputs.revision }}
+
+    steps:
+      - name: Checkout independent release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+
+      - name: Install release-planning dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Resolve tag and generate release plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_ARCH: ${{ inputs.artifact_arch }}
+          MANUAL_ROLE: ${{ inputs.image_role }}
+          MANUAL_TAG: ${{ inputs.release_tag }}
+          WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          revision="$(git rev-parse HEAD)"
+          if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "checkout did not resolve to a full Git commit" >&2
+            exit 1
+          fi
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="${MANUAL_TAG}"
+          else
+            release_tag="${WORKFLOW_RUN_HEAD_BRANCH}"
+            if [[ ! "${release_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+              mapfile -t matching_tags < <(
+                git tag --points-at "${revision}" |
+                  grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$' || true
+              )
+              if [[ "${#matching_tags[@]}" -ne 1 ]]; then
+                echo "successful release run must resolve to exactly one stable or beta tag" >&2
+                exit 1
+              fi
+              release_tag="${matching_tags[0]}"
+            fi
+          fi
+          if [[ ! "${release_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+|-build\.[0-9a-f]{8})?$ ]]; then
+            echo "invalid release tag: ${release_tag}" >&2
+            exit 1
+          fi
+
+          release_ref="refs/tags/${release_tag}"
+          tag_revision="$(git rev-parse "${release_ref}^{commit}")"
+          if [[ "${tag_revision}" != "${revision}" ]]; then
+            echo "${release_ref} resolves to ${tag_revision}, not checked-out ${revision}" >&2
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" && "${revision}" != "${WORKFLOW_RUN_HEAD_SHA}" ]]; then
+            echo "release workflow completed for ${WORKFLOW_RUN_HEAD_SHA}, not ${revision}" >&2
+            exit 1
+          fi
+
+          if [[ "${release_tag}" == *-build.* ]]; then
+            release_event="push"
+            release_prerelease="false"
+          elif [[ "${release_tag}" == *-beta.* ]]; then
+            release_event="release"
+            release_prerelease="true"
+          else
+            release_event="release"
+            release_prerelease="false"
+          fi
+
+          plan="${RUNNER_TEMP}/independent-image-plan.json"
+          OXIBELT_RELEASE_REF="${release_ref}" \
+          OXIBELT_RELEASE_REVISION="${revision}" \
+          OXIBELT_RELEASE_IS_PRERELEASE="${release_prerelease}" \
+          OXIBELT_IMAGE_PLAN_OUTPUT="${plan}" \
+          GITHUB_EVENT_NAME="${release_event}" \
+            pnpm run versioning:release
+
+          selection='.'
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            # shellcheck disable=SC2016
+            selection='select(.role == $role and .artifactArch == $arch)'
+          fi
+          matrix="$(jq -c \
+            --arg role "${MANUAL_ROLE}" \
+            --arg arch "${MANUAL_ARCH}" \
+            --arg selection "${selection}" '
+              def prefix:
+                if .role == "standalone" then "oxibelt"
+                elif .role == "dataplane" then "oxibelt-dataplane"
+                elif .role == "dataplane-strict" then "oxibelt-dataplane-strict"
+                elif .role == "controller" then "oxibelt-gateway-controller"
+                elif .role == "tools" then "oxibelt-tools"
+                elif .role == "keysigner" then "oxibelt-keysigner"
+                else error("unsupported image role") end;
+              {include: [.artifacts[] |
+                if $selection == "." then . else select(.role == $role and .artifactArch == $arch) end |
+                {role, artifact_arch: .artifactArch, image, canonical_tag: .canonicalGhcrTag,
+                 platform, artifact_prefix: prefix}]}
+            ' "${plan}")"
+          expected_count=30
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            expected_count=1
+          fi
+          if [[ "$(jq '.include | length' <<<"${matrix}")" -ne "${expected_count}" ]]; then
+            echo "independent rebuild matrix is incomplete" >&2
+            exit 1
+          fi
+          {
+            echo "matrix=${matrix}"
+            echo "release_ref=${release_ref}"
+            echo "revision=${revision}"
+          } >>"${GITHUB_OUTPUT}"
+
+  verify:
+    name: Rebuild ${{ matrix.role }}/${{ matrix.artifact_arch }} independently
+    needs: resolve
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+
+    steps:
+      - name: Checkout verifier at the immutable release revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Start isolated rootless Docker
+        uses: docker/setup-docker-action@6d7cfa65f60a9dda7b46e5513fa982536f3c9877 # v5.3.0
+        with:
+          version: v29.6.1
+          rootless: true
+          set-host: true
+
+      - name: Assert rootless Docker boundary
+        run: |
+          set -euo pipefail
+          docker info --format '{{json .SecurityOptions}}' |
+            jq -e 'index("name=rootless") != null' >/dev/null
+
+      - name: Pre-pull pinned BuildKit
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
+
+      - name: Setup pinned Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
+      - name: Setup pinned Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.72.0
+          cache: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+
+      - name: Install verifier dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Resolve immutable published digest
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ matrix.image }}
+          TAG: ${{ matrix.canonical_tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          digest="$(docker buildx imagetools inspect "${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "canonical tag ${TAG} returned invalid digest ${digest}" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Rebuild from fresh source and compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ matrix.image }}
+          OUTPUT: ${{ runner.temp }}/rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}.json
+          PUBLISHED_DIGEST: ${{ steps.subject.outputs.digest }}
+          RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.resolve.outputs.revision }}
+          ROLE: ${{ matrix.role }}
+          ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+        run: |
+          set -euo pipefail
+          tests/scripts/verify-release-rebuild.sh \
+            --image "${IMAGE}" \
+            --digest "${PUBLISHED_DIGEST}" \
+            --revision "${RELEASE_REVISION}" \
+            --release-ref "${RELEASE_REF}" \
+            --role "${ROLE}" \
+            --artifact-arch "${ARTIFACT_ARCH}" \
+            --output "${OUTPUT}"
+
+      - name: Upload independent rebuild receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}
+          path: ${{ runner.temp }}/rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}.json
+          if-no-files-found: error
+          retention-days: 30

@@ -282,8 +282,8 @@ function FindReleaseContract(ImagePlanValue: unknown, Role: string, ArtifactArch
   artifact?: JsonRecord
 } {
   const Plan = RecordValue(ImagePlanValue, 'image release plan')
-  if (Plan.schemaVersion !== 6) {
-    throw new Error('image release plan schemaVersion must be 6')
+  if (Plan.schemaVersion !== 7) {
+    throw new Error('image release plan schemaVersion must be 7')
   }
   const Version = StringValue(Plan.version, 'image release plan version')
   ExactString(Plan.tag, Version, 'image release plan tag')

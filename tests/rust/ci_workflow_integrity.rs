@@ -88,6 +88,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "source-structure",
   "test",
   "rust-advisory-checks",
+  "node-dependency-admission",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -131,6 +132,7 @@ const BENCHMARK_ONLY_JOBS: &[&str] = &[
 const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "test",
   "rust-advisory-checks",
+  "node-dependency-admission",
   "check-riscv64-cross",
   "fuzz-smoke",
   "unsafe-validation",
@@ -140,6 +142,7 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "source-structure",
   "test",
   "rust-advisory-checks",
+  "node-dependency-admission",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -177,6 +180,11 @@ fn release_workflow_text() -> String {
 fn release_image_arch_workflow_text() -> String {
   fs::read_to_string(repo_root().join(".github/workflows/release-image-arch.yml"))
     .expect("release image architecture workflow should be readable")
+}
+
+fn release_rebuild_verification_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/verify-release-rebuild.yml"))
+    .expect("independent release rebuild workflow should be readable")
 }
 
 fn dependabot_config_text() -> String {
@@ -771,7 +779,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1227,7 +1235,7 @@ fn check_workflow_entry_jobs_skip_dependabot() {
 fn person_proof_asset_regeneration_uses_the_frozen_workspace_lockfile() {
   let source_structure = workflow_job_text(&workflow_text(), "source-structure");
   for expected in [
-    "corepack prepare pnpm@11.13.1 --activate",
+    "corepack install",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm --filter @oxibelt/person-proof-ui build",
     "pnpm --filter @oxibelt/person-proof-ui check:openapi",
@@ -1961,19 +1969,22 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
   );
 
   for expected in [
-    "name: Rust advisory checks",
+    "name: Rust dependency admission",
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
     "rustup toolchain install 1.97.0 --profile minimal",
     "rustup default 1.97.0",
-    "name: Install Rust advisory tools",
-    "cargo install cargo-audit --locked",
-    "cargo install cargo-deny --locked",
+    "name: Install pinned Rust dependency tools",
+    "cargo install cargo-audit --version 0.22.2 --locked",
+    "cargo install cargo-deny --version 0.20.2 --locked",
+    "cargo install cargo-vet --version 0.10.0 --locked",
     "name: Cargo audit",
     "run: cargo audit",
-    "name: Cargo deny advisories",
-    "run: cargo deny check advisories",
+    "name: Cargo deny complete policy",
+    "run: cargo deny check",
+    "name: Cargo vet locked review evidence",
+    "run: cargo vet --locked",
   ] {
     assert!(
       advisory_job_text.contains(expected),
@@ -1982,9 +1993,10 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
   }
 
   for forbidden in [
-    "name: Install Rust advisory tools",
+    "name: Install pinned Rust dependency tools",
     "run: cargo audit",
-    "run: cargo deny check advisories",
+    "run: cargo deny check",
+    "run: cargo vet --locked",
   ] {
     assert!(
       !test_job.contains(forbidden),
@@ -1996,19 +2008,72 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     .find("name: Install Rust toolchain")
     .expect("advisory job should install Rust before advisory checks");
   let install_advisory = advisory_job_text
-    .find("name: Install Rust advisory tools")
+    .find("name: Install pinned Rust dependency tools")
     .expect("advisory job should install advisory tools");
   let cargo_audit = advisory_job_text
     .find("name: Cargo audit")
     .expect("advisory job should run cargo audit");
   let cargo_deny = advisory_job_text
-    .find("name: Cargo deny advisories")
-    .expect("advisory job should run cargo deny advisories");
+    .find("name: Cargo deny complete policy")
+    .expect("advisory job should run the complete cargo-deny policy");
+  let cargo_vet = advisory_job_text
+    .find("name: Cargo vet locked review evidence")
+    .expect("advisory job should run locked cargo-vet evidence");
 
   assert!(
-    install_rust < install_advisory && install_advisory < cargo_audit && cargo_audit < cargo_deny,
+    install_rust < install_advisory
+      && install_advisory < cargo_audit
+      && cargo_audit < cargo_deny
+      && cargo_deny < cargo_vet,
     "advisory checks should run after Rust toolchain setup inside their independent job"
   );
+}
+
+#[test]
+fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("node-dependency-admission")
+    .expect("workflow should define Node dependency admission");
+  let job_text = workflow_job_text(&workflow, "node-dependency-admission");
+
+  assert!(
+    job.needs.is_empty(),
+    "Node dependency admission should be an independent entry gate"
+  );
+  for expected in [
+    "name: Node dependency admission",
+    "contents: read",
+    "corepack install",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "pnpm run dependency-admission",
+    "pnpm licenses list --json --long",
+    "pnpm --dir \"${audit_root}\" audit --audit-level low --json",
+    "'  ignoreGhsas: []'",
+    "pnpm audit signatures",
+    "pnpm sbom --sbom-format cyclonedx --lockfile-only",
+    "name: Upload local pnpm dependency snapshot",
+    "retention-days: 7",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Node dependency admission should include {expected}"
+    );
+  }
+  for forbidden in [
+    "contents: write",
+    "id-token: write",
+    "packages: write",
+    "dependency-graph/snapshots",
+    "gh api",
+    "continue-on-error",
+  ] {
+    assert!(
+      !job_text.contains(forbidden),
+      "pull-request Node admission must not contain {forbidden}"
+    );
+  }
 }
 
 #[test]
@@ -2769,8 +2834,12 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
 
   assert_eq!(
     job.needs,
-    vec!["test".to_owned(), "rust-advisory-checks".to_owned()],
-    "current Kubernetes compatibility should wait for the primary native and advisory gates"
+    vec![
+      "test".to_owned(),
+      "rust-advisory-checks".to_owned(),
+      "node-dependency-admission".to_owned(),
+    ],
+    "current Kubernetes compatibility should wait for all primary dependency gates"
   );
   for expected in [
     "name: Kubernetes v1.36.1 and Helm v4.2.3 compatibility",
@@ -3691,18 +3760,19 @@ fn production_role_images_cover_every_role_architecture_and_bind_artifacts() {
       "CI image artifact validator should enforce {expected}"
     );
   }
-  for forbidden in [
-    "extractall",
-    "subprocess",
-    "os.system",
-    "eval(",
-    "shell=True",
-  ] {
+  for forbidden in ["extractall", "os.system", "eval(", "shell=True"] {
     assert!(
       !validator.contains(forbidden),
       "CI image artifact validator must not use unsafe primitive {forbidden}"
     );
   }
+  assert!(
+    validator.contains("subprocess.run(")
+      && validator.contains("\"ls-files\"")
+      && validator.contains("check=True")
+      && validator.contains("capture_output=True"),
+    "source inventory should use an argument-vector Git subprocess with checked, captured output"
+  );
 }
 
 #[test]
@@ -3862,7 +3932,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     serde_json::from_str(&summary_text).expect("success summary should be JSON");
   assert_eq!(summary["schema"], 1);
   assert_eq!(summary["overall"], "success");
-  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(32));
+  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(33));
   assert_eq!(summary["unexpected"], serde_json::json!([]));
   assert!(!summary_text.contains("synthetic-secret-output"));
   assert!(
@@ -4375,19 +4445,22 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       && !workflow.contains("v1.2.3")
   );
   for expected in [
-    "corepack prepare pnpm@11.13.1 --activate",
+    "corepack install",
     "pnpm install --frozen-lockfile",
-    "pnpm exec tsc devops/sources/release_sbom.ts",
+    "pnpm run dependency-admission",
+    "pnpm audit signatures",
+    "pnpm exec tsc devops/sources/release_sbom.ts devops/sources/rebuild_recipe.ts",
     "--ignoreConfig",
     "--module NodeNext",
     "--types node",
     "release_sbom.mjs",
+    "rebuild_recipe.mjs",
     "OXIBELT_RELEASE_HELPER=\"file://${helper_root}/release_sbom.mjs\"",
     "await import(process.env.OXIBELT_RELEASE_HELPER)",
     "pnpm run versioning:release",
     "git rev-parse \"${release_ref}^{commit}\"",
     "releases must run from ${release_ref}@${tag_commit}",
-    "if plan[\"schemaVersion\"] != 6:",
+    "if plan[\"schemaVersion\"] != 7:",
     "expected_roles = {",
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
@@ -4397,6 +4470,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "install -D -m 0644 Cargo.toml \"${workspace_root}/Cargo.toml\"",
     "cargo metadata --locked --no-deps --format-version 1",
     "${metadata_root}/helper/release_sbom.mjs",
+    "${metadata_root}/helper/rebuild_recipe.mjs",
   ] {
     assert!(
       validate_job_text.contains(expected),
@@ -4463,7 +4537,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Upload Docker image artifact",
     "-build-metadata.json",
     "io.oxibelt.image.role",
-    "if plan[\"schemaVersion\"] != 6:",
+    "if plan[\"schemaVersion\"] != 7:",
     "validate-strict-dataplane-image.py",
   ] {
     assert!(
@@ -4578,7 +4652,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "packages: write",
     "Validate Docker image artifact for publish",
-    "if plan[\"schemaVersion\"] != 6:",
+    "if plan[\"schemaVersion\"] != 7:",
     "GHCR_TOKEN: ${{ secrets.ghcr_token }}",
     "docker login ghcr.io",
     r#"jq -c --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch)'"#,
@@ -4693,7 +4767,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
 
   for expected in [
     "packages: write",
-    "if plan[\"schemaVersion\"] != 6:",
+    "if plan[\"schemaVersion\"] != 7:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
@@ -4968,13 +5042,13 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
       + arch_workflow
         .matches("actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1")
         .count(),
-    4,
-    "the two workflow templates should publish provenance and SBOM attestations for platform and index matrices"
+    6,
+    "the two workflow templates should publish provenance, SBOM, and rebuild attestations for platform and index matrices"
   );
   assert_eq!(
     workflow.matches("push-to-registry: false").count()
       + arch_workflow.matches("push-to-registry: false").count(),
-    4,
+    6,
     "every attestation action must keep bundles in the GitHub Attestations API"
   );
 
@@ -5055,6 +5129,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Generate CycloneDX platform SBOM",
     "Publish signed platform provenance",
     "Publish signed platform SBOM",
+    "Publish signed platform rebuild recipe",
     "Verify GitHub API platform attestations",
     "Promote canonical GHCR aliases",
     "ghcr-manifest-publish",
@@ -5064,15 +5139,18 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "ghcr-index-attest",
     "Publish signed index provenance",
     "Publish signed index SBOM",
+    "Publish signed index rebuild recipe",
     "ghcr-index-verify",
     "Verify GitHub API index attestations",
     "ghcr-index-promote",
     "Promote canonical multi-arch aliases",
-    "if plan[\"schemaVersion\"] != 6:",
+    "if plan[\"schemaVersion\"] != 7:",
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
     "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "https://oxibelt.dev/attestations/rebuild/v1",
+    "rebuild_recipe.mjs",
     "push-to-registry: false",
     ":latest",
     r#"aliases = [f"{image}:{major}-alpine-musl-{arch}"] if kind == "stable" else []"#,
@@ -5100,12 +5178,81 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
 }
 
 #[test]
+fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() {
+  let workflow = release_rebuild_verification_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("independent rebuild workflow should parse as YAML");
+  let jobs = parsed["jobs"]
+    .as_object()
+    .expect("independent rebuild workflow should define jobs");
+
+  assert_eq!(
+    jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from(["resolve".to_owned(), "verify".to_owned()]),
+    "independent rebuild workflow should separate immutable planning from rebuild verification"
+  );
+  assert_eq!(
+    parsed["permissions"],
+    serde_json::json!({
+      "actions": "read",
+      "attestations": "read",
+      "contents": "read",
+      "packages": "read"
+    }),
+    "independent rebuild workflow must remain globally read-only"
+  );
+
+  for expected in [
+    "workflows: [\"Release OxiBelt images\"]",
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.event == 'release'",
+    "successful release run must resolve to exactly one stable or beta tag",
+    "pnpm run versioning:release",
+    "expected_count=30",
+    "persist-credentials: false",
+    "docker/setup-docker-action@6d7cfa65f60a9dda7b46e5513fa982536f3c9877 # v5.3.0",
+    "rootless: true",
+    "index(\"name=rootless\") != null",
+    "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec",
+    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
+    "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "tests/scripts/verify-release-rebuild.sh",
+    "--release-ref \"${RELEASE_REF}\"",
+    "--revision \"${RELEASE_REVISION}\"",
+    "Upload independent rebuild receipt",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "independent rebuild workflow should include {expected}"
+    );
+  }
+  for forbidden in [
+    "actions/download-artifact",
+    "oxibelt-release-metadata",
+    "attestations: write",
+    "contents: write",
+    "id-token: write",
+    "packages: write",
+    "docker-rootful",
+    "continue-on-error",
+  ] {
+    assert!(
+      !workflow.contains(forbidden),
+      "independent rebuild workflow must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
 fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let workflow = workflow_text();
   let script = docker_pull_retry_script_text();
   let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
-  let prepull_command = "tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1";
+  let prepull_command = "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"";
+  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec";
+  let pinned_driver = "driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
@@ -5121,6 +5268,15 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
     workflow.matches(prepull_command).count(),
     setup_count,
     "each BuildKit pre-pull step should use the shared retry helper"
+  );
+  assert!(
+    workflow.contains(pinned_image),
+    "BuildKit must be pinned to the reviewed multi-architecture index digest"
+  );
+  assert_eq!(
+    workflow.matches(pinned_driver).count(),
+    setup_count,
+    "each Buildx builder should use the digest-pinned BuildKit driver"
   );
   assert!(
     script.contains("retry_command 3 docker pull \"${image}\""),

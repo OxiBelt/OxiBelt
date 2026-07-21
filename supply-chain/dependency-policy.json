@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "policyOwner": "OxiBelt maintainers",
+  "reviewedOn": "2026-07-21",
+  "maxExceptionDays": 90,
+  "rust": {
+    "allowedRegistries": [
+      "https://github.com/rust-lang/crates.io-index"
+    ],
+    "approvedGitSources": [],
+    "cargoVet": {
+      "version": "0.10.0",
+      "deploymentCriteria": "safe-to-deploy",
+      "developmentCriteria": "safe-to-run",
+      "imports": {
+        "google": "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml",
+        "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+      },
+      "bootstrapException": "rust-cargo-vet-bootstrap",
+      "lockfileSha256": "2fb40b19f2a531883ca529fd3d3e4cceed0ff75d78270cbe6992d1e2bbd7a17d",
+      "exemptionInventorySha256": "d097fc907efff7d0648e7b74ad6997d15459cc9bd4f8195966b200ccb4cb9a4a",
+      "exemptedPackageVersions": 474
+    },
+    "reviewTriggers": [
+      "new direct dependency",
+      "new or changed dependency source",
+      "new critical dependency version or feature",
+      "new transitive critical major version",
+      "new build script or proc-macro capability",
+      "new or extended dependency-policy exception"
+    ],
+    "duplicateCompatibilityBaseline": {
+      "aes": ["0.8", "0.9"],
+      "annotate-snippets": ["0.11", "0.12"],
+      "bit-set": ["0.8", "0.9"],
+      "bit-vec": ["0.8", "0.9"],
+      "bitflags": ["1", "2"],
+      "block-buffer": ["0.10", "0.12"],
+      "cipher": ["0.4", "0.5"],
+      "const-oid": ["0.10", "0.9"],
+      "cpufeatures": ["0.2", "0.3"],
+      "crypto-common": ["0.1", "0.2"],
+      "der": ["0.7", "0.8"],
+      "der_derive": ["0.7", "0.8"],
+      "digest": ["0.10", "0.11"],
+      "foldhash": ["0.1", "0.2"],
+      "generic-array": ["0.14", "1"],
+      "getrandom": ["0.2", "0.3", "0.4"],
+      "hashbrown": ["0.15", "0.16", "0.17"],
+      "inout": ["0.1", "0.2"],
+      "itertools": ["0.13", "0.14"],
+      "pem-rfc7468": ["0.7", "1"],
+      "r-efi": ["5", "6"],
+      "rand": ["0.10", "0.8"],
+      "rand_core": ["0.10", "0.6"],
+      "sha2": ["0.10", "0.11"],
+      "shlex": ["1", "2"],
+      "spki": ["0.7", "0.8"],
+      "thiserror": ["1", "2"],
+      "thiserror-impl": ["1", "2"],
+      "untrusted": ["0.7", "0.9"],
+      "windows-sys": ["0.52", "0.61"],
+      "x509-cert": ["0.2", "0.3"]
+    },
+    "criticalDependencies": [
+      {
+        "category": "cryptography",
+        "packages": {
+          "aes-gcm": ["0.11.0"],
+          "argon2": ["0.5.3"],
+          "aws-lc-rs": ["1.17.1"],
+          "aws-lc-sys": ["0.42.0"],
+          "chacha20poly1305": ["0.11.0"],
+          "hkdf": ["0.13.0"],
+          "hmac": ["0.13.0"],
+          "openssl-sys": ["0.9.117"],
+          "ring": ["0.17.14"],
+          "sequoia-openpgp": ["2.4.1"],
+          "sha2": ["0.10.9", "0.11.0"],
+          "zeroize": ["1.9.0"]
+        },
+        "reviewBoundary": "primitive choice, key handling, FFI, unsafe code, enabled algorithms, and release provenance"
+      },
+      {
+        "category": "tls-quic-http",
+        "packages": {
+          "fastwebsockets": ["0.10.0"],
+          "h2": ["0.4.15"],
+          "h3": ["0.0.8"],
+          "h3-quinn": ["0.0.10"],
+          "h3-webtransport": ["0.1.2"],
+          "http": ["1.4.2"],
+          "httparse": ["1.10.1"],
+          "hyper": ["1.10.1"],
+          "hyper-rustls": ["0.27.9"],
+          "hyper-util": ["0.1.20"],
+          "quinn": ["0.11.11"],
+          "quinn-proto": ["0.11.16"],
+          "quinn-udp": ["0.5.15"],
+          "rustls": ["0.23.42"],
+          "rustls-pki-types": ["1.15.0"],
+          "rustls-webpki": ["0.103.13"],
+          "web-transport-proto": ["0.6.0"],
+          "web-transport-quinn": ["0.11.10"]
+        },
+        "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
+      },
+      {
+        "category": "parsing-serialization",
+        "packages": {
+          "jsonschema": ["0.48.1"],
+          "serde": ["1.0.228"],
+          "serde-saphyr": ["0.0.27", "0.0.29"],
+          "serde_json": ["1.0.150"],
+          "toml": ["1.1.3+spec-1.1.0"],
+          "toml_edit": ["0.25.13+spec-1.1.0"]
+        },
+        "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, and format compatibility"
+      },
+      {
+        "category": "compression",
+        "packages": {
+          "async-compression": ["0.4.42"],
+          "brotli": ["8.0.4"],
+          "flate2": ["1.1.9"],
+          "zstd": ["0.13.3"]
+        },
+        "reviewBoundary": "decompression limits, native-code boundaries, memory use, and malformed-stream behavior"
+      },
+      {
+        "category": "database",
+        "packages": {
+          "sqlx": ["0.9.0"],
+          "sqlx-core": ["0.9.0"],
+          "sqlx-postgres": ["0.9.0"]
+        },
+        "reviewBoundary": "query binding, TLS, credential handling, protocol parsing, and migration compatibility"
+      },
+      {
+        "category": "kubernetes",
+        "packages": {
+          "k8s-openapi": ["0.28.0"],
+          "kube": ["4.0.0"],
+          "kube-client": ["4.0.0"],
+          "kube-core": ["4.0.0"],
+          "kube-runtime": ["4.0.0"]
+        },
+        "reviewBoundary": "API version selection, authentication, TLS, watch-stream parsing, and controller retry behavior"
+      }
+    ]
+  },
+  "node": {
+    "allowedRegistries": [
+      "https://registry.npmjs.org/"
+    ],
+    "allowedLicenses": [
+      "0BSD",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "BlueOak-1.0.0",
+      "BSL-1.0",
+      "CC0-1.0",
+      "CDLA-Permissive-2.0",
+      "ISC",
+      "MIT",
+      "MIT-0",
+      "NCSA",
+      "OpenSSL",
+      "Unicode-3.0",
+      "Unlicense",
+      "Zlib"
+    ],
+    "lifecycleScripts": [
+      {
+        "package": "esbuild",
+        "version": "0.28.1",
+        "rationale": "tsx uses esbuild's install hook to select the exact platform-specific compiler binary. OxiBelt CI and release installs retain --ignore-scripts."
+      }
+    ],
+    "auditExceptions": []
+  },
+  "exceptions": [
+    {
+      "id": "rust-duplicate-compatibility-bootstrap",
+      "ecosystem": "rust",
+      "control": "duplicate-compatibility-lines",
+      "subject": "Cargo.lock@sha256:2fb40b19f2a531883ca529fd3d3e4cceed0ff75d78270cbe6992d1e2bbd7a17d",
+      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-cargo-vet-bootstrap",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "Cargo.lock@sha256:2fb40b19f2a531883ca529fd3d3e4cceed0ff75d78270cbe6992d1e2bbd7a17d",
+      "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-license-buffered-reader-1.4.1",
+      "ecosystem": "rust",
+      "control": "license",
+      "subject": "buffered-reader@1.4.1:LGPL-2.0-or-later",
+      "rationale": "Sequoia uses this streaming parser internally; keep the copyleft license scoped to the exact reviewed crate version.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-license-clubcard-0.3.3",
+      "ecosystem": "rust",
+      "control": "license",
+      "subject": "clubcard@0.3.3:MPL-2.0",
+      "rationale": "CRLite uses this exact package for probabilistic certificate-revocation data; keep MPL approval package-local.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-license-clubcard-crlite-0.5.1",
+      "ecosystem": "rust",
+      "control": "license",
+      "subject": "clubcard-crlite@0.5.1:MPL-2.0",
+      "rationale": "OxiBelt's CRLite integration directly relies on this exact MPL-licensed implementation.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-license-sequoia-openpgp-2.4.1",
+      "ecosystem": "rust",
+      "control": "license",
+      "subject": "sequoia-openpgp@2.4.1:LGPL-2.0-or-later",
+      "rationale": "The CLI signing and verification boundary requires Sequoia; approval remains limited to the exact reviewed release.",
+      "owner": "OxiBelt maintainers",
+      "bootstrap": true,
+      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
+      "reviewedOn": "2026-07-21",
+      "expiresOn": "2026-10-19"
+    }
+  ]
+}

@@ -277,7 +277,7 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
-  Assert.equal(Plan.schemaVersion, 6)
+  Assert.equal(Plan.schemaVersion, 7)
   Assert.deepEqual(Plan.roles, [
     {
       role: 'standalone',

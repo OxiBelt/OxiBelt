@@ -61,7 +61,8 @@ cargo fmt --check
 tests/scripts/check-tests-rustfmt.sh
 tests/scripts/check-rust-module-size.sh
 cargo audit
-cargo deny check advisories
+cargo deny check
+cargo vet --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
@@ -298,7 +299,8 @@ cargo fmt --check
 tests/scripts/check-tests-rustfmt.sh
 tests/scripts/check-rust-module-size.sh
 cargo audit
-cargo deny check advisories
+cargo deny check
+cargo vet --locked
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
@@ -330,7 +332,10 @@ OxiBelt uses the root pnpm workspace for TypeScript DevOps tooling under
 DevOps TypeScript automation, run:
 
 ```sh
+corepack enable
+corepack install
 pnpm install --frozen-lockfile
+pnpm run dependency-admission
 pnpm run lint
 pnpm run typecheck
 pnpm run test
@@ -405,6 +410,18 @@ safety documentation, focused validation, and review process. A change to an
 allowlisted module or the allowlist requires approval from a named reviewer
 other than the author, with the safety model and Miri, sanitizer, syscall-test,
 and fuzz evidence recorded in the pull request.
+
+Dependency admission is security-sensitive. Changes to Cargo or pnpm
+manifests, lockfiles, `deny.toml`, `supply-chain/`, lifecycle-script approvals,
+or dependency exceptions must run the repository admission checks. A new
+direct dependency, a new security-critical major version, a source or feature
+change to a critical dependency, a new Rust build script or pnpm lifecycle
+script, or a new exception requires a named owner and tracking issue. Record
+the source and unsafe-code review, license and maintenance review, alternatives
+considered, and any fuzzing or wrapper boundary in the pull request. Cargo-vet
+evidence must use `safe-to-deploy` for runtime dependencies and `safe-to-run`
+for development or build-only dependencies. Exceptions must match the shared
+policy ledger exactly and may not be open-ended.
 
 Security-sensitive decisions include WAF and OxiRule evaluation, route matching
 and route authorization, Person proof validation, bot, agent, and person

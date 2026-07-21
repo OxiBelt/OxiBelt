@@ -2,7 +2,7 @@
   "name": "oxibelt",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.13.1",
+  "packageManager": "pnpm@11.13.1+sha512.b2fc7683b8a6525414e7d13e1ba28caaddde96bf66ec540bfaeb7e702b81f3e0be4d1f295edf7f9fe0396740a8dce4509c582ddf79891f4543fea32d37645f25",
   "workspaces": [
     "devops",
     "ui/*"
@@ -12,21 +12,22 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
     "lint": "eslint \"devops/**/*.ts\" \"ui/*/source/**/*.ts\"",
     "test": "node --import tsx --test devops/tests/*.test.ts",
+    "dependency-admission": "node --import tsx devops/sources/dependency_admission.ts --workspace-path . --policy-path supply-chain/dependency-policy.json",
     "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock",
     "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock --ref \"$OXIBELT_RELEASE_REF\" --revision \"$OXIBELT_RELEASE_REVISION\" --event-name \"$GITHUB_EVENT_NAME\" --release-prerelease \"$OXIBELT_RELEASE_IS_PRERELEASE\" --image-plan-output \"$OXIBELT_IMAGE_PLAN_OUTPUT\" --release-publish",
     "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "@types/semver": "^7.7.1",
-    "@typescript-eslint/eslint-plugin": "^8.64.0",
-    "@typescript-eslint/parser": "^8.64.0",
-    "eslint": "^10.7.0",
-    "tsx": "^4.23.1",
-    "typescript": "^6.0.3"
+    "@types/node": "24.13.3",
+    "@types/semver": "7.7.1",
+    "@typescript-eslint/eslint-plugin": "8.64.0",
+    "@typescript-eslint/parser": "8.64.0",
+    "eslint": "10.7.0",
+    "tsx": "4.23.1",
+    "typescript": "6.0.3"
   },
   "dependencies": {
-    "semver": "^7.8.5",
-    "smol-toml": "^1.7.0"
+    "semver": "7.8.5",
+    "smol-toml": "1.7.0"
   }
 }

@@ -214,3 +214,7 @@ path = "../tests/rust/helm_chart_assets.rs"
 [[test]]
 name = "shared_state_async_contract"
 path = "../tests/rust/shared_state_async_contract.rs"
+
+[[test]]
+name = "dependency_admission"
+path = "../tests/rust/dependency_admission.rs"

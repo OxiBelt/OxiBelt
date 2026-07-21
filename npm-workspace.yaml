@@ -1,4 +1,0 @@
-# npm workspaces are declared in package.json.
-# pnpm reads pnpm-workspace.yaml; this mirror documents the same package set.
-packages:
-  - "ui/*"

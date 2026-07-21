@@ -4,8 +4,10 @@ OxiBelt publishes six role-specific container images. The release workflow
 creates GitHub artifact attestations for every canonical platform image digest
 and every canonical multi-architecture index digest. Each digest receives:
 
-- SLSA provenance with predicate type `https://slsa.dev/provenance/v1`; and
-- a CycloneDX SBOM with predicate type `https://cyclonedx.org/bom`.
+- SLSA provenance with predicate type `https://slsa.dev/provenance/v1`;
+- a CycloneDX SBOM with predicate type `https://cyclonedx.org/bom`; and
+- a deterministic rebuild recipe with predicate type
+  `https://oxibelt.dev/attestations/rebuild/v1`.
 
 These are keyless GitHub Attestations API records signed from the release's
 GitHub Actions identity. The workflow deliberately sets
@@ -16,10 +18,13 @@ retrieves bundles from GitHub's API and separately reads the image from GHCR.
 An OCI digest identifies exact registry content. A successfully verified
 attestation additionally authenticates the GitHub Actions signer identity and
 binds a statement to that digest. It does not prove that the source was
-reviewed or approved, that the build is reproducible, that dependencies or the
-image are vulnerability-free, or that the digest is the newest acceptable
-release. Operators must enforce approval, freshness, rollback, vulnerability,
-and deployment-admission policy separately.
+reviewed or approved, that dependencies or the image are vulnerability-free,
+or that the digest is the newest acceptable release. The rebuild recipe makes
+the stated source tree, build inputs, base images, role/architecture contract,
+binary inventory, SBOM, and build environment independently checkable; it is
+still a workflow assertion until a separate rebuild verifies it. Operators
+must enforce approval, freshness, rollback, vulnerability, and
+deployment-admission policy separately.
 
 ## Official image repositories
 
@@ -134,6 +139,18 @@ gh attestation verify "${subject}" \
   --predicate-type https://cyclonedx.org/bom \
   --limit 100 \
   --format json > sbom.json
+
+gh attestation verify "${subject}" \
+  --repo OxiBelt/OxiBelt \
+  --signer-workflow "${signer}" \
+  --signer-digest "${revision}" \
+  --source-digest "${revision}" \
+  --source-ref "refs/tags/${version}" \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
+  --deny-self-hosted-runners \
+  --predicate-type https://oxibelt.dev/attestations/rebuild/v1 \
+  --limit 100 \
+  --format json > rebuild.json
 ```
 
 For a multi-architecture index digest, use the same commands with
@@ -143,8 +160,8 @@ before promotion.
 
 `--signer-workflow` constrains a workflow path prefix. A complete consumer
 policy must inspect every returned verification result, not just the first,
-and require all of the following for at least one provenance result and at
-least one CycloneDX result:
+and require all of the following for at least one provenance, CycloneDX, and
+rebuild-recipe result:
 
 - the statement subject name is exactly the tagless image repository and its
   SHA-256 digest is exactly the independently resolved digest;
@@ -158,12 +175,61 @@ least one CycloneDX result:
   ref and revision, and the expected builder and caller workflow identities;
   for platform images, the signer/builder is `release-image-arch.yml` while the
   provenance caller path is `.github/workflows/release.yml`; and
-- the CycloneDX predicate exactly matches the SBOM expected for that digest.
+- the CycloneDX predicate exactly matches the SBOM expected for that digest;
+  and
+- the rebuild predicate is the expected `platform` or `index` recipe, has one
+  exact subject, source ref and revision, and binds the expected role,
+  architecture, source tree, build contract, binary inventory, and SBOM.
 
 Attestation generation is safely repeatable, so the API can return duplicate
 valid records as well as historical records. Verification must examine all
 results and select an exact match. A trusted timestamp proves when a particular
 bundle was witnessed; it is not a release-freshness or anti-rollback policy.
+
+## Independent rebuild verification
+
+`.github/workflows/verify-release-rebuild.yml` is a separate read-only
+consumer of published evidence. After a successful stable or beta release it
+rebuilds all six roles and five architecture variants. A manual dispatch can
+target one stable, beta, or build artifact. The job checks out the exact tag in
+a fresh tree, starts an isolated rootless Docker daemon, verifies the
+provenance, SBOM, and rebuild-recipe records through GitHub's API, resolves the
+canonical GHCR digest, and rebuilds without downloading artifacts from the
+producer workflow.
+
+The verifier writes a machine-readable receipt with one of four outcomes:
+
+- `exact` means the rebuilt archive digest and bound evidence match exactly;
+- `normalized_equivalent` means the semantic image contract matches after
+  ignoring only documented archive ordering, compression, filesystem mtime,
+  and OCI created/history timestamp fields;
+- `mismatch` is a verification failure; and
+- `unverifiable` means evidence was missing, malformed, unsafe to compare, or
+  outside the comparator's resource bounds, and also fails the job.
+
+Normalization preserves filesystem content and types, modes, ownership,
+links, extended attributes and capabilities, OCI configuration, executable
+hashes, and the SBOM graph. A normalized result is evidence of semantic
+equivalence, not a claim of byte-for-byte reproducibility.
+
+## Dependency admission
+
+Rust admission is defined by `deny.toml`, `supply-chain/config.toml`, and the
+owned exception and bootstrap ledger in
+`supply-chain/dependency-policy.json`. CI runs the complete `cargo deny check`
+policy and locked `cargo vet` review evidence. Duplicate compatibility lines,
+critical dependencies, allowed registries/licenses, and every temporary
+exception are statically checked; exceptions require an owner, rationale,
+review reference, and bounded expiry.
+
+Node admission requires exact manifest and lockfile specifiers, the
+hash-pinned root `packageManager`, the public npm registry, lockfile integrity,
+a minimum release age, denied exotic sources, and an exact allowlist for
+lifecycle scripts. CI installs with `--ignore-scripts`, then separately checks
+the approved script tuple, license inventory, an unfiltered audit report, and
+registry signatures. Vulnerability exceptions must exactly match GHSA,
+package, affected range, owner, issue, review date, and expiry; stale or
+unreported exceptions fail admission.
 
 ## Download bundles for retained verification
 
@@ -191,13 +257,15 @@ gh attestation verify "${subject}" \
 ```
 
 Repeat the bundle verification with
-`--predicate-type https://cyclonedx.org/bom`. Retain the immutable image digest,
-bundle, expected source/signer identity, expected SBOM, GitHub CLI version, and
-required trust material together. OxiBelt does not publish these bundles as
-OCI referrers, so `--bundle-from-oci` is not the supported path. Downloaded
-bundles enable file-based verification, but the release contract does not
-provide a complete registry-only or air-gapped verification system; operators
-must provision the image and verifier trust material for those environments.
+`--predicate-type https://cyclonedx.org/bom` and
+`--predicate-type https://oxibelt.dev/attestations/rebuild/v1`. Retain the
+immutable image digest, bundle, expected source/signer identity, expected SBOM
+and rebuild recipe, GitHub CLI version, and required trust material together.
+OxiBelt does not publish these bundles as OCI referrers, so
+`--bundle-from-oci` is not the supported path. Downloaded bundles enable
+file-based verification, but the release contract does not provide a complete
+registry-only or air-gapped verification system; operators must provision the
+image and verifier trust material for those environments.
 
 ## RISC-V build trust boundary
 
@@ -266,9 +334,10 @@ Consequently:
   dependency, maintainer, pinned action commit, release credential, GitHub
   Actions identity, or registry authority can still produce or publish
   malicious content and plausible predicates.
-- Attestations bind a digest to a trusted workflow and stated source; they do
-  not prove code review, branch protection, human approval, reproducibility, or
-  base-image digest pinning.
+- Attestations bind a digest to a trusted workflow and stated source; the
+  rebuild predicate records base-image pins and reproducibility inputs, but an
+  attestation alone does not prove code review, branch protection, human
+  approval, or an independently successful rebuild.
 - Image labels and executable inventories remain publisher-supplied metadata.
 - Vulnerability reports and dependency snapshots do not prove that a deployed
   digest is vulnerability-free.

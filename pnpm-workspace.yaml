@@ -1,5 +1,12 @@
 packages:
   - "devops"
   - "ui/*"
+registry: "https://registry.npmjs.org/"
+blockExoticSubdeps: true
+trustLockfile: false
+strictDepBuilds: true
+minimumReleaseAge: 1440
+auditConfig:
+  ignoreGhsas: []
 allowBuilds:
-  esbuild: true
+  "esbuild@0.28.1": true

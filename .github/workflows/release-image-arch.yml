@@ -49,6 +49,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
   OXIBELT_GHCR_IMAGE: ${{ inputs.image }}
   OXIBELT_IMAGE_ROLE: ${{ inputs.image_role }}
   OXIBELT_ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
@@ -100,12 +101,13 @@ jobs:
           cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
 
       - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
         env:
@@ -152,7 +154,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 6:
+          if plan["schemaVersion"] != 7:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
@@ -258,6 +260,7 @@ jobs:
           path: |
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
           if-no-files-found: error
           retention-days: 1
 
@@ -409,6 +412,52 @@ jobs:
             --image-digest "${image_digest}" \
             --output "${RELEASE_SBOM}"
 
+      - name: Build platform rebuild recipe
+        env:
+          ARTIFACT_CONTRACT: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
+          BINARY_INVENTORY: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
+          BUILD_ENVIRONMENT: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-build-environment-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          REBUILD_RECIPE: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
+          RELEASE_SBOM: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+        run: |
+          set -euo pipefail
+
+          feature_graph_sha256="$(jq -cS '.cargo_builds' "${ARTIFACT_CONTRACT}" | sha256sum | awk '{print $1}')"
+          buildx_version="$(docker buildx version | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+          rust_builder="$(jq -r '.build_parameters.rust_builder_image' "${ARTIFACT_CONTRACT}")"
+          node_builder="$(jq -r '.build_parameters.node_builder_image' "${ARTIFACT_CONTRACT}")"
+          rust_target="$(jq -r '.rust_target' "${ARTIFACT_CONTRACT}")"
+          if [[ "${OXIBELT_ARTIFACT_ARCH}" == "riscv64" ]]; then
+            cc_identity="cross-rs riscv64gc-musl toolchain c12165aa"
+          else
+            cc_identity="Alpine 3.24 build-base musl toolchain"
+          fi
+          jq -n \
+            --arg rustc "rustc 1.97.0 via ${rust_builder}" \
+            --arg cargo "cargo from ${rust_builder}" \
+            --arg node "${node_builder}" \
+            --arg pnpm "pnpm 11.13.1" \
+            --arg buildx "${buildx_version}" \
+            --arg buildkit "${OXIBELT_BUILDKIT_IMAGE}" \
+            --arg trivy "trivy v0.72.0" \
+            --arg cc "${cc_identity}" \
+            --arg ld "Rust target linker ${rust_target}" \
+            --arg feature_graph_sha256 "sha256:${feature_graph_sha256}" \
+            '{schemaVersion: 1, rustc: $rustc, cargo: $cargo, node: $node, pnpm: $pnpm,
+              buildx: $buildx, buildkit: $buildkit, trivy: $trivy, cc: $cc, ld: $ld,
+              featureGraphSha256: $feature_graph_sha256}' >"${BUILD_ENVIRONMENT}"
+
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/rebuild_recipe.mjs" platform \
+            --image-plan "${IMAGE_PLAN}" \
+            --artifact-contract "${ARTIFACT_CONTRACT}" \
+            --binary-inventory "${BINARY_INVENTORY}" \
+            --sbom "${RELEASE_SBOM}" \
+            --build-environment "${BUILD_ENVIRONMENT}" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
+            --output "${REBUILD_RECIPE}"
+
       - name: Upload Trivy vulnerability report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
@@ -422,6 +471,14 @@ jobs:
         with:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload platform rebuild recipe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
           if-no-files-found: error
           retention-days: 1
 
@@ -458,6 +515,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate Docker image artifact for publish
         env:
@@ -490,7 +548,7 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 6:
+          if plan["schemaVersion"] != 7:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
@@ -705,10 +763,17 @@ jobs:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/oxibelt-platform-sbom
 
+      - name: Download platform rebuild recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/oxibelt-platform-rebuild
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate immutable platform attestation subject
         env:
@@ -716,6 +781,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.ghcr_token }}
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           RELEASE_REF: ${{ inputs.release_ref }}
+          REBUILD_RECIPE: ${{ runner.temp }}/oxibelt-platform-rebuild/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
           RELEASE_REVISION: ${{ inputs.release_revision }}
           RELEASE_SBOM: ${{ runner.temp }}/oxibelt-platform-sbom/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
           RELEASE_VERSION: ${{ inputs.release_version }}
@@ -770,6 +836,23 @@ jobs:
               "io.oxibelt.image.digest": $digest
             }
           ' "${RELEASE_SBOM}" >/dev/null
+          jq -e \
+            --arg image "${OXIBELT_GHCR_IMAGE}" \
+            --arg digest "${DIGEST}" \
+            --arg revision "${RELEASE_REVISION}" \
+            --arg ref "${RELEASE_REF}" \
+            --arg role "${OXIBELT_IMAGE_ROLE}" \
+            --arg arch "${OXIBELT_ARTIFACT_ARCH}" '
+              .schemaVersion == 1
+              and .predicateType == "https://oxibelt.dev/attestations/rebuild/v1"
+              and .kind == "platform"
+              and .subject == {name: $image, digest: $digest}
+              and .source.revision == $revision
+              and .source.ref == $ref
+              and .build.role == $role
+              and .build.artifactArch == $arch
+              and .output.artifactContract.schema == 2
+            ' "${REBUILD_RECIPE}" >/dev/null
 
       - name: Publish signed platform provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
@@ -784,6 +867,15 @@ jobs:
           subject-name: ${{ inputs.image }}
           subject-digest: ${{ needs.publish.outputs.digest }}
           sbom-path: ${{ runner.temp }}/oxibelt-platform-sbom/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
+          push-to-registry: false
+
+      - name: Publish signed platform rebuild recipe
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ inputs.image }}
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          predicate-type: https://oxibelt.dev/attestations/rebuild/v1
+          predicate-path: ${{ runner.temp }}/oxibelt-platform-rebuild/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
           push-to-registry: false
 
   verify:
@@ -814,16 +906,24 @@ jobs:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/oxibelt-platform-sbom
 
+      - name: Download platform rebuild recipe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
+          path: ${{ runner.temp }}/oxibelt-platform-rebuild
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Verify GitHub API platform attestations
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
           GH_TOKEN: ${{ secrets.ghcr_token }}
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          REBUILD_RECIPE: ${{ runner.temp }}/oxibelt-platform-rebuild/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
           RELEASE_REF: ${{ inputs.release_ref }}
           RELEASE_REVISION: ${{ inputs.release_revision }}
           RELEASE_SBOM: ${{ runner.temp }}/oxibelt-platform-sbom/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
@@ -873,6 +973,8 @@ jobs:
             "${common_args[@]}" --predicate-type https://slsa.dev/provenance/v1
           retry_attestation "${RUNNER_TEMP}/platform-sbom.json" gh attestation verify \
             "${common_args[@]}" --predicate-type https://cyclonedx.org/bom
+          retry_attestation "${RUNNER_TEMP}/platform-rebuild.json" gh attestation verify \
+            "${common_args[@]}" --predicate-type https://oxibelt.dev/attestations/rebuild/v1
 
           expected_signer="https://github.com/OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml@${RELEASE_REF}"
           for kind in provenance sbom; do
@@ -892,6 +994,19 @@ jobs:
             fi
             node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/release_sbom.mjs" "${args[@]}"
           done
+
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/rebuild_recipe.mjs" extract \
+            --attestations "${RUNNER_TEMP}/platform-rebuild.json" \
+            --subject-name "${OXIBELT_GHCR_IMAGE}" \
+            --subject-digest "${DIGEST}" \
+            --signer-workflow "${expected_signer}" \
+            --source-repository OxiBelt/OxiBelt \
+            --source-ref "${RELEASE_REF}" \
+            --source-revision "${RELEASE_REVISION}" \
+            --predicate-type https://oxibelt.dev/attestations/rebuild/v1 \
+            --output "${RUNNER_TEMP}/verified-platform-rebuild.json"
+          jq -e --slurpfile expected "${REBUILD_RECIPE}" '. == $expected[0]' \
+            "${RUNNER_TEMP}/verified-platform-rebuild.json" >/dev/null
 
   promote:
     name: Promote canonical GHCR aliases (${{ inputs.image_role }}/${{ inputs.artifact_arch }})
@@ -918,6 +1033,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           version: v0.35.0
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Promote digest to mutable aliases
         env:

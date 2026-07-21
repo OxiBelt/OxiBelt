@@ -18,6 +18,7 @@ required_jobs=(
   source-structure
   test
   rust-advisory-checks
+  node-dependency-admission
   fuzz-smoke
   unsafe-validation
   check-riscv64-cross
