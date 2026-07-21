@@ -17,6 +17,28 @@ fn repo_root() -> PathBuf {
     .to_path_buf()
 }
 
+fn schema_node_for_metadata_path<'a>(
+  schema: &'a serde_json::Value,
+  path: &str,
+) -> &'a serde_json::Value {
+  let mut current = schema;
+  for segment in path.split('.') {
+    let (key, array_item) = segment
+      .strip_suffix("[]")
+      .map_or((segment, false), |key| (key, true));
+    current = current
+      .get("properties")
+      .and_then(|properties| properties.get(key))
+      .unwrap_or_else(|| panic!("native schema is missing `{path}` at `{segment}`"));
+    if array_item {
+      current = current
+        .get("items")
+        .unwrap_or_else(|| panic!("native schema field `{segment}` is not an array"));
+    }
+  }
+  current
+}
+
 #[test]
 fn checked_metadata_generator_matches_the_embedded_versioned_schema() {
   let generated = generate_native_config_schema().expect("native schema should generate");
@@ -140,6 +162,73 @@ fn secret_reference_metadata_covers_runtime_credential_boundaries() {
   assert_eq!(
     native_config_field_metadata("admin.mutations.artifact_key_env").reference_activation,
     NativeConfigActivation::RestartRequired
+  );
+}
+
+#[test]
+fn generated_schema_preserves_metadata_through_array_items() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+
+  for path in [
+    "admin.tls.certificates[].private_key",
+    "cache.external_handlers[].token_env",
+    "external_auth[].client_secret_env",
+    "ipm.credentials[].bearer_token_env",
+    "ipm.credentials[].break_glass_access_token_hash",
+    "webrtc_turn_listeners[].auth.rest_shared_secret",
+    "webrtc_turn_listeners[].auth.rest_shared_secret_env",
+    "webrtc_turn_listeners[].auth.static_credentials[].password",
+    "webrtc_turn_listeners[].auth.static_credentials[].password_env",
+    "webrtc_turn_listeners[].tls.private_key",
+    "tls.certificates[].ocsp.responder_url",
+    "tls.certificates[].private_key",
+    "upstreams[].origin",
+    "upstream_pools[].servers[].origin",
+    "stream_upstream_pools[].servers[].origin",
+    "turn_upstream_pools[].servers[].origin",
+    "upstream_pools[].discovery.token_env",
+    "upstream_pools[].discovery.token_file",
+    "upstream_pools[].sticky_cookie.secret_env",
+  ] {
+    let node = schema_node_for_metadata_path(&schema, path);
+    let metadata = native_config_field_metadata(path);
+    assert_ne!(
+      metadata.secret_class,
+      NativeConfigSecretClass::None,
+      "test inventory must contain only secret metadata paths: {path}"
+    );
+    assert_eq!(
+      node["x-oxibelt-secret-class"],
+      serde_json::to_value(metadata.secret_class).expect("secret class should serialize"),
+      "generated schema must preserve the secret class for {path}"
+    );
+    assert_eq!(
+      node["description"],
+      format!("OxiBelt native field `{path}`. Production Rust validation is authoritative."),
+      "generated schema must publish the canonical array path for {path}"
+    );
+  }
+
+  let non_array_control = "database.mitigation.connection_url";
+  let control = schema_node_for_metadata_path(&schema, non_array_control);
+  assert_eq!(
+    control["x-oxibelt-secret-class"], "credential_bearing_url",
+    "non-array secret metadata must remain unchanged"
+  );
+
+  let oxirule = schema_node_for_metadata_path(&schema, "routes[].waf");
+  assert_eq!(oxirule["x-oxibelt-config-activation"], "oxi_rule_reload");
+  assert_eq!(oxirule["x-oxibelt-reference-activation"], "oxi_rule_reload");
+
+  let deprecated = schema_node_for_metadata_path(&schema, "upstream_pools[].health_check.rise");
+  assert_eq!(deprecated["deprecated"], true);
+  assert_eq!(deprecated["x-oxibelt-introduced-epoch"], 0);
+  assert_eq!(deprecated["x-oxibelt-deprecated-epoch"], 1);
+  assert_eq!(
+    deprecated["x-oxibelt-replacement"],
+    "upstream_pools[].health_check.healthy_threshold"
   );
 }
 

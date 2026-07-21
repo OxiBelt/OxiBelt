@@ -85,7 +85,7 @@ pub(super) fn collect_unknown_keys(value: &toml::Value, path: &str, unknown: &mu
   }
 }
 
-fn join_key_path(parent: &str, key: &str) -> String {
+pub(super) fn join_key_path(parent: &str, key: &str) -> String {
   if parent.is_empty() {
     key.to_string()
   } else {

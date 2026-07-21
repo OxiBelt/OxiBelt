@@ -8,7 +8,7 @@ use serde_json::Value;
 use serde_json::{Map, json};
 
 #[cfg(feature = "config-tooling")]
-use super::allowed_config_keys;
+use super::{allowed_config_keys, shape::join_key_path};
 
 pub const NATIVE_CONFIG_SCHEMA_EPOCH: u32 = 1;
 pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 1;
@@ -400,7 +400,7 @@ pub fn validate_native_schema_instance(
 
 #[cfg(feature = "config-tooling")]
 fn generated_schema_value() -> Value {
-  let mut root = object_schema("");
+  let mut root = object_schema("", "");
   if let Some(properties) = root.get_mut("properties").and_then(Value::as_object_mut) {
     properties.insert(
       "include".to_string(),
@@ -439,17 +439,17 @@ fn generated_schema_value() -> Value {
 }
 
 #[cfg(feature = "config-tooling")]
-fn object_schema(path: &str) -> Value {
-  let keys = allowed_config_keys(path).unwrap_or_default();
+fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
+  let keys = allowed_config_keys(shape_path).unwrap_or_default();
   let properties = keys
     .into_iter()
     .map(|key| {
-      let child_path = if path.is_empty() {
-        key.to_string()
-      } else {
-        format!("{path}.{key}")
-      };
-      (key.to_string(), schema_for_path(&child_path))
+      let child_shape_path = join_key_path(shape_path, key);
+      let child_metadata_path = join_key_path(metadata_path, key);
+      (
+        key.to_string(),
+        schema_for_path(&child_shape_path, &child_metadata_path),
+      )
     })
     .collect::<Map<_, _>>();
   json!({
@@ -460,20 +460,20 @@ fn object_schema(path: &str) -> Value {
 }
 
 #[cfg(feature = "config-tooling")]
-fn schema_for_path(path: &str) -> Value {
-  let metadata = native_config_field_metadata(path);
-  let mut schema = if is_array_path(path) {
-    let item_path = path;
-    let items = if allowed_config_keys(item_path).is_some() {
-      object_schema(item_path)
+fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
+  let metadata = native_config_field_metadata(metadata_path);
+  let mut schema = if is_array_path(shape_path) {
+    let item_metadata_path = format!("{metadata_path}[]");
+    let items = if allowed_config_keys(shape_path).is_some() {
+      object_schema(shape_path, &item_metadata_path)
     } else {
-      scalar_schema(path)
+      scalar_schema(shape_path)
     };
     json!({"type": "array", "items": items})
-  } else if allowed_config_keys(path).is_some() {
-    object_schema(path)
+  } else if allowed_config_keys(shape_path).is_some() {
+    object_schema(shape_path, metadata_path)
   } else {
-    scalar_schema(path)
+    scalar_schema(shape_path)
   };
   let Some(object) = schema.as_object_mut() else {
     return schema;
@@ -481,7 +481,7 @@ fn schema_for_path(path: &str) -> Value {
   object.insert(
     "description".to_string(),
     json!(format!(
-      "OxiBelt native field `{path}`. Production Rust validation is authoritative."
+      "OxiBelt native field `{metadata_path}`. Production Rust validation is authoritative."
     )),
   );
   object.insert(
@@ -507,10 +507,10 @@ fn schema_for_path(path: &str) -> Value {
   if let Some(replacement) = metadata.replacement {
     object.insert("x-oxibelt-replacement".to_string(), json!(replacement));
   }
-  if let Some(default) = default_value(path) {
+  if let Some(default) = default_value(shape_path) {
     object.insert("default".to_string(), default);
   }
-  if let Some(path_kind) = path_kind(path) {
+  if let Some(path_kind) = path_kind(shape_path) {
     object.insert("x-oxibelt-path-kind".to_string(), json!(path_kind));
   }
   schema
