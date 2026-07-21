@@ -72,6 +72,7 @@ esac
 image_tag="${artifact_prefix}:alpine-musl-${artifact_arch}"
 image_tar="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}.tar"
 build_metadata="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-build-metadata.json"
+artifact_contract="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arch}-artifact-contract.json"
 build_metadata_tmp=""
 rust_toolchain_version="1.97.0"
 rust_builder_image="rust:${rust_toolchain_version}-trixie"
@@ -185,5 +186,15 @@ docker buildx build \
 
 mv -- "${build_metadata_tmp}" "${build_metadata}"
 
+python3 "${repo_root}/tests/scripts/validate-ci-image-artifact.py" create \
+  --image-tar "${image_tar}" \
+  --build-metadata "${build_metadata}" \
+  --contract "${artifact_contract}" \
+  --role "${role}" \
+  --artifact-arch "${artifact_arch}" \
+  --expected-revision "${oxibelt_revision}" \
+  --expected-source "${oxibelt_source}"
+
 echo "Wrote ${image_tar}"
 echo "Wrote ${build_metadata}"
+echo "Wrote ${artifact_contract}"

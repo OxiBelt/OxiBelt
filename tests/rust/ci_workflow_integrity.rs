@@ -75,6 +75,59 @@ const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
   ),
 ];
 
+const OXIBELT_IMAGE_ROLES: &[(&str, &str)] = &[
+  ("standalone", "oxibelt"),
+  ("dataplane", "oxibelt-dataplane"),
+  ("dataplane-strict", "oxibelt-dataplane-strict"),
+  ("controller", "oxibelt-gateway-controller"),
+  ("tools", "oxibelt-tools"),
+  ("keysigner", "oxibelt-keysigner"),
+];
+
+const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
+  "source-structure",
+  "test",
+  "rust-advisory-checks",
+  "fuzz-smoke",
+  "unsafe-validation",
+  "check-riscv64-cross",
+  "generate-test-matrices",
+  "linux-target-builds",
+  "docker-alpine-musl-image-amd64",
+  "docker-alpine-musl-role-image-amd64",
+  "docker-alpine-musl-role-image-other",
+  "docker-alpine-musl-image-other",
+  "docker-alpine-musl-image-riscv64",
+  "docker-image-trivy-scan",
+  "docker-integration-helper-images",
+  "admin-mutation-postgres",
+  "admin-operation-postgres",
+  "admin-audit-anchor-postgres",
+  "kubernetes-immutable-rollout",
+  "kubernetes-pod-lifecycle",
+  "kubernetes-network-policy",
+  "kubernetes-current-compatibility",
+  "docker-integration-config-runtime",
+  "docker-integration-proxy",
+  "docker-integration-protocol",
+  "docker-integration-waf",
+  "docker-integration-cache",
+  "docker-integration-state-data",
+  "docker-integration-ops",
+  "docker-integration-security",
+  "remote-signer-dos-docker",
+  "browser-webdriver",
+];
+
+const BENCHMARK_ONLY_JOBS: &[&str] = &[
+  "docker-alpine-comparator-musl-image-amd64",
+  "docker-performance-probe-image",
+  "docker-external-benchmark-image",
+  "docker-performance",
+  "docker-performance-summary",
+  "docker-aggressive-long-run",
+];
+
 const PRIMARY_RUST_GATE_NEEDS: &[&str] = &[
   "test",
   "rust-advisory-checks",
@@ -385,6 +438,25 @@ fn docker_image_artifact_build_script_text() -> String {
 fn strict_dataplane_image_validator_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/validate-strict-dataplane-image.py"))
     .expect("strict data-plane image validator should be readable")
+}
+
+fn ci_image_artifact_validator_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/validate-ci-image-artifact.py"))
+    .expect("CI image artifact validator should be readable")
+}
+
+fn dependency_snapshot_helper_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/prepare-ci-dependency-snapshot.py"))
+    .expect("CI dependency snapshot helper should be readable")
+}
+
+fn non_benchmark_summary_script_path() -> PathBuf {
+  repo_root().join("tests/scripts/summarize-ci-needs.sh")
+}
+
+fn non_benchmark_summary_script_text() -> String {
+  fs::read_to_string(non_benchmark_summary_script_path())
+    .expect("non-benchmark summary script should be readable")
 }
 
 fn performance_probe_build_script_text() -> String {
@@ -1439,37 +1511,10 @@ fn dependabot_retirement_uses_authenticated_privilege_separation() {
 #[test]
 fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
   let jobs = parse_jobs(&workflow_text());
-  let mut security_relevant_jobs = vec![
-    "test",
-    "rust-advisory-checks",
-    "check-riscv64-cross",
-    "unsafe-validation",
-    "generate-test-matrices",
-    "linux-target-builds",
-    "docker-alpine-musl-image-amd64",
-    "docker-alpine-musl-kubernetes-role-image-amd64",
-    "docker-alpine-comparator-musl-image-amd64",
-    "docker-performance-probe-image",
-    "docker-external-benchmark-image",
-    "docker-integration-helper-images",
-    "admin-mutation-postgres",
-    "admin-operation-postgres",
-    "admin-audit-anchor-postgres",
-    "kubernetes-immutable-rollout",
-    "kubernetes-pod-lifecycle",
-    "kubernetes-network-policy",
-    "kubernetes-current-compatibility",
-    "docker-alpine-musl-image-other",
-    "docker-alpine-musl-image-riscv64",
-    "docker-image-trivy-scan",
-    "docker-image-dependency-snapshot",
-    "remote-signer-dos-docker",
-    "browser-webdriver",
-    "docker-performance",
-    "docker-performance-summary",
-    "docker-aggressive-long-run",
-  ];
-  security_relevant_jobs.extend(DOCKER_INTEGRATION_JOBS.iter().copied());
+  let security_relevant_jobs = REQUIRED_NON_BENCHMARK_JOBS
+    .iter()
+    .copied()
+    .filter(|job_id| *job_id != "source-structure");
 
   assert_eq!(
     simulate_source_structure_failure(&jobs, "source-structure"),
@@ -1970,10 +2015,8 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
     "generate-test-matrices",
     "linux-target-builds",
     "docker-alpine-musl-image-amd64",
-    "docker-alpine-musl-kubernetes-role-image-amd64",
-    "docker-alpine-comparator-musl-image-amd64",
-    "docker-performance-probe-image",
-    "docker-external-benchmark-image",
+    "docker-alpine-musl-role-image-amd64",
+    "docker-alpine-musl-role-image-other",
     "docker-alpine-musl-image-other",
     "docker-alpine-musl-image-riscv64",
     "docker-integration-helper-images",
@@ -1994,8 +2037,7 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
 fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
-  let role_image_job =
-    workflow_job_text(&workflow, "docker-alpine-musl-kubernetes-role-image-amd64");
+  let role_image_job = workflow_job_text(&workflow, "docker-alpine-musl-role-image-amd64");
   let job = jobs
     .get("kubernetes-immutable-rollout")
     .expect("workflow should define the Kubernetes immutable rollout job");
@@ -2006,23 +2048,27 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   assert_eq!(
     job.needs,
-    vec!["docker-alpine-musl-kubernetes-role-image-amd64".to_owned()],
+    vec!["docker-alpine-musl-role-image-amd64".to_owned()],
     "the Kubernetes rollout job should consume distinct AMD64 data-plane and controller artifacts"
   );
   for expected in [
-    "name: Docker Kubernetes role image (Alpine musl, amd64, ${{ matrix.role }})",
-    "role: dataplane",
+    "name: Docker role image (Alpine musl, amd64, ${{ matrix.role.name }})",
+    "name: dataplane",
     "artifact_prefix: oxibelt-dataplane",
-    "role: dataplane-strict",
+    "name: dataplane-strict",
     "artifact_prefix: oxibelt-dataplane-strict",
     "name: Validate strict data-plane image inventory",
-    "if: matrix.role == 'dataplane-strict'",
+    "if: matrix.role.name == 'dataplane-strict'",
     "tests/scripts/validate-strict-dataplane-image.py",
-    "role: controller",
+    "name: controller",
     "artifact_prefix: oxibelt-gateway-controller",
+    "name: tools",
+    "artifact_prefix: oxibelt-tools",
+    "name: keysigner",
+    "artifact_prefix: oxibelt-keysigner",
     "tests/scripts/build-docker-image-artifact.sh",
-    "\"${{ matrix.role }}\"",
-    "name: ${{ matrix.artifact_prefix }}-alpine-musl-amd64-image",
+    "\"${{ matrix.role.name }}\"",
+    "name: ${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-image",
   ] {
     assert!(
       role_image_job.contains(expected),
@@ -3412,49 +3458,75 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     scan_job.needs,
     vec![
       "docker-alpine-musl-image-amd64".to_owned(),
+      "docker-alpine-musl-role-image-amd64".to_owned(),
+      "docker-alpine-musl-role-image-other".to_owned(),
       "docker-alpine-musl-image-other".to_owned(),
       "docker-alpine-musl-image-riscv64".to_owned(),
     ],
-    "Trivy scans should wait for every OxiBelt release image artifact"
+    "Trivy scans should wait for every production role image artifact"
   );
   assert!(
-    scan_job_text.contains("name: Docker image Trivy scan (${{ matrix.artifact_arch }})"),
-    "Trivy scan job should expose the scanned artifact arch"
+    scan_job_text.contains(
+      "name: Docker image Trivy scan (${{ matrix.role.name }}, ${{ matrix.target.artifact_arch }})"
+    ) && scan_job_text.contains("fail-fast: false"),
+    "Trivy scan job should expose and independently collect every role/architecture result"
   );
 
-  for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
-    for expected in [
-      format!("artifact_arch: {artifact_arch}"),
-      format!("artifact_name: {artifact_name}"),
-      format!("image_tar: {image_tar}"),
-      format!("image_tag: {image_tag}"),
-    ] {
-      assert!(
-        scan_job_text.contains(&expected),
-        "Trivy scan matrix should include {expected}"
-      );
-    }
+  for (role, artifact_prefix) in OXIBELT_IMAGE_ROLES {
+    assert!(
+      scan_job_text.contains(&format!("name: {role}"))
+        && scan_job_text.contains(&format!("artifact_prefix: {artifact_prefix}")),
+      "Trivy scan matrix should include production role {role}"
+    );
+  }
+  for (artifact_arch, _, _, _) in OXIBELT_IMAGE_ARTIFACTS {
+    assert!(
+      scan_job_text.contains(&format!("artifact_arch: {artifact_arch}")),
+      "Trivy scan matrix should include architecture {artifact_arch}"
+    );
   }
 
   for expected in [
     "actions: read",
     "contents: read",
+    "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
-    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
+    "tests/scripts/validate-ci-image-artifact.py validate",
+    "-build-metadata.json",
+    "-artifact-contract.json",
+    "--expected-revision \"${GITHUB_SHA}\"",
+    "--expected-source \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}\"",
+    "tests/scripts/validate-strict-dataplane-image.py",
+    "if: matrix.role.name == 'dataplane-strict'",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
     "version: v0.72.0",
     "scan-type: image",
-    "image-ref: ${{ matrix.image_tag }}",
+    "image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}",
     "format: json",
     "vuln-type: os,library",
     "severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
     "exit-code: \"0\"",
     "GITHUB_STEP_SUMMARY",
+    "name: Generate local Trivy dependency snapshot",
+    "format: github",
+    "tests/scripts/prepare-ci-dependency-snapshot.py normalize",
     "Upload Trivy vulnerability report",
+    "Upload local dependency snapshot",
   ] {
     assert!(
       scan_job_text.contains(expected),
       "Trivy scan job should include {expected}"
+    );
+  }
+  for forbidden in [
+    "contents: write",
+    "github-pat:",
+    "secrets.GITHUB_TOKEN",
+    "gh api",
+  ] {
+    assert!(
+      !scan_job_text.contains(forbidden),
+      "pull-request image scanning must not contain write-capable operation {forbidden}"
     );
   }
 }
@@ -3464,18 +3536,17 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
   let snapshot_job = jobs
-    .get("docker-image-dependency-snapshot")
-    .expect("workflow should define the Docker image dependency snapshot job");
-  let snapshot_job_text = workflow_job_text(&workflow, "docker-image-dependency-snapshot");
+    .get("docker-image-dependency-snapshot-submit")
+    .expect("workflow should define the trusted Docker dependency snapshot submission job");
+  let snapshot_job_text = workflow_job_text(&workflow, "docker-image-dependency-snapshot-submit");
 
   assert_eq!(
     snapshot_job.needs,
     vec![
-      "docker-alpine-musl-image-amd64".to_owned(),
-      "docker-alpine-musl-image-other".to_owned(),
-      "docker-alpine-musl-image-riscv64".to_owned(),
+      "docker-image-trivy-scan".to_owned(),
+      "pr-non-benchmark-summary".to_owned(),
     ],
-    "dependency snapshots should wait for every OxiBelt release image artifact"
+    "external dependency submission should wait for local scans and complete validation"
   );
   assert!(
     workflow.contains("submit_dependency_snapshots:")
@@ -3486,10 +3557,11 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     "workflow_dispatch should expose an opt-in dependency snapshot toggle that is disabled by default"
   );
   for expected in [
+    "needs.pr-non-benchmark-summary.result == 'success'",
     "github.repository == 'OxiBelt/OxiBelt'",
+    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
     "github.event_name == 'push'",
     "github.event_name == 'schedule'",
-    "github.event_name == 'pull_request' && github.event['pull_request']['head']['repo']['full_name'] == github.repository",
     "github.event_name == 'workflow_dispatch' && inputs['submit_dependency_snapshots']",
   ] {
     assert!(
@@ -3498,39 +3570,407 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     );
   }
   assert!(
-    !snapshot_job_text.contains("github.event_name != 'pull_request'"),
-    "dependency snapshot job should not use a broad non-PR condition"
+    !snapshot_job_text.contains("github.event_name == 'pull_request'"),
+    "external dependency snapshot submission must not run on pull requests"
   );
-
-  for (artifact_arch, artifact_name, image_tar, image_tag) in OXIBELT_IMAGE_ARTIFACTS {
-    for expected in [
-      format!("artifact_arch: {artifact_arch}"),
-      format!("artifact_name: {artifact_name}"),
-      format!("image_tar: {image_tar}"),
-      format!("image_tag: {image_tag}"),
-    ] {
-      assert!(
-        snapshot_job_text.contains(&expected),
-        "dependency snapshot matrix should include {expected}"
-      );
-    }
-  }
 
   for expected in [
     "actions: read",
     "contents: write",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
-    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}\"",
-    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "version: v0.72.0",
-    "scan-type: image",
-    "image-ref: ${{ matrix.image_tag }}",
-    "format: github",
-    "github-pat: ${{ secrets.GITHUB_TOKEN }}",
+    "pattern: dependency-snapshot-*",
+    "roles=(standalone dataplane dataplane-strict controller tools keysigner)",
+    "architectures=(amd64v2 amd64 amd64v4 arm64 riscv64)",
+    "[[ \"${#actual_artifacts[@]}\" -eq 30 ]]",
+    "snapshot_sha=\"sha256:$(sha256sum",
+    "gh api --include --method POST",
+    "repos/OxiBelt/OxiBelt/dependency-graph/snapshots",
+    "201[[:space:]]",
+    ".result == \"SUCCESS\"",
   ] {
     assert!(
       snapshot_job_text.contains(expected),
       "dependency snapshot job should include {expected}"
+    );
+  }
+  for forbidden in [
+    "actions/checkout@",
+    "docker load",
+    "aquasecurity/trivy-action@",
+    "tests/scripts/",
+    "github-pat:",
+  ] {
+    assert!(
+      !snapshot_job_text.contains(forbidden),
+      "write-capable snapshot submission must not execute {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn production_role_images_cover_every_role_architecture_and_bind_artifacts() {
+  let workflow = workflow_text();
+  let amd64_roles = workflow_job_text(&workflow, "docker-alpine-musl-role-image-amd64");
+  let other_roles = workflow_job_text(&workflow, "docker-alpine-musl-role-image-other");
+  let builder = docker_image_artifact_build_script_text();
+  let validator = ci_image_artifact_validator_text();
+
+  for (role, artifact_prefix) in OXIBELT_IMAGE_ROLES
+    .iter()
+    .copied()
+    .filter(|(role, _)| *role != "standalone")
+  {
+    for job in [&amd64_roles, &other_roles] {
+      assert!(
+        job.contains(&format!("name: {role}"))
+          && job.contains(&format!("artifact_prefix: {artifact_prefix}")),
+        "role image job should include {role}/{artifact_prefix}"
+      );
+    }
+  }
+  for (artifact_arch, platform, runner) in [
+    ("amd64v2", "linux/amd64", "ubuntu-26.04"),
+    ("amd64v4", "linux/amd64", "ubuntu-26.04"),
+    ("arm64", "linux/arm64", "ubuntu-26.04-arm"),
+    ("riscv64", "linux/riscv64", "ubuntu-26.04"),
+  ] {
+    for expected in [
+      format!("artifact_arch: {artifact_arch}"),
+      format!("platform: {platform}"),
+      format!("runner: {runner}"),
+    ] {
+      assert!(
+        other_roles.contains(&expected),
+        "non-canonical role matrix should include {expected}"
+      );
+    }
+  }
+  for job in [&amd64_roles, &other_roles] {
+    assert!(
+      job.contains("fail-fast: false")
+        && job.contains("if: matrix.role.name == 'dataplane-strict'")
+        && job.contains("tests/scripts/validate-strict-dataplane-image.py")
+        && job.contains("-build-metadata.json")
+        && job.contains("-artifact-contract.json")
+        && job.contains("if-no-files-found: error"),
+      "role images should collect all failures and upload validated identity material"
+    );
+  }
+
+  for expected in [
+    "artifact_contract=",
+    "tests/scripts/validate-ci-image-artifact.py\" create",
+    "--expected-revision \"${oxibelt_revision}\"",
+    "--expected-source \"${oxibelt_source}\"",
+  ] {
+    assert!(
+      builder.contains(expected),
+      "Docker image builder should create its artifact contract with {expected}"
+    );
+  }
+  for expected in [
+    "MAXIMUM_ARCHIVE_BYTES",
+    "MAXIMUM_ARCHIVE_MEMBERS",
+    "safe_member_name",
+    "Docker archive contains duplicate member names",
+    "containerimage.config.digest",
+    "containerimage.descriptor",
+    "containerimage.digest",
+    "org.opencontainers.image.revision",
+    "org.opencontainers.image.source",
+    "io.oxibelt.image.role",
+    "image_tar_sha256",
+    "os.replace",
+  ] {
+    assert!(
+      validator.contains(expected),
+      "CI image artifact validator should enforce {expected}"
+    );
+  }
+  for forbidden in [
+    "extractall",
+    "subprocess",
+    "os.system",
+    "eval(",
+    "shell=True",
+  ] {
+    assert!(
+      !validator.contains(forbidden),
+      "CI image artifact validator must not use unsafe primitive {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check workflow should parse as YAML");
+  let jobs = parse_jobs(&workflow);
+  let summary = jobs
+    .get("pr-non-benchmark-summary")
+    .expect("workflow should define the terminal non-benchmark summary");
+  let summary_text = workflow_job_text(&workflow, "pr-non-benchmark-summary");
+  let summary_script = non_benchmark_summary_script_text();
+
+  assert_eq!(
+    summary.needs,
+    expected_needs(REQUIRED_NON_BENCHMARK_JOBS),
+    "terminal non-benchmark summary should depend on the exact required job set"
+  );
+  for expected in [
+    "github.event_name == 'pull_request' && 'PR non-benchmark summary'",
+    "if: ${{ always() && github.actor != 'dependabot[bot]' }}",
+    "OXIBELT_NEEDS_JSON: ${{ toJSON(needs) }}",
+    "tests/scripts/summarize-ci-needs.sh",
+    "name: Upload non-benchmark validation summary",
+    "if: always()",
+    "name: Enforce non-benchmark validation result",
+  ] {
+    assert!(
+      summary_text.contains(expected),
+      "terminal non-benchmark summary should include {expected}"
+    );
+  }
+  for job_id in REQUIRED_NON_BENCHMARK_JOBS {
+    assert!(
+      summary_script.contains(&format!("  {job_id}\n")),
+      "summary helper should require {job_id}"
+    );
+  }
+  for job_id in BENCHMARK_ONLY_JOBS
+    .iter()
+    .copied()
+    .chain(["docker-image-dependency-snapshot-submit"])
+  {
+    assert!(
+      !summary.needs.contains(&job_id.to_owned()),
+      "terminal non-benchmark summary must not depend on {job_id}"
+    );
+  }
+  for job_id in BENCHMARK_ONLY_JOBS {
+    assert!(
+      has_transitive_need(&jobs, job_id, "pr-non-benchmark-summary"),
+      "scheduled/manual benchmark job {job_id} should wait for the same-run non-benchmark summary"
+    );
+  }
+  for forbidden in [".outputs", "eval", "source ", "contents: write"] {
+    assert!(
+      !summary_script.contains(forbidden) && !summary_text.contains("contents: write"),
+      "terminal summary must not expose or execute dependency data via {forbidden}"
+    );
+  }
+
+  let pull_request = parsed
+    .pointer("/on/pull_request")
+    .expect("check workflow should run on pull requests");
+  assert!(
+    pull_request.is_null()
+      || pull_request.as_object().is_some_and(
+        |trigger| !trigger.contains_key("paths") && !trigger.contains_key("paths-ignore")
+      ),
+    "pull-request trigger must not use path filtering"
+  );
+  for expected in [
+    "format('{0}-pr-{1}', github.workflow, github.event.pull_request.number)",
+    "format('{0}-run-{1}', github.workflow, github.run_id)",
+    "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "workflow should preserve PR-only superseded-run cancellation with {expected}"
+    );
+  }
+
+  let parsed_jobs = parsed
+    .get("jobs")
+    .and_then(serde_json::Value::as_object)
+    .expect("check workflow should contain jobs");
+  for job_id in REQUIRED_NON_BENCHMARK_JOBS {
+    let job = parsed_jobs
+      .get(*job_id)
+      .unwrap_or_else(|| panic!("workflow should define required job {job_id}"));
+    let condition = job.get("if").and_then(serde_json::Value::as_str);
+    if CHECK_WORKFLOW_ENTRY_JOBS.contains(job_id) {
+      assert_eq!(condition, Some(DEPENDABOT_ACTOR_CONDITION));
+    } else {
+      assert!(
+        condition.is_none(),
+        "ordinary PR job {job_id} must not have a top-level skip condition"
+      );
+    }
+  }
+}
+
+#[test]
+fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results() {
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-non-benchmark-summary-")
+    .tempdir()
+    .expect("summary helper temp directory should be creatable");
+  let script = non_benchmark_summary_script_path();
+  let mut needs = serde_json::Map::new();
+  for job_id in REQUIRED_NON_BENCHMARK_JOBS {
+    needs.insert(
+      (*job_id).to_owned(),
+      serde_json::json!({
+        "result": "success",
+        "outputs": {"must_not_leak": "synthetic-secret-output"}
+      }),
+    );
+  }
+
+  let run_case = |label: &str, value: &serde_json::Value| {
+    let input = temp_dir.path().join(format!("{label}-needs.json"));
+    let summary = temp_dir.path().join(format!("{label}-summary.json"));
+    let markdown = temp_dir.path().join(format!("{label}-summary.md"));
+    fs::write(
+      &input,
+      serde_json::to_vec(value).expect("summary fixture should serialize"),
+    )
+    .expect("summary fixture should be writable");
+    let output = Command::new("bash")
+      .arg(&script)
+      .arg(&input)
+      .arg(&summary)
+      .arg(&markdown)
+      .current_dir(repo_root())
+      .env("GITHUB_REPOSITORY", "OxiBelt/OxiBelt")
+      .env("GITHUB_EVENT_NAME", "pull_request")
+      .env("GITHUB_SHA", "0123456789abcdef0123456789abcdef01234567")
+      .env("GITHUB_REF", "refs/pull/1/merge")
+      .env("GITHUB_RUN_ID", "123")
+      .env("GITHUB_RUN_ATTEMPT", "1")
+      .output()
+      .unwrap_or_else(|error| panic!("summary helper case {label} should execute: {error}"));
+    (output, summary, markdown)
+  };
+
+  let success_value = serde_json::Value::Object(needs.clone());
+  let (success, summary_path, markdown_path) = run_case("success", &success_value);
+  assert!(
+    success.status.success(),
+    "all-success summary should pass: {}",
+    String::from_utf8_lossy(&success.stderr)
+  );
+  let summary_text = fs::read_to_string(&summary_path).expect("success summary should be readable");
+  let summary: serde_json::Value =
+    serde_json::from_str(&summary_text).expect("success summary should be JSON");
+  assert_eq!(summary["schema"], 1);
+  assert_eq!(summary["overall"], "success");
+  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(32));
+  assert_eq!(summary["unexpected"], serde_json::json!([]));
+  assert!(!summary_text.contains("synthetic-secret-output"));
+  assert!(
+    fs::read_to_string(markdown_path)
+      .expect("success Markdown should be readable")
+      .contains("Non-benchmark validation summary")
+  );
+
+  for result in ["failure", "cancelled", "skipped", "unexpected"] {
+    let mut failed = needs.clone();
+    failed.insert(
+      "browser-webdriver".to_owned(),
+      serde_json::json!({"result": result, "outputs": {}}),
+    );
+    let (output, summary_path, _) = run_case(result, &serde_json::Value::Object(failed));
+    assert!(
+      !output.status.success(),
+      "summary helper must reject required result {result}"
+    );
+    let summary: serde_json::Value = serde_json::from_slice(
+      &fs::read(&summary_path).expect("failed summary should still be written"),
+    )
+    .expect("failed summary should be valid JSON");
+    assert_eq!(summary["overall"], "failure");
+    assert_eq!(summary["unexpected"][0]["result"], result);
+  }
+
+  let mut extra = needs.clone();
+  extra.insert(
+    "unexpected-extra-job".to_owned(),
+    serde_json::json!({"result": "success", "outputs": {}}),
+  );
+  let (output, summary_path, _) = run_case("extra", &serde_json::Value::Object(extra));
+  assert!(
+    !output.status.success(),
+    "summary helper must reject an unexpected extra job"
+  );
+  let summary: serde_json::Value = serde_json::from_slice(
+    &fs::read(summary_path).expect("extra-job summary should still be written"),
+  )
+  .expect("extra-job summary should be valid JSON");
+  assert_eq!(
+    summary["extra_jobs"],
+    serde_json::json!(["unexpected-extra-job"])
+  );
+
+  let mut missing = needs;
+  missing.remove("browser-webdriver");
+  let (output, summary_path, _) = run_case("missing", &serde_json::Value::Object(missing));
+  assert!(
+    !output.status.success(),
+    "summary helper must reject a missing required job"
+  );
+  let summary: serde_json::Value = serde_json::from_slice(
+    &fs::read(summary_path).expect("missing-job summary should still be written"),
+  )
+  .expect("missing-job summary should be valid JSON");
+  assert_eq!(
+    summary["missing_jobs"],
+    serde_json::json!(["browser-webdriver"])
+  );
+
+  let malformed_input = temp_dir.path().join("malformed-needs.json");
+  let malformed_summary = temp_dir.path().join("malformed-summary.json");
+  let malformed_markdown = temp_dir.path().join("malformed-summary.md");
+  fs::write(&malformed_input, b"{").expect("malformed fixture should be writable");
+  let output = Command::new("bash")
+    .arg(&script)
+    .arg(&malformed_input)
+    .arg(&malformed_summary)
+    .arg(&malformed_markdown)
+    .current_dir(repo_root())
+    .output()
+    .expect("summary helper malformed-input case should execute");
+  assert!(
+    !output.status.success(),
+    "summary helper must reject malformed JSON"
+  );
+  assert!(
+    !malformed_summary.exists() && !malformed_markdown.exists(),
+    "malformed input must not produce misleading summary artifacts"
+  );
+}
+
+#[test]
+fn dependency_snapshot_helper_is_local_bounded_and_schema_exact() {
+  let helper = dependency_snapshot_helper_text();
+  for expected in [
+    "MAXIMUM_SNAPSHOT_BYTES",
+    "SNAPSHOT_KEYS",
+    "CONTRACT_KEYS",
+    "oxibelt-image:{role}:{artifact_arch}",
+    "snapshot_sha256",
+    "os.replace",
+  ] {
+    assert!(
+      helper.contains(expected),
+      "dependency snapshot helper should enforce {expected}"
+    );
+  }
+  for forbidden in [
+    "subprocess",
+    "requests",
+    "urllib",
+    "socket",
+    "gh api",
+    "github-pat",
+    "eval(",
+  ] {
+    assert!(
+      !helper.contains(forbidden),
+      "local dependency snapshot helper must not use {forbidden}"
     );
   }
 }
@@ -4505,7 +4945,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
-    setup_count, 9,
+    setup_count, 10,
     "workflow should keep pre-pull coverage aligned with every Buildx setup"
   );
   assert_eq!(
@@ -4627,8 +5067,8 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
 
   assert_eq!(
     comparator_job.needs,
-    expected_needs(PRIMARY_RUST_GATE_NEEDS),
-    "comparator image builds should run in parallel with OxiBelt AMD64 image builds"
+    expected_needs(&["pr-non-benchmark-summary"]),
+    "comparator image builds should wait for complete non-benchmark validation"
   );
   assert!(
         workflow.contains("name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})"),
@@ -4772,8 +5212,8 @@ fn docker_performance_probe_image_job_builds_reusable_artifact() {
 
   assert_eq!(
     probe_job.needs,
-    expected_needs(PRIMARY_RUST_GATE_NEEDS),
-    "performance probe image builds should follow the normal test gates"
+    expected_needs(&["pr-non-benchmark-summary"]),
+    "performance probe image builds should wait for complete non-benchmark validation"
   );
   assert!(
     workflow.contains("name: Docker performance probe image"),
@@ -4809,8 +5249,8 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
 
   assert_eq!(
     external_job.needs,
-    expected_needs(PRIMARY_RUST_GATE_NEEDS),
-    "external benchmark image builds should follow the normal test gates"
+    expected_needs(&["pr-non-benchmark-summary"]),
+    "external benchmark image builds should wait for complete non-benchmark validation"
   );
   assert!(
     workflow.contains("name: Docker external benchmark image"),

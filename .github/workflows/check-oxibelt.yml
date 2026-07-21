@@ -64,6 +64,10 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
@@ -548,11 +552,15 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+          path: |
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}.tar
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.artifact_arch }}-artifact-contract.json
+          if-no-files-found: error
           retention-days: 0
 
-  docker-alpine-musl-kubernetes-role-image-amd64:
-    name: Docker Kubernetes role image (Alpine musl, amd64, ${{ matrix.role }})
+  docker-alpine-musl-role-image-amd64:
+    name: Docker role image (Alpine musl, amd64, ${{ matrix.role.name }})
     runs-on: ubuntu-26.04
     needs:
       - test
@@ -565,13 +573,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - role: dataplane
+        role:
+          - name: dataplane
             artifact_prefix: oxibelt-dataplane
-          - role: dataplane-strict
+          - name: dataplane-strict
             artifact_prefix: oxibelt-dataplane-strict
-          - role: controller
+          - name: controller
             artifact_prefix: oxibelt-gateway-controller
+          - name: tools
+            artifact_prefix: oxibelt-tools
+          - name: keysigner
+            artifact_prefix: oxibelt-keysigner
 
     steps:
       - name: Checkout
@@ -589,30 +601,30 @@ jobs:
             "linux/amd64" \
             "amd64" \
             "${RUNNER_TEMP}/oxibelt-image" \
-            "${{ matrix.role }}"
+            "${{ matrix.role.name }}"
 
       - name: Validate strict data-plane image inventory
-        if: matrix.role == 'dataplane-strict'
+        if: matrix.role.name == 'dataplane-strict'
         run: |
           python3 tests/scripts/validate-strict-dataplane-image.py \
-            "${RUNNER_TEMP}/oxibelt-image/${{ matrix.artifact_prefix }}-alpine-musl-amd64.tar"
+            "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64.tar"
 
       - name: Upload role-specific Docker image artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: ${{ matrix.artifact_prefix }}-alpine-musl-amd64-image
-          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_prefix }}-alpine-musl-amd64.tar
+          name: ${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-image
+          path: |
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64.tar
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-artifact-contract.json
+          if-no-files-found: error
           retention-days: 0
 
   docker-alpine-comparator-musl-image-amd64:
     name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})
     runs-on: ubuntu-26.04
     needs:
-      - test
-      - rust-advisory-checks
-      - check-riscv64-cross
-      - fuzz-smoke
-      - unsafe-validation
+      - pr-non-benchmark-summary
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -674,11 +686,7 @@ jobs:
     name: Docker performance probe image
     runs-on: ubuntu-26.04
     needs:
-      - test
-      - rust-advisory-checks
-      - check-riscv64-cross
-      - fuzz-smoke
-      - unsafe-validation
+      - pr-non-benchmark-summary
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -711,11 +719,7 @@ jobs:
     name: Docker external benchmark image
     runs-on: ubuntu-26.04
     needs:
-      - test
-      - rust-advisory-checks
-      - check-riscv64-cross
-      - fuzz-smoke
-      - unsafe-validation
+      - pr-non-benchmark-summary
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -784,7 +788,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: oxibelt-alpine-musl-${{ matrix.arch }}-image
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.arch }}.tar
+          path: |
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.arch }}.tar
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.arch }}-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-${{ matrix.arch }}-artifact-contract.json
+          if-no-files-found: error
           retention-days: 0
 
   docker-alpine-musl-image-riscv64:
@@ -820,14 +828,94 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: oxibelt-alpine-musl-riscv64-image
-          path: ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64.tar
+          path: |
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64.tar
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/oxibelt-alpine-musl-riscv64-artifact-contract.json
+          if-no-files-found: error
+          retention-days: 0
+
+  docker-alpine-musl-role-image-other:
+    name: Docker role image (Alpine musl, ${{ matrix.role.name }}, ${{ matrix.target.artifact_arch }})
+    runs-on: ${{ matrix.target.runner }}
+    permissions:
+      contents: read
+    needs:
+      - test
+      - rust-advisory-checks
+      - check-riscv64-cross
+      - fuzz-smoke
+      - unsafe-validation
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - name: dataplane
+            artifact_prefix: oxibelt-dataplane
+          - name: dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
+          - name: controller
+            artifact_prefix: oxibelt-gateway-controller
+          - name: tools
+            artifact_prefix: oxibelt-tools
+          - name: keysigner
+            artifact_prefix: oxibelt-keysigner
+        target:
+          - artifact_arch: amd64v2
+            platform: linux/amd64
+            runner: ubuntu-26.04
+          - artifact_arch: amd64v4
+            platform: linux/amd64
+            runner: ubuntu-26.04
+          - artifact_arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-26.04-arm
+          - artifact_arch: riscv64
+            platform: linux/riscv64
+            runner: ubuntu-26.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh moby/buildkit:buildx-stable-1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+
+      - name: Build role-specific Docker image artifact
+        run: |
+          tests/scripts/build-docker-image-artifact.sh \
+            "${{ matrix.target.platform }}" \
+            "${{ matrix.target.artifact_arch }}" \
+            "${RUNNER_TEMP}/oxibelt-image" \
+            "${{ matrix.role.name }}"
+
+      - name: Validate strict data-plane image inventory
+        if: matrix.role.name == 'dataplane-strict'
+        run: |
+          python3 tests/scripts/validate-strict-dataplane-image.py \
+            "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}.tar"
+
+      - name: Upload role-specific Docker image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-image
+          path: |
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}.tar
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-build-metadata.json
+            ${{ runner.temp }}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-artifact-contract.json
+          if-no-files-found: error
           retention-days: 0
 
   docker-image-trivy-scan:
-    name: Docker image Trivy scan (${{ matrix.artifact_arch }})
+    name: Docker image Trivy scan (${{ matrix.role.name }}, ${{ matrix.target.artifact_arch }})
     runs-on: ubuntu-26.04
     needs:
       - docker-alpine-musl-image-amd64
+      - docker-alpine-musl-role-image-amd64
+      - docker-alpine-musl-role-image-other
       - docker-alpine-musl-image-other
       - docker-alpine-musl-image-riscv64
     permissions:
@@ -836,63 +924,93 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        role:
+          - name: standalone
+            artifact_prefix: oxibelt
+          - name: dataplane
+            artifact_prefix: oxibelt-dataplane
+          - name: dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
+          - name: controller
+            artifact_prefix: oxibelt-gateway-controller
+          - name: tools
+            artifact_prefix: oxibelt-tools
+          - name: keysigner
+            artifact_prefix: oxibelt-keysigner
+        target:
           - artifact_arch: amd64v2
-            artifact_name: oxibelt-alpine-musl-amd64v2-image
-            image_tar: oxibelt-alpine-musl-amd64v2.tar
-            image_tag: oxibelt:alpine-musl-amd64v2
             scan_target: linux/amd64 x86-64-v2
           - artifact_arch: amd64
-            artifact_name: oxibelt-alpine-musl-amd64-image
-            image_tar: oxibelt-alpine-musl-amd64.tar
-            image_tag: oxibelt:alpine-musl-amd64
             scan_target: linux/amd64 x86-64-v3
           - artifact_arch: amd64v4
-            artifact_name: oxibelt-alpine-musl-amd64v4-image
-            image_tar: oxibelt-alpine-musl-amd64v4.tar
-            image_tag: oxibelt:alpine-musl-amd64v4
             scan_target: linux/amd64 x86-64-v4
           - artifact_arch: arm64
-            artifact_name: oxibelt-alpine-musl-arm64-image
-            image_tar: oxibelt-alpine-musl-arm64.tar
-            image_tag: oxibelt:alpine-musl-arm64
             scan_target: linux/arm64
           - artifact_arch: riscv64
-            artifact_name: oxibelt-alpine-musl-riscv64-image
-            image_tar: oxibelt-alpine-musl-riscv64.tar
-            image_tag: oxibelt:alpine-musl-riscv64
             scan_target: linux/riscv64
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
       - name: Download OxiBelt Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
+          name: ${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-image
+          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
+
+      - name: Validate OxiBelt Docker image artifact
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.target.artifact_arch }}
+          OXIBELT_ARTIFACT_PREFIX: ${{ matrix.role.artifact_prefix }}
+          OXIBELT_IMAGE_ROLE: ${{ matrix.role.name }}
+        run: |
+          artifact_dir="${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}"
+          python3 tests/scripts/validate-ci-image-artifact.py validate \
+            --image-tar "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}.tar" \
+            --build-metadata "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-build-metadata.json" \
+            --contract "${artifact_dir}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-artifact-contract.json" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
+            --expected-revision "${GITHUB_SHA}" \
+            --expected-source "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+      - name: Validate strict data-plane image inventory
+        if: matrix.role.name == 'dataplane-strict'
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.target.artifact_arch }}
+          OXIBELT_ARTIFACT_PREFIX: ${{ matrix.role.artifact_prefix }}
+          OXIBELT_IMAGE_ROLE: ${{ matrix.role.name }}
+        run: |
+          python3 tests/scripts/validate-strict-dataplane-image.py \
+            "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}.tar"
 
       - name: Load OxiBelt Docker image
         env:
-          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
-          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.target.artifact_arch }}
+          OXIBELT_ARTIFACT_PREFIX: ${{ matrix.role.artifact_prefix }}
+          OXIBELT_IMAGE_ROLE: ${{ matrix.role.name }}
+        run: |
+          docker load --input \
+            "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}.tar"
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.72.0
           scan-type: image
-          image-ref: ${{ matrix.image_tag }}
+          image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: json
-          output: trivy-results-${{ matrix.artifact_arch }}.json
+          output: trivy-results-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
           vuln-type: os,library
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           exit-code: "0"
 
       - name: Append Trivy vulnerability table
         env:
-          OXIBELT_IMAGE_TAG: ${{ matrix.image_tag }}
-          OXIBELT_SCAN_TARGET: ${{ matrix.scan_target }}
-          TRIVY_JSON: trivy-results-${{ matrix.artifact_arch }}.json
+          OXIBELT_IMAGE_TAG: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
+          OXIBELT_SCAN_TARGET: ${{ matrix.target.scan_target }}
+          TRIVY_JSON: trivy-results-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
         run: |
           {
             echo "### Trivy image scan: \`${OXIBELT_IMAGE_TAG}\`"
@@ -930,79 +1048,162 @@ jobs:
             echo
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Generate local Trivy dependency snapshot
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: image
+          image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
+          format: github
+          output: dependency-snapshot-raw-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
+
+      - name: Normalize and validate local dependency snapshot
+        env:
+          OXIBELT_ARTIFACT_ARCH: ${{ matrix.target.artifact_arch }}
+          OXIBELT_IMAGE_ROLE: ${{ matrix.role.name }}
+        run: |
+          snapshot_dir="${RUNNER_TEMP}/dependency-snapshot/${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}"
+          mkdir -p "${snapshot_dir}"
+          python3 tests/scripts/prepare-ci-dependency-snapshot.py normalize \
+            --input "dependency-snapshot-raw-${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}.json" \
+            --snapshot "${snapshot_dir}/dependency-snapshot-${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}.json" \
+            --contract "${snapshot_dir}/dependency-snapshot-${OXIBELT_IMAGE_ROLE}-${OXIBELT_ARTIFACT_ARCH}-contract.json" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
+            --revision "${GITHUB_SHA}" \
+            --ref "${GITHUB_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --html-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
       - name: Upload Trivy vulnerability report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: trivy-oxibelt-${{ matrix.artifact_arch }}-json
-          path: trivy-results-${{ matrix.artifact_arch }}.json
+          name: trivy-oxibelt-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}-json
+          path: trivy-results-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
           if-no-files-found: error
           retention-days: 0
 
-  docker-image-dependency-snapshot:
-    name: Docker image dependency snapshot (${{ matrix.artifact_arch }})
+      - name: Upload local dependency snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: dependency-snapshot-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
+          path: ${{ runner.temp }}/dependency-snapshot/${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-image-dependency-snapshot-submit:
+    name: Submit Docker image dependency snapshots
     runs-on: ubuntu-26.04
     needs:
-      - docker-alpine-musl-image-amd64
-      - docker-alpine-musl-image-other
-      - docker-alpine-musl-image-riscv64
+      - docker-image-trivy-scan
+      - pr-non-benchmark-summary
     if: >-
+      needs.pr-non-benchmark-summary.result == 'success' &&
       github.repository == 'OxiBelt/OxiBelt' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (
         github.event_name == 'push' ||
         github.event_name == 'schedule' ||
-        (github.event_name == 'pull_request' && github.event['pull_request']['head']['repo']['full_name'] == github.repository) ||
         (github.event_name == 'workflow_dispatch' && inputs['submit_dependency_snapshots'])
       )
     permissions:
       actions: read
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - artifact_arch: amd64v2
-            artifact_name: oxibelt-alpine-musl-amd64v2-image
-            image_tar: oxibelt-alpine-musl-amd64v2.tar
-            image_tag: oxibelt:alpine-musl-amd64v2
-          - artifact_arch: amd64
-            artifact_name: oxibelt-alpine-musl-amd64-image
-            image_tar: oxibelt-alpine-musl-amd64.tar
-            image_tag: oxibelt:alpine-musl-amd64
-          - artifact_arch: amd64v4
-            artifact_name: oxibelt-alpine-musl-amd64v4-image
-            image_tar: oxibelt-alpine-musl-amd64v4.tar
-            image_tag: oxibelt:alpine-musl-amd64v4
-          - artifact_arch: arm64
-            artifact_name: oxibelt-alpine-musl-arm64-image
-            image_tar: oxibelt-alpine-musl-arm64.tar
-            image_tag: oxibelt:alpine-musl-arm64
-          - artifact_arch: riscv64
-            artifact_name: oxibelt-alpine-musl-riscv64-image
-            image_tar: oxibelt-alpine-musl-riscv64.tar
-            image_tag: oxibelt:alpine-musl-riscv64
 
     steps:
-      - name: Download OxiBelt Docker image artifact
+      - name: Download local dependency snapshots
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ runner.temp }}/oxibelt-image/${{ matrix.artifact_arch }}
+          pattern: dependency-snapshot-*
+          path: ${{ runner.temp }}/dependency-snapshots
+          merge-multiple: false
 
-      - name: Load OxiBelt Docker image
+      - name: Validate and submit dependency snapshots
         env:
-          OXIBELT_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
-          OXIBELT_IMAGE_TAR: ${{ matrix.image_tar }}
-        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_ARTIFACT_ARCH}/${OXIBELT_IMAGE_TAR}"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
 
-      - name: Submit Trivy dependency snapshot
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: v0.72.0
-          scan-type: image
-          image-ref: ${{ matrix.image_tag }}
-          format: github
-          output: dependency-results-${{ matrix.artifact_arch }}.sbom.json
-          github-pat: ${{ secrets.GITHUB_TOKEN }}
+          snapshot_root="${RUNNER_TEMP}/dependency-snapshots"
+          roles=(standalone dataplane dataplane-strict controller tools keysigner)
+          architectures=(amd64v2 amd64 amd64v4 arm64 riscv64)
+          expected_artifacts=()
+          snapshot_files=()
+
+          for role in "${roles[@]}"; do
+            for artifact_arch in "${architectures[@]}"; do
+              artifact_name="dependency-snapshot-${role}-${artifact_arch}"
+              artifact_dir="${snapshot_root}/${artifact_name}"
+              snapshot="${artifact_dir}/${artifact_name}.json"
+              contract="${artifact_dir}/${artifact_name}-contract.json"
+              expected_artifacts+=("${artifact_name}")
+              snapshot_files+=("${snapshot}")
+
+              [[ -d "${artifact_dir}" && -f "${snapshot}" && -f "${contract}" ]]
+              mapfile -t files < <(find "${artifact_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+              [[ "${#files[@]}" -eq 2 ]]
+              [[ "${files[0]}" == "${artifact_name}-contract.json" ]]
+              [[ "${files[1]}" == "${artifact_name}.json" ]]
+              [[ "$(stat -c '%s' "${snapshot}")" -le 134217728 ]]
+              snapshot_sha="sha256:$(sha256sum "${snapshot}" | awk '{print $1}')"
+
+              jq -e \
+                --arg role "${role}" \
+                --arg arch "${artifact_arch}" \
+                --arg revision "${GITHUB_SHA}" \
+                --arg ref "${GITHUB_REF}" \
+                --arg file "${artifact_name}.json" \
+                --arg digest "${snapshot_sha}" '
+                  (keys | sort) == ["artifact_arch", "ref", "revision", "role", "schema", "snapshot_file", "snapshot_sha256"] and
+                  .schema == 1 and .role == $role and .artifact_arch == $arch and
+                  .revision == $revision and .ref == $ref and
+                  .snapshot_file == $file and .snapshot_sha256 == $digest
+                ' "${contract}" >/dev/null
+
+              jq -e \
+                --arg role "${role}" \
+                --arg arch "${artifact_arch}" \
+                --arg revision "${GITHUB_SHA}" \
+                --arg ref "${GITHUB_REF}" \
+                --arg job_id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.${role}.${artifact_arch}" \
+                --arg correlator "oxibelt-image:${role}:${artifact_arch}" \
+                --arg html_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '
+                  (keys | sort) == ["detector", "job", "manifests", "ref", "scanned", "sha", "version"] and
+                  .version == 0 and .sha == $revision and .ref == $ref and
+                  (.job | keys | sort) == ["correlator", "html_url", "id"] and
+                  .job.id == $job_id and .job.correlator == $correlator and .job.html_url == $html_url and
+                  (.detector | type) == "object" and (.detector.name | type) == "string" and
+                  (.scanned | type) == "string" and (.scanned | length) > 0 and
+                  (.manifests | type) == "object"
+                ' "${snapshot}" >/dev/null
+            done
+          done
+
+          mapfile -t actual_artifacts < <(find "${snapshot_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t sorted_expected < <(printf '%s\n' "${expected_artifacts[@]}" | LC_ALL=C sort)
+          [[ "${#actual_artifacts[@]}" -eq 30 ]]
+          [[ "$(printf '%s\n' "${actual_artifacts[@]}")" == "$(printf '%s\n' "${sorted_expected[@]}")" ]]
+
+          response_dir="$(mktemp -d)"
+          cleanup() {
+            rm -rf -- "${response_dir}"
+          }
+          trap cleanup EXIT
+
+          for snapshot in "${snapshot_files[@]}"; do
+            response="${response_dir}/$(basename -- "${snapshot}").response"
+            body="${response}.body"
+            gh api --include --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "repos/OxiBelt/OxiBelt/dependency-graph/snapshots" \
+              --input "${snapshot}" >"${response}"
+            status_line="$(head -n 1 "${response}" | tr -d '\r')"
+            [[ "${status_line}" =~ ^HTTP/[0-9.]+[[:space:]]201[[:space:]] ]]
+            awk 'body { print } /^\r?$/ { body = 1 }' "${response}" >"${body}"
+            jq -e '.result == "SUCCESS" and (.id | type) == "number"' "${body}" >/dev/null
+          done
 
   docker-integration-helper-images:
     name: Docker integration helper images
@@ -1146,7 +1347,7 @@ jobs:
     name: Kubernetes immutable Gateway rollout
     runs-on: ubuntu-26.04
     needs:
-      - docker-alpine-musl-kubernetes-role-image-amd64
+      - docker-alpine-musl-role-image-amd64
     permissions:
       actions: read
       contents: read
@@ -2040,6 +2241,83 @@ jobs:
           if-no-files-found: ignore
           retention-days: 0
 
+  pr-non-benchmark-summary:
+    name: ${{ github.event_name == 'pull_request' && 'PR non-benchmark summary' || 'Non-benchmark validation summary' }}
+    runs-on: ubuntu-26.04
+    needs:
+      - source-structure
+      - test
+      - rust-advisory-checks
+      - fuzz-smoke
+      - unsafe-validation
+      - check-riscv64-cross
+      - generate-test-matrices
+      - linux-target-builds
+      - docker-alpine-musl-image-amd64
+      - docker-alpine-musl-role-image-amd64
+      - docker-alpine-musl-role-image-other
+      - docker-alpine-musl-image-other
+      - docker-alpine-musl-image-riscv64
+      - docker-image-trivy-scan
+      - docker-integration-helper-images
+      - admin-mutation-postgres
+      - admin-operation-postgres
+      - admin-audit-anchor-postgres
+      - kubernetes-immutable-rollout
+      - kubernetes-pod-lifecycle
+      - kubernetes-network-policy
+      - kubernetes-current-compatibility
+      - docker-integration-config-runtime
+      - docker-integration-proxy
+      - docker-integration-protocol
+      - docker-integration-waf
+      - docker-integration-cache
+      - docker-integration-state-data
+      - docker-integration-ops
+      - docker-integration-security
+      - remote-signer-dos-docker
+      - browser-webdriver
+    if: ${{ always() && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Build non-benchmark validation summary
+        id: summarize
+        env:
+          OXIBELT_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "${OXIBELT_NEEDS_JSON}" >"${RUNNER_TEMP}/non-benchmark-needs.json"
+          status=0
+          bash tests/scripts/summarize-ci-needs.sh \
+            "${RUNNER_TEMP}/non-benchmark-needs.json" \
+            "${RUNNER_TEMP}/non-benchmark-summary.json" \
+            "${RUNNER_TEMP}/non-benchmark-summary.md" || status="$?"
+          if [[ -f "${RUNNER_TEMP}/non-benchmark-summary.md" ]]; then
+            cat "${RUNNER_TEMP}/non-benchmark-summary.md" >>"${GITHUB_STEP_SUMMARY}"
+          fi
+          echo "status=${status}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload non-benchmark validation summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: non-benchmark-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/non-benchmark-summary.json
+            ${{ runner.temp }}/non-benchmark-summary.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce non-benchmark validation result
+        if: always()
+        env:
+          OXIBELT_SUMMARY_STATUS: ${{ steps.summarize.outputs.status }}
+        run: test "${OXIBELT_SUMMARY_STATUS}" = "0"
+
   docker-performance:
     name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile'] || 'smoke' }}, ${{ matrix.serving_type }}, shard ${{ matrix.shard }})
     runs-on: ${{ matrix.runner }}
@@ -2054,6 +2332,7 @@ jobs:
       - docker-integration-security
       - remote-signer-dos-docker
       - browser-webdriver
+      - pr-non-benchmark-summary
       - docker-alpine-comparator-musl-image-amd64
       - docker-performance-probe-image
       - docker-external-benchmark-image

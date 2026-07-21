@@ -310,6 +310,17 @@ tests/scripts/build-targets.sh
 tests/scripts/run-proxy-integration.sh
 ```
 
+Every ordinary non-Dependabot pull request runs the complete non-benchmark
+validation graph without path-based skipping. The stable
+`PR non-benchmark summary` check observes every required Rust, security,
+container, Kubernetes, integration, signer, and browser job and fails when a
+dependency fails, is cancelled, or is unexpectedly skipped. Comparative
+performance, profiling, baseline, and long-load jobs remain scheduled or
+manually dispatched and start only after the same workflow run passes the
+non-benchmark summary. Pull-request image scans may generate and upload local
+dependency snapshot artifacts, but only a trusted default-branch push,
+schedule, or explicitly opted-in manual run may submit them to GitHub.
+
 If TypeScript DevOps tooling is added, CI should run its typecheck, lint, and
 tests. If browser WebDriver tests are added, CI must run them with both
 Chromium and Firefox.
