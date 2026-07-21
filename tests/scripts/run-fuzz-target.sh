@@ -175,7 +175,7 @@ validate_seed_corpus() {
   (( seed_bytes <= MAX_SEED_BYTES )) || fail "reviewed seed corpus exceeds $MAX_SEED_BYTES bytes"
 }
 
-validate_mutable_corpus() {
+validate_working_corpus() {
   local directory="$1"
   [[ -d "$directory" && ! -L "$directory" ]] || fail "missing mutable corpus: $directory"
   assert_no_symlinks "$directory"
@@ -189,8 +189,16 @@ validate_mutable_corpus() {
   local corpus_files corpus_bytes
   read -r corpus_files corpus_bytes < <(directory_stats "$directory")
   (( corpus_files > 0 )) || fail "mutable corpus is empty: $directory"
-  (( corpus_files <= MAX_CORPUS_FILES )) || fail "corpus exceeds $MAX_CORPUS_FILES files"
   (( corpus_bytes <= MAX_CORPUS_BYTES )) || fail "corpus exceeds $MAX_CORPUS_BYTES bytes"
+}
+
+validate_cached_corpus() {
+  local directory="$1"
+  validate_working_corpus "$directory"
+
+  local corpus_files corpus_bytes
+  read -r corpus_files corpus_bytes < <(directory_stats "$directory")
+  (( corpus_files <= MAX_CORPUS_FILES )) || fail "corpus exceeds $MAX_CORPUS_FILES files"
 }
 
 copy_reviewed_seeds() {
@@ -266,7 +274,7 @@ case "$mode" in
     mkdir -p -- "$persistent_corpus"
     assert_no_symlinks "$persistent_corpus"
     copy_reviewed_seeds "$persistent_corpus"
-    validate_mutable_corpus "$persistent_corpus"
+    validate_cached_corpus "$persistent_corpus"
     cargo "+$FUZZ_NIGHTLY" fuzz run --sanitizer address "$target" "$persistent_corpus" -- \
       "-max_total_time=$duration_seconds" \
       -detect_leaks=1 \
@@ -277,7 +285,7 @@ case "$mode" in
 
   cmin)
     configure_sanitizer_environment 1
-    validate_mutable_corpus "$persistent_corpus"
+    validate_working_corpus "$persistent_corpus"
 
     cmin_staging="$(mktemp -d "$fuzz_root/.cmin-${target}.XXXXXX")"
     cmin_replacement="$(mktemp -d "$runner_temp/oxibelt-fuzz-cmin-${target}.XXXXXX")"
@@ -314,16 +322,16 @@ case "$mode" in
     trap cleanup_cmin_directories EXIT
 
     copy_corpus_files "$persistent_corpus" "$cmin_staging"
-    validate_mutable_corpus "$cmin_staging"
+    validate_working_corpus "$cmin_staging"
     cargo "+$FUZZ_NIGHTLY" fuzz cmin --sanitizer address "$target" "$cmin_staging" -- \
       "-max_len=$max_input_bytes" \
       "-timeout=$FUZZ_TIMEOUT_SECONDS" \
       -detect_leaks=1 \
       "${dictionary_argument[@]}"
-    validate_mutable_corpus "$cmin_staging"
+    validate_cached_corpus "$cmin_staging"
 
     copy_corpus_files "$cmin_staging" "$cmin_replacement"
-    validate_mutable_corpus "$cmin_replacement"
+    validate_cached_corpus "$cmin_replacement"
     mv -- "$persistent_corpus" "$cmin_backup/original"
     preserve_cmin_backup=1
     if ! mv -- "$cmin_replacement" "$persistent_corpus"; then
@@ -333,13 +341,13 @@ case "$mode" in
       fi
       fail "failed to install minimized corpus; the original is retained in $cmin_backup"
     fi
+    validate_cached_corpus "$persistent_corpus"
     preserve_cmin_backup=0
-    validate_mutable_corpus "$persistent_corpus"
     ;;
 
   coverage)
     configure_sanitizer_environment 1
-    validate_mutable_corpus "$persistent_corpus"
+    validate_cached_corpus "$persistent_corpus"
     cargo "+$FUZZ_NIGHTLY" fuzz coverage --sanitizer address "$target" "$persistent_corpus" -- \
       "-max_len=$max_input_bytes" \
       "-timeout=$FUZZ_TIMEOUT_SECONDS" \

@@ -404,6 +404,29 @@ fn toml_type_name(value: &toml::Value) -> &'static str {
 }
 
 #[cfg(feature = "fuzzing")]
+fn deterministic_toml_values_equal(left: &toml::Value, right: &toml::Value) -> bool {
+  match (left, right) {
+    (toml::Value::Float(left), toml::Value::Float(right)) => left.to_bits() == right.to_bits(),
+    (toml::Value::Array(left), toml::Value::Array(right)) => {
+      left.len() == right.len()
+        && left
+          .iter()
+          .zip(right)
+          .all(|(left, right)| deterministic_toml_values_equal(left, right))
+    }
+    (toml::Value::Table(left), toml::Value::Table(right)) => {
+      left.len() == right.len()
+        && left.iter().all(|(key, left)| {
+          right
+            .get(key)
+            .is_some_and(|right| deterministic_toml_values_equal(left, right))
+        })
+    }
+    _ => left == right,
+  }
+}
+
+#[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_virtual_toml_documents(data: &[u8]) {
   const MAX_TOTAL_BYTES: usize = 64 * 1024;
   let data = &data[..data.len().min(MAX_TOTAL_BYTES)];
@@ -417,9 +440,11 @@ pub(crate) fn fuzz_virtual_toml_documents(data: &[u8]) {
   let second = load_virtual_toml_document(&entry, &documents, &mut Vec::new());
   match (first, second) {
     (Ok(first), Ok(second)) => {
-      assert_eq!(
-        first.0, second.0,
-        "virtual include loading was not deterministic"
+      assert!(
+        deterministic_toml_values_equal(&first.0, &second.0),
+        "virtual include loading was not deterministic: left={:?}, right={:?}",
+        first.0,
+        second.0
       );
       assert_eq!(
         first.1, second.1,
@@ -705,5 +730,15 @@ mod fuzz_tests {
       routes[1].get("name").and_then(toml::Value::as_str),
       Some("b")
     );
+  }
+
+  #[test]
+  fn virtual_documents_compare_nan_by_exact_float_representation() {
+    fuzz_virtual_toml_documents(b"i=-nan");
+
+    let nan = toml::Value::Float(f64::from_bits(0x7ff8_0000_0000_0001));
+    let different_nan = toml::Value::Float(f64::from_bits(0x7ff8_0000_0000_0002));
+    assert!(deterministic_toml_values_equal(&nan, &nan));
+    assert!(!deterministic_toml_values_equal(&nan, &different_nan));
   }
 }

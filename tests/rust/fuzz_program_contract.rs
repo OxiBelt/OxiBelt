@@ -737,6 +737,160 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
   }
 }
 
+#[cfg(unix)]
+struct CminHarness {
+  _temp_dir: tempfile::TempDir,
+  runner_temp: PathBuf,
+  corpus: PathBuf,
+  called_marker: PathBuf,
+  bin_dir: PathBuf,
+}
+
+#[cfg(unix)]
+impl CminHarness {
+  fn new() -> Self {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = repo_root();
+    let target_dir = repo.join("target");
+    fs::create_dir_all(&target_dir).expect("Cargo target directory should be creatable");
+    let temp_dir = tempfile::Builder::new()
+      .prefix("oxibelt-fuzz-cmin-contract-")
+      .tempdir_in(target_dir)
+      .expect("cmin contract temp directory should be creatable");
+    let runner_temp = temp_dir.path().join("runner");
+    let corpus = runner_temp.join("oxibelt-fuzz-corpus/native_config");
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&corpus).expect("over-limit working corpus should be creatable");
+    fs::create_dir_all(&bin_dir).expect("fake Cargo directory should be creatable");
+    for index in 0..2_049 {
+      fs::write(
+        corpus.join(format!("input-{index:04}")),
+        [u8::try_from(index % 251).expect("corpus byte should fit")],
+      )
+      .expect("working corpus entry should be writable");
+    }
+
+    let cargo = bin_dir.join("cargo");
+    fs::write(
+      &cargo,
+      r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$#" -ge 7 ]]
+[[ "$1" == "+nightly-2026-07-16" ]]
+[[ "$2" == "fuzz" ]]
+[[ "$3" == "cmin" ]]
+[[ "$6" == "native_config" ]]
+case "$7" in
+  "${EXPECTED_CMIN_PREFIX}".??????) ;;
+  *) exit 65 ;;
+esac
+mapfile -d '' corpus_entries < <(find "$7" -maxdepth 1 -type f -print0 | sort -z)
+(( ${#corpus_entries[@]} == 2049 ))
+printf '%s\n' "$7" >"$FAKE_CMIN_CALLED"
+case "$FAKE_CMIN_MODE" in
+  reduce)
+    for ((index = 1; index < ${#corpus_entries[@]}; index += 1)); do
+      rm -- "${corpus_entries[$index]}"
+    done
+    ;;
+  noop) ;;
+  *) exit 66 ;;
+esac
+"#,
+    )
+    .expect("fake Cargo should be writable");
+    let mut permissions = fs::metadata(&cargo)
+      .expect("fake Cargo should have metadata")
+      .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cargo, permissions).expect("fake Cargo should be executable");
+
+    let called_marker = temp_dir.path().join("cmin-called");
+    Self {
+      _temp_dir: temp_dir,
+      runner_temp,
+      corpus,
+      called_marker,
+      bin_dir,
+    }
+  }
+
+  fn run(&self, mode: &str) -> std::process::Output {
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!(
+      "{}:{}",
+      self.bin_dir.display(),
+      original_path.to_string_lossy()
+    );
+    std::process::Command::new("bash")
+      .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+      .args(["cmin", "native_config", "1"])
+      .current_dir(repo_root())
+      .env("RUNNER_TEMP", &self.runner_temp)
+      .env(
+        "EXPECTED_CMIN_PREFIX",
+        repo_root().join("fuzz/.cmin-native_config"),
+      )
+      .env("FAKE_CMIN_CALLED", &self.called_marker)
+      .env("FAKE_CMIN_MODE", mode)
+      .env("PATH", path)
+      .output()
+      .expect("cmin contract runner should execute")
+  }
+
+  fn corpus_snapshot(&self) -> BTreeMap<String, Vec<u8>> {
+    fs::read_dir(&self.corpus)
+      .expect("working corpus should be readable")
+      .map(|entry| {
+        let entry = entry.expect("working corpus entry should be readable");
+        let name = entry
+          .file_name()
+          .into_string()
+          .expect("working corpus names should be UTF-8");
+        let bytes = fs::read(entry.path()).expect("working corpus bytes should be readable");
+        (name, bytes)
+      })
+      .collect()
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn cmin_accepts_over_limit_working_corpus_when_result_is_cacheable() {
+  let harness = CminHarness::new();
+  let output = harness.run("reduce");
+  assert!(
+    output.status.success(),
+    "cmin should accept a safe over-limit working corpus: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(harness.called_marker.is_file(), "fake cmin should run");
+  assert_eq!(
+    harness.corpus_snapshot(),
+    BTreeMap::from([("input-0000".to_string(), vec![0])])
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmin_rejects_over_limit_result_without_replacing_working_corpus() {
+  let harness = CminHarness::new();
+  let original = harness.corpus_snapshot();
+  let output = harness.run("noop");
+  assert!(harness.called_marker.is_file(), "fake cmin should run");
+  assert!(
+    !output.status.success(),
+    "an over-limit cmin result must fail"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr).contains("corpus exceeds 2048 files"),
+    "cmin should explain the retained cache bound: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(harness.corpus_snapshot(), original);
+}
+
 #[test]
 fn fuzz_target_wrappers_do_not_gain_side_effect_apis() {
   let (_, targets) = catalog();
