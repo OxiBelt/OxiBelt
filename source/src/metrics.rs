@@ -389,7 +389,7 @@ impl Metrics {
     } else {
       self
         .mitigation_queue_depth
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
           Some(current.saturating_sub(delta.unsigned_abs()))
         })
         .ok();

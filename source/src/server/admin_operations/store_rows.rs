@@ -1,7 +1,5 @@
 //! SQL row decoding shared by the Admin-operation journal paths.
 
-use std::str::FromStr as _;
-
 use sqlx::{AssertSqlSafe, Executor, Postgres, Row};
 
 use super::*;

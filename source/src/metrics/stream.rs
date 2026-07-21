@@ -85,7 +85,7 @@ impl Metrics {
       self
         .stream
         .udp_flows_active
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
           Some(active.saturating_sub(count))
         });
     self
@@ -113,7 +113,7 @@ impl Metrics {
       self
         .stream
         .udp_flows_active
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
           Some(active.saturating_sub(1))
         });
     counter.fetch_add(1, Ordering::Relaxed);

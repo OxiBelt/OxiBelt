@@ -622,7 +622,7 @@ fn observe_ewma_latency(server: &PoolServerRuntime, sample_ms: u64) {
   let sample_ms = sample_ms.max(1);
   let _ = server
     .ewma_latency_ms
-    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
       Some(if current == 0 {
         sample_ms
       } else {
