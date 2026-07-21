@@ -3659,9 +3659,24 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     "architectures=(amd64v2 amd64 amd64v4 arm64 riscv64)",
     "[[ \"${#actual_artifacts[@]}\" -eq 30 ]]",
     "snapshot_sha=\"sha256:$(sha256sum",
+    "[[ \"${job_id}\" =~ ^([^.]+)\\.([^.]+)\\.([^.]+)\\.([^.]+)$ ]]",
+    "[[ \"${job_run_id}\" == \"${GITHUB_RUN_ID}\" ]]",
+    "[[ \"${source_attempt}\" =~ ^[1-9][0-9]*$ ]]",
+    "${#source_attempt} > ${#GITHUB_RUN_ATTEMPT}",
+    "[[ \"${source_attempt}\" > \"${GITHUB_RUN_ATTEMPT}\" ]]",
+    "[[ \"${job_role}\" == \"${role}\" && \"${job_arch}\" == \"${artifact_arch}\" ]]",
+    "for attempt in 1 2 3 4",
+    "delay=$((5 * (1 << (attempt - 1))))",
+    "[[ -z \"${status_code}\" || \"${status_code}\" == \"408\" || \"${status_code}\" == \"429\" ]]",
+    "10#${status_code} >= 500 && 10#${status_code} <= 599",
+    "[[ \"${retryable}\" != true || \"${attempt}\" -eq 4 ]]",
+    "sleep \"${delay}\"",
+    "${status_code:-unavailable}",
     "gh api --include --method POST",
+    "--input \"${snapshot}\" >\"${response}\" 2>\"${stderr}\" || gh_exit=$?",
     "repos/OxiBelt/OxiBelt/dependency-graph/snapshots",
-    "201[[:space:]]",
+    "\"${gh_exit}\" -eq 0 && \"${status_code}\" == \"201\"",
+    "[[ \"${submission_succeeded}\" == true ]]",
     ".result == \"SUCCESS\"",
   ] {
     assert!(
@@ -3675,12 +3690,21 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
     "aquasecurity/trivy-action@",
     "tests/scripts/",
     "github-pat:",
+    "--arg job_id \"${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}",
+    ".job.id == $job_id",
   ] {
     assert!(
       !snapshot_job_text.contains(forbidden),
       "write-capable snapshot submission must not execute {forbidden}"
     );
   }
+  assert_eq!(
+    snapshot_job_text
+      .matches("gh api --include --method POST")
+      .count(),
+    1,
+    "snapshot submission should use one guarded POST call inside the bounded retry loop"
+  );
 }
 
 #[test]

@@ -1299,17 +1299,34 @@ jobs:
                 --arg arch "${artifact_arch}" \
                 --arg revision "${GITHUB_SHA}" \
                 --arg ref "${GITHUB_REF}" \
-                --arg job_id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.${role}.${artifact_arch}" \
                 --arg correlator "oxibelt-image:${role}:${artifact_arch}" \
                 --arg html_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '
                   (keys | sort) == ["detector", "job", "manifests", "ref", "scanned", "sha", "version"] and
                   .version == 0 and .sha == $revision and .ref == $ref and
                   (.job | keys | sort) == ["correlator", "html_url", "id"] and
-                  .job.id == $job_id and .job.correlator == $correlator and .job.html_url == $html_url and
+                  (.job.id | type) == "string" and
+                  .job.correlator == $correlator and .job.html_url == $html_url and
                   (.detector | type) == "object" and (.detector.name | type) == "string" and
                   (.scanned | type) == "string" and (.scanned | length) > 0 and
                   (.manifests | type) == "object"
                 ' "${snapshot}" >/dev/null
+
+              job_id="$(jq -er '.job.id' "${snapshot}")"
+              [[ "${job_id}" =~ ^([^.]+)\.([^.]+)\.([^.]+)\.([^.]+)$ ]]
+              job_run_id="${BASH_REMATCH[1]}"
+              source_attempt="${BASH_REMATCH[2]}"
+              job_role="${BASH_REMATCH[3]}"
+              job_arch="${BASH_REMATCH[4]}"
+              [[ "${job_run_id}" == "${GITHUB_RUN_ID}" ]]
+              [[ "${source_attempt}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${job_role}" == "${role}" && "${job_arch}" == "${artifact_arch}" ]]
+              if (( ${#source_attempt} > ${#GITHUB_RUN_ATTEMPT} )) ||
+                { (( ${#source_attempt} == ${#GITHUB_RUN_ATTEMPT} )) &&
+                  [[ "${source_attempt}" > "${GITHUB_RUN_ATTEMPT}" ]]; }; then
+                echo "dependency snapshot source attempt is newer than the current run attempt" >&2
+                exit 1
+              fi
             done
           done
 
@@ -1327,13 +1344,48 @@ jobs:
           for snapshot in "${snapshot_files[@]}"; do
             response="${response_dir}/$(basename -- "${snapshot}").response"
             body="${response}.body"
-            gh api --include --method POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "repos/OxiBelt/OxiBelt/dependency-graph/snapshots" \
-              --input "${snapshot}" >"${response}"
-            status_line="$(head -n 1 "${response}" | tr -d '\r')"
-            [[ "${status_line}" =~ ^HTTP/[0-9.]+[[:space:]]201[[:space:]] ]]
+            stderr="${response}.stderr"
+            submission_succeeded=false
+
+            for attempt in 1 2 3 4; do
+              : >"${response}"
+              : >"${stderr}"
+              gh_exit=0
+              gh api --include --method POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/OxiBelt/OxiBelt/dependency-graph/snapshots" \
+                --input "${snapshot}" >"${response}" 2>"${stderr}" || gh_exit=$?
+
+              status_line="$(head -n 1 "${response}" | tr -d '\r')"
+              status_code=""
+              if [[ "${status_line}" =~ ^HTTP/[0-9.]+[[:space:]]([0-9]{3})[[:space:]] ]]; then
+                status_code="${BASH_REMATCH[1]}"
+              fi
+
+              if [[ "${gh_exit}" -eq 0 && "${status_code}" == "201" ]]; then
+                submission_succeeded=true
+                break
+              fi
+
+              retryable=false
+              if [[ -z "${status_code}" || "${status_code}" == "408" || "${status_code}" == "429" ]]; then
+                retryable=true
+              elif (( 10#${status_code} >= 500 && 10#${status_code} <= 599 )); then
+                retryable=true
+              fi
+
+              if [[ "${retryable}" != true || "${attempt}" -eq 4 ]]; then
+                echo "dependency snapshot submission failed (attempt ${attempt}, HTTP status ${status_code:-unavailable})" >&2
+                exit 1
+              fi
+
+              delay=$((5 * (1 << (attempt - 1))))
+              echo "dependency snapshot submission encountered a transient failure; retrying in ${delay} seconds" >&2
+              sleep "${delay}"
+            done
+
+            [[ "${submission_succeeded}" == true ]]
             awk 'body { print } /^\r?$/ { body = 1 }' "${response}" >"${body}"
             jq -e '.result == "SUCCESS" and (.id | type) == "number"' "${body}" >/dev/null
           done

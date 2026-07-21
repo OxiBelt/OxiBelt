@@ -199,6 +199,49 @@ async fn h3_graceful_shutdown_timeout_aborts_stalled_request_tasks() {
   );
 }
 
+#[tokio::test(start_paused = true)]
+async fn h3_transport_close_waits_for_peer() {
+  let (peer_closed_tx, peer_closed_rx) = tokio::sync::oneshot::channel::<()>();
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+  let waiter = wait_for_h3_transport_close(peer_closed_rx, deadline);
+  tokio::pin!(waiter);
+
+  assert!(
+    tokio::time::timeout(Duration::ZERO, &mut waiter)
+      .await
+      .is_err(),
+    "transport-close wait should remain pending while the peer is open"
+  );
+
+  peer_closed_tx.send(()).unwrap();
+  waiter.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn h3_transport_close_completes_when_peer_closes() {
+  let started = tokio::time::Instant::now();
+  wait_for_h3_transport_close(std::future::ready(()), started + Duration::from_secs(30)).await;
+
+  assert_eq!(
+    tokio::time::Instant::now(),
+    started,
+    "an observed peer close should not consume the graceful timeout"
+  );
+}
+
+#[tokio::test(start_paused = true)]
+async fn h3_transport_close_is_bounded_by_graceful_deadline() {
+  let started = tokio::time::Instant::now();
+  let deadline = started + Duration::from_secs(30);
+  wait_for_h3_transport_close(std::future::pending::<()>(), deadline).await;
+
+  assert_eq!(
+    tokio::time::Instant::now(),
+    deadline,
+    "transport-close wait should stop at the existing graceful deadline"
+  );
+}
+
 fn h3_request(method: Method) -> Request<()> {
   Request::builder()
     .method(method)

@@ -117,6 +117,7 @@ pub(crate) async fn handle_downstream_connection(
   let max_field_section_size = h3_field_section_size(snapshot.config.limits.max_total_header_bytes);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
   let early_data = crate::quic::h3::EarlyDataTracker::default();
+  let downstream_connection = connection.clone();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
   let mut request_tasks = request_tasks::RequestTaskSet::new(&snapshot.config);
@@ -159,28 +160,58 @@ pub(crate) async fn handle_downstream_connection(
       );
     }
     if *shutdown.borrow() || *data_plane_drain.borrow() {
-      return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
+      return graceful_h3_shutdown(
+        &mut h3_connection,
+        &downstream_connection,
+        &mut request_tasks,
+        graceful_timeout,
+      )
+      .await;
     }
     if lifecycle_drain.has_lifecycle_drain_transition() {
-      return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
+      return graceful_h3_shutdown(
+        &mut h3_connection,
+        &downstream_connection,
+        &mut request_tasks,
+        graceful_timeout,
+      )
+      .await;
     }
     let receive_started = timing::start(timing_enabled);
     let resolver = tokio::select! {
       biased;
       changed = shutdown.changed() => {
         if changed.is_ok() && *shutdown.borrow() {
-          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
+          return graceful_h3_shutdown(
+            &mut h3_connection,
+            &downstream_connection,
+            &mut request_tasks,
+            graceful_timeout,
+          )
+          .await;
         }
         continue;
       }
       changed = data_plane_drain.changed() => {
         if changed.is_ok() && *data_plane_drain.borrow() {
-          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
+          return graceful_h3_shutdown(
+            &mut h3_connection,
+            &downstream_connection,
+            &mut request_tasks,
+            graceful_timeout,
+          )
+          .await;
         }
         continue;
       }
       _ = lifecycle_drain.wait_for_lifecycle_drain_transition() => {
-        return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout).await;
+        return graceful_h3_shutdown(
+          &mut h3_connection,
+          &downstream_connection,
+          &mut request_tasks,
+          graceful_timeout,
+        )
+        .await;
       }
       accepted = h3_connection.accept() => {
         match accepted {
@@ -290,8 +321,13 @@ pub(crate) async fn handle_downstream_connection(
       {
         Ok(Some(permit)) => permit,
         Ok(None) => {
-          return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout)
-            .await;
+          return graceful_h3_shutdown(
+            &mut h3_connection,
+            &downstream_connection,
+            &mut request_tasks,
+            graceful_timeout,
+          )
+          .await;
         }
         Err(error) => {
           if timing_enabled {
@@ -383,8 +419,13 @@ pub(crate) async fn handle_downstream_connection(
       )
       .await
       {
-        return graceful_h3_shutdown(&mut h3_connection, &mut request_tasks, graceful_timeout)
-          .await;
+        return graceful_h3_shutdown(
+          &mut h3_connection,
+          &downstream_connection,
+          &mut request_tasks,
+          graceful_timeout,
+        )
+        .await;
       }
       continue;
     }
@@ -411,6 +452,7 @@ pub(crate) async fn handle_downstream_connection(
 
 async fn graceful_h3_shutdown(
   h3_connection: &mut H3ServerConnection,
+  downstream_connection: &h3_quinn::quinn::Connection,
   request_tasks: &mut request_tasks::RequestTaskSet,
   graceful_timeout: Duration,
 ) -> anyhow::Result<()> {
@@ -423,7 +465,15 @@ async fn graceful_h3_shutdown(
     }
   }
   wait_for_h3_request_tasks(request_tasks, deadline).await;
+  wait_for_h3_transport_close(downstream_connection.closed(), deadline).await;
   Ok(())
+}
+
+async fn wait_for_h3_transport_close<F, T>(closed: F, deadline: tokio::time::Instant)
+where
+  F: Future<Output = T>,
+{
+  let _ = tokio::time::timeout_at(deadline, closed).await;
 }
 
 async fn wait_for_h3_request_tasks(
