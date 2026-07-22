@@ -622,7 +622,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "permissions:\n      contents: read",
       "timeout-minutes: 45",
-      "nightly-2026-07-16",
+      "nightly-2026-07-22",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh smoke",
       "LSAN_OPTIONS: detect_leaks=0",
@@ -650,7 +650,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "permissions:\n      contents: read",
       "max-parallel: 4",
       "timeout-minutes: 120",
-      "nightly-2026-07-16",
+      "nightly-2026-07-22",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh campaign",
       "LSAN_OPTIONS: detect_leaks=1",
@@ -690,7 +690,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "set -Eeuo pipefail",
       "umask 077",
-      "readonly FUZZ_NIGHTLY=\"nightly-2026-07-16\"",
+      "readonly FUZZ_NIGHTLY=\"nightly-2026-07-22\"",
       "readonly MAX_SEED_FILES=128",
       "readonly MAX_SEED_BYTES=524288",
       "readonly MAX_WORKING_CORPUS_FILES=16384",
@@ -783,7 +783,7 @@ impl CminHarness {
       r#"#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$#" -ge 7 ]]
-[[ "$1" == "+nightly-2026-07-16" ]]
+[[ "$1" == "+nightly-2026-07-22" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "cmin" ]]
 [[ "$6" == "native_config" ]]

@@ -753,7 +753,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
-    "ARG RUST_BUILDER_IMAGE=rust:1.97.0-trixie",
+    "ARG RUST_BUILDER_IMAGE=rust:1.97.1-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
     "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
@@ -779,7 +779,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1974,9 +1974,9 @@ fn unsafe_validation_runs_pinned_miri_and_sanitizers_as_a_primary_gate() {
     "- miri",
     "- address",
     "- thread",
-    "nightly-2026-07-16",
-    "rustup component add miri --toolchain nightly-2026-07-16",
-    "cargo +nightly-2026-07-16 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
+    "nightly-2026-07-22",
+    "rustup component add miri --toolchain nightly-2026-07-22",
+    "cargo +nightly-2026-07-22 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
     "RUSTFLAGS: -Zsanitizer=address",
     "ASAN_OPTIONS: detect_leaks=1:halt_on_error=1",
     "-Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked",
@@ -2016,12 +2016,12 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
-    "rustup toolchain install 1.97.0 --profile minimal",
-    "rustup default 1.97.0",
+    "rustup toolchain install 1.97.1 --profile minimal",
+    "rustup default 1.97.1",
     "name: Install pinned Rust dependency tools",
     "cargo install cargo-audit --version 0.22.2 --locked",
     "cargo install cargo-deny --version 0.20.2 --locked",
-    "cargo install cargo-vet --version 0.10.0 --locked",
+    "cargo install cargo-vet --version 0.10.2 --locked",
     "name: Cargo audit",
     "run: cargo audit",
     "name: Cargo deny complete policy",
@@ -3665,7 +3665,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
   for expected in [
     "actions: read",
     "contents: read",
-    "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
     "tests/scripts/validate-ci-image-artifact.py validate",
     "-build-metadata.json",
@@ -3956,7 +3956,7 @@ fn pr_non_benchmark_summary_executes_only_trusted_helper() {
   );
   assert_eq!(
     checkout["uses"].as_str(),
-    Some("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0")
+    Some("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
   );
   assert_eq!(
     checkout["with"],
@@ -4930,7 +4930,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Validate immutable platform attestation subject",
     "canonical platform tag ${canonical_tag} resolved to ${resolved_digest}, expected ${DIGEST}",
     "and ([.metadata.component.properties[].name] | length == 9 and (unique | length == 9))",
-    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
     "Publish signed platform provenance",
     "Publish signed platform SBOM",
     "subject-name: ${{ inputs.image }}",
@@ -5075,7 +5075,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "dependsOn: [$index[0].children[].digest | $image + \"@\" + .]",
     "release index requires exactly two canonical tags",
     "canonical index tag ${canonical_tag} resolved to ${resolved_digest}, expected ${digest}",
-    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
     "Publish signed index provenance",
     "Publish signed index SBOM",
     "subject-name: ${{ matrix.image }}",
@@ -5279,10 +5279,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
 
   assert_eq!(
     workflow
-      .matches("actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1")
+      .matches("actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0")
       .count()
       + arch_workflow
-        .matches("actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1")
+        .matches("actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0")
         .count(),
     6,
     "the two workflow templates should publish provenance, SBOM, and rebuild attestations for platform and index matrices"
@@ -5390,7 +5390,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
-    "actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1",
+    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
     "https://oxibelt.dev/attestations/rebuild/v1",
     "rebuild_recipe.mjs",
     "push-to-registry: false",

@@ -448,6 +448,30 @@ mod tests {
     );
   }
 
+  #[test]
+  fn nonzero_reserved_filter_byte_returns_parse_error() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let filter_path = temp_dir.path().join("crlite.filter");
+    let filter = test_crlite_filter(
+      IssuerSpkiHash([5_u8; 32]),
+      LogId([9_u8; 32]),
+      &[1_u8],
+      &[2_u8],
+    );
+    let mut bytes = filter
+      .to_bytes(Encoding::V4)
+      .expect("filter should serialize");
+    bytes[1] = 1;
+    fs::write(&filter_path, bytes).expect("write filter");
+    let tls = test_tls_config(filter_path.clone());
+
+    let Err(error) = load_filter(&tls.crlite, &filter_path) else {
+      panic!("nonzero reserved byte should fail closed");
+    };
+
+    assert!(error.to_string().contains("crlite_filter_parse"));
+  }
+
   #[tokio::test]
   async fn invalid_filter_bytes_return_parse_error() {
     let temp_dir = tempfile::tempdir().expect("tempdir");

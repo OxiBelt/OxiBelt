@@ -298,7 +298,7 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
 fn cargo_vet_imports_and_bootstrap_inventory_are_locked() {
   let policy = json_policy();
   let vet_policy = &policy["rust"]["cargoVet"];
-  assert_eq!(vet_policy["version"], "0.10.0");
+  assert_eq!(vet_policy["version"], "0.10.2");
   assert_eq!(vet_policy["deploymentCriteria"], "safe-to-deploy");
   assert_eq!(vet_policy["developmentCriteria"], "safe-to-run");
 

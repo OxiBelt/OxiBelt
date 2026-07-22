@@ -28,10 +28,10 @@ function Plan(): ReturnType<typeof BuildImageReleasePlan> {
 function Environment(): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    rustc: 'rustc 1.97.0',
-    cargo: 'cargo 1.97.0',
+    rustc: 'rustc 1.97.1',
+    cargo: 'cargo 1.97.1',
     node: 'v24.13.0',
-    pnpm: '11.13.1',
+    pnpm: '11.15.1',
     buildx: 'github.com/docker/buildx v0.35.0',
     buildkit: 'moby/buildkit@sha256:' + '1'.repeat(64),
     trivy: '0.69.3',
