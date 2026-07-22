@@ -2623,6 +2623,14 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "io.x-k8s.kind.cluster",
     "has(\"node-role.kubernetes.io/control-plane\") | not",
     "topology.kubernetes.io/zone",
+    "workers_are_eligible() {",
+    ".type == \"Ready\" and .status == \"True\"",
+    ".spec.unschedulable != true",
+    ".effect == \"NoSchedule\" or .effect == \"NoExecute\"",
+    ".metadata.labels[\"topology.kubernetes.io/zone\"] == $zone",
+    "wait_for \"all lifecycle-test workers to become eligible\" 120 workers_are_eligible",
+    "node_eligibility_diagnostics >&2 || true",
+    "get pods -o wide --ignore-not-found",
     "podDistribution.enabled=true",
     "lifecycle.preStop.enabled=true",
     "lifecycle.preStop.drainSeconds=10",
@@ -2683,6 +2691,19 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
         .find("helm upgrade --install")
         .expect("Kubernetes Pod lifecycle script should install the Helm release"),
     "Kubernetes Pod lifecycle route fixture must exist before the Helm release starts"
+  );
+  let worker_labels = script
+    .find("topology.kubernetes.io/zone=${zone_labels[${index}]}\"")
+    .expect("Kubernetes Pod lifecycle script should label its workers by zone");
+  let worker_eligibility_wait = script
+    .find("wait_for \"all lifecycle-test workers to become eligible\" 120 workers_are_eligible")
+    .expect("Kubernetes Pod lifecycle script should bound its worker eligibility wait");
+  let helm_install = script
+    .find("helm upgrade --install")
+    .expect("Kubernetes Pod lifecycle script should install the Helm release");
+  assert!(
+    worker_labels < worker_eligibility_wait && worker_eligibility_wait < helm_install,
+    "Kubernetes Pod lifecycle workers must be labeled and proved eligible before Helm installation"
   );
 
   for forbidden in [
@@ -3129,6 +3150,42 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
   assert!(
     gate_ready < probe_start && proxy_ready < probe_start,
     "the lifecycle drain fixture should establish mock and proxy readiness before launching probes"
+  );
+
+  let retry_storm = &scripts[2];
+  for expected in [
+    "retry_storm_proxy_request() {",
+    "docker exec \"${http_container}\" python /opt/mock_upstream/client.py",
+    "--target-host proxy",
+    "retry_storm_proxy_request 9090 ops.test /metrics 200",
+    "retry_storm_proxy_request 9091 ops.test /live 200",
+    "for _ in $(seq 1 100)",
+    "10#${active_retry} > 1",
+    "10#${queued_retry} != 0",
+    "10#${observed_budget} > 15",
+    "[[ \"${observed_budget}\" == \"15\" ]]",
+    "retry storm did not reach fifteen durable budget rejections",
+    "--concurrency 16",
+    "--timeout-seconds 10",
+    "wait \"${burst_pid}\"",
+    "\"${original_attempts}\" != \"16\"",
+    "\"${retry_attempts}\" != \"1\"",
+    "\"${retry_rejections}\" != \"15\"",
+    "\"${active_retry}\" != \"0\"",
+    "\"${queued_retry}\" != \"0\"",
+    "retry attempt, rejection, or final gauge invariants did not reconcile",
+    ".body == \"recovered\" and .headers[\"x-sequence-index\"] == \"17\"",
+  ] {
+    assert!(
+      retry_storm.contains(expected),
+      "the retry-storm fixture should preserve deterministic budget invariant {expected}"
+    );
+  }
+  assert!(
+    !retry_storm.contains("plain_client_request_on_port")
+      && !retry_storm
+        .contains("[[ \"${active_retry}\" == \"1\" && \"${observed_budget}\" == \"15\" ]]"),
+    "the retry-storm fixture must use its existing-container probe and must not require transient activity in the durable rejection sample"
   );
 }
 

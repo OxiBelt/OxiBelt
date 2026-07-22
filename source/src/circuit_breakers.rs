@@ -18,6 +18,8 @@ mod priority_tests;
 #[cfg(test)]
 mod queue_fairness_tests;
 #[cfg(test)]
+mod retry_budget_tests;
+#[cfg(test)]
 mod tests;
 
 pub use runtime::{

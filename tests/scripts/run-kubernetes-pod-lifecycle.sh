@@ -26,6 +26,8 @@ work_dir=""
 cluster_created=0
 port_forward_pid=""
 stopped_worker=""
+workers=()
+zone_labels=()
 
 release_name="oxibelt-lifecycle"
 workload_name="oxibelt"
@@ -63,7 +65,9 @@ cleanup() {
 
   if ((status != 0 && cluster_created == 1)); then
     echo "Kubernetes Pod lifecycle diagnostics for ${cluster_name}/${namespace}:" >&2
+    node_eligibility_diagnostics >&2 || true
     kube -n "${namespace}" get deployments,pods,endpointslices,poddisruptionbudgets --ignore-not-found >&2 || true
+    kube -n "${namespace}" get pods -o wide --ignore-not-found >&2 || true
     kube -n "${namespace}" get events --sort-by=.metadata.creationTimestamp >&2 || true
     kube -n "${namespace}" logs -l "${selector}" \
       --all-containers=true --prefix --tail=200 >&2 || true
@@ -103,6 +107,56 @@ wait_for() {
       die "timed out waiting for ${description}"
     fi
     sleep 1
+  done
+}
+
+workers_are_eligible() {
+  local index nodes worker zone
+  nodes="$(kube get nodes -o json 2>/dev/null)" || return 1
+
+  for index in "${!workers[@]}"; do
+    worker="${workers[${index}]}"
+    zone="${zone_labels[${index}]}"
+    jq -e --arg worker "${worker}" --arg zone "${zone}" '
+      .items[]
+      | select(.metadata.name == $worker)
+      | (any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+        and (.spec.unschedulable != true)
+        and ([.spec.taints[]?
+          | select(.effect == "NoSchedule" or .effect == "NoExecute")]
+          | length == 0)
+        and (.metadata.labels["topology.kubernetes.io/zone"] == $zone)
+    ' >/dev/null <<<"${nodes}" || return 1
+  done
+}
+
+node_eligibility_diagnostics() {
+  local index nodes worker zone
+  nodes="$(kube get nodes -o json 2>/dev/null)" || {
+    echo "Node eligibility: unavailable"
+    return 0
+  }
+
+  printf '%s\n' 'Node eligibility:'
+  printf 'NAME\tEXPECTED-ZONE\tREADY\tUNSCHEDULABLE\tNO-SCHEDULE-OR-NO-EXECUTE-TAINTS\tACTUAL-ZONE\n'
+  for index in "${!workers[@]}"; do
+    worker="${workers[${index}]}"
+    zone="${zone_labels[${index}]:-unknown}"
+    jq -er --arg worker "${worker}" --arg zone "${zone}" '
+      first(.items[] | select(.metadata.name == $worker)) as $node
+      | [
+          $worker,
+          $zone,
+          (any($node.status.conditions[]?;
+            .type == "Ready" and .status == "True") | tostring),
+          (($node.spec.unschedulable // false) | tostring),
+          ([$node.spec.taints[]?
+            | select(.effect == "NoSchedule" or .effect == "NoExecute")]
+            | length | tostring),
+          ($node.metadata.labels["topology.kubernetes.io/zone"] // "missing")
+        ]
+      | @tsv
+    ' <<<"${nodes}" || printf '%s\t%s\t%s\n' "${worker}" "${zone}" 'unavailable'
   done
 }
 
@@ -344,6 +398,7 @@ for index in "${!workers[@]}"; do
   kube label node "${workers[${index}]}" \
     "topology.kubernetes.io/zone=${zone_labels[${index}]}" --overwrite >/dev/null
 done
+wait_for "all lifecycle-test workers to become eligible" 120 workers_are_eligible
 
 kube create namespace "${namespace}" >/dev/null
 kube -n "${namespace}" create -f - <<EOF
