@@ -3047,6 +3047,24 @@ upsert_oxibelt_config_scalar() {
   mv "${tmp}" "${config_path}"
 }
 
+configure_performance_circuit_breakers() {
+  local config_path="$1"
+  local capacity=200000
+  local scope
+
+  # Performance fixtures already admit this many downstream connections. Keep
+  # circuit breakers enabled, but use the same deterministic bound so cgroup-
+  # derived auto capacities do not reject the benchmark workload. Disable the
+  # pending queue so a real capacity overrun remains an immediate hard failure.
+  upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers" "enabled" "true"
+  for scope in global route_defaults pool_defaults; do
+    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_active_requests" "${capacity}"
+    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_pending_requests" "0"
+    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_connections" "${capacity}"
+    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_streams" "${capacity}"
+  done
+}
+
 start_oxibelt() {
   local scenario="$1"
   local alias_name="$2"
@@ -3097,6 +3115,7 @@ start_oxibelt() {
   mkdir -p "${configs_dir}/oxibelt-${scenario}"
   cp -R "${fixture_dir}/." "${configs_dir}/oxibelt-${scenario}/"
   oxibelt_config="${configs_dir}/oxibelt-${scenario}/config/oxibelt.toml"
+  configure_performance_circuit_breakers "${oxibelt_config}"
   if [[ "${detailed_hot_path_diagnostics}" == "1" ]]; then
     sed -i 's/^[[:space:]]*detail = "basic"[[:space:]]*$/detail = "detailed"/' \
       "${oxibelt_config}"

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use oxibelt::config::{Config, MetricsDetail};
+use oxibelt::config::{CapacitySetting, Config, MetricsDetail};
 use oxibelt::routes::{RouteTable, WafExecutionPlan};
 use oxibelt::waf::WafEngine;
 
@@ -1307,6 +1307,109 @@ upsert_oxibelt_config_scalar "$1" "proxy.http3" "inline_bodyless_fast_path" "tru
       .and_then(toml::Value::as_bool),
     Some(true)
   );
+}
+
+#[test]
+fn generated_performance_configs_pin_circuit_breaker_capacity() {
+  let script = performance_script_text();
+  let start_function = extract_bash_function(&script, "start_oxibelt");
+  assert!(
+    start_function.contains("configure_performance_circuit_breakers \"${oxibelt_config}\""),
+    "every generated OxiBelt performance config should receive the benchmark circuit-breaker profile"
+  );
+
+  let temp = HarnessTempDir::new("oxibelt-performance-circuit-breakers-");
+  let config_path = temp.join("oxibelt.toml");
+  let harness_path = temp.join("configure.sh");
+  let baseline_path = oxibelt_performance_fixture_root().join("baseline/config/oxibelt.toml");
+  fs::copy(&baseline_path, &config_path).unwrap_or_else(|error| {
+    panic!(
+      "failed to copy {} to the harness: {error}",
+      baseline_path.display()
+    )
+  });
+  fs::write(
+    &harness_path,
+    format!(
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+
+{}
+
+{}
+
+configure_performance_circuit_breakers "$1"
+configure_performance_circuit_breakers "$1"
+"#,
+      extract_bash_function(&script, "upsert_oxibelt_config_scalar"),
+      extract_bash_function(&script, "configure_performance_circuit_breakers")
+    ),
+  )
+  .expect("circuit-breaker harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .arg(&config_path)
+    .output()
+    .expect("circuit-breaker harness should run");
+  assert!(
+    output.status.success(),
+    "circuit-breaker harness failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let config_text = fs::read_to_string(&config_path).expect("config should be readable");
+  for table in [
+    "[circuit_breakers]",
+    "[circuit_breakers.global]",
+    "[circuit_breakers.route_defaults]",
+    "[circuit_breakers.pool_defaults]",
+  ] {
+    assert_eq!(
+      config_text.matches(table).count(),
+      1,
+      "reapplying the benchmark profile should not duplicate {table}"
+    );
+  }
+
+  let config: Config =
+    toml::from_str(&config_text).expect("generated performance config should parse");
+  assert!(
+    config.circuit_breakers.enabled,
+    "performance circuit breakers must remain enabled"
+  );
+  for (scope_name, scope) in [
+    ("global", &config.circuit_breakers.global),
+    ("route_defaults", &config.circuit_breakers.route_defaults),
+    ("pool_defaults", &config.circuit_breakers.pool_defaults),
+  ] {
+    for (resource_name, value) in [
+      ("max_active_requests", scope.max_active_requests),
+      ("max_connections", scope.max_connections),
+      ("max_streams", scope.max_streams),
+    ] {
+      assert_eq!(
+        value,
+        CapacitySetting::Fixed(200000),
+        "{scope_name}.{resource_name} should match the performance fixture capacity"
+      );
+    }
+    assert_eq!(
+      scope.max_pending_requests,
+      CapacitySetting::Fixed(0),
+      "{scope_name}.max_pending_requests should reject rather than queue beyond the benchmark bound"
+    );
+    assert_eq!(
+      scope.max_body_inspection_jobs,
+      CapacitySetting::Auto,
+      "{scope_name}.max_body_inspection_jobs should keep exercising automatic resource sizing"
+    );
+    assert_eq!(
+      scope.max_decompression_jobs,
+      CapacitySetting::Auto,
+      "{scope_name}.max_decompression_jobs should keep exercising automatic resource sizing"
+    );
+  }
 }
 
 #[test]
