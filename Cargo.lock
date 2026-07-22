@@ -3008,6 +3008,7 @@ dependencies = [
  "memchr",
  "nix",
  "online-dsl-forge",
+ "oxibelt-build-identity",
  "oxibelt-control-protocol",
  "pretty_assertions",
  "proc-macro2",
@@ -3047,6 +3048,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibelt-build-identity"
+version = "0.0.0"
+
+[[package]]
 name = "oxibelt-control-http"
 version = "0.0.0"
 dependencies = [
@@ -3080,6 +3085,7 @@ dependencies = [
  "clap",
  "nix",
  "oxibelt",
+ "oxibelt-build-identity",
  "serde",
  "serde_json",
  "socket2",
@@ -3125,6 +3131,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "oxibelt",
+ "oxibelt-build-identity",
  "oxibelt-control-http",
  "oxibelt-control-protocol",
  "pretty_assertions",
@@ -3146,6 +3153,7 @@ dependencies = [
  "anyhow",
  "clap",
  "oxibelt",
+ "oxibelt-build-identity",
  "tokio",
 ]
 
@@ -3158,6 +3166,7 @@ dependencies = [
  "libc",
  "nix",
  "oxibelt",
+ "oxibelt-build-identity",
  "rustix",
  "tokio",
  "tracing",
@@ -3184,6 +3193,7 @@ dependencies = [
  "libc",
  "openssl-sys",
  "oxibelt",
+ "oxibelt-build-identity",
  "oxibelt-deployment-diagnostics",
  "rustls",
  "sequoia-openpgp",

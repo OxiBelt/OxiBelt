@@ -6,6 +6,7 @@ members = [
   "source/apps/oxibelt-keysigner",
   "source/apps/oxibelt-netport-switcher",
   "source/apps/oxibeltctl",
+  "source/crates/oxibelt-build-identity",
   "source/crates/oxibelt-control-http",
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
@@ -18,6 +19,7 @@ default-members = [
   "source/apps/oxibelt-keysigner",
   "source/apps/oxibelt-netport-switcher",
   "source/apps/oxibeltctl",
+  "source/crates/oxibelt-build-identity",
   "source/crates/oxibelt-control-http",
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
@@ -49,6 +51,7 @@ kube = { version = "4.0.0", default-features = false, features = ["client", "run
 libc = "0.2.186"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
 oxibelt = { path = "source" }
+oxibelt-build-identity = { path = "source/crates/oxibelt-build-identity" }
 oxibelt-control-http = { path = "source/crates/oxibelt-control-http" }
 oxibelt-control-protocol = { path = "source/crates/oxibelt-control-protocol" }
 oxibelt-deployment-diagnostics = { path = "source/crates/oxibelt-deployment-diagnostics" }

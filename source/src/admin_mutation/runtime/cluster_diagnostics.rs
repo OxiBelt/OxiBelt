@@ -49,7 +49,7 @@ impl AdminMutationRuntime {
         let heartbeat = live.iter().find(|value| &value.instance_id == instance_id);
         let compatible = heartbeat.is_some_and(|value| {
           value.membership_revision == self.inner.target.membership_revision
-            && value.build_version == env!("CARGO_PKG_VERSION")
+            && value.build_version == oxibelt_build_identity::SHORT_VERSION
             && value.capability_version == CAPABILITY_VERSION
             && value.artifact_key_fingerprint == expected_key
         });

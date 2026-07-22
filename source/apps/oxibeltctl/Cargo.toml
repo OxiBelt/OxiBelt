@@ -21,6 +21,7 @@ getrandom.workspace = true
 http.workspace = true
 libc.workspace = true
 oxibelt = { workspace = true, features = ["config-tooling"] }
+oxibelt-build-identity.workspace = true
 oxibelt-deployment-diagnostics.workspace = true
 rustls.workspace = true
 sequoia-openpgp.workspace = true

@@ -127,7 +127,7 @@ impl AdminMutationRuntime {
       &self.inner.cluster_id,
       &self.inner.target.membership_revision,
       &self.inner.members,
-      env!("CARGO_PKG_VERSION"),
+      oxibelt_build_identity::SHORT_VERSION,
       "admin-mutation-rollout-v1",
       self.artifact_key_fingerprint()?,
     )

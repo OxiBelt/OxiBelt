@@ -290,7 +290,7 @@ test('platform enrichment rejects invalid CycloneDX identity, reserved propertie
 test('platform enrichment rejects plan, digest, component, and binary inventory mismatches', () => {
   const BadSchema = PlatformOptions()
   ;(BadSchema.imagePlan as Record<string, unknown>).schemaVersion = 4
-  Assert.throws(() => BuildPlatformSbom(BadSchema), /schemaVersion must be 7/)
+  Assert.throws(() => BuildPlatformSbom(BadSchema), /schemaVersion must be 8/)
 
   const BadDigest = PlatformOptions()
   BadDigest.imageDigest = Digest('b')

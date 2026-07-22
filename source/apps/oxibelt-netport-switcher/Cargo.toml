@@ -18,6 +18,7 @@ clap.workspace = true
 libc.workspace = true
 nix.workspace = true
 oxibelt.workspace = true
+oxibelt-build-identity.workspace = true
 rustix.workspace = true
 tokio.workspace = true
 tracing.workspace = true

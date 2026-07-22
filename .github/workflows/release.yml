@@ -178,7 +178,7 @@ jobs:
               raise SystemExit(f"invalid strict OxiBelt release tag: {tag}")
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 7:
+          if plan["schemaVersion"] != 8:
               raise SystemExit("unsupported image release plan schema")
           if plan["version"] != tag:
               raise SystemExit("image plan version does not match release tag")
@@ -188,6 +188,8 @@ jobs:
               raise SystemExit("release image must publish to ghcr.io/oxibelt/oxibelt")
           if plan["revision"] != revision:
               raise SystemExit("image plan revision does not match checked-out commit")
+          if plan["sourceRef"] != f"refs/tags/{tag}" or plan["sourceDirty"] != "clean" or plan["buildKind"] != "official_release":
+              raise SystemExit("image plan does not contain the official clean-tag build identity")
 
           major = tag.split(".", 1)[0]
           expected_roles = {
@@ -476,12 +478,14 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 7:
+          if plan["schemaVersion"] != 8:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
           if plan["source"] != source:
               raise SystemExit("release plan source URL does not match workflow source")
+          if plan["sourceRef"] != f"refs/tags/{version}" or plan["sourceDirty"] != "clean" or plan["buildKind"] != "official_release":
+              raise SystemExit("release plan does not contain the official clean-tag build identity")
 
           major = version.split(".", 1)[0]
           expected = {

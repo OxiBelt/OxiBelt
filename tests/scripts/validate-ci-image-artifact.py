@@ -19,9 +19,14 @@ from typing import Any
 MAXIMUM_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAXIMUM_ARCHIVE_MEMBERS = 4096
 MAXIMUM_JSON_BYTES = 8 * 1024 * 1024
+MAXIMUM_BINARY_BYTES = 256 * 1024 * 1024
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
 CREATED = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+SOURCE_REF = re.compile(r"refs/(?:heads|tags)/[A-Za-z0-9._/-]+\Z")
+BUILD_IDENTITY_MARKER = re.compile(
+    rb"OXIBELT_BUILD_IDENTITY_V1=(\{[^}\x00\r\n]{1,4096}\})"
+)
 
 ARCHITECTURES = {
     "amd64v2": {
@@ -153,6 +158,9 @@ CONTRACT_KEYS = {
     "source_tree",
     "version",
     "ref_name",
+    "source_ref",
+    "source_dirty",
+    "build_kind",
     "created",
     "role",
     "platform",
@@ -173,6 +181,7 @@ CONTRACT_KEYS = {
     "descriptor_digest",
     "image_digest",
     "layers",
+    "binaries",
 }
 
 
@@ -360,6 +369,72 @@ def expected_paths(
     return expected_tar, expected_metadata, expected_contract
 
 
+def inspect_binary_identities(
+    archive: tarfile.TarFile,
+    layer_paths: list[str],
+    role_contract: dict[str, Any],
+    expected_identity: dict[str, str],
+) -> list[dict[str, str]]:
+    binary_names = sorted(
+        {build["binary"] for build in role_contract["cargo_builds"]}
+    )
+    expected_paths = {f"usr/local/bin/{name}": name for name in binary_names}
+    binaries: dict[str, bytes] = {}
+    for layer_path in layer_paths:
+        layer_member = archive.getmember(layer_path)
+        layer_stream = archive.extractfile(layer_member)
+        if layer_stream is None:
+            fail(f"Docker layer {layer_path!r} cannot be read")
+        try:
+            with tarfile.open(fileobj=layer_stream, mode="r:*") as layer:
+                for member in layer:
+                    normalized = member.name.removeprefix("./").lstrip("/")
+                    if normalized == "usr/local/bin/.wh..wh..opq":
+                        binaries.clear()
+                        continue
+                    if normalized.startswith("usr/local/bin/.wh."):
+                        removed_path = normalized.replace("/.wh.", "/", 1)
+                        removed_name = expected_paths.get(removed_path)
+                        if removed_name is not None:
+                            binaries.pop(removed_name, None)
+                        continue
+                    name = expected_paths.get(normalized)
+                    if name is None:
+                        continue
+                    if not member.isfile() or member.size > MAXIMUM_BINARY_BYTES:
+                        fail(f"image binary {normalized!r} is not a bounded regular file")
+                    stream = layer.extractfile(member)
+                    if stream is None:
+                        fail(f"image binary {normalized!r} cannot be read")
+                    binaries[name] = stream.read()
+        except tarfile.TarError as error:
+            fail(f"invalid Docker layer {layer_path!r}: {error}")
+
+    inventory: list[dict[str, str]] = []
+    for name in binary_names:
+        binary = binaries.get(name)
+        if binary is None:
+            fail(f"Docker image is missing expected binary /usr/local/bin/{name}")
+        markers = BUILD_IDENTITY_MARKER.findall(binary)
+        if len(markers) != 1:
+            fail(f"binary {name} does not contain exactly one canonical build identity marker")
+        try:
+            identity = json.loads(markers[0].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            fail(f"binary {name} contains an invalid build identity marker: {error}")
+        if identity != expected_identity:
+            fail(f"binary {name} build identity does not match labels and build inputs")
+        inventory.append(
+            {
+                "name": name,
+                "path": f"/usr/local/bin/{name}",
+                "sha256": hashlib.sha256(binary).hexdigest(),
+                "version": identity["version"],
+            }
+        )
+    return inventory
+
+
 def inspect_artifact(
     image_tar: pathlib.Path,
     build_metadata_path: pathlib.Path,
@@ -370,6 +445,9 @@ def inspect_artifact(
     source_tree: str,
     version: str,
     ref_name: str,
+    source_ref: str,
+    source_dirty: str,
+    build_kind: str,
     created: str,
     rust_builder_image: str,
     node_builder_image: str,
@@ -382,6 +460,17 @@ def inspect_artifact(
         fail("expected source tree must be a full lowercase Git object ID")
     if not version or not ref_name:
         fail("expected version and ref name must be non-empty")
+    if source_ref != "unknown" and SOURCE_REF.fullmatch(source_ref) is None:
+        fail("expected source ref must be unknown or a canonical full Git ref")
+    if source_dirty not in ("clean", "dirty", "unknown"):
+        fail("expected source dirty state is invalid")
+    if build_kind not in (
+        "official_release",
+        "tagged_development",
+        "git_development",
+        "source_archive",
+    ):
+        fail("expected build kind is invalid")
     if CREATED.fullmatch(created) is None:
         fail("expected creation time must be second-resolution UTC RFC 3339")
     for description, value in (
@@ -441,6 +530,16 @@ def inspect_artifact(
             if len(layer_paths) != len(set(layer_paths)):
                 fail("Docker archive manifest contains duplicate layer paths")
             layer_digests = [hash_regular_member(archive, item) for item in layer_paths]
+            expected_identity = {
+                "version": version,
+                "revision": revision,
+                "source_ref": source_ref,
+                "dirty": source_dirty,
+                "kind": build_kind,
+            }
+            binaries = inspect_binary_identities(
+                archive, layer_paths, ROLES[role], expected_identity
+            )
     except (tarfile.TarError, json.JSONDecodeError) as error:
         fail(f"invalid Docker archive: {error}")
 
@@ -486,6 +585,9 @@ def inspect_artifact(
         "org.opencontainers.image.source": source,
         "org.opencontainers.image.url": source,
         "io.oxibelt.image.role": role,
+        "io.oxibelt.build.source-ref": source_ref,
+        "io.oxibelt.build.dirty": source_dirty,
+        "io.oxibelt.build.kind": build_kind,
     }.items():
         if labels.get(key) != value:
             fail(f"Docker image label {key!r} does not match the expected identity")
@@ -507,6 +609,9 @@ def inspect_artifact(
         "created": created,
         "source": source,
         "ref_name": ref_name,
+        "source_ref": source_ref,
+        "source_dirty": source_dirty,
+        "build_kind": build_kind,
     }
     layers = [
         {"path": path, "content_digest": digest, "diff_id": diff_id}
@@ -516,12 +621,15 @@ def inspect_artifact(
     ]
 
     return {
-        "schema": 2,
+        "schema": 3,
         "revision": revision,
         "source": source,
         "source_tree": source_tree,
         "version": version,
         "ref_name": ref_name,
+        "source_ref": source_ref,
+        "source_dirty": source_dirty,
+        "build_kind": build_kind,
         "created": created,
         "role": role,
         "platform": architecture["platform"],
@@ -542,6 +650,7 @@ def inspect_artifact(
         "descriptor_digest": build_descriptor_digest,
         "image_digest": image_digest,
         "layers": layers,
+        "binaries": binaries,
     }
 
 
@@ -569,6 +678,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-source-tree", required=True)
     parser.add_argument("--expected-version", required=True)
     parser.add_argument("--expected-ref-name", required=True)
+    parser.add_argument("--expected-source-ref", required=True)
+    parser.add_argument("--expected-source-dirty", required=True)
+    parser.add_argument("--expected-build-kind", required=True)
     parser.add_argument("--expected-created", required=True)
     parser.add_argument("--rust-builder-image", required=True)
     parser.add_argument("--node-builder-image", required=True)
@@ -598,6 +710,9 @@ def main() -> None:
         args.expected_source_tree,
         args.expected_version,
         args.expected_ref_name,
+        args.expected_source_ref,
+        args.expected_source_dirty,
+        args.expected_build_kind,
         args.expected_created,
         args.rust_builder_image,
         args.node_builder_image,

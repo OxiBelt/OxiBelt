@@ -282,12 +282,15 @@ function FindReleaseContract(ImagePlanValue: unknown, Role: string, ArtifactArch
   artifact?: JsonRecord
 } {
   const Plan = RecordValue(ImagePlanValue, 'image release plan')
-  if (Plan.schemaVersion !== 7) {
-    throw new Error('image release plan schemaVersion must be 7')
+  if (Plan.schemaVersion !== 8) {
+    throw new Error('image release plan schemaVersion must be 8')
   }
   const Version = StringValue(Plan.version, 'image release plan version')
   ExactString(Plan.tag, Version, 'image release plan tag')
   StringValue(Plan.revision, 'image release plan revision')
+  ExactString(Plan.sourceRef, `refs/tags/${Version}`, 'image release plan sourceRef')
+  ExactString(Plan.sourceDirty, 'clean', 'image release plan sourceDirty')
+  ExactString(Plan.buildKind, 'official_release', 'image release plan buildKind')
   const Roles = ArrayValue(Plan.roles, 'image release plan roles')
     .map((Item, Index) => RecordValue(Item, `image release plan roles[${Index}]`))
     .filter(Item => Item.role === Role)

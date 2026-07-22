@@ -136,6 +136,15 @@ metric blocks scale-down.
 
 ## Operator Questions
 
+### Which exact build is running?
+
+Use authenticated `GET /admin/v1/version`, runtime introspection, or a redacted
+support bundle. Their effective version, revision, source ref, tracked-tree
+state, and build kind come from the same compile-time identity used by CLI
+`--version` and OCI labels. Build identity is deliberately absent from public
+health responses and from Prometheus label sets to avoid unauthenticated
+fingerprinting and unbounded time-series churn.
+
 The dashboard and existing endpoints are organized around first-response
 questions.
 

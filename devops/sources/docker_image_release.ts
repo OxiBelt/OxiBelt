@@ -63,13 +63,16 @@ export type ImageRoleContract = {
 }
 
 export type ImageReleasePlan = {
-  schemaVersion: 7
+  schemaVersion: 8
   image: string
   tag: string
   version: string
   kind: ReleaseKind
   revision: string
   source: string
+  sourceRef: string
+  sourceDirty: 'clean'
+  buildKind: 'official_release'
   roles: ImageRoleContract[]
   artifacts: ImageArtifact[]
   manifests: ImageManifest[]
@@ -410,13 +413,16 @@ export function BuildImageReleasePlan(Options: BuildImageReleasePlanOptions): Im
   })
 
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     image: Image,
     tag: Tag,
     version: Tag,
     kind: Options.releaseTag.kind,
     revision: Options.revision,
     source: Options.source,
+    sourceRef: `refs/tags/${Tag}`,
+    sourceDirty: 'clean',
+    buildKind: 'official_release',
     roles: Roles,
     artifacts: Artifacts,
     manifests: Manifests

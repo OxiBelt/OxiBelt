@@ -21,6 +21,10 @@ use tokio::signal::unix::{SignalKind, signal};
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-netport-switcher")]
 #[command(about = "OxiBelt privileged port socket broker")]
+#[command(
+  version = oxibelt_build_identity::SHORT_VERSION,
+  long_version = oxibelt_build_identity::LONG_VERSION
+)]
 struct Cli {
   #[arg(long, value_name = "FILE")]
   config: PathBuf,
@@ -213,4 +217,22 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
   value
     .parse()
     .map_err(|error: anyhow::Error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::Cli;
+  use clap::Parser;
+
+  #[test]
+  fn version_flag_reports_canonical_build_identity() {
+    let error = Cli::try_parse_from(["oxibelt-netport-switcher", "--version"])
+      .expect_err("--version should exit through Clap");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
 }

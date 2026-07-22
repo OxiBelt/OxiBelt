@@ -16,6 +16,7 @@ mutation-pqc = ["oxibelt/mutation-pqc"]
 anyhow.workspace = true
 clap.workspace = true
 oxibelt.workspace = true
+oxibelt-build-identity.workspace = true
 tokio.workspace = true
 
 [lints]

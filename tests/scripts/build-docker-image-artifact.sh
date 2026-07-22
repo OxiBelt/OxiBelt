@@ -82,8 +82,63 @@ rust_target=""
 rust_target_cpu=""
 rust_builder_stage="builder-native"
 rust_build_cache_key=""
-oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "${repo_root}/Cargo.toml" | head -n 1)}"
-oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)}"
+derived_revision="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
+derived_dirty="unknown"
+derived_kind="source_archive"
+derived_ref="unknown"
+derived_version="0.0.0-dev.archive"
+if [[ "${derived_revision}" =~ ^[0-9a-f]{40}$ ]]; then
+  derived_dirty="clean"
+  if ! git -C "${repo_root}" diff --quiet --ignore-submodules -- ||
+     ! git -C "${repo_root}" diff --cached --quiet --ignore-submodules --; then
+    derived_dirty="dirty"
+  fi
+  derived_ref="$(git -C "${repo_root}" symbolic-ref -q HEAD 2>/dev/null || true)"
+  [[ -n "${derived_ref}" ]] || derived_ref="unknown"
+  mapfile -t exact_release_tags < <(
+    git -C "${repo_root}" tag --points-at HEAD 2>/dev/null |
+      sed -nE '/^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+|-build\.[0-9a-f]{8})?$/p'
+  )
+  for release_tag in "${exact_release_tags[@]}"; do
+    if [[ "${release_tag}" =~ -build\.([0-9a-f]{8})$ ]] &&
+       [[ "${BASH_REMATCH[1]}" != "${derived_revision:0:8}" ]]; then
+      echo "release build tag does not match the source revision" >&2
+      exit 2
+    fi
+  done
+  if [[ "${#exact_release_tags[@]}" -gt 0 ]]; then
+    release_tag="$(printf '%s\n' "${exact_release_tags[@]}" | python3 -c '
+import re, sys
+def key(value):
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-(beta)\.([0-9]+)|-(build)\.([0-9a-f]{8}))?", value)
+    if match is None:
+        raise SystemExit("invalid release tag passed to selector")
+    base = tuple(map(int, match.group(1, 2, 3)))
+    if match.group(4) is not None:
+        return (*base, 0, "beta", int(match.group(5)))
+    if match.group(6) is not None:
+        return (*base, 0, "build", match.group(7))
+    return (*base, 1, "", 0)
+values = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
+print(max(values, key=key))
+')"
+    derived_kind="tagged_development"
+    derived_ref="refs/tags/${release_tag}"
+    derived_version="${release_tag}"
+  else
+    derived_kind="git_development"
+    derived_version="0.0.0-dev.${derived_revision:0:8}"
+  fi
+  if [[ "${derived_dirty}" == "dirty" ]]; then
+    derived_version="${derived_version}+dirty"
+  fi
+fi
+
+oxibelt_version="${OXIBELT_DOCKER_IMAGE_VERSION:-${derived_version}}"
+oxibelt_revision="${OXIBELT_DOCKER_IMAGE_REVISION:-${derived_revision:-unknown}}"
+oxibelt_source_ref="${OXIBELT_DOCKER_IMAGE_SOURCE_REF:-${derived_ref}}"
+oxibelt_source_dirty="${OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY:-${derived_dirty}}"
+oxibelt_build_kind="${OXIBELT_DOCKER_IMAGE_BUILD_KIND:-${derived_kind}}"
 oxibelt_source_tree="${OXIBELT_DOCKER_IMAGE_SOURCE_TREE:-}"
 oxibelt_created="${OXIBELT_DOCKER_IMAGE_CREATED:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 oxibelt_source="${OXIBELT_DOCKER_IMAGE_SOURCE:-$(detect_oxibelt_source)}"
@@ -140,12 +195,20 @@ case "${artifact_arch}" in
     ;;
 esac
 
-if [[ -z "${oxibelt_version}" ]]; then
-  oxibelt_version="0.0.0"
-fi
-
 if [[ -z "${oxibelt_revision}" ]]; then
   oxibelt_revision="unknown"
+fi
+
+if [[ ! "${oxibelt_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] ||
+   [[ ! "${oxibelt_source_dirty}" =~ ^(clean|dirty|unknown)$ ]] ||
+   [[ ! "${oxibelt_build_kind}" =~ ^(official_release|tagged_development|git_development|source_archive)$ ]]; then
+  echo "the Docker build identity tuple is malformed" >&2
+  exit 2
+fi
+if [[ "${oxibelt_source_ref}" != "unknown" ]] &&
+   [[ ! "${oxibelt_source_ref}" =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]]; then
+  echo "the Docker build source ref is malformed" >&2
+  exit 2
 fi
 
 if [[ -z "${oxibelt_source_tree}" && "${oxibelt_revision}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -183,8 +246,11 @@ docker buildx build \
   --build-arg "OXIBELT_RUST_CACHE_ID=${rust_build_cache_key}" \
   --build-arg "OXIBELT_RUST_TARGET=${rust_target}" \
   --build-arg "OXIBELT_RUST_TARGET_CPU=${rust_target_cpu}" \
-  --build-arg "OXIBELT_VERSION=${oxibelt_version}" \
-  --build-arg "OXIBELT_REVISION=${oxibelt_revision}" \
+  --build-arg "OXIBELT_BUILD_VERSION=${oxibelt_version}" \
+  --build-arg "OXIBELT_BUILD_REVISION=${oxibelt_revision}" \
+  --build-arg "OXIBELT_BUILD_REF=${oxibelt_source_ref}" \
+  --build-arg "OXIBELT_BUILD_DIRTY=${oxibelt_source_dirty}" \
+  --build-arg "OXIBELT_BUILD_KIND=${oxibelt_build_kind}" \
   --build-arg "OXIBELT_CREATED=${oxibelt_created}" \
   --build-arg "OXIBELT_SOURCE=${oxibelt_source}" \
   --build-arg "OXIBELT_REF_NAME=${oxibelt_ref_name}" \
@@ -206,6 +272,9 @@ python3 "${repo_root}/tests/scripts/validate-ci-image-artifact.py" create \
   --expected-source "${oxibelt_source}" \
   --expected-source-tree "${oxibelt_source_tree}" \
   --expected-version "${oxibelt_version}" \
+  --expected-source-ref "${oxibelt_source_ref}" \
+  --expected-source-dirty "${oxibelt_source_dirty}" \
+  --expected-build-kind "${oxibelt_build_kind}" \
   --expected-ref-name "${oxibelt_ref_name}" \
   --expected-created "${oxibelt_created}" \
   --rust-builder-image "${rust_builder_image}" \

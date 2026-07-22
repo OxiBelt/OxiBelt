@@ -48,6 +48,7 @@ publish = false
 
   const ProductionPackages = [
     'oxibelt',
+    'oxibelt-build-identity',
     'oxibelt-dataplane-strict',
     'oxibelt-control-http',
     'oxibelt-control-protocol',
@@ -277,7 +278,10 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
-  Assert.equal(Plan.schemaVersion, 7)
+  Assert.equal(Plan.schemaVersion, 8)
+  Assert.equal(Plan.sourceRef, 'refs/tags/5.2.0')
+  Assert.equal(Plan.sourceDirty, 'clean')
+  Assert.equal(Plan.buildKind, 'official_release')
   Assert.deepEqual(Plan.roles, [
     {
       role: 'standalone',

@@ -28,6 +28,17 @@ deployment-admission policy separately.
 
 ## Official image repositories
 
+Official builds bind one atomic identity tuple: release version, full source
+revision, `refs/tags/<version>`, `clean`, and `official_release`. Release CI
+requires that tuple to agree across the embedded executable marker and
+`--version` output, authenticated runtime metadata, OCI version/revision and
+OxiBelt source-ref/dirty/kind labels, the image plan, and the artifact
+contract. The `official_release` field is not self-authenticating; trust still
+requires the verified release workflow identity, tag and commit, subject
+digest, and provenance described below. A local clean exact-tag build is
+`tagged_development`, while a direct archive Docker build is
+`0.0.0-dev.archive`; neither is an official artifact.
+
 Only the following repositories are official OxiBelt image sources:
 
 | Role | OCI repository | Expected executable inventory |

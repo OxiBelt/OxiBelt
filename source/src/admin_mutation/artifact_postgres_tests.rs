@@ -57,7 +57,7 @@ async fn postgres_artifact_is_ciphertext_only_and_bound_to_a_live_member() {
       cluster_id: "edge-cluster".to_string(),
       instance_id: "edge-a".to_string(),
       boot_id: "boot-a".to_string(),
-      build_version: env!("CARGO_PKG_VERSION").to_string(),
+      build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
       capability_version: "admin-mutation-rollout-v1".to_string(),
       artifact_key_fingerprint: sha256_digest(b"test artifact key"),
       membership_revision: membership.clone(),

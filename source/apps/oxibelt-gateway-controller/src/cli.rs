@@ -9,6 +9,10 @@ pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-gateway-controller")]
 #[command(about = "Translate Kubernetes Gateway API resources into OxiBelt configuration")]
+#[command(
+  version = oxibelt_build_identity::SHORT_VERSION,
+  long_version = oxibelt_build_identity::LONG_VERSION
+)]
 pub struct Cli {
   #[command(flatten)]
   pub shared: SharedArgs,
@@ -137,4 +141,22 @@ pub struct RenderArgs {
   pub input: PathBuf,
   #[arg(long, default_value = "-")]
   pub output: String,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::Cli;
+  use clap::Parser;
+
+  #[test]
+  fn version_flag_reports_canonical_build_identity() {
+    let error = Cli::try_parse_from(["oxibelt-gateway-controller", "--version"])
+      .expect_err("--version should exit through Clap");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
 }

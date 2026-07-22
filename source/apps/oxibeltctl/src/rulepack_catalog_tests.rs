@@ -44,7 +44,12 @@ description = "Vaultwarden hardening"
 
   assert_eq!(entries.len(), 1);
   assert_eq!(entries[0].name, "vaultwarden-hardening");
-  assert!(is_compatible(&entries[0]));
+  assert_eq!(
+    is_compatible(&entries[0]),
+    oxibelt_build_identity::current()
+      .compatibility_version()
+      .is_some()
+  );
   assert_eq!(
     compare_versions("0.10.0", "0.9.9"),
     std::cmp::Ordering::Greater
@@ -110,6 +115,23 @@ sha256 = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   )
   .expect_err("duplicate entries should fail");
   assert!(duplicate.to_string().contains("duplicate rulepack entry"));
+
+  let invalid_minimum = parse_catalog_bytes(
+    br#"[index]
+schema_version = 1
+
+[[rulepacks]]
+name = "demo"
+version = "0.1.0"
+source = "https://packs.example.test/demo.oxirule-rulepack.toml"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+min_oxibelt_version = "1.02.3"
+"#,
+    "invalid minimum catalog",
+    false,
+  )
+  .expect_err("catalog minimums must use strict SemVer");
+  assert!(invalid_minimum.to_string().contains("strict SemVer"));
 }
 
 #[test]

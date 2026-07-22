@@ -66,7 +66,6 @@ fn embed_validated_assets() {
   );
   #[cfg(feature = "admin-runtime")]
   println!("cargo:rerun-if-changed={}", admin_openapi_path.display());
-  println!("cargo:rerun-if-env-changed=OXIBELT_SOURCE_REVISION");
 
   let person_proof = read_asset(&person_proof_path, "Person Proof challenge");
   validate_person_proof_asset(&person_proof);
@@ -93,10 +92,6 @@ fn embed_validated_assets() {
   println!(
     "cargo:rustc-env=OXIBELT_ADMIN_OPENAPI_SHA256={}",
     sha256_hex(&admin_openapi)
-  );
-  println!(
-    "cargo:rustc-env=OXIBELT_SOURCE_REVISION={}",
-    source_revision()
   );
 }
 
@@ -269,19 +264,4 @@ fn sha256_hex(bytes: &[u8]) -> String {
     write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
   }
   encoded
-}
-
-fn source_revision() -> String {
-  let revision = env::var("OXIBELT_SOURCE_REVISION")
-    .unwrap_or_else(|_| "unknown".to_string())
-    .trim()
-    .to_ascii_lowercase();
-  if revision == "unknown" {
-    return revision;
-  }
-  assert!(
-    revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
-    "OXIBELT_SOURCE_REVISION must be 'unknown' or an exact 40-character Git commit"
-  );
-  revision
 }

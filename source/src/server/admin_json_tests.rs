@@ -284,7 +284,7 @@ async fn admin_metadata_endpoints_return_openapi_capabilities_and_version() {
   assert_eq!(capabilities_body["api_version"], "v1");
   assert_eq!(
     capabilities_body["package_version"],
-    env!("CARGO_PKG_VERSION")
+    oxibelt_build_identity::SHORT_VERSION
   );
   assert_eq!(
     capabilities_body["limits"]["admin_json_body_bytes"],
@@ -302,7 +302,10 @@ async fn admin_metadata_endpoints_return_openapi_capabilities_and_version() {
     serde_json::from_str(response_body(&version)).expect("version response should parse as JSON");
   assert_eq!(version_body["api_version"], "v1");
   assert_eq!(version_body["package_name"], env!("CARGO_PKG_NAME"));
-  assert_eq!(version_body["package_version"], env!("CARGO_PKG_VERSION"));
+  assert_eq!(
+    version_body["package_version"],
+    oxibelt_build_identity::SHORT_VERSION
+  );
   super::admin_metadata_assertions::assert_embedded_build_metadata(&version_body);
 
   let _ = shutdown.send(true);

@@ -25,6 +25,10 @@ const LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS: u64 = 86_400;
 #[derive(Debug, Parser)]
 #[command(name = env!("CARGO_PKG_NAME"))]
 #[command(about = "OxiBelt reverse proxy")]
+#[command(
+  version = oxibelt_build_identity::SHORT_VERSION,
+  long_version = oxibelt_build_identity::LONG_VERSION
+)]
 struct Cli {
   #[arg(long, value_name = "FILE")]
   config: Option<PathBuf>,
@@ -637,6 +641,18 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn version_flag_reports_canonical_build_identity() {
+    let error = Cli::try_parse_from(["oxibelt", "--version"])
+      .expect_err("--version should exit through Clap");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
 
   fn lifecycle_args(values: &[&str]) -> Vec<OsString> {
     std::iter::once(OsString::from("oxibelt"))

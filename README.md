@@ -230,6 +230,24 @@ the Admin OpenAPI input; `oxibelt-dataplane-strict` does not compile or embed
 the Admin runtime or OpenAPI asset. Node.js, pnpm, Cargo, and the Rust compiler
 are build-stage inputs only.
 
+Cargo's workspace version remains the private `0.0.0` packaging sentinel. It
+is not OxiBelt's effective build identity. Every shipped executable reports a
+canonical identity with `--version`: a clean exact release tag uses that tag;
+an untagged Git build uses `0.0.0-dev.<commit-prefix>`; tracked staged or
+unstaged changes add `+dirty`; and a source tree without Git metadata uses
+`0.0.0-dev.archive`. Untracked files alone do not mark a build dirty. A clean
+exact-tag source build is still `tagged_development`; only the release pipeline
+asserts `official_release`, whose trust comes from verified provenance rather
+than the assertion itself.
+
+The direct Docker command above intentionally excludes `.git`, so its binaries
+and OCI labels report the archive identity. Release and CI helpers pass one
+atomic version, revision, source-ref, dirty-state, and build-kind tuple to both
+the compiler and image labels. Authenticated Admin metadata, runtime
+introspection, support bundles, binary `--version`, and OCI metadata therefore
+describe the same build. Public `/ready` and `/live` responses do not expose
+this identity.
+
 Official releases publish these role-specific repositories from the same
 version and source revision:
 

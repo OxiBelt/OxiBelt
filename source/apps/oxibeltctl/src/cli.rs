@@ -29,6 +29,10 @@ pub(crate) use rulepack_cli::*;
 #[derive(Debug, Parser)]
 #[command(name = "oxibeltctl")]
 #[command(about = "OxiBelt operations CLI")]
+#[command(
+  version = oxibelt_build_identity::SHORT_VERSION,
+  long_version = oxibelt_build_identity::LONG_VERSION
+)]
 pub(crate) struct Cli {
   #[command(flatten)]
   pub(crate) admin: AdminArgs,
@@ -704,6 +708,18 @@ fn parse_ttl_seconds(value: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn version_flag_reports_canonical_build_identity() {
+    let error = Cli::try_parse_from(["oxibeltctl", "--version"])
+      .expect_err("--version should exit through Clap");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
 
   #[test]
   fn token_env_defaults_to_admin_token() {

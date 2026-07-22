@@ -46,6 +46,10 @@ pub struct SupportBundleMetadata {
   pub format_version: u32,
   pub generated_at_unix_ms: u64,
   pub package_version: &'static str,
+  pub source_revision: &'static str,
+  pub source_ref: &'static str,
+  pub source_dirty: &'static str,
+  pub build_kind: &'static str,
   pub target_os: &'static str,
   pub target_arch: &'static str,
   pub process_id: u32,
@@ -281,6 +285,7 @@ pub async fn build_support_bundle(
   effective_toml: Option<String>,
   options: &DoctorOptions,
 ) -> SupportBundle {
+  let identity = oxibelt_build_identity::current();
   let doctor = diagnose_config(snapshot.config.clone(), options).await;
   let runtime_snapshot = build_runtime_snapshot(snapshot);
   let waf = build_waf_snapshot(snapshot);
@@ -296,7 +301,11 @@ pub async fn build_support_bundle(
     metadata: SupportBundleMetadata {
       format_version: SUPPORT_BUNDLE_FORMAT_VERSION,
       generated_at_unix_ms: now_unix_ms(),
-      package_version: env!("CARGO_PKG_VERSION"),
+      package_version: identity.effective_version,
+      source_revision: identity.source_revision_or_unknown(),
+      source_ref: identity.source_ref_or_unknown(),
+      source_dirty: identity.dirty.as_str(),
+      build_kind: identity.kind.as_str(),
       target_os: std::env::consts::OS,
       target_arch: std::env::consts::ARCH,
       process_id: std::process::id(),

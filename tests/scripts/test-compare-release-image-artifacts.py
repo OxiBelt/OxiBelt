@@ -77,6 +77,9 @@ def docker_archive(path: pathlib.Path, layer_value: bytes, created: str) -> str:
                 "org.opencontainers.image.source": "https://github.com/OxiBelt/OxiBelt",
                 "org.opencontainers.image.url": "https://github.com/OxiBelt/OxiBelt",
                 "io.oxibelt.image.role": "standalone",
+                "io.oxibelt.build.source-ref": "refs/tags/1.2.3",
+                "io.oxibelt.build.dirty": "clean",
+                "io.oxibelt.build.kind": "official_release",
             },
         },
         "rootfs": {"type": "layers", "diff_ids": [layer_digest]},
@@ -160,12 +163,15 @@ class ComparatorTest(unittest.TestCase):
         image_digest = digest(image.read_bytes() + b"manifest")
         contract = self.root / f"{prefix}-contract.json"
         value = {
-            "schema": 2,
+            "schema": 3,
             "revision": "a" * 40,
             "source": "https://github.com/OxiBelt/OxiBelt",
             "source_tree": "b" * 40,
             "version": "1.2.3",
             "ref_name": "1.2.3",
+            "source_ref": "refs/tags/1.2.3",
+            "source_dirty": "clean",
+            "build_kind": "official_release",
             "created": "2026-07-21T00:00:00Z",
             "role": "standalone",
             "platform": "linux/amd64",
@@ -379,10 +385,24 @@ class ComparatorTest(unittest.TestCase):
         self.assertEqual(receipt["outcome"], "unverifiable")
         self.assertIn("unsafe", receipt["differences"][0])
 
-    def test_artifact_validator_creates_and_revalidates_schema_two_evidence(self) -> None:
+    def test_artifact_validator_creates_and_revalidates_schema_three_evidence(self) -> None:
         image = self.root / "oxibelt-alpine-musl-amd64.tar"
+        marker = (
+            b'binary\x00OXIBELT_BUILD_IDENTITY_V1='
+            b'{"version":"1.2.3","revision":"' + b'a' * 40
+            + b'","source_ref":"refs/tags/1.2.3","dirty":"clean","kind":"official_release"}\x00'
+        )
         config_digest = docker_archive(
-            image, layer([("usr/local/bin/oxibelt", b"binary", 0o755)]),
+            image,
+            layer([
+                (f"usr/local/bin/{name}", marker, 0o755)
+                for name in (
+                    "oxibelt",
+                    "oxibeltctl",
+                    "oxibelt-keysigner",
+                    "oxibelt-netport-switcher",
+                )
+            ]),
             "2026-07-21T00:00:00Z"
         )
         image_digest = digest(b"manifest")
@@ -405,6 +425,9 @@ class ComparatorTest(unittest.TestCase):
             "--expected-source-tree", "b" * 40,
             "--expected-version", "1.2.3",
             "--expected-ref-name", "1.2.3",
+            "--expected-source-ref", "refs/tags/1.2.3",
+            "--expected-source-dirty", "clean",
+            "--expected-build-kind", "official_release",
             "--expected-created", "2026-07-21T00:00:00Z",
             "--rust-builder-image", "rust:1.97.1-trixie@sha256:" + "1" * 64,
             "--node-builder-image", "node:24-alpine3.24@sha256:" + "2" * 64,
@@ -414,7 +437,7 @@ class ComparatorTest(unittest.TestCase):
         created = subprocess.run([*common[:2], "create", *common[2:]], check=False, capture_output=True, text=True)
         self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
         value = json.loads(contract.read_text(encoding="utf-8"))
-        self.assertEqual(value["schema"], 2)
+        self.assertEqual(value["schema"], 3)
         self.assertEqual(value["image_digest"], image_digest)
         self.assertEqual(value["source_inputs"]["Cargo.lock"]["type"], "file")
         self.assertEqual(len(value["layers"]), 1)

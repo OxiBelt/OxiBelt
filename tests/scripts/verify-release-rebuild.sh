@@ -164,7 +164,7 @@ jq -e \
    .kind == "platform" and .subject == {name: $image, digest: $digest} and
    .source.revision == $revision and .source.ref == $ref and
    .build.role == $role and .build.artifactArch == $arch and
-   .output.artifactContract.schema == 2' \
+   .output.artifactContract.schema == 3' \
   "${temporary}/recipe.json" >/dev/null
 jq -S '.output.artifactContract' "${temporary}/recipe.json" >"${published_contract}"
 
@@ -223,6 +223,9 @@ mkdir -p "${rebuilt_output}"
 OXIBELT_DOCKER_IMAGE_CREATED="${created}" \
 OXIBELT_DOCKER_IMAGE_REF_NAME="${release_version}" \
 OXIBELT_DOCKER_IMAGE_REVISION="${revision}" \
+OXIBELT_DOCKER_IMAGE_SOURCE_REF="${release_ref}" \
+OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY="clean" \
+OXIBELT_DOCKER_IMAGE_BUILD_KIND="official_release" \
 OXIBELT_DOCKER_IMAGE_SOURCE="${source_url}" \
 OXIBELT_DOCKER_IMAGE_SOURCE_TREE="$(jq -r '.source_tree' "${published_contract}")" \
 OXIBELT_DOCKER_IMAGE_VERSION="${release_version}" \
@@ -242,20 +245,19 @@ if docker image inspect "${local_tag}" >/dev/null 2>&1; then
 fi
 docker load --input "${rebuilt_tar}" >/dev/null
 loaded_image="${local_tag}"
-container_id="$(docker create "${local_tag}")"
-binary_inventory='[]'
-while read -r binary; do
-  binary_path="${temporary}/${binary}"
-  docker cp "${container_id}:/usr/local/bin/${binary}" "${binary_path}"
-  binary_sha="$(sha256sum "${binary_path}" | awk '{print $1}')"
-  binary_inventory="$(jq -c \
-    --arg name "${binary}" --arg path "/usr/local/bin/${binary}" \
-    --arg version "${release_version}" --arg sha256 "${binary_sha}" \
-    '. + [{name: $name, path: $path, version: $version, sha256: $sha256}]' \
-    <<<"${binary_inventory}")"
-done < <(jq -r --arg role "${role}" '.roles[] | select(.role == $role) | .binaries[]' "${rebuilt_plan}")
-jq -n --argjson binaries "${binary_inventory}" \
-  '{schemaVersion: 1, binaries: $binaries}' >"${temporary}/rebuilt-binaries.json"
+jq '{schemaVersion: 1, binaries: .binaries}' \
+  "${rebuilt_contract}" >"${temporary}/rebuilt-binaries.json"
+native=false
+case "$(uname -m):${artifact_arch}" in
+  x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4|aarch64:arm64) native=true ;;
+esac
+if [[ "${native}" == "true" ]]; then
+  while read -r binary; do
+    version_output="$(docker run --rm --entrypoint "/usr/local/bin/${binary}" "${local_tag}" --version)"
+    grep -F "OXIBELT_BUILD_IDENTITY_V1=" <<<"${version_output}" >/dev/null
+    grep -F "${release_version}" <<<"${version_output}" >/dev/null
+  done < <(jq -r '.binaries[].name' "${rebuilt_contract}")
+fi
 
 trivy image --input "${rebuilt_tar}" --format cyclonedx \
   --output "${temporary}/rebuilt-raw.cdx.json"

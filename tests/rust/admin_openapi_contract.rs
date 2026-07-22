@@ -40,6 +40,9 @@ fn admin_version_documents_embedded_asset_identity() {
     "package_name",
     "package_version",
     "source_revision",
+    "source_ref",
+    "source_dirty",
+    "build_kind",
     "person_proof_api_version",
     "person_proof_asset_sha256",
     "admin_openapi_sha256",
@@ -59,6 +62,30 @@ fn admin_version_documents_embedded_asset_identity() {
       "AdminVersion.{field} must be a lowercase SHA-256 digest"
     );
   }
+  assert_eq!(schema["additionalProperties"], false);
+  assert_eq!(
+    json_string_set(
+      &schema["properties"]["source_dirty"]["enum"],
+      "AdminVersion.source_dirty.enum"
+    ),
+    BTreeSet::from([
+      "clean".to_string(),
+      "dirty".to_string(),
+      "unknown".to_string(),
+    ])
+  );
+  assert_eq!(
+    json_string_set(
+      &schema["properties"]["build_kind"]["enum"],
+      "AdminVersion.build_kind.enum"
+    ),
+    BTreeSet::from([
+      "git_development".to_string(),
+      "official_release".to_string(),
+      "source_archive".to_string(),
+      "tagged_development".to_string(),
+    ])
+  );
 }
 
 #[test]

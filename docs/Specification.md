@@ -101,6 +101,31 @@ build remain unchanged. A workspace-wide all-features build is not evidence of
 strict isolation; release acceptance uses an isolated package graph plus
 binary, image-filesystem, listener, Helm-role, SBOM, and provenance checks.
 
+## Effective Build Identity
+
+The workspace Cargo version `0.0.0` is a package-rewrite sentinel, not a
+product version. A dependency-free first-party resolver freezes one atomic
+build identity at compile time. An explicit release tuple is accepted only
+when all of version, full lowercase revision, full tag ref, clean dirty-state,
+and build kind are present and mutually consistent. Otherwise a Git checkout
+uses the highest valid exact release tag at `HEAD`, or
+`0.0.0-dev.<revision-prefix>` when untagged; tracked index or worktree changes
+append `+dirty`. A source archive without Git metadata is
+`0.0.0-dev.archive` with unknown revision, ref, and dirty state. If a `.git`
+control directory exists but cannot be interrogated, the build fails rather
+than falling back to archive identity. Untracked-only files are excluded from
+dirty-state calculation so Cargo rebuild inputs remain deterministic.
+
+Only an official release or a clean exact-tag development build has a SemVer
+compatibility version. Official status is a build assertion, not an
+authentication decision; release tag, commit, workflow identity, artifact
+digest, and provenance establish trust. Admin version metadata, capabilities,
+runtime introspection, support bundles, cluster build fencing, executable
+`--version`, OCI labels, and release artifact contracts consume this canonical
+identity. The additive metadata fields do not change the introspection or
+support-bundle format version. Public readiness and liveness responses retain
+their existing non-identifying contract.
+
 ## Request Pipeline
 
 At a high level, each HTTP transaction follows this order:

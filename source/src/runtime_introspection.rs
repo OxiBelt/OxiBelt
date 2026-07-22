@@ -175,6 +175,10 @@ pub struct RuntimeIntrospectionMetadata {
   pub format_version: u32,
   pub generated_at_unix_ms: u64,
   pub package_version: &'static str,
+  pub source_revision: &'static str,
+  pub source_ref: &'static str,
+  pub source_dirty: &'static str,
+  pub build_kind: &'static str,
   pub redacted: bool,
 }
 
@@ -223,11 +227,16 @@ pub struct TurnConnectionSnapshot {
 
 #[cfg(feature = "admin-runtime")]
 pub fn build_runtime_introspection(snapshot: &AppSnapshot) -> RuntimeIntrospection {
+  let identity = oxibelt_build_identity::current();
   RuntimeIntrospection {
     metadata: RuntimeIntrospectionMetadata {
       format_version: RUNTIME_INTROSPECTION_FORMAT_VERSION,
       generated_at_unix_ms: now_unix_ms(),
-      package_version: env!("CARGO_PKG_VERSION"),
+      package_version: identity.effective_version,
+      source_revision: identity.source_revision_or_unknown(),
+      source_ref: identity.source_ref_or_unknown(),
+      source_dirty: identity.dirty.as_str(),
+      build_kind: identity.kind.as_str(),
       redacted: true,
     },
     runtime: build_runtime_snapshot(snapshot),

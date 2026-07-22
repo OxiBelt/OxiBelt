@@ -92,6 +92,7 @@ compio-driver = { version = "0.12.4", default-features = false, features = ["io-
 crc32fast = "1.5.0"
 memchr = "2.8.3"
 online-dsl-forge = "0.2.0"
+oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]

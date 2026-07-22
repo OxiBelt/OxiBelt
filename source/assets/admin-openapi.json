@@ -8811,6 +8811,9 @@
           "package_name",
           "package_version",
           "source_revision",
+          "source_ref",
+          "source_dirty",
+          "build_kind",
           "person_proof_api_version",
           "person_proof_asset_sha256",
           "admin_openapi_sha256"
@@ -8824,10 +8827,11 @@
             "type": "string"
           },
           "package_version": {
+            "description": "Effective OxiBelt build version, distinct from the Cargo workspace sentinel.",
             "type": "string"
           },
           "source_revision": {
-            "description": "Exact Git commit embedded by release builds, or unknown for an unversioned local build.",
+            "description": "Exact Git commit embedded by Git-aware builds, or unknown for a source archive.",
             "oneOf": [
               {
                 "const": "unknown"
@@ -8836,6 +8840,37 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{40}$"
               }
+            ]
+          },
+          "source_ref": {
+            "description": "Validated full Git branch or tag ref, or unknown when no source ref is available.",
+            "oneOf": [
+              {
+                "const": "unknown"
+              },
+              {
+                "type": "string",
+                "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+              }
+            ]
+          },
+          "source_dirty": {
+            "description": "Whether tracked index or worktree content differed from the source revision at build time.",
+            "type": "string",
+            "enum": [
+              "clean",
+              "dirty",
+              "unknown"
+            ]
+          },
+          "build_kind": {
+            "description": "Build identity derivation and trust class. Official is a build assertion whose trust comes from release provenance.",
+            "type": "string",
+            "enum": [
+              "official_release",
+              "tagged_development",
+              "git_development",
+              "source_archive"
             ]
           },
           "person_proof_api_version": {

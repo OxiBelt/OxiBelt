@@ -379,7 +379,7 @@ impl AdminMutationRuntime {
         members: self.inner.members.clone(),
         instance_id,
         boot_id,
-        build_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
         artifact_key_fingerprint: self.artifact_key_fingerprint()?.to_string(),
         heartbeat_interval: Duration::from_secs(rollout.heartbeat_interval_seconds),
         stale_after: Duration::from_secs(rollout.stale_after_seconds),

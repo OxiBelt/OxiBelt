@@ -41,7 +41,16 @@ effective `policy` (`disabled`, `best_effort`, or `required`), runtime `state`
 `pending_bytes`. These values expose operational progress without returning
 the authority URL, credentials, signer socket/token, event content, or key
 material.
-`/admin/v1/version` reports the API version, package name, and package version.
+`/admin/v1/version` reports the API version, package name, effective build
+version, exact source revision or `unknown`, full source ref or `unknown`,
+tracked-tree state (`clean`, `dirty`, or `unknown`), and build kind
+(`official_release`, `tagged_development`, `git_development`, or
+`source_archive`). `package_version` is the effective OxiBelt version and is
+never inferred from Cargo's private `0.0.0` workspace sentinel. Runtime
+introspection and support-bundle format version 1 carry the same additive
+`package_version`, `source_revision`, `source_ref`, `source_dirty`, and
+`build_kind` metadata. The unauthenticated health endpoints intentionally omit
+build identity; use these authenticated metadata surfaces for inventory.
 Admin listener responses include `X-OxiBelt-Request-Id` and
 `X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
 `{ "error": { "code": "...", "message": "...", "details": { ... } },

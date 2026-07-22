@@ -55,11 +55,14 @@ function PlatformFixture(ArtifactArch = 'amd64', Character = '3'): Parameters<ty
   return {
     imagePlan: ImagePlan,
     artifactContract: {
-      schema: 2,
+      schema: 3,
       role: 'standalone',
       artifact_arch: ArtifactArch,
       revision: Revision,
       source: Source,
+      source_ref: ImagePlan.sourceRef,
+      source_dirty: ImagePlan.sourceDirty,
+      build_kind: ImagePlan.buildKind,
       source_tree: 'b'.repeat(40),
       platform: Artifact.platform,
       docker_architecture: Artifact.dockerArchitecture,
@@ -110,7 +113,7 @@ test('platform recipe deterministically binds source, parameters, output, binari
 test('platform recipe rejects plan, contract, SBOM, inventory, and toolchain drift', () => {
   const BadPlan = PlatformFixture()
   ;(BadPlan.imagePlan as Record<string, unknown>).schemaVersion = 6
-  Assert.throws(() => BuildPlatformRebuildRecipe(BadPlan), /schemaVersion must be 7/)
+  Assert.throws(() => BuildPlatformRebuildRecipe(BadPlan), /schemaVersion must be 8/)
 
   const BadContract = PlatformFixture()
   ;(BadContract.artifactContract as Record<string, unknown>).role = 'controller'

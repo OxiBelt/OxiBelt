@@ -20,6 +20,7 @@ glob.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
+oxibelt-build-identity.workspace = true
 oxibelt-control-http.workspace = true
 oxibelt-control-protocol.workspace = true
 serde.workspace = true

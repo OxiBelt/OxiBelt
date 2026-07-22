@@ -1,11 +1,14 @@
 ARG RUST_BUILDER_IMAGE=rust:1.97.1-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488
 ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-ARG OXIBELT_VERSION=0.0.0
-ARG OXIBELT_REVISION=unknown
+ARG OXIBELT_BUILD_VERSION=0.0.0-dev.archive
+ARG OXIBELT_BUILD_REVISION=unknown
+ARG OXIBELT_BUILD_REF=unknown
+ARG OXIBELT_BUILD_DIRTY=unknown
+ARG OXIBELT_BUILD_KIND=source_archive
 ARG OXIBELT_CREATED=1970-01-01T00:00:00Z
 ARG OXIBELT_SOURCE=https://github.com/OxiBelt/OxiBelt
-ARG OXIBELT_REF_NAME=0.0.0
+ARG OXIBELT_REF_NAME=0.0.0-dev.archive
 ARG OXIBELT_RUST_BUILDER_STAGE=builder-native
 ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64
 
@@ -77,7 +80,11 @@ ARG OXIBELT_RUST_BUILDER_STAGE
 ARG OXIBELT_RUST_CACHE_ID=native
 ARG OXIBELT_RUST_TARGET=
 ARG OXIBELT_RUST_TARGET_CPU=
-ARG OXIBELT_REVISION
+ARG OXIBELT_BUILD_VERSION
+ARG OXIBELT_BUILD_REVISION
+ARG OXIBELT_BUILD_REF
+ARG OXIBELT_BUILD_DIRTY
+ARG OXIBELT_BUILD_KIND
 
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
@@ -87,13 +94,18 @@ COPY source/apps/oxibelt-gateway-controller ./source/apps/oxibelt-gateway-contro
 COPY source/apps/oxibelt-keysigner ./source/apps/oxibelt-keysigner
 COPY source/apps/oxibelt-netport-switcher ./source/apps/oxibelt-netport-switcher
 COPY source/apps/oxibeltctl ./source/apps/oxibeltctl
+COPY source/crates/oxibelt-build-identity ./source/crates/oxibelt-build-identity
 COPY source/crates/oxibelt-control-http ./source/crates/oxibelt-control-http
 COPY source/crates/oxibelt-control-protocol ./source/crates/oxibelt-control-protocol
 COPY source/crates/oxibelt-deployment-diagnostics ./source/crates/oxibelt-deployment-diagnostics
 COPY fuzz ./fuzz
 COPY tests/unsafe_harness ./tests/unsafe_harness
 
-ENV OXIBELT_SOURCE_REVISION=${OXIBELT_REVISION}
+ENV OXIBELT_BUILD_VERSION=${OXIBELT_BUILD_VERSION} \
+    OXIBELT_BUILD_REVISION=${OXIBELT_BUILD_REVISION} \
+    OXIBELT_BUILD_REF=${OXIBELT_BUILD_REF} \
+    OXIBELT_BUILD_DIRTY=${OXIBELT_BUILD_DIRTY} \
+    OXIBELT_BUILD_KIND=${OXIBELT_BUILD_KIND}
 
 RUN rust_target="${OXIBELT_RUST_TARGET}" && \
     if [ -z "${rust_target}" ]; then \
@@ -253,19 +265,25 @@ COPY --from=runtime-preparer /opt/oxibelt-strict.toml /etc/oxibelt/config/oxibel
 
 FROM scratch AS role-metadata
 
-ARG OXIBELT_VERSION
-ARG OXIBELT_REVISION
+ARG OXIBELT_BUILD_VERSION
+ARG OXIBELT_BUILD_REVISION
+ARG OXIBELT_BUILD_REF
+ARG OXIBELT_BUILD_DIRTY
+ARG OXIBELT_BUILD_KIND
 ARG OXIBELT_CREATED
 ARG OXIBELT_SOURCE
 ARG OXIBELT_REF_NAME
 
 LABEL org.opencontainers.image.source="${OXIBELT_SOURCE}" \
       org.opencontainers.image.url="${OXIBELT_SOURCE}" \
-      org.opencontainers.image.version="${OXIBELT_VERSION}" \
+      org.opencontainers.image.version="${OXIBELT_BUILD_VERSION}" \
       org.opencontainers.image.ref.name="${OXIBELT_REF_NAME}" \
-      org.opencontainers.image.revision="${OXIBELT_REVISION}" \
+      org.opencontainers.image.revision="${OXIBELT_BUILD_REVISION}" \
       org.opencontainers.image.created="${OXIBELT_CREATED}" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.oxibelt.build.source-ref="${OXIBELT_BUILD_REF}" \
+      io.oxibelt.build.dirty="${OXIBELT_BUILD_DIRTY}" \
+      io.oxibelt.build.kind="${OXIBELT_BUILD_KIND}"
 
 COPY --from=runtime /etc/passwd /etc/group /etc/
 COPY --from=runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -290,8 +308,11 @@ ENTRYPOINT ["/usr/local/bin/oxibelt", "--config", "/etc/oxibelt/config/oxibelt.t
 
 FROM scratch AS dataplane-strict
 
-ARG OXIBELT_VERSION
-ARG OXIBELT_REVISION
+ARG OXIBELT_BUILD_VERSION
+ARG OXIBELT_BUILD_REVISION
+ARG OXIBELT_BUILD_REF
+ARG OXIBELT_BUILD_DIRTY
+ARG OXIBELT_BUILD_KIND
 ARG OXIBELT_CREATED
 ARG OXIBELT_SOURCE
 ARG OXIBELT_REF_NAME
@@ -300,11 +321,14 @@ LABEL org.opencontainers.image.title="OxiBelt strict data plane" \
       org.opencontainers.image.description="Compile-time Admin-free OxiBelt public data-plane runtime" \
       org.opencontainers.image.source="${OXIBELT_SOURCE}" \
       org.opencontainers.image.url="${OXIBELT_SOURCE}" \
-      org.opencontainers.image.version="${OXIBELT_VERSION}" \
+      org.opencontainers.image.version="${OXIBELT_BUILD_VERSION}" \
       org.opencontainers.image.ref.name="${OXIBELT_REF_NAME}" \
-      org.opencontainers.image.revision="${OXIBELT_REVISION}" \
+      org.opencontainers.image.revision="${OXIBELT_BUILD_REVISION}" \
       org.opencontainers.image.created="${OXIBELT_CREATED}" \
       org.opencontainers.image.licenses="Apache-2.0" \
+      io.oxibelt.build.source-ref="${OXIBELT_BUILD_REF}" \
+      io.oxibelt.build.dirty="${OXIBELT_BUILD_DIRTY}" \
+      io.oxibelt.build.kind="${OXIBELT_BUILD_KIND}" \
       io.oxibelt.image.role="dataplane-strict"
 
 COPY --from=strict-dataplane-builder /tmp/oxibelt-strict-passwd /etc/passwd
@@ -362,8 +386,11 @@ ENTRYPOINT ["/usr/local/bin/oxibelt-keysigner"]
 # compatibility image used by existing standalone deployments and harnesses.
 FROM runtime AS standalone
 
-ARG OXIBELT_VERSION
-ARG OXIBELT_REVISION
+ARG OXIBELT_BUILD_VERSION
+ARG OXIBELT_BUILD_REVISION
+ARG OXIBELT_BUILD_REF
+ARG OXIBELT_BUILD_DIRTY
+ARG OXIBELT_BUILD_KIND
 ARG OXIBELT_CREATED
 ARG OXIBELT_SOURCE
 ARG OXIBELT_REF_NAME
@@ -372,11 +399,14 @@ LABEL org.opencontainers.image.title="OxiBelt" \
       org.opencontainers.image.description="Rust reverse proxy with integrated Admin and Person Proof runtimes" \
       org.opencontainers.image.source="${OXIBELT_SOURCE}" \
       org.opencontainers.image.url="${OXIBELT_SOURCE}" \
-      org.opencontainers.image.version="${OXIBELT_VERSION}" \
+      org.opencontainers.image.version="${OXIBELT_BUILD_VERSION}" \
       org.opencontainers.image.ref.name="${OXIBELT_REF_NAME}" \
-      org.opencontainers.image.revision="${OXIBELT_REVISION}" \
+      org.opencontainers.image.revision="${OXIBELT_BUILD_REVISION}" \
       org.opencontainers.image.created="${OXIBELT_CREATED}" \
       org.opencontainers.image.licenses="Apache-2.0" \
+      io.oxibelt.build.source-ref="${OXIBELT_BUILD_REF}" \
+      io.oxibelt.build.dirty="${OXIBELT_BUILD_DIRTY}" \
+      io.oxibelt.build.kind="${OXIBELT_BUILD_KIND}" \
       io.oxibelt.image.role="standalone"
 
 COPY --from=runtime-builder /tmp/oxibelt /usr/local/bin/oxibelt

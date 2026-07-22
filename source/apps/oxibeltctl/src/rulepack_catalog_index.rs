@@ -10,7 +10,13 @@ use crate::rulepack_catalog_registry::RulepackRepoConfig;
 
 const MAX_RULEPACK_INDEX_BYTES: usize = 1024 * 1024;
 const SUPPORTED_INDEX_SCHEMA_VERSION: u32 = 1;
-const CURRENT_OXIBELT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Compatibility {
+  Compatible,
+  TooOld,
+  UnverifiedDevelopment,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CatalogRulepack {
@@ -116,23 +122,54 @@ pub(crate) fn parse_catalog_bytes(
 }
 
 pub(crate) fn is_compatible(entry: &CatalogRulepack) -> bool {
-  entry
-    .min_oxibelt_version
-    .as_deref()
-    .is_none_or(|minimum| compare_versions(CURRENT_OXIBELT_VERSION, minimum) != Ordering::Less)
+  compatibility(entry) == Compatibility::Compatible
 }
 
 pub(crate) fn compatibility_error(entry: &CatalogRulepack) -> Option<String> {
-  entry
-    .min_oxibelt_version
-    .as_ref()
-    .filter(|_| !is_compatible(entry))
-    .map(|minimum| {
-      format!(
-        "rulepack {} {} requires OxiBelt >= {}, current version is {}",
-        entry.name, entry.version, minimum, CURRENT_OXIBELT_VERSION
-      )
-    })
+  let minimum = entry.min_oxibelt_version.as_ref()?;
+  let identity = oxibelt_build_identity::current();
+  match compatibility(entry) {
+    Compatibility::Compatible => None,
+    Compatibility::TooOld => Some(format!(
+      "rulepack {} {} requires OxiBelt >= {}, current compatible version is {}",
+      entry.name,
+      entry.version,
+      minimum,
+      identity
+        .compatibility_version()
+        .expect("too-old result requires a comparable build")
+    )),
+    Compatibility::UnverifiedDevelopment => Some(format!(
+      "rulepack {} {} requires OxiBelt >= {}, but build {} ({}) has no verified compatibility version; use an official release or clean exact-tag build",
+      entry.name,
+      entry.version,
+      minimum,
+      identity.effective_version,
+      identity.kind.as_str(),
+    )),
+  }
+}
+
+fn compatibility(entry: &CatalogRulepack) -> Compatibility {
+  compatibility_for(
+    entry.min_oxibelt_version.as_deref(),
+    oxibelt_build_identity::current().compatibility_version(),
+  )
+}
+
+fn compatibility_for(minimum: Option<&str>, current: Option<&str>) -> Compatibility {
+  let Some(minimum) = minimum else {
+    return Compatibility::Compatible;
+  };
+  let Some(current) = current else {
+    return Compatibility::UnverifiedDevelopment;
+  };
+  match oxibelt_build_identity::compare_semver(current, minimum)
+    .expect("catalog minimums are validated during ingestion")
+  {
+    Ordering::Less => Compatibility::TooOld,
+    Ordering::Equal | Ordering::Greater => Compatibility::Compatible,
+  }
 }
 
 pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -194,6 +231,9 @@ fn validate_catalog_document(
     }
     if let Some(value) = &raw.min_oxibelt_version {
       validate_non_empty(source, "rulepacks.min_oxibelt_version", value)?;
+      oxibelt_build_identity::parse_semver(value).map_err(|error| {
+        anyhow::anyhow!("{source} rulepacks.min_oxibelt_version must be strict SemVer: {error}")
+      })?;
     }
     validate_rulepack_source_url(&raw.source, allow_insecure_rulepack_url)?;
     if let Some(signature_type) = &raw.signature_type
@@ -310,4 +350,30 @@ fn version_parts(version: &str) -> Vec<VersionPart> {
         .unwrap_or_else(|_| VersionPart::Text(part.to_ascii_lowercase()))
     })
     .collect()
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+  use super::{Compatibility, compatibility_for};
+
+  #[test]
+  fn fails_closed_when_a_declared_minimum_cannot_be_verified() {
+    assert_eq!(
+      compatibility_for(Some("0.0.0"), None),
+      Compatibility::UnverifiedDevelopment
+    );
+    assert_eq!(compatibility_for(None, None), Compatibility::Compatible);
+  }
+
+  #[test]
+  fn compares_only_verified_semver_identities() {
+    assert_eq!(
+      compatibility_for(Some("1.2.3"), Some("1.2.3")),
+      Compatibility::Compatible
+    );
+    assert_eq!(
+      compatibility_for(Some("1.2.4"), Some("1.2.3")),
+      Compatibility::TooOld
+    );
+  }
 }

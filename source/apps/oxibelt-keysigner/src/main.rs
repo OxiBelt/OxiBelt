@@ -11,6 +11,10 @@ use oxibelt::remote_signer::{
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-keysigner")]
 #[command(about = "OxiBelt purpose-bound IPC private-key signer")]
+#[command(
+  version = oxibelt_build_identity::SHORT_VERSION,
+  long_version = oxibelt_build_identity::LONG_VERSION
+)]
 struct Cli {
   #[arg(long, value_name = "PATH")]
   socket: PathBuf,
@@ -130,6 +134,18 @@ fn parse_nonzero_u64(value: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn version_flag_reports_canonical_build_identity() {
+    let error = Cli::try_parse_from(["oxibelt-keysigner", "--version"])
+      .expect_err("--version should exit through Clap");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(
+      error
+        .to_string()
+        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
 
   #[test]
   fn cli_accepts_an_audit_only_keyset() {

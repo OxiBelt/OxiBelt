@@ -1090,21 +1090,28 @@ fn alpine_dockerfile_bundles_operations_binaries() {
 }
 
 #[test]
-fn alpine_dockerfile_records_release_ref_name_label() {
+fn alpine_dockerfile_records_canonical_build_identity_labels() {
   let dockerfile = dockerfile_text();
   let script = docker_image_artifact_build_script_text();
 
   assert!(
     dockerfile.contains("ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24")
-      && dockerfile.contains("ARG OXIBELT_VERSION=0.0.0")
-      && dockerfile.contains("ARG OXIBELT_REF_NAME=0.0.0")
+      && dockerfile.contains("ARG OXIBELT_BUILD_VERSION=0.0.0-dev.archive")
+      && dockerfile.contains("ARG OXIBELT_BUILD_REVISION=unknown")
+      && dockerfile.contains("ARG OXIBELT_BUILD_REF=unknown")
+      && dockerfile.contains("ARG OXIBELT_BUILD_DIRTY=unknown")
+      && dockerfile.contains("ARG OXIBELT_BUILD_KIND=source_archive")
+      && dockerfile.contains("ARG OXIBELT_REF_NAME=0.0.0-dev.archive")
       && dockerfile.contains("ARG OXIBELT_REF_NAME")
       && dockerfile.contains("org.opencontainers.image.ref.name=\"${OXIBELT_REF_NAME}\""),
-    "source/ops/Dockerfile.alpine should default direct image builds to 0.0.0 and expose the validated release tag as an OCI ref.name label"
+    "source/ops/Dockerfile.alpine should give direct archive builds an explicit non-release identity and expose the validated release tag as OCI ref.name"
   );
   for expected in [
     "OXIBELT_DOCKER_IMAGE_VERSION",
     "OXIBELT_DOCKER_IMAGE_REVISION",
+    "OXIBELT_DOCKER_IMAGE_SOURCE_REF",
+    "OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY",
+    "OXIBELT_DOCKER_IMAGE_BUILD_KIND",
     "OXIBELT_DOCKER_IMAGE_CREATED",
     "OXIBELT_DOCKER_IMAGE_SOURCE",
     "OXIBELT_DOCKER_IMAGE_REF_NAME",
@@ -1112,6 +1119,9 @@ fn alpine_dockerfile_records_release_ref_name_label() {
     "--build-arg \"OXIBELT_NODE_IMAGE=${node_builder_image}\"",
     "--build-arg \"OXIBELT_RUNTIME_IMAGE=${runtime_image}\"",
     "--build-arg \"OXIBELT_REF_NAME=${oxibelt_ref_name}\"",
+    "--build-arg \"OXIBELT_BUILD_REF=${oxibelt_source_ref}\"",
+    "--build-arg \"OXIBELT_BUILD_DIRTY=${oxibelt_source_dirty}\"",
+    "--build-arg \"OXIBELT_BUILD_KIND=${oxibelt_build_kind}\"",
   ] {
     assert!(
       script.contains(expected),
@@ -4780,7 +4790,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "pnpm run versioning:release",
     "git rev-parse \"${release_ref}^{commit}\"",
     "releases must run from ${release_ref}@${tag_commit}",
-    "if plan[\"schemaVersion\"] != 7:",
+    "if plan[\"schemaVersion\"] != 8:",
     "expected_roles = {",
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
@@ -4861,7 +4871,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "Upload Docker image artifact",
     "-build-metadata.json",
     "io.oxibelt.image.role",
-    "if plan[\"schemaVersion\"] != 7:",
+    "if plan[\"schemaVersion\"] != 8:",
     "validate-strict-dataplane-image.py",
   ] {
     assert!(
@@ -4937,6 +4947,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "must not request a program interpreter",
     "must not declare dynamic shared-library dependencies",
     "select(.role == $role) | .binaries[]",
+    "OXIBELT_BUILD_IDENTITY_V1=",
     "{schemaVersion: 1, binaries: $binaries}",
     "Validate and enrich platform SBOM",
     "release_sbom.mjs\" platform",
@@ -4957,8 +4968,8 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "release workflow should run one vulnerability scan and one CycloneDX inventory scan"
   );
   assert!(
-    !scan_job_text.contains("docker start") && !scan_job_text.contains("docker run"),
-    "release binary validation must inspect copied files without starting target containers"
+    !scan_job_text.contains("docker start"),
+    "release binary validation must not start the image's configured service entrypoint"
   );
   for removed in [
     "packages: read",
@@ -4976,7 +4987,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "packages: write",
     "Validate Docker image artifact for publish",
-    "if plan[\"schemaVersion\"] != 7:",
+    "if plan[\"schemaVersion\"] != 8:",
     "GHCR_TOKEN: ${{ secrets.ghcr_token }}",
     "docker login ghcr.io",
     r#"jq -c --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch)'"#,
@@ -5091,7 +5102,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
 
   for expected in [
     "packages: write",
-    "if plan[\"schemaVersion\"] != 7:",
+    "if plan[\"schemaVersion\"] != 8:",
     "def expected_artifact_tags(arch):",
     "if artifact[\"canonicalGhcrTag\"] != expected_tag or artifact[\"aliasGhcrTags\"] != expected_aliases:",
     "if manifest[\"canonicalGhcrTag\"] != canonical_tag or manifest[\"aliasGhcrTags\"] != alias_tags:",
@@ -5441,6 +5452,9 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
   for expected in [
     "OXIBELT_DOCKER_IMAGE_VERSION",
     "OXIBELT_DOCKER_IMAGE_REVISION",
+    "OXIBELT_DOCKER_IMAGE_SOURCE_REF",
+    "OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY",
+    "OXIBELT_DOCKER_IMAGE_BUILD_KIND",
     "OXIBELT_DOCKER_IMAGE_CREATED",
     "OXIBELT_DOCKER_IMAGE_REF_NAME",
     "OXIBELT_DOCKER_IMAGE_SOURCE",
@@ -5468,7 +5482,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Verify GitHub API index attestations",
     "ghcr-index-promote",
     "Promote canonical multi-arch aliases",
-    "if plan[\"schemaVersion\"] != 7:",
+    "if plan[\"schemaVersion\"] != 8:",
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",

@@ -114,6 +114,9 @@ jobs:
           OXIBELT_DOCKER_IMAGE_CREATED: ${{ inputs.release_created }}
           OXIBELT_DOCKER_IMAGE_REF_NAME: ${{ inputs.release_version }}
           OXIBELT_DOCKER_IMAGE_REVISION: ${{ inputs.release_revision }}
+          OXIBELT_DOCKER_IMAGE_SOURCE_REF: ${{ inputs.release_ref }}
+          OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY: clean
+          OXIBELT_DOCKER_IMAGE_BUILD_KIND: official_release
           OXIBELT_DOCKER_IMAGE_SOURCE: ${{ inputs.source_url }}
           OXIBELT_DOCKER_IMAGE_VERSION: ${{ inputs.release_version }}
         run: |
@@ -154,12 +157,14 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 7:
+          if plan["schemaVersion"] != 8:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
           if plan["source"] != source:
               raise SystemExit("release plan source URL does not match workflow source")
+          if plan["sourceRef"] != f"refs/tags/{version}" or plan["sourceDirty"] != "clean" or plan["buildKind"] != "official_release":
+              raise SystemExit("release plan build identity is not an official clean tag tuple")
 
           major = version.split(".", 1)[0]
           expected = {
@@ -334,6 +339,8 @@ jobs:
           IMAGE_REF: ${{ steps.trivy-image.outputs.image_ref }}
           INVENTORY_FILE: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
           OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
+          OXIBELT_RELEASE_REVISION: ${{ inputs.release_revision }}
+          OXIBELT_RELEASE_REF: ${{ inputs.release_ref }}
         run: |
           set -euo pipefail
 
@@ -376,10 +383,42 @@ jobs:
             fi
 
             digest="$(sha256sum "${binary_path}" | awk '{print $1}')"
+            binary_version="$(python3 - "${binary_path}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_RELEASE_REF}" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          matches = set(re.findall(rb'OXIBELT_BUILD_IDENTITY_V1=(\{[^}\x00\r\n]{1,4096}\})', data))
+          if len(matches) != 1:
+              raise SystemExit("binary does not contain exactly one canonical build identity marker")
+          identity = json.loads(next(iter(matches)))
+          expected = {
+              "version": sys.argv[2],
+              "revision": sys.argv[3],
+              "source_ref": sys.argv[4],
+              "dirty": "clean",
+              "kind": "official_release",
+          }
+          if identity != expected:
+              raise SystemExit(f"binary build identity mismatch: {identity!r}")
+          print(identity["version"])
+          PY
+            )"
+            native=false
+            case "$(uname -m):${OXIBELT_ARTIFACT_ARCH}" in
+              x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4|aarch64:arm64) native=true ;;
+            esac
+            if [[ "${native}" == "true" ]]; then
+              version_output="$(docker run --rm --entrypoint "${install_path}" "${IMAGE_REF}" --version)"
+              grep -F "OXIBELT_BUILD_IDENTITY_V1=" <<<"${version_output}" >/dev/null
+              grep -F "${binary_version}" <<<"${version_output}" >/dev/null
+            fi
             inventory="$(jq -c \
               --arg name "${binary}" \
               --arg path "${install_path}" \
-              --arg version "${OXIBELT_RELEASE_VERSION}" \
+              --arg version "${binary_version}" \
               --arg sha256 "${digest}" \
               '. + [{name: $name, path: $path, version: $version, sha256: $sha256}]' \
               <<<"${inventory}")"
@@ -548,12 +587,14 @@ jobs:
 
           if kind not in ("stable", "beta", "build"):
               raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 7:
+          if plan["schemaVersion"] != 8:
               raise SystemExit("unsupported image release plan schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
           if plan["source"] != source:
               raise SystemExit("release plan source URL does not match workflow source")
+          if plan["sourceRef"] != f"refs/tags/{version}" or plan["sourceDirty"] != "clean" or plan["buildKind"] != "official_release":
+              raise SystemExit("release plan build identity is not an official clean tag tuple")
 
           major = version.split(".", 1)[0]
           expected = {
@@ -851,7 +892,7 @@ jobs:
               and .source.ref == $ref
               and .build.role == $role
               and .build.artifactArch == $arch
-              and .output.artifactContract.schema == 2
+              and .output.artifactContract.schema == 3
             ' "${REBUILD_RECIPE}" >/dev/null
 
       - name: Publish signed platform provenance

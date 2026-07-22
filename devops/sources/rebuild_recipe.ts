@@ -121,13 +121,16 @@ function ReleaseContract(ImagePlan: unknown, Role: string, ArtifactArch?: string
   artifact?: JsonRecord
 } {
   const Plan = RecordValue(ImagePlan, 'image release plan')
-  if (Plan.schemaVersion !== 7) {
-    throw new Error('image release plan schemaVersion must be 7')
+  if (Plan.schemaVersion !== 8) {
+    throw new Error('image release plan schemaVersion must be 8')
   }
   const RevisionValue = StringValue(Plan.revision, 'image release plan revision')
   if (!Revision.test(RevisionValue)) {
     throw new Error('image release plan revision must be a full lowercase Git commit')
   }
+  Exact(Plan.sourceRef, `refs/tags/${StringValue(Plan.version, 'image release plan version')}`, 'image release plan sourceRef')
+  Exact(Plan.sourceDirty, 'clean', 'image release plan sourceDirty')
+  Exact(Plan.buildKind, 'official_release', 'image release plan buildKind')
   const Roles = ArrayValue(Plan.roles, 'image release plan roles')
     .map((Item, Index) => RecordValue(Item, `image release plan roles[${Index}]`))
     .filter(Item => Item.role === Role)
@@ -202,14 +205,17 @@ export function BuildPlatformRebuildRecipe(Options: PlatformRecipeOptions): Json
   const Release = ReleaseContract(Options.imagePlan, Options.role, Options.artifactArch)
   const Artifact = Release.artifact as JsonRecord
   const Contract = RecordValue(Options.artifactContract, 'artifact contract')
-  if (Contract.schema !== 2) {
-    throw new Error('artifact contract schema must be 2')
+  if (Contract.schema !== 3) {
+    throw new Error('artifact contract schema must be 3')
   }
   for (const [Key, Expected] of Object.entries({
     role: Options.role,
     artifact_arch: Options.artifactArch,
     revision: Release.plan.revision,
     source: Release.plan.source,
+    source_ref: Release.plan.sourceRef,
+    source_dirty: Release.plan.sourceDirty,
+    build_kind: Release.plan.buildKind,
     platform: Artifact.platform,
     docker_architecture: Artifact.dockerArchitecture,
     target_cpu: Artifact.targetCpu ?? null,

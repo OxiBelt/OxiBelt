@@ -346,8 +346,8 @@ def validated_contract(
     path: pathlib.Path, image_tar: pathlib.Path, *, require_archive_digest: bool
 ) -> dict[str, Any]:
     value = read_json(path, "artifact contract")
-    if not isinstance(value, dict) or value.get("schema") != 2:
-        raise ComparisonError("artifact contract schema must be 2")
+    if not isinstance(value, dict) or value.get("schema") != 3:
+        raise ComparisonError("artifact contract schema must be 3")
     for key in ("image_digest", "image_tar_sha256", "normalized_config_sha256"):
         if not isinstance(value.get(key), str) or DIGEST.fullmatch(value[key]) is None:
             raise ComparisonError(f"artifact contract {key} is not a SHA-256 digest")

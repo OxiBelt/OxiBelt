@@ -266,6 +266,15 @@ description = "Protect Vaultwarden admin and login surfaces."
 
 `source` must be an HTTPS `.oxirule-rulepack.toml` URL unless the repo was added with `--allow-insecure-rulepack-url`; HTTP rulepack sources still require a valid detached OpenPGP signature during install. `sha256` is required for every catalog entry and is passed to the existing URL verifier. `signature_type` may only be `openpgp` in this release, and `signature` is passed to `--rulepack-openpgp-signature-url`. Sigstore and SLSA provenance are reserved for a later catalog schema.
 
+`min_oxibelt_version`, when present, must be strict SemVer. Official releases
+and clean exact-tag builds compare that minimum with their verified
+compatibility version. Untagged Git, dirty, and source-archive builds have no
+verified compatibility version and reject every catalog entry that declares a
+minimum, including `0.0.0`, with a diagnostic recommending an official or
+clean exact-tag build. Catalog entries without `min_oxibelt_version` remain
+eligible. This fail-closed rule prevents Cargo's `0.0.0` sentinel or an
+arbitrary development commit from impersonating a compatible release.
+
 ```bash
 oxibeltctl rulepack repo add official https://packs.example.test/index.toml \
   --rulepack-openpgp-keyring /etc/oxibelt/oxirule/trusted-rulepack-publishers

@@ -19,7 +19,6 @@ use super::admin_ops::OXIRULE_REPLAY_BODY_LIMIT;
 
 const ADMIN_API_VERSION: &str = "v1";
 const OPENAPI_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/admin-openapi.json"));
-const SOURCE_REVISION: &str = env!("OXIBELT_SOURCE_REVISION");
 const PERSON_PROOF_ASSET_SHA256: &str = env!("OXIBELT_PERSON_PROOF_ASSET_SHA256");
 const ADMIN_OPENAPI_SHA256: &str = env!("OXIBELT_ADMIN_OPENAPI_SHA256");
 
@@ -85,7 +84,7 @@ fn capabilities_response(
     StatusCode::OK,
     &json!({
       "api_version": ADMIN_API_VERSION,
-      "package_version": env!("CARGO_PKG_VERSION"),
+      "package_version": oxibelt_build_identity::SHORT_VERSION,
       "features": features,
       "audit_anchoring": snapshot.admin_audit.anchor_status(),
       "operation_persistence": operations.persistence_status(),
@@ -121,13 +120,17 @@ fn debug_assert_capability_feature_keys(features: &Value) {
 }
 
 fn version_response() -> Response<ProxyBody> {
+  let identity = oxibelt_build_identity::current();
   admin::json_response(
     StatusCode::OK,
     &json!({
       "api_version": ADMIN_API_VERSION,
       "package_name": env!("CARGO_PKG_NAME"),
-      "package_version": env!("CARGO_PKG_VERSION"),
-      "source_revision": SOURCE_REVISION,
+      "package_version": identity.effective_version,
+      "source_revision": identity.source_revision_or_unknown(),
+      "source_ref": identity.source_ref_or_unknown(),
+      "source_dirty": identity.dirty.as_str(),
+      "build_kind": identity.kind.as_str(),
       "person_proof_api_version": crate::waf::PERSON_PROOF_API_VERSION,
       "person_proof_asset_sha256": PERSON_PROOF_ASSET_SHA256,
       "admin_openapi_sha256": ADMIN_OPENAPI_SHA256,
