@@ -312,6 +312,37 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  typescript-release-tooling:
+    name: TypeScript release tooling
+    runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Lint TypeScript tooling
+        run: pnpm run lint
+
+      - name: Type-check TypeScript tooling
+        run: pnpm run typecheck
+
+      - name: Test DevOps tooling
+        run: pnpm run test
+
+      - name: Validate committed version state
+        run: pnpm run versioning:check
+
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
@@ -2445,6 +2476,7 @@ jobs:
       - test
       - rust-advisory-checks
       - node-dependency-admission
+      - typescript-release-tooling
       - fuzz-smoke
       - unsafe-validation
       - check-riscv64-cross

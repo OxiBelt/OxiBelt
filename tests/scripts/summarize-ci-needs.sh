@@ -19,6 +19,7 @@ required_jobs=(
   test
   rust-advisory-checks
   node-dependency-admission
+  typescript-release-tooling
   fuzz-smoke
   unsafe-validation
   check-riscv64-cross

@@ -89,6 +89,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "test",
   "rust-advisory-checks",
   "node-dependency-admission",
+  "typescript-release-tooling",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -143,6 +144,7 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "test",
   "rust-advisory-checks",
   "node-dependency-admission",
+  "typescript-release-tooling",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -2118,6 +2120,86 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     assert!(
       !job_text.contains(forbidden),
       "pull-request Node admission must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("typescript-release-tooling")
+    .expect("workflow should define TypeScript release tooling");
+  let job_text = workflow_job_text(&workflow, "typescript-release-tooling");
+
+  assert!(
+    job.needs.is_empty(),
+    "TypeScript release tooling should be an independent entry gate"
+  );
+  for expected in [
+    "name: TypeScript release tooling",
+    "runs-on: ubuntu-26.04",
+    "if: github.actor != 'dependabot[bot]'",
+    "contents: read",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
+    "corepack enable",
+    "corepack install",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "pnpm run lint",
+    "pnpm run typecheck",
+    "pnpm run test",
+    "pnpm run versioning:check",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "TypeScript release tooling should include {expected}"
+    );
+  }
+  for command in [
+    "pnpm run lint",
+    "pnpm run typecheck",
+    "pnpm run test",
+    "pnpm run versioning:check",
+  ] {
+    assert_eq!(
+      job_text.matches(command).count(),
+      1,
+      "TypeScript release tooling should run {command} exactly once"
+    );
+  }
+  let install = job_text
+    .find("pnpm install --frozen-lockfile --ignore-scripts")
+    .expect("TypeScript release tooling should install dependencies");
+  let lint = job_text
+    .find("pnpm run lint")
+    .expect("TypeScript release tooling should lint");
+  let typecheck = job_text
+    .find("pnpm run typecheck")
+    .expect("TypeScript release tooling should type-check");
+  let test = job_text
+    .find("pnpm run test")
+    .expect("TypeScript release tooling should test");
+  let versioning = job_text
+    .find("pnpm run versioning:check")
+    .expect("TypeScript release tooling should validate committed version state");
+  assert!(
+    install < lint && lint < typecheck && typecheck < test && test < versioning,
+    "TypeScript release tooling should install, lint, type-check, test, and validate version state in order"
+  );
+  for forbidden in [
+    "contents: write",
+    "id-token: write",
+    "packages: write",
+    "continue-on-error",
+    "pnpm run dependency-admission",
+    "pnpm run versioning:release",
+    "actions/upload-artifact",
+    "actions/download-artifact",
+  ] {
+    assert!(
+      !job_text.contains(forbidden),
+      "TypeScript release tooling must not contain {forbidden}"
     );
   }
 }
@@ -4168,7 +4250,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     serde_json::from_str(&summary_text).expect("success summary should be JSON");
   assert_eq!(summary["schema"], 1);
   assert_eq!(summary["overall"], "success");
-  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(33));
+  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(34));
   assert_eq!(summary["unexpected"], serde_json::json!([]));
   assert!(!summary_text.contains("synthetic-secret-output"));
   assert!(
@@ -4180,7 +4262,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
   for result in ["failure", "cancelled", "skipped", "unexpected"] {
     let mut failed = needs.clone();
     failed.insert(
-      "browser-webdriver".to_owned(),
+      "typescript-release-tooling".to_owned(),
       serde_json::json!({"result": result, "outputs": {}}),
     );
     let (output, summary_path, _) = run_case(result, &serde_json::Value::Object(failed));
@@ -4216,7 +4298,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
   );
 
   let mut missing = needs;
-  missing.remove("browser-webdriver");
+  missing.remove("typescript-release-tooling");
   let (output, summary_path, _) = run_case("missing", &serde_json::Value::Object(missing));
   assert!(
     !output.status.success(),
@@ -4228,7 +4310,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
   .expect("missing-job summary should be valid JSON");
   assert_eq!(
     summary["missing_jobs"],
-    serde_json::json!(["browser-webdriver"])
+    serde_json::json!(["typescript-release-tooling"])
   );
 
   let malformed_input = temp_dir.path().join("malformed-needs.json");
