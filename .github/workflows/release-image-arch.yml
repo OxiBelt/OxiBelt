@@ -42,6 +42,9 @@ on:
       source_url:
         required: true
         type: string
+      transport_artifact_name:
+        required: true
+        type: string
     secrets:
       ghcr_token:
         required: true
@@ -53,6 +56,7 @@ env:
   OXIBELT_GHCR_IMAGE: ${{ inputs.image }}
   OXIBELT_IMAGE_ROLE: ${{ inputs.image_role }}
   OXIBELT_ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
+  OXIBELT_TRANSPORT_ARTIFACT_NAME: ${{ inputs.transport_artifact_name }}
 
 jobs:
   build:
@@ -261,7 +265,7 @@ jobs:
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: ${{ env.OXIBELT_ARTIFACT_NAME }}
+          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: |
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
@@ -292,7 +296,7 @@ jobs:
       - name: Download Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ env.OXIBELT_ARTIFACT_NAME }}
+          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Load image for scanning
@@ -571,7 +575,7 @@ jobs:
       - name: Download Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: ${{ env.OXIBELT_ARTIFACT_NAME }}
+          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
 
       - name: Setup Docker Buildx

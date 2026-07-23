@@ -21,9 +21,135 @@ env:
   OXIBELT_SOURCE_URL: https://github.com/OxiBelt/OxiBelt
 
 jobs:
-  validate:
-    name: Validate release metadata
+  resolve-release-source:
+    name: Resolve immutable release source
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      created: ${{ steps.release-ref.outputs.created }}
+      release_ref: ${{ steps.release-ref.outputs.release_ref }}
+      revision: ${{ steps.release-ref.outputs.revision }}
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate release ref matches checkout
+        id: release-ref
+        env:
+          OXIBELT_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+        run: |
+          set -euo pipefail
+
+          release_ref="${OXIBELT_RELEASE_REF}"
+          if [[ "${release_ref}" != refs/tags/* ]]; then
+            echo "release ref must start with refs/tags/: ${release_ref}" >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse "${release_ref}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "${tag_commit}" != "${head_commit}" ]]; then
+            echo "release tag ${release_ref} resolves to ${tag_commit}, but checkout is ${head_commit}" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "${release_ref}" || "${GITHUB_SHA}" != "${tag_commit}" ]]; then
+            echo "releases must run from ${release_ref}@${tag_commit}, not ${GITHUB_REF}@${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+          commit_epoch="$(git show -s --format=%ct "${head_commit}")"
+          if [[ ! "${commit_epoch}" =~ ^[0-9]+$ ]]; then
+            echo "release commit timestamp is invalid: ${commit_epoch}" >&2
+            exit 1
+          fi
+          created="$(date -u --date="@${commit_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "created=${created}"
+            echo "release_ref=${release_ref}"
+            echo "revision=${head_commit}"
+          } >> "${GITHUB_OUTPUT}"
+
+  source-validation:
+    name: Validate complete non-benchmark source graph
+    needs:
+      - resolve-release-source
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/check-oxibelt.yml
+    with:
+      release_validation: true
+      source_ref: ${{ needs.resolve-release-source.outputs.release_ref }}
+      source_revision: ${{ needs.resolve-release-source.outputs.revision }}
+
+  enforce-source-validation:
+    name: Enforce exact source validation
+    runs-on: ubuntu-26.04
+    needs:
+      - resolve-release-source
+      - source-validation
+    if: always()
+    permissions: {}
+
+    steps:
+      - name: Enforce validated release source
+        env:
+          EXPECTED_REF: ${{ needs.resolve-release-source.outputs.release_ref }}
+          EXPECTED_REVISION: ${{ needs.resolve-release-source.outputs.revision }}
+          RESOLVER_RESULT: ${{ needs.resolve-release-source.result }}
+          SOURCE_VALIDATION_RESULT: ${{ needs.source-validation.result }}
+          VALIDATED_REF: ${{ needs.source-validation.outputs.validated_ref }}
+          VALIDATED_REVISION: ${{ needs.source-validation.outputs.validated_revision }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+          if [[ "${RESOLVER_RESULT}" != "success" ]]; then
+            echo "release source resolution result is ${RESOLVER_RESULT}, expected success" >&2
+            failed=1
+          fi
+          if [[ "${SOURCE_VALIDATION_RESULT}" != "success" ]]; then
+            echo "source validation result is ${SOURCE_VALIDATION_RESULT}, expected success" >&2
+            failed=1
+          fi
+          if [[ ! "${EXPECTED_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolved release revision is malformed: ${EXPECTED_REVISION}" >&2
+            failed=1
+          fi
+          if [[ "${EXPECTED_REF}" != refs/tags/* ]]; then
+            echo "resolved release ref is malformed: ${EXPECTED_REF}" >&2
+            failed=1
+          fi
+          if [[ "${VALIDATED_REVISION}" != "${EXPECTED_REVISION}" ]]; then
+            echo "validated source revision ${VALIDATED_REVISION} does not match ${EXPECTED_REVISION}" >&2
+            failed=1
+          fi
+          if [[ "${VALIDATED_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "validated source ref ${VALIDATED_REF} does not match ${EXPECTED_REF}" >&2
+            failed=1
+          fi
+          if [[ "${failed}" != "0" ]]; then
+            exit 1
+          fi
+
+          {
+            echo "Release source validation passed."
+            echo
+            echo "- Ref: \`${EXPECTED_REF}\`"
+            echo "- Revision: \`${EXPECTED_REVISION}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  prepare-release:
+    name: Prepare release metadata
+    runs-on: ubuntu-26.04
+    needs:
+      - resolve-release-source
+      - enforce-source-validation
     permissions:
       contents: read
     outputs:
@@ -34,10 +160,10 @@ jobs:
       version: ${{ steps.image-plan.outputs.version }}
 
     steps:
-      - name: Checkout release ref
+      - name: Checkout release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          ref: ${{ needs.resolve-release-source.outputs.revision }}
           fetch-depth: 0
 
       - name: Enable pnpm
@@ -47,40 +173,6 @@ jobs:
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Revalidate Node dependency admission
-        env:
-          LICENSE_REPORT: ${{ runner.temp }}/pnpm-release-licenses.json
-          AUDIT_REPORT: ${{ runner.temp }}/pnpm-release-audit.json
-        run: |
-          set -euo pipefail
-          pnpm licenses list --json --long >"${LICENSE_REPORT}"
-
-          audit_root="${RUNNER_TEMP}/pnpm-policy-neutral-release-audit"
-          mkdir -p "${audit_root}/devops" "${audit_root}/ui/person-proof"
-          cp package.json pnpm-lock.yaml "${audit_root}/"
-          cp devops/package.json "${audit_root}/devops/package.json"
-          cp ui/person-proof/package.json "${audit_root}/ui/person-proof/package.json"
-          node --input-type=module - "${audit_root}/pnpm-workspace.yaml" <<'NODE'
-          import { writeFileSync } from 'node:fs'
-          const workspace = [
-            'packages:',
-            '  - "devops"',
-            '  - "ui/*"',
-            'registry: "https://registry.npmjs.org/"',
-            'auditConfig:',
-            '  ignoreGhsas: []',
-            ''
-          ].join('\n')
-          writeFileSync(process.argv[2], workspace, { mode: 0o600 })
-          NODE
-          set +e
-          pnpm --dir "${audit_root}" audit --audit-level low --json >"${AUDIT_REPORT}"
-          set -e
-          pnpm run dependency-admission \
-            --license-report-path "${LICENSE_REPORT}" \
-            --audit-report-path "${AUDIT_REPORT}"
-          pnpm audit signatures
 
       - name: Compile release attestation helpers
         run: |
@@ -328,7 +420,8 @@ jobs:
   release-image-arch:
     name: Release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})
     needs:
-      - validate
+      - prepare-release
+      - enforce-source-validation
     permissions:
       actions: read
       attestations: write
@@ -394,12 +487,13 @@ jobs:
       image: ${{ matrix.image }}
       platform: ${{ matrix.platform }}
       runner: ${{ matrix.runner }}
-      release_ref: ${{ needs.validate.outputs.release_ref }}
-      release_created: ${{ needs.validate.outputs.created }}
-      release_kind: ${{ needs.validate.outputs.kind }}
-      release_revision: ${{ needs.validate.outputs.revision }}
-      release_version: ${{ needs.validate.outputs.version }}
+      release_ref: ${{ needs.prepare-release.outputs.release_ref }}
+      release_created: ${{ needs.prepare-release.outputs.created }}
+      release_kind: ${{ needs.prepare-release.outputs.kind }}
+      release_revision: ${{ needs.prepare-release.outputs.revision }}
+      release_version: ${{ needs.prepare-release.outputs.version }}
       source_url: https://github.com/OxiBelt/OxiBelt
+      transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}
     secrets:
       ghcr_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -407,7 +501,7 @@ jobs:
     name: Publish canonical GHCR multi-arch manifests (${{ matrix.image_role }})
     runs-on: ubuntu-26.04
     needs:
-      - validate
+      - prepare-release
       - release-image-arch
     if: github.repository == 'OxiBelt/OxiBelt'
     permissions:
@@ -457,9 +551,9 @@ jobs:
       - name: Validate manifest release plan
         env:
           METADATA_ROOT: ${{ runner.temp }}/oxibelt-release-metadata
-          OXIBELT_RELEASE_KIND: ${{ needs.validate.outputs.kind }}
-          OXIBELT_RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
-          OXIBELT_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          OXIBELT_RELEASE_KIND: ${{ needs.prepare-release.outputs.kind }}
+          OXIBELT_RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
+          OXIBELT_RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
           OXIBELT_SOURCE_URL: ${{ env.OXIBELT_SOURCE_URL }}
         run: |
           set -euo pipefail
@@ -675,7 +769,7 @@ jobs:
     name: Compose multi-arch index SBOM (${{ matrix.image_role }})
     runs-on: ubuntu-26.04
     needs:
-      - validate
+      - prepare-release
       - ghcr-manifest-publish
     if: github.repository == 'OxiBelt/OxiBelt'
     permissions:
@@ -794,7 +888,7 @@ jobs:
     name: Attest multi-arch index (${{ matrix.image_role }})
     runs-on: ubuntu-26.04
     needs:
-      - validate
+      - prepare-release
       - ghcr-manifest-publish
       - ghcr-index-sbom
     if: github.repository == 'OxiBelt/OxiBelt'
@@ -869,9 +963,9 @@ jobs:
           INDEX_METADATA: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
           INDEX_REBUILD: ${{ runner.temp }}/oxibelt-index-rebuild/${{ matrix.artifact_prefix }}-release-index.rebuild.json
           INDEX_SBOM: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json
-          RELEASE_REF: ${{ needs.validate.outputs.release_ref }}
-          RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_REF: ${{ needs.prepare-release.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -996,7 +1090,7 @@ jobs:
     name: Verify multi-arch index attestations (${{ matrix.image_role }})
     runs-on: ubuntu-26.04
     needs:
-      - validate
+      - prepare-release
       - ghcr-manifest-publish
       - ghcr-index-attest
     if: github.repository == 'OxiBelt/OxiBelt'
@@ -1069,8 +1163,8 @@ jobs:
           INDEX_METADATA: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
           INDEX_REBUILD: ${{ runner.temp }}/oxibelt-index-rebuild/${{ matrix.artifact_prefix }}-release-index.rebuild.json
           INDEX_SBOM: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json
-          RELEASE_REF: ${{ needs.validate.outputs.release_ref }}
-          RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+          RELEASE_REF: ${{ needs.prepare-release.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
         run: |
           set -euo pipefail
 

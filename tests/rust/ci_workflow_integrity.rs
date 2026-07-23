@@ -149,14 +149,13 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "unsafe-validation",
   "check-riscv64-cross",
 ];
-const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
+const DEPENDABOT_ACTOR_CONDITION: &str =
+  "${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}";
 
 const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
   "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
-const PERFORMANCE_WORKFLOW_JOB_IF: &str =
-  "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
-const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str =
-  "if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')";
+const PERFORMANCE_WORKFLOW_JOB_IF: &str = "if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
+const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str = "if: ${{ always() && !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
 
 fn expected_needs(job_ids: &[&str]) -> Vec<String> {
   job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
@@ -2155,7 +2154,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   for expected in [
     "name: TypeScript release tooling",
     "runs-on: ubuntu-26.04",
-    "if: github.actor != 'dependabot[bot]'",
+    DEPENDABOT_ACTOR_CONDITION,
     "contents: read",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
     "corepack enable",
@@ -4059,7 +4058,7 @@ fn pr_non_benchmark_summary_executes_only_trusted_helper() {
     checkout["with"],
     serde_json::json!({
       "repository": "${{ github.repository }}",
-      "ref": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}",
+      "ref": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.source_revision || github.sha }}",
       "path": "trusted-non-benchmark-summary",
       "persist-credentials": false,
       "sparse-checkout": "tests/scripts/summarize-ci-needs.sh",
@@ -4127,7 +4126,7 @@ fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
   );
   for expected in [
     "github.event_name == 'pull_request' && 'PR non-benchmark summary'",
-    "if: ${{ always() && github.actor != 'dependabot[bot]' }}",
+    "if: ${{ always() && (inputs.release_validation || github.actor != 'dependabot[bot]') }}",
     "OXIBELT_NEEDS_JSON: ${{ toJSON(needs) }}",
     "tests/scripts/summarize-ci-needs.sh",
     "name: Upload non-benchmark validation summary",
@@ -4543,6 +4542,238 @@ fn dependency_snapshot_helper_is_local_bounded_and_schema_exact() {
 }
 
 #[test]
+fn release_publication_requires_exact_non_benchmark_source_validation() {
+  let check_workflow = workflow_text();
+  let release_workflow = release_workflow_text();
+  let parsed_check: serde_json::Value =
+    serde_saphyr::from_str(&check_workflow).expect("check workflow should parse as YAML");
+  let parsed_release: serde_json::Value =
+    serde_saphyr::from_str(&release_workflow).expect("release workflow should parse as YAML");
+  let release_jobs = parse_jobs(&release_workflow);
+
+  let workflow_call_inputs = parsed_check["on"]["workflow_call"]["inputs"]
+    .as_object()
+    .expect("canonical non-benchmark graph should expose workflow-call inputs");
+  assert_eq!(
+    workflow_call_inputs
+      .keys()
+      .cloned()
+      .collect::<BTreeSet<_>>(),
+    BTreeSet::from([
+      "release_validation".to_owned(),
+      "source_ref".to_owned(),
+      "source_revision".to_owned()
+    ]),
+    "the canonical non-benchmark graph should expose only the exact source identity and release mode"
+  );
+  for (name, kind) in [
+    ("release_validation", "boolean"),
+    ("source_ref", "string"),
+    ("source_revision", "string"),
+  ] {
+    assert_eq!(workflow_call_inputs[name]["required"], true);
+    assert_eq!(workflow_call_inputs[name]["type"], kind);
+  }
+  assert_eq!(
+    parsed_check["on"]["workflow_call"]["outputs"]["validated_ref"]["value"],
+    "${{ jobs.pr-non-benchmark-summary.outputs.validated_ref }}"
+  );
+  assert_eq!(
+    parsed_check["on"]["workflow_call"]["outputs"]["validated_revision"]["value"],
+    "${{ jobs.pr-non-benchmark-summary.outputs.validated_revision }}"
+  );
+
+  let source_structure_text = workflow_job_text(&check_workflow, "source-structure");
+  for expected in [
+    "validated_ref: ${{ steps.source-identity.outputs.validated_ref }}",
+    "validated_revision: ${{ steps.source-identity.outputs.validated_revision }}",
+    "ref: ${{ inputs.source_revision || github.sha }}",
+    "EXPECTED_REF: ${{ inputs.source_ref || github.ref }}",
+    "EXPECTED_REVISION: ${{ inputs.source_revision || github.sha }}",
+    "git check-ref-format \"${EXPECTED_REF}\"",
+    "actual_revision=\"$(git rev-parse HEAD)\"",
+    "GITHUB_REF",
+    "GITHUB_SHA",
+  ] {
+    assert!(
+      source_structure_text.contains(expected),
+      "source identity gate should contain {expected}"
+    );
+  }
+
+  let summary = &parsed_check["jobs"]["pr-non-benchmark-summary"];
+  assert_eq!(
+    summary["outputs"],
+    serde_json::json!({
+      "validated_ref": "${{ steps.enforce.outputs.validated_ref }}",
+      "validated_revision": "${{ steps.enforce.outputs.validated_revision }}"
+    }),
+    "only the terminal non-benchmark summary should export the validated source identity"
+  );
+  let summary_text = workflow_job_text(&check_workflow, "pr-non-benchmark-summary");
+  for expected in [
+    "inputs.release_validation || github.actor != 'dependabot[bot]'",
+    "needs.source-structure.outputs.validated_ref",
+    "needs.source-structure.outputs.validated_revision",
+    "OXIBELT_SUMMARY_STATUS",
+    "validated_ref=${OXIBELT_EXPECTED_REF}",
+    "validated_revision=${OXIBELT_EXPECTED_REVISION}",
+  ] {
+    assert!(
+      summary_text.contains(expected),
+      "terminal source-validation summary should contain {expected}"
+    );
+  }
+
+  for job_id in CHECK_WORKFLOW_ENTRY_JOBS {
+    let condition = parsed_check["jobs"][job_id]["if"]
+      .as_str()
+      .unwrap_or_else(|| panic!("entry job {job_id} should define a condition"));
+    assert_eq!(
+      condition, "${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}",
+      "release validation must not allow actor-based skipping in {job_id}"
+    );
+  }
+  let check_jobs = parsed_check["jobs"]
+    .as_object()
+    .expect("check workflow should define jobs");
+  for (job_id, job) in check_jobs {
+    let Some(steps) = job.get("steps").and_then(serde_json::Value::as_array) else {
+      continue;
+    };
+    for step in steps {
+      if step["name"].as_str() == Some("Checkout") {
+        assert_eq!(
+          step["with"]["ref"], "${{ inputs.source_revision || github.sha }}",
+          "source checkout in {job_id} should remain bound to the selected commit"
+        );
+      }
+    }
+  }
+  for job_id in BENCHMARK_ONLY_JOBS
+    .iter()
+    .copied()
+    .chain(["docker-image-dependency-snapshot-submit"])
+  {
+    let condition = parsed_check["jobs"][job_id]["if"]
+      .as_str()
+      .unwrap_or_else(|| panic!("{job_id} should define a release-mode exclusion"));
+    assert!(
+      condition.contains("!inputs.release_validation"),
+      "{job_id} must not run as part of release source validation"
+    );
+  }
+
+  assert_eq!(
+    release_jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from([
+      "enforce-source-validation".to_owned(),
+      "ghcr-index-attest".to_owned(),
+      "ghcr-index-promote".to_owned(),
+      "ghcr-index-sbom".to_owned(),
+      "ghcr-index-verify".to_owned(),
+      "ghcr-manifest-publish".to_owned(),
+      "prepare-release".to_owned(),
+      "release-image-arch".to_owned(),
+      "resolve-release-source".to_owned(),
+      "source-validation".to_owned(),
+    ]),
+    "release publication should contain an explicit source-resolution and fail-closed validation chain"
+  );
+  let resolver_text = workflow_job_text(&release_workflow, "resolve-release-source");
+  for forbidden in [
+    "pnpm ",
+    "cargo ",
+    "tests/scripts/",
+    "actions/upload-artifact@",
+    "packages: write",
+    "id-token: write",
+  ] {
+    assert!(
+      !resolver_text.contains(forbidden),
+      "source resolver must not execute or publish through {forbidden}"
+    );
+  }
+
+  let validation = &parsed_release["jobs"]["source-validation"];
+  assert_eq!(validation["uses"], "./.github/workflows/check-oxibelt.yml");
+  assert_eq!(
+    validation["needs"],
+    serde_json::json!(["resolve-release-source"])
+  );
+  assert_eq!(
+    validation["permissions"],
+    serde_json::json!({"actions": "read", "contents": "read"})
+  );
+  assert_eq!(
+    validation["with"],
+    serde_json::json!({
+      "release_validation": true,
+      "source_ref": "${{ needs.resolve-release-source.outputs.release_ref }}",
+      "source_revision": "${{ needs.resolve-release-source.outputs.revision }}"
+    })
+  );
+  assert!(
+    validation.get("secrets").is_none(),
+    "release source validation must not inherit or receive secrets"
+  );
+
+  let enforcement_text = workflow_job_text(&release_workflow, "enforce-source-validation");
+  for expected in [
+    "if: always()",
+    "permissions: {}",
+    "needs.resolve-release-source.result",
+    "needs.source-validation.result",
+    "needs.source-validation.outputs.validated_ref",
+    "needs.source-validation.outputs.validated_revision",
+    "Release source validation passed",
+  ] {
+    assert!(
+      enforcement_text.contains(expected),
+      "fail-closed source-validation enforcement should contain {expected}"
+    );
+  }
+
+  assert_eq!(
+    release_jobs["prepare-release"].needs,
+    expected_needs(&["resolve-release-source", "enforce-source-validation"])
+  );
+  assert_eq!(
+    release_jobs["release-image-arch"].needs,
+    expected_needs(&["prepare-release", "enforce-source-validation"])
+  );
+  for job_id in [
+    "release-image-arch",
+    "ghcr-manifest-publish",
+    "ghcr-index-sbom",
+    "ghcr-index-attest",
+    "ghcr-index-verify",
+    "ghcr-index-promote",
+  ] {
+    assert!(
+      has_transitive_need(&release_jobs, job_id, "enforce-source-validation"),
+      "release publication job {job_id} must transitively require successful source validation"
+    );
+  }
+
+  let prepare_text = workflow_job_text(&release_workflow, "prepare-release");
+  let metadata_upload = prepare_text
+    .find("name: Upload release metadata")
+    .expect("release preparation should upload metadata");
+  let identity_check = prepare_text
+    .find("name: Validate release ref matches checkout")
+    .expect("release preparation should revalidate the release identity");
+  assert!(
+    identity_check < metadata_upload,
+    "release identity must be revalidated before release metadata is uploaded"
+  );
+  assert!(
+    !prepare_text.contains("Revalidate Node dependency admission"),
+    "canonical source validation should own Node dependency admission"
+  );
+}
+
+#[test]
 fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions() {
   let workflow = release_workflow_text();
   let arch_workflow = release_image_arch_workflow_text();
@@ -4556,15 +4787,18 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   assert_eq!(
     jobs.keys().cloned().collect::<BTreeSet<_>>(),
     BTreeSet::from([
+      "enforce-source-validation".to_owned(),
       "ghcr-index-promote".to_owned(),
       "ghcr-index-attest".to_owned(),
       "ghcr-index-sbom".to_owned(),
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
+      "prepare-release".to_owned(),
       "release-image-arch".to_owned(),
-      "validate".to_owned(),
+      "resolve-release-source".to_owned(),
+      "source-validation".to_owned(),
     ]),
-    "release workflow should contain only validation and the attestation-gated platform/index release chains"
+    "release workflow should contain only exact source validation and the attestation-gated platform/index release chains"
   );
   assert_eq!(
     arch_jobs.keys().cloned().collect::<BTreeSet<_>>(),
@@ -4579,9 +4813,9 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "reusable architecture workflow should contain the attestation-gated platform release chain"
   );
 
-  let validate_job = jobs
-    .get("validate")
-    .expect("release workflow should define validate");
+  let prepare_job = jobs
+    .get("prepare-release")
+    .expect("release workflow should define post-validation preparation");
   let arch_caller_job = jobs
     .get("release-image-arch")
     .expect("release workflow should define release-image-arch");
@@ -4619,11 +4853,20 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     .get("verify")
     .expect("reusable release image workflow should define verify");
 
-  assert!(validate_job.needs.is_empty());
-  assert_eq!(arch_caller_job.needs, vec!["validate".to_owned()]);
+  assert_eq!(
+    prepare_job.needs,
+    expected_needs(&["resolve-release-source", "enforce-source-validation"])
+  );
+  assert_eq!(
+    arch_caller_job.needs,
+    expected_needs(&["prepare-release", "enforce-source-validation"])
+  );
   assert_eq!(
     manifest_job.needs,
-    vec!["validate".to_owned(), "release-image-arch".to_owned()]
+    vec![
+      "prepare-release".to_owned(),
+      "release-image-arch".to_owned()
+    ]
   );
   assert!(build_job.needs.is_empty());
   assert_eq!(scan_job.needs, vec!["build".to_owned()]);
@@ -4639,12 +4882,15 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   );
   assert_eq!(
     index_sbom_job.needs,
-    vec!["validate".to_owned(), "ghcr-manifest-publish".to_owned()]
+    vec![
+      "prepare-release".to_owned(),
+      "ghcr-manifest-publish".to_owned()
+    ]
   );
   assert_eq!(
     index_attest_job.needs,
     vec![
-      "validate".to_owned(),
+      "prepare-release".to_owned(),
       "ghcr-manifest-publish".to_owned(),
       "ghcr-index-sbom".to_owned()
     ]
@@ -4652,7 +4898,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   assert_eq!(
     index_verify_job.needs,
     vec![
-      "validate".to_owned(),
+      "prepare-release".to_owned(),
       "ghcr-manifest-publish".to_owned(),
       "ghcr-index-attest".to_owned()
     ]
@@ -4665,7 +4911,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     ]
   );
 
-  let validate_job_text = workflow_job_text(&workflow, "validate");
+  let prepare_job_text = workflow_job_text(&workflow, "prepare-release");
   let arch_caller_job_text = workflow_job_text(&workflow, "release-image-arch");
   let manifest_job_text = workflow_job_text(&workflow, "ghcr-manifest-publish");
   let index_promote_job_text = workflow_job_text(&workflow, "ghcr-index-promote");
@@ -4780,10 +5026,6 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
   for expected in [
     "corepack install",
     "pnpm install --frozen-lockfile",
-    "pnpm run dependency-admission \\",
-    "--license-report-path \"${LICENSE_REPORT}\" \\",
-    "--audit-report-path \"${AUDIT_REPORT}\"",
-    "pnpm audit signatures",
     "pnpm exec tsc devops/sources/release_sbom.ts devops/sources/rebuild_recipe.ts",
     "--ignoreConfig",
     "--module NodeNext",
@@ -4810,13 +5052,14 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "${metadata_root}/helper/select-amd64-docker-image-artifact.sh",
   ] {
     assert!(
-      validate_job_text.contains(expected),
-      "release validate job should include {expected}"
+      prepare_job_text.contains(expected),
+      "post-validation release preparation should include {expected}"
     );
   }
   assert!(
-    !validate_job_text.contains("pnpm run dependency-admission -- \\"),
-    "release dependency admission must not forward pnpm's literal separator"
+    !prepare_job_text.contains("pnpm run dependency-admission")
+      && !prepare_job_text.contains("pnpm audit signatures"),
+    "canonical non-benchmark validation should own release dependency admission"
   );
 
   for expected in [
@@ -4828,9 +5071,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "artifact_prefix: ${{ matrix.artifact_prefix }}",
     "image_role: ${{ matrix.image_role }}",
     "image: ${{ matrix.image }}",
-    "release_ref: ${{ needs.validate.outputs.release_ref }}",
-    "release_revision: ${{ needs.validate.outputs.revision }}",
-    "release_version: ${{ needs.validate.outputs.version }}",
+    "release_ref: ${{ needs.prepare-release.outputs.release_ref }}",
+    "release_revision: ${{ needs.prepare-release.outputs.revision }}",
+    "release_version: ${{ needs.prepare-release.outputs.version }}",
+    "transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}",
     "ghcr_token: ${{ secrets.GITHUB_TOKEN }}",
   ] {
     assert!(
@@ -4854,6 +5098,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "release_revision:",
     "release_version:",
     "source_url:",
+    "transport_artifact_name:",
     "ghcr_token:",
   ] {
     assert!(
@@ -4862,6 +5107,22 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     );
   }
   assert!(!arch_workflow.contains("github_token:"));
+  assert_eq!(
+    parsed_arch_workflow["on"]["workflow_call"]["inputs"]["transport_artifact_name"]["required"],
+    true,
+    "the transport artifact namespace should be required"
+  );
+  assert_eq!(
+    arch_workflow
+      .matches("name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}")
+      .count(),
+    3,
+    "build, scan, and publish should share only the run-unique transport artifact name"
+  );
+  assert!(
+    arch_workflow.contains("OXIBELT_ARTIFACT_NAME: ${{ inputs.artifact_name }}"),
+    "logical artifact names should remain available for release-plan validation"
+  );
 
   for expected in [
     "actions: read",
@@ -6797,7 +7058,7 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
     "aggressive long-run should start after the Docker performance matrix"
   );
   assert!(
-        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))"),
+        workflow.contains("if: ${{ !inputs.release_validation && needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run'])) }}"),
         "aggressive long-run should run only after successful Docker performance on schedule or explicit manual dispatch"
     );
   assert!(

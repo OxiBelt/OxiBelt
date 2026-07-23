@@ -323,6 +323,13 @@ non-benchmark summary. Pull-request image scans may generate and upload local
 dependency snapshot artifacts, but only a trusted default-branch push,
 schedule, or explicitly opted-in manual run may submit them to GitHub.
 
+Release publication calls the same complete non-benchmark graph for the exact
+full tag revision and ref. The release workflow accepts the validation identity
+only from the successful terminal summary; failed, cancelled, skipped,
+malformed, missing, or mismatched validation blocks release metadata, image
+publication, attestations, manifests, and alias promotion. Benchmark jobs and
+dependency-snapshot submission are excluded from release validation.
+
 If TypeScript DevOps tooling is added, CI should run its typecheck, lint, and
 tests. If browser WebDriver tests are added, CI must run them with both
 Chromium and Firefox.

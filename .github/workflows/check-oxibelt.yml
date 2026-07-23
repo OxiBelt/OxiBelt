@@ -63,6 +63,27 @@ on:
         required: false
         default: false
         type: boolean
+  workflow_call:
+    inputs:
+      release_validation:
+        description: Run only the complete non-benchmark graph as a release publication prerequisite
+        required: true
+        type: boolean
+      source_ref:
+        description: Exact full Git ref that the validation source must match
+        required: true
+        type: string
+      source_revision:
+        description: Exact full lowercase Git commit that every source checkout must validate
+        required: true
+        type: string
+    outputs:
+      validated_ref:
+        description: Source ref exported only after complete non-benchmark validation succeeds
+        value: ${{ jobs.pr-non-benchmark-summary.outputs.validated_ref }}
+      validated_revision:
+        description: Source commit exported only after complete non-benchmark validation succeeds
+        value: ${{ jobs.pr-non-benchmark-summary.outputs.validated_revision }}
 
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || format('{0}-run-{1}', github.workflow, github.run_id) }}
@@ -79,13 +100,58 @@ jobs:
   source-structure:
     name: Source structure checks
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
+    outputs:
+      validated_ref: ${{ steps.source-identity.outputs.validated_ref }}
+      validated_revision: ${{ steps.source-identity.outputs.validated_revision }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
+
+      - name: Validate exact source identity
+        id: source-identity
+        env:
+          EXPECTED_REF: ${{ inputs.source_ref || github.ref }}
+          EXPECTED_REVISION: ${{ inputs.source_revision || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${EXPECTED_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source revision must be a full lowercase Git commit: ${EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          if ! git check-ref-format "${EXPECTED_REF}" >/dev/null; then
+            echo "source ref is not a valid full Git ref: ${EXPECTED_REF}" >&2
+            exit 1
+          fi
+
+          actual_revision="$(git rev-parse HEAD)"
+          if [[ "${actual_revision}" != "${EXPECTED_REVISION}" ]]; then
+            echo "source checkout is ${actual_revision}, expected ${EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_SHA}" != "${EXPECTED_REVISION}" ]]; then
+            echo "workflow source is ${GITHUB_SHA}, expected ${EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "workflow ref is ${GITHUB_REF}, expected ${EXPECTED_REF}" >&2
+            exit 1
+          fi
+
+          {
+            echo "validated_ref=${EXPECTED_REF}"
+            echo "validated_revision=${EXPECTED_REVISION}"
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "Validated source ref: \`${EXPECTED_REF}\`"
+            echo "Validated source revision: \`${EXPECTED_REVISION}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Test release-image rebuild comparator
         env:
@@ -157,7 +223,7 @@ jobs:
   test:
     name: Test (${{ matrix.runner }} with rust-${{ matrix.rust_version }})
     runs-on: ${{ matrix.runner }}
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
     strategy:
@@ -172,6 +238,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -199,13 +267,15 @@ jobs:
   rust-advisory-checks:
     name: Rust dependency admission
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -230,13 +300,15 @@ jobs:
   node-dependency-admission:
     name: Node dependency admission
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -315,13 +387,15 @@ jobs:
   typescript-release-tooling:
     name: TypeScript release tooling
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -347,7 +421,7 @@ jobs:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
     timeout-minutes: 45
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
     strategy:
@@ -374,6 +448,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install pinned Rust toolchain
         run: |
@@ -402,7 +478,7 @@ jobs:
   unsafe-validation:
     name: Unsafe validation (${{ matrix.check }})
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
     strategy:
@@ -416,6 +492,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install pinned nightly Rust
         run: |
@@ -447,7 +525,7 @@ jobs:
   check-riscv64-cross:
     name: Check (riscv64 cross, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})
     runs-on: ubuntu-26.04
-    if: github.actor != 'dependabot[bot]'
+    if: ${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read
     strategy:
@@ -462,6 +540,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         if: matrix.target == 'riscv64gc-unknown-linux-gnu'
@@ -545,6 +625,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -618,6 +700,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -666,6 +750,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -724,6 +810,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -764,7 +852,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - pr-non-benchmark-summary
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
     strategy:
@@ -799,6 +887,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -829,7 +919,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - pr-non-benchmark-summary
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
     timeout-minutes: 45
@@ -837,6 +927,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -865,7 +957,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - pr-non-benchmark-summary
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: read
     timeout-minutes: 90
@@ -873,6 +965,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -919,6 +1013,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -963,6 +1059,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -1034,6 +1132,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -1112,6 +1212,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Download OxiBelt Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -1268,6 +1370,7 @@ jobs:
       - docker-image-trivy-scan
       - pr-non-benchmark-summary
     if: >-
+      !inputs.release_validation &&
       needs.pr-non-benchmark-summary.result == 'success' &&
       github.repository == 'OxiBelt/OxiBelt' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
@@ -1443,6 +1546,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
@@ -1479,6 +1584,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -1513,6 +1620,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -1547,6 +1656,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -1581,6 +1692,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -1649,6 +1762,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -1711,6 +1826,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -1760,6 +1877,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Set up current Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -1828,6 +1947,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -1900,6 +2021,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -1972,6 +2095,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2044,6 +2169,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2116,6 +2243,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2188,6 +2317,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2260,6 +2391,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2332,6 +2465,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -2399,6 +2534,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2437,6 +2574,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2506,16 +2645,19 @@ jobs:
       - docker-integration-security
       - remote-signer-dos-docker
       - browser-webdriver
-    if: ${{ always() && github.actor != 'dependabot[bot]' }}
+    if: ${{ always() && (inputs.release_validation || github.actor != 'dependabot[bot]') }}
     permissions:
       contents: read
+    outputs:
+      validated_ref: ${{ steps.enforce.outputs.validated_ref }}
+      validated_revision: ${{ steps.enforce.outputs.validated_revision }}
 
     steps:
       - name: Checkout trusted non-benchmark summary helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.source_revision || github.sha }}
           path: trusted-non-benchmark-summary
           persist-credentials: false
           sparse-checkout: tests/scripts/summarize-ci-needs.sh
@@ -2549,10 +2691,39 @@ jobs:
           retention-days: 30
 
       - name: Enforce non-benchmark validation result
+        id: enforce
         if: always()
         env:
+          OXIBELT_EXPECTED_REF: ${{ inputs.source_ref || github.ref }}
+          OXIBELT_EXPECTED_REVISION: ${{ inputs.source_revision || github.sha }}
           OXIBELT_SUMMARY_STATUS: ${{ steps.summarize.outputs.status }}
-        run: test "${OXIBELT_SUMMARY_STATUS}" = "0"
+          OXIBELT_VALIDATED_REF: ${{ needs.source-structure.outputs.validated_ref }}
+          OXIBELT_VALIDATED_REVISION: ${{ needs.source-structure.outputs.validated_revision }}
+        run: |
+          set -euo pipefail
+
+          test "${OXIBELT_SUMMARY_STATUS}" = "0"
+          if [[ ! "${OXIBELT_EXPECTED_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected source revision is malformed: ${OXIBELT_EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          if [[ "${OXIBELT_EXPECTED_REF}" != refs/* ]]; then
+            echo "expected source ref is malformed: ${OXIBELT_EXPECTED_REF}" >&2
+            exit 1
+          fi
+          if [[ "${OXIBELT_VALIDATED_REVISION}" != "${OXIBELT_EXPECTED_REVISION}" ]]; then
+            echo "validated source revision ${OXIBELT_VALIDATED_REVISION} does not match ${OXIBELT_EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          if [[ "${OXIBELT_VALIDATED_REF}" != "${OXIBELT_EXPECTED_REF}" ]]; then
+            echo "validated source ref ${OXIBELT_VALIDATED_REF} does not match ${OXIBELT_EXPECTED_REF}" >&2
+            exit 1
+          fi
+
+          {
+            echo "validated_ref=${OXIBELT_EXPECTED_REF}"
+            echo "validated_revision=${OXIBELT_EXPECTED_REVISION}"
+          } >> "${GITHUB_OUTPUT}"
 
   docker-performance:
     name: Docker performance (${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile'] || 'smoke' }}, ${{ matrix.serving_type }}, shard ${{ matrix.shard }})
@@ -2572,7 +2743,7 @@ jobs:
       - docker-alpine-comparator-musl-image-amd64
       - docker-performance-probe-image
       - docker-external-benchmark-image
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     permissions:
       actions: read
       contents: read
@@ -2623,6 +2794,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - parallel:
           - name: Select AMD64 v2 Docker image artifact
@@ -3004,7 +3177,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - docker-performance
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: ${{ always() && !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     permissions:
       actions: read
       contents: read
@@ -3015,6 +3188,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Install Rust toolchain
         run: |
@@ -3299,7 +3474,7 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - docker-performance
-    if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))
+    if: ${{ !inputs.release_validation && needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run'])) }}
     permissions:
       actions: read
       contents: read
@@ -3311,6 +3486,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image

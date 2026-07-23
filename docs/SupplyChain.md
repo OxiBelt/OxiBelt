@@ -39,6 +39,27 @@ digest, and provenance described below. A local clean exact-tag build is
 `tagged_development`, while a direct archive Docker build is
 `0.0.0-dev.archive`; neither is an official artifact.
 
+Before release preparation or publication, the release workflow resolves the
+tag to one full lowercase commit and calls the canonical complete
+non-benchmark validation graph for that exact ref and revision. The call has
+only read access and receives no secrets. Its terminal summary exports the
+validated identity only when all 34 required Rust, dependency, TypeScript,
+fuzzing, sanitizer, cross-build, image, vulnerability, database, Kubernetes,
+integration, signer, and browser jobs succeed. Failure, cancellation, skip,
+missing output, malformed identity, or ref/revision mismatch blocks release
+metadata, GHCR writes, attestations, manifests, verification, and alias
+promotion. Benchmark jobs and dependency-snapshot submission are not part of
+the release prerequisite.
+
+Source-validation artifacts are evidence for the gate, not official release
+inputs. After the gate, release CI checks out the same immutable revision,
+revalidates its tag identity, applies the disposable release-version rewrite,
+and independently rebuilds every image. Actions transport names include the
+release run and attempt so validation and release artifacts cannot collide;
+the image plan, tar filenames, OCI repositories, and public tags are unchanged.
+This repository-enforced boundary does not rely on branch-protection,
+ruleset, or environment configuration for correctness.
+
 Only the following repositories are official OxiBelt image sources:
 
 | Role | OCI repository | Expected executable inventory |
