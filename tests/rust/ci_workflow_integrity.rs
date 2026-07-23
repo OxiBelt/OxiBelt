@@ -189,6 +189,11 @@ fn release_rebuild_verification_workflow_text() -> String {
     .expect("independent release rebuild workflow should be readable")
 }
 
+fn release_rebuild_verification_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/verify-release-rebuild.sh"))
+    .expect("independent release rebuild script should be readable")
+}
+
 fn dependabot_config_text() -> String {
   fs::read_to_string(repo_root().join(".github/dependabot.yml"))
     .expect("Dependabot configuration should be readable")
@@ -5518,6 +5523,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
 #[test]
 fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() {
   let workflow = release_rebuild_verification_workflow_text();
+  let script = release_rebuild_verification_script_text();
   let parsed: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("independent rebuild workflow should parse as YAML");
   let jobs = parsed["jobs"]
@@ -5578,6 +5584,26 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     assert!(
       !workflow.contains(forbidden),
       "independent rebuild workflow must not contain {forbidden}"
+    );
+  }
+
+  for expected in [
+    "--workspace-path \"${rebuilt_root}\"",
+    "--manifest-path Cargo.toml",
+    "--lockfile-path Cargo.lock",
+  ] {
+    assert!(
+      script.contains(expected),
+      "independent rebuild versioning should use workspace-relative path argument {expected}"
+    );
+  }
+  for forbidden in [
+    "--manifest-path \"${rebuilt_root}/Cargo.toml\"",
+    "--lockfile-path \"${rebuilt_root}/Cargo.lock\"",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "independent rebuild versioning must not pass rejected absolute path argument {forbidden}"
     );
   }
 }

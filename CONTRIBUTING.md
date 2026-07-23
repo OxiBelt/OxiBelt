@@ -18,7 +18,7 @@ be committed.
 
 | Path | Purpose | Change here when |
 | --- | --- | --- |
-| `Cargo.toml` | Rust workspace, release version, shared dependency policy, and default members. | Package ownership, shared dependency, or release metadata changes. |
+| `Cargo.toml` | Rust workspace, committed package-version sentinel, shared dependency policy, and default members. | Package ownership, shared dependency, committed package metadata, or default members change. |
 | `source/` | Integrated data-plane and Admin runtime crate. | You are changing runtime, proxy, TLS, WAF, routing, config, Admin, or Person Proof behavior. |
 | `source/apps/` | Independently packaged controller, CLI, keysigner, and netport binaries. | External orchestration, operator tooling, or role-specific helper behavior changes. |
 | `source/crates/` | Shared external-control protocol and HTTP client crates. | Stable cross-package models or controller transport behavior changes. |
@@ -341,6 +341,35 @@ pnpm run typecheck
 pnpm run test
 pnpm run versioning:check
 ```
+
+### Repository Version Policy
+
+The committed development version is the `0.0.0` sentinel. The root Cargo
+workspace owns that value; production Cargo packages inherit it, first-party
+fuzz, test, and probe packages declare it explicitly, and their generated lock
+entries must agree. Private npm workspace packages and both Helm charts'
+`version` and `appVersion` fields also remain `0.0.0`; the private root npm
+orchestration package remains versionless, and `package.json` and
+`pnpm-workspace.yaml` must name the same policy-covered workspaces.
+
+The sentinel is package metadata, not OxiBelt's runtime or product identity. A
+direct source-archive build uses the complete development identity tuple
+`0.0.0-dev.archive`, unknown revision, ref, and dirty state, and
+`source_archive` build kind. The canonical build-identity layer supplies
+validated Git development or official release identities to binaries, runtime
+metadata, and OCI labels; its source-archive fallback remains bound to the same
+archive version.
+
+`pnpm run versioning:check` is the authoritative committed-state gate. It must
+validate every policy-bearing Cargo, lockfile, Docker/archive, npm, Helm, and
+release-helper default and report all mismatches together, naming each file or
+package, its expected value, and its actual value.
+
+Release tooling may rewrite only the root Cargo workspace version and the
+production package entries in `Cargo.lock`, and only inside a disposable
+release checkout or worktree. Sentinel-only Cargo packages, npm packages, Helm
+charts, and direct-build archive defaults remain unchanged. Never commit files
+rewritten for a release build.
 
 ## Security Requirements
 

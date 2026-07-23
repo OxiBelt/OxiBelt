@@ -2,8 +2,6 @@ import * as Fs from 'node:fs'
 import * as Path from 'node:path'
 import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
-import * as Semver from 'semver'
-import * as Toml from 'smol-toml'
 import {
   AssertBuildTagMatchesRevision,
   AssertReleaseEventAllowed,
@@ -11,6 +9,11 @@ import {
   ParseReleaseRef,
   ParseReleaseTag
 } from './docker_image_release.js'
+import {
+  AssertRepositoryVersionPolicy,
+  ProductionPackageNames,
+  RepositoryVersionPolicy
+} from './repository_version_policy.js'
 
 /* eslint-disable @typescript-eslint/naming-convention -- CLI options and release results use stable lower-camel-case keys. */
 type CliParameters = {
@@ -44,26 +47,21 @@ export type VersioningResult = {
   packageName: string
   version: string
 }
-/* eslint-enable @typescript-eslint/naming-convention */
 
-type TomlRecord = Record<string, unknown>
-
-const ProductionPackageNames = [
-  'oxibelt',
-  'oxibelt-build-identity',
-  'oxibelt-dataplane-strict',
-  'oxibelt-control-http',
-  'oxibelt-control-protocol',
-  'oxibelt-deployment-diagnostics',
-  'oxibelt-gateway-controller',
-  'oxibelt-keysigner',
-  'oxibelt-netport-switcher',
-  'oxibeltctl'
-]
-
-function IsRecord(Value: unknown): Value is TomlRecord {
-  return typeof Value === 'object' && Value !== null && !Array.isArray(Value)
+type PlannedWrite = {
+  path: string
+  content: string
 }
+
+type StagedWrite = PlannedWrite & {
+  stagingDirectory: string
+  stagedPath: string
+  backupPath: string
+  originalExists: boolean
+  originalMoved: boolean
+  installed: boolean
+}
+/* eslint-enable @typescript-eslint/naming-convention */
 
 function FormatError(ErrorValue: unknown): string {
   if (ErrorValue instanceof Error) {
@@ -102,33 +100,6 @@ function ResolveWorkspaceFile(WorkspacePath: string, RelativePath: string, Label
   return Resolved
 }
 
-function ParseToml(Content: string, FilePath: string): TomlRecord {
-  try {
-    const Parsed = Toml.parse(Content)
-    if (!IsRecord(Parsed)) {
-      throw new Error('top-level TOML value is not an object')
-    }
-
-    return Parsed
-  } catch (ErrorValue) {
-    throw new Error(`${FilePath} is not valid TOML: ${FormatError(ErrorValue)}`)
-  }
-}
-
-function WorkspacePackageTable(Manifest: TomlRecord, ManifestPath: string): TomlRecord {
-  const Workspace = Manifest.workspace
-  if (!IsRecord(Workspace)) {
-    throw new Error(`${ManifestPath} must contain a [workspace] table`)
-  }
-  const PackageData = Workspace.package
-
-  if (!IsRecord(PackageData)) {
-    throw new Error(`${ManifestPath} must contain a [workspace.package] table`)
-  }
-
-  return PackageData
-}
-
 function WorkspacePackageSectionRange(Content: string, ManifestPath: string): [number, number] {
   const PackageMatch = /^\[workspace[.]package\]\s*$/m.exec(Content)
 
@@ -142,16 +113,6 @@ function WorkspacePackageSectionRange(Content: string, ManifestPath: string): [n
   const End = NextTableMatch === null ? Content.length : AfterPackageHeader + NextTableMatch.index
 
   return [Start, End]
-}
-
-function WorkspacePackageStringField(PackageData: TomlRecord, ManifestPath: string, FieldName: string): string {
-  const Value = PackageData[FieldName]
-
-  if (typeof Value !== 'string') {
-    throw new Error(`${ManifestPath} [workspace.package] table must contain string ${FieldName}`)
-  }
-
-  return Value
 }
 
 function ReplaceWorkspacePackageVersion(Content: string, ManifestPath: string, Version: string): string {
@@ -187,24 +148,6 @@ function EscapeRegExp(Value: string): string {
   return Value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function LockPackageTable(Lockfile: TomlRecord, LockfilePath: string, PackageName: string): TomlRecord {
-  const Packages = Lockfile.package
-
-  if (!Array.isArray(Packages)) {
-    throw new Error(`${LockfilePath} must contain [[package]] entries`)
-  }
-
-  const Matches = Packages.filter((Entry): Entry is TomlRecord => {
-    return IsRecord(Entry) && Entry.name === PackageName
-  })
-
-  if (Matches.length !== 1) {
-    throw new Error(`${LockfilePath} must contain exactly one ${PackageName} package entry`)
-  }
-
-  return Matches[0]
-}
-
 function LockPackageBlockRange(Content: string, LockfilePath: string, PackageName: string): [number, number] {
   const Ranges = LockPackageBlockRanges(Content)
   const MatchingRanges = Ranges.filter(([Start, End]) => {
@@ -217,17 +160,6 @@ function LockPackageBlockRange(Content: string, LockfilePath: string, PackageNam
   }
 
   return MatchingRanges[0]
-}
-
-function LockPackageVersion(Lockfile: TomlRecord, LockfilePath: string, PackageName: string): string {
-  const PackageData = LockPackageTable(Lockfile, LockfilePath, PackageName)
-  const Version = PackageData.version
-
-  if (typeof Version !== 'string') {
-    throw new Error(`${LockfilePath} ${PackageName} package block must contain a string version field`)
-  }
-
-  return Version
 }
 
 function UpdateLockPackageVersion(
@@ -254,48 +186,158 @@ function UpdateProductionLockVersions(Content: string, LockfilePath: string, Ver
   )
 }
 
-function IsStrictStableSemver(Version: string): boolean {
-  const Parsed = Semver.parse(Version)
-
-  return Parsed !== null &&
-    Parsed.version === Version &&
-    Parsed.prerelease.length === 0 &&
-    Parsed.build.length === 0
+function AssertCanonicalPolicyFile(
+  WorkspacePath: string,
+  ResolvedPath: string,
+  ExpectedRelativePath: string,
+  Label: string
+): void {
+  if (ResolvedPath !== Path.resolve(WorkspacePath, ExpectedRelativePath)) {
+    throw new Error(`${Label} must be ${ExpectedRelativePath}`)
+  }
 }
 
-function AssertCommittedState(
+function ResolveImagePlanOutput(
+  Value: string | undefined,
+  WorkspacePath: string,
   ManifestPath: string,
-  LockfilePath: string,
-  PackageName: string
-): string {
-  const Manifest = ParseToml(Fs.readFileSync(ManifestPath, 'utf8'), ManifestPath)
-  const Lockfile = ParseToml(Fs.readFileSync(LockfilePath, 'utf8'), LockfilePath)
-  const ManifestPackage = WorkspacePackageTable(Manifest, ManifestPath)
-  const ManifestVersion = WorkspacePackageStringField(ManifestPackage, ManifestPath, 'version')
-
-  if (PackageName !== 'oxibelt') {
-    throw new Error('release package name must be oxibelt')
+  LockfilePath: string
+): string | undefined {
+  if (Value === undefined) {
+    return undefined
+  }
+  if (Value.trim() === '') {
+    throw new Error('image plan output must not be empty')
   }
 
-  if (!IsStrictStableSemver(ManifestVersion)) {
-    throw new Error(`${ManifestPath} committed package version must use strict stable SemVer`)
+  const Resolved = Path.isAbsolute(Value)
+    ? Path.resolve(Value)
+    : Path.resolve(WorkspacePath, Value)
+  const Parent = Path.dirname(Resolved)
+  if (!Fs.existsSync(Parent) || !Fs.statSync(Parent).isDirectory()) {
+    throw new Error(`image plan output directory does not exist: ${Parent}`)
   }
 
-  for (const ProductionPackageName of ProductionPackageNames) {
-    const LockVersion = LockPackageVersion(Lockfile, LockfilePath, ProductionPackageName)
-    if (LockVersion !== ManifestVersion) {
-      throw new Error(`${LockfilePath} ${ProductionPackageName} version must match ${ManifestPath}`)
+  const Canonical = Path.join(Fs.realpathSync(Parent), Path.basename(Resolved))
+  const ProtectedPaths = [ManifestPath, LockfilePath].map(ProtectedPath => Fs.realpathSync(ProtectedPath))
+  if (ProtectedPaths.includes(Canonical)) {
+    throw new Error('image plan output must not overwrite Cargo.toml or Cargo.lock')
+  }
+
+  if (Fs.existsSync(Resolved)) {
+    const Metadata = Fs.lstatSync(Resolved)
+    if (Metadata.isSymbolicLink() || !Metadata.isFile()) {
+      throw new Error(`image plan output must be a regular file: ${Value}`)
+    }
+    if (ProtectedPaths.includes(Fs.realpathSync(Resolved))) {
+      throw new Error('image plan output must not overwrite Cargo.toml or Cargo.lock')
     }
   }
+  return Resolved
+}
 
-  return ManifestVersion
+function CleanupStagedWrites(Writes: StagedWrite[]): void {
+  for (const Write of Writes) {
+    Fs.rmSync(Write.stagingDirectory, { force: true, recursive: true })
+  }
+}
+
+function ApplyPlannedWrites(Writes: PlannedWrite[]): void {
+  const UniquePaths = new Set(Writes.map(Write => Write.path))
+  if (UniquePaths.size !== Writes.length) {
+    throw new Error('release outputs must use distinct paths')
+  }
+
+  const Staged: StagedWrite[] = []
+  try {
+    for (const Write of Writes) {
+      const OriginalExists = Fs.existsSync(Write.path)
+      if (OriginalExists) {
+        const Metadata = Fs.lstatSync(Write.path)
+        if (Metadata.isSymbolicLink() || !Metadata.isFile()) {
+          throw new Error(`release output must be a regular file: ${Write.path}`)
+        }
+      }
+
+      const StagingDirectory = Fs.mkdtempSync(
+        Path.join(Path.dirname(Write.path), '.oxibelt-versioning-')
+      )
+      const StagedPath = Path.join(StagingDirectory, 'next')
+      const BackupPath = Path.join(StagingDirectory, 'original')
+      Staged.push({
+        ...Write,
+        stagingDirectory: StagingDirectory,
+        stagedPath: StagedPath,
+        backupPath: BackupPath,
+        originalExists: OriginalExists,
+        originalMoved: false,
+        installed: false
+      })
+      Fs.writeFileSync(StagedPath, Write.content, {
+        flag: 'wx',
+        mode: OriginalExists ? Fs.statSync(Write.path).mode : 0o600
+      })
+    }
+  } catch (ErrorValue) {
+    CleanupStagedWrites(Staged)
+    throw ErrorValue
+  }
+
+  try {
+    for (const Write of Staged) {
+      if (Write.originalExists) {
+        Fs.renameSync(Write.path, Write.backupPath)
+        Write.originalMoved = true
+      }
+      Fs.renameSync(Write.stagedPath, Write.path)
+      Write.installed = true
+    }
+  } catch (ErrorValue) {
+    const RollbackErrors: string[] = []
+    for (const Write of [...Staged].reverse()) {
+      try {
+        if (Write.installed && Fs.existsSync(Write.path)) {
+          Fs.unlinkSync(Write.path)
+        }
+        if (Write.originalMoved && Fs.existsSync(Write.backupPath)) {
+          Fs.renameSync(Write.backupPath, Write.path)
+        }
+      } catch (RollbackError) {
+        RollbackErrors.push(FormatError(RollbackError))
+      }
+    }
+    if (RollbackErrors.length === 0) {
+      CleanupStagedWrites(Staged)
+    }
+    const Suffix = RollbackErrors.length === 0
+      ? ''
+      : `; rollback also failed and staging backups were retained: ${RollbackErrors.join('; ')}`
+    throw new Error(`release output commit failed: ${FormatError(ErrorValue)}${Suffix}`)
+  }
+
+  CleanupStagedWrites(Staged)
 }
 
 export function RunVersioning(Options: VersioningOptions): VersioningResult {
   const WorkspacePath = ResolveWorkspacePath(Options.workspacePath)
   const ManifestPath = ResolveWorkspaceFile(WorkspacePath, Options.manifestPath, 'manifest path')
   const LockfilePath = ResolveWorkspaceFile(WorkspacePath, Options.lockfilePath, 'lockfile path')
-  const CommittedVersion = AssertCommittedState(ManifestPath, LockfilePath, Options.packageName)
+  AssertCanonicalPolicyFile(
+    WorkspacePath,
+    ManifestPath,
+    RepositoryVersionPolicy.manifestPath,
+    'manifest path'
+  )
+  AssertCanonicalPolicyFile(
+    WorkspacePath,
+    LockfilePath,
+    RepositoryVersionPolicy.lockfilePath,
+    'lockfile path'
+  )
+  if (Options.packageName !== 'oxibelt') {
+    throw new Error('release package name must be oxibelt')
+  }
+  const CommittedVersion = AssertRepositoryVersionPolicy(WorkspacePath)
 
   if (!Options.releasePublish) {
     return {
@@ -328,18 +370,28 @@ export function RunVersioning(Options: VersioningOptions): VersioningResult {
     LockfilePath,
     Version
   )
+  const ImagePlanOutput = ResolveImagePlanOutput(
+    Options.imagePlanOutput,
+    WorkspacePath,
+    ManifestPath,
+    LockfilePath
+  )
+  const NextImagePlan = ImagePlanOutput === undefined
+    ? undefined
+    : `${JSON.stringify(BuildImageReleasePlan({
+        releaseTag: ReleaseTag,
+        revision: Options.revision,
+        source: 'https://github.com/OxiBelt/OxiBelt'
+      }), null, 2)}\n`
 
-  Fs.writeFileSync(ManifestPath, NextManifest)
-  Fs.writeFileSync(LockfilePath, NextLockfile)
-
-  if (Options.imagePlanOutput !== undefined) {
-    const Plan = BuildImageReleasePlan({
-      releaseTag: ReleaseTag,
-      revision: Options.revision,
-      source: 'https://github.com/OxiBelt/OxiBelt'
-    })
-    Fs.writeFileSync(Options.imagePlanOutput, `${JSON.stringify(Plan, null, 2)}\n`)
+  const Writes: PlannedWrite[] = [
+    { path: ManifestPath, content: NextManifest },
+    { path: LockfilePath, content: NextLockfile }
+  ]
+  if (ImagePlanOutput !== undefined && NextImagePlan !== undefined) {
+    Writes.push({ path: ImagePlanOutput, content: NextImagePlan })
   }
+  ApplyPlannedWrites(Writes)
 
   return {
     mode: 'release',

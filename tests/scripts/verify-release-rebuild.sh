@@ -209,9 +209,9 @@ fi
 
 node --import tsx "${rebuilt_root}/devops/sources/versioning.ts" \
   --workspace-path "${rebuilt_root}" \
-  --manifest-path "${rebuilt_root}/Cargo.toml" \
+  --manifest-path Cargo.toml \
   --package-name oxibelt \
-  --lockfile-path "${rebuilt_root}/Cargo.lock" \
+  --lockfile-path Cargo.lock \
   --ref "${release_ref}" \
   --revision "${revision}" \
   --event-name "${release_event}" \
