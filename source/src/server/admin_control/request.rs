@@ -122,3 +122,47 @@ pub(crate) fn fuzz_decode_mutation_body(selector: u8, data: &[u8]) {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::{AdminApplyMode, AdminFileRoot, AdminFilesSyncRequest};
+
+  #[test]
+  fn file_sync_payload_accepts_public_oxirule_names() {
+    let payload: AdminFilesSyncRequest = serde_json::from_str(
+      r#"{
+        "apply": "oxirule",
+        "operations": [
+          {
+            "op": "put",
+            "root": "oxirule_group",
+            "path": "groups/main.oxirule-group.toml",
+            "content": "[[rule_groups]]\nname = \"main\"\n"
+          },
+          {
+            "op": "put",
+            "root": "oxirule_rulepack",
+            "path": "rulepacks/main.oxirule-rulepack.toml",
+            "content": "[rulepack]\nschema_version = 2\nname = \"main\"\nversion = \"0.1.0\"\n\n[[group_files]]\ncontent = '''\n[[rule_groups]]\nname = \"main\"\nwhen = \"true\"\n'''\n"
+          },
+          {
+            "op": "put",
+            "root": "oxirule_rulepack_install",
+            "path": "rulepacks/main.install.toml",
+            "content": "[install]\nname = \"main\"\nversion = \"0.1.0\"\nsource = \"test\"\neffective_mode = \"monitor\"\nforce_mode = false\ninstalled_at = \"2026-06-12T00:00:00Z\"\n"
+          }
+        ]
+      }"#,
+    )
+    .expect("public file sync payload names should deserialize");
+
+    assert_eq!(payload.apply, AdminApplyMode::OxiRule);
+    assert_eq!(payload.operations.len(), 3);
+    assert_eq!(payload.operations[0].root, AdminFileRoot::OxiRuleGroup);
+    assert_eq!(payload.operations[1].root, AdminFileRoot::OxiRuleRulepack);
+    assert_eq!(
+      payload.operations[2].root,
+      AdminFileRoot::OxiRuleRulepackInstall
+    );
+  }
+}

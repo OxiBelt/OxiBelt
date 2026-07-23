@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-07-22",
+  "reviewedOn": "2026-07-23",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "723aa2a580756af59c1647d1836e57556e4dda0fcbf27055730220c17b2482d9",
+      "lockfileSha256": "07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
       "exemptionInventorySha256": "d097fc907efff7d0648e7b74ad6997d15459cc9bd4f8195966b200ccb4cb9a4a",
       "exemptedPackageVersions": 474
     },
@@ -185,24 +185,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:723aa2a580756af59c1647d1836e57556e4dda0fcbf27055730220c17b2482d9",
+      "subject": "Cargo.lock@sha256:07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-22",
+      "reviewedOn": "2026-07-23",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:723aa2a580756af59c1647d1836e57556e4dda0fcbf27055730220c17b2482d9",
+      "subject": "Cargo.lock@sha256:07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-22",
+      "reviewedOn": "2026-07-23",
       "expiresOn": "2026-10-19"
     },
     {
