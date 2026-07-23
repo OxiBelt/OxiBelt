@@ -408,13 +408,39 @@ and modes are validated before a copy-only final image is created, so no
 RISC-V executable runs during rootfs construction.
 
 CI validates RISC-V compilation, static ELF linkage, image architecture,
-executable and package inventories, image metadata, SBOMs, and attestations. It
-does not start a RISC-V container or claim emulated runtime coverage. A valid
-RISC-V attestation therefore authenticates the released artifact and build
-workflow under the documented policy; it is not evidence that every runtime
-path was exercised on RISC-V hardware. Updating the pinned cross-toolchain
-image or its expected identity is a supply-chain boundary change that requires
-review and synchronized integrity-test updates.
+executable and package inventories, image metadata, SBOMs, and attestations.
+The release-only `riscv64` scan workflow then performs a bounded functional
+smoke under QEMU user-mode emulation before the corresponding platform image
+can reach the package-write publication job. Emulation remains outside the
+build boundary: the smoke job downloads the already-built image tar plus its
+release plan and artifact contract, verifies every digest and the official
+build identity, and loads only the validated config digest. Its QEMU setup
+action and `binfmt` image are immutable-pinned, scoped to `riscv64`, and cannot
+alter an image that will later be published.
+
+The smoke runs all six role images. It requires exact `/usr/local/bin`
+inventories and successful `--version` identity output; checks configuration
+validation, server startup, health endpoints, and an HTTP/1 redirect for the
+data-plane roles; proves the strict role refuses an Admin-enabled
+configuration; exercises controller rendering, authenticated Kubernetes
+watching, leader contention, and health/readiness separation; and verifies a
+real keysigner process creates its Unix socket and readiness event. Runtime
+containers are non-root, read-only, capability-free, protected by
+`no-new-privileges`, and given explicit process, memory, CPU, and timeout
+ceilings. The job records a bounded JSON receipt and failure diagnostics,
+removes only resources it created, and has read-only repository permissions
+with no secrets or package write capability.
+
+This is a deterministic functional admission check, not a benchmark, soak
+test, full protocol matrix, or native-hardware qualification. QEMU cannot prove
+RISC-V hardware performance, kernel/device behavior, or every production path.
+A valid RISC-V attestation therefore authenticates the released artifact and
+build workflow under the documented policy; the pre-publication smoke adds
+bounded emulated-runtime evidence but does not replace a future native RISC-V
+hardware lane. Updating the pinned cross-toolchain or QEMU images, their
+expected identities, the role inventory, or the smoke boundary is a
+supply-chain change that requires review and synchronized integrity-test
+updates.
 
 ## SBOM coverage
 

@@ -92,7 +92,9 @@ jobs:
       - name: Test release-image rebuild comparator
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py
+        run: |
+          python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py
+          python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py
 
       - name: Check documentation links and anchors
         env:

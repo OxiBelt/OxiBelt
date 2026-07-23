@@ -1228,7 +1228,8 @@ fn release_image_rebuild_comparator_regressions_are_ci_gated() {
   let steps = parsed["jobs"]["source-structure"]["steps"]
     .as_array()
     .expect("source-structure should define steps");
-  let command = "python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py";
+  let command = "python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py\n\
+python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py\n";
   let matching_steps = steps
     .iter()
     .enumerate()
@@ -3806,18 +3807,14 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
 }
 
 #[test]
-fn build_and_release_workflows_do_not_expose_qemu_or_binfmt() {
-  let workflows = [
+fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
+  let emulator_free_workflows = [
     ("check", workflow_text()),
     ("release", release_workflow_text()),
-    (
-      "release architecture scan",
-      release_image_arch_scan_workflow_text(),
-    ),
     ("release architecture", release_image_arch_workflow_text()),
   ];
 
-  for (name, workflow) in workflows {
+  for (name, workflow) in emulator_free_workflows {
     for forbidden in [
       "docker/setup-qemu-action",
       "tonistiigi/binfmt",
@@ -3830,6 +3827,87 @@ fn build_and_release_workflows_do_not_expose_qemu_or_binfmt() {
         "{name} workflow must not retain the emulation boundary {forbidden}"
       );
     }
+  }
+
+  let scan_workflow = release_image_arch_scan_workflow_text();
+  let build = workflow_job_text(&scan_workflow, "build");
+  let scan = workflow_job_text(&scan_workflow, "scan");
+  let runtime_smoke = workflow_job_text(&scan_workflow, "runtime-smoke");
+  for (name, job) in [("build", build), ("scan", scan)] {
+    for forbidden in [
+      "docker/setup-qemu-action",
+      "tonistiigi/binfmt",
+      "qemu-v",
+      "Setup pinned RISC-V runtime emulation",
+    ] {
+      assert!(
+        !job.contains(forbidden),
+        "release {name} job must remain emulator-free: {forbidden}"
+      );
+    }
+  }
+  for expected in [
+    "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0",
+    "docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
+    "platforms: riscv64",
+    "reset: false",
+    "cache-image: false",
+    "steps.qemu.outputs.platforms",
+    "*,linux/riscv64,*",
+  ] {
+    assert!(
+      runtime_smoke.contains(expected),
+      "release runtime smoke should pin and verify {expected}"
+    );
+  }
+  assert_eq!(
+    scan_workflow.matches("docker/setup-qemu-action@").count(),
+    1,
+    "release scanning should register QEMU in exactly one job"
+  );
+  assert_eq!(
+    scan_workflow.matches("tonistiigi/binfmt:").count(),
+    1,
+    "release scanning should reference exactly one pinned binfmt image"
+  );
+  assert!(
+    !scan_workflow.contains("--privileged"),
+    "workflows must not expose a direct privileged Docker command"
+  );
+
+  let smoke_helper = source_file_text("tests/scripts/run-riscv64-release-image-smoke.py");
+  for expected in [
+    "ROLE_BINARIES = {",
+    "DIGEST = re.compile",
+    "docker_archive_identity",
+    "inspect_rootfs_inventory",
+    "parse_build_identity",
+    "wait_for_service",
+    "\"--pull\",\n            \"never\"",
+    "\"--read-only\"",
+    "\"--cap-drop\"",
+    "\"no-new-privileges\"",
+    "\"logs\", \"--timestamps\", \"--tail\", \"200\"",
+    "docker.io/library/alpine:3.24@",
+    "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+  ] {
+    assert!(
+      smoke_helper.contains(expected),
+      "RISC-V runtime smoke helper should enforce {expected}"
+    );
+  }
+  for forbidden in [
+    "shell=True",
+    "docker system prune",
+    "docker container prune",
+    "docker volume prune",
+    "docker network prune",
+    "docker-rootful",
+  ] {
+    assert!(
+      !smoke_helper.contains(forbidden),
+      "RISC-V runtime smoke helper must not use {forbidden}"
+    );
   }
 }
 
@@ -5049,7 +5127,11 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   );
   assert_eq!(
     scan_jobs.keys().cloned().collect::<BTreeSet<_>>(),
-    BTreeSet::from(["build".to_owned(), "scan".to_owned()])
+    BTreeSet::from([
+      "build".to_owned(),
+      "runtime-smoke".to_owned(),
+      "scan".to_owned(),
+    ])
   );
   assert_eq!(
     arch_jobs.keys().cloned().collect::<BTreeSet<_>>(),
@@ -5082,6 +5164,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   );
   assert!(scan_jobs["build"].needs.is_empty());
   assert_eq!(scan_jobs["scan"].needs, vec!["build".to_owned()]);
+  assert_eq!(scan_jobs["runtime-smoke"].needs, vec!["build".to_owned()]);
   assert!(arch_jobs["publish"].needs.is_empty());
   assert_eq!(arch_jobs["attest"].needs, vec!["publish".to_owned()]);
   assert_eq!(
@@ -5220,7 +5303,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     parsed_arch["on"]["workflow_call"]["inputs"]["vulnerability_decision_artifact_name"]["required"],
     true
   );
-  for job_id in ["build", "scan"] {
+  for job_id in ["build", "scan", "runtime-smoke"] {
     assert_eq!(
       parsed_scan["jobs"][job_id]["permissions"],
       serde_json::json!({"actions": "read", "contents": "read"})
@@ -5307,6 +5390,10 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "validate-policy",
     "supply-chain/image-vulnerability-policy.json",
     "${metadata_root}/policy/image-vulnerability-policy.json",
+    "run-riscv64-release-image-smoke.py",
+    "validate-strict-dataplane-image.py",
+    "riscv64-release-image-smoke/oxibelt.toml",
+    "riscv64-release-image-smoke/controller-empty-list.json",
   ] {
     assert!(
       prepare.contains(expected),
@@ -5369,6 +5456,49 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     assert!(
       !scan.contains(forbidden),
       "scan must not include {forbidden}"
+    );
+  }
+
+  let runtime_smoke = workflow_job_text(&scan_workflow, "runtime-smoke");
+  assert_eq!(
+    parsed_scan["jobs"]["runtime-smoke"]["if"],
+    "${{ github.repository == 'OxiBelt/OxiBelt' && inputs.artifact_arch == 'riscv64' }}"
+  );
+  assert_eq!(parsed_scan["jobs"]["runtime-smoke"]["timeout-minutes"], 15);
+  for expected in [
+    "Run immutable RISC-V release image smoke",
+    "run-riscv64-release-image-smoke.py",
+    "--artifact-contract",
+    "--build-metadata",
+    "--image-tar",
+    "--strict-validator",
+    "--expected-version",
+    "--expected-revision",
+    "--expected-source-ref",
+    "Upload RISC-V runtime smoke evidence",
+    "if: always()",
+    "if-no-files-found: warn",
+    "retention-days: 7",
+  ] {
+    assert!(
+      runtime_smoke.contains(expected),
+      "RISC-V runtime smoke should include {expected}"
+    );
+  }
+  for forbidden in [
+    "actions/checkout",
+    "packages:",
+    "attestations:",
+    "id-token:",
+    "GITHUB_TOKEN",
+    "ghcr_token",
+    "docker login",
+    "docker push",
+    "continue-on-error",
+  ] {
+    assert!(
+      !runtime_smoke.contains(forbidden),
+      "RISC-V runtime smoke must not include {forbidden}"
     );
   }
 

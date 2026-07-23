@@ -445,6 +445,34 @@ class ComparatorTest(unittest.TestCase):
         validated = subprocess.run([*common[:2], "validate", *common[2:]], check=False, capture_output=True, text=True)
         self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
 
+        unexpected_config_digest = docker_archive(
+            image,
+            layer([
+                (f"usr/local/bin/{name}", marker, 0o755)
+                for name in (
+                    "oxibelt",
+                    "oxibeltctl",
+                    "oxibelt-keysigner",
+                    "oxibelt-netport-switcher",
+                    "oxibelt-admin",
+                )
+            ]),
+            "2026-07-21T00:00:00Z",
+        )
+        write_json(metadata, {
+            "containerimage.config.digest": unexpected_config_digest,
+            "containerimage.digest": image_digest,
+            "containerimage.descriptor": {"digest": image_digest},
+        })
+        unexpected = subprocess.run(
+            [*common[:2], "create", *common[2:]],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(unexpected.returncode, 0)
+        self.assertIn("unexpected=['usr/local/bin/oxibelt-admin']", unexpected.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

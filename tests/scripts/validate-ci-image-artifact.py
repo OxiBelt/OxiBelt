@@ -379,7 +379,29 @@ def inspect_binary_identities(
         {build["binary"] for build in role_contract["cargo_builds"]}
     )
     expected_paths = {f"usr/local/bin/{name}": name for name in binary_names}
-    binaries: dict[str, bytes] = {}
+    inventory_root = pathlib.PurePosixPath("usr/local/bin")
+    maximum_inventory_entries = 64
+    entries: dict[str, tuple[str, int, bytes | None]] = {}
+
+    def normalize_layer_path(name: str) -> pathlib.PurePosixPath:
+        while name.startswith("./"):
+            name = name[2:]
+        if "\x00" in name or "\\" in name:
+            fail(f"unsafe Docker layer member name {name!r}")
+        path = pathlib.PurePosixPath(name)
+        if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+            fail(f"unsafe Docker layer member name {name!r}")
+        return path
+
+    def under_inventory(path: pathlib.PurePosixPath) -> bool:
+        return path == inventory_root or inventory_root in path.parents
+
+    def remove_path(path: pathlib.PurePosixPath) -> None:
+        path_text = path.as_posix()
+        for current in list(entries):
+            if current == path_text or current.startswith(f"{path_text}/"):
+                entries.pop(current, None)
+
     for layer_path in layer_paths:
         layer_member = archive.getmember(layer_path)
         layer_stream = archive.extractfile(layer_member)
@@ -387,34 +409,114 @@ def inspect_binary_identities(
             fail(f"Docker layer {layer_path!r} cannot be read")
         try:
             with tarfile.open(fileobj=layer_stream, mode="r:*") as layer:
+                opaque_roots: list[pathlib.PurePosixPath] = []
+                removed_paths: list[pathlib.PurePosixPath] = []
+                additions: list[
+                    tuple[pathlib.PurePosixPath, tuple[str, int, bytes | None]]
+                ] = []
+
+                def enforce_layer_entry_limit() -> None:
+                    if (
+                        len(opaque_roots)
+                        + len(removed_paths)
+                        + len(additions)
+                        > maximum_inventory_entries
+                    ):
+                        fail(
+                            "Docker layer has too many /usr/local/bin inventory entries"
+                        )
+
+                # OCI whiteouts remove lower-layer entries. Apply them before
+                # additions from the same layer so an opaque marker cannot
+                # erase a sibling that the layer itself supplies.
                 for member in layer:
-                    normalized = member.name.removeprefix("./").lstrip("/")
-                    if normalized == "usr/local/bin/.wh..wh..opq":
-                        binaries.clear()
+                    path = normalize_layer_path(member.name)
+                    if path.name == ".wh..wh..opq":
+                        opaque_root = path.parent
+                        if (
+                            under_inventory(opaque_root)
+                            or opaque_root in inventory_root.parents
+                        ):
+                            opaque_roots.append(opaque_root)
+                            enforce_layer_entry_limit()
                         continue
-                    if normalized.startswith("usr/local/bin/.wh."):
-                        removed_path = normalized.replace("/.wh.", "/", 1)
-                        removed_name = expected_paths.get(removed_path)
-                        if removed_name is not None:
-                            binaries.pop(removed_name, None)
+                    if path.name.startswith(".wh."):
+                        removed = path.parent / path.name.removeprefix(".wh.")
+                        if (
+                            under_inventory(removed)
+                            or removed in inventory_root.parents
+                        ):
+                            removed_paths.append(removed)
+                            enforce_layer_entry_limit()
                         continue
-                    name = expected_paths.get(normalized)
-                    if name is None:
+                    if path == inventory_root:
+                        if not member.isdir():
+                            fail("/usr/local/bin must remain a directory")
                         continue
-                    if not member.isfile() or member.size > MAXIMUM_BINARY_BYTES:
-                        fail(f"image binary {normalized!r} is not a bounded regular file")
-                    stream = layer.extractfile(member)
-                    if stream is None:
-                        fail(f"image binary {normalized!r} cannot be read")
-                    binaries[name] = stream.read()
+                    if not under_inventory(path):
+                        continue
+                    path_text = path.as_posix()
+                    if member.isdir():
+                        additions.append(
+                            (path, ("directory", member.mode, None))
+                        )
+                        enforce_layer_entry_limit()
+                        continue
+                    if not member.isfile():
+                        additions.append(
+                            (path, ("non-regular", member.mode, None))
+                        )
+                        enforce_layer_entry_limit()
+                        continue
+                    content = None
+                    if path_text in expected_paths:
+                        if member.size > MAXIMUM_BINARY_BYTES:
+                            fail(f"image binary {path_text!r} exceeds the size limit")
+                        stream = layer.extractfile(member)
+                        if stream is None:
+                            fail(f"image binary {path_text!r} cannot be read")
+                        content = stream.read()
+                    additions.append(
+                        (path, ("regular", member.mode, content))
+                    )
+                    enforce_layer_entry_limit()
+
+                for opaque_root in opaque_roots:
+                    if under_inventory(opaque_root):
+                        remove_path(opaque_root)
+                    elif opaque_root in inventory_root.parents:
+                        entries.clear()
+                for removed in removed_paths:
+                    if under_inventory(removed):
+                        remove_path(removed)
+                    elif removed in inventory_root.parents:
+                        entries.clear()
+                for path, entry in additions:
+                    path_text = path.as_posix()
+                    if entry[0] != "directory":
+                        remove_path(path)
+                    entries[path_text] = entry
+                if len(entries) > maximum_inventory_entries:
+                    fail("effective /usr/local/bin inventory exceeds the entry limit")
         except tarfile.TarError as error:
             fail(f"invalid Docker layer {layer_path!r}: {error}")
 
+    if set(entries) != set(expected_paths):
+        missing = sorted(set(expected_paths) - set(entries))
+        unexpected = sorted(set(entries) - set(expected_paths))
+        fail(
+            "effective /usr/local/bin inventory does not match the role contract "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
+
     inventory: list[dict[str, str]] = []
     for name in binary_names:
-        binary = binaries.get(name)
-        if binary is None:
-            fail(f"Docker image is missing expected binary /usr/local/bin/{name}")
+        path = f"usr/local/bin/{name}"
+        kind, mode, binary = entries[path]
+        if kind != "regular" or binary is None:
+            fail(f"image binary {path!r} is not a regular file")
+        if mode & 0o111 == 0:
+            fail(f"image binary {path!r} is not executable")
         markers = BUILD_IDENTITY_MARKER.findall(binary)
         if len(markers) != 1:
             fail(f"binary {name} does not contain exactly one canonical build identity marker")

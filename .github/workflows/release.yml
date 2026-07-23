@@ -582,6 +582,18 @@ jobs:
           install -D -m 0644 \
             tests/scripts/select-amd64-docker-image-artifact.sh \
             "${metadata_root}/helper/select-amd64-docker-image-artifact.sh"
+          install -D -m 0755 \
+            tests/scripts/run-riscv64-release-image-smoke.py \
+            "${metadata_root}/helper/run-riscv64-release-image-smoke.py"
+          install -D -m 0644 \
+            tests/scripts/validate-strict-dataplane-image.py \
+            "${metadata_root}/helper/validate-strict-dataplane-image.py"
+          install -D -m 0644 \
+            tests/fixtures/riscv64-release-image-smoke/oxibelt.toml \
+            "${metadata_root}/helper/riscv64-release-image-smoke/oxibelt.toml"
+          install -D -m 0644 \
+            tests/fixtures/riscv64-release-image-smoke/controller-empty-list.json \
+            "${metadata_root}/helper/riscv64-release-image-smoke/controller-empty-list.json"
 
       - name: Upload release metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1

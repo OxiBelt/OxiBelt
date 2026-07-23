@@ -6,6 +6,7 @@
 - `scripts/check-tests-rustfmt.sh`: enforces `tests/rustfmt.toml` formatting for tracked Rust files under `tests/`, including Docker probe crates
 - `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes a loadable image tar, Buildx metadata, and a validated commit/role/architecture/digest contract. AMD64 builds accept `amd64v2`, `amd64`, and `amd64v4`; the default `amd64` artifact name remains `oxibelt-alpine-musl-amd64-image` and targets `x86-64-v3`. Release CI can override OCI metadata with one complete `OXIBELT_DOCKER_IMAGE_VERSION`, `OXIBELT_DOCKER_IMAGE_REVISION`, `OXIBELT_DOCKER_IMAGE_SOURCE_REF`, `OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY`, and `OXIBELT_DOCKER_IMAGE_BUILD_KIND` tuple, plus created/source/ref-name label inputs.
 - `scripts/validate-ci-image-artifact.py`: validates downloaded CI image tars without executing foreign-architecture contents, binding the archive hash, Buildx digests, OCI identity, role, architecture, entrypoint, runtime user, exposed ports, and each binary's embedded `OXIBELT_BUILD_IDENTITY_V1` marker to the expected workflow commit. Native release rows additionally execute `--version`; all architectures scan the marker.
+- `scripts/run-riscv64-release-image-smoke.py`: validates each official RISC-V image tar against its release plan, artifact contract, Buildx metadata, OCI config, role inventory, and embedded identity, then runs a bounded QEMU user-mode functional smoke before publication. It covers every role, records a JSON evidence receipt, and uses exact-resource cleanup without broad Docker pruning.
 - `scripts/compare-release-image-artifacts.py`: reconstructs bounded Docker layers without extracting them and compares independently rebuilt release images while normalizing only documented archive, compression, filesystem-mtime, and OCI timestamp differences. `scripts/test-compare-release-image-artifacts.py` covers exact and normalized matches, content and metadata mismatches, unsafe inputs, and the artifact contract, and runs in source-structure CI.
 - `scripts/prepare-ci-dependency-snapshot.py`: normalizes Trivy's local GitHub dependency snapshot into a bounded, commit-bound artifact and emits a companion role/architecture/hash contract.
 - `scripts/summarize-ci-needs.sh`: emits the machine-readable and Markdown forms of the complete non-benchmark result and fails closed on failed, cancelled, skipped, missing, extra, malformed, or unknown required-job outcomes.
@@ -62,7 +63,12 @@ unprivileged image tar, records the Buildx digest metadata used by canonical
 publication, scans the local tar as report-only pre-publish evidence, and
 produces a validated CycloneDX platform SBOM. An isolated package-write job
 publishes each canonical platform digest without checking out or executing
-release build code.
+release build code. Before that job can publish a `riscv64` digest, a separate
+read-only job downloads the exact build artifact and metadata, verifies their
+digest/identity bindings, registers an immutable-pinned RISC-V QEMU handler,
+and runs the bounded six-role smoke. The runtime job cannot write packages,
+does not check out release source, and uploads its schema-versioned evidence
+receipt even when a probe fails.
 Separate OIDC jobs create GitHub API-hosted SLSA provenance and CycloneDX SBOM
 attestations, verify exact workflow/source/subject/predicate/timestamp policy,
 and gate platform promotion. The attestation jobs do not push Cosign signatures,
@@ -75,9 +81,10 @@ their platform SBOMs, composes a CycloneDX 1.7 index SBOM that points to the
 separate platform inventories, and gates index alias promotion on GitHub
 attestation verification. RISC-V artifacts use digest-pinned `cross-rs`
 cross-compilation and signed Alpine rootfs assembly without QEMU or `binfmt`;
-their validation covers compilation, static linking, image structure, and
-metadata rather than emulated runtime execution. AMD64 and ARM64 build natively
-on their release runners. Build tags matching
+only their later pre-publication smoke uses QEMU user-mode emulation, so runtime
+registration cannot influence compilation or rootfs construction. The smoke is
+functional evidence rather than a benchmark or native-hardware qualification.
+AMD64 and ARM64 build natively on their release runners. Build tags matching
 `major.minor.patch-build.<8 hex chars>` may publish from tag push events;
 stable and `major.minor.patch-beta.N` tags publish from GitHub release or
 manual dispatch events. Workflow integrity tests in

@@ -603,3 +603,86 @@ jobs:
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
           if-no-files-found: error
           retention-days: 1
+
+  runtime-smoke:
+    name: Runtime smoke (${{ inputs.image_role }}/${{ inputs.artifact_arch }})
+    runs-on: ${{ inputs.runner }}
+    needs:
+      - build
+    if: ${{ github.repository == 'OxiBelt/OxiBelt' && inputs.artifact_arch == 'riscv64' }}
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    env:
+      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
+      OXIBELT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Setup pinned RISC-V runtime emulation
+        id: qemu
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          # tonistiigi/binfmt source revision e29e7d72c9672c8c8bf846655ab149b50e1a62bd
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: riscv64
+          reset: false
+          cache-image: false
+
+      - name: Verify RISC-V runtime emulation
+        env:
+          QEMU_PLATFORMS: ${{ steps.qemu.outputs.platforms }}
+        run: |
+          set -euo pipefail
+
+          case ",${QEMU_PLATFORMS}," in
+            *,linux/riscv64,*) ;;
+            *)
+              echo "pinned QEMU setup did not register linux/riscv64: ${QEMU_PLATFORMS}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Run immutable RISC-V release image smoke
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/oxibelt-riscv64-runtime-smoke
+          FIXTURE_ROOT: ${{ runner.temp }}/oxibelt-release-metadata/helper/riscv64-release-image-smoke
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          IMAGE_ROOT: ${{ runner.temp }}/oxibelt-image
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${EVIDENCE_DIR}"
+          python3 "${RUNNER_TEMP}/oxibelt-release-metadata/helper/run-riscv64-release-image-smoke.py" \
+            --image-plan "${IMAGE_PLAN}" \
+            --artifact-contract "${IMAGE_ROOT}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-artifact-contract.json" \
+            --build-metadata "${IMAGE_ROOT}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}-build-metadata.json" \
+            --image-tar "${IMAGE_ROOT}/${OXIBELT_ARTIFACT_PREFIX}-alpine-musl-${OXIBELT_ARTIFACT_ARCH}.tar" \
+            --fixture-root "${FIXTURE_ROOT}" \
+            --strict-validator "${RUNNER_TEMP}/oxibelt-release-metadata/helper/validate-strict-dataplane-image.py" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --expected-version "${{ inputs.release_version }}" \
+            --expected-revision "${{ inputs.release_revision }}" \
+            --expected-source-ref "${{ inputs.release_ref }}" \
+            --evidence-dir "${EVIDENCE_DIR}"
+
+      - name: Upload RISC-V runtime smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: riscv64-runtime-smoke-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.OXIBELT_ARTIFACT_PREFIX }}
+          path: ${{ runner.temp }}/oxibelt-riscv64-runtime-smoke
+          if-no-files-found: warn
+          retention-days: 7
