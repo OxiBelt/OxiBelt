@@ -400,6 +400,38 @@ admin_endpoint_accepts_client() {
     >/dev/null
 }
 
+admin_get_json() {
+  local port="$1"
+  local path="$2"
+  local output="$3"
+
+  case "${path}" in
+    /admin/v1/capabilities | /admin/v1/config/status)
+      ;;
+    *)
+      die "refusing unexpected Admin JSON probe path: ${path}"
+      ;;
+  esac
+  case "${output}" in
+    "${work_dir}"/admin-*.json)
+      ;;
+    *)
+      die "refusing unexpected Admin JSON probe output: ${output}"
+      ;;
+  esac
+
+  curl --fail --silent --show-error --max-time 5 --tlsv1.3 \
+    --resolve "${admin_server_name}:${port}:127.0.0.1" \
+    --cacert "${work_dir}/admin-server-ca.crt" \
+    --cert "${work_dir}/admin-client.crt" \
+    --key "${work_dir}/admin-client.key" \
+    --header "@${work_dir}/admin-headers.txt" \
+    --output "${output}" \
+    "https://${admin_server_name}:${port}${path}"
+  jq -e 'type == "object"' "${output}" >/dev/null \
+    || die "Admin JSON probe did not return an object for ${path}"
+}
+
 admin_port_forward_is_ready() {
   local port="$1"
   local log="$2"
@@ -482,6 +514,94 @@ admin_tls_rejection_observed() {
   ((10#${after} > 10#${before}))
 }
 
+verify_admin_immutable_secret_boundary() {
+  local port="$1"
+  local capabilities="${work_dir}/admin-capabilities.json"
+  local status_before="${work_dir}/admin-config-status-before.json"
+  local status_after="${work_dir}/admin-config-status-after.json"
+  local request="${work_dir}/admin-secret-reference-request.json"
+  local response_body="${work_dir}/admin-secret-reference-response.json"
+  local response_headers="${work_dir}/admin-secret-reference-response.headers"
+  local state_before
+  local state_after
+  local etag
+  local http_status
+
+  admin_get_json "${port}" "/admin/v1/capabilities" "${capabilities}"
+  jq -e '.features.atomic_secret_reference_activation == false' "${capabilities}" >/dev/null \
+    || die "Admin capabilities must disable atomic secret-reference activation in immutable rollout mode"
+
+  admin_get_json "${port}" "/admin/v1/config/status" "${status_before}"
+  state_before="$(jq -cer '
+    select(.revision | type == "number")
+    | select(.etag | type == "string" and test("^\\\"oxibelt-config-[1-9][0-9]*\\\"$"))
+    | select(.rollout.rollout_mode == "kubernetes_immutable")
+    | select(.rollout.apply_state == "applied")
+    | {
+        revision,
+        etag,
+        rollout: {
+          rollout_mode: .rollout.rollout_mode,
+          desired_revision: .rollout.desired_revision,
+          applied_revision: .rollout.applied_revision,
+          digest: .rollout.digest,
+          apply_state: .rollout.apply_state
+        }
+      }
+  ' "${status_before}")" \
+    || die "Admin config status did not expose a valid applied immutable rollout identity"
+  etag="$(jq -er '.etag' "${status_before}")" \
+    || die "Admin config status did not expose a strong config ETag"
+
+  jq -n \
+    '{
+      schema_version: 1,
+      field: "tls.remote_signer.token_env",
+      reference: "OXIBELT_IMMUTABLE_PROBE_UNUSED"
+    }' >"${request}"
+  http_status="$(curl --silent --show-error --max-time 5 --tlsv1.3 \
+    --resolve "${admin_server_name}:${port}:127.0.0.1" \
+    --cacert "${work_dir}/admin-server-ca.crt" \
+    --cert "${work_dir}/admin-client.crt" \
+    --key "${work_dir}/admin-client.key" \
+    --header "@${work_dir}/admin-headers.txt" \
+    --header "Content-Type: application/json" \
+    --header "If-Match: ${etag}" \
+    --request POST \
+    --data-binary "@${request}" \
+    --dump-header "${response_headers}" \
+    --output "${response_body}" \
+    --write-out '%{http_code}' \
+    "https://${admin_server_name}:${port}/admin/v1/config/secret-references/update")" \
+    || die "Admin immutable secret-reference probe did not complete"
+  [[ "${http_status}" == "409" ]] \
+    || die "immutable secret-reference activation returned HTTP ${http_status}, expected 409"
+  jq -e '.error.code == "immutable_rollout_conflict"' "${response_body}" >/dev/null \
+    || die "immutable secret-reference activation did not return immutable_rollout_conflict"
+  if grep -Fq "OXIBELT_IMMUTABLE_PROBE_UNUSED" "${response_body}" "${response_headers}" \
+    || grep -Fq -f "${work_dir}/admin-token" "${response_body}" "${response_headers}"; then
+    die "immutable secret-reference rejection leaked request reference or bearer material"
+  fi
+
+  admin_get_json "${port}" "/admin/v1/config/status" "${status_after}"
+  state_after="$(jq -cer '
+    {
+      revision,
+      etag,
+      rollout: {
+        rollout_mode: .rollout.rollout_mode,
+        desired_revision: .rollout.desired_revision,
+        applied_revision: .rollout.applied_revision,
+        digest: .rollout.digest,
+        apply_state: .rollout.apply_state
+      }
+    }
+  ' "${status_after}")" \
+    || die "Admin config status became invalid after immutable mutation rejection"
+  [[ "${state_after}" == "${state_before}" ]] \
+    || die "immutable secret-reference rejection changed config revision or rollout identity"
+}
+
 verify_admin_mtls() {
   local pod="$1"
   local port="$2"
@@ -496,6 +616,7 @@ verify_admin_mtls() {
   start_admin_port_forward "${pod}" "${port}" authenticated-before-rejection
   admin_endpoint_accepts_client "${port}" \
     || die "Admin listener rejected the configured mTLS client and bearer token before the rejection probe"
+  verify_admin_immutable_secret_boundary "${port}"
   stop_admin_port_forward
 
   tls_failures_before="$(admin_tls_handshake_failure_count "${pod}")" \

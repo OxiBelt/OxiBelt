@@ -52,9 +52,10 @@ pub(super) async fn finalize_response(
       .map(|value| (name, value))
   })
   .collect::<Vec<_>>();
-  let (message, body_details) = error_body(response.into_body(), status).await;
+  let (code, message, body_details) = error_body(response.into_body(), status).await;
   let details = merge_details(body_details, audit.error_details(status));
-  let mut response = error_envelope_response(status, &message, &request_id, details);
+  let mut response =
+    error_envelope_response_with_code(status, code, &message, &request_id, details);
   for (name, value) in mutation_headers {
     response.headers_mut().insert(name, value);
   }
@@ -84,11 +85,27 @@ pub(super) fn error_envelope_response(
   request_id: &str,
   details: Option<Value>,
 ) -> Response<ProxyBody> {
+  error_envelope_response_with_code(
+    status,
+    code_for_status(status),
+    message,
+    request_id,
+    details,
+  )
+}
+
+fn error_envelope_response_with_code(
+  status: StatusCode,
+  code: &'static str,
+  message: &str,
+  request_id: &str,
+  details: Option<Value>,
+) -> Response<ProxyBody> {
   let response = json_response(
     status,
     &AdminErrorEnvelope {
       error: AdminError {
-        code: code_for_status(status),
+        code,
         message,
         details,
       },
@@ -111,23 +128,34 @@ fn with_admin_headers(mut response: Response<ProxyBody>, request_id: &str) -> Re
   response
 }
 
-async fn error_body(body: ProxyBody, status: StatusCode) -> (String, Option<Value>) {
+async fn error_body(body: ProxyBody, status: StatusCode) -> (&'static str, String, Option<Value>) {
   let Ok(collected) = body.collect().await else {
-    return (default_message(status).to_string(), None);
+    return (
+      code_for_status(status),
+      default_message(status).to_string(),
+      None,
+    );
   };
   parse_error_body(status, &collected.to_bytes())
 }
 
-fn parse_error_body(status: StatusCode, bytes: &Bytes) -> (String, Option<Value>) {
+fn parse_error_body(status: StatusCode, bytes: &Bytes) -> (&'static str, String, Option<Value>) {
   if bytes.is_empty() {
-    return (default_message(status).to_string(), None);
+    return (
+      code_for_status(status),
+      default_message(status).to_string(),
+      None,
+    );
   }
   if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+    let code = json_error_code(&value)
+      .and_then(allowlisted_error_code)
+      .unwrap_or_else(|| code_for_status(status));
     let message = json_error_message(&value)
       .or_else(|| value.get("message").and_then(Value::as_str))
       .unwrap_or_else(|| default_message(status))
       .to_string();
-    return (message, json_error_details(&value));
+    return (code, message, json_error_details(&value));
   }
   let message = std::str::from_utf8(bytes)
     .map(str::trim)
@@ -135,7 +163,24 @@ fn parse_error_body(status: StatusCode, bytes: &Bytes) -> (String, Option<Value>
     .filter(|value| !value.is_empty())
     .unwrap_or_else(|| default_message(status))
     .to_string();
-  (message, None)
+  (code_for_status(status), message, None)
+}
+
+fn json_error_code(value: &Value) -> Option<&str> {
+  value.get("code").and_then(Value::as_str).or_else(|| {
+    value
+      .get("error")
+      .and_then(Value::as_object)
+      .and_then(|error| error.get("code"))
+      .and_then(Value::as_str)
+  })
+}
+
+fn allowlisted_error_code(candidate: &str) -> Option<&'static str> {
+  super::ADMIN_ERROR_CODE_VALUES
+    .iter()
+    .copied()
+    .find(|allowed| *allowed == candidate)
 }
 
 fn json_error_message(value: &Value) -> Option<&str> {
@@ -259,6 +304,17 @@ mod tests {
     );
   }
 
+  #[test]
+  fn secret_activation_codes_are_all_allowlisted() {
+    for code in crate::secret_activation::SECRET_ACTIVATION_ERROR_CODE_VALUES {
+      assert_eq!(
+        allowlisted_error_code(code),
+        Some(*code),
+        "secret activation code {code} must remain a bounded Admin error code"
+      );
+    }
+  }
+
   #[tokio::test]
   async fn envelope_omits_empty_details_and_sets_headers() {
     let response = error_envelope_response(StatusCode::NOT_FOUND, "not found", "req-1", None);
@@ -318,6 +374,73 @@ mod tests {
     assert_eq!(body["error"]["code"], "precondition_required");
     assert_eq!(body["error"]["details"]["header"], "If-Match");
     assert_eq!(body["error"]["details"]["expected"], "\"oxibelt-config-1\"");
+  }
+
+  #[tokio::test]
+  async fn finalize_preserves_only_allowlisted_handler_codes() {
+    let audit = AdminAuditHandle::new(
+      "127.0.0.1:12345".parse().expect("peer address"),
+      "http",
+      &Method::POST,
+      "/admin/v1/config/secret-references/update",
+      None,
+    );
+    let allowed = json_response(
+      StatusCode::CONFLICT,
+      &json!({
+        "error": "secret reference activation is controlled by immutable rollout",
+        "code": "immutable_rollout_conflict",
+      }),
+    );
+    let allowed = finalize_response(allowed, &audit).await;
+    let body = allowed.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "immutable_rollout_conflict");
+
+    let nested = json_response(
+      StatusCode::CONFLICT,
+      &json!({
+        "error": {
+          "code": "secret_activation_snapshot_conflict",
+          "message": "secret reference activation failed",
+        },
+      }),
+    );
+    let nested = finalize_response(nested, &audit).await;
+    let body = nested.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "secret_activation_snapshot_conflict");
+
+    let unknown = json_response(
+      StatusCode::CONFLICT,
+      &json!({
+        "error": "secret reference activation failed",
+        "code": "attacker_selected_error_code",
+      }),
+    );
+    let unknown = finalize_response(unknown, &audit).await;
+    let body = unknown.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "conflict");
+
+    let nested_unknown = json_response(
+      StatusCode::CONFLICT,
+      &json!({
+        "error": {
+          "code": "attacker_selected_nested_error_code",
+          "message": "secret reference activation failed",
+        },
+      }),
+    );
+    let nested_unknown = finalize_response(nested_unknown, &audit).await;
+    let body = nested_unknown
+      .into_body()
+      .collect()
+      .await
+      .unwrap()
+      .to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "conflict");
   }
 
   #[tokio::test]

@@ -30,6 +30,8 @@ pub(crate) use field::SecretReferenceField;
 use field::collect_reference_specs;
 #[cfg(feature = "admin-runtime")]
 use preflight::{preflight_certificate_material, preflight_upstream_tls};
+#[cfg(all(feature = "admin-runtime", test))]
+pub(crate) use resolver::SECRET_ACTIVATION_ERROR_CODE_VALUES;
 pub(crate) use resolver::SecretActivationError;
 use resolver::resolve_spec;
 #[cfg(feature = "admin-runtime")]

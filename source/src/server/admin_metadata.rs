@@ -75,7 +75,9 @@ fn capabilities_response(
     "admin_audit": snapshot.config.admin.audit.enabled,
     "admin_audit_anchoring": snapshot.config.admin.audit.anchor.enabled,
     "admin_mutation_replay": snapshot.config.admin.mutations.mode.enabled(),
-    "atomic_secret_reference_activation": !snapshot.config.rollout.is_immutable(),
+    "atomic_secret_reference_activation": atomic_secret_reference_activation_available(
+      snapshot.config.rollout.blocks_per_pod_mutation()
+    ),
   });
   debug_assert_capability_feature_keys(&features);
   let workload_identity = &snapshot.config.admin.workload_identity;
@@ -105,6 +107,10 @@ fn capabilities_response(
       },
     }),
   )
+}
+
+const fn atomic_secret_reference_activation_available(blocks_per_pod_mutation: bool) -> bool {
+  !blocks_per_pod_mutation
 }
 
 fn debug_assert_capability_feature_keys(features: &Value) {
@@ -149,4 +155,15 @@ fn static_json_response(status: StatusCode, value: &'static str) -> Response<Pro
     ::http::HeaderValue::from_static("application/json"),
   );
   response
+}
+
+#[cfg(test)]
+mod tests {
+  use super::atomic_secret_reference_activation_available;
+
+  #[test]
+  fn atomic_secret_reference_activation_tracks_per_pod_mutation_policy() {
+    assert!(atomic_secret_reference_activation_available(false));
+    assert!(!atomic_secret_reference_activation_available(true));
+  }
 }

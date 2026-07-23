@@ -198,12 +198,27 @@ fn admin_openapi_enums_match_runtime_wire_contracts() {
 fn admin_wire_values_are_documented_in_feature_matrix() {
   let feature_status = read_repo_file("docs/FeatureStatus.md");
   for values in [
-    ADMIN_CAPABILITY_FEATURE_KEYS,
     ADMIN_OPERATION_KIND_WIRE_VALUES,
     ADMIN_OPERATION_STATE_WIRE_VALUES,
   ] {
     assert_values_appear("docs/FeatureStatus.md", &feature_status, values);
   }
+
+  let description = feature_status_description("admin-api-runtime-control");
+  let capabilities = description
+    .strip_prefix("Admin capabilities: ")
+    .expect("admin-api-runtime-control must start with its capability inventory")
+    .split_once(". ")
+    .expect("Admin capability inventory must end before its explanatory text")
+    .0
+    .split(", ")
+    .map(markdown_code_value)
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    capabilities,
+    string_set(ADMIN_CAPABILITY_FEATURE_KEYS),
+    "admin-api-runtime-control must document the exact runtime capability inventory"
+  );
 }
 
 fn feature_statuses() -> BTreeMap<String, String> {
@@ -230,6 +245,24 @@ fn feature_statuses() -> BTreeMap<String, String> {
     );
   }
   statuses
+}
+
+fn feature_status_description(feature_id: &str) -> String {
+  for line in read_repo_file("docs/FeatureStatus.md").lines() {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') {
+      continue;
+    }
+    let cells = trimmed
+      .trim_matches('|')
+      .split('|')
+      .map(str::trim)
+      .collect::<Vec<_>>();
+    if cells.len() >= 4 && markdown_code_value(cells[0]) == feature_id {
+      return cells[3].to_string();
+    }
+  }
+  panic!("docs/FeatureStatus.md must include feature ID {feature_id}");
 }
 
 fn markdown_code_value(value: &str) -> String {

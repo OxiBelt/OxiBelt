@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use oxibelt::server::ADMIN_ERROR_CODE_VALUES;
 use serde_json::Value;
 
 fn repo_root() -> PathBuf {
@@ -27,6 +28,13 @@ fn admin_openapi_is_31_and_covers_current_v1_paths() {
   assert_eq!(
     documented, expected,
     "source/assets/admin-openapi.json must cover every current /admin/v1 operation exactly"
+  );
+
+  let operation_ids = documented_operation_ids(&spec);
+  assert_eq!(
+    operation_ids.len(),
+    documented.len(),
+    "every current /admin/v1 operation must have one unique nonempty operationId"
   );
 }
 
@@ -117,6 +125,7 @@ fn admin_error_responses_use_json_envelope_and_headers() {
     "Forbidden",
     "Conflict",
     "ImmutableRolloutConflict",
+    "SecretReferenceActivationConflict",
     "NotFound",
     "PreconditionFailed",
     "PreconditionRequired",
@@ -140,6 +149,30 @@ fn admin_error_responses_use_json_envelope_and_headers() {
       "{name} must declare X-OxiBelt-API-Version"
     );
   }
+
+  let error_enum = &spec["components"]["schemas"]["AdminError"]["properties"]["code"]["enum"];
+  let documented_error_codes = json_string_set(error_enum, "AdminError.code.enum");
+  let runtime_error_codes = ADMIN_ERROR_CODE_VALUES
+    .iter()
+    .map(|value| (*value).to_string())
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    error_enum
+      .as_array()
+      .expect("AdminError.code.enum must be an array")
+      .len(),
+    documented_error_codes.len(),
+    "AdminError.code.enum must not contain duplicate values"
+  );
+  assert_eq!(
+    ADMIN_ERROR_CODE_VALUES.len(),
+    runtime_error_codes.len(),
+    "runtime Admin error allowlist must not contain duplicate values"
+  );
+  assert_eq!(
+    documented_error_codes, runtime_error_codes,
+    "AdminError.code must exactly match the runtime finalizer allowlist"
+  );
 }
 
 #[test]
@@ -318,6 +351,174 @@ fn immutable_rollout_status_and_mutation_boundaries_are_documented() {
 }
 
 #[test]
+fn secret_reference_activation_contract_is_strict_and_conditional() {
+  let spec = openapi();
+  let operation = &spec["paths"]["/admin/v1/config/secret-references/update"]["post"];
+  assert_eq!(operation["operationId"], "updateSecretReference");
+  assert_eq!(
+    operation["responses"]
+      .as_object()
+      .expect("secret-reference responses must be an object")
+      .keys()
+      .cloned()
+      .collect::<BTreeSet<_>>(),
+    [
+      "200", "400", "401", "403", "409", "412", "413", "428", "503",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+  );
+  assert_eq!(
+    operation["responses"]["200"]["$ref"],
+    "#/components/responses/SecretReferenceActivationResult"
+  );
+  assert_eq!(
+    operation["responses"]["409"]["$ref"],
+    "#/components/responses/SecretReferenceActivationConflict"
+  );
+  for response_name in [
+    "SecretReferenceActivationResult",
+    "SecretReferenceActivationConflict",
+  ] {
+    let headers = spec["components"]["responses"][response_name]["headers"]
+      .as_object()
+      .unwrap_or_else(|| panic!("{response_name} headers must be an object"));
+    for header in [
+      "X-OxiBelt-Request-Id",
+      "X-OxiBelt-API-Version",
+      "X-OxiBelt-Mutation-Request-Id",
+      "X-OxiBelt-Mutation-Revision",
+      "X-OxiBelt-Idempotent-Replay",
+    ] {
+      assert!(
+        headers.contains_key(header),
+        "{response_name} must declare {header}"
+      );
+    }
+  }
+  let conflict = &spec["components"]["responses"]["SecretReferenceActivationConflict"];
+  assert_eq!(
+    conflict["content"]["application/json"]["schema"]["$ref"],
+    "#/components/schemas/AdminErrorEnvelope"
+  );
+  let conflict_description = conflict["description"]
+    .as_str()
+    .expect("secret-reference conflict must describe its broad boundary");
+  for value in [
+    "immutable rollout",
+    "target or material",
+    "runtime preflight",
+    "validation evidence",
+    "snapshot",
+    "mutation claim",
+  ] {
+    assert!(
+      conflict_description.contains(value),
+      "secret-reference conflict must mention {value}"
+    );
+  }
+  let description = operation["description"]
+    .as_str()
+    .expect("secret-reference activation must describe rollout availability");
+  for value in [
+    "mutable",
+    "admin_cluster",
+    "Kubernetes immutable",
+    "immutable_rollout_conflict",
+    "atomic_secret_reference_activation",
+  ] {
+    assert!(
+      description.contains(value),
+      "secret-reference activation description must mention {value}"
+    );
+  }
+
+  let result = &spec["components"]["schemas"]["SecretReferenceActivationResult"]["oneOf"];
+  let variants = result
+    .as_array()
+    .expect("SecretReferenceActivationResult.oneOf must be an array");
+  assert_eq!(variants.len(), 2);
+  let first = &variants[0];
+  assert_eq!(first["additionalProperties"], false);
+  assert_eq!(
+    json_string_set(&first["required"], "first activation result required"),
+    [
+      "ok",
+      "request_id",
+      "config_logical_revision",
+      "reference_set_digest",
+      "runtime_snapshot_revision",
+      "target_revision",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+  );
+  assert_eq!(
+    first["properties"]
+      .as_object()
+      .expect("first activation result properties must be an object")
+      .keys()
+      .cloned()
+      .collect::<BTreeSet<_>>(),
+    json_string_set(&first["required"], "first activation result required")
+  );
+  assert_eq!(first["properties"]["ok"]["const"], true);
+  assert_eq!(
+    first["properties"]["reference_set_digest"]["pattern"],
+    "^sha256:[a-f0-9]{64}$"
+  );
+  assert!(first["properties"].get("token_recoverable").is_none());
+
+  let replay = &variants[1];
+  assert_eq!(replay["additionalProperties"], false);
+  assert_eq!(
+    json_string_set(&replay["required"], "replayed activation result required"),
+    ["ok", "token_recoverable"]
+      .into_iter()
+      .map(str::to_string)
+      .collect()
+  );
+  assert_eq!(replay["properties"]["ok"]["const"], true);
+  assert_eq!(replay["properties"]["token_recoverable"]["const"], false);
+  assert_eq!(replay["properties"]["state"]["const"], "committed");
+  assert_eq!(
+    replay["properties"]
+      .as_object()
+      .expect("replayed activation result properties must be an object")
+      .keys()
+      .cloned()
+      .collect::<BTreeSet<_>>(),
+    [
+      "ok",
+      "token_recoverable",
+      "state",
+      "request_id",
+      "config_logical_revision",
+      "reference_set_digest",
+      "runtime_snapshot_revision",
+      "target_revision",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+  );
+
+  let capability = &spec["components"]["schemas"]["AdminCapabilities"]["properties"]["features"]["properties"]
+    ["atomic_secret_reference_activation"];
+  let description = capability["description"]
+    .as_str()
+    .expect("atomic secret-reference capability must describe availability");
+  for value in ["mutable", "admin_cluster", "kubernetes_immutable"] {
+    assert!(
+      description.contains(value),
+      "atomic secret-reference capability must mention {value}"
+    );
+  }
+}
+
+#[test]
 fn dynamic_policy_and_upstream_mutations_declare_etag_preconditions() {
   let spec = openapi();
   for (method, path) in [
@@ -464,9 +665,14 @@ fn high_risk_mutations_declare_signed_replay_contract() {
       .get("200")
       .or_else(|| operation["responses"].get("201"))
       .unwrap_or_else(|| panic!("{method} {path} must document a terminal success"));
+    let expected_response = if path == "/admin/v1/config/secret-references/update" {
+      "#/components/responses/SecretReferenceActivationResult"
+    } else {
+      "#/components/responses/MutationResult"
+    };
     assert_eq!(
-      success["$ref"], "#/components/responses/MutationResult",
-      "{method} {path} must use the mutation result headers"
+      success["$ref"], expected_response,
+      "{method} {path} must use its protected-mutation result headers"
     );
   }
 
@@ -987,6 +1193,36 @@ fn documented_operations(spec: &Value) -> BTreeSet<(String, String)> {
     }
   }
   documented
+}
+
+fn documented_operation_ids(spec: &Value) -> BTreeSet<String> {
+  let paths = spec["paths"]
+    .as_object()
+    .expect("OpenAPI paths should be an object");
+  let mut operation_ids = BTreeSet::new();
+  for (path, item) in paths {
+    if !path.starts_with("/admin/v1/") {
+      continue;
+    }
+    let item = item.as_object().expect("path item should be an object");
+    for method in ["get", "post", "patch", "delete"] {
+      let Some(operation) = item.get(method) else {
+        continue;
+      };
+      let operation_id = operation["operationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{method} {path} must have an operationId"));
+      assert!(
+        !operation_id.trim().is_empty(),
+        "{method} {path} operationId must not be empty"
+      );
+      assert!(
+        operation_ids.insert(operation_id.to_string()),
+        "{method} {path} duplicates operationId {operation_id}"
+      );
+    }
+  }
+  operation_ids
 }
 
 fn operation_parameter_names(spec: &Value, path: &str, method: &str) -> BTreeSet<String> {

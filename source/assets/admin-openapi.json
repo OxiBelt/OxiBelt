@@ -929,7 +929,8 @@
           "config"
         ],
         "operationId": "updateSecretReference",
-        "summary": "Preflight and atomically activate one allowlisted secret reference as a complete runtime snapshot.",
+        "summary": "Preflight and atomically activate one allowlisted secret reference when per-Pod mutation is enabled.",
+        "description": "Supported in mutable and fixed-member admin_cluster runtimes. Kubernetes immutable rollout mode rejects local activation with 409 and code immutable_rollout_conflict; the atomic_secret_reference_activation capability reports this availability.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IfMatch"
@@ -943,7 +944,7 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/MutationResult"
+            "$ref": "#/components/responses/SecretReferenceActivationResult"
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -955,7 +956,7 @@
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/SecretReferenceActivationConflict"
           },
           "412": {
             "$ref": "#/components/responses/PreconditionFailed"
@@ -5829,6 +5830,33 @@
           }
         }
       },
+      "SecretReferenceActivationResult": {
+        "description": "First application or reduced exact-replay result for a successful atomic secret-reference activation. Secret values and provider paths are never returned.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          },
+          "X-OxiBelt-Mutation-Request-Id": {
+            "$ref": "#/components/headers/MutationRequestId"
+          },
+          "X-OxiBelt-Mutation-Revision": {
+            "$ref": "#/components/headers/MutationRevision"
+          },
+          "X-OxiBelt-Idempotent-Replay": {
+            "$ref": "#/components/headers/IdempotentReplay"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SecretReferenceActivationResult"
+            }
+          }
+        }
+      },
       "MutationReceipt": {
         "description": "Bounded redacted protected-mutation receipt containing the durable logical revision chain and reduced safe replay result.",
         "headers": {
@@ -5998,6 +6026,33 @@
           },
           "X-OxiBelt-API-Version": {
             "$ref": "#/components/headers/AdminApiVersion"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminErrorEnvelope"
+            }
+          }
+        }
+      },
+      "SecretReferenceActivationConflict": {
+        "description": "Activation conflicts with Kubernetes immutable rollout authority, the selected target or material, candidate runtime preflight, validation evidence, active snapshot state, or protected-mutation claim state.",
+        "headers": {
+          "X-OxiBelt-Request-Id": {
+            "$ref": "#/components/headers/AdminRequestId"
+          },
+          "X-OxiBelt-API-Version": {
+            "$ref": "#/components/headers/AdminApiVersion"
+          },
+          "X-OxiBelt-Mutation-Request-Id": {
+            "$ref": "#/components/headers/MutationRequestId"
+          },
+          "X-OxiBelt-Mutation-Revision": {
+            "$ref": "#/components/headers/MutationRevision"
+          },
+          "X-OxiBelt-Idempotent-Replay": {
+            "$ref": "#/components/headers/IdempotentReplay"
           }
         },
         "content": {
@@ -6995,6 +7050,100 @@
         },
         "additionalProperties": false
       },
+      "SecretReferenceActivationResult": {
+        "oneOf": [
+          {
+            "title": "FirstSecretReferenceActivationResult",
+            "type": "object",
+            "required": [
+              "ok",
+              "request_id",
+              "config_logical_revision",
+              "reference_set_digest",
+              "runtime_snapshot_revision",
+              "target_revision"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean",
+                "const": true
+              },
+              "request_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "config_logical_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "reference_set_digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "runtime_snapshot_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "target_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "title": "ReplayedSecretReferenceActivationResult",
+            "type": "object",
+            "required": [
+              "ok",
+              "token_recoverable"
+            ],
+            "properties": {
+              "ok": {
+                "type": "boolean",
+                "const": true
+              },
+              "token_recoverable": {
+                "type": "boolean",
+                "const": false
+              },
+              "state": {
+                "type": "string",
+                "const": "committed"
+              },
+              "request_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "config_logical_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "reference_set_digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "runtime_snapshot_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "target_revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
       "BreakGlassActivationRequest": {
         "type": "object",
         "required": [
@@ -7795,15 +7944,43 @@
               "method_not_allowed",
               "conflict",
               "etag_mismatch",
-              "mutation_conflict",
               "mutation_required",
               "mutation_digest_mismatch",
               "mutation_expired",
               "mutation_not_yet_valid",
               "mutation_indeterminate",
+              "mutation_failed",
               "mutation_store_unavailable",
               "invalid_mutation_signature",
               "invalid_mutation_envelope",
+              "mutation_request_id_conflict",
+              "mutation_revision_conflict",
+              "mutation_in_progress",
+              "mutation_target_conflict",
+              "immutable_rollout_conflict",
+              "secret_reference_version_unsupported",
+              "secret_reference_field_not_allowlisted",
+              "secret_reference_invalid",
+              "secret_reference_target_not_found",
+              "secret_reference_target_ambiguous",
+              "secret_reference_missing",
+              "secret_reference_unauthorized",
+              "secret_reference_provider_unavailable",
+              "secret_reference_type_mismatch",
+              "secret_reference_size_exceeded",
+              "secret_reference_digest_mismatch",
+              "secret_material_invalid_format",
+              "secret_certificate_key_mismatch",
+              "secret_certificate_expired",
+              "secret_certificate_not_yet_valid",
+              "secret_ca_bundle_invalid",
+              "secret_upstream_tls_preflight_failed",
+              "secret_hostname_validation_failed",
+              "secret_client_identity_unusable",
+              "secret_activation_snapshot_conflict",
+              "secret_activation_validation_evidence_mismatch",
+              "secret_activation_rollback_failed",
+              "secret_activation_entropy_unavailable",
               "payload_too_large",
               "precondition_required",
               "control_plane_unavailable",
@@ -8656,7 +8833,8 @@
                 "type": "boolean"
               },
               "atomic_secret_reference_activation": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "True for mutable and fixed-member admin_cluster runtimes; false when per-Pod mutation is blocked, including kubernetes_immutable rollout mode."
               }
             },
             "additionalProperties": false

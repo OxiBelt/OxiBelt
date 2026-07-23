@@ -94,6 +94,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py
 
+      - name: Check documentation links and anchors
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m unittest tests/scripts/test-check-markdown-links.py
+          python3 tests/scripts/check-markdown-links.py --repo-root .
+
       - name: Rust module size
         run: tests/scripts/check-rust-module-size.sh
 

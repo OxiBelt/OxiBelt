@@ -6,6 +6,8 @@ image do not compile or embed the Admin listener, mutation/operation runtime,
 or this OpenAPI asset. Deploy a compatibility artifact when any endpoint in
 this document is required.
 
+Admin API image roles: with Admin and its OpenAPI asset: `standalone`, `dataplane`; without Admin and its OpenAPI asset: `dataplane-strict`, `controller`, `tools`, `keysigner`.
+
 OxiBelt exposes its authenticated control-plane API on the configured
 `[admin]` listener. The canonical machine-readable contract is
 `source/assets/admin-openapi.json`, an OpenAPI 3.1 document for the current
@@ -33,6 +35,9 @@ or configured Admin features, active mTLS workload-identity binding mode, and
 request-size limits used by the Admin API.
 `features.admin_mutation_replay` is true when `[admin.mutations]` is in
 `optional` or `required` mode.
+`features.atomic_secret_reference_activation` is true in mutable
+`single_instance` and fixed-member `admin_cluster` modes and false in
+`kubernetes_immutable` mode.
 `features.admin_audit_anchoring` is true when external audit anchoring is
 configured. The top-level `audit_anchoring` object reports `enabled`, the
 effective `policy` (`disabled`, `best_effort`, or `required`), runtime `state`
@@ -382,9 +387,11 @@ transport. It publishes a Kubernetes immutable ConfigMap, updates the selected
 workload, and relies on per-Pod revision/digest proof. In
 `kubernetes_immutable` deployment mode, `POST /admin/v1/config/load`,
 `POST /admin/v1/config/rollback`, `POST /admin/v1/files/sync`, and
-`POST /admin/v1/tls/downstream/reload` return `409` so one Pod cannot diverge
-from its assigned revision. Read-only status, effective-config, validation, and
-diff endpoints remain available to operators.
+`POST /admin/v1/config/secret-references/update`, and
+`POST /admin/v1/tls/downstream/reload` return
+`409 immutable_rollout_conflict` so one Pod cannot diverge from its assigned
+revision. Read-only status, effective-config, validation, and diff endpoints
+remain available to operators.
 
 `[admin.mutations.rollout] mode = "admin_cluster"` enables the PostgreSQL-backed
 fixed-member rollout authority. It requires mutation mode `required`, matching
@@ -512,14 +519,26 @@ for an affected configured HTTPS provider. Only a complete candidate is installe
 with one compare-and-swap operation. A failure or competing mutation leaves the
 old snapshot active.
 
-A successful response and replay-safe receipt contain only `request_id`,
+A first successful response contains `ok = true`, `request_id`,
 `config_logical_revision`, `reference_set_digest`,
-`runtime_snapshot_revision`, and `target_revision`; references, environment
-values, file paths, and plaintext material are not returned or written to the
-mutation ledger. Stable `secret_*` error codes identify the rejected phase
-without provider details. The prior snapshot remains rollback-capable for a
-bounded connection-drain grace period and is then dropped. In Kubernetes
-immutable rollout mode the endpoint returns `409 immutable_rollout_conflict`. In
+`runtime_snapshot_revision`, and `target_revision`. A protected replay-safe
+result also contains `token_recoverable = false` and may include `state`; the
+five binding fields are present only when the retained terminal evidence still
+provides them. References, environment values, file paths, and plaintext
+material are never returned or written to the mutation ledger. Stable
+allowlisted `secret_*` error codes identify the rejected phase without provider
+details. The endpoint returns `200` after an atomic activation; `400` for a
+malformed, unsupported, non-allowlisted, or invalid reference; `401` for
+invalid authentication or mutation-signer identity; `403` for failed IPM
+authorization or a forbidden file; `409` for activation, preflight, snapshot,
+mutation, or immutable-rollout conflicts; `412` for stale `If-Match`; `413`
+above the 16 KiB request limit; `428` for missing `If-Match` or required
+mutation metadata; and `503` for an unavailable provider, entropy source,
+mutation store, audit authority, or cluster rollout dependency. A rejected
+request leaves the active snapshot unchanged. The prior successful snapshot
+remains rollback-capable for a bounded connection-drain grace period and is
+then dropped. In Kubernetes immutable rollout mode the endpoint returns
+`409 immutable_rollout_conflict`. In
 `[ipm.break_glass] access_mode = "two_factor_activation"`, an inactive
 break-glass credential can access only its self-status and activation route;
 activation additionally requires a signer bound to that principal and creates

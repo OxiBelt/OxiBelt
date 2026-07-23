@@ -2604,15 +2604,19 @@ performs one atomic snapshot compare-and-swap. Readers retain their complete old
 snapshot or acquire the complete new one. Candidate failure or a competing
 activation leaves the old snapshot active.
 
-Successful metadata binds the mutation request, logical config revision, keyed
-reference-set digest, runtime snapshot revision, and instance or cluster rollout
-target. Only those redacted values may enter receipts, audit records, logs, and
-metrics. `admin_cluster` requires every configured member to report the same
-reference-set digest and runtime revision before canary apply. A prior snapshot
-is retained for the larger of the connection-drain and rollout timeout windows,
-remains available to rollback during that grace, and is then dropped. Owned
-candidate buffers and replaced remote-signer tokens are zeroized on drop; memory
-copied into TLS or HTTP libraries is not claimed to be zeroized.
+The first successful response contains `ok = true` and binds the mutation
+request, logical config revision, keyed reference-set digest, runtime snapshot
+revision, and instance or cluster rollout target. A protected replay-safe
+result also contains `token_recoverable = false` and may include `state`; those
+five binding fields are present only while the retained terminal evidence can
+provide them. References, environment names, paths, and plaintext material are
+not returned. Only the bounded redacted result may enter receipts, audit
+records, logs, and metrics. `admin_cluster` requires every configured member to
+report the same reference-set digest and runtime revision before canary apply.
+A prior snapshot is retained for the larger of the connection-drain and rollout
+timeout windows, remains available to rollback during that grace, and is then
+dropped. Owned candidate buffers and replaced remote-signer tokens are zeroized
+on drop; memory copied into TLS or HTTP libraries is not claimed to be zeroized.
 
 IPM (Identity Permission Management) is the authorization model for Admin APIs and opt-in data-plane authorization. The legacy `admin.rbac.tokens`, role names, and `permissions`/`deny_permissions` fields are rejected; use `[ipm]`, `[[ipm.credentials]]`, `[[ipm.principals]]`, `[[ipm.policies]]`, and `[[ipm.bindings]]` instead. IPM evaluates `Action`, `Resource`, and `Condition` statements with explicit deny first, matching allow second, and default deny otherwise. `admin.bearer_token_env` is retained only as a bootstrap fallback when `[ipm].enabled = false`.
 
@@ -2895,8 +2899,16 @@ authoritative convergence proof. `POST /admin/v1/keys/rotate` verifies and
 reloads only the configured default or SNI downstream TLS key path. `POST
 /admin/v1/config/secret-references/update` validates the allowlisted reference
 shape, preflights the complete runtime candidate, and atomically activates it.
-The response contains only bound revisions and a keyed reference-set digest;
-Kubernetes immutable rollout mode returns an immutable-rollout conflict. Break-glass activation is
+The endpoint returns `200` with bounded revision/digest bindings on success;
+`400` for malformed, unsupported, non-allowlisted, or invalid references;
+`401` for invalid authentication or mutation-signer identity; `403` for failed
+IPM authorization or a forbidden file; `409` for activation, preflight,
+snapshot, mutation, or immutable-rollout conflicts; `412` for stale
+`If-Match`; `413` above the 16 KiB request limit; `428` for missing `If-Match`
+or required mutation metadata; and `503` for an unavailable provider, entropy
+source, mutation store, audit authority, or cluster rollout dependency.
+Kubernetes immutable rollout mode specifically returns
+`409 immutable_rollout_conflict` without changing state. Break-glass activation is
 exposed through `GET /admin/v1/break-glass/activations/self`,
 `POST /admin/v1/break-glass/activations`, and
 `POST /admin/v1/break-glass/activations/{id}/revoke`.

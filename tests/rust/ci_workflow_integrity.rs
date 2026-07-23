@@ -1213,6 +1213,11 @@ fn source_structure_job_stays_independent() {
     workflow.contains("bash tests/scripts/check-native-config-schema.sh"),
     "source-structure should enforce native configuration schema drift"
   );
+  assert!(
+    workflow.contains("python3 -m unittest tests/scripts/test-check-markdown-links.py")
+      && workflow.contains("python3 tests/scripts/check-markdown-links.py --repo-root ."),
+    "source-structure should enforce documentation links and anchors"
+  );
 }
 
 #[test]
@@ -1255,6 +1260,77 @@ fn release_image_rebuild_comparator_regressions_are_ci_gated() {
   assert!(
     checkout_position < position,
     "the release-image rebuild comparator tests require the checked-out repository"
+  );
+}
+
+#[test]
+fn documentation_link_checker_is_ci_gated() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let steps = parsed["jobs"]["source-structure"]["steps"]
+    .as_array()
+    .expect("source-structure should define steps");
+  let unit_command = "python3 -m unittest tests/scripts/test-check-markdown-links.py";
+  let check_command = "python3 tests/scripts/check-markdown-links.py --repo-root .";
+  let matching_steps = steps
+    .iter()
+    .enumerate()
+    .filter(|(_, step)| {
+      step["run"].as_str().is_some_and(|run| {
+        let commands = run.lines().collect::<Vec<_>>();
+        commands == [unit_command, check_command]
+      })
+    })
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    matching_steps.len(),
+    1,
+    "source-structure should run the documentation link unit tests and repository check together exactly once"
+  );
+  let (position, step) = matching_steps[0];
+  assert_eq!(
+    step["name"].as_str(),
+    Some("Check documentation links and anchors")
+  );
+  assert_eq!(
+    step["env"],
+    serde_json::json!({"PYTHONDONTWRITEBYTECODE": "1"})
+  );
+  assert_eq!(
+    steps
+      .iter()
+      .filter_map(|step| step["run"].as_str())
+      .map(|run| run.matches(unit_command).count())
+      .sum::<usize>(),
+    1,
+    "source-structure should execute the documentation link unit tests exactly once"
+  );
+  assert_eq!(
+    steps
+      .iter()
+      .filter_map(|step| step["run"].as_str())
+      .map(|run| run.matches(check_command).count())
+      .sum::<usize>(),
+    1,
+    "source-structure should execute the repository documentation link check exactly once"
+  );
+  assert!(
+    step.get("continue-on-error").is_none(),
+    "the documentation link gate must fail closed"
+  );
+  let checkout_position = steps
+    .iter()
+    .position(|step| {
+      step["uses"]
+        .as_str()
+        .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+    })
+    .expect("source-structure should check out the repository");
+  assert!(
+    checkout_position < position,
+    "the documentation link checker requires the checked-out repository"
   );
 }
 
@@ -2384,6 +2460,13 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "openssl rand -hex 32 | tr -d '\\r\\n' >\"${work_dir}/admin-token\"",
     "grep -Eq '^[a-f0-9]{64}$' \"${work_dir}/admin-token\"",
     "verify_admin_mtls",
+    "verify_admin_immutable_secret_boundary",
+    "/admin/v1/config/secret-references/update",
+    ".features.atomic_secret_reference_activation == false",
+    "tls.remote_signer.token_env",
+    "OXIBELT_IMMUTABLE_PROBE_UNUSED",
+    ".error.code == \"immutable_rollout_conflict\"",
+    "immutable secret-reference rejection changed config revision or rollout identity",
     "Admin listener completed an HTTP exchange without a client certificate",
     ".projected.defaultMode == 288",
     "automountServiceAccountToken == false",
@@ -2541,6 +2624,13 @@ fn kubernetes_immutable_rollout_admin_mtls_probe_is_connection_isolated() {
     .split_once("\n}\n\nadmin_tls_handshake_failure_count() {")
     .expect("Admin Pod identity capture should precede TLS rejection evidence")
     .0;
+  let immutable_boundary = script
+    .split_once("verify_admin_immutable_secret_boundary() {")
+    .expect("rollout harness should define the immutable secret-reference boundary proof")
+    .1
+    .split_once("\n}\n\nverify_admin_mtls() {")
+    .expect("immutable secret-reference proof should precede the Admin mTLS proof")
+    .0;
   let verify = script
     .split_once("verify_admin_mtls() {")
     .expect("rollout harness should define the Admin mTLS proof")
@@ -2604,12 +2694,56 @@ fn kubernetes_immutable_rollout_admin_mtls_probe_is_connection_isolated() {
     "identity_before=\"$(admin_pod_runtime_identity \"${pod}\")\"",
     "identity_after=\"$(admin_pod_runtime_identity \"${pod}\")\"",
     "[[ \"${identity_after}\" == \"${identity_before}\" ]]",
+    "verify_admin_immutable_secret_boundary \"${port}\"",
     "admin_tls_rejection_observed \"${pod}\" \"${tls_failures_before}\"",
     "Admin listener did not recover after rejecting a client without a certificate",
   ] {
     assert!(
       verify.contains(expected),
       "Admin mTLS proof should preserve {expected}"
+    );
+  }
+  for expected in [
+    "admin_get_json \"${port}\" \"/admin/v1/capabilities\"",
+    ".features.atomic_secret_reference_activation == false",
+    "admin_get_json \"${port}\" \"/admin/v1/config/status\"",
+    "field: \"tls.remote_signer.token_env\"",
+    "reference: \"OXIBELT_IMMUTABLE_PROBE_UNUSED\"",
+    "--header \"If-Match: ${etag}\"",
+    "--header \"@${work_dir}/admin-headers.txt\"",
+    "--data-binary \"@${request}\"",
+    "/admin/v1/config/secret-references/update",
+    "[[ \"${http_status}\" == \"409\" ]]",
+    ".error.code == \"immutable_rollout_conflict\"",
+    "grep -Fq -f \"${work_dir}/admin-token\"",
+    "[[ \"${state_after}\" == \"${state_before}\" ]]",
+  ] {
+    assert!(
+      immutable_boundary.contains(expected),
+      "immutable secret-reference boundary proof should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    immutable_boundary
+      .matches("admin_get_json \"${port}\" \"/admin/v1/config/status\"")
+      .count(),
+    2,
+    "immutable secret-reference boundary proof should capture config status before and after the rejected mutation"
+  );
+  assert!(
+    !script.contains("docker-rootful"),
+    "the Kubernetes immutable rollout harness must remain on the rootless docker CLI"
+  );
+  for forbidden in [
+    "Authorization: Bearer",
+    "--verbose",
+    "--trace",
+    "cat \"${work_dir}/admin-headers.txt\"",
+    "cat \"${work_dir}/admin-token\"",
+  ] {
+    assert!(
+      !immutable_boundary.contains(forbidden),
+      "immutable secret-reference boundary proof must not expose credentials through {forbidden}"
     );
   }
 
@@ -2627,6 +2761,9 @@ fn kubernetes_immutable_rollout_admin_mtls_probe_is_connection_isolated() {
     .match_indices("stop_admin_port_forward")
     .map(|(position, _)| position)
     .collect::<Vec<_>>();
+  let immutable_boundary_position = verify
+    .find("verify_admin_immutable_secret_boundary \"${port}\"")
+    .expect("authenticated Admin phase should prove the immutable secret-reference boundary");
   assert_eq!(
     stop_positions.len(),
     3,
@@ -2634,6 +2771,8 @@ fn kubernetes_immutable_rollout_admin_mtls_probe_is_connection_isolated() {
   );
   assert!(
     phase_positions[0] < stop_positions[0]
+      && phase_positions[0] < immutable_boundary_position
+      && immutable_boundary_position < stop_positions[0]
       && stop_positions[0] < phase_positions[1]
       && phase_positions[1] < stop_positions[1]
       && stop_positions[1] < phase_positions[2]

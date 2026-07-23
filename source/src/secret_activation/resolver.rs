@@ -142,6 +142,33 @@ impl SecretActivationError {
   }
 }
 
+#[cfg(all(feature = "admin-runtime", test))]
+pub(crate) const SECRET_ACTIVATION_ERROR_CODE_VALUES: &[&str] = &[
+  SecretActivationError::UnsupportedVersion.code(),
+  SecretActivationError::FieldNotAllowlisted.code(),
+  SecretActivationError::InvalidReference.code(),
+  SecretActivationError::TargetNotFound.code(),
+  SecretActivationError::TargetAmbiguous.code(),
+  SecretActivationError::ReferenceMissing.code(),
+  SecretActivationError::ReferenceUnauthorized.code(),
+  SecretActivationError::ProviderUnavailable.code(),
+  SecretActivationError::WrongMaterialType.code(),
+  SecretActivationError::MaterialTooLarge.code(),
+  SecretActivationError::DigestMismatch.code(),
+  SecretActivationError::CandidateInvalid.code(),
+  SecretActivationError::CertificateKeyMismatch.code(),
+  SecretActivationError::CertificateExpired.code(),
+  SecretActivationError::CertificateNotYetValid.code(),
+  SecretActivationError::CaBundleInvalid.code(),
+  SecretActivationError::UpstreamTlsPreflightFailed.code(),
+  SecretActivationError::HostnameValidationFailed.code(),
+  SecretActivationError::ClientIdentityUnusable.code(),
+  SecretActivationError::ActivationConflict.code(),
+  SecretActivationError::ValidationEvidenceMismatch.code(),
+  SecretActivationError::RollbackFailed.code(),
+  SecretActivationError::EntropyUnavailable.code(),
+];
+
 pub(super) fn resolve_spec(
   spec: &SecretReferenceSpec,
 ) -> Result<Zeroizing<Vec<u8>>, SecretActivationError> {
