@@ -356,8 +356,25 @@ pnpm run dependency-admission
 pnpm run lint
 pnpm run typecheck
 pnpm run test
+pnpm run image-vulnerability-policy:check
 pnpm run versioning:check
 ```
+
+Changes to `supply-chain/image-vulnerability-policy.json`, the release image
+scanner, or its evaluator are security-sensitive release-boundary changes.
+Keep stable and beta releases fail-closed for every `CRITICAL` finding and
+every `HIGH` finding with a nonempty fixed version; development build releases
+remain fail-closed for every `CRITICAL` finding. Do not suppress findings in
+Trivy or substitute Cargo or Node admission for the image gate.
+
+A vulnerability exception must identify one exact vulnerability, package
+identity and version, image role, release channel, and architecture. It also
+requires a named `@owner`, rationale, impact analysis, an OxiBelt issue or pull
+request approval reference, review date, and bounded expiry. Wildcard,
+open-ended, malformed, expired, stale, partially matching, or otherwise
+overbroad exceptions must fail admission. Keep raw scan reports available when
+the gate fails, and record the policy change, approval, affected release
+subjects, and focused policy-test evidence in the pull request.
 
 ### Repository Version Policy
 

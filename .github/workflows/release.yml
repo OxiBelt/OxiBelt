@@ -333,13 +333,16 @@ jobs:
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      - name: Validate repository-owned image vulnerability policy
+        run: pnpm run image-vulnerability-policy:check
+
       - name: Compile release attestation helpers
         run: |
           set -euo pipefail
 
           helper_root="${RUNNER_TEMP}/oxibelt-release-helper"
           mkdir -p "${helper_root}"
-          pnpm exec tsc devops/sources/release_sbom.ts devops/sources/rebuild_recipe.ts \
+          pnpm exec tsc devops/sources/release_sbom.ts devops/sources/rebuild_recipe.ts devops/sources/image_vulnerability_policy.ts \
             --ignoreConfig \
             --module NodeNext \
             --moduleResolution NodeNext \
@@ -348,12 +351,18 @@ jobs:
             --outDir "${helper_root}"
           mv "${helper_root}/release_sbom.js" "${helper_root}/release_sbom.mjs"
           mv "${helper_root}/rebuild_recipe.js" "${helper_root}/rebuild_recipe.mjs"
+          mv "${helper_root}/image_vulnerability_policy.js" "${helper_root}/image_vulnerability_policy.mjs"
           OXIBELT_RELEASE_HELPER="file://${helper_root}/release_sbom.mjs" \
             node --input-type=module --eval \
               'await import(process.env.OXIBELT_RELEASE_HELPER)'
           OXIBELT_REBUILD_HELPER="file://${helper_root}/rebuild_recipe.mjs" \
             node --input-type=module --eval \
               'await import(process.env.OXIBELT_REBUILD_HELPER)'
+          OXIBELT_VULNERABILITY_POLICY_HELPER="file://${helper_root}/image_vulnerability_policy.mjs" \
+            node --input-type=module --eval \
+              'await import(process.env.OXIBELT_VULNERABILITY_POLICY_HELPER)'
+          node "${helper_root}/image_vulnerability_policy.mjs" validate-policy \
+            --policy supply-chain/image-vulnerability-policy.json
 
       - name: Validate release ref matches checkout
         id: release-ref
@@ -565,6 +574,12 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-release-helper/rebuild_recipe.mjs" \
             "${metadata_root}/helper/rebuild_recipe.mjs"
           install -D -m 0644 \
+            "${RUNNER_TEMP}/oxibelt-release-helper/image_vulnerability_policy.mjs" \
+            "${metadata_root}/helper/image_vulnerability_policy.mjs"
+          install -D -m 0644 \
+            supply-chain/image-vulnerability-policy.json \
+            "${metadata_root}/policy/image-vulnerability-policy.json"
+          install -D -m 0644 \
             tests/scripts/select-amd64-docker-image-artifact.sh \
             "${metadata_root}/helper/select-amd64-docker-image-artifact.sh"
 
@@ -576,11 +591,195 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  release-image-arch:
-    name: Release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})
+  release-image-arch-scan:
+    name: Build and scan release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})
     needs:
       - prepare-release
       - enforce-source-validation
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image_role:
+          - standalone
+          - dataplane
+          - dataplane-strict
+          - controller
+          - tools
+          - keysigner
+        artifact_arch:
+          - amd64v2
+          - amd64
+          - amd64v4
+          - arm64
+          - riscv64
+        include:
+          - image_role: standalone
+            image: ghcr.io/oxibelt/oxibelt
+            artifact_prefix: oxibelt
+          - image_role: dataplane
+            image: ghcr.io/oxibelt/oxibelt-dataplane
+            artifact_prefix: oxibelt-dataplane
+          - image_role: dataplane-strict
+            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
+            artifact_prefix: oxibelt-dataplane-strict
+          - image_role: controller
+            image: ghcr.io/oxibelt/oxibelt-gateway-controller
+            artifact_prefix: oxibelt-gateway-controller
+          - image_role: tools
+            image: ghcr.io/oxibelt/oxibelt-tools
+            artifact_prefix: oxibelt-tools
+          - image_role: keysigner
+            image: ghcr.io/oxibelt/oxibelt-keysigner
+            artifact_prefix: oxibelt-keysigner
+          - artifact_arch: amd64v2
+            platform: linux/amd64
+            runner: ubuntu-26.04
+          - artifact_arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-26.04
+          - artifact_arch: amd64v4
+            platform: linux/amd64
+            runner: ubuntu-26.04
+          - artifact_arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-26.04-arm
+          - artifact_arch: riscv64
+            platform: linux/riscv64
+            runner: ubuntu-26.04
+    uses: ./.github/workflows/release-image-arch-scan.yml
+    with:
+      artifact_arch: ${{ matrix.artifact_arch }}
+      artifact_name: ${{ format('{0}-alpine-musl-{1}-image', matrix.artifact_prefix, matrix.artifact_arch) }}
+      artifact_prefix: ${{ matrix.artifact_prefix }}
+      image_role: ${{ matrix.image_role }}
+      image: ${{ matrix.image }}
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
+      release_ref: ${{ needs.prepare-release.outputs.release_ref }}
+      release_created: ${{ needs.prepare-release.outputs.created }}
+      release_kind: ${{ needs.prepare-release.outputs.kind }}
+      release_revision: ${{ needs.prepare-release.outputs.revision }}
+      release_version: ${{ needs.prepare-release.outputs.version }}
+      source_url: https://github.com/OxiBelt/OxiBelt
+      transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}
+
+  release-vulnerability-gate:
+    name: Enforce global release image vulnerability policy
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+      - release-image-arch-scan
+    if: ${{ always() && needs.prepare-release.result == 'success' }}
+    permissions:
+      actions: read
+
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download all digest-bound vulnerability scan evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/oxibelt-vulnerability-scans
+          merge-multiple: true
+
+      - name: Evaluate complete release image vulnerability matrix
+        id: evaluate
+        continue-on-error: true
+        env:
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
+          DECISION_MARKDOWN: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.md
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
+          SCAN_ROOT: ${{ runner.temp }}/oxibelt-vulnerability-scans
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${DECISION}")" "${SCAN_ROOT}"
+          scan_args=()
+          while IFS= read -r -d '' contract; do
+            scan_args+=(--scan-contract "${contract}")
+          done < <(find "${SCAN_ROOT}" -type f -name 'scan-contract-*.json' -print0 | sort -z)
+          while IFS= read -r -d '' report; do
+            scan_args+=(--scan-report "${report}")
+          done < <(find "${SCAN_ROOT}" -type f -name 'trivy-results-*.json' -print0 | sort -z)
+
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" evaluate \
+            --policy "${POLICY}" \
+            --image-plan "${IMAGE_PLAN}" \
+            "${scan_args[@]}" \
+            --revision "${{ needs.prepare-release.outputs.revision }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --output "${DECISION}" \
+            --markdown-output "${DECISION_MARKDOWN}"
+
+      - name: Publish vulnerability gate summary
+        if: always()
+        env:
+          DECISION_MARKDOWN: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.md
+        run: |
+          if [[ -s "${DECISION_MARKDOWN}" ]]; then
+            cat "${DECISION_MARKDOWN}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "The vulnerability evaluator did not produce a Markdown decision." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload controlled vulnerability gate decision
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: release-vulnerability-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Enforce vulnerability gate result
+        if: always()
+        env:
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
+          DECISION_MARKDOWN: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.md
+          EVALUATION_OUTCOME: ${{ steps.evaluate.outcome }}
+          SCAN_MATRIX_RESULT: ${{ needs.release-image-arch-scan.result }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+          if [[ "${SCAN_MATRIX_RESULT}" != "success" ]]; then
+            echo "release image scan matrix result is ${SCAN_MATRIX_RESULT}, expected success" >&2
+            failed=1
+          fi
+          if [[ "${EVALUATION_OUTCOME}" != "success" ]]; then
+            echo "release image vulnerability evaluation result is ${EVALUATION_OUTCOME}, expected success" >&2
+            failed=1
+          fi
+          for output in "${DECISION}" "${DECISION_MARKDOWN}"; do
+            if [[ ! -s "${output}" ]]; then
+              echo "release image vulnerability evaluation did not produce ${output}" >&2
+              failed=1
+            fi
+          done
+          if [[ -s "${DECISION}" ]] && ! jq -e '.decision == "allow"' "${DECISION}" >/dev/null; then
+            echo "release image vulnerability decision is not allow" >&2
+            failed=1
+          fi
+          if [[ "${failed}" != "0" ]]; then
+            exit 1
+          fi
+
+  release-image-arch:
+    name: Publish release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})
+    needs:
+      - prepare-release
+      - release-vulnerability-gate
     permissions:
       actions: read
       attestations: write
@@ -653,6 +852,7 @@ jobs:
       release_version: ${{ needs.prepare-release.outputs.version }}
       source_url: https://github.com/OxiBelt/OxiBelt
       transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}
+      vulnerability_decision_artifact_name: ${{ format('release-vulnerability-decision-{0}-{1}', github.run_id, github.run_attempt) }}
     secrets:
       ghcr_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -700,6 +900,12 @@ jobs:
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download controlled vulnerability gate decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-vulnerability-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
@@ -807,19 +1013,16 @@ jobs:
                   raise SystemExit(f"unexpected manifest GHCR tags for {name}")
           PY
 
-      - name: Login to GHCR
+      - name: Validate admitted manifest children before registry login
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-
-      - name: Publish canonical multi-arch manifests
-        id: publish
-        env:
+          ADMITTED_CHILDREN: ${{ runner.temp }}/oxibelt-admitted-children/children.json
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
         run: |
           set -euo pipefail
 
-          source_refs=()
+          source_refs='[]'
           expected_descriptors='[]'
           child_descriptors='[]'
           for artifact_arch in amd64 arm64 riscv64; do
@@ -836,7 +1039,17 @@ jobs:
               echo "invalid published child ${canonical_tag}: ${digest}/${actual_os}/${actual_architecture}" >&2
               exit 1
             fi
-            source_refs+=("${OXIBELT_GHCR_IMAGE}@${digest}")
+            node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
+              --decision "${DECISION}" \
+              --policy "${POLICY}" \
+              --role "${OXIBELT_IMAGE_ROLE}" \
+              --architecture "${artifact_arch}" \
+              --channel "${{ needs.prepare-release.outputs.kind }}" \
+              --revision "${{ needs.prepare-release.outputs.revision }}" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+              --manifest-digest "${digest}"
+            source_refs="$(jq -c --arg source_ref "${OXIBELT_GHCR_IMAGE}@${digest}" '. + [$source_ref]' <<<"${source_refs}")"
             expected_descriptors="$(jq -c \
               --arg digest "${digest}" \
               --arg os "${actual_os}" \
@@ -853,6 +1066,30 @@ jobs:
               '. + [{artifactArch: $artifact_arch, digest: $digest, os: $os, architecture: $architecture, variant: (if $variant == "" then null else $variant end)}]' \
               <<<"${child_descriptors}")"
           done
+          mkdir -p "$(dirname "${ADMITTED_CHILDREN}")"
+          jq -n \
+            --argjson source_refs "${source_refs}" \
+            --argjson expected_descriptors "${expected_descriptors}" \
+            --argjson child_descriptors "${child_descriptors}" \
+            '{sourceRefs: $source_refs, expectedDescriptors: $expected_descriptors, childDescriptors: $child_descriptors}' \
+            >"${ADMITTED_CHILDREN}"
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Publish canonical multi-arch manifests
+        id: publish
+        env:
+          ADMITTED_CHILDREN: ${{ runner.temp }}/oxibelt-admitted-children/children.json
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        run: |
+          set -euo pipefail
+
+          mapfile -t source_refs < <(jq -r '.sourceRefs[]' "${ADMITTED_CHILDREN}")
+          expected_descriptors="$(jq -c '.expectedDescriptors' "${ADMITTED_CHILDREN}")"
+          child_descriptors="$(jq -c '.childDescriptors' "${ADMITTED_CHILDREN}")"
           mapfile -t canonical_tags < <(jq -r --arg role "${OXIBELT_IMAGE_ROLE}" '.manifests[] | select(.role == $role) | .canonicalGhcrTag' "${IMAGE_PLAN}")
           if [[ "${#source_refs[@]}" -ne 3 || "${#canonical_tags[@]}" -ne 2 ]]; then
             echo "release index requires three child manifests and two canonical tags" >&2
@@ -1415,6 +1652,7 @@ jobs:
     name: Promote canonical multi-arch aliases (${{ matrix.image_role }})
     runs-on: ubuntu-26.04
     needs:
+      - prepare-release
       - ghcr-manifest-publish
       - ghcr-index-verify
     if: github.repository == 'OxiBelt/OxiBelt'
@@ -1466,6 +1704,40 @@ jobs:
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata
+
+      - name: Download controlled vulnerability gate decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-vulnerability-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
+
+      - name: Revalidate admitted index children before promotion
+        env:
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
+          INDEX_METADATA: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
+          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
+        run: |
+          set -euo pipefail
+
+          jq -e --arg role "${OXIBELT_IMAGE_ROLE}" --arg image "${OXIBELT_GHCR_IMAGE}" '
+            .schemaVersion == 2
+            and .role == $role
+            and .image == $image
+            and (.digest | test("^sha256:[0-9a-f]{64}$"))
+            and ([.children[].artifactArch] == ["amd64", "arm64", "riscv64"])
+          ' "${INDEX_METADATA}" >/dev/null
+          while IFS=$'\t' read -r artifact_arch digest; do
+            node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
+              --decision "${DECISION}" \
+              --policy "${POLICY}" \
+              --role "${OXIBELT_IMAGE_ROLE}" \
+              --architecture "${artifact_arch}" \
+              --channel "${{ needs.prepare-release.outputs.kind }}" \
+              --revision "${{ needs.prepare-release.outputs.revision }}" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+              --manifest-digest "${digest}"
+          done < <(jq -r '.children[] | [.artifactArch, .digest] | @tsv' "${INDEX_METADATA}")
 
       - name: Promote digest to mutable aliases
         env:

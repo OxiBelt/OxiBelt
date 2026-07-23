@@ -87,10 +87,17 @@ before promotion. Platform SBOMs carry detailed component inventory; index
 SBOMs identify the three canonical child digests and retain their inventories
 as separate platform attestations. The bundles are not GHCR OCI referrers, and
 the project does not provide an OxiBelt-managed signature/provenance admission
-gate. Operators must verify, approve, and pin each role's immutable digest.
-Base-image digest pinning (P2-2), vulnerability admission thresholds,
-freshness, rollback prevention, code-review proof, and reproducible-build proof
-remain separate controls.
+gate. Before any package write, a repository-owned global vulnerability gate
+requires all 30 role/platform images to be scanned by immutable image ID and
+bound to their expected OCI manifest digests. Stable and beta releases block
+every `CRITICAL` and every fixable `HIGH`; development build releases block
+every `CRITICAL`. Only exact, approved, expiring exceptions can admit a
+blocking finding. Multi-architecture indexes are assembled only from admitted
+child digests rather than redundantly rescanning an inventory-free index.
+Operators must still verify, approve, pin, and rescan each role's immutable
+digest with current vulnerability intelligence. Base-image digest pinning
+(P2-2), deployment freshness, rollback prevention, code-review proof, and
+reproducible-build proof remain separate controls.
 
 The optional strict data-plane release is a separate
 `oxibelt-dataplane-strict` package, executable, and OCI repository. It retains

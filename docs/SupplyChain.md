@@ -22,9 +22,11 @@ reviewed or approved, that dependencies or the image are vulnerability-free,
 or that the digest is the newest acceptable release. The rebuild recipe makes
 the stated source tree, build inputs, base images, role/architecture contract,
 binary inventory, SBOM, and build environment independently checkable; it is
-still a workflow assertion until a separate rebuild verifies it. Operators
-must enforce approval, freshness, rollback, vulnerability, and
-deployment-admission policy separately.
+still a workflow assertion until a separate rebuild verifies it. The
+publication-time vulnerability gate described below applies repository policy
+to the release scan, but operators must still enforce approval, current
+vulnerability intelligence, freshness, rollback, and deployment-admission
+policy separately.
 
 ## Official image repositories
 
@@ -275,6 +277,80 @@ the approved script tuple, license inventory, an unfiltered audit report, and
 registry signatures. Vulnerability exceptions must exactly match GHSA,
 package, affected range, owner, issue, review date, and expiry; stale or
 unreported exceptions fail admission.
+
+## Release image vulnerability admission
+
+Official image release scanning is a publication gate, not only a report. The
+repository-owned policy is
+`supply-chain/image-vulnerability-policy.json`; contributors validate its
+schema, thresholds, and exceptions with:
+
+```sh
+pnpm run image-vulnerability-policy:check
+```
+
+Release CI builds and scans all 30 final platform images: each of the six roles
+at `amd64v2`, `amd64`, `amd64v4`, `arm64`, and `riscv64`. Trivy receives the
+loaded image's full immutable SHA-256 image ID rather than a mutable local or
+GHCR tag. A scan contract binds that ID, the raw Trivy report, release run and
+attempt, source revision, role, architecture, policy hash, and expected OCI
+manifest digest. Publication must later resolve to that exact manifest digest.
+A missing, duplicate, malformed, stale-attempt, wrong-revision, or
+hash-mismatched report or contract fails closed.
+
+The channel thresholds are:
+
+| Release channel | Blocking findings | Report-only findings |
+| --- | --- | --- |
+| `stable`, `beta` | Every `CRITICAL`; every `HIGH` with a nonempty Trivy `FixedVersion` | `HIGH` without a fix, `UNKNOWN`, `MEDIUM`, and `LOW` |
+| `build` | Every `CRITICAL` | Every `HIGH`, `UNKNOWN`, `MEDIUM`, and `LOW` |
+
+Scanner failures, unsupported severities, and malformed finding fields are gate
+errors, not report-only results. Trivy's raw JSON remains unfiltered: the
+workflow does not hide findings with `.trivyignore`, `ignore-unfixed`, or a
+filtered report. Release CI uploads the available raw reports, scan contracts,
+and global decision before enforcing the result and retains them for seven
+days, including on failed gates. Pull-request, scheduled, and other nonrelease
+image scans remain report-only and do not gain package-publication authority.
+
+An exception can admit only an otherwise-blocking finding. Its exact identity
+fields are `exceptionId`, `vulnerabilityId`, `packageName`, `packagePurl`,
+`packageType`, `installedVersion`, `fixedVersion`, and `severity`; an empty
+`fixedVersion` means that Trivy reports no known fix. Its exact scope fields
+are nonempty `roles`, `channels`, and `architectures`. It also requires
+`rationale`, `impactAnalysis`, an `owner` in `@username` form, an `approvalUrl`
+under `https://github.com/OxiBelt/OxiBelt/issues/<number>` or
+`https://github.com/OxiBelt/OxiBelt/pull/<number>`, and `reviewedOn` and
+`expiresOn` UTC dates.
+
+Wildcards, unknown fields, overlapping or duplicate exceptions, empty scopes,
+future review dates, and an interval longer than 90 days from review through
+expiry are invalid; `expiresOn` remains valid through that UTC date. Every
+declared role and architecture combination in the current channel must contain
+the exact finding. Partial matches are overbroad and fail, and an applicable
+exception that no longer matches the scan is stale and also fails. Excepted
+findings remain visible in the raw report.
+
+One read-only global gate evaluates the complete 30-subject matrix before any
+job with `packages: write` can start. Each publisher revalidates that its role,
+architecture, run attempt, revision, policy hash, and manifest digest appear
+in the allowed decision before registry login or push. This prevents a clean
+matrix leg from publishing while another subject is missing or blocked.
+
+The versioned multi-architecture index is not redundantly vulnerability-scanned
+because it contains no package inventory beyond its platform children. Its
+existing descriptor and SBOM checks remain mandatory, and every canonical
+`amd64`, `arm64`, and `riscv64` child digest must appear in the admitted global
+decision before index assembly. Explicit architecture tags likewise refer only
+to platform images that passed the gate.
+
+The decision reflects the pinned Trivy version and vulnerability database
+available during the release run. A passing gate is not a promise that an
+image is vulnerability-free, does not account for vulnerabilities disclosed
+later, and cannot eliminate false positives or component-detection gaps.
+Operators must rescan approved immutable digests with current intelligence and
+apply their own deployment admission, freshness, remediation, and rollback
+policy.
 
 ## Download bundles for retained verification
 

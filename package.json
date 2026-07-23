@@ -13,6 +13,7 @@
     "lint": "eslint \"devops/**/*.ts\" \"ui/*/source/**/*.ts\"",
     "test": "node --import tsx --test devops/tests/*.test.ts",
     "dependency-admission": "node --import tsx devops/sources/dependency_admission.ts --workspace-path . --policy-path supply-chain/dependency-policy.json",
+    "image-vulnerability-policy:check": "node --import tsx devops/sources/image_vulnerability_policy.ts validate-policy --policy supply-chain/image-vulnerability-policy.json",
     "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock",
     "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock --ref \"$OXIBELT_RELEASE_REF\" --revision \"$OXIBELT_RELEASE_REVISION\" --event-name \"$GITHUB_EVENT_NAME\" --release-prerelease \"$OXIBELT_RELEASE_IS_PRERELEASE\" --image-plan-output \"$OXIBELT_IMAGE_PLAN_OUTPUT\" --release-publish",
     "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"

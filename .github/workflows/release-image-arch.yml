@@ -1,4 +1,4 @@
-name: Release OxiBelt image architecture
+name: Publish OxiBelt image architecture
 
 on:
   workflow_call:
@@ -45,6 +45,9 @@ on:
       transport_artifact_name:
         required: true
         type: string
+      vulnerability_decision_artifact_name:
+        required: true
+        type: string
     secrets:
       ghcr_token:
         required: true
@@ -58,502 +61,11 @@ env:
   OXIBELT_ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
   OXIBELT_TRANSPORT_ARTIFACT_NAME: ${{ inputs.transport_artifact_name }}
 
+
 jobs:
-  build:
-    name: Build Docker image (${{ inputs.image_role }}/${{ inputs.artifact_arch }})
-    runs-on: ${{ inputs.runner }}
-    permissions:
-      actions: read
-      contents: read
-    env:
-      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
-      OXIBELT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
-      OXIBELT_DOCKER_PLATFORM: ${{ inputs.platform }}
-
-    steps:
-      - name: Checkout release revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
-        with:
-          ref: ${{ inputs.release_revision }}
-          fetch-depth: 0
-
-      - name: Validate immutable release checkout
-        env:
-          EXPECTED_REVISION: ${{ inputs.release_revision }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! "${EXPECTED_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "release revision must be a full lowercase Git commit: ${EXPECTED_REVISION}" >&2
-            exit 1
-          fi
-          actual_revision="$(git rev-parse HEAD)"
-          if [[ "${actual_revision}" != "${EXPECTED_REVISION}" ]]; then
-            echo "release checkout is ${actual_revision}, expected ${EXPECTED_REVISION}" >&2
-            exit 1
-          fi
-
-      - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-release-metadata
-          path: ${{ runner.temp }}/oxibelt-release-metadata
-
-      - name: Apply release metadata
-        run: |
-          set -euo pipefail
-          cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
-
-      - name: Pre-pull Docker BuildKit image
-        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
-        with:
-          version: v0.35.0
-          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
-
-      - name: Build Docker image artifact
-        env:
-          OXIBELT_DOCKER_IMAGE_CREATED: ${{ inputs.release_created }}
-          OXIBELT_DOCKER_IMAGE_REF_NAME: ${{ inputs.release_version }}
-          OXIBELT_DOCKER_IMAGE_REVISION: ${{ inputs.release_revision }}
-          OXIBELT_DOCKER_IMAGE_SOURCE_REF: ${{ inputs.release_ref }}
-          OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY: clean
-          OXIBELT_DOCKER_IMAGE_BUILD_KIND: official_release
-          OXIBELT_DOCKER_IMAGE_SOURCE: ${{ inputs.source_url }}
-          OXIBELT_DOCKER_IMAGE_VERSION: ${{ inputs.release_version }}
-        run: |
-          tests/scripts/build-docker-image-artifact.sh \
-            "${OXIBELT_DOCKER_PLATFORM}" \
-            "${OXIBELT_ARTIFACT_ARCH}" \
-            "${RUNNER_TEMP}/oxibelt-image" \
-            "${OXIBELT_IMAGE_ROLE}"
-
-      - name: Validate Docker image artifact
-        env:
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
-          OXIBELT_RELEASE_KIND: ${{ inputs.release_kind }}
-          OXIBELT_RELEASE_REVISION: ${{ inputs.release_revision }}
-          OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
-          OXIBELT_SOURCE_URL: ${{ inputs.source_url }}
-        run: |
-          set -euo pipefail
-
-          python3 - "${IMAGE_PLAN}" "${IMAGE_TAR}" "${OXIBELT_IMAGE_ROLE}" "${OXIBELT_ARTIFACT_PREFIX}" "${OXIBELT_ARTIFACT_ARCH}" "${OXIBELT_GHCR_IMAGE}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
-          import json
-          import pathlib
-          import sys
-          import tarfile
-
-          plan_path = pathlib.Path(sys.argv[1])
-          image_tar = pathlib.Path(sys.argv[2])
-          role = sys.argv[3]
-          artifact_prefix = sys.argv[4]
-          artifact_arch = sys.argv[5]
-          image = sys.argv[6]
-          version = sys.argv[7]
-          kind = sys.argv[8]
-          revision = sys.argv[9]
-          source = sys.argv[10]
-          plan = json.loads(plan_path.read_text(encoding="utf-8"))
-
-          if kind not in ("stable", "beta", "build"):
-              raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 8:
-              raise SystemExit("unsupported image release plan schema")
-          if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
-              raise SystemExit("release plan identity does not match workflow outputs")
-          if plan["source"] != source:
-              raise SystemExit("release plan source URL does not match workflow source")
-          if plan["sourceRef"] != f"refs/tags/{version}" or plan["sourceDirty"] != "clean" or plan["buildKind"] != "official_release":
-              raise SystemExit("release plan build identity is not an official clean tag tuple")
-
-          major = version.split(".", 1)[0]
-          expected = {
-              "amd64v2": ("amd64", "x86-64-v2"),
-              "amd64": ("amd64", "x86-64-v3"),
-              "amd64v4": ("amd64", "x86-64-v4"),
-              "arm64": ("arm64", None),
-              "riscv64": ("riscv64", None),
-          }
-          role_contracts = [item for item in plan["roles"] if item["role"] == role]
-          if len(role_contracts) != 1:
-              raise SystemExit(f"release plan must contain exactly one role contract for {role}")
-          role_contract = role_contracts[0]
-          if role_contract["image"] != image:
-              raise SystemExit(f"release role {role} must publish to {image}")
-          artifacts = {}
-          for artifact in plan["artifacts"]:
-              if artifact["role"] != role:
-                  continue
-              arch = artifact["artifactArch"]
-              if arch in artifacts:
-                  raise SystemExit(f"duplicate release artifact for {role}/{arch}")
-              artifacts[arch] = artifact
-          if set(artifacts) != set(expected):
-              raise SystemExit(f"unexpected artifact matrix for {role}: {sorted(artifacts)}")
-          if artifact_arch not in artifacts:
-              raise SystemExit(f"release plan is missing artifact {role}/{artifact_arch}")
-
-          docker_arch, target_cpu = expected[artifact_arch]
-          artifact_name = f"{artifact_prefix}-alpine-musl-{artifact_arch}-image"
-          image_tar_name = f"{artifact_prefix}-alpine-musl-{artifact_arch}.tar"
-          artifact = artifacts[artifact_arch]
-          if artifact["artifactName"] != artifact_name or artifact["imageTar"] != image_tar_name:
-              raise SystemExit(f"unexpected artifact naming for {role}/{artifact_arch}")
-          if image_tar.name != image_tar_name:
-              raise SystemExit(f"unexpected image tar path for {artifact_arch}: {image_tar}")
-          for key in ("image", "dockerTarget", "binaries", "entrypoint", "user", "ports", "embeddedAssets"):
-              if artifact[key] != role_contract[key]:
-                  raise SystemExit(f"artifact {role}/{artifact_arch} has inconsistent {key}")
-          if artifact["dockerArchitecture"] != docker_arch:
-              raise SystemExit(f"unexpected docker architecture for {artifact_arch}")
-          if target_cpu is None:
-              if "targetCpu" in artifact:
-                  raise SystemExit(f"{artifact_arch} should not declare targetCpu")
-          elif artifact.get("targetCpu") != target_cpu:
-              raise SystemExit(f"{artifact_arch} targetCpu was {artifact.get('targetCpu')!r}, expected {target_cpu!r}")
-          expected_tag = f"{image}:{version}-alpine-musl-{artifact_arch}"
-          expected_aliases = [f"{image}:{major}-alpine-musl-{artifact_arch}"] if kind == "stable" else []
-          if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
-              raise SystemExit(f"unexpected GHCR tags for {artifact_arch}")
-
-          if not image_tar.is_file():
-              raise SystemExit(f"missing Docker image tar: {image_tar}")
-          with tarfile.open(image_tar) as docker_tar:
-              manifest_member = docker_tar.extractfile("manifest.json")
-              if manifest_member is None:
-                  raise SystemExit(f"{image_tar} is missing manifest.json")
-              manifest = json.load(manifest_member)
-              if len(manifest) != 1:
-                  raise SystemExit(f"{image_tar} should contain exactly one image")
-              config_member = docker_tar.extractfile(manifest[0]["Config"])
-              if config_member is None:
-                  raise SystemExit(f"{image_tar} is missing image config")
-              config = json.load(config_member)
-
-          labels = config.get("config", {}).get("Labels", {})
-          for key, expected_value in {
-              "org.opencontainers.image.version": version,
-              "org.opencontainers.image.ref.name": version,
-              "org.opencontainers.image.revision": revision,
-              "org.opencontainers.image.source": source,
-              "org.opencontainers.image.url": source,
-              "io.oxibelt.image.role": role,
-          }.items():
-              if labels.get(key) != expected_value:
-                  raise SystemExit(f"{image_tar} label {key} was {labels.get(key)!r}, expected {expected_value!r}")
-          if config.get("architecture") != docker_arch:
-              raise SystemExit(f"{image_tar} architecture does not match release plan")
-          image_config = config.get("config", {})
-          entrypoint = image_config.get("Entrypoint")
-          if entrypoint != role_contract["entrypoint"]:
-              raise SystemExit(f"{image_tar} has unexpected entrypoint: {entrypoint}")
-          if image_config.get("User") != role_contract["user"]:
-              raise SystemExit(f"{image_tar} has unexpected user: {image_config.get('User')}")
-          exposed = sorted(image_config.get("ExposedPorts", {}).keys())
-          if exposed != sorted(role_contract["ports"]):
-              raise SystemExit(f"{image_tar} has unexpected exposed ports: {exposed}")
-          PY
-
-          if [[ "${OXIBELT_IMAGE_ROLE}" == "dataplane-strict" ]]; then
-            python3 tests/scripts/validate-strict-dataplane-image.py "${IMAGE_TAR}"
-          fi
-
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
-          path: |
-            ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
-            ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
-            ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
-          if-no-files-found: error
-          retention-days: 1
-
-  scan:
-    name: Scan Docker image (${{ inputs.image_role }}/${{ inputs.artifact_arch }})
-    runs-on: ${{ inputs.runner }}
-    needs:
-      - build
-    if: github.repository == 'OxiBelt/OxiBelt'
-    permissions:
-      actions: read
-      contents: read
-    env:
-      OXIBELT_ARTIFACT_ARCH: ${{ inputs.artifact_arch }}
-      OXIBELT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
-
-    steps:
-      - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-release-metadata
-          path: ${{ runner.temp }}/oxibelt-release-metadata
-
-      - name: Download Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
-          path: ${{ runner.temp }}/oxibelt-image
-
-      - name: Load image for scanning
-        id: trivy-image
-        env:
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
-        run: |
-          set -euo pipefail
-
-          image_ref="$(jq -r --arg role "${OXIBELT_IMAGE_ROLE}" --arg arch "${OXIBELT_ARTIFACT_ARCH}" '.artifacts[] | select(.role == $role and .artifactArch == $arch) | .localTag' "${IMAGE_PLAN}")"
-          if [[ -z "${image_ref}" || "${image_ref}" == "null" ]]; then
-            echo "release plan is missing local tag for ${OXIBELT_ARTIFACT_ARCH}" >&2
-            exit 1
-          fi
-          docker load --input "${IMAGE_TAR}"
-          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: v0.72.0
-          scan-type: image
-          image-ref: ${{ steps.trivy-image.outputs.image_ref }}
-          format: json
-          output: trivy-results-${{ env.OXIBELT_ARTIFACT_PREFIX }}-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          vuln-type: os,library
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          exit-code: "0"
-
-      - name: Generate CycloneDX platform SBOM
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: v0.72.0
-          scan-type: image
-          image-ref: ${{ steps.trivy-image.outputs.image_ref }}
-          format: cyclonedx
-          output: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}-raw.cdx.json
-          vuln-type: os,library
-
-      - name: Validate release binaries
-        env:
-          AMD64_SELECTOR: ${{ runner.temp }}/oxibelt-release-metadata/helper/select-amd64-docker-image-artifact.sh
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          IMAGE_REF: ${{ steps.trivy-image.outputs.image_ref }}
-          INVENTORY_FILE: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
-          OXIBELT_RELEASE_REVISION: ${{ inputs.release_revision }}
-          OXIBELT_RELEASE_REF: ${{ inputs.release_ref }}
-        run: |
-          set -euo pipefail
-
-          container_id="$(docker create "${IMAGE_REF}")"
-          binary_root="$(mktemp -d "${RUNNER_TEMP}/oxibelt-binaries.XXXXXX")"
-          cleanup() {
-            docker rm -f "${container_id}" >/dev/null 2>&1 || true
-            rm -rf -- "${binary_root}"
-          }
-          trap cleanup EXIT
-
-          inventory='[]'
-          case "${OXIBELT_ARTIFACT_ARCH}" in
-            amd64v2|amd64|amd64v4) expected_machine="Advanced Micro Devices X86-64" ;;
-            arm64) expected_machine="AArch64" ;;
-            riscv64) expected_machine="RISC-V" ;;
-            *)
-              echo "unsupported release artifact architecture: ${OXIBELT_ARTIFACT_ARCH}" >&2
-              exit 1
-              ;;
-          esac
-
-          native=false
-          target_cpu=""
-          case "$(uname -m):${OXIBELT_ARTIFACT_ARCH}" in
-            x86_64:amd64v2) target_cpu="x86-64-v2" ;;
-            x86_64:amd64) target_cpu="x86-64-v3" ;;
-            x86_64:amd64v4) target_cpu="x86-64-v4" ;;
-            aarch64:arm64) native=true ;;
-          esac
-          if [[ -n "${target_cpu}" ]]; then
-            selector_output="$(
-              GITHUB_OUTPUT='' bash "${AMD64_SELECTOR}" "${target_cpu}" --allow-unsupported
-            )"
-            supported="$(awk -F= '$1 == "supported" { print $2 }' <<<"${selector_output}")"
-            missing_features="$(awk -F= '$1 == "missing_features" { sub(/^[^=]*=/, ""); print }' <<<"${selector_output}")"
-            case "${supported}" in
-              true) native=true ;;
-              false)
-                printf 'runner CPU does not support %s; skipping native --version execution (missing: %s)\n' \
-                  "${target_cpu}" "${missing_features:-unknown}"
-                ;;
-              *)
-                echo "AMD64 selector returned invalid supported status: ${supported:-missing}" >&2
-                exit 1
-                ;;
-            esac
-          fi
-
-          while read -r binary; do
-            install_path="/usr/local/bin/${binary}"
-            docker cp "${container_id}:${install_path}" "${binary_root}/${binary}"
-            binary_path="${binary_root}/${binary}"
-            elf_class="$(readelf -hW "${binary_path}" | awk -F: '/^[[:space:]]*Class:/{sub(/^[[:space:]]*/, "", $2); print $2}')"
-            elf_machine="$(readelf -hW "${binary_path}" | awk -F: '/^[[:space:]]*Machine:/{sub(/^[[:space:]]*/, "", $2); print $2}')"
-            if [[ "${elf_class}" != "ELF64" || "${elf_machine}" != "${expected_machine}" ]]; then
-              echo "${install_path} is ${elf_class}/${elf_machine}, expected ELF64/${expected_machine}" >&2
-              exit 1
-            fi
-            if readelf -lW "${binary_path}" | grep -F ' INTERP ' >/dev/null; then
-              echo "${install_path} must not request a program interpreter" >&2
-              exit 1
-            fi
-            if readelf -dW "${binary_path}" | grep -F '(NEEDED)' >/dev/null; then
-              echo "${install_path} must not declare dynamic shared-library dependencies" >&2
-              exit 1
-            fi
-
-            digest="$(sha256sum "${binary_path}" | awk '{print $1}')"
-            binary_version="$(python3 - "${binary_path}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_RELEASE_REF}" <<'PY'
-          import json
-          import pathlib
-          import re
-          import sys
-
-          data = pathlib.Path(sys.argv[1]).read_bytes()
-          matches = set(re.findall(rb'OXIBELT_BUILD_IDENTITY_V1=(\{[^}\x00\r\n]{1,4096}\})', data))
-          if len(matches) != 1:
-              raise SystemExit("binary does not contain exactly one canonical build identity marker")
-          identity = json.loads(next(iter(matches)))
-          expected = {
-              "version": sys.argv[2],
-              "revision": sys.argv[3],
-              "source_ref": sys.argv[4],
-              "dirty": "clean",
-              "kind": "official_release",
-          }
-          if identity != expected:
-              raise SystemExit(f"binary build identity mismatch: {identity!r}")
-          print(identity["version"])
-          PY
-            )"
-            if [[ "${native}" == "true" ]]; then
-              version_output="$(docker run --rm --entrypoint "${install_path}" "${IMAGE_REF}" --version)"
-              grep -F "OXIBELT_BUILD_IDENTITY_V1=" <<<"${version_output}" >/dev/null
-              grep -F "${binary_version}" <<<"${version_output}" >/dev/null
-            fi
-            inventory="$(jq -c \
-              --arg name "${binary}" \
-              --arg path "${install_path}" \
-              --arg version "${binary_version}" \
-              --arg sha256 "${digest}" \
-              '. + [{name: $name, path: $path, version: $version, sha256: $sha256}]' \
-              <<<"${inventory}")"
-          done < <(jq -r --arg role "${OXIBELT_IMAGE_ROLE}" '.roles[] | select(.role == $role) | .binaries[]' "${IMAGE_PLAN}")
-
-          jq -n --argjson binaries "${inventory}" \
-            '{schemaVersion: 1, binaries: $binaries}' >"${INVENTORY_FILE}"
-
-      - name: Validate and enrich platform SBOM
-        env:
-          BINARY_INVENTORY: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          RAW_SBOM: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}-raw.cdx.json
-          RELEASE_SBOM: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
-        run: |
-          set -euo pipefail
-
-          image_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
-          if [[ ! "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Buildx metadata contains an invalid image digest: ${image_digest}" >&2
-            exit 1
-          fi
-          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/release_sbom.mjs" platform \
-            --image-plan "${IMAGE_PLAN}" \
-            --trivy-sbom "${RAW_SBOM}" \
-            --binary-inventory "${BINARY_INVENTORY}" \
-            --role "${OXIBELT_IMAGE_ROLE}" \
-            --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
-            --image-digest "${image_digest}" \
-            --output "${RELEASE_SBOM}"
-
-      - name: Build platform rebuild recipe
-        env:
-          ARTIFACT_CONTRACT: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
-          BINARY_INVENTORY: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          BUILD_ENVIRONMENT: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-build-environment-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          REBUILD_RECIPE: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
-          RELEASE_SBOM: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
-        run: |
-          set -euo pipefail
-
-          feature_graph_sha256="$(jq -cS '.cargo_builds' "${ARTIFACT_CONTRACT}" | sha256sum | awk '{print $1}')"
-          buildx_version="$(docker buildx version | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
-          rust_builder="$(jq -r '.build_parameters.rust_builder_image' "${ARTIFACT_CONTRACT}")"
-          node_builder="$(jq -r '.build_parameters.node_builder_image' "${ARTIFACT_CONTRACT}")"
-          rust_target="$(jq -r '.rust_target' "${ARTIFACT_CONTRACT}")"
-          if [[ "${OXIBELT_ARTIFACT_ARCH}" == "riscv64" ]]; then
-            cc_identity="cross-rs riscv64gc-musl toolchain c12165aa"
-          else
-            cc_identity="Alpine 3.24 build-base musl toolchain"
-          fi
-          jq -n \
-            --arg rustc "rustc 1.97.1 via ${rust_builder}" \
-            --arg cargo "cargo from ${rust_builder}" \
-            --arg node "${node_builder}" \
-            --arg pnpm "pnpm 11.15.1" \
-            --arg buildx "${buildx_version}" \
-            --arg buildkit "${OXIBELT_BUILDKIT_IMAGE}" \
-            --arg trivy "trivy v0.72.0" \
-            --arg cc "${cc_identity}" \
-            --arg ld "Rust target linker ${rust_target}" \
-            --arg feature_graph_sha256 "sha256:${feature_graph_sha256}" \
-            '{schemaVersion: 1, rustc: $rustc, cargo: $cargo, node: $node, pnpm: $pnpm,
-              buildx: $buildx, buildkit: $buildkit, trivy: $trivy, cc: $cc, ld: $ld,
-              featureGraphSha256: $feature_graph_sha256}' >"${BUILD_ENVIRONMENT}"
-
-          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/rebuild_recipe.mjs" platform \
-            --image-plan "${IMAGE_PLAN}" \
-            --artifact-contract "${ARTIFACT_CONTRACT}" \
-            --binary-inventory "${BINARY_INVENTORY}" \
-            --sbom "${RELEASE_SBOM}" \
-            --build-environment "${BUILD_ENVIRONMENT}" \
-            --role "${OXIBELT_IMAGE_ROLE}" \
-            --artifact-arch "${OXIBELT_ARTIFACT_ARCH}" \
-            --output "${REBUILD_RECIPE}"
-
-      - name: Upload Trivy vulnerability report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: trivy-release-${{ env.OXIBELT_ARTIFACT_PREFIX }}-${{ env.OXIBELT_ARTIFACT_ARCH }}-json
-          path: trivy-results-${{ env.OXIBELT_ARTIFACT_PREFIX }}-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload platform SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
-          path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload platform rebuild recipe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
-        with:
-          name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
-          path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
-          if-no-files-found: error
-          retention-days: 1
-
   publish:
     name: Publish canonical GHCR image (${{ inputs.image_role }}/${{ inputs.artifact_arch }})
     runs-on: ${{ inputs.runner }}
-    needs:
-      - scan
     if: github.repository == 'OxiBelt/OxiBelt'
     permissions:
       actions: read
@@ -577,6 +89,12 @@ jobs:
         with:
           name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Download controlled vulnerability gate decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ inputs.vulnerability_decision_artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
@@ -711,6 +229,30 @@ jobs:
           if exposed != sorted(role_contract["ports"]):
               raise SystemExit(f"{image_tar} has unexpected exposed ports: {exposed}")
           PY
+
+      - name: Verify platform subject was admitted by the global vulnerability gate
+        env:
+          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
+          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
+        run: |
+          set -euo pipefail
+
+          manifest_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
+          if [[ ! "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx metadata contains an invalid image manifest digest: ${manifest_digest}" >&2
+            exit 1
+          fi
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
+            --decision "${DECISION}" \
+            --policy "${POLICY}" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --architecture "${OXIBELT_ARTIFACT_ARCH}" \
+            --channel "${{ inputs.release_kind }}" \
+            --revision "${{ inputs.release_revision }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --manifest-digest "${manifest_digest}"
 
       - name: Push canonical arch-specific GHCR tag
         id: publish
@@ -1097,6 +639,31 @@ jobs:
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
+
+      - name: Download controlled vulnerability gate decision
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ inputs.vulnerability_decision_artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
+
+      - name: Revalidate admitted platform subject before promotion
+        env:
+          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
+        run: |
+          set -euo pipefail
+
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
+            --decision "${DECISION}" \
+            --policy "${POLICY}" \
+            --role "${OXIBELT_IMAGE_ROLE}" \
+            --architecture "${OXIBELT_ARTIFACT_ARCH}" \
+            --channel "${{ inputs.release_kind }}" \
+            --revision "${{ inputs.release_revision }}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --manifest-digest "${DIGEST}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
