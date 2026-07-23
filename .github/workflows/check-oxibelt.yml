@@ -1176,6 +1176,9 @@ jobs:
             --expected-source-tree "$(git rev-parse "${GITHUB_SHA}^{tree}")" \
             --expected-version "$(jq -r '.version' "${contract}")" \
             --expected-ref-name "$(jq -r '.ref_name' "${contract}")" \
+            --expected-source-ref "unknown" \
+            --expected-source-dirty "clean" \
+            --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
             --rust-builder-image "rust:1.97.1-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488" \
             --node-builder-image "node:24-alpine3.24@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd" \

@@ -3759,6 +3759,24 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
   }
 
   for expected in [
+    "--expected-source-ref \"unknown\"",
+    "--expected-source-dirty \"clean\"",
+    "--expected-build-kind \"git_development\"",
+  ] {
+    assert_eq!(
+      scan_job_text.matches(expected).count(),
+      1,
+      "Trivy scan job should pass the trusted CI build identity exactly once: {expected}"
+    );
+  }
+  for forbidden in [".source_ref", ".source_dirty", ".build_kind"] {
+    assert!(
+      !scan_job_text.contains(forbidden),
+      "Trivy scan job must not derive a trusted CI build identity expectation from the downloaded artifact contract: {forbidden}"
+    );
+  }
+
+  for expected in [
     "actions: read",
     "contents: read",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
