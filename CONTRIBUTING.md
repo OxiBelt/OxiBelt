@@ -84,6 +84,54 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 If a command must be run from `source/`, say so explicitly in the command block
 or pull request notes.
 
+## Release Changelog and Upgrade Contract
+
+`CHANGELOG.md` is the stable-release ledger. `CHANGELOG-beta.md` is the
+beta-release ledger. Do not put beta entries in the stable ledger, and do not
+create `CHANGELOG-build.md`: development tags of the form
+`X.Y.Z-build.<sha8>` have no changelog entry or GitHub Release.
+
+Add stable and beta entries in strict descending SemVer order. A governed entry
+uses the heading `## [VERSION] - YYYY-MM-DD`, followed by these metadata lines:
+
+```md
+- Changes since: `PREVIOUS_VERSION`
+- Supported upgrade sources: `PREVIOUS_VERSION`
+- Upgrade guide: [Human-readable path](docs/Upgrading.md#exact-anchor)
+```
+
+The comparison base for a stable release and for `beta.1` is the immediately
+preceding stable release. The comparison base for `beta.N`, where `N > 1`, is
+the preceding beta for the same target; that entry must list both the
+preceding beta and preceding stable release as supported upgrade sources.
+
+Every governed entry must contain these level-three sections in this order:
+`Configuration`, `Schema epochs`, `Deprecations and removals`, `Admin API`,
+`Feature lifecycle`, `Rulepack compatibility`, `Executables and images`,
+`Storage and state`, `Upgrade validation`,
+`Rollback and irreversible steps`, `Known issues`, and `Security`. Use
+`- No changes for this release.` only for an inapplicable section, and
+`- None known at release cut.` when there are no known issues. The complete
+entry cannot be placeholder-only. Upgrade validation must include an exact
+`sh` or `bash` command block, and rollback guidance must state how to recover
+or which step is irreversible.
+
+Update `docs/Upgrading.md` whenever a change affects configuration or schema
+compatibility, the Admin API, feature lifecycle, rulepack compatibility,
+executable/image roles, or persisted state. Validate the ledger and changed
+compatibility surfaces with:
+
+```sh
+pnpm run release-contract:check
+```
+
+When a stable or beta tag is pushed, the tag workflow binds the entry to the
+exact tag commit and prepares a draft GitHub Release. It never publishes the
+draft and never overwrites a differing draft or published release. A human
+must review and publish the draft; the image-publication workflow then
+revalidates the published body against the same exact-revision contract before
+publishing artifacts.
+
 ## Commit Messages
 
 Use Conventional Commits for commit messages:
@@ -522,6 +570,8 @@ Before opening or marking a pull request ready:
 - The affected area is clear in the pull request description.
 - User-visible behavior changes are covered in `README.md` or `docs/` as
   appropriate.
+- Compatibility-surface changes update `docs/Upgrading.md` or the appropriate
+  stable/beta changelog entry and pass `pnpm run release-contract:check`.
 - Configuration changes update tests, docs, and example configuration when
   needed.
 - Proxy, TLS, routing, WAF, runtime, or security-sensitive changes include

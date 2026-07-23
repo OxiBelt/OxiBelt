@@ -178,6 +178,11 @@ fn release_workflow_text() -> String {
     .expect("release workflow should be readable")
 }
 
+fn release_draft_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/prepare-release-draft.yml"))
+    .expect("release draft workflow should be readable")
+}
+
 fn release_image_arch_workflow_text() -> String {
   fs::read_to_string(repo_root().join(".github/workflows/release-image-arch.yml"))
     .expect("release image architecture workflow should be readable")
@@ -2246,6 +2251,11 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run typecheck",
     "pnpm run test",
     "pnpm run versioning:check",
+    "pnpm run release-contract:check",
+    "fetch-depth: 0",
+    "OXIBELT_CHANGE_BASE",
+    "--change-base \"${OXIBELT_CHANGE_BASE}\"",
+    "--change-head \"${OXIBELT_CHANGE_HEAD}\"",
   ] {
     assert!(
       job_text.contains(expected),
@@ -2279,9 +2289,16 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   let versioning = job_text
     .find("pnpm run versioning:check")
     .expect("TypeScript release tooling should validate committed version state");
+  let release_contract = job_text
+    .find("name: Validate release changelog and upgrade contract")
+    .expect("TypeScript release tooling should validate the release contract");
   assert!(
-    install < lint && lint < typecheck && typecheck < test && test < versioning,
-    "TypeScript release tooling should install, lint, type-check, test, and validate version state in order"
+    install < lint
+      && lint < typecheck
+      && typecheck < test
+      && test < versioning
+      && versioning < release_contract,
+    "TypeScript release tooling should install, lint, type-check, test, validate version state, and validate the release contract in order"
   );
   for forbidden in [
     "contents: write",
@@ -4842,6 +4859,7 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
       "prepare-release".to_owned(),
+      "release-contract".to_owned(),
       "release-image-arch".to_owned(),
       "release-image-arch-scan".to_owned(),
       "release-vulnerability-gate".to_owned(),
@@ -5046,7 +5064,11 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
 
   assert_eq!(
     release_jobs["prepare-release"].needs,
-    expected_needs(&["resolve-release-source", "enforce-source-validation"])
+    expected_needs(&[
+      "resolve-release-source",
+      "enforce-source-validation",
+      "release-contract"
+    ])
   );
   assert_eq!(
     release_jobs["release-image-arch-scan"].needs,
@@ -5074,6 +5096,37 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
       has_transitive_need(&release_jobs, job_id, "enforce-source-validation"),
       "release publication job {job_id} must transitively require successful source validation"
     );
+    assert!(
+      has_transitive_need(&release_jobs, job_id, "release-contract"),
+      "release publication job {job_id} must transitively require the exact changelog and published-note contract"
+    );
+  }
+
+  let release_contract_text = workflow_job_text(&release_workflow, "release-contract");
+  for expected in [
+    "name: Verify release changelog and published notes",
+    "permissions:",
+    "contents: read",
+    "persist-credentials: false",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "pnpm run release-contract:candidate",
+    "build tags must not have or publish from a GitHub Release",
+    "Read published stable or beta release",
+    "github.rest.repos.getReleaseByTag",
+    "pnpm run release-contract:verify",
+    "--expected-state published",
+    "Upload verified release contract",
+  ] {
+    assert!(
+      release_contract_text.contains(expected),
+      "release-contract publication gate should contain {expected}"
+    );
+  }
+  for forbidden in ["contents: write", "packages: write", "id-token: write"] {
+    assert!(
+      !release_contract_text.contains(forbidden),
+      "release-contract publication gate must not contain {forbidden}"
+    );
   }
 
   let prepare_text = workflow_job_text(&release_workflow, "prepare-release");
@@ -5091,6 +5144,107 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     !prepare_text.contains("Revalidate Node dependency admission"),
     "canonical source validation should own Node dependency admission"
   );
+}
+
+#[test]
+fn stable_and_beta_tags_prepare_conflict_safe_drafts_without_publishing() {
+  let workflow = release_draft_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("release draft workflow should parse as YAML");
+  let jobs = parse_jobs(&workflow);
+
+  assert_eq!(
+    parsed["on"]["push"]["tags"],
+    serde_json::json!(["*.*.*"]),
+    "the draft workflow should inspect release-shaped tag pushes"
+  );
+  assert_eq!(
+    parsed["concurrency"]["cancel-in-progress"],
+    serde_json::json!(false),
+    "draft preparation must not cancel an in-flight run for an immutable tag"
+  );
+  assert_eq!(
+    jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from([
+      "prepare-draft".to_owned(),
+      "validate-release-contract".to_owned(),
+    ])
+  );
+  assert!(jobs["validate-release-contract"].needs.is_empty());
+  assert_eq!(
+    jobs["prepare-draft"].needs,
+    expected_needs(&["validate-release-contract"])
+  );
+  assert_eq!(
+    parsed["jobs"]["validate-release-contract"]["permissions"],
+    serde_json::json!({"contents": "read"})
+  );
+  assert_eq!(
+    parsed["jobs"]["prepare-draft"]["permissions"],
+    serde_json::json!({"contents": "write"})
+  );
+  assert_eq!(
+    parsed["jobs"]["prepare-draft"]["if"],
+    "needs.validate-release-contract.outputs.kind == 'stable' || needs.validate-release-contract.outputs.kind == 'beta'",
+    "build tags must not enter the GitHub Release writer"
+  );
+
+  let validation = workflow_job_text(&workflow, "validate-release-contract");
+  for expected in [
+    "Checkout exact tag",
+    "fetch-depth: 0",
+    "persist-credentials: false",
+    "pnpm install --frozen-lockfile --ignore-scripts",
+    "pnpm run release-contract:candidate",
+    "--ref \"${GITHUB_REF}\"",
+    "--revision \"${GITHUB_SHA}\"",
+    "Upload exact-tag release contract",
+  ] {
+    assert!(
+      validation.contains(expected),
+      "draft release validation should contain {expected}"
+    );
+  }
+  for forbidden in ["contents: write", "packages: write", "id-token: write"] {
+    assert!(
+      !validation.contains(forbidden),
+      "draft release validation must not contain {forbidden}"
+    );
+  }
+
+  let draft = workflow_job_text(&workflow, "prepare-draft");
+  for expected in [
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+    "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0",
+    "github.rest.repos.getReleaseByTag",
+    "github.rest.git.getRef",
+    "github.rest.git.getTag",
+    "tagObject.sha !== receipt.revision",
+    "receipt.bodySha256 !== bodyDigest",
+    "existing.draft === true",
+    "refusing to overwrite it",
+    "github.rest.repos.createRelease",
+    "target_commitish: receipt.revision",
+    "draft: true",
+    "prerelease",
+  ] {
+    assert!(
+      draft.contains(expected),
+      "draft release writer should contain {expected}"
+    );
+  }
+  for forbidden in [
+    "github.rest.repos.updateRelease",
+    "draft: false",
+    "generate_release_notes",
+    "packages: write",
+    "id-token: write",
+  ] {
+    assert!(
+      !draft.contains(forbidden),
+      "draft release writer must not contain {forbidden}"
+    );
+  }
 }
 
 #[test]
@@ -5118,6 +5272,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
       "prepare-release".to_owned(),
+      "release-contract".to_owned(),
       "release-image-arch".to_owned(),
       "release-image-arch-scan".to_owned(),
       "release-vulnerability-gate".to_owned(),

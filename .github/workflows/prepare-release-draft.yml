@@ -1,0 +1,201 @@
+name: Prepare OxiBelt release draft
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release-contract:
+    name: Validate exact-tag release contract
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      kind: ${{ steps.receipt.outputs.kind }}
+
+    steps:
+      - name: Checkout exact tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Bind release notes to the exact tag commit
+        env:
+          OXIBELT_BODY_OUTPUT: ${{ runner.temp }}/release-body.md
+          OXIBELT_RECEIPT_OUTPUT: ${{ runner.temp }}/release-contract.json
+        run: |
+          set -euo pipefail
+          pnpm run release-contract:candidate -- \
+            --ref "${GITHUB_REF}" \
+            --revision "${GITHUB_SHA}" \
+            --receipt-output "${OXIBELT_RECEIPT_OUTPUT}" \
+            --body-output "${OXIBELT_BODY_OUTPUT}"
+
+      - name: Read validated release kind
+        id: receipt
+        env:
+          OXIBELT_RECEIPT: ${{ runner.temp }}/release-contract.json
+        run: |
+          set -euo pipefail
+          kind="$(jq -er 'select(.schemaVersion == 1 and (.kind == "stable" or .kind == "beta" or .kind == "build")) | .kind' "${OXIBELT_RECEIPT}")"
+          printf 'kind=%s\n' "${kind}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload exact-tag release contract
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: release-contract-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/release-contract.json
+            ${{ runner.temp }}/release-body.md
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare-draft:
+    name: Prepare stable or beta draft
+    needs:
+      - validate-release-contract
+    if: needs.validate-release-contract.outputs.kind == 'stable' || needs.validate-release-contract.outputs.kind == 'beta'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download exact-tag release contract
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-contract-${{ github.sha }}
+          path: ${{ runner.temp }}/release-contract
+
+      - name: Create an immutable draft without overwriting conflicts
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          OXIBELT_BODY: ${{ runner.temp }}/release-contract/release-body.md
+          OXIBELT_RECEIPT: ${{ runner.temp }}/release-contract/release-contract.json
+        with:
+          script: |
+            const fs = require('fs')
+            const crypto = require('crypto')
+
+            if (context.repo.owner !== 'OxiBelt' || context.repo.repo !== 'OxiBelt') {
+              core.setFailed('draft releases may be prepared only in OxiBelt/OxiBelt')
+              return
+            }
+
+            const receiptBytes = fs.readFileSync(process.env.OXIBELT_RECEIPT)
+            const bodyBytes = fs.readFileSync(process.env.OXIBELT_BODY)
+            if (receiptBytes.length > 262144 || bodyBytes.length > 262144) {
+              core.setFailed('release-contract inputs exceed the 256 KiB bound')
+              return
+            }
+
+            const receipt = JSON.parse(receiptBytes.toString('utf8'))
+            const body = bodyBytes.toString('utf8')
+            const fullRevision = /^[0-9a-f]{40}$/
+            const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+            const beta = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-beta\.([1-9]\d*)$/
+            const expectedKind = stable.test(receipt.version)
+              ? 'stable'
+              : (beta.test(receipt.version) ? 'beta' : null)
+            const expectedLedger = expectedKind === 'stable' ? 'CHANGELOG.md' : 'CHANGELOG-beta.md'
+            const bodyDigest = crypto.createHash('sha256').update(body, 'utf8').digest('hex')
+            if (
+              receipt.schemaVersion !== 1 ||
+              expectedKind === null ||
+              receipt.kind !== expectedKind ||
+              receipt.ref !== `refs/tags/${receipt.version}` ||
+              context.ref !== receipt.ref ||
+              !fullRevision.test(receipt.revision) ||
+              context.sha !== receipt.revision ||
+              typeof receipt.baseVersion !== 'string' ||
+              !fullRevision.test(receipt.baseRevision ?? '') ||
+              !Array.isArray(receipt.supportedUpgradeSources) ||
+              receipt.supportedUpgradeSources.length === 0 ||
+              receipt.ledgerPath !== expectedLedger ||
+              !/^[0-9a-f]{64}$/.test(receipt.entrySha256 ?? '') ||
+              receipt.bodySha256 !== bodyDigest
+            ) {
+              core.setFailed('release-contract receipt does not match the immutable tag context')
+              return
+            }
+
+            const tagRef = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${receipt.version}`
+            })
+            let tagObject = tagRef.data.object
+            for (let depth = 0; depth < 4 && tagObject.type === 'tag'; depth += 1) {
+              const annotated = await github.rest.git.getTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_sha: tagObject.sha
+              })
+              tagObject = annotated.data.object
+            }
+            if (tagRef.data.ref !== receipt.ref || tagObject.type !== 'commit' || tagObject.sha !== receipt.revision) {
+              core.setFailed('release tag no longer resolves to the validated commit')
+              return
+            }
+
+            const prerelease = receipt.kind === 'beta'
+            const normalizeBody = value => {
+              const normalized = (value ?? '').replace(/\r\n/g, '\n')
+              return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized
+            }
+
+            let existing
+            try {
+              existing = (await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: receipt.version
+              })).data
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error
+              }
+            }
+
+            if (existing !== undefined) {
+              if (
+                existing.draft === true &&
+                existing.tag_name === receipt.version &&
+                existing.name === receipt.version &&
+                existing.prerelease === prerelease &&
+                normalizeBody(existing.body) === normalizeBody(body)
+              ) {
+                core.info(`matching draft release ${receipt.version} already exists`)
+                return
+              }
+              core.setFailed(
+                `release ${receipt.version} already exists with different content or state; refusing to overwrite it`
+              )
+              return
+            }
+
+            const created = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: receipt.version,
+              target_commitish: receipt.revision,
+              name: receipt.version,
+              body,
+              draft: true,
+              prerelease
+            })
+            core.info(`created draft release ${created.data.id} for ${receipt.version}`)

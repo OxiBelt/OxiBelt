@@ -303,12 +303,135 @@ jobs:
             echo "- Revision: \`${EXPECTED_REVISION}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  release-contract:
+    name: Verify release changelog and published notes
+    runs-on: ubuntu-26.04
+    needs:
+      - resolve-release-source
+      - enforce-source-validation
+    permissions:
+      contents: read
+    outputs:
+      kind: ${{ steps.receipt.outputs.kind }}
+
+    steps:
+      - name: Checkout release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve-release-source.outputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Bind release notes to the exact tag commit
+        env:
+          OXIBELT_BODY_OUTPUT: ${{ runner.temp }}/release-body.md
+          OXIBELT_RECEIPT_OUTPUT: ${{ runner.temp }}/release-contract.json
+          OXIBELT_RELEASE_REF: ${{ needs.resolve-release-source.outputs.release_ref }}
+          OXIBELT_RELEASE_REVISION: ${{ needs.resolve-release-source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          pnpm run release-contract:candidate -- \
+            --ref "${OXIBELT_RELEASE_REF}" \
+            --revision "${OXIBELT_RELEASE_REVISION}" \
+            --receipt-output "${OXIBELT_RECEIPT_OUTPUT}" \
+            --body-output "${OXIBELT_BODY_OUTPUT}"
+
+      - name: Read validated release kind
+        id: receipt
+        env:
+          OXIBELT_EVENT_NAME: ${{ github.event_name }}
+          OXIBELT_RECEIPT: ${{ runner.temp }}/release-contract.json
+        run: |
+          set -euo pipefail
+          kind="$(jq -er 'select(.schemaVersion == 1 and (.kind == "stable" or .kind == "beta" or .kind == "build")) | .kind' "${OXIBELT_RECEIPT}")"
+          if [[ "${kind}" == "build" && "${OXIBELT_EVENT_NAME}" == "release" ]]; then
+            echo "build tags must not have or publish from a GitHub Release" >&2
+            exit 1
+          fi
+          printf 'kind=%s\n' "${kind}" >>"${GITHUB_OUTPUT}"
+
+      - name: Read published stable or beta release
+        if: steps.receipt.outputs.kind == 'stable' || steps.receipt.outputs.kind == 'beta'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          OXIBELT_RELEASE_JSON: ${{ runner.temp }}/github-release.json
+          OXIBELT_RELEASE_TAG: ${{ needs.resolve-release-source.outputs.release_ref }}
+        with:
+          script: |
+            const fs = require('fs')
+            if (context.repo.owner !== 'OxiBelt' || context.repo.repo !== 'OxiBelt') {
+              core.setFailed('release publication validation may run only in OxiBelt/OxiBelt')
+              return
+            }
+            const prefix = 'refs/tags/'
+            if (!process.env.OXIBELT_RELEASE_TAG.startsWith(prefix)) {
+              core.setFailed('release ref is not an exact tag ref')
+              return
+            }
+            const tag = process.env.OXIBELT_RELEASE_TAG.slice(prefix.length)
+            const response = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag
+            })
+            const release = response.data
+            const bounded = {
+              tag_name: release.tag_name,
+              name: release.name,
+              body: release.body,
+              draft: release.draft,
+              prerelease: release.prerelease
+            }
+            const encoded = `${JSON.stringify(bounded, null, 2)}\n`
+            if (Buffer.byteLength(encoded, 'utf8') > 262144) {
+              core.setFailed('GitHub release metadata exceeds the 256 KiB validation bound')
+              return
+            }
+            fs.writeFileSync(process.env.OXIBELT_RELEASE_JSON, encoded, {
+              encoding: 'utf8',
+              flag: 'wx',
+              mode: 0o600
+            })
+
+      - name: Verify published notes are canonical
+        if: steps.receipt.outputs.kind == 'stable' || steps.receipt.outputs.kind == 'beta'
+        env:
+          OXIBELT_BODY: ${{ runner.temp }}/release-body.md
+          OXIBELT_RECEIPT: ${{ runner.temp }}/release-contract.json
+          OXIBELT_RELEASE_JSON: ${{ runner.temp }}/github-release.json
+        run: |
+          set -euo pipefail
+          pnpm run release-contract:verify -- \
+            --receipt "${OXIBELT_RECEIPT}" \
+            --release "${OXIBELT_RELEASE_JSON}" \
+            --expected-state published \
+            --expected-body "${OXIBELT_BODY}"
+
+      - name: Upload verified release contract
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: release-contract-${{ needs.resolve-release-source.outputs.revision }}
+          path: |
+            ${{ runner.temp }}/release-contract.json
+            ${{ runner.temp }}/release-body.md
+          if-no-files-found: error
+          retention-days: 1
+
   prepare-release:
     name: Prepare release metadata
     runs-on: ubuntu-26.04
     needs:
       - resolve-release-source
       - enforce-source-validation
+      - release-contract
     permissions:
       contents: read
     outputs:
@@ -332,6 +455,12 @@ jobs:
 
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download verified release contract
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-contract-${{ needs.resolve-release-source.outputs.revision }}
+          path: ${{ runner.temp }}/release-contract
 
       - name: Validate repository-owned image vulnerability policy
         run: pnpm run image-vulnerability-policy:check
@@ -567,6 +696,12 @@ jobs:
             install -D -m 0644 "${relative_path}" "${workspace_root}/${relative_path}"
           done < <(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | sort -u)
           cp "${RUNNER_TEMP}/oxibelt-release/image-plan.json" "${metadata_root}/image-plan.json"
+          install -D -m 0644 \
+            "${RUNNER_TEMP}/release-contract/release-contract.json" \
+            "${metadata_root}/release-contract/release-contract.json"
+          install -D -m 0644 \
+            "${RUNNER_TEMP}/release-contract/release-body.md" \
+            "${metadata_root}/release-contract/release-body.md"
           install -D -m 0644 \
             "${RUNNER_TEMP}/oxibelt-release-helper/release_sbom.mjs" \
             "${metadata_root}/helper/release_sbom.mjs"

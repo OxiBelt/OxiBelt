@@ -341,6 +341,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -361,6 +362,20 @@ jobs:
 
       - name: Validate committed version state
         run: pnpm run versioning:check
+
+      - name: Validate release changelog and upgrade contract
+        env:
+          OXIBELT_CHANGE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}
+          OXIBELT_CHANGE_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${OXIBELT_CHANGE_BASE}" || "${OXIBELT_CHANGE_BASE}" =~ ^0{40}$ ]]; then
+            pnpm run release-contract:check
+          else
+            pnpm run release-contract:check -- \
+              --change-base "${OXIBELT_CHANGE_BASE}" \
+              --change-head "${OXIBELT_CHANGE_HEAD}"
+          fi
 
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_target }})
