@@ -4804,8 +4804,10 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "image-plan.json",
     "install -D -m 0644 Cargo.toml \"${workspace_root}/Cargo.toml\"",
     "cargo metadata --locked --no-deps --format-version 1",
+    "tests/scripts/select-amd64-docker-image-artifact.sh",
     "${metadata_root}/helper/release_sbom.mjs",
     "${metadata_root}/helper/rebuild_recipe.mjs",
+    "${metadata_root}/helper/select-amd64-docker-image-artifact.sh",
   ] {
     assert!(
       validate_job_text.contains(expected),
@@ -4941,6 +4943,7 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "format: cyclonedx",
     "-raw.cdx.json",
     "Validate release binaries",
+    "AMD64_SELECTOR: ${{ runner.temp }}/oxibelt-release-metadata/helper/select-amd64-docker-image-artifact.sh",
     "container_id=\"$(docker create \"${IMAGE_REF}\")\"",
     "docker cp",
     "expected_machine=\"Advanced Micro Devices X86-64\"",
@@ -4951,6 +4954,11 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     "readelf -dW \"${binary_path}\"",
     "must not request a program interpreter",
     "must not declare dynamic shared-library dependencies",
+    "x86_64:amd64v2) target_cpu=\"x86-64-v2\"",
+    "x86_64:amd64) target_cpu=\"x86-64-v3\"",
+    "x86_64:amd64v4) target_cpu=\"x86-64-v4\"",
+    "GITHUB_OUTPUT='' bash \"${AMD64_SELECTOR}\" \"${target_cpu}\" --allow-unsupported",
+    "AMD64 selector returned invalid supported status",
     "select(.role == $role) | .binaries[]",
     "OXIBELT_BUILD_IDENTITY_V1=",
     "{schemaVersion: 1, binaries: $binaries}",
@@ -4976,7 +4984,25 @@ fn release_workflows_use_reusable_arch_pipeline_with_scoped_publish_permissions(
     !scan_job_text.contains("docker start"),
     "release binary validation must not start the image's configured service entrypoint"
   );
+  assert!(
+    !scan_job_text.contains("x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4"),
+    "release binary execution must not treat every x86-64 CPU level as supported based only on uname"
+  );
+  let selector_position = scan_job_text
+    .find("GITHUB_OUTPUT='' bash \"${AMD64_SELECTOR}\"")
+    .expect("release binary validation should query the AMD64 CPU selector");
+  let native_gate_position = scan_job_text
+    .find("if [[ \"${native}\" == \"true\" ]]")
+    .expect("release binary validation should gate native execution");
+  let version_execution_position = scan_job_text
+    .find("version_output=\"$(docker run --rm --entrypoint")
+    .expect("release binary validation should retain native --version execution");
+  assert!(
+    selector_position < native_gate_position && native_gate_position < version_execution_position,
+    "release binary validation must query CPU support and gate native --version execution in order"
+  );
   for removed in [
+    "actions/checkout",
     "packages: read",
     "packages: write",
     "GITHUB_TOKEN",
@@ -5597,6 +5623,20 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
       "independent rebuild versioning should use workspace-relative path argument {expected}"
     );
   }
+  for expected in [
+    "x86_64:amd64v2) target_cpu=\"x86-64-v2\"",
+    "x86_64:amd64) target_cpu=\"x86-64-v3\"",
+    "x86_64:amd64v4) target_cpu=\"x86-64-v4\"",
+    "\"${rebuilt_root}/tests/scripts/select-amd64-docker-image-artifact.sh\"",
+    "GITHUB_OUTPUT='' bash",
+    "--allow-unsupported",
+    "AMD64 selector returned invalid supported status",
+  ] {
+    assert!(
+      script.contains(expected),
+      "independent rebuild binary validation should include {expected}"
+    );
+  }
   for forbidden in [
     "--manifest-path \"${rebuilt_root}/Cargo.toml\"",
     "--lockfile-path \"${rebuilt_root}/Cargo.lock\"",
@@ -5606,6 +5646,23 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
       "independent rebuild versioning must not pass rejected absolute path argument {forbidden}"
     );
   }
+  assert!(
+    !script.contains("x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4"),
+    "independent rebuild execution must not treat every x86-64 CPU level as supported based only on uname"
+  );
+  let selector_position = script
+    .find("GITHUB_OUTPUT='' bash")
+    .expect("independent rebuild should query the AMD64 CPU selector");
+  let native_gate_position = script
+    .find("if [[ \"${native}\" == \"true\" ]]")
+    .expect("independent rebuild should gate native execution");
+  let version_execution_position = script
+    .find("version_output=\"$(docker run --rm --entrypoint")
+    .expect("independent rebuild should retain native --version execution");
+  assert!(
+    selector_position < native_gate_position && native_gate_position < version_execution_position,
+    "independent rebuild must query CPU support and gate native --version execution in order"
+  );
 }
 
 #[test]

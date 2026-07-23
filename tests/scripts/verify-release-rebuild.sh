@@ -248,9 +248,34 @@ loaded_image="${local_tag}"
 jq '{schemaVersion: 1, binaries: .binaries}' \
   "${rebuilt_contract}" >"${temporary}/rebuilt-binaries.json"
 native=false
+target_cpu=""
 case "$(uname -m):${artifact_arch}" in
-  x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4|aarch64:arm64) native=true ;;
+  x86_64:amd64v2) target_cpu="x86-64-v2" ;;
+  x86_64:amd64) target_cpu="x86-64-v3" ;;
+  x86_64:amd64v4) target_cpu="x86-64-v4" ;;
+  aarch64:arm64) native=true ;;
 esac
+if [[ -n "${target_cpu}" ]]; then
+  selector_output="$(
+    GITHUB_OUTPUT='' bash \
+      "${rebuilt_root}/tests/scripts/select-amd64-docker-image-artifact.sh" \
+      "${target_cpu}" \
+      --allow-unsupported
+  )"
+  supported="$(awk -F= '$1 == "supported" { print $2 }' <<<"${selector_output}")"
+  missing_features="$(awk -F= '$1 == "missing_features" { sub(/^[^=]*=/, ""); print }' <<<"${selector_output}")"
+  case "${supported}" in
+    true) native=true ;;
+    false)
+      printf 'runner CPU does not support %s; skipping native --version execution (missing: %s)\n' \
+        "${target_cpu}" "${missing_features:-unknown}"
+      ;;
+    *)
+      echo "AMD64 selector returned invalid supported status: ${supported:-missing}" >&2
+      exit 1
+      ;;
+  esac
+fi
 if [[ "${native}" == "true" ]]; then
   while read -r binary; do
     version_output="$(docker run --rm --entrypoint "/usr/local/bin/${binary}" "${local_tag}" --version)"

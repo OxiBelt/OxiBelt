@@ -335,6 +335,7 @@ jobs:
 
       - name: Validate release binaries
         env:
+          AMD64_SELECTOR: ${{ runner.temp }}/oxibelt-release-metadata/helper/select-amd64-docker-image-artifact.sh
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_REF: ${{ steps.trivy-image.outputs.image_ref }}
           INVENTORY_FILE: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-binaries-${{ env.OXIBELT_ARTIFACT_ARCH }}.json
@@ -362,6 +363,33 @@ jobs:
               exit 1
               ;;
           esac
+
+          native=false
+          target_cpu=""
+          case "$(uname -m):${OXIBELT_ARTIFACT_ARCH}" in
+            x86_64:amd64v2) target_cpu="x86-64-v2" ;;
+            x86_64:amd64) target_cpu="x86-64-v3" ;;
+            x86_64:amd64v4) target_cpu="x86-64-v4" ;;
+            aarch64:arm64) native=true ;;
+          esac
+          if [[ -n "${target_cpu}" ]]; then
+            selector_output="$(
+              GITHUB_OUTPUT='' bash "${AMD64_SELECTOR}" "${target_cpu}" --allow-unsupported
+            )"
+            supported="$(awk -F= '$1 == "supported" { print $2 }' <<<"${selector_output}")"
+            missing_features="$(awk -F= '$1 == "missing_features" { sub(/^[^=]*=/, ""); print }' <<<"${selector_output}")"
+            case "${supported}" in
+              true) native=true ;;
+              false)
+                printf 'runner CPU does not support %s; skipping native --version execution (missing: %s)\n' \
+                  "${target_cpu}" "${missing_features:-unknown}"
+                ;;
+              *)
+                echo "AMD64 selector returned invalid supported status: ${supported:-missing}" >&2
+                exit 1
+                ;;
+            esac
+          fi
 
           while read -r binary; do
             install_path="/usr/local/bin/${binary}"
@@ -406,10 +434,6 @@ jobs:
           print(identity["version"])
           PY
             )"
-            native=false
-            case "$(uname -m):${OXIBELT_ARTIFACT_ARCH}" in
-              x86_64:amd64v2|x86_64:amd64|x86_64:amd64v4|aarch64:arm64) native=true ;;
-            esac
             if [[ "${native}" == "true" ]]; then
               version_output="$(docker run --rm --entrypoint "${install_path}" "${IMAGE_REF}" --version)"
               grep -F "OXIBELT_BUILD_IDENTITY_V1=" <<<"${version_output}" >/dev/null
