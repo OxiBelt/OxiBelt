@@ -323,12 +323,22 @@ non-benchmark summary. Pull-request image scans may generate and upload local
 dependency snapshot artifacts, but only a trusted default-branch push,
 schedule, or explicitly opted-in manual run may submit them to GitHub.
 
-Release publication calls the same complete non-benchmark graph for the exact
-full tag revision and ref. The release workflow accepts the validation identity
-only from the successful terminal summary; failed, cancelled, skipped,
-malformed, missing, or mismatched validation blocks release metadata, image
-publication, attestations, manifests, and alias promotion. Benchmark jobs and
-dependency-snapshot submission are excluded from release validation.
+Release-like tags are governed by the tracked
+`devops/config/github-release-tag-ruleset.json` policy. Tag creation requires
+the GitHub Actions `Non-benchmark validation summary` status, and matching tags
+cannot be updated or deleted; the active policy has no bypass actors. Wait for
+the canonical default-branch push at the intended commit to pass before
+creating the tag, and retry tag creation after that check succeeds if an
+earlier attempt was rejected.
+
+Release publication resolves the full tag ref and revision, then independently
+queries the newest attempt of the canonical default-branch `Check OxiBelt`
+push for that exact commit. It accepts only the single successful terminal
+summary and its GitHub Actions check identity; failed, cancelled, skipped,
+missing, duplicate, stale, or mismatched evidence blocks release metadata,
+image publication, attestations, manifests, and alias promotion. Benchmark
+jobs and dependency-snapshot submission remain outside the release
+prerequisite.
 
 If TypeScript DevOps tooling is added, CI should run its typecheck, lint, and
 tests. If browser WebDriver tests are added, CI must run them with both

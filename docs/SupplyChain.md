@@ -39,17 +39,28 @@ digest, and provenance described below. A local clean exact-tag build is
 `tagged_development`, while a direct archive Docker build is
 `0.0.0-dev.archive`; neither is an official artifact.
 
+Release-like tags are covered by the active, bypass-free desired state in
+`devops/config/github-release-tag-ruleset.json`. Creation requires the
+GitHub Actions `Non-benchmark validation summary` status, while updates and
+deletions are blocked. Operators must wait for the canonical default-branch
+push at the intended commit to pass before creating a tag; a rejected tag
+creation can be retried after that check succeeds.
+
 Before release preparation or publication, the release workflow resolves the
-tag to one full lowercase commit and calls the canonical complete
-non-benchmark validation graph for that exact ref and revision. The call has
-only read access and receives no secrets. Its terminal summary exports the
-validated identity only when all 34 required Rust, dependency, TypeScript,
-fuzzing, sanitizer, cross-build, image, vulnerability, database, Kubernetes,
-integration, signer, and browser jobs succeed. Failure, cancellation, skip,
-missing output, malformed identity, or ref/revision mismatch blocks release
-metadata, GHCR writes, attestations, manifests, verification, and alias
-promotion. Benchmark jobs and dependency-snapshot submission are not part of
-the release prerequisite.
+tag to one full lowercase commit and uses read-only Actions, Checks, and
+Contents access to inspect the newest canonical default-branch
+`.github/workflows/check-oxibelt.yml` push run for that exact revision. It
+requires the latest attempt to contain exactly one completed, successful
+`Non-benchmark validation summary` job and verifies the corresponding check
+name, revision, details URL, and GitHub Actions application identity. Failure,
+cancellation, skip, missing or duplicate evidence, a stale older success, or
+any repository, workflow, branch, event, ref, revision, check, or application
+mismatch blocks release metadata, GHCR writes, attestations, manifests,
+verification, and alias promotion. The 34-job terminal summary covers Rust,
+dependency, TypeScript, fuzzing, sanitizer, cross-build, image, vulnerability,
+database, Kubernetes, integration, signer, and browser validation. Benchmark
+jobs and dependency-snapshot submission remain outside the release
+prerequisite.
 
 Source-validation artifacts are evidence for the gate, not official release
 inputs. After the gate, release CI checks out the same immutable revision,
@@ -57,8 +68,10 @@ revalidates its tag identity, applies the disposable release-version rewrite,
 and independently rebuilds every image. Actions transport names include the
 release run and attempt so validation and release artifacts cannot collide;
 the image plan, tar filenames, OCI repositories, and public tags are unchanged.
-This repository-enforced boundary does not rely on branch-protection,
-ruleset, or environment configuration for correctness.
+The runtime verifier and tag ruleset are complementary: the ruleset prevents
+creation without the canonical status and makes matching tags immutable, while
+the release workflow independently verifies exact-run provenance before any
+publication permission is reached.
 
 Only the following repositories are official OxiBelt image sources:
 

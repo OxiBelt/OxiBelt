@@ -44,15 +44,20 @@ CI builds the six production Alpine musl roles (`standalone`, `dataplane`, `data
 After the image artifacts are built in non-release CI, Trivy scans all 30 role/architecture combinations. Each scan reports vulnerabilities as a Markdown table in `GITHUB_STEP_SUMMARY`, uploads report-only raw JSON, and generates a normalized local dependency snapshot without a write token. Pull requests, including forks, upload those local snapshot artifacts but never submit them externally. A checkout-free canonical-repository job validates the complete 30-snapshot set and submits it to the Dependency Snapshot API only after the non-benchmark summary succeeds on a default-branch push, schedule, or manual run with `submit_dependency_snapshots` enabled.
 Every ordinary pull request exposes the stable `PR non-benchmark summary` check. It depends on all 34 required aggregate jobs and uploads schema-versioned JSON plus Markdown; any failure, cancellation, unexpected skip, or topology mismatch fails the check. The summary helper is loaded from the pull request's immutable base revision instead of the pull request worktree. Required-job inventory changes therefore need a compatibility-first helper that accepts the old and new inventories, followed by the workflow update and a strict-helper cleanup; otherwise the intermediate base-branch run fails closed. Superseded runs are cancelled only within the same pull request. Comparator, performance-probe, external-benchmark, Docker performance, performance summary, and aggressive long-run jobs remain schedule/manual-only and wait for a successful same-run non-benchmark summary.
 Kubernetes integration keeps the supported Kubernetes `v1.31.14` and Helm 3 compatibility lane. A separate read-only compatibility job runs the full static chart checks with Helm `v4.2.3`, starts a digest-pinned Kubernetes `v1.36.1` Kind node with Kind `v0.32.0`, and submits the default rendered chart to the API server with `--dry-run=server` using kubectl `v1.36.2`.
-The release workflow resolves the strict tag to one full revision and calls
-the same 34-job non-benchmark graph with read-only permissions and no secrets.
-Only the successful terminal summary exports the validated ref and revision;
-all other outcomes and identity mismatches block release preparation and
-publication. Release-mode validation skips benchmark and dependency-snapshot
-submission jobs, and its artifacts are evidence only: the release rebuilds the
-30-image matrix after the gate. Run- and attempt-qualified transport artifact
-names keep those official builds separate without changing image-plan names,
-tar filenames, or OCI tags. Each reusable per-architecture row builds an
+The tracked, bypass-free release-tag ruleset requires the configured GitHub
+Actions `Non-benchmark validation summary` context and application identity
+when matching tags are created and blocks later update or deletion. The
+release workflow resolves the strict tag to one full revision, then
+independently uses read-only GitHub metadata to require the newest canonical
+default-branch `Check OxiBelt` push attempt for that exact revision to contain
+exactly one successful 34-job terminal summary with the expected GitHub
+Actions check identity. Missing, stale, duplicate, failed, or mismatched
+evidence blocks release preparation and publication. Benchmark and
+dependency-snapshot submission jobs remain outside the prerequisite, and
+validation artifacts are evidence only: the release rebuilds the 30-image
+matrix after the gate. Run- and attempt-qualified transport artifact names
+keep those official builds separate without changing image-plan names, tar
+filenames, or OCI tags. Each reusable per-architecture row builds an
 unprivileged image tar, records the Buildx digest metadata used by canonical
 publication, scans the local tar as report-only pre-publish evidence, and
 produces a validated CycloneDX platform SBOM. An isolated package-write job

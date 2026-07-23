@@ -1,0 +1,35 @@
+{
+  "name": "release-tags-require-complete-validation",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/tags/[0-9]*.[0-9]*.[0-9]*"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "Non-benchmark validation summary",
+            "integration_id": 15368
+          }
+        ],
+        "strict_required_status_checks_policy": false
+      }
+    },
+    {
+      "type": "update"
+    },
+    {
+      "type": "deletion"
+    }
+  ]
+}

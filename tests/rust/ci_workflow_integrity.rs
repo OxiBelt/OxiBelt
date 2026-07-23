@@ -149,13 +149,13 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "unsafe-validation",
   "check-riscv64-cross",
 ];
-const DEPENDABOT_ACTOR_CONDITION: &str =
-  "${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}";
+const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
 
 const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
   "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
-const PERFORMANCE_WORKFLOW_JOB_IF: &str = "if: ${{ !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
-const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str = "if: ${{ always() && !inputs.release_validation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
+const PERFORMANCE_WORKFLOW_JOB_IF: &str =
+  "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
+const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str = "if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
 
 fn expected_needs(job_ids: &[&str]) -> Vec<String> {
   job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
@@ -4058,7 +4058,7 @@ fn pr_non_benchmark_summary_executes_only_trusted_helper() {
     checkout["with"],
     serde_json::json!({
       "repository": "${{ github.repository }}",
-      "ref": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.source_revision || github.sha }}",
+      "ref": "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}",
       "path": "trusted-non-benchmark-summary",
       "persist-credentials": false,
       "sparse-checkout": "tests/scripts/summarize-ci-needs.sh",
@@ -4126,7 +4126,7 @@ fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
   );
   for expected in [
     "github.event_name == 'pull_request' && 'PR non-benchmark summary'",
-    "if: ${{ always() && (inputs.release_validation || github.actor != 'dependabot[bot]') }}",
+    "if: ${{ always() && github.actor != 'dependabot[bot]' }}",
     "OXIBELT_NEEDS_JSON: ${{ toJSON(needs) }}",
     "tests/scripts/summarize-ci-needs.sh",
     "name: Upload non-benchmark validation summary",
@@ -4551,87 +4551,24 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     serde_saphyr::from_str(&release_workflow).expect("release workflow should parse as YAML");
   let release_jobs = parse_jobs(&release_workflow);
 
-  let workflow_call_inputs = parsed_check["on"]["workflow_call"]["inputs"]
-    .as_object()
-    .expect("canonical non-benchmark graph should expose workflow-call inputs");
-  assert_eq!(
-    workflow_call_inputs
-      .keys()
-      .cloned()
-      .collect::<BTreeSet<_>>(),
-    BTreeSet::from([
-      "release_validation".to_owned(),
-      "source_ref".to_owned(),
-      "source_revision".to_owned()
-    ]),
-    "the canonical non-benchmark graph should expose only the exact source identity and release mode"
+  assert!(
+    parsed_check["on"].get("workflow_call").is_none(),
+    "the canonical check workflow must remain direct so write-capable jobs retain their own permissions"
   );
-  for (name, kind) in [
-    ("release_validation", "boolean"),
-    ("source_ref", "string"),
-    ("source_revision", "string"),
-  ] {
-    assert_eq!(workflow_call_inputs[name]["required"], true);
-    assert_eq!(workflow_call_inputs[name]["type"], kind);
-  }
-  assert_eq!(
-    parsed_check["on"]["workflow_call"]["outputs"]["validated_ref"]["value"],
-    "${{ jobs.pr-non-benchmark-summary.outputs.validated_ref }}"
+  assert!(
+    !check_workflow.contains("release_validation")
+      && !check_workflow.contains("inputs.source_ref")
+      && !check_workflow.contains("inputs.source_revision"),
+    "release-only inputs must not alter the canonical check workflow"
   );
-  assert_eq!(
-    parsed_check["on"]["workflow_call"]["outputs"]["validated_revision"]["value"],
-    "${{ jobs.pr-non-benchmark-summary.outputs.validated_revision }}"
-  );
-
-  let source_structure_text = workflow_job_text(&check_workflow, "source-structure");
-  for expected in [
-    "validated_ref: ${{ steps.source-identity.outputs.validated_ref }}",
-    "validated_revision: ${{ steps.source-identity.outputs.validated_revision }}",
-    "ref: ${{ inputs.source_revision || github.sha }}",
-    "EXPECTED_REF: ${{ inputs.source_ref || github.ref }}",
-    "EXPECTED_REVISION: ${{ inputs.source_revision || github.sha }}",
-    "git check-ref-format \"${EXPECTED_REF}\"",
-    "actual_revision=\"$(git rev-parse HEAD)\"",
-    "GITHUB_REF",
-    "GITHUB_SHA",
-  ] {
-    assert!(
-      source_structure_text.contains(expected),
-      "source identity gate should contain {expected}"
-    );
-  }
-
-  let summary = &parsed_check["jobs"]["pr-non-benchmark-summary"];
-  assert_eq!(
-    summary["outputs"],
-    serde_json::json!({
-      "validated_ref": "${{ steps.enforce.outputs.validated_ref }}",
-      "validated_revision": "${{ steps.enforce.outputs.validated_revision }}"
-    }),
-    "only the terminal non-benchmark summary should export the validated source identity"
-  );
-  let summary_text = workflow_job_text(&check_workflow, "pr-non-benchmark-summary");
-  for expected in [
-    "inputs.release_validation || github.actor != 'dependabot[bot]'",
-    "needs.source-structure.outputs.validated_ref",
-    "needs.source-structure.outputs.validated_revision",
-    "OXIBELT_SUMMARY_STATUS",
-    "validated_ref=${OXIBELT_EXPECTED_REF}",
-    "validated_revision=${OXIBELT_EXPECTED_REVISION}",
-  ] {
-    assert!(
-      summary_text.contains(expected),
-      "terminal source-validation summary should contain {expected}"
-    );
-  }
 
   for job_id in CHECK_WORKFLOW_ENTRY_JOBS {
     let condition = parsed_check["jobs"][job_id]["if"]
       .as_str()
       .unwrap_or_else(|| panic!("entry job {job_id} should define a condition"));
     assert_eq!(
-      condition, "${{ inputs.release_validation || github.actor != 'dependabot[bot]' }}",
-      "release validation must not allow actor-based skipping in {job_id}"
+      condition, DEPENDABOT_ACTOR_CONDITION,
+      "canonical entry-job actor handling should remain unchanged in {job_id}"
     );
   }
   let check_jobs = parsed_check["jobs"]
@@ -4644,24 +4581,11 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     for step in steps {
       if step["name"].as_str() == Some("Checkout") {
         assert_eq!(
-          step["with"]["ref"], "${{ inputs.source_revision || github.sha }}",
-          "source checkout in {job_id} should remain bound to the selected commit"
+          step["with"]["ref"], "${{ github.sha }}",
+          "source checkout in {job_id} should remain bound to the workflow commit"
         );
       }
     }
-  }
-  for job_id in BENCHMARK_ONLY_JOBS
-    .iter()
-    .copied()
-    .chain(["docker-image-dependency-snapshot-submit"])
-  {
-    let condition = parsed_check["jobs"][job_id]["if"]
-      .as_str()
-      .unwrap_or_else(|| panic!("{job_id} should define a release-mode exclusion"));
-    assert!(
-      condition.contains("!inputs.release_validation"),
-      "{job_id} must not run as part of release source validation"
-    );
   }
 
   assert_eq!(
@@ -4696,26 +4620,166 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
   }
 
   let validation = &parsed_release["jobs"]["source-validation"];
-  assert_eq!(validation["uses"], "./.github/workflows/check-oxibelt.yml");
+  assert_eq!(validation["runs-on"], "ubuntu-26.04");
   assert_eq!(
     validation["needs"],
     serde_json::json!(["resolve-release-source"])
   );
   assert_eq!(
     validation["permissions"],
-    serde_json::json!({"actions": "read", "contents": "read"})
+    serde_json::json!({"actions": "read", "checks": "read", "contents": "read"})
   );
   assert_eq!(
-    validation["with"],
+    validation["outputs"],
     serde_json::json!({
-      "release_validation": true,
-      "source_ref": "${{ needs.resolve-release-source.outputs.release_ref }}",
-      "source_revision": "${{ needs.resolve-release-source.outputs.revision }}"
+      "validated_ref": "${{ steps.verify.outputs.validated_ref }}",
+      "validated_revision": "${{ steps.verify.outputs.validated_revision }}"
     })
   );
   assert!(
-    validation.get("secrets").is_none(),
-    "release source validation must not inherit or receive secrets"
+    validation.get("uses").is_none()
+      && validation.get("with").is_none()
+      && validation.get("secrets").is_none(),
+    "release source validation must be a normal job without reusable-workflow inputs or secrets"
+  );
+  let validation_steps = validation["steps"]
+    .as_array()
+    .expect("source validation should define steps");
+  assert_eq!(
+    validation_steps.len(),
+    1,
+    "source validation should only query trusted GitHub metadata"
+  );
+  let verifier = &validation_steps[0];
+  assert_eq!(
+    verifier["uses"],
+    "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
+  );
+  assert_eq!(verifier["with"]["github-token"], "${{ github.token }}");
+  assert_eq!(
+    verifier["env"],
+    serde_json::json!({
+      "OXIBELT_CANONICAL_BRANCH": "${{ github.event.repository.default_branch }}",
+      "OXIBELT_CANONICAL_REPOSITORY": "OxiBelt/OxiBelt",
+      "OXIBELT_CANONICAL_WORKFLOW": ".github/workflows/check-oxibelt.yml",
+      "OXIBELT_EXPECTED_APP_ID": "15368",
+      "OXIBELT_EXPECTED_APP_SLUG": "github-actions",
+      "OXIBELT_EXPECTED_REF": "${{ needs.resolve-release-source.outputs.release_ref }}",
+      "OXIBELT_EXPECTED_REVISION": "${{ needs.resolve-release-source.outputs.revision }}",
+      "OXIBELT_EXPECTED_SUMMARY": "Non-benchmark validation summary"
+    })
+  );
+  let verifier_script = verifier["with"]["script"]
+    .as_str()
+    .expect("source validation should execute a GitHub API verifier");
+  for expected in [
+    "github.rest.actions.listWorkflowRuns",
+    "workflow_id: canonicalWorkflow",
+    "branch: canonicalBranch",
+    "event: 'push'",
+    "head_sha: expectedRevision",
+    "run.path === canonicalWorkflow",
+    "run.repository?.full_name === canonicalRepository",
+    "run.head_repository?.full_name === canonicalRepository",
+    "canonicalRuns.sort((left, right) => right.id - left.id)",
+    "github.rest.actions.listJobsForWorkflowRunAttempt",
+    "attempt_number: run.run_attempt",
+    "summaries.length !== 1",
+    "summary.status !== 'completed'",
+    "summary.conclusion !== 'success'",
+    "summary.head_sha !== expectedRevision",
+    "github.rest.checks.get",
+    "check.app?.id !== expectedAppId",
+    "check.app?.slug !== expectedAppSlug",
+    "check.details_url !== summary.html_url",
+    "github.rest.actions.getWorkflowRun",
+    "finalRun.data.run_attempt !== run.run_attempt",
+    "changed identity or attempt during validation",
+    "core.setOutput('validated_ref', expectedRef)",
+    "core.setOutput('validated_revision', expectedRevision)",
+  ] {
+    assert!(
+      verifier_script.contains(expected),
+      "exact-revision canonical-run verifier should contain {expected}"
+    );
+  }
+  let validation_text = workflow_job_text(&release_workflow, "source-validation");
+  for forbidden in [
+    "actions/checkout@",
+    "packages: write",
+    "id-token: write",
+    "uses: ./.github/workflows/check-oxibelt.yml",
+    "secrets:",
+  ] {
+    assert!(
+      !validation_text.contains(forbidden),
+      "source-validation metadata query must not use {forbidden}"
+    );
+  }
+
+  let ruleset_text =
+    fs::read_to_string(repo_root().join("devops/config/github-release-tag-ruleset.json"))
+      .expect("release-tag ruleset desired state should be readable");
+  let ruleset: serde_json::Value =
+    serde_json::from_str(&ruleset_text).expect("release-tag ruleset should parse as JSON");
+  assert_eq!(
+    ruleset,
+    serde_json::json!({
+      "name": "release-tags-require-complete-validation",
+      "target": "tag",
+      "enforcement": "active",
+      "bypass_actors": [],
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/tags/[0-9]*.[0-9]*.[0-9]*"],
+          "exclude": []
+        }
+      },
+      "rules": [
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [{
+              "context": "Non-benchmark validation summary",
+              "integration_id": 15368
+            }],
+            "strict_required_status_checks_policy": false
+          }
+        },
+        {"type": "update"},
+        {"type": "deletion"}
+      ]
+    }),
+    "tracked tag-ruleset desired state must stay exact and bypass-free"
+  );
+  assert!(
+    !ruleset["rules"]
+      .as_array()
+      .expect("ruleset should define rules")
+      .iter()
+      .any(|rule| rule["type"] == "creation"),
+    "the ruleset must gate rather than universally block release-tag creation"
+  );
+  let required_check = &ruleset["rules"][0]["parameters"]["required_status_checks"][0];
+  assert_eq!(
+    required_check["context"],
+    verifier["env"]["OXIBELT_EXPECTED_SUMMARY"]
+  );
+  assert_eq!(
+    required_check["integration_id"]
+      .as_u64()
+      .expect("required check integration id should be numeric")
+      .to_string(),
+    verifier["env"]["OXIBELT_EXPECTED_APP_ID"]
+      .as_str()
+      .expect("verifier app id should be a string")
+  );
+  assert!(
+    check_workflow.contains(
+      "github.event_name == 'pull_request' && 'PR non-benchmark summary' || 'Non-benchmark validation summary'"
+    ),
+    "the ruleset and release verifier must name the canonical non-PR summary check"
   );
 
   let enforcement_text = workflow_job_text(&release_workflow, "enforce-source-validation");
@@ -7058,7 +7122,7 @@ fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
     "aggressive long-run should start after the Docker performance matrix"
   );
   assert!(
-        workflow.contains("if: ${{ !inputs.release_validation && needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run'])) }}"),
+        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))"),
         "aggressive long-run should run only after successful Docker performance on schedule or explicit manual dispatch"
     );
   assert!(

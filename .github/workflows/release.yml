@@ -75,17 +75,176 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   source-validation:
-    name: Validate complete non-benchmark source graph
+    name: Verify canonical non-benchmark source validation
+    runs-on: ubuntu-26.04
     needs:
       - resolve-release-source
     permissions:
       actions: read
+      checks: read
       contents: read
-    uses: ./.github/workflows/check-oxibelt.yml
-    with:
-      release_validation: true
-      source_ref: ${{ needs.resolve-release-source.outputs.release_ref }}
-      source_revision: ${{ needs.resolve-release-source.outputs.revision }}
+    outputs:
+      validated_ref: ${{ steps.verify.outputs.validated_ref }}
+      validated_revision: ${{ steps.verify.outputs.validated_revision }}
+
+    steps:
+      - name: Verify newest canonical validation for exact revision
+        id: verify
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          OXIBELT_CANONICAL_BRANCH: ${{ github.event.repository.default_branch }}
+          OXIBELT_CANONICAL_REPOSITORY: OxiBelt/OxiBelt
+          OXIBELT_CANONICAL_WORKFLOW: .github/workflows/check-oxibelt.yml
+          OXIBELT_EXPECTED_APP_ID: "15368"
+          OXIBELT_EXPECTED_APP_SLUG: github-actions
+          OXIBELT_EXPECTED_REF: ${{ needs.resolve-release-source.outputs.release_ref }}
+          OXIBELT_EXPECTED_REVISION: ${{ needs.resolve-release-source.outputs.revision }}
+          OXIBELT_EXPECTED_SUMMARY: Non-benchmark validation summary
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const {
+              OXIBELT_CANONICAL_BRANCH: canonicalBranch,
+              OXIBELT_CANONICAL_REPOSITORY: canonicalRepository,
+              OXIBELT_CANONICAL_WORKFLOW: canonicalWorkflow,
+              OXIBELT_EXPECTED_APP_ID: expectedAppIdText,
+              OXIBELT_EXPECTED_APP_SLUG: expectedAppSlug,
+              OXIBELT_EXPECTED_REF: expectedRef,
+              OXIBELT_EXPECTED_REVISION: expectedRevision,
+              OXIBELT_EXPECTED_SUMMARY: expectedSummary,
+            } = process.env
+
+            if (`${context.repo.owner}/${context.repo.repo}` !== canonicalRepository) {
+              core.setFailed(`release validation must run in ${canonicalRepository}`)
+              return
+            }
+            if (!canonicalBranch || !canonicalWorkflow || !expectedSummary) {
+              core.setFailed('canonical validation identity is incomplete')
+              return
+            }
+            if (!expectedRef?.startsWith('refs/tags/')) {
+              core.setFailed(`release ref must start with refs/tags/: ${expectedRef}`)
+              return
+            }
+            if (!/^[0-9a-f]{40}$/.test(expectedRevision ?? '')) {
+              core.setFailed(`release revision must be a full lowercase Git commit: ${expectedRevision}`)
+              return
+            }
+            if (!/^[1-9][0-9]*$/.test(expectedAppIdText ?? '')) {
+              core.setFailed(`expected check app id is malformed: ${expectedAppIdText}`)
+              return
+            }
+            const expectedAppId = Number(expectedAppIdText)
+
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRuns,
+              {
+                ...context.repo,
+                workflow_id: canonicalWorkflow,
+                branch: canonicalBranch,
+                event: 'push',
+                head_sha: expectedRevision,
+                per_page: 100,
+              },
+            )
+            const canonicalRuns = runs.filter((run) =>
+              run.path === canonicalWorkflow &&
+              run.event === 'push' &&
+              run.head_branch === canonicalBranch &&
+              run.head_sha === expectedRevision &&
+              run.repository?.full_name === canonicalRepository &&
+              run.head_repository?.full_name === canonicalRepository
+            )
+            canonicalRuns.sort((left, right) => right.id - left.id)
+            const run = canonicalRuns[0]
+            if (!run) {
+              core.setFailed(
+                `no canonical ${canonicalWorkflow} push run exists for ${canonicalBranch}@${expectedRevision}`,
+              )
+              return
+            }
+            if (!Number.isInteger(run.run_attempt) || run.run_attempt < 1) {
+              core.setFailed(`canonical workflow run ${run.id} has invalid attempt ${run.run_attempt}`)
+              return
+            }
+
+            const jobs = await github.paginate(
+              github.rest.actions.listJobsForWorkflowRunAttempt,
+              {
+                ...context.repo,
+                run_id: run.id,
+                attempt_number: run.run_attempt,
+                per_page: 100,
+              },
+            )
+            const summaries = jobs.filter((job) => job.name === expectedSummary)
+            if (summaries.length !== 1) {
+              core.setFailed(
+                `canonical workflow run ${run.id} attempt ${run.run_attempt} has ${summaries.length} ${expectedSummary} jobs`,
+              )
+              return
+            }
+            const summary = summaries[0]
+            if (
+              summary.status !== 'completed' ||
+              summary.conclusion !== 'success' ||
+              summary.head_sha !== expectedRevision
+            ) {
+              core.setFailed(
+                `${expectedSummary} is ${summary.status}/${summary.conclusion} for ${summary.head_sha}, expected completed/success for ${expectedRevision}`,
+              )
+              return
+            }
+
+            const checkRunMatch = /\/check-runs\/([1-9][0-9]*)$/.exec(summary.check_run_url ?? '')
+            if (!checkRunMatch) {
+              core.setFailed(`${expectedSummary} does not expose a canonical check run URL`)
+              return
+            }
+            const checkRun = await github.rest.checks.get({
+              ...context.repo,
+              check_run_id: Number(checkRunMatch[1]),
+            })
+            const check = checkRun.data
+            if (
+              check.name !== expectedSummary ||
+              check.head_sha !== expectedRevision ||
+              check.status !== 'completed' ||
+              check.conclusion !== 'success' ||
+              check.app?.id !== expectedAppId ||
+              check.app?.slug !== expectedAppSlug ||
+              check.details_url !== summary.html_url
+            ) {
+              core.setFailed(
+                `${expectedSummary} check identity or successful exact-revision conclusion did not match`,
+              )
+              return
+            }
+
+            const finalRun = await github.rest.actions.getWorkflowRun({
+              ...context.repo,
+              run_id: run.id,
+            })
+            if (
+              finalRun.data.run_attempt !== run.run_attempt ||
+              finalRun.data.path !== canonicalWorkflow ||
+              finalRun.data.event !== 'push' ||
+              finalRun.data.head_branch !== canonicalBranch ||
+              finalRun.data.head_sha !== expectedRevision ||
+              finalRun.data.repository?.full_name !== canonicalRepository ||
+              finalRun.data.head_repository?.full_name !== canonicalRepository
+            ) {
+              core.setFailed(
+                `canonical workflow run ${run.id} changed identity or attempt during validation`,
+              )
+              return
+            }
+
+            core.info(
+              `accepted ${expectedSummary} from ${run.html_url} attempt ${run.run_attempt}`,
+            )
+            core.setOutput('validated_ref', expectedRef)
+            core.setOutput('validated_revision', expectedRevision)
 
   enforce-source-validation:
     name: Enforce exact source validation
