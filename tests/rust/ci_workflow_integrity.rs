@@ -2251,7 +2251,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run typecheck",
     "pnpm run test",
     "pnpm run versioning:check",
-    "pnpm run release-contract:check",
+    "pnpm run release-contract:check \\",
     "fetch-depth: 0",
     "OXIBELT_CHANGE_BASE",
     "--change-base \"${OXIBELT_CHANGE_BASE}\"",
@@ -2307,6 +2307,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "continue-on-error",
     "pnpm run dependency-admission",
     "pnpm run versioning:release",
+    "pnpm run release-contract:check -- \\",
     "actions/upload-artifact",
     "actions/download-artifact",
   ] {
@@ -5109,11 +5110,11 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     "contents: read",
     "persist-credentials: false",
     "pnpm install --frozen-lockfile --ignore-scripts",
-    "pnpm run release-contract:candidate",
+    "pnpm run release-contract:candidate \\",
     "build tags must not have or publish from a GitHub Release",
     "Read published stable or beta release",
     "github.rest.repos.getReleaseByTag",
-    "pnpm run release-contract:verify",
+    "pnpm run release-contract:verify \\",
     "--expected-state published",
     "Upload verified release contract",
   ] {
@@ -5122,7 +5123,13 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
       "release-contract publication gate should contain {expected}"
     );
   }
-  for forbidden in ["contents: write", "packages: write", "id-token: write"] {
+  for forbidden in [
+    "contents: write",
+    "packages: write",
+    "id-token: write",
+    "pnpm run release-contract:candidate -- \\",
+    "pnpm run release-contract:verify -- \\",
+  ] {
     assert!(
       !release_contract_text.contains(forbidden),
       "release-contract publication gate must not contain {forbidden}"
@@ -5195,7 +5202,7 @@ fn stable_and_beta_tags_prepare_conflict_safe_drafts_without_publishing() {
     "fetch-depth: 0",
     "persist-credentials: false",
     "pnpm install --frozen-lockfile --ignore-scripts",
-    "pnpm run release-contract:candidate",
+    "pnpm run release-contract:candidate \\",
     "--ref \"${GITHUB_REF}\"",
     "--revision \"${GITHUB_SHA}\"",
     "Upload exact-tag release contract",
@@ -5205,7 +5212,12 @@ fn stable_and_beta_tags_prepare_conflict_safe_drafts_without_publishing() {
       "draft release validation should contain {expected}"
     );
   }
-  for forbidden in ["contents: write", "packages: write", "id-token: write"] {
+  for forbidden in [
+    "contents: write",
+    "packages: write",
+    "id-token: write",
+    "pnpm run release-contract:candidate -- \\",
+  ] {
     assert!(
       !validation.contains(forbidden),
       "draft release validation must not contain {forbidden}"

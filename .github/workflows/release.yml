@@ -338,7 +338,7 @@ jobs:
           OXIBELT_RELEASE_REVISION: ${{ needs.resolve-release-source.outputs.revision }}
         run: |
           set -euo pipefail
-          pnpm run release-contract:candidate -- \
+          pnpm run release-contract:candidate \
             --ref "${OXIBELT_RELEASE_REF}" \
             --revision "${OXIBELT_RELEASE_REVISION}" \
             --receipt-output "${OXIBELT_RECEIPT_OUTPUT}" \
@@ -409,7 +409,7 @@ jobs:
           OXIBELT_RELEASE_JSON: ${{ runner.temp }}/github-release.json
         run: |
           set -euo pipefail
-          pnpm run release-contract:verify -- \
+          pnpm run release-contract:verify \
             --receipt "${OXIBELT_RECEIPT}" \
             --release "${OXIBELT_RELEASE_JSON}" \
             --expected-state published \

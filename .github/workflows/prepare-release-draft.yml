@@ -40,7 +40,7 @@ jobs:
           OXIBELT_RECEIPT_OUTPUT: ${{ runner.temp }}/release-contract.json
         run: |
           set -euo pipefail
-          pnpm run release-contract:candidate -- \
+          pnpm run release-contract:candidate \
             --ref "${GITHUB_REF}" \
             --revision "${GITHUB_SHA}" \
             --receipt-output "${OXIBELT_RECEIPT_OUTPUT}" \

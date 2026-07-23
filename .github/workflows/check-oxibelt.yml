@@ -372,7 +372,7 @@ jobs:
           if [[ -z "${OXIBELT_CHANGE_BASE}" || "${OXIBELT_CHANGE_BASE}" =~ ^0{40}$ ]]; then
             pnpm run release-contract:check
           else
-            pnpm run release-contract:check -- \
+            pnpm run release-contract:check \
               --change-base "${OXIBELT_CHANGE_BASE}" \
               --change-head "${OXIBELT_CHANGE_HEAD}"
           fi
