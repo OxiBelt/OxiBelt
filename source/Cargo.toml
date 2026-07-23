@@ -104,7 +104,7 @@ criterion = { version = "0.8.2", default-features = false }
 loom = "0.7.2"
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.106"
-syn = { version = "2.0.119", features = ["full", "visit"] }
+syn = { version = "3.0.3", features = ["full", "visit"] }
 tokio = { version = "1.52.4", features = ["test-util"] }
 
 [build-dependencies]
