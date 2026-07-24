@@ -227,53 +227,115 @@ l4_routes_are_unresolved() {
     && route_conditions_match udproutes.gateway.networking.k8s.io udp-probe False False RefNotPermitted
 }
 
+verify_kind_node_l4_probe_runtime() {
+  local node="${cluster_name}-control-plane"
+
+  docker exec "${node}" /usr/bin/perl \
+    -MIO::Socket::IP \
+    -MIO::Select \
+    -MSocket=SOCK_STREAM,SOCK_DGRAM \
+    -e 'exit 0' \
+    || die "Kind control-plane node lacks the package-free Perl L4 probe runtime"
+}
+
 probe_l4_round_trips() {
   local expected_namespace="$1"
   local node="${cluster_name}-control-plane"
+  local tcp_response
+  local udp_response
 
-  docker exec \
-    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
-    --env OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
-    "${node}" python3 -c '
-import json
-import os
-import socket
+  tcp_response="$(
+    docker exec \
+      --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+      "${node}" /usr/bin/perl \
+      -MIO::Socket::IP \
+      -MIO::Select \
+      -MSocket=SOCK_STREAM \
+      -e '
+use strict;
+use warnings;
 
-address = os.environ["OXIBELT_L4_ADDRESS"]
-expected_namespace = os.environ["OXIBELT_L4_EXPECTED_NAMESPACE"]
-with socket.create_connection((address, 9300), timeout=5) as connection:
-    with connection.makefile("rwb") as stream:
-        welcome = stream.readline()
-        stream.write(b"TEST\n")
-        stream.flush()
-        response = json.loads(stream.readline())
-if welcome != b"Gateway API Test TCP Server\n":
-    raise SystemExit("unexpected TCP probe response")
-if response.get("namespace") != expected_namespace or response.get("service") != "tcp-backend":
-    raise SystemExit("TCP probe reached an unexpected backend")
-' || return 1
+sub read_bounded_line {
+    my ($connection, $selector, $timeout, $label) = @_;
+    my $deadline = time() + $timeout;
+    my $buffer = "";
 
-  docker exec \
-    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
-    --env OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
-    "${node}" python3 -c '
-import json
-import os
-import socket
+    while (length($buffer) < 4096) {
+        my $remaining = $deadline - time();
+        $remaining > 0 && $selector->can_read($remaining)
+            or die "$label timed out\n";
+        my $read = sysread($connection, my $byte, 1);
+        defined $read or die "$label read failed: $!\n";
+        $read > 0 or die "$label ended before newline\n";
+        $buffer .= $byte;
+        return $buffer if $byte eq "\n";
+    }
 
-address = os.environ["OXIBELT_L4_ADDRESS"]
-expected_namespace = os.environ["OXIBELT_L4_EXPECTED_NAMESPACE"]
-target = socket.getaddrinfo(address, 5300, type=socket.SOCK_DGRAM)[0]
-with socket.socket(target[0], target[1], target[2]) as connection:
-    connection.settimeout(5)
-    connection.sendto(b"oxibelt-udp-probe", target[4])
-    payload, _ = connection.recvfrom(4096)
-response = json.loads(payload)
-if response.get("request") != "oxibelt-udp-probe":
-    raise SystemExit("unexpected UDP probe response")
-if response.get("namespace") != expected_namespace or response.get("service") != "udp-backend":
-    raise SystemExit("UDP probe reached an unexpected backend")
-' || return 1
+    die "$label exceeded 4096 bytes\n";
+}
+
+my $connection = IO::Socket::IP->new(
+    PeerHost => $ENV{OXIBELT_L4_ADDRESS},
+    PeerPort => 9300,
+    Type => SOCK_STREAM,
+    Timeout => 5,
+) or die "TCP probe connection failed: $!\n";
+my $selector = IO::Select->new($connection);
+my $welcome = read_bounded_line($connection, $selector, 5, "TCP probe welcome");
+$welcome eq "Gateway API Test TCP Server\n"
+    or die "unexpected TCP probe response\n";
+
+my $request = "TEST\n";
+my $written = syswrite($connection, $request);
+defined $written && $written == length($request)
+    or die "TCP probe request write failed: $!\n";
+my $response = read_bounded_line($connection, $selector, 5, "TCP probe response");
+print STDOUT $response;
+'
+  )" || return 1
+  OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
+    jq -s -e '
+      length == 1
+        and .[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE
+        and .[0].service == "tcp-backend"
+    ' >/dev/null <<<"${tcp_response}" || return 1
+
+  udp_response="$(
+    docker exec \
+      --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+      "${node}" /usr/bin/perl \
+      -MIO::Socket::IP \
+      -MIO::Select \
+      -MSocket=SOCK_DGRAM \
+      -e '
+use strict;
+use warnings;
+
+my $connection = IO::Socket::IP->new(
+    PeerHost => $ENV{OXIBELT_L4_ADDRESS},
+    PeerPort => 5300,
+    Type => SOCK_DGRAM,
+    Timeout => 5,
+) or die "UDP probe socket creation failed: $!\n";
+my $request = "oxibelt-udp-probe";
+my $written = $connection->send($request);
+defined $written && $written == length($request)
+    or die "UDP probe request write failed: $!\n";
+my $selector = IO::Select->new($connection);
+$selector->can_read(5) or die "UDP probe response timed out\n";
+my $peer = $connection->recv(my $response, 4096);
+defined $peer or die "UDP probe response read failed: $!\n";
+length($response) > 0 or die "UDP probe response was empty\n";
+print STDOUT $response;
+'
+  )" || return 1
+  OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
+    jq -s -e '
+      length == 1
+        and .[0].request == "oxibelt-udp-probe"
+        and .[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE
+        and .[0].service == "udp-backend"
+    ' >/dev/null <<<"${udp_response}" || return 1
 }
 
 l4_ports_fail_closed() {
@@ -281,27 +343,39 @@ l4_ports_fail_closed() {
 
   docker exec \
     --env OXIBELT_L4_ADDRESS="${status_service_address}" \
-    "${node}" python3 -c '
-import os
-import socket
+    "${node}" /usr/bin/perl \
+    -MIO::Socket::IP \
+    -MIO::Select \
+    -MSocket=SOCK_STREAM,SOCK_DGRAM \
+    -e '
+use strict;
+use warnings;
 
-address = os.environ["OXIBELT_L4_ADDRESS"]
-try:
-    with socket.create_connection((address, 9300), timeout=2):
-        raise SystemExit("TCP listener remained reachable without ReferenceGrant")
-except OSError:
-    pass
+my $address = $ENV{OXIBELT_L4_ADDRESS};
+my $tcp = IO::Socket::IP->new(
+    PeerHost => $address,
+    PeerPort => 9300,
+    Type => SOCK_STREAM,
+    Timeout => 2,
+);
+die "TCP listener remained reachable without ReferenceGrant\n" if defined $tcp;
 
-target = socket.getaddrinfo(address, 5300, type=socket.SOCK_DGRAM)[0]
-try:
-    with socket.socket(target[0], target[1], target[2]) as connection:
-        connection.settimeout(2)
-        connection.connect(target[4])
-        connection.send(b"oxibelt-udp-denied-probe")
-        connection.recv(4096)
-    raise SystemExit("UDP listener remained reachable without ReferenceGrant")
-except OSError:
-    pass
+my $udp = IO::Socket::IP->new(
+    PeerHost => $address,
+    PeerPort => 5300,
+    Type => SOCK_DGRAM,
+    Timeout => 2,
+) or die "UDP denied-probe socket creation failed: $!\n";
+my $request = "oxibelt-udp-denied-probe";
+my $written = $udp->send($request);
+exit 0 unless defined $written;
+$written == length($request)
+    or die "UDP denied-probe request write was incomplete\n";
+my $selector = IO::Select->new($udp);
+exit 0 unless $selector->can_read(2);
+my $peer = $udp->recv(my $response, 4096);
+exit 0 unless defined $peer;
+die "UDP listener remained reachable without ReferenceGrant\n";
 '
 }
 
@@ -1002,6 +1076,7 @@ kind create cluster \
   --image "${kind_node_image}" \
   --wait 120s
 cluster_created=1
+verify_kind_node_l4_probe_runtime
 
 kind load docker-image --name "${cluster_name}" "${dataplane_image}" "${controller_image}"
 

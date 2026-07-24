@@ -2562,9 +2562,24 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "same-namespace TCPRoute and UDPRoute programming",
     "probe_l4_round_trips",
     "OXIBELT_L4_EXPECTED_NAMESPACE",
-    "connection.makefile(\"rwb\")",
-    "socket.create_connection((address, 9300), timeout=5)",
-    "connection.sendto(b\"oxibelt-udp-probe\", target[4])",
+    "verify_kind_node_l4_probe_runtime",
+    "/usr/bin/perl",
+    "IO::Socket::IP",
+    "IO::Select",
+    "SOCK_STREAM",
+    "SOCK_DGRAM",
+    "PeerPort => 9300",
+    "PeerPort => 5300",
+    "$selector->can_read(5)",
+    "$selector->can_read(2)",
+    "while (length($buffer) < 4096)",
+    "my $remaining = $deadline - time()",
+    "$selector->can_read($remaining)",
+    "my $request = \"TEST\\n\"",
+    "my $request = \"oxibelt-udp-probe\"",
+    "jq -s -e",
+    "length == 1",
+    ".[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE",
     "verify_cross_namespace_l4_reference_grants",
     "cross-namespace L4 routes rejected without ReferenceGrant",
     "deployment_committed_revision_changed",
@@ -2714,6 +2729,79 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     assert!(
       !script.contains(forbidden),
       "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
+  let script = kubernetes_immutable_rollout_script_text();
+  let probes = script
+    .split_once("verify_kind_node_l4_probe_runtime() {")
+    .expect("rollout harness should define a Kind-node L4 probe runtime preflight")
+    .1
+    .split_once("\n}\n\ncontroller_has_two_ready_replicas() {")
+    .expect("the package-free L4 probes should precede controller readiness checks")
+    .0;
+
+  for expected in [
+    "/usr/bin/perl",
+    "-MIO::Socket::IP",
+    "-MIO::Select",
+    "-MSocket=SOCK_STREAM,SOCK_DGRAM",
+    "PeerHost => $ENV{OXIBELT_L4_ADDRESS}",
+    "PeerPort => 9300",
+    "PeerPort => 5300",
+    "Timeout => 5",
+    "Timeout => 2",
+    "while (length($buffer) < 4096)",
+    "my $deadline = time() + $timeout",
+    "my $remaining = $deadline - time()",
+    "$selector->can_read($remaining)",
+    "$selector->can_read(2)",
+    "my $request = \"TEST\\n\"",
+    "my $request = \"oxibelt-udp-probe\"",
+    "my $request = \"oxibelt-udp-denied-probe\"",
+    "my $peer = $connection->recv(my $response, 4096)",
+    "my $peer = $udp->recv(my $response, 4096)",
+    "OXIBELT_L4_EXPECTED_NAMESPACE=\"${expected_namespace}\"",
+    "jq -s -e",
+    "length == 1",
+    ".[0].request == \"oxibelt-udp-probe\"",
+    ".[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE",
+    ".[0].service == \"tcp-backend\"",
+    ".[0].service == \"udp-backend\"",
+    "TCP listener remained reachable without ReferenceGrant",
+    "UDP listener remained reachable without ReferenceGrant",
+  ] {
+    assert!(
+      probes.contains(expected),
+      "package-free Kind-node L4 probes should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    probes.matches("/usr/bin/perl").count(),
+    4,
+    "the L4 harness should preflight Perl once and use it for the TCP, UDP, and denied probes"
+  );
+  assert!(
+    script
+      .contains("cluster_created=1\nverify_kind_node_l4_probe_runtime\n\nkind load docker-image"),
+    "the Kind-node L4 probe runtime must be verified immediately after cluster creation"
+  );
+
+  for forbidden in [
+    "python3 -c",
+    "apt-get",
+    "apk add",
+    "dnf install",
+    "yum install",
+    "pip install",
+    "kubectl run",
+  ] {
+    assert!(
+      !probes.contains(forbidden),
+      "package-free Kind-node L4 probes must not use {forbidden}"
     );
   }
 }
