@@ -35,7 +35,7 @@ function GovernedEntry(
 
 ### Configuration
 
-- Add a human-reviewed configuration compatibility statement.
+- Add a person-reviewed configuration compatibility statement.
 
 ### Schema epochs
 
@@ -150,7 +150,7 @@ test('rejects cross-channel and placeholder-only release entries', () => {
 
   const PlaceholderRoot = CreateContractWorkspace(
     `${GovernedEntry().replace(
-      '- Add a human-reviewed configuration compatibility statement.',
+      '- Add a person-reviewed configuration compatibility statement.',
       '- No changes for this release.'
     )}\n${BaselineEntry}`
   )
@@ -275,7 +275,7 @@ test('requires a substantive candidate section for each changed compatibility su
     Git(Root, ['tag', '0.6.5'])
     const Entry = GovernedEntry()
       .replace(
-        '- Add a human-reviewed configuration compatibility statement.',
+        '- Add a person-reviewed configuration compatibility statement.',
         '- No changes for this release.'
       )
       .replace(
@@ -322,7 +322,7 @@ test('build tags produce no changelog body or GitHub Release metadata', () => {
 })
 
 test('verifies draft and published GitHub release state without normalizing content changes', () => {
-  const Body = '# OxiBelt 0.7.0\n\nHuman-reviewed notes.\n'
+  const Body = '# OxiBelt 0.7.0\n\nPerson-reviewed notes.\n'
   const Receipt: ReleaseContractReceipt = {
     schemaVersion: 1,
     kind: 'stable',

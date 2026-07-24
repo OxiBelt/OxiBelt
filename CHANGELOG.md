@@ -5,7 +5,7 @@ This file records stable OxiBelt releases only. Beta releases are recorded in
 `0.7.0-build.46d6ea54` do not receive changelog entries or GitHub Releases.
 
 OxiBelt follows [Semantic Versioning](https://semver.org/). Starting with the
-release after `0.6.5`, every stable entry is a human-reviewed, cumulative
+release after `0.6.5`, every stable entry is a person-reviewed, cumulative
 description of changes since the immediately preceding stable release. Release
 automation rejects missing, cross-channel, misordered, or placeholder-only
 entries. See the

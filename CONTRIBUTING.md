@@ -97,7 +97,7 @@ uses the heading `## [VERSION] - YYYY-MM-DD`, followed by these metadata lines:
 ```md
 - Changes since: `PREVIOUS_VERSION`
 - Supported upgrade sources: `PREVIOUS_VERSION`
-- Upgrade guide: [Human-readable path](docs/Upgrading.md#exact-anchor)
+- Upgrade guide: [Upgrade from PREVIOUS_VERSION](docs/Upgrading.md#exact-anchor)
 ```
 
 The comparison base for a stable release and for `beta.1` is the immediately
@@ -127,7 +127,7 @@ pnpm run release-contract:check
 
 When a stable or beta tag is pushed, the tag workflow binds the entry to the
 exact tag commit and prepares a draft GitHub Release. It never publishes the
-draft and never overwrites a differing draft or published release. A human
+draft and never overwrites a differing draft or published release. A person
 must review and publish the draft; the image-publication workflow then
 revalidates the published body against the same exact-revision contract before
 publishing artifacts.

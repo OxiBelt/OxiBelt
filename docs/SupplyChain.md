@@ -483,8 +483,8 @@ Consequently:
   malicious content and plausible predicates.
 - Attestations bind a digest to a trusted workflow and stated source; the
   rebuild predicate records base-image pins and reproducibility inputs, but an
-  attestation alone does not prove code review, branch protection, human
-  approval, or an independently successful rebuild.
+  attestation alone does not prove code review, branch protection, approval by
+  a person, or an independently successful rebuild.
 - Image labels and executable inventories remain publisher-supplied metadata.
 - Vulnerability reports and dependency snapshots do not prove that a deployed
   digest is vulnerability-free.

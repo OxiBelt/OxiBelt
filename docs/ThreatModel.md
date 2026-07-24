@@ -320,7 +320,7 @@ guarantees.
 | `tls-upstream-revocation` | Outbound OCSP/CRLite reachability, freshness, and failure policy can affect upstream availability and trust. |
 | `root-netport-switcher` | The privileged bind broker expands the local capability and Unix-socket boundary. |
 | `client-identity-asn` | Operator-supplied or managed ASN data is a fallible classifier, not authenticated client identity. |
-| `sybil-rate-limit-identities` | Composite and hashed classifiers can reduce abuse but do not prove one human or one device. |
+| `sybil-rate-limit-identities` | Composite and hashed classifiers can reduce abuse but do not prove one person or one device. |
 | `gateway-controller` | A UID-and-epoch-fenced Lease limits normal operation to one writer, but Kubernetes API integrity, RBAC, admission, and timely Lease observations remain external trust boundaries. |
 | `gateway-api-httproute` | Translation supports a bounded subset and rejects unsupported matching/filter behavior. |
 | `gateway-api-grpcroute` | Translation supports only the documented bounded gRPC route subset. |

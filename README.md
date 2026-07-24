@@ -168,8 +168,8 @@ the complete contract and boundaries.
 
 ## Documentation
 
-- [Stable changelog](CHANGELOG.md): human-reviewed changes for stable releases.
-- [Beta changelog](CHANGELOG-beta.md): human-reviewed changes for beta releases.
+- [Stable changelog](CHANGELOG.md): person-reviewed changes for stable releases.
+- [Beta changelog](CHANGELOG-beta.md): person-reviewed changes for beta releases.
 - [Upgrade guide](docs/Upgrading.md): supported upgrade paths, validation,
   rollback, and irreversible-step contracts.
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
