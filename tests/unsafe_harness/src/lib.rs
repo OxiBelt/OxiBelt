@@ -30,7 +30,7 @@ mod tests {
   static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
   #[test]
-  fn miri_contracts_cover_layouts_and_pure_boundary_planning() {
+  fn layout_and_pure_boundary_planning_contracts_hold() {
     let (ruleset, path_beneath) = hardening_syscalls::landlock_layout();
     assert_eq!(ruleset, (8, 8));
     assert!(path_beneath.0 >= 12);

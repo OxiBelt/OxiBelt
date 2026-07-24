@@ -72,19 +72,21 @@ cargo test --test unsafe_code_policy --locked
 cargo test --all-features --locked
 ```
 
-CI additionally runs the `oxibelt-unsafe-harness` package with:
+CI additionally runs the complete `oxibelt-unsafe-harness` package on the
+latest stable Rust toolchain. The harness covers pure layout and typed-boundary
+planning contracts, focused Linux syscall behavior, repeated concurrent
+`TCP_INFO` access, and child-process isolation for irreversible Landlock and
+`close_range` checks. Because the workflow tracks the stable channel rather
+than an exact release, its compiler can advance without a repository change.
+The separate fuzz gate continues to cover syscall-boundary input planning and
+the existing protocol boundaries.
 
-- Miri for pure layout, range, marshalling, and typed-boundary contracts.
-- AddressSanitizer for focused Linux syscall tests.
-- ThreadSanitizer for selected concurrent `TCP_INFO` access.
-- Child-process isolation for irreversible Landlock and `close_range` checks.
-- Cargo-fuzz coverage for syscall-boundary input planning and the existing
-  protocol boundaries.
-
-Rust currently exposes AddressSanitizer and ThreadSanitizer for the CI target,
-but does not expose UndefinedBehaviorSanitizer through its sanitizer interface.
-Miri is the current dynamic undefined-behavior check. Add a UBSan lane when the
-pinned Rust toolchain provides one; do not claim UBSan coverage before then.
+The stable harness is functional coverage only. It does not provide Miri,
+AddressSanitizer, ThreadSanitizer, or UndefinedBehaviorSanitizer
+instrumentation and must not be cited as dynamic undefined-behavior, memory
+error, or data-race evidence. Pull requests that change an allowlisted module
+or the allowlist must provide the Miri and sanitizer evidence required above
+separately.
 
 Tests may treat `ENOSYS` or `EOPNOTSUPP` as an explicitly reported unsupported
 kernel capability. Generic permission failures and unexpected errno values are

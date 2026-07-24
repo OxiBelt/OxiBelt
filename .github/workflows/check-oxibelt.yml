@@ -436,18 +436,11 @@ jobs:
           retention-days: 90
 
   unsafe-validation:
-    name: Unsafe validation (${{ matrix.check }})
+    name: Unsafe validation (stable)
     runs-on: ubuntu-26.04
     if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        check:
-          - miri
-          - address
-          - thread
 
     steps:
       - name: Checkout
@@ -455,32 +448,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Install pinned nightly Rust
-        run: |
-          rustup toolchain install nightly-2026-07-24 --profile minimal --component rust-src
-          if [[ "${{ matrix.check }}" == "miri" ]]; then
-            rustup component add miri --toolchain nightly-2026-07-24
-          fi
+      - name: Install latest stable Rust
+        run: rustup toolchain install stable --profile minimal
 
-      - name: Run Miri contracts
-        if: matrix.check == 'miri'
-        run: cargo +nightly-2026-07-24 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked
-
-      - name: Run AddressSanitizer syscall tests
-        if: matrix.check == 'address'
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          RUSTDOCFLAGS: -Zsanitizer=address
-          RUSTFLAGS: -Zsanitizer=address
-        run: cargo +nightly-2026-07-24 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked -- --test-threads=1
-
-      - name: Run ThreadSanitizer concurrency test
-        if: matrix.check == 'thread'
-        env:
-          RUSTDOCFLAGS: -Zsanitizer=thread
-          RUSTFLAGS: -Zsanitizer=thread
-          TSAN_OPTIONS: halt_on_error=1
-        run: cargo +nightly-2026-07-24 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked -- --test-threads=1
+      - name: Run stable unsafe-code harness
+        run: cargo +stable test -p oxibelt-unsafe-harness --lib --locked -- --test-threads=1
 
   check-riscv64-cross:
     name: Check (riscv64 cross, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})

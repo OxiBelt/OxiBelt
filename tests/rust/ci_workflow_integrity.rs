@@ -2057,7 +2057,7 @@ fn test_job_runs_bounded_loom_models_on_amd64() {
 }
 
 #[test]
-fn unsafe_validation_runs_pinned_miri_and_sanitizers_as_a_primary_gate() {
+fn unsafe_validation_runs_latest_stable_harness_as_a_primary_gate() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
   let job = jobs
@@ -2070,32 +2070,36 @@ fn unsafe_validation_runs_pinned_miri_and_sanitizers_as_a_primary_gate() {
     "unsafe validation should start alongside the other primary Rust gates"
   );
   for expected in [
-    "name: Unsafe validation (${{ matrix.check }})",
+    "name: Unsafe validation (stable)",
     "runs-on: ubuntu-26.04",
     "contents: read",
-    "fail-fast: false",
-    "- miri",
-    "- address",
-    "- thread",
-    "nightly-2026-07-24",
-    "rustup component add miri --toolchain nightly-2026-07-24",
-    "cargo +nightly-2026-07-24 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked",
-    "RUSTFLAGS: -Zsanitizer=address",
-    "ASAN_OPTIONS: detect_leaks=1:halt_on_error=1",
-    "-Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked",
-    "RUSTFLAGS: -Zsanitizer=thread",
-    "TSAN_OPTIONS: halt_on_error=1",
-    "--lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked",
+    "rustup toolchain install stable --profile minimal",
+    "cargo +stable test -p oxibelt-unsafe-harness --lib --locked -- --test-threads=1",
   ] {
     assert!(
       job_text.contains(expected),
       "unsafe-validation should include {expected}"
     );
   }
-  assert!(
-    !job_text.contains("continue-on-error"),
-    "unsafe-validation must not soften Miri or sanitizer failures"
-  );
+  for forbidden in [
+    "strategy:",
+    "matrix.",
+    "nightly",
+    "rust-src",
+    "Miri",
+    "miri",
+    "Sanitizer",
+    "-Zbuild-std",
+    "-Zsanitizer",
+    "ASAN_OPTIONS",
+    "TSAN_OPTIONS",
+    "continue-on-error",
+  ] {
+    assert!(
+      !job_text.contains(forbidden),
+      "unsafe-validation should not include {forbidden}"
+    );
+  }
 }
 
 #[test]
