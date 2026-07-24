@@ -1,6 +1,7 @@
 use super::semver::{compare_semver, is_release_version};
 use super::{
-  Cleanliness, Identity, Kind, validate_build_suffix, validate_revision, validate_source_ref,
+  Cleanliness, Identity, Kind, git_development_version, validate_build_suffix, validate_revision,
+  validate_source_ref,
 };
 use std::cmp::Ordering;
 use std::fs;
@@ -65,15 +66,7 @@ pub(super) fn discover_git_identity(workspace: &Path) -> Result<Identity, String
     None => None,
   };
   Ok(Identity {
-    version: format!(
-      "0.0.0-dev.{}{}",
-      &revision[..8],
-      if dirty == Cleanliness::Dirty {
-        "+dirty"
-      } else {
-        ""
-      }
-    ),
+    version: git_development_version(&revision, dirty)?,
     revision: Some(revision),
     source_ref,
     dirty,

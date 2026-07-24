@@ -238,7 +238,7 @@ const ReleaseHelperAssignments: ShellAssignmentPolicy[] = [
     allowedLines: [
       'derived_version="0.0.0-dev.archive"',
       'derived_version="${release_tag}"',
-      'derived_version="0.0.0-dev.${derived_revision:0:8}"',
+      'derived_version="0.0.0-dev.g${derived_revision:0:8}"',
       'derived_version="${derived_version}+dirty"'
     ]
   },

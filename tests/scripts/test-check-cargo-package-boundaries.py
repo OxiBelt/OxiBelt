@@ -138,6 +138,18 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 )
                 self.assertNotIn("dev", command)
 
+    def test_every_graph_command_disables_color_for_machine_parsing(
+        self,
+    ) -> None:
+        for policy in CHECKER.POLICIES:
+            with self.subTest(policy=policy.label):
+                command = CHECKER.cargo_tree_command(policy)
+                self.assertEqual(command.count("--color"), 1)
+                self.assertEqual(
+                    command[command.index("--color") + 1],
+                    "never",
+                )
+
     def test_workspace_metadata_is_structured_and_complete(self) -> None:
         packages = [
             {"id": f"path+file:///workspace/{name}#0.0.0", "name": name}

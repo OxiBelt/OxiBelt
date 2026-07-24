@@ -552,6 +552,8 @@ def cargo_tree_command(policy: GraphPolicy) -> tuple[str, ...]:
         "--locked",
         "--target",
         "all",
+        "--color",
+        "never",
         "-e",
         "normal,build",
         "--prefix",

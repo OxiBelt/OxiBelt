@@ -184,7 +184,7 @@ if [[ "\${derived_revision}" =~ ^[0-9a-f]{40}$ ]]; then
   derived_ref="refs/tags/\${release_tag}"
   derived_version="\${release_tag}"
   derived_kind="git_development"
-  derived_version="0.0.0-dev.\${derived_revision:0:8}"
+  derived_version="0.0.0-dev.g\${derived_revision:0:8}"
   derived_version="\${derived_version}+dirty"
 fi
 oxibelt_version="\${OXIBELT_DOCKER_IMAGE_VERSION:-\${derived_version}}"

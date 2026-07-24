@@ -116,7 +116,7 @@ build identity at compile time. An explicit release tuple is accepted only
 when all of version, full lowercase revision, full tag ref, clean dirty-state,
 and build kind are present and mutually consistent. Otherwise a Git checkout
 uses the highest valid exact release tag at `HEAD`, or
-`0.0.0-dev.<revision-prefix>` when untagged; tracked index or worktree changes
+`0.0.0-dev.g<revision-prefix>` when untagged; tracked index or worktree changes
 append `+dirty`. A source archive without Git metadata is
 `0.0.0-dev.archive` with unknown revision, ref, and dirty state. If a `.git`
 control directory exists but cannot be interrogated, the build fails rather

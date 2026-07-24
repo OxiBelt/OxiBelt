@@ -264,18 +264,7 @@ fn validate_explicit(
         validate_source_ref(source_ref)?;
         Some(source_ref.to_string())
       };
-      if dirty == Cleanliness::Unknown {
-        return Err("Git development dirty state cannot be unknown".to_string());
-      }
-      let expected = format!(
-        "0.0.0-dev.{}{}",
-        &revision[..8],
-        if dirty == Cleanliness::Dirty {
-          "+dirty"
-        } else {
-          ""
-        }
-      );
+      let expected = git_development_version(revision, dirty)?;
       if version != expected {
         return Err(format!("Git development version must be {expected}"));
       }
@@ -302,6 +291,18 @@ fn validate_explicit(
       Ok(archive_identity())
     }
   }
+}
+
+fn git_development_version(revision: &str, dirty: Cleanliness) -> Result<String, String> {
+  validate_revision(revision)?;
+  let dirty_suffix = match dirty {
+    Cleanliness::Clean => "",
+    Cleanliness::Dirty => "+dirty",
+    Cleanliness::Unknown => {
+      return Err("Git development dirty state cannot be unknown".to_string());
+    }
+  };
+  Ok(format!("0.0.0-dev.g{}{dirty_suffix}", &revision[..8]))
 }
 
 fn archive_identity() -> Identity {
@@ -502,7 +503,7 @@ mod tests {
     assert!(
       validate_explicit(
         "git_development",
-        "0.0.0-dev.abcdef01",
+        "0.0.0-dev.gabcdef01",
         REVISION,
         "refs/heads/main",
         "clean",
@@ -563,7 +564,7 @@ mod tests {
     assert!(
       validate_explicit(
         "git_development",
-        "0.0.0-dev.abcdef01",
+        "0.0.0-dev.gabcdef01",
         "ABCDEF0123456789abcdef0123456789abcdef01",
         "refs/heads/main",
         "clean",
@@ -618,6 +619,40 @@ mod tests {
   }
 
   #[test]
+  fn prefixes_numeric_revision_identifiers_to_preserve_strict_semver() {
+    const NUMERIC_PREFIX_REVISION: &str = "024513821aa1a26ff6813349e693f5c158f345fc";
+
+    for (dirty, version) in [
+      ("clean", "0.0.0-dev.g02451382"),
+      ("dirty", "0.0.0-dev.g02451382+dirty"),
+    ] {
+      let identity = validate_explicit(
+        "git_development",
+        version,
+        NUMERIC_PREFIX_REVISION,
+        "refs/heads/main",
+        dirty,
+        "0.0.0",
+      )
+      .expect("g-prefixed numeric revision identity must be valid");
+      assert_eq!(identity.version, version);
+    }
+
+    assert!(
+      validate_explicit(
+        "git_development",
+        "0.0.0-dev.02451382",
+        NUMERIC_PREFIX_REVISION,
+        "refs/heads/main",
+        "clean",
+        "0.0.0",
+      )
+      .is_err(),
+      "legacy all-numeric revision identifiers must remain invalid strict SemVer"
+    );
+  }
+
+  #[test]
   fn discovers_clean_and_dirty_untagged_git_identities() {
     let workspace = TemporaryWorkspace::new();
     let revision = workspace.initialize_git();
@@ -627,14 +662,17 @@ mod tests {
     assert_eq!(clean.dirty, Cleanliness::Clean);
     assert_eq!(clean.revision.as_deref(), Some(revision.as_str()));
     assert_eq!(clean.source_ref.as_deref(), Some("refs/heads/main"));
-    assert_eq!(clean.version, format!("0.0.0-dev.{}", &revision[..8]));
+    assert_eq!(clean.version, format!("0.0.0-dev.g{}", &revision[..8]));
     assert_eq!(clean.compatibility, None);
 
     fs::write(workspace.path().join("tracked.txt"), "dirty\n").expect("modify tracked fixture");
     let dirty = discover_git_identity(workspace.path()).expect("dirty Git identity");
     assert_eq!(dirty.kind, Kind::GitDevelopment);
     assert_eq!(dirty.dirty, Cleanliness::Dirty);
-    assert_eq!(dirty.version, format!("0.0.0-dev.{}+dirty", &revision[..8]));
+    assert_eq!(
+      dirty.version,
+      format!("0.0.0-dev.g{}+dirty", &revision[..8])
+    );
     assert_eq!(dirty.compatibility, None);
   }
 

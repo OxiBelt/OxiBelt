@@ -243,7 +243,7 @@ are build-stage inputs only.
 Cargo's workspace version remains the private `0.0.0` packaging sentinel. It
 is not OxiBelt's effective build identity. Every shipped executable reports a
 canonical identity with `--version`: a clean exact release tag uses that tag;
-an untagged Git build uses `0.0.0-dev.<commit-prefix>`; tracked staged or
+an untagged Git build uses `0.0.0-dev.g<commit-prefix>`; tracked staged or
 unstaged changes add `+dirty`; and a source tree without Git metadata uses
 `0.0.0-dev.archive`. Untracked files alone do not mark a build dirty. A clean
 exact-tag source build is still `tagged_development`; only the release pipeline

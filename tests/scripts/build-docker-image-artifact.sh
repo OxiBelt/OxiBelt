@@ -127,7 +127,7 @@ print(max(values, key=key))
     derived_version="${release_tag}"
   else
     derived_kind="git_development"
-    derived_version="0.0.0-dev.${derived_revision:0:8}"
+    derived_version="0.0.0-dev.g${derived_revision:0:8}"
   fi
   if [[ "${derived_dirty}" == "dirty" ]]; then
     derived_version="${derived_version}+dirty"
