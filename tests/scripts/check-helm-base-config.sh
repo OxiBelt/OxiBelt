@@ -8,6 +8,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt"
+kubernetes_version="1.34.8"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 empty_config_digest="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -45,14 +46,16 @@ trap cleanup EXIT
 render() {
   local name="$1"
   shift
-  helm template oxibelt "${chart_dir}" "$@" >"${work_dir}/${name}.yaml"
+  helm template oxibelt "${chart_dir}" --kube-version "${kubernetes_version}" \
+    "$@" >"${work_dir}/${name}.yaml"
 }
 
 expect_failure() {
   local name="$1"
   shift
 
-  if helm template oxibelt "${chart_dir}" "$@" >"${work_dir}/${name}.log" 2>&1; then
+  if helm template oxibelt "${chart_dir}" --kube-version "${kubernetes_version}" \
+    "$@" >"${work_dir}/${name}.log" 2>&1; then
     die "${name} unexpectedly rendered successfully"
   fi
 }
@@ -89,12 +92,21 @@ done
 [[ -f "${chart_dir}/Chart.yaml" ]] || die "chart is unavailable: ${chart_dir}"
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-base-config.XXXXXX")"
 
-helm lint --strict "${chart_dir}" >"${work_dir}/lint.log"
+helm lint --strict "${chart_dir}" --kube-version "${kubernetes_version}" >"${work_dir}/lint.log"
 
 render chart_created_default
 assert_contains "${work_dir}/chart_created_default.yaml" "kind: ConfigMap"
 assert_contains "${work_dir}/chart_created_default.yaml" "immutable: true"
+assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/effective-version: \"0.0.0\""
+assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/feature-status: \"experimental\""
+assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/kubernetes-support-policy: \"1\""
 assert_not_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/immutable-config-rollout: \"true\""
+
+render explicit_effective_version --set-string effectiveVersion=0.7.0-dev.abc12345
+assert_contains "${work_dir}/explicit_effective_version.yaml" \
+  "oxibelt.dev/effective-version: \"0.7.0-dev.abc12345\""
+assert_contains "${work_dir}/explicit_effective_version.yaml" \
+  "app.kubernetes.io/version: \"0.7.0-dev.abc12345\""
 
 for workload_kind in Deployment DaemonSet; do
   render "chart_created_${workload_kind}" \
@@ -138,5 +150,18 @@ for rollout_mode in helm_immutable kubernetes_immutable; do
       --set-string "config.existingConfigMap="
   done
 done
+
+if helm template oxibelt "${chart_dir}" --kube-version 1.33.0 \
+  --set-string configRollout.mode=kubernetes_immutable \
+  >"${work_dir}/unsupported-kubernetes.log" 2>&1; then
+  die "kubernetes_immutable unexpectedly rendered for Kubernetes 1.33"
+fi
+assert_contains "${work_dir}/unsupported-kubernetes.log" \
+  "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.37.0"
+
+helm template oxibelt "${chart_dir}" --kube-version 1.31.14 \
+  --set-string configRollout.mode=helm_immutable \
+  >"${work_dir}/legacy-helm-immutable.yaml"
+assert_contains "${work_dir}/legacy-helm-immutable.yaml" "kind: Deployment"
 
 echo "Helm base configuration check passed"

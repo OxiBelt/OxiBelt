@@ -9,6 +9,7 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 data_chart_dir="${repo_root}/deploy/helm/oxibelt"
 controller_chart_dir="${repo_root}/deploy/helm/oxibelt-gateway-controller"
+kubernetes_version="1.34.8"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 
@@ -44,20 +45,23 @@ trap cleanup EXIT
 render_data() {
   local name="$1"
   shift
-  helm template token-check "${data_chart_dir}" "$@" >"${work_dir}/data-${name}.yaml"
+  helm template token-check "${data_chart_dir}" --kube-version "${kubernetes_version}" \
+    "$@" >"${work_dir}/data-${name}.yaml"
 }
 
 render_controller() {
   local name="$1"
   shift
-  helm template controller-check "${controller_chart_dir}" "$@" >"${work_dir}/controller-${name}.yaml"
+  helm template controller-check "${controller_chart_dir}" \
+    --kube-version "${kubernetes_version}" "$@" >"${work_dir}/controller-${name}.yaml"
 }
 
 expect_data_failure() {
   local name="$1"
   shift
 
-  if helm template token-check "${data_chart_dir}" "$@" >"${work_dir}/data-${name}.log" 2>&1; then
+  if helm template token-check "${data_chart_dir}" --kube-version "${kubernetes_version}" \
+    "$@" >"${work_dir}/data-${name}.log" 2>&1; then
     die "data-plane ${name} unexpectedly rendered successfully"
   fi
 }
@@ -76,7 +80,8 @@ expect_controller_failure() {
   local name="$1"
   shift
 
-  if helm template controller-check "${controller_chart_dir}" "$@" >"${work_dir}/controller-${name}.log" 2>&1; then
+  if helm template controller-check "${controller_chart_dir}" \
+    --kube-version "${kubernetes_version}" "$@" >"${work_dir}/controller-${name}.log" 2>&1; then
     die "controller ${name} unexpectedly rendered successfully"
   fi
 }
@@ -137,8 +142,10 @@ done
   || die "controller chart is unavailable: ${controller_chart_dir}"
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-service-account-token.XXXXXX")"
 
-helm lint --strict "${data_chart_dir}" >"${work_dir}/data-lint.log"
-helm lint --strict "${controller_chart_dir}" >"${work_dir}/controller-lint.log"
+helm lint --strict "${data_chart_dir}" \
+  --kube-version "${kubernetes_version}" >"${work_dir}/data-lint.log"
+helm lint --strict "${controller_chart_dir}" \
+  --kube-version "${kubernetes_version}" >"${work_dir}/controller-lint.log"
 
 # The data plane must have no Kubernetes API credential or discovery RBAC by
 # default, regardless of whether it creates its ServiceAccount itself.

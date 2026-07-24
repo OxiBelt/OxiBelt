@@ -11,6 +11,9 @@ pub(super) fn code_for(id: &str) -> String {
     "admin.public_without_mtls" => "ADM-001".to_string(),
     "kubernetes.controller_rollout_wiring" => "K8S-004".to_string(),
     "kubernetes.multi_instance_missing_revision" => "K8S-005".to_string(),
+    "kubernetes.unsupported_server_version" => "K8S-006".to_string(),
+    "kubernetes.required_gateway_api_missing" => "K8S-007".to_string(),
+    "kubernetes.component_version_skew" => "K8S-009".to_string(),
     "real_ip.no_trusted_proxies" => "PROXY-002".to_string(),
     "tls.http3_host_key_missing" => "TLS-013".to_string(),
     "shared_state.redis_plaintext_remote" => "STATE-008".to_string(),
@@ -45,6 +48,12 @@ mod tests {
       code_for("kubernetes.multi_instance_missing_revision"),
       "K8S-005"
     );
+    assert_eq!(code_for("kubernetes.unsupported_server_version"), "K8S-006");
+    assert_eq!(
+      code_for("kubernetes.required_gateway_api_missing"),
+      "K8S-007"
+    );
+    assert_eq!(code_for("kubernetes.component_version_skew"), "K8S-009");
     assert_eq!(code_for("real_ip.no_trusted_proxies"), "PROXY-002");
     assert_eq!(code_for("tls.http3_host_key_missing"), "TLS-013");
     assert_eq!(code_for("shared_state.redis_plaintext_remote"), "STATE-008");

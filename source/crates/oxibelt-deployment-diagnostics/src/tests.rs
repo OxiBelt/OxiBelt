@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -7,7 +8,8 @@ use oxibelt::diagnostics::DiagnosticReport;
 use super::{
   MAX_MANIFEST_DOCUMENTS, Manifest,
   checks::{diagnose_manifests, is_digest_pinned},
-  diagnose_rendered_directory, helm_template_command,
+  diagnose_gateway_resources, diagnose_rendered_directory, diagnose_server_version,
+  helm_template_command,
   manifest::{
     append_yaml_manifests, contains_command_credential, validate_chart_tree,
     validate_helm_identifier,
@@ -33,6 +35,7 @@ metadata:
   name: oxibelt
   annotations:
     oxibelt.dev/immutable-config-rollout: "true"
+    oxibelt.dev/effective-version: "0.7.0"
 spec:
   replicas: 2
   template:
@@ -41,6 +44,7 @@ spec:
         oxibelt.dev/immutable-config-rollout: "true"
         oxibelt.dev/config-revision: config-v1
         oxibelt.dev/config-digest: deadbeef
+        oxibelt.dev/effective-version: "0.7.0"
     spec:
       containers:
       - name: oxibelt
@@ -72,6 +76,9 @@ kind: Deployment
 metadata: {name: controller}
 spec:
   template:
+    metadata:
+      annotations:
+        oxibelt.dev/effective-version: "0.7.0"
     spec:
       containers:
       - name: controller
@@ -84,11 +91,98 @@ spec:
         - --rollout-target-name=oxibelt
         - --rollout-target-container-name=oxibelt
         - --rollout-volume-name=gateway-config
+        - --compatibility-mode=exact
 "#;
   let report = diagnose_manifests(manifests(raw));
   assert!(!has_code(&report, "K8S-004"), "{:#?}", report.findings);
   assert!(!has_code(&report, "K8S-005"), "{:#?}", report.findings);
+  assert!(!has_code(&report, "K8S-009"), "{:#?}", report.findings);
   assert!(!has_code(&report, "REL-012"), "{:#?}", report.findings);
+}
+
+#[test]
+fn detects_controller_data_plane_version_skew() {
+  let raw = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxibelt
+  annotations:
+    oxibelt.dev/immutable-config-rollout: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        oxibelt.dev/immutable-config-rollout: "true"
+        oxibelt.dev/effective-version: "0.6.5"
+    spec:
+      containers:
+      - name: oxibelt
+        command: ["/usr/local/bin/oxibelt"]
+        args: ["--config=/etc/oxibelt/config/oxibelt.toml"]
+        volumeMounts:
+        - {name: config, mountPath: /etc/oxibelt/config, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: oxibelt-config}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: controller}
+spec:
+  template:
+    metadata:
+      annotations:
+        oxibelt.dev/effective-version: "0.7.0"
+    spec:
+      containers:
+      - name: controller
+        command: ["/usr/local/bin/oxibelt-gateway-controller"]
+        args:
+        - run
+        - --rollout-target-namespace=default
+        - --rollout-target-kind=deployment
+        - --rollout-target-name=oxibelt
+        - --compatibility-mode=exact
+"#;
+  let report = diagnose_manifests(manifests(raw));
+
+  assert!(has_code(&report, "K8S-009"), "{:#?}", report.findings);
+}
+
+#[test]
+fn diagnoses_unsupported_kubernetes_minors_and_missing_gateway_apis() {
+  let mut report = DiagnosticReport::new();
+  diagnose_server_version(&mut report, "v1.33.9", "1", "33");
+  diagnose_gateway_resources(&mut report, &BTreeSet::new());
+  let report = report.finish();
+
+  assert!(has_code(&report, "K8S-006"), "{:#?}", report.findings);
+  assert!(has_code(&report, "K8S-007"), "{:#?}", report.findings);
+}
+
+#[test]
+fn accepts_qualified_kubernetes_minors_and_complete_gateway_api_v1() {
+  let mut report = DiagnosticReport::new();
+  diagnose_server_version(&mut report, "v1.36.1", "1", "36+");
+  let served = super::REQUIRED_GATEWAY_API_V1_RESOURCES
+    .iter()
+    .map(|resource| (*resource).to_string())
+    .collect::<BTreeSet<_>>();
+  diagnose_gateway_resources(&mut report, &served);
+  let report = report.finish();
+
+  assert!(!has_code(&report, "K8S-006"), "{:#?}", report.findings);
+  assert!(!has_code(&report, "K8S-007"), "{:#?}", report.findings);
+}
+
+#[test]
+fn rejects_non_kubernetes_major_even_with_a_qualified_minor() {
+  let mut report = DiagnosticReport::new();
+  diagnose_server_version(&mut report, "v2.36.0", "2", "36");
+  let report = report.finish();
+
+  assert!(has_code(&report, "K8S-006"), "{:#?}", report.findings);
 }
 
 #[test]

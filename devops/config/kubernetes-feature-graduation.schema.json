@@ -1,0 +1,483 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxibelt.dev/schemas/kubernetes-feature-graduation-v1.json",
+  "title": "OxiBelt Kubernetes feature graduation policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "policyVersion",
+    "lifecycleAuthority",
+    "evidenceSchema",
+    "supportContract",
+    "cadences",
+    "blockers",
+    "gates",
+    "features"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "./kubernetes-feature-graduation.schema.json"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "policyVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "lifecycleAuthority": {
+      "type": "string",
+      "const": "docs/FeatureStatus.md"
+    },
+    "evidenceSchema": {
+      "type": "string",
+      "const": "devops/config/kubernetes-feature-graduation-evidence.schema.json"
+    },
+    "supportContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kubernetes",
+        "helm",
+        "gatewayApi",
+        "crdLifecycle",
+        "controllerDataPlaneSkew",
+        "architectures",
+        "networking",
+        "podSecurity"
+      ],
+      "properties": {
+        "kubernetes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "range",
+            "minors"
+          ],
+          "properties": {
+            "range": {
+              "type": "string",
+              "const": ">=1.34.0-0 <1.37.0-0"
+            },
+            "minors": {
+              "type": "array",
+              "minItems": 3,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "minor",
+                  "ciVersion",
+                  "kindNodeImage"
+                ],
+                "properties": {
+                  "minor": {
+                    "type": "string",
+                    "pattern": "^1\\.(34|35|36)$"
+                  },
+                  "ciVersion": {
+                    "type": "string",
+                    "pattern": "^v1\\.(34|35|36)\\.[0-9]+$"
+                  },
+                  "kindNodeImage": {
+                    "type": "string",
+                    "pattern": "^kindest/node:v1\\.(34|35|36)\\.[0-9]+@sha256:[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "helm": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "versions",
+            "upgradeCompatibility"
+          ],
+          "properties": {
+            "versions": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "3.21.3",
+                  "4.2.3"
+                ]
+              }
+            },
+            "upgradeCompatibility": {
+              "type": "string",
+              "const": "clean-install-upgrade-rollback-uninstall"
+            }
+          }
+        },
+        "gatewayApi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "channel",
+            "servedVersion",
+            "standardInstallUrl",
+            "standardInstallSha256"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "v1.6.1"
+            },
+            "channel": {
+              "type": "string",
+              "const": "standard"
+            },
+            "servedVersion": {
+              "type": "string",
+              "const": "v1"
+            },
+            "standardInstallUrl": {
+              "type": "string",
+              "const": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml"
+            },
+            "standardInstallSha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "crdLifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "owner",
+            "chartInstalls",
+            "chartConverts",
+            "chartDeletes",
+            "supportedUpgradeOrder"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string",
+              "const": "operator"
+            },
+            "chartInstalls": {
+              "type": "boolean",
+              "const": false
+            },
+            "chartConverts": {
+              "type": "boolean",
+              "const": false
+            },
+            "chartDeletes": {
+              "type": "boolean",
+              "const": false
+            },
+            "supportedUpgradeOrder": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "controllerDataPlaneSkew": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "defaultMode",
+            "rollingMode",
+            "maximumRollingHours",
+            "upgradeOrder",
+            "rollbackOrder"
+          ],
+          "properties": {
+            "defaultMode": {
+              "type": "string",
+              "const": "exact"
+            },
+            "rollingMode": {
+              "type": "string",
+              "const": "rolling_upgrade"
+            },
+            "maximumRollingHours": {
+              "type": "integer",
+              "const": 24
+            },
+            "upgradeOrder": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "rollbackOrder": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "architectures": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "nativeClusterRequired",
+              "qualification"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "linux/amd64",
+                  "linux/arm64",
+                  "linux/riscv64"
+                ]
+              },
+              "nativeClusterRequired": {
+                "type": "boolean",
+                "const": true
+              },
+              "qualification": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "blocked"
+                ]
+              }
+            }
+          }
+        },
+        "networking": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ipFamilies",
+            "networkPolicyCnis"
+          ],
+          "properties": {
+            "ipFamilies": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "const": "IPv4"
+              }
+            },
+            "networkPolicyCnis": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "Calico",
+                  "Cilium"
+                ]
+              }
+            }
+          }
+        },
+        "podSecurity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "standard",
+            "mode",
+            "version"
+          ],
+          "properties": {
+            "standard": {
+              "type": "string",
+              "const": "restricted"
+            },
+            "mode": {
+              "type": "string",
+              "const": "enforce"
+            },
+            "version": {
+              "type": "string",
+              "const": "latest"
+            }
+          }
+        }
+      }
+    },
+    "cadences": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "purpose"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "pull_request",
+              "nightly",
+              "release_candidate",
+              "stable"
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "objective",
+          "cadence",
+          "status",
+          "mandatory",
+          "appliesTo",
+          "evidenceReceipts"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "objective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cadence": {
+            "type": "string",
+            "enum": [
+              "pull_request",
+              "nightly",
+              "release_candidate"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unmet",
+              "passed"
+            ]
+          },
+          "mandatory": {
+            "type": "boolean",
+            "const": true
+          },
+          "appliesTo": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            }
+          },
+          "evidenceReceipts": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^evidence/kubernetes-graduation/[a-zA-Z0-9._/-]+\\.json$"
+            }
+          }
+        }
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "gateIds",
+          "blockerIds"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "experimental",
+              "supported"
+            ]
+          },
+          "gateIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            }
+          },
+          "blockerIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

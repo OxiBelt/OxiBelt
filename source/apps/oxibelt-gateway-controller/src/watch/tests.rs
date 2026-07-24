@@ -178,6 +178,35 @@ fn parse_list_keeps_named_custom_kind_ending_in_list_as_an_object() {
 }
 
 #[tokio::test]
+async fn required_gateway_api_endpoint_not_found_fails_the_snapshot() {
+  let missing = "/apis/gateway.networking.k8s.io/v1/namespaces/default/tlsroutes";
+  let api =
+    TestKubernetesApi::spawn_with_missing("unused-ca", ConfigMapResponse::Valid, Some(missing))
+      .await;
+  let token = TestToken::new();
+  let error = test_poller(&api, &token)
+    .snapshot()
+    .await
+    .expect_err("a missing required Gateway API endpoint must fail closed");
+  let message = format!("{error:#}");
+
+  assert!(message.contains("required Kubernetes API list endpoint"));
+  assert!(message.contains(missing));
+}
+
+#[tokio::test]
+async fn empty_successful_gateway_api_list_remains_a_valid_empty_collection() {
+  let api = TestKubernetesApi::spawn("unused-ca", ConfigMapResponse::Valid).await;
+  let token = TestToken::new();
+  let objects = test_poller(&api, &token)
+    .list_objects("/apis/gateway.networking.k8s.io/v1/namespaces/default/tlsroutes")
+    .await
+    .expect("an empty 200 List response is legitimate");
+
+  assert!(objects.is_empty());
+}
+
+#[tokio::test]
 async fn oversized_backend_tls_config_map_is_policy_local() {
   let api =
     TestKubernetesApi::spawn("attacker-ca", ConfigMapResponse::Oversized(StatusCode::OK)).await;
@@ -310,6 +339,14 @@ struct TestKubernetesApi {
 
 impl TestKubernetesApi {
   async fn spawn(ca_name: &str, config_map_response: ConfigMapResponse) -> Self {
+    Self::spawn_with_missing(ca_name, config_map_response, None).await
+  }
+
+  async fn spawn_with_missing(
+    ca_name: &str,
+    config_map_response: ConfigMapResponse,
+    missing_path: Option<&str>,
+  ) -> Self {
     let listener = TcpListener::bind(("127.0.0.1", 0))
       .await
       .expect("fake Kubernetes API should bind");
@@ -319,6 +356,7 @@ impl TestKubernetesApi {
     let paths = Arc::new(Mutex::new(Vec::new()));
     let recorded_paths = Arc::clone(&paths);
     let ca_name = ca_name.to_string();
+    let missing_path = missing_path.map(str::to_string);
     let task = tokio::spawn(async move {
       loop {
         let Ok((mut stream, _)) = listener.accept().await else {
@@ -331,7 +369,12 @@ impl TestKubernetesApi {
           .lock()
           .expect("request path lock should not be poisoned")
           .push(path.clone());
-        let response = kubernetes_response(&path, &ca_name, config_map_response);
+        let response = kubernetes_response(
+          &path,
+          &ca_name,
+          config_map_response,
+          missing_path.as_deref(),
+        );
         let reason = response.status.canonical_reason().unwrap_or("Unknown");
         let headers = format!(
           "HTTP/1.1 {} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -374,7 +417,20 @@ fn kubernetes_response(
   path: &str,
   ca_name: &str,
   config_map_response: ConfigMapResponse,
+  missing_path: Option<&str>,
 ) -> ApiResponse {
+  if missing_path == Some(path) {
+    return json_response(
+      StatusCode::NOT_FOUND,
+      json!({
+        "apiVersion": "v1",
+        "kind": "Status",
+        "status": "Failure",
+        "reason": "NotFound",
+        "code": 404
+      }),
+    );
+  }
   let config_map_path = format!("/api/v1/namespaces/default/configmaps/{ca_name}");
   if path == config_map_path {
     return match config_map_response {

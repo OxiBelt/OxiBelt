@@ -96,9 +96,26 @@ pub enum RolloutTargetKind {
   DaemonSet,
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CompatibilityMode {
+  #[default]
+  Exact,
+  RollingUpgrade,
+}
+
+impl CompatibilityMode {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Exact => "exact",
+      Self::RollingUpgrade => "rolling_upgrade",
+    }
+  }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
-  Run(RunArgs),
+  Run(Box<RunArgs>),
   Render(RenderArgs),
 }
 
@@ -133,6 +150,12 @@ pub struct RunArgs {
   pub leader_election_renew_deadline_seconds: u64,
   #[arg(long = "leader-election-retry-period-seconds", default_value_t = 2)]
   pub leader_election_retry_period_seconds: u64,
+  #[arg(long = "compatibility-mode", value_enum, default_value = "exact")]
+  pub compatibility_mode: CompatibilityMode,
+  #[arg(long = "compatibility-previous-version")]
+  pub compatibility_previous_version: Option<String>,
+  #[arg(long = "compatibility-deadline")]
+  pub compatibility_deadline: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -145,7 +168,7 @@ pub struct RenderArgs {
 
 #[cfg(test)]
 mod tests {
-  use super::Cli;
+  use super::{Cli, Command, CompatibilityMode};
   use clap::Parser;
 
   #[test]
@@ -157,6 +180,35 @@ mod tests {
       error
         .to_string()
         .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
+
+  #[test]
+  fn run_command_parses_explicit_rolling_upgrade_contract() {
+    let cli = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "run",
+      "--rollout-target-namespace=default",
+      "--rollout-target-name=oxibelt",
+      "--leader-election-namespace=default",
+      "--leader-election-lease-name=controller",
+      "--compatibility-mode=rolling_upgrade",
+      "--compatibility-previous-version=0.6.5",
+      "--compatibility-deadline=2026-07-25T00:00:00Z",
+    ])
+    .expect("rolling-upgrade CLI should parse");
+    let Command::Run(args) = cli.command else {
+      panic!("expected run command");
+    };
+
+    assert_eq!(args.compatibility_mode, CompatibilityMode::RollingUpgrade);
+    assert_eq!(
+      args.compatibility_previous_version.as_deref(),
+      Some("0.6.5")
+    );
+    assert_eq!(
+      args.compatibility_deadline.as_deref(),
+      Some("2026-07-25T00:00:00Z")
     );
   }
 }

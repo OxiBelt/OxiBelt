@@ -130,7 +130,13 @@ k8s:app.kubernetes.io/instance: {{ .Release.Name }}
 {{ include "oxibelt.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "oxibelt.effectiveVersion" . | quote }}
+oxibelt.dev/feature-status: {{ index .Chart.Annotations "oxibelt.dev/feature-status" | quote }}
+oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/kubernetes-support-policy" | quote }}
+{{- end -}}
+
+{{- define "oxibelt.effectiveVersion" -}}
+{{- default .Chart.AppVersion .Values.effectiveVersion -}}
 {{- end -}}
 
 {{- define "oxibelt.configMapName" -}}
@@ -652,9 +658,16 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 
 {{- define "oxibelt.validateConfigRollout" -}}
+{{- $helmVersion := .Capabilities.HelmVersion.Version -}}
+{{- if not (or (semverCompare "=3.21.3" $helmVersion) (semverCompare "=4.2.3" $helmVersion)) -}}
+{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.21.3 or 4.2.3, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
+{{- end -}}
 {{- $mode := .Values.configRollout.mode -}}
 {{- if not (has $mode (list "helm_immutable" "kubernetes_immutable")) -}}
 {{- fail "configRollout.mode must be helm_immutable or kubernetes_immutable" -}}
+{{- end -}}
+{{- if and (eq $mode "kubernetes_immutable") (not (semverCompare ">=1.34.0-0 <1.37.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.37.0; see docs/KubernetesSupport.md" -}}
 {{- end -}}
 {{- $path := .Values.configRollout.managedConfigPath -}}
 {{- if hasPrefix "/" $path -}}

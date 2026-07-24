@@ -9,10 +9,18 @@ OxiBelt in Kubernetes without making OxiBelt itself own certificate issuance,
 listener binding, Admin/IPM policy, or base runtime configuration.
 The controller, Gateway API translations, and Helm chart are currently
 `experimental` in the canonical [feature lifecycle matrix](FeatureStatus.md).
+The version, conformance, architecture, failure-recovery, and promotion
+requirements are defined in the
+[Kubernetes support and graduation contract](KubernetesSupport.md). Its
+Kubernetes `1.34`–`1.36`, Helm `3.21.3`/`4.2.3`, and Gateway API `v1.6.1`
+matrix is a graduation target, not a supported-production claim.
 The data-plane chart and controller chart are documented together in
 [KubernetesDeployment.md](KubernetesDeployment.md).
 
 ## Supported Resources
+
+“Supported” in this section describes implemented translation input. The
+feature rows remain `experimental` until their mandatory graduation gates pass.
 
 The controller watches:
 
@@ -409,6 +417,16 @@ chart may instead select `image.role: dataplane-strict` and
 Gateway translation do not require the Admin API. The strict role retains
 Person Proof and rejects any Admin configuration rather than falling back to
 Admin file sync.
+
+Normal operation uses `--compatibility-mode exact`. The selected workload's
+Pod-template annotation `oxibelt.dev/effective-version` must equal the
+controller's effective version. A controlled adjacent-minor transition may
+temporarily use `--compatibility-mode rolling_upgrade` together with
+`--compatibility-previous-version` and an RFC3339
+`--compatibility-deadline` no more than 24 hours in the future. An invalid,
+unlisted, or expired skew keeps readiness false and prevents reconciliation.
+See [KubernetesSupport.md](KubernetesSupport.md#controller-and-data-plane-skew)
+for upgrade and rollback order.
 
 The rolling strategy uses `maxUnavailable: 0` and `maxSurge: 1`; the default
 PDB keeps `minAvailable: 1`. `replicaCount: 1` remains available for deliberate

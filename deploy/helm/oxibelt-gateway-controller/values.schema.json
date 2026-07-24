@@ -14,6 +14,10 @@
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },
+    "effectiveVersion": {
+      "type": "string",
+      "pattern": "^$|^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
     "replicaCount": { "type": "integer", "minimum": 1 },
     "leaderElection": {
       "type": "object",
@@ -50,6 +54,22 @@
     },
     "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
     "dryRun": { "type": "boolean" },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "previousVersion", "deadline"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["exact", "rolling_upgrade"] },
+        "previousVersion": {
+          "type": "string",
+          "pattern": "^$|^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$"
+        },
+        "deadline": {
+          "type": "string",
+          "pattern": "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    },
     "l4": {
       "type": "object",
       "additionalProperties": false,
@@ -141,6 +161,49 @@
       },
       "then": {
         "properties": { "watchNamespace": { "const": "" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["compatibility"],
+        "properties": {
+          "compatibility": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "exact" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "properties": {
+              "previousVersion": { "const": "" },
+              "deadline": { "const": "" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["compatibility"],
+        "properties": {
+          "compatibility": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "rolling_upgrade" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "required": ["previousVersion", "deadline"],
+            "properties": {
+              "previousVersion": { "type": "string", "minLength": 5 },
+              "deadline": { "type": "string", "minLength": 20 }
+            }
+          }
+        }
       }
     }
   ]

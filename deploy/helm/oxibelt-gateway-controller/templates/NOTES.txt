@@ -1,0 +1,11 @@
+KUBERNETES FEATURE STATUS: experimental
+Policy: docs/KubernetesSupport.md (schema version
+{{ index .Chart.Annotations "oxibelt.dev/kubernetes-support-policy" }})
+
+This controller is qualified only on Kubernetes 1.34, 1.35, and 1.36. A
+successful render or install is not a support claim. Check `/supportz` and run
+`oxibeltctl doctor --kubernetes` before rollout.
+
+Steady state requires `compatibility.mode=exact`. Use `rolling_upgrade` only
+for the documented controller-first adjacent-minor procedure and restore
+`exact` before its bounded deadline.

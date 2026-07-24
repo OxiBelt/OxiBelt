@@ -238,6 +238,35 @@ test('rejects compatibility-surface changes without a release-contract document 
   }
 })
 
+test('classifies the Kubernetes graduation registry as a feature lifecycle surface', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(
+      Root,
+      'devops/config/kubernetes-feature-graduation.json',
+      '{"schemaVersion":1,"policyVersion":1}\n'
+    )
+    const Base = Commit(Root, 'baseline')
+    WriteFile(
+      Root,
+      'devops/config/kubernetes-feature-graduation.json',
+      '{"schemaVersion":1,"policyVersion":2}\n'
+    )
+    const Head = Commit(Root, 'change Kubernetes graduation')
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: Head
+      }),
+      /compatibility surfaces changed \(Feature lifecycle\)/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('builds exact stable release notes and a digest-bound receipt', () => {
   const Root = CreateContractWorkspace()
   try {

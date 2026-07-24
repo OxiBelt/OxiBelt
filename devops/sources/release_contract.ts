@@ -171,7 +171,12 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
   },
   {
     section: 'Feature lifecycle',
-    patterns: [/^docs\/FeatureStatus\.md$/]
+    patterns: [
+      /^docs\/FeatureStatus\.md$/,
+      /^docs\/KubernetesSupport\.md$/,
+      /^devops\/config\/kubernetes-feature-graduation(?:-evidence)?(?:\.schema)?\.json$/,
+      /^devops\/sources\/kubernetes_graduation\.ts$/
+    ]
   },
   {
     section: 'Rulepack compatibility',

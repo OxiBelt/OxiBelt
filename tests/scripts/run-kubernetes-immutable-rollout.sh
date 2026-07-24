@@ -10,13 +10,22 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 gateway_api_version="v1.6.1"
-# Kubernetes v1.31 lacks the CEL format library used by the experimental
-# XBackend CRD. The standard bundle still includes every CRD OxiBelt watches.
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
 gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
-# `kind create --image` accepts an OCI image reference. Keep the final v1.31
-# patch tag for operator readability but pin its multi-platform manifest list.
-kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"
+# The scheduled qualification matrix may select only these reviewed Kind node
+# manifests. Arbitrary environment-provided images are rejected before Docker
+# or Kind creates resources.
+kind_node_image="${OXIBELT_KUBERNETES_KIND_NODE_IMAGE:-kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256}"
+case "${kind_node_image}" in
+  "kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256" | \
+  "kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95" | \
+  "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5")
+    ;;
+  *)
+    echo "kubernetes immutable rollout test: unapproved Kind node image: ${kind_node_image}" >&2
+    exit 1
+    ;;
+esac
 rollout_timeout_seconds="${OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS:-420}"
 
 run_id=""
@@ -954,6 +963,19 @@ controller_image_tag="${controller_image##*:}"
 docker version --format '{{.Server.Version}}' >/dev/null
 docker image inspect "${dataplane_image}" >/dev/null
 docker image inspect "${controller_image}" >/dev/null
+dataplane_effective_version="$(docker image inspect \
+  --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+  "${dataplane_image}")"
+controller_effective_version="$(docker image inspect \
+  --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+  "${controller_image}")"
+semver_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+[[ "${dataplane_effective_version}" =~ ${semver_pattern} ]] \
+  || die "data-plane image must declare a valid org.opencontainers.image.version SemVer label"
+[[ "${controller_effective_version}" =~ ${semver_pattern} ]] \
+  || die "controller image must declare a valid org.opencontainers.image.version SemVer label"
+[[ "${dataplane_effective_version}" == "${controller_effective_version}" ]] \
+  || die "exact compatibility mode requires identical data-plane and controller image versions"
 
 if kind get clusters | grep -Fqx "${cluster_name}"; then
   die "refusing to reuse an existing Kind cluster named ${cluster_name}"
@@ -963,10 +985,12 @@ mkdir -p "${work_dir}"
 gateway_api_manifest="${work_dir}/gateway-api-${gateway_api_version}.yaml"
 dataplane_image_values="${work_dir}/dataplane-image-values.yaml"
 controller_image_values="${work_dir}/controller-image-values.yaml"
-printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
-  "${dataplane_image_repository}" "${dataplane_image_tag}" >"${dataplane_image_values}"
-printf 'image:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
-  "${controller_image_repository}" "${controller_image_tag}" >"${controller_image_values}"
+printf 'effectiveVersion: "%s"\nimage:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
+  "${dataplane_effective_version}" "${dataplane_image_repository}" "${dataplane_image_tag}" \
+  >"${dataplane_image_values}"
+printf 'effectiveVersion: "%s"\nimage:\n  repository: "%s"\n  tag: "%s"\n  pullPolicy: "IfNotPresent"\n' \
+  "${controller_effective_version}" "${controller_image_repository}" "${controller_image_tag}" \
+  >"${controller_image_values}"
 
 external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
   || die "external ConfigMap Deployment bootstrap must remain unassigned until controller reconciliation"

@@ -17,8 +17,9 @@ metadata:
   name: {{ include "oxibelt.name" . }}
   labels:
 {{ include "oxibelt.labels" . | indent 4 }}
-{{ if eq .Values.configRollout.mode "kubernetes_immutable" }}
   annotations:
+    oxibelt.dev/effective-version: {{ include "oxibelt.effectiveVersion" . | quote }}
+{{ if eq .Values.configRollout.mode "kubernetes_immutable" }}
     oxibelt.dev/immutable-config-rollout: "true"
 {{ end }}
 spec:
@@ -45,6 +46,9 @@ spec:
 {{ with .Values.podAnnotations }}
 {{ toYaml . | indent 8 }}
 {{ end }}
+        oxibelt.dev/effective-version: {{ include "oxibelt.effectiveVersion" . | quote }}
+        oxibelt.dev/feature-status: {{ index .Chart.Annotations "oxibelt.dev/feature-status" | quote }}
+        oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/kubernetes-support-policy" | quote }}
         checksum/oxibelt-config: {{ include "oxibelt.configDigest" . | quote }}
         {{- if .Values.oxirule.enabled }}
         checksum/oxibelt-oxirule: {{ include "oxibelt.oxiruleConfigMapDigest" . | quote }}

@@ -8,6 +8,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use super::cli::{RunArgs, SharedArgs};
+use super::compatibility::CompatibilityPolicy;
 use super::rollout::{
   CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact, HOLDER_IDENTITY_ANNOTATION,
   LEADER_EPOCH_ANNOTATION, LEASE_UID_ANNOTATION, RolloutPhase, RolloutState, RolloutTarget,
@@ -28,10 +29,23 @@ use super::watch::{KUBERNETES_MAX_BODY_BYTES, KubernetesPoller};
 const ROLLOUT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl KubernetesPoller {
+  pub async fn preflight_target_compatibility(
+    &self,
+    args: &RunArgs,
+    compatibility: &CompatibilityPolicy,
+  ) -> anyhow::Result<()> {
+    let target = RolloutTarget::from_args(args)?;
+    let workload = self.get_required_json(&target.workload_path()).await?;
+    compatibility
+      .validate_target_workload(&workload)
+      .context("target workload compatibility preflight failed")
+  }
+
   pub async fn reconcile_immutable_rollout(
     &self,
     shared: &SharedArgs,
     args: &RunArgs,
+    compatibility: &CompatibilityPolicy,
     generated_toml: &str,
     generated_assets: &[super::translate::RenderedAsset],
   ) -> anyhow::Result<RolloutStatus> {
@@ -50,6 +64,9 @@ impl KubernetesPoller {
         .collect(),
     )?;
     let workload = self.get_required_json(&target.workload_path()).await?;
+    compatibility
+      .validate_target_workload(&workload)
+      .context("target workload compatibility preflight failed")?;
     validate_rollout_opt_in(&workload)?;
     self
       .preflight_base_config(&target, &workload, &candidate.managed_path)

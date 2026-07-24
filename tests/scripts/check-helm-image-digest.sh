@@ -8,6 +8,7 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 data_chart="${repo_root}/deploy/helm/oxibelt"
 controller_chart="${repo_root}/deploy/helm/oxibelt-gateway-controller"
+kubernetes_version="1.34.8"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 data_image_repository="ghcr.io/oxibelt/oxibelt-dataplane"
@@ -39,22 +40,28 @@ trap cleanup EXIT
 command -v helm >/dev/null 2>&1 || die "required command is unavailable: helm"
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-image-digest.XXXXXX")"
 
-helm lint --strict "${data_chart}" >"${work_dir}/data-lint.log"
-helm lint --strict "${controller_chart}" >"${work_dir}/controller-lint.log"
+helm lint --strict "${data_chart}" \
+  --kube-version "${kubernetes_version}" >"${work_dir}/data-lint.log"
+helm lint --strict "${controller_chart}" \
+  --kube-version "${kubernetes_version}" >"${work_dir}/controller-lint.log"
 
-helm template oxibelt "${data_chart}" >"${work_dir}/data-default.yaml"
 helm template oxibelt "${data_chart}" \
+  --kube-version "${kubernetes_version}" >"${work_dir}/data-default.yaml"
+helm template oxibelt "${data_chart}" \
+  --kube-version "${kubernetes_version}" \
   --set-string image.repository="${data_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
   >"${work_dir}/data-deployment.yaml"
 helm template oxibelt "${data_chart}" \
+  --kube-version "${kubernetes_version}" \
   --set-string workload.kind=DaemonSet \
   --set-string image.repository="${data_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
   >"${work_dir}/data-daemonset.yaml"
 helm template oxibelt-controller "${controller_chart}" \
+  --kube-version "${kubernetes_version}" \
   --set-string image.repository="${controller_image_repository}" \
   --set-string image.tag=ignored \
   --set-string image.digest="${image_digest}" \
@@ -74,11 +81,13 @@ for rendered in data-deployment data-daemonset controller; do
   fi
 done
 
-if helm template oxibelt "${data_chart}" --set-string image.digest=sha256:ABC \
+if helm template oxibelt "${data_chart}" --kube-version "${kubernetes_version}" \
+  --set-string image.digest=sha256:ABC \
   >"${work_dir}/invalid-data.log" 2>&1; then
   die "data-plane chart accepted an invalid digest"
 fi
-if helm template oxibelt-controller "${controller_chart}" --set-string image.digest=sha256:ABC \
+if helm template oxibelt-controller "${controller_chart}" \
+  --kube-version "${kubernetes_version}" --set-string image.digest=sha256:ABC \
   >"${work_dir}/invalid-controller.log" 2>&1; then
   die "gateway controller chart accepted an invalid digest"
 fi

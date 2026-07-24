@@ -76,6 +76,33 @@ checker.
    configuration revision, and a representative request before completing the
    rollout. Run any additional commands in the target release entry.
 
+### Kubernetes controller and data-plane upgrade
+
+The Kubernetes integration remains `experimental`; its objective compatibility
+and graduation rules are in
+[KubernetesSupport.md](KubernetesSupport.md). For a controlled adjacent-version
+upgrade:
+
+1. Verify that the source and target are explicitly admitted by the exact
+   release entry and retain both immutable image digests.
+2. Apply and establish the release-pinned operator-owned Gateway API standard
+   CRD bundle. OxiBelt charts do not own CRD conversion or deletion.
+3. Set the controller to `--compatibility-mode rolling_upgrade`, name an exact
+   approved version from the immediately preceding minor with
+   `--compatibility-previous-version`, and set `--compatibility-deadline` to an
+   RFC3339 time no more than 24 hours ahead.
+4. Upgrade the controller, verify `/supportz` and readiness, then upgrade the
+   selected data-plane workload.
+5. After every selected Pod carries the target
+   `oxibelt.dev/effective-version`, restore
+   `--compatibility-mode exact`.
+
+Missing or mismatched Pod-template identity, newer-data-plane skew,
+non-adjacent or unlisted versions, and expired transitions fail closed. For a
+rollback inside the declared window, restore the prior data plane before the
+prior controller, then return to `exact`. Never downgrade or delete
+operator-owned Gateway API CRDs as an implicit Helm rollback.
+
 ## Rollback contract
 
 Rollback means restoring the previous version's exact image repositories,
@@ -99,6 +126,9 @@ For the Gateway Controller, retain the metadata-only Lease during a normal
 rolling upgrade. Before downgrading to a version without Lease fencing, scale
 the controller to one replica and wait for replacement to complete; multiple
 unfenced writers are unsafe.
+Retain controller-generated immutable ConfigMaps needed for the named rollback;
+normal Helm uninstall removes release workloads/RBAC/Lease but not
+operator-owned Gateway API CRDs or unrelated Gateway API objects.
 
 ## Upgrade from 0.6.5 to the 0.7.0 line
 
@@ -125,4 +155,3 @@ Before upgrading:
 The exact stable or beta changelog entry must complete the validation,
 rollback, known-issue, and security details before its tag can prepare a draft
 GitHub Release.
-

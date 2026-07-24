@@ -9,6 +9,10 @@ covered in [Configuration.md](Configuration.md), behavior details are covered in
 [Specification.md](Specification.md), and Admin API wire shapes are covered in
 [AdminAPI.md](AdminAPI.md) plus the canonical
 [admin-openapi.json](../source/assets/admin-openapi.json).
+Kubernetes/controller and Helm lifecycle changes additionally follow the
+objective, machine-enforced gates in
+[KubernetesSupport.md](KubernetesSupport.md); a rendered chart or single
+happy-path cluster run is not promotion evidence.
 
 Lifecycle states are intentionally limited:
 

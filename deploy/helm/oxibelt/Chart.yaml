@@ -4,3 +4,6 @@ description: OxiBelt reverse proxy and WAF data plane
 type: application
 version: 0.0.0
 appVersion: "0.0.0"
+annotations:
+  oxibelt.dev/feature-status: experimental
+  oxibelt.dev/kubernetes-support-policy: "1"

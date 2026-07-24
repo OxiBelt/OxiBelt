@@ -9,9 +9,9 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-# Keep the Kubernetes version aligned with the chart's edge-secure-medium
-# lifecycle contract and the CI-installed kubectl version.
-kind_node_image="kindest/node:v1.31.14@sha256:6f86cf509dbb42767b6e79debc3f2c32e4ee01386f0489b3b2be24b0a55aac2b"
+# Keep the PR lifecycle lane on the oldest Kubernetes version in the
+# qualification window. The full version matrix runs in the rollout lane.
+kind_node_image="kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256"
 timeout_seconds="${OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS:-600}"
 
 if [[ "${OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE:-}" != "1" ]]; then

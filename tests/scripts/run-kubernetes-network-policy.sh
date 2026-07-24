@@ -18,7 +18,7 @@ external_denied_container=""
 external_allowed_ip=""
 external_denied_ip=""
 
-# Kubernetes v1.31.14 publishes agnhost 2.52. The multi-architecture manifest
+# Kubernetes publishes agnhost 2.52. The multi-architecture manifest
 # digest keeps the fixture portable while remaining immutable.
 agnhost_image="registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:b173c7d0ffe3d805d49f4dfe48375169b7b8d2e1feb81783efd61eb9d08042e6"
 curl_image="quay.io/cilium/alpine-curl:v1.10.0@sha256:913e8c9f3d960dde03882defa0edd3a919d529c2eb167caa7f54194528bde364"
@@ -316,7 +316,7 @@ if ! minikube start \
   --driver=docker \
   --container-runtime=containerd \
   --cni="${cni}" \
-  --kubernetes-version=v1.31.14 \
+  --kubernetes-version=v1.34.8 \
   --output=json \
   --wait=all \
   --wait-timeout="${timeout_seconds}s" \

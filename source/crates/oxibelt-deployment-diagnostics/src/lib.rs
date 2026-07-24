@@ -6,6 +6,7 @@ mod manifest;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,12 +17,12 @@ use k8s_openapi::api::{
   apps::v1::{DaemonSet, Deployment},
   autoscaling::v2::HorizontalPodAutoscaler,
 };
-use kube::{Api, Client, api::ListParams};
+use kube::{Api, Client, api::ListParams, discovery::Discovery};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use oxibelt::diagnostics::DiagnosticReport;
+use oxibelt::diagnostics::{DiagnosticReport, DiagnosticSeverity};
 
 pub(crate) const MAX_MANIFEST_FILES: usize = 1_024;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +32,19 @@ const MAX_HELM_STDERR_BYTES: usize = 64 * 1024;
 const HELM_TIMEOUT: Duration = Duration::from_secs(30);
 const KUBERNETES_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const KUBERNETES_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const SUPPORTED_KUBERNETES_MIN_MINOR: u32 = 34;
+const SUPPORTED_KUBERNETES_MAX_MINOR: u32 = 36;
+const REQUIRED_GATEWAY_API_V1_RESOURCES: &[&str] = &[
+  "backendtlspolicies",
+  "gatewayclasses",
+  "gateways",
+  "grpcroutes",
+  "httproutes",
+  "referencegrants",
+  "tcproutes",
+  "tlsroutes",
+  "udproutes",
+];
 
 fn helm_template_command(
   chart: &Path,
@@ -173,6 +187,9 @@ pub async fn diagnose_kubernetes(
     .clone()
     .unwrap_or_else(|| config.default_namespace.clone());
   let client = Client::try_from(config).context("failed to create read-only Kubernetes client")?;
+  let mut live_report = DiagnosticReport::new();
+  diagnose_kubernetes_server(&client, &mut live_report).await;
+  diagnose_gateway_api(&client, &mut live_report).await;
   let list_params = options
     .selector
     .as_deref()
@@ -201,7 +218,120 @@ pub async fn diagnose_kubernetes(
   for autoscaler in autoscalers {
     push_kubernetes_manifest(&mut manifests, "HorizontalPodAutoscaler", autoscaler)?;
   }
-  Ok(checks::diagnose_manifests(manifests))
+  let mut report = checks::diagnose_manifests(manifests);
+  for finding in live_report.findings {
+    report.push(
+      finding.severity,
+      &finding.id,
+      &finding.category,
+      finding.target,
+      finding.message,
+      finding.remediation,
+    );
+  }
+  Ok(report.finish())
+}
+
+async fn diagnose_kubernetes_server(client: &Client, report: &mut DiagnosticReport) {
+  match client.apiserver_version().await {
+    Ok(version) => diagnose_server_version(
+      report,
+      &version.git_version,
+      &version.major,
+      &version.minor,
+    ),
+    Err(_) => report.push(
+      DiagnosticSeverity::Error,
+      "kubernetes.unsupported_server_version",
+      "kubernetes",
+      "kubernetes://version",
+      "Kubernetes API server version could not be read",
+      "Grant read-only access to the non-resource /version endpoint and verify Kubernetes 1.34 through 1.36.",
+    ),
+  }
+}
+
+fn diagnose_server_version(
+  report: &mut DiagnosticReport,
+  git_version: &str,
+  major: &str,
+  minor: &str,
+) {
+  let parsed = minor
+    .bytes()
+    .take_while(u8::is_ascii_digit)
+    .try_fold(0_u32, |value, digit| {
+      value.checked_mul(10)?.checked_add(u32::from(digit - b'0'))
+    });
+  if major != "1"
+    || parsed.is_none_or(|minor| {
+      !(SUPPORTED_KUBERNETES_MIN_MINOR..=SUPPORTED_KUBERNETES_MAX_MINOR).contains(&minor)
+    })
+  {
+    report.push(
+      DiagnosticSeverity::Error,
+      "kubernetes.unsupported_server_version",
+      "kubernetes",
+      "kubernetes://version",
+      format!(
+        "Kubernetes API server {git_version} is outside the qualified 1.{SUPPORTED_KUBERNETES_MIN_MINOR} through 1.{SUPPORTED_KUBERNETES_MAX_MINOR} range"
+      ),
+      "Use a qualified Kubernetes minor or keep the Kubernetes feature state experimental.",
+    );
+  }
+}
+
+async fn diagnose_gateway_api(client: &Client, report: &mut DiagnosticReport) {
+  let discovery = Discovery::new(client.clone())
+    .filter(&["gateway.networking.k8s.io"])
+    .run()
+    .await;
+  let served = match discovery {
+    Ok(discovery) => discovery
+      .groups()
+      .find(|group| group.name() == "gateway.networking.k8s.io")
+      .map(|group| {
+        group
+          .versioned_resources("v1")
+          .into_iter()
+          .map(|(resource, _)| resource.plural)
+          .collect::<BTreeSet<_>>()
+      })
+      .unwrap_or_default(),
+    Err(_) => {
+      report.push(
+        DiagnosticSeverity::Error,
+        "kubernetes.required_gateway_api_missing",
+        "kubernetes",
+        "kubernetes://apis/gateway.networking.k8s.io/v1",
+        "Gateway API discovery failed; required served v1 resources could not be verified",
+        "Install the pinned standard Gateway API CRD bundle and permit read-only API discovery.",
+      );
+      return;
+    }
+  };
+  diagnose_gateway_resources(report, &served);
+}
+
+fn diagnose_gateway_resources(report: &mut DiagnosticReport, served: &BTreeSet<String>) {
+  let missing = REQUIRED_GATEWAY_API_V1_RESOURCES
+    .iter()
+    .copied()
+    .filter(|resource| !served.contains(*resource))
+    .collect::<Vec<_>>();
+  if !missing.is_empty() {
+    report.push(
+      DiagnosticSeverity::Error,
+      "kubernetes.required_gateway_api_missing",
+      "kubernetes",
+      "kubernetes://apis/gateway.networking.k8s.io/v1",
+      format!(
+        "required Gateway API v1 resources are not served: {}",
+        missing.join(", ")
+      ),
+      "Install the pinned standard Gateway API CRD bundle before starting the Gateway Controller.",
+    );
+  }
 }
 
 async fn list_resources<T>(

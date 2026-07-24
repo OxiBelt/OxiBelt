@@ -6,6 +6,10 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+# Empty uses Chart.appVersion. Development and release-equivalent image
+# qualification must set the immutable image's effective SemVer explicitly.
+effectiveVersion: ""
+
 # Two replicas are the supported highly available default. Set this to 1 only
 # for an intentional single-replica development deployment.
 replicaCount: 2
@@ -34,6 +38,16 @@ statusService: ""
 statusAddresses: []
 backendResolution: cluster_dns
 dryRun: false
+
+# Normal reconciliation requires the selected data-plane workload to carry
+# `oxibelt.dev/effective-version` equal to the controller build version.
+# `rolling_upgrade` is a temporary, bounded exception for one explicitly named
+# immediately preceding minor. Both additional fields are then required and
+# the deadline must be no more than 24 hours in the future.
+compatibility:
+  mode: exact # exact | rolling_upgrade
+  previousVersion: ""
+  deadline: ""
 
 # Controller-owned bounds used only for generated TCPRoute and UDPRoute stream
 # listeners. Listener ports still come from the operator-owned status Service.

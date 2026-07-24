@@ -2,6 +2,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 
 mod cli;
+mod compatibility;
 mod gateway_policy;
 mod health;
 mod kubernetes_time;
@@ -48,7 +49,8 @@ pub async fn run() -> anyhow::Result<()> {
       render::write_rendered(&args.output, &rendered.toml)?;
     }
     Command::Run(args) => {
-      let controller_health = health::ControllerHealth::default();
+      let compatibility = compatibility::CompatibilityPolicy::from_args(args)?;
+      let controller_health = health::ControllerHealth::new(&compatibility);
       let _health =
         health::spawn_if_configured(cli.shared.health_bind, controller_health.clone()).await?;
       let kubernetes = watch::KubernetesPoller::from_environment(&cli.shared)
@@ -77,6 +79,7 @@ pub async fn run() -> anyhow::Result<()> {
         kubernetes,
         &cli.shared,
         args,
+        &compatibility,
         controller_health,
         leadership.clone(),
         reconcile_shutdown_rx,

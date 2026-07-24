@@ -8,6 +8,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt-gateway-controller"
+kubernetes_version="1.34.8"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 
@@ -40,8 +41,9 @@ done
 [[ -f "${chart_dir}/Chart.yaml" ]] || die "controller chart is unavailable: ${chart_dir}"
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-gateway-controller-ha.XXXXXX")"
 
-helm lint --strict "${chart_dir}" >"${work_dir}/lint.log"
-helm template controller-ha "${chart_dir}" --namespace control >"${work_dir}/default.yaml"
+helm lint --strict "${chart_dir}" --kube-version "${kubernetes_version}" >"${work_dir}/lint.log"
+helm template controller-ha "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" >"${work_dir}/default.yaml"
 
 assert_contains() {
   local expected="$1"
@@ -82,6 +84,10 @@ for expected in \
   "--udp-datagram-burst=400" \
   "--udp-batch=auto" \
   "--udp-batch-size=16" \
+  "--compatibility-mode=exact" \
+  "oxibelt.dev/effective-version: \"0.0.0\"" \
+  "oxibelt.dev/feature-status: \"experimental\"" \
+  "oxibelt.dev/kubernetes-support-policy: \"1\"" \
   "apiVersion: coordination.k8s.io/v1" \
   "kind: Lease" \
   "resources: [\"leases\"]" \
@@ -90,9 +96,23 @@ for expected in \
 done
 assert_not_contains "type: Recreate"
 assert_not_contains "verbs: [\"get\", \"watch\", \"patch\", \"create\"]"
+assert_not_contains "--compatibility-previous-version="
+assert_not_contains "--compatibility-deadline="
+
+helm template controller-versioned "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
+  --set-string effectiveVersion=0.7.0-dev.abc12345 \
+  >"${work_dir}/versioned.yaml"
+for expected in \
+  "oxibelt.dev/effective-version: \"0.7.0-dev.abc12345\"" \
+  "app.kubernetes.io/version: \"0.7.0-dev.abc12345\""; do
+  grep -F -- "${expected}" "${work_dir}/versioned.yaml" >/dev/null \
+    || die "versioned manifest is missing: ${expected}"
+done
 
 lease_document="${work_dir}/lease.yaml"
 helm template controller-ha "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
   --show-only templates/lease.yaml >"${lease_document}"
 grep -F -- "kind: Lease" "${lease_document}" >/dev/null || die "Lease template did not render"
 if grep -Eq '^spec:' "${lease_document}"; then
@@ -101,6 +121,7 @@ fi
 
 role_document="${work_dir}/rbac.yaml"
 helm template controller-ha "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
   --show-only templates/rbac.yaml >"${role_document}"
 grep -F -- 'name: oxibelt-gateway-controller-leader-election' "${role_document}" >/dev/null \
   || die "named leader-election Role did not render"
@@ -123,6 +144,7 @@ fi
 
 status_document="${work_dir}/status-addresses.yaml"
 helm template controller-ha "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
   --set-json 'statusAddresses=["203.0.113.10","gateway.example.test"]' \
   --show-only templates/deployment.yaml >"${status_document}"
 grep -F -- '--status-address=203.0.113.10' "${status_document}" >/dev/null \
@@ -134,7 +156,8 @@ expect_failure() {
   local name="$1"
   local expected="$2"
   shift 2
-  if helm template controller-ha "${chart_dir}" --namespace control --skip-schema-validation "$@" \
+  if helm template controller-ha "${chart_dir}" --namespace control \
+    --kube-version "${kubernetes_version}" --skip-schema-validation "$@" \
     >"${work_dir}/${name}.log" 2>&1; then
     die "${name} unexpectedly rendered successfully"
   fi
@@ -150,8 +173,21 @@ expect_failure unsafe_timing \
 expect_failure raw_anti_affinity_conflict \
   "podAntiAffinity.enabled=true cannot be combined with affinity.podAntiAffinity" \
   --set-json 'affinity.podAntiAffinity={}'
+expect_failure exact_previous_version \
+  "compatibility.previousVersion and compatibility.deadline must be empty" \
+  --set-string compatibility.previousVersion=0.0.0
+expect_failure rolling_upgrade_without_previous \
+  "compatibility.previousVersion is required" \
+  --set-string compatibility.mode=rolling_upgrade \
+  --set-string compatibility.deadline=2026-07-24T12:00:00Z
+expect_failure rolling_upgrade_invalid_deadline \
+  "compatibility.deadline must be an RFC3339 UTC timestamp" \
+  --set-string compatibility.mode=rolling_upgrade \
+  --set-string compatibility.previousVersion=0.0.0 \
+  --set-string compatibility.deadline=2026-07-24
 
 helm template controller-single "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
   --set replicaCount=1 \
   --set podDisruptionBudget.enabled=false >"${work_dir}/single.yaml"
 grep -F -- "replicas: 1" "${work_dir}/single.yaml" >/dev/null \
@@ -159,5 +195,27 @@ grep -F -- "replicas: 1" "${work_dir}/single.yaml" >/dev/null \
 if grep -F -- "kind: PodDisruptionBudget" "${work_dir}/single.yaml" >/dev/null; then
   die "disabled PodDisruptionBudget unexpectedly rendered"
 fi
+
+helm template controller-rolling-upgrade "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
+  --set-string compatibility.mode=rolling_upgrade \
+  --set-string compatibility.previousVersion=0.0.0 \
+  --set-string compatibility.deadline=2026-07-24T12:00:00Z \
+  >"${work_dir}/rolling-upgrade.yaml"
+for expected in \
+  "--compatibility-mode=rolling_upgrade" \
+  "--compatibility-previous-version=0.0.0" \
+  "--compatibility-deadline=2026-07-24T12:00:00Z"; do
+  grep -F -- "${expected}" "${work_dir}/rolling-upgrade.yaml" >/dev/null \
+    || die "rolling-upgrade manifest is missing: ${expected}"
+done
+
+if helm template controller-unsupported "${chart_dir}" --namespace control \
+  --kube-version 1.33.0 >"${work_dir}/unsupported-kubernetes.log" 2>&1; then
+  die "controller chart unexpectedly rendered for Kubernetes 1.33"
+fi
+grep -F -- "chart requires kubeVersion: >=1.34.0-0 <1.37.0-0" \
+  "${work_dir}/unsupported-kubernetes.log" >/dev/null \
+  || die "unsupported Kubernetes render did not report the chart support window"
 
 echo "Gateway controller HA Helm checks passed."

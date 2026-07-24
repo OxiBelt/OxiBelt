@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use serde_json::Value;
 
 use oxibelt::diagnostics::{DiagnosticReport, DiagnosticSeverity};
@@ -13,6 +13,7 @@ use super::Manifest;
 const IMMUTABLE_ROLLOUT: &str = "oxibelt.dev/immutable-config-rollout";
 const CONFIG_REVISION: &str = "oxibelt.dev/config-revision";
 const CONFIG_DIGEST: &str = "oxibelt.dev/config-digest";
+const EFFECTIVE_VERSION: &str = "oxibelt.dev/effective-version";
 
 #[derive(Debug, Clone)]
 struct ControllerTarget {
@@ -21,6 +22,10 @@ struct ControllerTarget {
   name: String,
   container_name: String,
   volume_name: String,
+  controller_version: String,
+  compatibility_mode: String,
+  previous_version: Option<String>,
+  deadline: Option<String>,
 }
 
 pub(super) fn diagnose_manifests(manifests: Vec<Manifest>) -> DiagnosticReport {
@@ -36,7 +41,7 @@ pub(super) fn diagnose_manifests(manifests: Vec<Manifest>) -> DiagnosticReport {
       if !is_gateway_controller(container) {
         continue;
       }
-      match controller_target(container) {
+      match controller_target(&workload.value, container) {
         Ok(target) => targets.push(target),
         Err(error) => report.push(
           DiagnosticSeverity::Error,
@@ -83,6 +88,16 @@ pub(super) fn diagnose_manifests(manifests: Vec<Manifest>) -> DiagnosticReport {
         workload_target(workload),
         format!("Gateway Controller target wiring is unsafe: {reason}"),
         "Use immutable rollout opt-in, a read-only base ConfigMap mount, or the controller-owned projected rollout volume for the target configuration root.",
+      );
+    }
+    if let Err(reason) = verify_version_compatibility(workload, target) {
+      report.push(
+        DiagnosticSeverity::Error,
+        "kubernetes.component_version_skew",
+        "kubernetes",
+        workload_target(workload),
+        format!("Gateway Controller/data-plane compatibility is unsafe: {reason}"),
+        "Set matching oxibelt.dev/effective-version pod-template annotations, or use a bounded rolling_upgrade window for the immediately preceding minor.",
       );
     }
   }
@@ -132,13 +147,41 @@ impl ControllerTarget {
   }
 }
 
-fn controller_target(container: &Value) -> anyhow::Result<ControllerTarget> {
+fn controller_target(workload: &Value, container: &Value) -> anyhow::Result<ControllerTarget> {
   let args = string_array(container.get("args"));
   let namespace = required_option(&args, "--rollout-target-namespace")?;
   let kind = required_option(&args, "--rollout-target-kind")?.to_ascii_lowercase();
   if !matches!(kind.as_str(), "deployment" | "daemonset") {
     bail!("--rollout-target-kind must be deployment or daemonset");
   }
+  let compatibility_mode = option_value(&args, "--compatibility-mode")
+    .unwrap_or("exact")
+    .to_string();
+  let previous_version = option_value(&args, "--compatibility-previous-version")
+    .filter(|value| !value.is_empty())
+    .map(str::to_string);
+  let deadline = option_value(&args, "--compatibility-deadline")
+    .filter(|value| !value.is_empty())
+    .map(str::to_string);
+  match compatibility_mode.as_str() {
+    "exact" if previous_version.is_some() || deadline.is_some() => {
+      bail!("exact compatibility mode must not set previous version or deadline");
+    }
+    "exact" => {}
+    "rolling_upgrade" if previous_version.is_none() || deadline.is_none() => {
+      bail!("rolling_upgrade compatibility mode requires previous version and deadline");
+    }
+    "rolling_upgrade" => {}
+    _ => bail!("--compatibility-mode must be exact or rolling_upgrade"),
+  }
+  let controller_version = annotation(
+    workload,
+    "/spec/template/metadata/annotations",
+    EFFECTIVE_VERSION,
+  )
+  .filter(|value| !value.is_empty())
+  .context("controller pod template is missing oxibelt.dev/effective-version")?
+  .to_string();
   Ok(ControllerTarget {
     namespace,
     kind,
@@ -149,7 +192,64 @@ fn controller_target(container: &Value) -> anyhow::Result<ControllerTarget> {
     volume_name: option_value(&args, "--rollout-volume-name")
       .unwrap_or("gateway-config")
       .to_string(),
+    controller_version,
+    compatibility_mode,
+    previous_version,
+    deadline,
   })
+}
+
+fn verify_version_compatibility(
+  workload: &Manifest,
+  target: &ControllerTarget,
+) -> anyhow::Result<()> {
+  let observed = annotation(
+    &workload.value,
+    "/spec/template/metadata/annotations",
+    EFFECTIVE_VERSION,
+  )
+  .filter(|value| !value.is_empty())
+  .context("target pod template is missing oxibelt.dev/effective-version")?;
+  match target.compatibility_mode.as_str() {
+    "exact" if observed == target.controller_version => Ok(()),
+    "exact" => bail!(
+      "target version `{observed}` does not match controller version `{}` in exact mode",
+      target.controller_version
+    ),
+    "rolling_upgrade"
+      if observed == target.controller_version
+        || target.previous_version.as_deref() == Some(observed) =>
+    {
+      let deadline = target
+        .deadline
+        .as_deref()
+        .context("rolling_upgrade deadline is missing")?;
+      if !looks_like_rfc3339_utc(deadline) {
+        bail!("rolling_upgrade deadline is not an RFC3339 UTC timestamp");
+      }
+      Ok(())
+    }
+    "rolling_upgrade" => bail!(
+      "target version `{observed}` is neither controller version `{}` nor permitted previous version",
+      target.controller_version
+    ),
+    _ => bail!("unsupported compatibility mode"),
+  }
+}
+
+fn looks_like_rfc3339_utc(value: &str) -> bool {
+  let bytes = value.as_bytes();
+  bytes.len() == 20
+    && bytes[4] == b'-'
+    && bytes[7] == b'-'
+    && bytes[10] == b'T'
+    && bytes[13] == b':'
+    && bytes[16] == b':'
+    && bytes[19] == b'Z'
+    && bytes
+      .iter()
+      .enumerate()
+      .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit())
 }
 
 fn required_option(args: &[String], option: &str) -> anyhow::Result<String> {

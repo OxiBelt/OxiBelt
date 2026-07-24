@@ -9,6 +9,36 @@ OxiBelt provides two Helm charts:
 
 The Gateway controller remains a Gateway API controller. It is not an Ingress controller.
 
+Both charts and the controller integration are currently `experimental`.
+[KubernetesSupport.md](KubernetesSupport.md) defines the machine-enforced
+graduation target and mandatory evidence. Its Kubernetes `1.34`–`1.36` matrix
+does not turn Helm rendering, API-server dry-run, or one successful rollout
+into a supported-production claim.
+
+## Graduation compatibility and support metadata
+
+The controller and `kubernetes_immutable` data-plane pairing targets Kubernetes
+`>=1.34.0-0 <1.37.0-0`, Helm `3.21.3` and `4.2.3`, and the operator-installed
+Gateway API `v1.6.1` standard CRD bundle. The charts do not install, convert,
+downgrade, or delete Gateway API CRDs. Install and establish the pinned CRDs
+before the controller, then install or upgrade the data plane.
+
+Chart metadata, rendered workload annotations, Helm NOTES, controller
+`/supportz`, and `oxibeltctl doctor --kubernetes` expose the lifecycle state
+and compatibility policy without exposing Secret data. The data-plane
+Pod-template annotation `oxibelt.dev/effective-version` is the controller's
+running-Pod version boundary. Normal pairing is exact. A declared
+`rolling_upgrade` may permit only the current and explicitly named immediately
+preceding minor version until an RFC3339 deadline no more than 24 hours away; see
+[the skew contract](KubernetesSupport.md#controller-and-data-plane-skew).
+
+Graduation also requires IPv4 single-stack cluster evidence on Calico and
+Cilium, `restricted` Pod Security admission, multi-node failure tests, and
+native `linux/amd64`, `linux/arm64`, and `linux/riscv64` Kubernetes runs. Other
+Kubernetes minors, Helm versions, Gateway API bundles/channels, CNIs, IP
+families, architectures, or component skew are unqualified and must produce a
+clear diagnostic.
+
 Both charts accept either `image.tag` or an immutable `image.digest`. When a
 digest is set it takes precedence and renders `repository@sha256:...`; the
 schema rejects malformed or uppercase digests. Production deployments of
@@ -74,6 +104,14 @@ TLS private keys are operator-owned Kubernetes Secrets. By default the chart mou
 cert_chain = "tls.crt"
 private_key = "tls.key"
 ```
+
+In Kubernetes immutable rollout mode, rotate downstream TLS and Admin material
+by creating a new immutable/versioned Secret and applying a Helm rollout that
+references it. In-place Secret projection alone is not a claimed rotation
+mechanism because the mode disables local mutable reload. BackendTLSPolicy
+public-CA ConfigMap changes instead require the controller to publish and
+converge a new immutable generated revision within the 300-second rollout
+bound.
 
 The chart-generated base configuration is content addressed: it creates an
 `immutable: true` ConfigMap named from a SHA-256 digest of the rendered key and

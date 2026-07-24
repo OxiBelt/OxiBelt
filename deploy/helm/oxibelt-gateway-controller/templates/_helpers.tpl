@@ -2,6 +2,19 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "oxibelt-gateway-controller.labels" -}}
+app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/version: {{ include "oxibelt-gateway-controller.effectiveVersion" . | quote }}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+oxibelt.dev/feature-status: {{ index .Chart.Annotations "oxibelt.dev/feature-status" | quote }}
+oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/kubernetes-support-policy" | quote }}
+{{- end -}}
+
+{{- define "oxibelt-gateway-controller.effectiveVersion" -}}
+{{- default .Chart.AppVersion .Values.effectiveVersion -}}
+{{- end -}}
+
 {{- define "oxibelt-gateway-controller.leaseName" -}}
 {{- default (include "oxibelt-gateway-controller.name" .) .Values.leaderElection.leaseName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -37,6 +50,10 @@
 {{- end -}}
 
 {{- define "oxibelt-gateway-controller.validateSecurity" -}}
+{{- $helmVersion := .Capabilities.HelmVersion.Version -}}
+{{- if not (or (semverCompare "=3.21.3" $helmVersion) (semverCompare "=4.2.3" $helmVersion)) -}}
+{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.21.3 or 4.2.3, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
+{{- end -}}
 {{- if not (kindIs "bool" .Values.serviceAccount.automountServiceAccountToken) -}}
 {{- fail "serviceAccount.automountServiceAccountToken must be a boolean" -}}
 {{- end -}}
@@ -92,5 +109,24 @@
 {{- end -}}
 {{- if not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9._/-]*[A-Za-z0-9])?$" .Values.podAntiAffinity.topologyKey) -}}
 {{- fail "podAntiAffinity.topologyKey must be a non-empty Kubernetes label key" -}}
+{{- end -}}
+{{- $compatibility := .Values.compatibility -}}
+{{- if not (has $compatibility.mode (list "exact" "rolling_upgrade")) -}}
+{{- fail "compatibility.mode must be exact or rolling_upgrade" -}}
+{{- end -}}
+{{- if eq $compatibility.mode "exact" -}}
+{{- if or $compatibility.previousVersion $compatibility.deadline -}}
+{{- fail "compatibility.previousVersion and compatibility.deadline must be empty when compatibility.mode=exact" -}}
+{{- end -}}
+{{- else -}}
+{{- if not $compatibility.previousVersion -}}
+{{- fail "compatibility.previousVersion is required when compatibility.mode=rolling_upgrade" -}}
+{{- end -}}
+{{- if not (regexMatch "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$" $compatibility.previousVersion) -}}
+{{- fail "compatibility.previousVersion must be a SemVer version" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" $compatibility.deadline) -}}
+{{- fail "compatibility.deadline must be an RFC3339 UTC timestamp" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

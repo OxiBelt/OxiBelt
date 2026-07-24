@@ -12,6 +12,10 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+# Empty uses Chart.appVersion. Development and release-equivalent image
+# qualification must set the immutable image's effective SemVer explicitly.
+effectiveVersion: ""
+
 nameOverride: ""
 replicaCount: 2
 

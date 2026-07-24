@@ -22,6 +22,10 @@ deployment surfaces. Exact behavior and configuration syntax remain in the
 [Gateway API reference](GatewayAPI.md). The
 [feature lifecycle matrix](FeatureStatus.md) is authoritative for whether a
 feature is supported, experimental, reserved, or removed. The
+[Kubernetes support and graduation contract](KubernetesSupport.md) binds
+Kubernetes lifecycle claims to explicit compatibility, fault-recovery,
+conformance, architecture, and exact-revision evidence. A chart render or
+happy-path cluster run is not evidence of supported status. The
 [security policy](../SECURITY.md) remains authoritative for supported releases,
 private reporting, disclosure, and official artifact scope.
 
@@ -330,6 +334,12 @@ guarantees.
 | `gateway-api-backendtlspolicy` | The stable subset binds SNI and certificate authentication to one hostname and exact System or ConfigMap CA trust. Referenced ConfigMap integrity and controller RBAC are trust boundaries; unsupported Secret identity, SAN override, option, mTLS, and pin fields fail closed. |
 | `helm-data-plane` | Chart output depends on operator values and cluster controls and is not a complete security deployment attestation. |
 | `helm-gateway-controller` | The controller has a deliberately projected API token, exact-name Lease RBAC, and narrowly scoped default namespace authority, but its Gateway/rollout permissions and any explicit cluster-wide watch choice still require namespace and cluster-policy review. Lease deletion denies writes until Helm recreates the exact object. |
+
+All Kubernetes rows remain experimental while mandatory graduation gates are
+unmet. Promotion evidence is itself a supply-chain input: it must bind the
+exact policy definition, source revision, immutable artifacts, run attempt,
+jobs, and report/log hashes. A forged, stale, skipped, incomplete, or mismatched
+receipt must fail lifecycle admission rather than weaken a gate.
 
 ## Attack Surface, Mitigations, and Attacker Stories
 

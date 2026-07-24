@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use super::cli::{RunArgs, SharedArgs};
+use super::compatibility::CompatibilityPolicy;
 use super::health::ControllerHealth;
 use super::leader_election::{Leadership, WritePermit, validate_write_permit};
 use super::model::KubernetesObject;
@@ -234,7 +235,9 @@ impl KubernetesPoller {
       .request(request, Duration::from_secs(10), KUBERNETES_MAX_BODY_BYTES)
       .await?;
     if response.status == http::StatusCode::NOT_FOUND {
-      return Ok(Vec::new());
+      bail!(
+        "required Kubernetes API list endpoint {path} was not found; verify the watched namespace and serve the required v1 Gateway API resources"
+      );
     }
     if !response.status.is_success() {
       bail!("Kubernetes API {path} returned {}", response.status);
@@ -393,6 +396,7 @@ pub async fn run_poll_loop(
   kubernetes: KubernetesPoller,
   shared: &SharedArgs,
   args: &RunArgs,
+  compatibility: &CompatibilityPolicy,
   health: ControllerHealth,
   leadership: Leadership,
   mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -403,7 +407,7 @@ pub async fn run_poll_loop(
       return Ok(());
     }
     if leadership.is_leader() {
-      match reconcile_once(&kubernetes, shared, args).await {
+      match reconcile_once(&kubernetes, shared, args, compatibility).await {
         Ok(rollout_status) => health.mark_reconciled(rollout_status),
         Err(error) => {
           health.mark_failed(error.to_string());
@@ -426,7 +430,11 @@ async fn reconcile_once(
   kubernetes: &KubernetesPoller,
   shared: &SharedArgs,
   args: &RunArgs,
+  compatibility: &CompatibilityPolicy,
 ) -> anyhow::Result<RolloutStatus> {
+  kubernetes
+    .preflight_target_compatibility(args, compatibility)
+    .await?;
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
   let rendered = translate::translate_objects(&objects, shared)?;
   status::print_diagnostics(&rendered.diagnostics);
@@ -443,7 +451,13 @@ async fn reconcile_once(
     )
     .await?;
     match kubernetes
-      .reconcile_immutable_rollout(shared, args, &rendered.toml, &rendered.assets)
+      .reconcile_immutable_rollout(
+        shared,
+        args,
+        compatibility,
+        &rendered.toml,
+        &rendered.assets,
+      )
       .await
     {
       Ok(status) => status,

@@ -23,6 +23,8 @@ The current implementation is a production-oriented foundation: configuration is
 - Optional Kubernetes Gateway API controller that translates `HTTPRoute` and
   passthrough `TLSRoute` resources into a controller-owned immutable OxiBelt
   TOML include and rolls the selected workload independently of the runtime.
+  The controller, Gateway API translations, and Helm charts remain
+  experimental pending the mandatory graduation evidence.
 
 See [docs/Specification.md](docs/Specification.md) for the compact behavior spec and current non-goals.
 
@@ -179,6 +181,9 @@ the complete contract and boundaries.
   companion values, and compatibility rules.
 - [Gateway API controller](docs/GatewayAPI.md): Kubernetes GatewayClass,
   Gateway, HTTPRoute, TLSRoute, ReferenceGrant, and Service translation.
+- [Kubernetes support and graduation](docs/KubernetesSupport.md): compatibility
+  target, CRD/skew contract, mandatory promotion gates, evidence, and CI
+  cadence for the experimental controller and Helm surfaces.
 - [OxiRule WAF reference](docs/OxiRule.md): rule shape, expression language, actions, object model, helpers, and examples.
 - [OxiRule examples](docs/example/OxiRule.md): cookbook-style request, response, routing, Person proof, and access-log rules.
 - [Feature status](docs/FeatureStatus.md): canonical supported, experimental,

@@ -6,7 +6,9 @@ kind: Deployment
 metadata:
   name: {{ include "oxibelt-gateway-controller.name" . }}
   labels:
-    app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
+{{ include "oxibelt-gateway-controller.labels" . | indent 4 }}
+  annotations:
+    oxibelt.dev/effective-version: {{ include "oxibelt-gateway-controller.effectiveVersion" . | quote }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
@@ -20,7 +22,9 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ include "oxibelt-gateway-controller.name" . }}
+{{ include "oxibelt-gateway-controller.labels" . | indent 8 }}
+      annotations:
+        oxibelt.dev/effective-version: {{ include "oxibelt-gateway-controller.effectiveVersion" . | quote }}
     spec:
       serviceAccountName: {{ include "oxibelt-gateway-controller.name" . }}
       automountServiceAccountToken: false
@@ -69,6 +73,11 @@ spec:
         - "--udp-batch={{ .Values.l4.udp.batch }}"
         - "--udp-batch-size={{ .Values.l4.udp.batchSize }}"
         - "--backend-resolution={{ .Values.backendResolution }}"
+        - "--compatibility-mode={{ .Values.compatibility.mode }}"
+        {{- if eq .Values.compatibility.mode "rolling_upgrade" }}
+        - "--compatibility-previous-version={{ .Values.compatibility.previousVersion }}"
+        - "--compatibility-deadline={{ .Values.compatibility.deadline }}"
+        {{- end }}
         {{- if .Values.dryRun }}
         - "--dry-run"
         {{- end }}
