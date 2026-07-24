@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-readonly FUZZ_NIGHTLY="nightly-2026-07-22"
+readonly FUZZ_NIGHTLY="nightly-2026-07-24"
 readonly MAX_SEED_FILES=128
 readonly MAX_SEED_BYTES=524288
 readonly MAX_WORKING_CORPUS_FILES=16384

@@ -18,19 +18,19 @@ multiple_unsafe_ops_per_block = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 bytes = "1.12.1"
 futures-util = "0.3.32"
 h2 = "0.4.15"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
-hdrhistogram = "7.5.4"
+hdrhistogram = "7.6.0"
 http = "1.4.2"
 http-body-util = "0.1.4"
 hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.20", features = ["http1", "http2", "server", "service", "tokio"] }
 quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 tokio = { version = "1.52.4", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }

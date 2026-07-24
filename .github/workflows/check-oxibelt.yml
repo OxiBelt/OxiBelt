@@ -413,12 +413,12 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install nightly-2026-07-22 --profile minimal
+          rustup toolchain install nightly-2026-07-24 --profile minimal
 
       - name: Install pinned cargo-fuzz
         run: |
-          cargo +nightly-2026-07-22 install cargo-fuzz --version 0.13.2 --locked
-          test "$(cargo +nightly-2026-07-22 fuzz --version)" = "cargo-fuzz 0.13.2"
+          cargo +nightly-2026-07-24 install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +nightly-2026-07-24 fuzz --version)" = "cargo-fuzz 0.13.2"
 
       - name: Run fuzz smoke (${{ matrix.fuzz_target }})
         env:
@@ -457,14 +457,14 @@ jobs:
 
       - name: Install pinned nightly Rust
         run: |
-          rustup toolchain install nightly-2026-07-22 --profile minimal --component rust-src
+          rustup toolchain install nightly-2026-07-24 --profile minimal --component rust-src
           if [[ "${{ matrix.check }}" == "miri" ]]; then
-            rustup component add miri --toolchain nightly-2026-07-22
+            rustup component add miri --toolchain nightly-2026-07-24
           fi
 
       - name: Run Miri contracts
         if: matrix.check == 'miri'
-        run: cargo +nightly-2026-07-22 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked
+        run: cargo +nightly-2026-07-24 miri test -p oxibelt-unsafe-harness --lib miri_contracts --locked
 
       - name: Run AddressSanitizer syscall tests
         if: matrix.check == 'address'
@@ -472,7 +472,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           RUSTDOCFLAGS: -Zsanitizer=address
           RUSTFLAGS: -Zsanitizer=address
-        run: cargo +nightly-2026-07-22 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked -- --test-threads=1
+        run: cargo +nightly-2026-07-24 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib syscall_ --locked -- --test-threads=1
 
       - name: Run ThreadSanitizer concurrency test
         if: matrix.check == 'thread'
@@ -480,7 +480,7 @@ jobs:
           RUSTDOCFLAGS: -Zsanitizer=thread
           RUSTFLAGS: -Zsanitizer=thread
           TSAN_OPTIONS: halt_on_error=1
-        run: cargo +nightly-2026-07-22 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked -- --test-threads=1
+        run: cargo +nightly-2026-07-24 -Zbuild-std test --target x86_64-unknown-linux-gnu -p oxibelt-unsafe-harness --lib concurrent_tcp_info_reads_use_borrowed_fd_without_races --locked -- --test-threads=1
 
   check-riscv64-cross:
     name: Check (riscv64 cross, rust-${{ matrix.rust_version }}, target-${{ matrix.target }})

@@ -18,5 +18,5 @@ multiple_unsafe_ops_per_block = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }

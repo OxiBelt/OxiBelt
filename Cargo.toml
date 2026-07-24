@@ -34,20 +34,20 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 aws-lc-rs = { version = "1.17.1", default-features = false }
 bytes = "1.12.1"
-clap = { version = "4.6.2", features = ["derive"] }
-glob = "0.3.3"
+clap = { version = "4.6.4", features = ["derive"] }
+glob = "0.3.4"
 getrandom = "0.4.3"
 http = "1.4.2"
 http-body-util = "0.1.4"
-jsonschema = { version = "0.48.1", default-features = false }
+jsonschema = { version = "0.48.5", default-features = false }
 hyper = { version = "1.10.1", features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
-kube = { version = "4.0.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.186"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
 oxibelt = { path = "source" }
@@ -60,8 +60,8 @@ pretty_assertions = "1.4.1"
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "process", "std"] }
 sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 serde-saphyr = { version = "0.0.29", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
 strsim = "0.11.1"
