@@ -132,33 +132,6 @@ pub(super) fn tls_fingerprint_payload(
   )
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct QuicTlsFingerprintInput<'a> {
-  pub(super) version: Option<&'a str>,
-  pub(super) cipher_suite: Option<&'a str>,
-  pub(super) key_exchange_group: Option<&'a str>,
-  pub(super) data_integrity_group: Option<&'a str>,
-  pub(super) sni: Option<&'a str>,
-  pub(super) alpn: Option<&'a str>,
-}
-
-pub(super) fn quic_tls_fingerprint(input: QuicTlsFingerprintInput<'_>) -> String {
-  let payload = quic_tls_fingerprint_payload(input);
-  hex_encode(&crate::crypto::sha256(payload.as_bytes()))
-}
-
-pub(super) fn quic_tls_fingerprint_payload(input: QuicTlsFingerprintInput<'_>) -> String {
-  format!(
-    "{QUIC_TLS_FINGERPRINT_SCHEME}\nselected_version={}\nselected_cipher_suite={}\nselected_key_exchange_group={}\nselected_data_integrity_group={}\nsni={}\nalpn={}\nmetadata_source=quinn-rustls-handshake-data",
-    input.version.unwrap_or_default(),
-    input.cipher_suite.unwrap_or_default(),
-    input.key_exchange_group.unwrap_or_default(),
-    input.data_integrity_group.unwrap_or_default(),
-    input.sni.unwrap_or_default(),
-    input.alpn.unwrap_or_default()
-  )
-}
-
 pub(super) fn hex_encode(bytes: &[u8]) -> String {
   const HEX: &[u8; 16] = b"0123456789abcdef";
   let mut out = String::with_capacity(bytes.len() * 2);

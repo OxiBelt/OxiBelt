@@ -1,0 +1,4 @@
+oxibelt-dataplane-strict v0.0.0 (/workspace/source/apps/oxibelt-dataplane-strict)|
+oxibelt v0.0.0 (/workspace/source)|admin-runtime,default
+oxibelt-build-identity v0.0.0 (/workspace/source/crates/oxibelt-build-identity)|
+oxibelt-control-protocol v0.0.0 (/workspace/source/crates/oxibelt-control-protocol)|

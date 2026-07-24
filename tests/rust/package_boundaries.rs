@@ -1,5 +1,6 @@
 //! Compile-time contracts for compatibility and strict data-plane package boundaries.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,6 +9,50 @@ fn repo_root() -> PathBuf {
     .parent()
     .expect("source manifest must have a repository parent")
     .to_path_buf()
+}
+
+fn manifest(relative_path: &str) -> toml::Value {
+  let path = repo_root().join(relative_path);
+  let source = fs::read_to_string(&path)
+    .unwrap_or_else(|error| panic!("{} should read: {error}", path.display()));
+  toml::from_str(&source)
+    .unwrap_or_else(|error| panic!("{} should parse as TOML: {error}", path.display()))
+}
+
+fn table<'a>(
+  value: &'a toml::Value,
+  key: &str,
+  context: &str,
+) -> &'a toml::map::Map<String, toml::Value> {
+  value
+    .get(key)
+    .and_then(toml::Value::as_table)
+    .unwrap_or_else(|| panic!("{context} must contain a `{key}` table"))
+}
+
+fn string_set(value: &toml::Value, context: &str) -> BTreeSet<String> {
+  value
+    .as_array()
+    .unwrap_or_else(|| panic!("{context} must be an array"))
+    .iter()
+    .map(|entry| {
+      entry
+        .as_str()
+        .unwrap_or_else(|| panic!("{context} entries must be strings"))
+        .to_owned()
+    })
+    .collect()
+}
+
+fn dependency<'a>(
+  manifest: &'a toml::Value,
+  package: &str,
+  context: &str,
+) -> &'a toml::map::Map<String, toml::Value> {
+  table(manifest, "dependencies", context)
+    .get(package)
+    .and_then(toml::Value::as_table)
+    .unwrap_or_else(|| panic!("{context} must declare `{package}` as a dependency table"))
 }
 
 #[test]
@@ -21,28 +66,168 @@ fn compatibility_runtime_retains_admin_and_person_proof_surfaces() {
 }
 
 #[test]
-fn strict_package_is_isolated_from_compatibility_defaults() {
-  let root_manifest =
-    fs::read_to_string(repo_root().join("Cargo.toml")).expect("workspace manifest should read");
-  assert!(root_manifest.contains("\"source/apps/oxibelt-dataplane-strict\""));
-  let default_members = root_manifest
-    .split("default-members = [")
-    .nth(1)
-    .and_then(|tail| tail.split(']').next())
-    .expect("workspace must declare default-members");
+fn workspace_dependencies_disable_oxibelt_default_features() {
+  let root_manifest = manifest("Cargo.toml");
+  let workspace = table(&root_manifest, "workspace", "workspace manifest");
+  let members = string_set(
+    workspace
+      .get("members")
+      .expect("workspace must declare members"),
+    "workspace members",
+  );
+  let default_members = string_set(
+    workspace
+      .get("default-members")
+      .expect("workspace must declare default-members"),
+    "workspace default-members",
+  );
+
+  assert!(members.contains("source/apps/oxibelt-dataplane-strict"));
   assert!(
-    !default_members.contains("oxibelt-dataplane-strict"),
+    !default_members.contains("source/apps/oxibelt-dataplane-strict"),
     "strict package must be built alone so feature unification cannot restore Admin"
   );
 
-  let strict_manifest =
-    fs::read_to_string(repo_root().join("source/apps/oxibelt-dataplane-strict/Cargo.toml"))
-      .expect("strict package manifest should read");
-  assert!(strict_manifest.contains("name = \"oxibelt-dataplane-strict\""));
-  assert!(strict_manifest.contains("autobins = false"));
-  assert!(strict_manifest.contains("oxibelt = { path = \"../..\", default-features = false }"));
-  assert_eq!(strict_manifest.matches("[[bin]]").count(), 1);
-  assert!(strict_manifest.contains("name = \"oxibelt-dataplane-strict\""));
+  let workspace_dependencies = workspace
+    .get("dependencies")
+    .and_then(toml::Value::as_table)
+    .expect("workspace must declare dependency policy");
+  let oxibelt = workspace_dependencies
+    .get("oxibelt")
+    .and_then(toml::Value::as_table)
+    .expect("workspace must declare `oxibelt` as a dependency table");
+  assert_eq!(
+    oxibelt.get("path").and_then(toml::Value::as_str),
+    Some("source")
+  );
+  assert_eq!(
+    oxibelt
+      .get("default-features")
+      .and_then(toml::Value::as_bool),
+    Some(false),
+    "workspace consumers must opt into role-owned `oxibelt` features"
+  );
+}
+
+#[test]
+fn strict_package_is_isolated_from_compatibility_defaults() {
+  let strict_manifest = manifest("source/apps/oxibelt-dataplane-strict/Cargo.toml");
+  let package = table(&strict_manifest, "package", "strict package manifest");
+  assert_eq!(
+    package.get("name").and_then(toml::Value::as_str),
+    Some("oxibelt-dataplane-strict")
+  );
+  assert_eq!(
+    package.get("autobins").and_then(toml::Value::as_bool),
+    Some(false)
+  );
+
+  let oxibelt = dependency(&strict_manifest, "oxibelt", "strict package manifest");
+  assert_eq!(
+    oxibelt.get("path").and_then(toml::Value::as_str),
+    Some("../..")
+  );
+  assert_eq!(
+    oxibelt
+      .get("default-features")
+      .and_then(toml::Value::as_bool),
+    Some(false)
+  );
+
+  let binaries = strict_manifest
+    .get("bin")
+    .and_then(toml::Value::as_array)
+    .expect("strict package must declare explicit binaries");
+  assert_eq!(
+    binaries.len(),
+    1,
+    "strict package must expose exactly one production binary"
+  );
+  let binary = binaries[0]
+    .as_table()
+    .expect("strict package binary must be a table");
+  assert_eq!(
+    binary.get("name").and_then(toml::Value::as_str),
+    Some("oxibelt-dataplane-strict")
+  );
+  assert_eq!(
+    binary.get("path").and_then(toml::Value::as_str),
+    Some("../../src/main.rs")
+  );
+}
+
+#[test]
+fn workspace_consumers_enable_only_role_owned_oxibelt_features() {
+  let tools_manifest = manifest("source/apps/oxibeltctl/Cargo.toml");
+  let tools_oxibelt = dependency(
+    &tools_manifest,
+    "oxibelt",
+    "operator-tools package manifest",
+  );
+  assert_eq!(
+    tools_oxibelt
+      .get("workspace")
+      .and_then(toml::Value::as_bool),
+    Some(true)
+  );
+  assert_eq!(
+    string_set(
+      tools_oxibelt
+        .get("features")
+        .expect("operator tools must declare `oxibelt` features"),
+      "operator-tools `oxibelt` features",
+    ),
+    BTreeSet::from(["admin-runtime".to_owned(), "config-tooling".to_owned()])
+  );
+
+  for (role, relative_path) in [
+    ("key signer", "source/apps/oxibelt-keysigner/Cargo.toml"),
+    (
+      "netport switcher",
+      "source/apps/oxibelt-netport-switcher/Cargo.toml",
+    ),
+  ] {
+    let role_manifest = manifest(relative_path);
+    let role_features = table(&role_manifest, "features", role);
+    assert_eq!(
+      role_features
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>(),
+      BTreeSet::from(["crypto-ring", "default"]),
+      "{role} must not expose unrelated runtime feature forwarding"
+    );
+    assert!(
+      string_set(
+        role_features
+          .get("default")
+          .unwrap_or_else(|| panic!("{role} must declare default features")),
+        &format!("{role} default features"),
+      )
+      .is_empty(),
+      "{role} defaults must remain empty"
+    );
+    assert_eq!(
+      string_set(
+        role_features
+          .get("crypto-ring")
+          .unwrap_or_else(|| panic!("{role} must declare crypto-ring forwarding")),
+        &format!("{role} crypto-ring forwarding"),
+      ),
+      BTreeSet::from(["oxibelt/crypto-ring".to_owned()]),
+      "{role} crypto-ring must enable only the matching runtime backend"
+    );
+
+    let role_oxibelt = dependency(&role_manifest, "oxibelt", role);
+    assert_eq!(
+      role_oxibelt.get("workspace").and_then(toml::Value::as_bool),
+      Some(true)
+    );
+    assert!(
+      role_oxibelt.get("features").is_none(),
+      "{role} must not enable `oxibelt` features outside its feature table"
+    );
+  }
 }
 
 #[test]

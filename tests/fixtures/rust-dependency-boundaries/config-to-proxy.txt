@@ -1,0 +1,5 @@
+use crate::proxy as request_runtime;
+
+fn compile_config() {
+  request_runtime::http::forward_request();
+}

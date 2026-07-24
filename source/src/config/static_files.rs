@@ -1,5 +1,8 @@
 //! Static-file proxy configuration and defaults.
 
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, bail};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
@@ -65,4 +68,17 @@ fn default_static_files_sendfile_chunk_bytes() -> usize {
 
 fn default_static_files_hot_object_cache_max_file_bytes() -> usize {
   64 * 1024
+}
+
+pub(crate) fn validate_static_root(path: &Path) -> anyhow::Result<PathBuf> {
+  let canonical = path
+    .canonicalize()
+    .with_context(|| format!("failed to resolve static_root {}", path.display()))?;
+  let metadata = canonical
+    .metadata()
+    .with_context(|| format!("failed to inspect static_root {}", canonical.display()))?;
+  if !metadata.is_dir() {
+    bail!("static_root must point to an existing directory");
+  }
+  Ok(canonical)
 }

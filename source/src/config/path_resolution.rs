@@ -298,9 +298,7 @@ impl Config {
           validate_relative_path("routes.static_root", static_root)?;
           path_roots.config_dir.join(static_root)
         };
-        route.static_root = Some(crate::proxy::http::static_files::validate_static_root(
-          &resolved,
-        )?);
+        route.static_root = Some(crate::config::validate_static_root(&resolved)?);
       }
       route.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
     }

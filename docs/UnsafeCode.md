@@ -66,7 +66,7 @@ Run the ordinary static and policy checks from the repository root:
 ```sh
 cargo fmt --check
 tests/scripts/check-tests-rustfmt.sh
-tests/scripts/check-rust-module-size.sh
+tests/scripts/check-rust-module-size.sh --warn
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --test unsafe_code_policy --locked
 cargo test --all-features --locked

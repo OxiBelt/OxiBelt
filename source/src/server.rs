@@ -185,7 +185,6 @@ pub(crate) use listener_supervisor::ListenerSupervisor;
 use listener_supervisor::*;
 use listener_tasks::*;
 use listeners::*;
-pub(crate) use public_dispatch::downstream_quic_tls_metadata;
 use public_dispatch::*;
 #[cfg(not(feature = "admin-runtime"))]
 pub use strict_runtime::serve;
@@ -287,7 +286,6 @@ pub const ADMIN_OPERATION_STATE_WIRE_VALUES: &[&str] = &[
 ];
 
 const TCP_TLS_FINGERPRINT_SCHEME: &str = "rustls-tcp-negotiated-v2";
-const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
 #[cfg(feature = "admin-runtime")]
 #[cfg(all(test, feature = "admin-runtime"))]
 mod admin_audit_tests;

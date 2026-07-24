@@ -56,6 +56,7 @@ pub(crate) mod normalization;
 mod object_model;
 mod pattern_set;
 mod person_proof;
+#[cfg(feature = "admin-runtime")]
 mod person_proof_admin;
 mod person_proof_api;
 mod person_proof_config;
@@ -128,6 +129,7 @@ pub use person_proof::PersonProofIssuedClearance;
 use person_proof::{
   PersonProofEngine, PersonProofPolicy, PersonProofRequestStatus, PersonProofState,
 };
+#[cfg(feature = "admin-runtime")]
 pub use person_proof_admin::{
   PersonProofAdminClearancePage, PersonProofAdminRevokeResult, PersonProofAdminStatus,
 };

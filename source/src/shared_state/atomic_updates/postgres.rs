@@ -8,10 +8,9 @@ use std::time::Duration;
 use anyhow::bail;
 use sqlx::Row;
 
-use super::super::{
-  HealthRecord, PersonProofIdempotencyConflict, PersonProofRevocationResult, PostgresBackend,
-  SharedCounterLease, now_unix_ms,
-};
+use super::super::{HealthRecord, PostgresBackend, SharedCounterLease, now_unix_ms};
+#[cfg(feature = "admin-runtime")]
+use super::super::{PersonProofIdempotencyConflict, PersonProofRevocationResult};
 use super::{apply_health_report, expiry_after, validate_lease_inputs};
 
 impl PostgresBackend {
@@ -511,6 +510,7 @@ impl PostgresBackend {
     Ok(removed)
   }
 
+  #[cfg(feature = "admin-runtime")]
   #[allow(clippy::too_many_arguments)]
   pub(in super::super) async fn person_proof_revoke_clearance_atomic(
     &self,

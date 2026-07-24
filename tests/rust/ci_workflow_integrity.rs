@@ -998,6 +998,28 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     );
   }
 
+  let strict_builder = dockerfile_stage(&dockerfile, "strict-dataplane-builder");
+  let strict_build_command = concat!(
+    "cargo build --locked --release -p oxibelt-dataplane-strict ",
+    "--bin oxibelt-dataplane-strict \\\n",
+    "      --no-default-features --target \"${OXIBELT_BUILD_RUST_TARGET}\"",
+  );
+  assert!(
+    strict_builder.contains(strict_build_command),
+    "the strict data-plane builder must select the exact package and binary with defaults disabled"
+  );
+  assert_eq!(
+    strict_builder.matches("cargo build ").count(),
+    1,
+    "the strict data-plane builder should have one auditable Cargo build invocation"
+  );
+  for forbidden in ["--workspace", "--all-features"] {
+    assert!(
+      !strict_builder.contains(forbidden),
+      "the strict data-plane builder must not broaden its graph with {forbidden}"
+    );
+  }
+
   for expected in [
     "FROM scratch AS role-metadata",
     "FROM role-metadata AS dataplane",
@@ -1202,25 +1224,101 @@ fn source_structure_job_stays_independent() {
     "source-structure should run independently, not after {:?}",
     source_structure.needs
   );
+
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let steps = parsed["jobs"]["source-structure"]["steps"]
+    .as_array()
+    .expect("source-structure should define steps");
+  let exact_step = |name: &str, command: &str| {
+    let matches = steps
+      .iter()
+      .enumerate()
+      .filter(|(_, step)| {
+        step["name"].as_str() == Some(name) && step["run"].as_str() == Some(command)
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(
+      matches.len(),
+      1,
+      "source-structure should define exact fail-closed step {name}"
+    );
+    matches[0].0
+  };
+
+  let rust_install = exact_step(
+    "Install Rust toolchain",
+    "rustup toolchain install 1.97.1 --profile minimal\nrustup default 1.97.1\n",
+  );
+  let boundary_unit_tests = exact_step(
+    "Test Rust boundary tooling",
+    "python3 -m unittest tests/scripts/test-check-rust-module-size.py\n\
+python3 -m unittest tests/scripts/test-check-cargo-package-boundaries.py\n",
+  );
+  let module_boundaries = exact_step(
+    "Rust module dependency boundaries",
+    "cargo test -p oxibelt --test module_decomposition_contract --locked",
+  );
+  let package_boundaries = exact_step(
+    "Data-plane Cargo package boundary",
+    "bash tests/scripts/check-cargo-package-boundaries.sh",
+  );
+  let size_advisory = exact_step(
+    "Rust module size advisory",
+    "tests/scripts/check-rust-module-size.sh --warn",
+  );
+  exact_step(
+    "Native configuration schema drift",
+    "bash tests/scripts/check-native-config-schema.sh",
+  );
+
   assert!(
-    workflow.contains("tests/scripts/check-rust-module-size.sh"),
-    "source-structure should keep running Rust module size checks"
+    rust_install < boundary_unit_tests
+      && boundary_unit_tests < module_boundaries
+      && module_boundaries < package_boundaries
+      && package_boundaries < size_advisory,
+    "Rust installation, negative-fixture unit tests, live boundary analyzers, and the size advisory must keep their fail-closed order"
+  );
+  assert_eq!(
+    steps[boundary_unit_tests]["env"],
+    serde_json::json!({"PYTHONDONTWRITEBYTECODE": "1"}),
+    "boundary analyzer unit tests should not write Python cache files into the checkout"
+  );
+
+  for (position, step) in steps.iter().enumerate() {
+    if position >= boundary_unit_tests && position <= size_advisory {
+      assert!(
+        step.get("continue-on-error").is_none(),
+        "Rust boundary step {} must fail closed",
+        step["name"].as_str().unwrap_or("<unnamed>")
+      );
+      assert!(
+        !step["run"]
+          .as_str()
+          .is_some_and(|command| command.contains("|| true")),
+        "Rust boundary step {} must not suppress command failures",
+        step["name"].as_str().unwrap_or("<unnamed>")
+      );
+    }
+  }
+
+  let source_structure_text = workflow_job_text(&workflow, "source-structure");
+  assert!(
+    !source_structure_text.contains("check-rust-module-size.sh --enforce"),
+    "source-structure should keep line count advisory after dependency checks become authoritative"
+  );
+  assert_eq!(
+    source_structure_text
+      .matches("tests/scripts/check-rust-module-size.sh")
+      .count(),
+    1,
+    "source-structure should invoke the module-size advisory exactly once"
   );
   assert!(
-    workflow.contains("cargo test -p oxibelt --test module_decomposition_contract --locked"),
-    "source-structure should enforce Rust module dependency boundaries"
-  );
-  assert!(
-    workflow.contains("bash tests/scripts/check-cargo-package-boundaries.sh"),
-    "source-structure should enforce the data-plane Cargo package boundary"
-  );
-  assert!(
-    workflow.contains("bash tests/scripts/check-native-config-schema.sh"),
-    "source-structure should enforce native configuration schema drift"
-  );
-  assert!(
-    workflow.contains("python3 -m unittest tests/scripts/test-check-markdown-links.py")
-      && workflow.contains("python3 tests/scripts/check-markdown-links.py --repo-root ."),
+    source_structure_text
+      .contains("python3 -m unittest tests/scripts/test-check-markdown-links.py")
+      && source_structure_text
+        .contains("python3 tests/scripts/check-markdown-links.py --repo-root ."),
     "source-structure should enforce documentation links and anchors"
   );
 }

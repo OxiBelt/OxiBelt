@@ -17,7 +17,7 @@ use pretty_assertions::assert_eq;
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
-use crate::config::{ProxyStaticFilesConfig, RouteStaticFilesConfig};
+use crate::config::{ProxyStaticFilesConfig, RouteStaticFilesConfig, validate_static_root};
 
 use super::*;
 

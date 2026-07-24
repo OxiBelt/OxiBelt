@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, bail};
 use bytes::Bytes;
 use http::header::{ALLOW, HeaderValue, RANGE};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
@@ -79,19 +78,6 @@ struct StaticErrorPage<'a> {
   status: StatusCode,
   fallback_message: &'a str,
   page: Option<&'a str>,
-}
-
-pub(crate) fn validate_static_root(path: &Path) -> anyhow::Result<PathBuf> {
-  let canonical = path
-    .canonicalize()
-    .with_context(|| format!("failed to resolve static_root {}", path.display()))?;
-  let metadata = canonical
-    .metadata()
-    .with_context(|| format!("failed to inspect static_root {}", canonical.display()))?;
-  if !metadata.is_dir() {
-    bail!("static_root must point to an existing directory");
-  }
-  Ok(canonical)
 }
 
 pub(crate) async fn serve<B>(

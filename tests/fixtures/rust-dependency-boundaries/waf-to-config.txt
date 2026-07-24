@@ -1,0 +1,5 @@
+use crate::config as configuration;
+
+fn evaluate_rule() {
+  configuration::load();
+}

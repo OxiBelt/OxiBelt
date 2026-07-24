@@ -5,10 +5,9 @@ use tokio::task::JoinSet;
 
 use super::super::{Backend, HealthRecord, now_unix_ms};
 use super::{apply_health_report, expiry_after, ttl_millis};
-use crate::shared_state::{
-  ConnectionScope, PersonProofIdempotencyConflict, PersonProofRevocationIdempotency,
-  SharedConnectionAcquire, SharedState,
-};
+use crate::shared_state::{ConnectionScope, SharedConnectionAcquire, SharedState};
+#[cfg(feature = "admin-runtime")]
+use crate::shared_state::{PersonProofIdempotencyConflict, PersonProofRevocationIdempotency};
 
 const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -47,6 +46,7 @@ fn expiry_calculation_never_wraps() {
   assert_eq!(ttl_millis(Duration::ZERO), 1);
 }
 
+#[cfg(feature = "admin-runtime")]
 #[test]
 fn person_proof_idempotency_fingerprint_is_unambiguously_delimited() {
   let idempotency = PersonProofRevocationIdempotency::new("retry-key", HASH_A, Some(60));
@@ -185,6 +185,7 @@ async fn get_or_init_and_health_updates_share_one_memory_transition() {
   );
 }
 
+#[cfg(feature = "admin-runtime")]
 #[tokio::test]
 async fn person_proof_revocation_replays_and_rejects_conflicts_atomically() {
   let state = SharedState::test_memory("atomic-person-proof");

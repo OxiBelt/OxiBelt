@@ -586,59 +586,6 @@ fn tls_fingerprint_changes_when_client_hello_or_selection_changes() {
 }
 
 #[test]
-fn quic_tls_fingerprint_payload_uses_exposed_quic_scheme() {
-  let payload = quic_tls_fingerprint_payload(QuicTlsFingerprintInput {
-    version: Some("TLSv1_3"),
-    cipher_suite: None,
-    key_exchange_group: None,
-    data_integrity_group: None,
-    sni: Some("example.com"),
-    alpn: Some("h3"),
-  });
-
-  assert!(payload.starts_with("quinn-rustls-quic-v2\n"));
-  assert!(payload.contains("selected_version=TLSv1_3"));
-  assert!(payload.contains("selected_cipher_suite="));
-  assert!(payload.contains("selected_key_exchange_group="));
-  assert!(payload.contains("selected_data_integrity_group="));
-  assert!(payload.contains("sni=example.com"));
-  assert!(payload.contains("alpn=h3"));
-  assert!(payload.contains("metadata_source=quinn-rustls-handshake-data"));
-}
-
-#[test]
-fn quic_tls_fingerprint_changes_when_exposed_handshake_metadata_changes() {
-  let base = quic_tls_fingerprint(QuicTlsFingerprintInput {
-    version: Some("TLSv1_3"),
-    cipher_suite: None,
-    key_exchange_group: None,
-    data_integrity_group: None,
-    sni: Some("example.com"),
-    alpn: Some("h3"),
-  });
-  let changed_sni = quic_tls_fingerprint(QuicTlsFingerprintInput {
-    version: Some("TLSv1_3"),
-    cipher_suite: None,
-    key_exchange_group: None,
-    data_integrity_group: None,
-    sni: Some("alt.example.com"),
-    alpn: Some("h3"),
-  });
-  let changed_alpn = quic_tls_fingerprint(QuicTlsFingerprintInput {
-    version: Some("TLSv1_3"),
-    cipher_suite: None,
-    key_exchange_group: None,
-    data_integrity_group: None,
-    sni: Some("example.com"),
-    alpn: Some("h3-29"),
-  });
-
-  assert_eq!(base.len(), 64);
-  assert_ne!(base, changed_sni);
-  assert_ne!(base, changed_alpn);
-}
-
-#[test]
 fn cipher_suite_data_integrity_groups_are_deduplicated_in_order() {
   let groups = unique_nonempty(
     [

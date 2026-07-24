@@ -3,15 +3,18 @@
 use std::time::Duration;
 
 use anyhow::bail;
+#[cfg(feature = "admin-runtime")]
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-  MemoryBackend, MemoryCounter, MemoryLease, MemoryValue, PersonProofIdempotencyConflict,
-  PersonProofRevocationResult, SharedCounterLease, now_unix_ms, purge_expired_counters,
-  purge_expired_values,
+  MemoryBackend, MemoryCounter, MemoryLease, MemoryValue, SharedCounterLease, now_unix_ms,
+  purge_expired_counters, purge_expired_values,
 };
+#[cfg(feature = "admin-runtime")]
+use super::super::{PersonProofIdempotencyConflict, PersonProofRevocationResult};
 use super::{expiry_after, validate_lease_inputs};
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Serialize, Deserialize)]
 struct PersonProofIdempotencyRecord {
   fingerprint: String,
@@ -185,6 +188,7 @@ impl MemoryBackend {
     Ok(values.remove(hash_key).is_some() || values.remove(legacy_key).is_some())
   }
 
+  #[cfg(feature = "admin-runtime")]
   #[allow(clippy::too_many_arguments)]
   pub(in super::super) fn person_proof_revoke_clearance_atomic(
     &self,

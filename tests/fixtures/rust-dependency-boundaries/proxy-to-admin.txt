@@ -1,0 +1,5 @@
+use crate::server::serve as serve_admin_and_data_plane;
+
+fn dispatch_request() {
+  serve_admin_and_data_plane();
+}

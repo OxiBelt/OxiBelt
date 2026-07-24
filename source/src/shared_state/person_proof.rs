@@ -1,21 +1,28 @@
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
+#[cfg(feature = "admin-runtime")]
+use anyhow::bail;
+#[cfg(feature = "admin-runtime")]
 use base64::Engine;
+#[cfg(feature = "admin-runtime")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "admin-runtime")]
 use super::enumeration::{EnumerationCursor, EnumerationLimits};
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 use super::now_unix_ms;
-use super::{
-  Backend, PersonProofRevocationIdempotency, PersonProofRevocationResult, SharedState,
-  SharedStateFeature, ttl_from_expires_ms,
-};
+use super::{Backend, SharedState, SharedStateFeature, ttl_from_expires_ms};
+#[cfg(feature = "admin-runtime")]
+use super::{PersonProofRevocationIdempotency, PersonProofRevocationResult};
 
 const PERSON_PROOF_REUSE_CLEARANCE_PREFIX: &str = "person-proof:reuse:clearance:";
 const PERSON_PROOF_REUSE_CHALLENGE_PREFIX: &str = "person-proof:reuse:challenge:";
 const PERSON_PROOF_REVOKED_CLEARANCE_PREFIX: &str = "person-proof:revoked:clearance:";
+#[cfg(feature = "admin-runtime")]
 const PERSON_PROOF_CLEARANCE_CURSOR_VERSION: u8 = 1;
+#[cfg(feature = "admin-runtime")]
 const PERSON_PROOF_CLEARANCE_CURSOR_MAX_BYTES: usize = 4_096;
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PersonProofSharedStatus {
   pub active_clearance_count: usize,
@@ -24,18 +31,21 @@ pub struct PersonProofSharedStatus {
   pub legacy_raw_key_count: usize,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonProofSharedClearance {
   pub clearance_hash: String,
   pub expires_at_unix_ms: Option<i64>,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonProofSharedClearancePage {
   pub clearances: Vec<PersonProofSharedClearance>,
   pub next_cursor: Option<String>,
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Deserialize, Serialize)]
 struct PersonProofClearanceCursor {
   version: u8,
@@ -134,6 +144,7 @@ impl SharedState {
     result.map(|value| value.is_some())
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub(crate) async fn person_proof_revoke_clearance_hash(
     &self,
     hash: &str,
@@ -170,6 +181,7 @@ impl SharedState {
     result
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofSharedStatus> {
     let Some(backend) = &self.person_proof else {
       return Ok(PersonProofSharedStatus::default());
@@ -188,6 +200,7 @@ impl SharedState {
     result
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_list_clearances(
     &self,
     limit: usize,
@@ -280,6 +293,7 @@ impl Backend {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   #[allow(clippy::too_many_arguments)]
   async fn person_proof_revoke_clearance(
     &self,
@@ -332,6 +346,7 @@ impl Backend {
     }
   }
 
+  #[cfg(feature = "admin-runtime")]
   async fn person_proof_status(
     &self,
     prefix: &str,
@@ -367,6 +382,7 @@ impl Backend {
     bail!("person proof status enumeration reached its configured scan-round limit")
   }
 
+  #[cfg(feature = "admin-runtime")]
   async fn person_proof_clearances(
     &self,
     prefix: &str,
@@ -421,6 +437,7 @@ impl Backend {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn person_proof_status_add_key(
   status: &mut PersonProofSharedStatus,
   key: &str,
@@ -451,6 +468,7 @@ fn person_proof_status_add_key(
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 fn encode_clearance_cursor(
   prefix: &str,
   backend: &Backend,
@@ -465,6 +483,7 @@ fn encode_clearance_cursor(
   Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
 }
 
+#[cfg(feature = "admin-runtime")]
 fn decode_clearance_cursor(
   cursor: Option<&str>,
   prefix: &str,
@@ -489,6 +508,7 @@ fn decode_clearance_cursor(
   Ok(Some(decoded.position))
 }
 
+#[cfg(feature = "admin-runtime")]
 fn clearance_cursor_scope(prefix: &str, backend: &Backend) -> String {
   let backend_scope = backend.enumeration_cursor_scope();
   let mut scope = Vec::with_capacity(
@@ -503,6 +523,7 @@ fn clearance_cursor_scope(prefix: &str, backend: &Backend) -> String {
   base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(crate::crypto::sha256(&scope))
 }
 
+#[cfg(feature = "admin-runtime")]
 fn person_proof_clearance_from_key(
   key: &str,
   prefix: &str,
@@ -515,9 +536,10 @@ fn person_proof_clearance_from_key(
   })
 }
 
+#[cfg(feature = "admin-runtime")]
 fn is_sha256_hex(value: &str) -> bool {
   value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin-runtime"))]
 mod tests;

@@ -2,50 +2,6 @@
 
 use super::*;
 
-pub(crate) fn downstream_quic_tls_metadata(
-  connection: &h3_quinn::quinn::Connection,
-) -> WafTlsMetadata {
-  let handshake_data = connection.handshake_data().and_then(|data| {
-    data
-      .downcast::<h3_quinn::quinn::crypto::rustls::HandshakeData>()
-      .ok()
-  });
-  let (alpn, sni) = handshake_data
-    .map(|data| {
-      (
-        data
-          .protocol
-          .as_ref()
-          .map(|value| String::from_utf8_lossy(value).into_owned()),
-        data.server_name.clone(),
-      )
-    })
-    .unwrap_or_default();
-  let version = Some("TLSv1_3".to_string());
-  // Quinn's stable rustls handshake data exposes ALPN and SNI for QUIC, but not the
-  // negotiated cipher suite or key-exchange group. Keep explicit empty payload
-  // slots so future metadata additions can move the QUIC scheme forward cleanly.
-  let fingerprint = Some(quic_tls_fingerprint(QuicTlsFingerprintInput {
-    version: version.as_deref(),
-    cipher_suite: None,
-    key_exchange_group: None,
-    data_integrity_group: None,
-    sni: sni.as_deref(),
-    alpn: alpn.as_deref(),
-  }));
-
-  WafTlsMetadata {
-    enabled: true,
-    version,
-    cipher_suite: None,
-    sni,
-    alpn,
-    fingerprint,
-    fingerprint_scheme: Some(QUIC_TLS_FINGERPRINT_SCHEME.to_string()),
-    client_certificate: None,
-  }
-}
-
 pub(super) async fn handle_connection(
   stream: TcpStream,
   peer_addr: SocketAddr,

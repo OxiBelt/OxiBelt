@@ -192,6 +192,7 @@ impl RedisPool {
     }
   }
 
+  #[cfg_attr(not(feature = "admin-runtime"), allow(dead_code))]
   pub(super) async fn pipeline(&self, commands: &[Vec<Vec<u8>>]) -> anyhow::Result<Vec<Resp>> {
     if commands.is_empty() {
       return Ok(Vec::new());

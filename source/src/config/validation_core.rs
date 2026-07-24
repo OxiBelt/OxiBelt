@@ -251,7 +251,7 @@ impl Config {
         }
         (Some(_), None, None, None) | (None, Some(_), None, None) => {}
         (None, None, Some(static_root), None) => {
-          crate::proxy::http::static_files::validate_static_root(static_root)
+          crate::config::validate_static_root(static_root)
             .with_context(|| format!("route {} static_root is invalid", route.name))?;
           if route.replace_prefix_with.is_some() {
             bail!(

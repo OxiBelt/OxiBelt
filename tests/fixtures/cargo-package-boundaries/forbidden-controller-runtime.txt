@@ -1,0 +1,5 @@
+oxibelt-gateway-controller v0.0.0 (/workspace/source/apps/oxibelt-gateway-controller)|
+oxibelt-build-identity v0.0.0 (/workspace/source/crates/oxibelt-build-identity)|
+oxibelt-control-http v0.0.0 (/workspace/source/crates/oxibelt-control-http)|
+oxibelt-control-protocol v0.0.0 (/workspace/source/crates/oxibelt-control-protocol)|
+oxibelt v0.0.0 (/workspace/source)|

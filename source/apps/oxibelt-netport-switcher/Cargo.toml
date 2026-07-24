@@ -10,7 +10,6 @@ autobins = false
 [features]
 default = []
 crypto-ring = ["oxibelt/crypto-ring"]
-mutation-pqc = ["oxibelt/mutation-pqc"]
 
 [dependencies]
 anyhow.workspace = true

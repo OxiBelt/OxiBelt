@@ -9,10 +9,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 
-use super::{
-  HealthRecord, PersonProofIdempotencyConflict, PersonProofRevocationResult, RedisBackend, Resp,
-  SharedCounterLease,
-};
+use super::{HealthRecord, RedisBackend, Resp, SharedCounterLease};
+#[cfg(feature = "admin-runtime")]
+use super::{PersonProofIdempotencyConflict, PersonProofRevocationResult};
 
 const HEALTH_RECORD_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -431,6 +430,7 @@ return redis.call('DEL', KEYS[3])
     )
   }
 
+  #[cfg(feature = "admin-runtime")]
   #[allow(clippy::too_many_arguments)]
   pub(super) async fn person_proof_revoke_clearance_atomic(
     &self,

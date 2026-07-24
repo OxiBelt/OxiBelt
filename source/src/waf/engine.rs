@@ -159,14 +159,17 @@ impl WafEngine {
     self.person_proof_tcp_max_hop
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
     self.person_proof.admin_status()
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_admin_status_async(&self) -> anyhow::Result<PersonProofAdminStatus> {
     self.person_proof.admin_status_async().await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub fn person_proof_admin_clearances(
     &self,
     limit: usize,
@@ -175,6 +178,7 @@ impl WafEngine {
     self.person_proof.admin_list_clearances(limit, cursor)
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_admin_clearances_async(
     &self,
     limit: usize,
@@ -186,6 +190,7 @@ impl WafEngine {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub fn person_proof_admin_revoke_clearance(
     &self,
     hash: &str,
@@ -194,6 +199,7 @@ impl WafEngine {
     self.person_proof.admin_revoke_clearance(hash, ttl_seconds)
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_admin_revoke_clearance_async(
     &self,
     hash: &str,
@@ -205,6 +211,7 @@ impl WafEngine {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub async fn person_proof_admin_revoke_clearance_with_idempotency_async(
     &self,
     hash: &str,
@@ -217,6 +224,7 @@ impl WafEngine {
       .await
   }
 
+  #[cfg(feature = "admin-runtime")]
   pub fn normalize_person_proof_admin_clearance_hash(hash: &str) -> anyhow::Result<String> {
     PersonProofEngine::normalize_admin_clearance_hash(hash)
   }

@@ -25,7 +25,6 @@ use crate::proxy::http::fast_path::stage_timing as timing;
 use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
-use crate::server::downstream_quic_tls_metadata;
 use crate::state::AppSnapshot;
 use crate::tls;
 use crate::waf::WafProtocol;
@@ -47,10 +46,12 @@ mod request_tasks;
 mod response_body;
 #[cfg(test)]
 mod tests;
+mod tls_metadata;
 mod upstream_connection;
 mod upstream_pool;
 mod webtransport_bridge;
 
+use tls_metadata::downstream_quic_tls_metadata;
 pub(crate) use upstream_connection::forward_request;
 use upstream_connection::{
   connect_h3_upstream, connect_upstream_webtransport, resolve_upstream_addr, send_h3_request,

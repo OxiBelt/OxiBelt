@@ -59,7 +59,7 @@ root:
 ```sh
 cargo fmt --check
 tests/scripts/check-tests-rustfmt.sh
-tests/scripts/check-rust-module-size.sh
+tests/scripts/check-rust-module-size.sh --warn
 cargo audit
 cargo deny check
 cargo vet --locked
@@ -174,12 +174,15 @@ If new code belongs to a different responsibility or feature category, add a
 new Rust module or source file under the most appropriate directory and wire it
 through `mod.rs`, `lib.rs`, or `main.rs` as needed.
 
-Treat 750 lines as the review threshold for Rust source files under
-`source/src/`. Files above that threshold should be split into smaller
-responsibility-focused modules unless there is a documented reason to keep the
-implementation together. Existing oversized files are tracked by
-`tests/scripts/check-rust-module-size.sh` and should shrink over time rather
-than grow.
+Treat 750 lines as an advisory review threshold for Rust source files under
+`source/src/`, not as the definition of a sound module boundary. A file above
+that threshold should prompt a responsibility and dependency review, but it
+does not fail CI solely because of its length. Run
+`tests/scripts/check-rust-module-size.sh --warn` for the advisory report; use
+`--enforce` only when a deliberately hard line-count check is required.
+Enforced dependency direction, package feature isolation, and public API
+ownership are documented in
+[Dependency Boundaries](docs/DependencyBoundaries.md).
 
 Keep module boundaries explicit:
 
@@ -345,7 +348,7 @@ GitHub Actions should run at least:
 ```sh
 cargo fmt --check
 tests/scripts/check-tests-rustfmt.sh
-tests/scripts/check-rust-module-size.sh
+tests/scripts/check-rust-module-size.sh --warn
 cargo audit
 cargo deny check
 cargo vet --locked

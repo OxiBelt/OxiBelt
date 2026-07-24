@@ -69,6 +69,7 @@ use helpers::{
 };
 #[cfg(test)]
 use helpers::{purge_expired_counters, purge_expired_values};
+#[cfg(feature = "admin-runtime")]
 pub use person_proof::{
   PersonProofSharedClearance, PersonProofSharedClearancePage, PersonProofSharedStatus,
 };
@@ -183,6 +184,7 @@ pub(crate) enum SharedConnectionAcquire {
 ///
 /// This is deliberately small and contains only hash-derived state, so it is
 /// safe to retain for the lifetime of an optional idempotency record.
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct PersonProofRevocationResult {
   pub(crate) removed_active: bool,
@@ -191,12 +193,14 @@ pub(crate) struct PersonProofRevocationResult {
 
 /// Digest-only idempotency material for the narrow Person-proof Admin
 /// mutation. Raw header values never reach storage or log fields.
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug, Clone)]
 pub(crate) struct PersonProofRevocationIdempotency {
   pub(crate) key_digest: String,
   pub(crate) request_fingerprint: String,
 }
 
+#[cfg(feature = "admin-runtime")]
 impl PersonProofRevocationIdempotency {
   pub(crate) fn new(key: &str, clearance_hash: &str, supplied_ttl_seconds: Option<u64>) -> Self {
     let key_digest = hex_encode(&crate::crypto::sha256(key.as_bytes()));
@@ -213,15 +217,18 @@ impl PersonProofRevocationIdempotency {
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 #[derive(Debug)]
 pub(crate) struct PersonProofIdempotencyConflict;
 
+#[cfg(feature = "admin-runtime")]
 impl std::fmt::Display for PersonProofIdempotencyConflict {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     formatter.write_str("person proof idempotency key was reused with a different request")
   }
 }
 
+#[cfg(feature = "admin-runtime")]
 impl std::error::Error for PersonProofIdempotencyConflict {}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

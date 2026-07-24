@@ -105,6 +105,7 @@ impl Backend {
     }
   }
 
+  #[cfg_attr(not(feature = "admin-runtime"), allow(dead_code))]
   pub(super) async fn enumeration_expirations(
     &self,
     keys: &[String],
@@ -175,6 +176,7 @@ impl Backend {
     }
   }
 
+  #[cfg_attr(not(feature = "admin-runtime"), allow(dead_code))]
   pub(super) fn enumeration_cursor_scope(&self) -> String {
     match self {
       Self::Redis(redis) => format!("{}:{}", redis.runtime.kind, redis.runtime.name),
@@ -285,6 +287,7 @@ impl RedisBackend {
       .collect()
   }
 
+  #[cfg_attr(not(feature = "admin-runtime"), allow(dead_code))]
   async fn enumeration_expirations(
     &self,
     keys: &[String],
@@ -387,6 +390,7 @@ impl PostgresBackend {
     Ok(keys.iter().map(|key| values.get(key).cloned()).collect())
   }
 
+  #[cfg_attr(not(feature = "admin-runtime"), allow(dead_code))]
   async fn enumeration_expirations(
     &self,
     keys: &[String],
