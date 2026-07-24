@@ -1,4 +1,212 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.anyhow]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.104"
+notes = "Reviewed complete 1.0.104 source and the 1.0.103 delta; error-erasure, downcast, pointer-ownership, and formatting-buffer unsafe invariants are contained, the build script only performs a Cargo-rustc probe in OUT_DIR, and the source delta is documentation-only."
+
+[[audits.clap]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "4.6.4"
+notes = "Reviewed complete 4.6.4 source and the 4.6.2 delta; the facade forbids unsafe code, only reexports clap_builder and optional derive support, has no build-time side effects, and the source delta is documentation-only."
+
+[[audits.clap_derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "4.6.4"
+notes = "Reviewed complete 4.6.4 proc-macro source and the 4.6.1 delta; it forbids unsafe code and has no file, network, or process effects, while the delta normalizes literal expression parsing and updates AST matching for Syn 3."
+
+[[audits.ctor]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.10"
+notes = "Audited full source of ctor 1.0.10; startup hooks require explicit unsafe acknowledgement, linker registration delegates to typed link-section boundaries, and Static publishes initialized storage through acquire and release state transitions with poisoning; the new dereference fast path reads only after observing INITIALIZED."
+
+[[audits.fastrand]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.5.0"
+notes = "Reviewed complete 2.5.0 source and the 2.4.1 delta; the crate forbids unsafe code, implements a documented non-cryptographic RNG with bounded range sampling, is not used for OxiBelt cryptographic randomness, and the source delta is documentation-only."
+
+[[audits.glob]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.3.4"
+notes = "Reviewed the complete 0.3.4 source and 0.3.3 diff; it contains no unsafe, build script, or write side effects, and the update only adds error conversion and caches filenames while preserving caller-controlled lazy filesystem traversal."
+
+[[audits.jiff]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.2.34"
+notes = "Reviewed complete 0.2.34 source and the 0.2.32 delta; TZif and POSIX parsing uses checked lengths and explicit caps, expected system-zone filesystem and platform-FFI access is contained, pointer-tagged TimeZone and formatting-buffer unsafe invariants are maintained, and extracted core code was audited separately."
+
+[[audits.jiff-core]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = "Reviewed complete new 0.1.0 source; the no-std civil-time and TZif/POSIX parsers use checked bounds and explicit resource caps, have no external side effects, and the sole ArrayStr unsafe conversion preserves initialized-length and UTF-8 invariants."
+
+[[audits.jiff-static]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.2.34"
+notes = "Reviewed complete 0.2.34 proc-macro source and the 0.2.32 delta; compile-time file access is limited to the explicitly supplied TZif path, parsing is delegated to audited jiff-core, and generated unsafe copying is restricted to a statically constructed TZif time zone."
+
+[[audits.jsonpath-rust]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.6"
+notes = "Reviewed the checksum-matched 1.0.6 archive and 1.0.5 diff; the only source change adds QueryRef getters, with no unsafe, build script, or IO, while recursive descendant queries remain caller-bounded."
+
+[[audits.jsonschema]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.48.5"
+notes = "Reviewed the complete 0.48.5 source and 0.48.1 diff: there is no unsafe or build script, OxiBelt disables HTTP/file retrieval and selects Rust regex, and canonical JSON caps recursion at 255 and initial preallocation at 1 MiB."
+
+[[audits.jsonschema-regex]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.48.5"
+notes = "Reviewed the complete 0.48.5 source and confirmed it is production-identical to 0.48.1; it is a safe-Rust ECMA regex translator with fallible parsing and no build or runtime IO side effects."
+
+[[audits.jsonschema-value]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.48.5"
+notes = "Reviewed the complete new 0.48.5 crate with its enabled serde_json feature; it contains no unsafe, build script, or IO side effects, and equality and unique-items allocations are proportional to caller input."
+
+[[audits.link-section]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.19.1"
+notes = "Audited full source of link-section 0.19.1; linker and FFI unsafe operations are confined to documented section-layout invariants, safe section names are isolated by location hashing, untyped or custom-name submission requires explicit unsafe opt-in, and the 0.19.1 change only corrects Wasm macro expansion punctuation."
+
+[[audits.pest]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.8.8"
+notes = "Reviewed the complete 2.8.8 parser and 2.8.7 diff; it has no unsafe, build script, or IO, and the source change only prevents node tagging during lookahead while retaining the opt-in parser call limit."
+
+[[audits.pest_derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.8.8"
+notes = "Reviewed the complete 2.8.8 proc-macro source and 2.8.7 diff; production code is unchanged and contains no unsafe, build script, or runtime side effects beyond delegated compile-time grammar generation."
+
+[[audits.pest_generator]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.8.8"
+notes = "Reviewed the complete 2.8.8 generator and 2.8.7 diff; production code is unchanged, has no unsafe or build script, and its only external side effect is the documented compile-time read of a caller-selected grammar file."
+
+[[audits.pest_meta]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.8.8"
+notes = "Reviewed the complete 2.8.8 grammar parser and 2.8.7 diff; production code is unchanged, contains no unsafe, build script, or IO, and rejects left-recursive and non-progressing grammars."
+
+[[audits.polyval]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.7.3"
+notes = "Audited full source of polyval 0.7.3; architecture-specific unsafe intrinsics are gated by runtime CPU detection and operate on fixed-size in-bounds blocks, the portable fallback contains no side effects, and the new Zeroize implementation clears field storage without changing cryptographic behavior."
+
+[[audits.proc-macro2]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.107"
+notes = "Reviewed complete 1.0.107 source and the 1.0.106 delta; token ownership and literal fast-path unsafe contracts are contained, build-time execution is limited to Cargo-provided rustc probes in OUT_DIR, and the behavioral delta preserves parser and span-invalidation safety."
+
+[[audits.quote]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.47"
+notes = "Reviewed complete 1.0.47 source and the 1.0.46 delta; token generation has no external side effects, the build script only queries Cargo-provided rustc, literal fast paths operate on compiler-validated literals, and the source delta is documentation-only."
+
+[[audits.ref-cast]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.26"
+notes = "Audited full source of ref-cast 1.0.26; casts are restricted to representation-validated types, unsafe conversions preserve reference layout, and build.rs only queries the configured Rust compiler version and writes generated configuration into OUT_DIR, with no network or uncontrolled filesystem side effects."
+
+[[audits.ref-cast-impl]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.26"
+notes = "Audited full source of ref-cast-impl 1.0.26; the proc macro rejects unsupported representations and nontrivial field layouts before generating confined pointer casts, and performs no filesystem, network, process, or environment side effects."
+
+[[audits.referencing]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.48.5"
+notes = "Reviewed the complete 0.48.5 source and confirmed it is production-identical to 0.48.1; default retrieval performs no IO, and registry crawling uses deduplication plus a depth-128 iterative fallback."
+
+[[audits.rustls-pki-types]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.15.1"
+notes = "Audited full source of rustls-pki-types 1.15.1; certificate and key wrappers, bounded PEM and base64 decoding, IP parsing, and the revised DNS validator preserve input bounds and secret-handling boundaries; the sole fixed-array byte reinterpretation is size and alignment safe, with no build script, FFI, networking, or command execution."
+
+[[audits.serde]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.229"
+notes = "Reviewed the complete 1.0.229 source and 1.0.228 diff; both UTF-8 unsafe sites preserve their invariants, hinted collection preallocation is capped at 1 MiB, and the build script only writes OUT_DIR and queries RUSTC --version."
+
+[[audits.serde_core]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.229"
+notes = "Reviewed the complete 1.0.229 core and 1.0.228 diff; both UTF-8 unsafe sites preserve their invariants, hinted collection preallocation is capped at 1 MiB, and the build script only writes OUT_DIR and queries RUSTC --version."
+
+[[audits.serde_derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.229"
+notes = "Reviewed the complete 1.0.229 proc macro and 1.0.228 diff; it has no unsafe, build script, or external IO, and the source changes are a Syn 3 API migration with equivalent generated serialization and deserialization structure."
+
+[[audits.serde_json]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.0.151"
+notes = "Reviewed the complete 1.0.151 source and 1.0.150 diff; all unsafe sites preserve documented bounds, UTF-8, and representation invariants, the parser retains its depth-128 limit, and the new contract-checked RawValue unsafe API is not enabled in this graph."
+
+[[audits.strum]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.28.0"
+notes = "Reviewed complete new 0.28.0 source; it contains safe enum traits and supporting data types with no unsafe code, build script, or filesystem, environment, network, or process side effects."
+
+[[audits.strum_macros]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.28.0"
+notes = "Reviewed complete new 0.28.0 proc-macro source; syntax parsing and generated implementations use safe code, have no file, network, or process effects, and the only environment behavior is explicitly enabled STRUM_DEBUG diagnostic output."
+
+[[audits.syn]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "3.0.3"
+notes = "Reviewed complete new 3.0.3 source; token-buffer cursor, parser-lifetime, thread-bound, and token-layout unsafe invariants are documented and maintained, parsing failures return structured errors, and the crate has no build script or runtime external side effects."
+
+[[audits.thiserror]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.0.19"
+notes = "Reviewed complete 2.0.19 source and the 2.0.18 delta; runtime behavior remains a derive facade, build-time writes and compiler probes are confined to OUT_DIR using Cargo-provided rustc, and the functional delta is an equivalent Option predicate update."
+
+[[audits.thiserror-impl]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "2.0.19"
+notes = "Reviewed complete 2.0.19 proc-macro source and the 2.0.18 delta; derive parsing, validation, and code generation contain no unsafe or external side effects, and the only functional changes are equivalent Option predicate rewrites."
+
+[[audits.xxhash-rust]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.8.18"
+notes = "Audited full source of xxhash-rust 0.8.18; unsafe loads are internal and preceded by slice-length checks, the XXH3 builder now applies seed and secret precedence consistently, and OxiBelt uses it only for non-cryptographic structural hashing through Sequoia, with no build-time or runtime side effects."

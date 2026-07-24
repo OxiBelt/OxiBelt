@@ -78,7 +78,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std
 unicode-normalization = "0.1.25"
 url = { version = "2.5.8", features = ["serde"] }
 webpki-roots = "1.0.8"
-web-transport-quinn = { version = "0.11.12", default-features = false, features = ["aws-lc-rs"] }
+web-transport-quinn = { version = "0.11.10", default-features = false, features = ["aws-lc-rs"] }
 quic-parser = { version = "0.1.5", default-features = false, features = ["aws-lc-rs"] }
 x509-cert = "0.3.0"
 # `x509-ocsp 0.2.1` still exposes `x509-cert 0.2` types in its public API.

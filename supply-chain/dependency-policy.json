@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
-      "exemptionInventorySha256": "d097fc907efff7d0648e7b74ad6997d15459cc9bd4f8195966b200ccb4cb9a4a",
-      "exemptedPackageVersions": 474
+      "lockfileSha256": "a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
+      "exemptionInventorySha256": "d6d61e2eea0c20fcb6d04dc1be2db659f1c2943b7e45037535185768aafe7d00",
+      "exemptedPackageVersions": 445
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -46,6 +46,7 @@
       "foldhash": ["0.1", "0.2"],
       "generic-array": ["0.14", "1"],
       "getrandom": ["0.2", "0.3", "0.4"],
+      "granit-parser": ["0.0.3", "0.0.7"],
       "hashbrown": ["0.15", "0.16", "0.17"],
       "inout": ["0.1", "0.2"],
       "itertools": ["0.13", "0.14"],
@@ -53,6 +54,7 @@
       "r-efi": ["5", "6"],
       "rand": ["0.10", "0.8"],
       "rand_core": ["0.10", "0.6"],
+      "serde-saphyr": ["0.0.27", "0.0.29"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
       "spki": ["0.7", "0.8"],
@@ -69,8 +71,8 @@
         "packages": {
           "aes-gcm": ["0.11.0"],
           "argon2": ["0.5.3"],
-          "aws-lc-rs": ["1.17.3"],
-          "aws-lc-sys": ["0.43.0"],
+          "aws-lc-rs": ["1.17.1"],
+          "aws-lc-sys": ["0.42.0"],
           "chacha20poly1305": ["0.11.0"],
           "hkdf": ["0.13.0"],
           "hmac": ["0.13.0"],
@@ -92,7 +94,7 @@
           "h3-webtransport": ["0.1.2"],
           "http": ["1.4.2"],
           "httparse": ["1.10.1"],
-          "hyper": ["1.11.0"],
+          "hyper": ["1.10.1"],
           "hyper-rustls": ["0.27.9"],
           "hyper-util": ["0.1.20"],
           "quinn": ["0.11.11"],
@@ -102,7 +104,7 @@
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.13"],
           "web-transport-proto": ["0.6.0"],
-          "web-transport-quinn": ["0.11.12"]
+          "web-transport-quinn": ["0.11.10"]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
       },
@@ -141,10 +143,10 @@
         "category": "kubernetes",
         "packages": {
           "k8s-openapi": ["0.28.0"],
-          "kube": ["4.2.0"],
-          "kube-client": ["4.2.0"],
-          "kube-core": ["4.2.0"],
-          "kube-runtime": ["4.2.0"]
+          "kube": ["4.0.0"],
+          "kube-client": ["4.0.0"],
+          "kube-core": ["4.0.0"],
+          "kube-runtime": ["4.0.0"]
         },
         "reviewBoundary": "API version selection, authentication, TLS, watch-stream parsing, and controller retry behavior"
       }
@@ -186,24 +188,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
+      "subject": "Cargo.lock@sha256:a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-23",
+      "reviewedOn": "2026-07-24",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:07c33ec0c8327990189b66118eaaf70776b6faeb9735d96958ed370da7fb0e9a",
+      "subject": "Cargo.lock@sha256:a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-23",
+      "reviewedOn": "2026-07-24",
       "expiresOn": "2026-10-19"
     },
     {

@@ -38,13 +38,26 @@ fn compatibility_line(version: &str) -> String {
     .split('.');
   let major = components.next().expect("version must have a major");
   if major == "0" {
-    format!(
-      "0.{}",
-      components.next().expect("0.x version must have a minor")
-    )
+    let minor = components.next().expect("0.x version must have a minor");
+    if minor == "0" {
+      format!(
+        "0.0.{}",
+        components.next().expect("0.0.x version must have a patch")
+      )
+    } else {
+      format!("0.{minor}")
+    }
   } else {
     major.to_owned()
   }
+}
+
+#[test]
+fn compatibility_lines_follow_cargo_zero_major_semantics() {
+  assert_eq!(compatibility_line("1.2.3"), "1");
+  assert_eq!(compatibility_line("0.2.3"), "0.2");
+  assert_eq!(compatibility_line("0.0.3"), "0.0.3");
+  assert_eq!(compatibility_line("0.0.7-alpha.1+metadata"), "0.0.7");
 }
 
 fn parse_date(value: &str) -> i64 {
