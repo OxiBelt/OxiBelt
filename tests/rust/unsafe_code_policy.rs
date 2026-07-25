@@ -47,6 +47,33 @@ fn first_party_rust_uses_only_the_audited_unsafe_allowlist() {
 }
 
 #[test]
+fn webtransport_generic_streams_stay_behind_the_selected_path_adapter() {
+  let root = repo_root();
+  let adapter = "source/src/proxy/http3/webtransport_bridge/upstream_adapter.rs";
+  let forbidden = [
+    "web_transport_quinn::Session",
+    "web_transport_quinn::RecvStream",
+    "web_transport_quinn::SendStream",
+    "web_transport_quinn::generic",
+    "web_transport_trait::",
+  ];
+
+  for relative in rust_source_files(&root) {
+    if !relative.starts_with("source/src/") || relative == adapter {
+      continue;
+    }
+    let source = fs::read_to_string(root.join(&relative))
+      .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+    for dependency_api in forbidden {
+      assert!(
+        !source.contains(dependency_api),
+        "{relative} must use the selected-path WebTransport adapter instead of {dependency_api}"
+      );
+    }
+  }
+}
+
+#[test]
 fn manifests_apply_the_policy_to_every_first_party_workspace() {
   let root = repo_root();
   let root_manifest = root.join("Cargo.toml");

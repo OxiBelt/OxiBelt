@@ -217,7 +217,7 @@ pub(super) async fn send_h3_request(
 pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
-) -> anyhow::Result<web_transport_quinn::Session> {
+) -> anyhow::Result<super::webtransport_bridge::UpstreamWebTransportSession> {
   let inherited_roots = state
     .config
     .proxy
@@ -277,7 +277,7 @@ pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
   .with_context(|| format!("failed to connect upstream WebTransport to {server_name}"))?;
   tokio::time::timeout(
     prepared.timeouts.upstream_first_byte,
-    web_transport_quinn::Session::connect(connection, request),
+    super::webtransport_bridge::UpstreamWebTransportSession::connect(connection, request),
   )
   .await
   .context("upstream WebTransport CONNECT timed out")?

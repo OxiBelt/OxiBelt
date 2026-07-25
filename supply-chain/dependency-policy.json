@@ -17,8 +17,8 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
-      "exemptionInventorySha256": "daf91de44d25b28ea3ded3f9f1ccfcf55f95afe641fc88ecb21545257f936919",
+      "lockfileSha256": "a5fd40f733b4a9af18e7699dab7ce4cd52527593715b84471793a934a148f10a",
+      "exemptionInventorySha256": "ae8241f5bf51649b1b39c4b37de65042e368bd8275ca9fd4e48dabdbedcc7a9b",
       "exemptedPackageVersions": 418
     },
     "reviewTriggers": [
@@ -104,7 +104,8 @@
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.13"],
           "web-transport-proto": ["0.6.0"],
-          "web-transport-quinn": ["0.11.10"]
+          "web-transport-quinn": ["0.11.12"],
+          "web-transport-trait": ["0.3.7"]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
       },
@@ -188,7 +189,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
+      "subject": "Cargo.lock@sha256:a5fd40f733b4a9af18e7699dab7ce4cd52527593715b84471793a934a148f10a",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -200,7 +201,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
+      "subject": "Cargo.lock@sha256:a5fd40f733b4a9af18e7699dab7ce4cd52527593715b84471793a934a148f10a",
       "rationale": "Initial cargo-vet adoption remains digest-bound while imported and local audits replace it; every post-bootstrap exempted version requires its own exact non-bootstrap exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -218,6 +219,17 @@
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/120",
       "reviewedOn": "2026-07-25",
       "expiresOn": "2026-10-23"
+    },
+    {
+      "id": "rust-cargo-vet-web-transport-trait-0.3.7",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "web-transport-trait@0.3.7:safe-to-deploy",
+      "rationale": "The generic receive-buffer default cannot receive whole-crate certification. OxiBelt confines the exact version behind a first-party initialized-buffer Tokio I/O adapter and a static dependency-API boundary.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
+      "reviewedOn": "2026-07-25",
+      "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-license-buffered-reader-1.4.1",

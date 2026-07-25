@@ -30,6 +30,7 @@ use crate::waf::WafStreamClose;
 
 mod connection;
 mod session;
+mod upstream_adapter;
 
 use connection::{DownstreamWebTransportConnection, spawn_downstream_reader_tasks};
 #[cfg(feature = "admin-runtime")]
@@ -39,6 +40,7 @@ use session::{
   close_all_sessions, close_expired_sessions, close_session, handle_downstream_bidi_stream,
   handle_downstream_datagram, handle_downstream_uni_stream,
 };
+pub(in crate::proxy::http3) use upstream_adapter::UpstreamWebTransportSession;
 
 type H3OpenStreams = <crate::quic::h3::Connection as H3QuicConnection<Bytes>>::OpenStreams;
 type DownstreamBidiStream = BufRecvStream<H3BidiStream, Bytes>;

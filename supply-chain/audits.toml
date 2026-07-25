@@ -361,6 +361,12 @@ criteria = "safe-to-deploy"
 version = "0.7.19"
 notes = "Reviewed complete 0.7.19 source and the 0.7.18 delta; queue, codec, cancellation, and I/O fixes preserve buffer and wakeup invariants. OxiBelt's selected io feature compiles the new vectored-write helper; its checked slice advancement and lifetime restoration preserve the underlying IoSlice bounds, and OxiBelt has no call site for it."
 
+[[audits.web-transport-quinn]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.11.10 -> 0.11.12"
+notes = "Reviewed the complete 0.11.10-to-0.11.12 source delta. The update removes the cancellation-unsafe write_buf override so input advances only after Quinn accepts bytes, attaches the selected congestion controller to server transport configuration, and adds an unselected qlog feature. OxiBelt keeps qlog disabled and confines Quinn streams behind an initialized-buffer Tokio I/O adapter."
+
 [[audits.webpki-root-certs]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
