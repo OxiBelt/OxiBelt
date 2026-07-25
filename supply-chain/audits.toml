@@ -175,6 +175,24 @@ criteria = "safe-to-deploy"
 version = "0.48.5"
 notes = "Reviewed the complete new 0.48.5 crate with its enabled serde_json feature; it contains no unsafe, build script, or IO side effects, and equality and unique-items allocations are proportional to caller input."
 
+[[audits.kube]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "4.2.0"
+notes = "Reviewed the complete checksum-matched 4.2.0 facade and the 4.0.0 delta at upstream revision 526f1f2cfa996ed0e92510feabb2d2327df5e49f; it forbids unsafe code, has no build script or external side effects, and only reexports the separately reviewed client, core, and runtime surfaces selected by OxiBelt."
+
+[[audits.kube-core]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "4.2.0"
+notes = "Reviewed the complete checksum-matched 4.2.0 source and the 4.0.0 delta at upstream revision 526f1f2cfa996ed0e92510feabb2d2327df5e49f; the crate forbids unsafe code, has no build script or IO, and the production delta only exposes structured serialization sources and removes an unnecessary formatting borrow without changing Kubernetes request or schema behavior."
+
+[[audits.kube-runtime]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "4.2.0"
+notes = "Reviewed the complete checksum-matched 4.2.0 source and the 4.0.0 delta at upstream revision 526f1f2cfa996ed0e92510feabb2d2327df5e49f; the crate forbids unsafe code and has no build script, controller metadata is moved from owned events without changing owner mapping, and predicate-cache eviction is amortized while per-entry TTL checks preserve event emission and bounded stale-state semantics."
+
 [[audits.libc]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

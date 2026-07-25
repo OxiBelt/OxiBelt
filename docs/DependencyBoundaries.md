@@ -71,7 +71,7 @@ that needs an integrated-runtime capability opts into it explicitly.
 | `oxibelt-keysigner` | Direct dependency | No default/Admin/config/fuzz/mutation features; role-local `crypto-ring` remains allowed | Integrated default features and mutation pass-through features |
 | `oxibelt-netport-switcher` | Direct dependency | No default/Admin/config/fuzz/mutation features; role-local `crypto-ring` remains allowed | Integrated default features and mutation pass-through features |
 | `oxibeltctl` | Direct dependency | Explicit `admin-runtime` and `config-tooling` | Implicit acquisition through workspace defaults |
-| `oxibelt-deployment-diagnostics` | Direct dependency | No default/Admin/config/fuzz/mutation features; Kubernetes dependencies are role-owned | Integrated default features outside the diagnostics role |
+| `oxibelt-deployment-diagnostics` | Direct dependency | No default/Admin/config/fuzz/mutation features; Kubernetes dependencies are role-owned and client construction is sealed behind the direct, verified transport adapter | Integrated default features outside the diagnostics role; proxied or verification-disabled Kubernetes clients |
 
 Dev-only dependencies are assessed separately from normal/build role graphs.
 The controller's tests may use `oxibelt::config::Config` in

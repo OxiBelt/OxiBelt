@@ -1,6 +1,7 @@
 //! Read-only deployment diagnostics for rendered manifests, Helm, and Kubernetes.
 
 mod checks;
+mod kubernetes;
 mod manifest;
 
 #[cfg(test)]
@@ -30,8 +31,6 @@ pub(crate) const MAX_MANIFEST_DOCUMENTS: usize = 4_096;
 const MAX_HELM_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HELM_STDERR_BYTES: usize = 64 * 1024;
 const HELM_TIMEOUT: Duration = Duration::from_secs(30);
-const KUBERNETES_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const KUBERNETES_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SUPPORTED_KUBERNETES_MIN_MINOR: u32 = 34;
 const SUPPORTED_KUBERNETES_MAX_MINOR: u32 = 36;
 const REQUIRED_GATEWAY_API_V1_RESOURCES: &[&str] = &[
@@ -179,14 +178,13 @@ pub async fn diagnose_helm_chart(
 pub async fn diagnose_kubernetes(
   options: &KubernetesDoctorOptions,
 ) -> anyhow::Result<DiagnosticReport> {
-  let mut config = manifest::load_safe_kubernetes_config(options).await?;
-  config.connect_timeout = Some(KUBERNETES_CONNECT_TIMEOUT);
-  config.read_timeout = Some(KUBERNETES_READ_TIMEOUT);
+  let config = manifest::load_safe_kubernetes_config(options).await?;
+  let config = kubernetes::DirectKubernetesConfig::try_from(config)?;
   let namespace = options
     .namespace
     .clone()
-    .unwrap_or_else(|| config.default_namespace.clone());
-  let client = Client::try_from(config).context("failed to create read-only Kubernetes client")?;
+    .unwrap_or_else(|| config.default_namespace().to_owned());
+  let client = config.into_client()?;
   let mut live_report = DiagnosticReport::new();
   diagnose_kubernetes_server(&client, &mut live_report).await;
   diagnose_gateway_api(&client, &mut live_report).await;

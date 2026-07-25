@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
-      "exemptionInventorySha256": "6ebb225f468132471a1d2188f7c846d311109c92f3cf390e19c433253aa57193",
-      "exemptedPackageVersions": 423
+      "lockfileSha256": "05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
+      "exemptionInventorySha256": "daf91de44d25b28ea3ded3f9f1ccfcf55f95afe641fc88ecb21545257f936919",
+      "exemptedPackageVersions": 418
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -47,7 +47,6 @@
       "foldhash": ["0.1", "0.2"],
       "generic-array": ["0.14", "1"],
       "getrandom": ["0.2", "0.3", "0.4"],
-      "granit-parser": ["0.0.3", "0.0.7"],
       "hashbrown": ["0.15", "0.16", "0.17"],
       "inout": ["0.1", "0.2"],
       "itertools": ["0.13", "0.14"],
@@ -55,7 +54,6 @@
       "r-efi": ["5", "6"],
       "rand": ["0.10", "0.8"],
       "rand_core": ["0.10", "0.6"],
-      "serde-saphyr": ["0.0.27", "0.0.29"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
       "spki": ["0.7", "0.8"],
@@ -145,10 +143,10 @@
         "category": "kubernetes",
         "packages": {
           "k8s-openapi": ["0.28.0"],
-          "kube": ["4.0.0"],
-          "kube-client": ["4.0.0"],
-          "kube-core": ["4.0.0"],
-          "kube-runtime": ["4.0.0"]
+          "kube": ["4.2.0"],
+          "kube-client": ["4.2.0"],
+          "kube-core": ["4.2.0"],
+          "kube-runtime": ["4.2.0"]
         },
         "reviewBoundary": "API version selection, authentication, TLS, watch-stream parsing, and controller retry behavior"
       }
@@ -190,7 +188,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
+      "subject": "Cargo.lock@sha256:05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -202,13 +200,24 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
-      "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
+      "subject": "Cargo.lock@sha256:05c90a6e7568c8e00c7127020b24173d9d6b102339f4e9513c11ba92c79520b4",
+      "rationale": "Initial cargo-vet adoption remains digest-bound while imported and local audits replace it; every post-bootstrap exempted version requires its own exact non-bootstrap exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
       "reviewedOn": "2026-07-25",
       "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-cargo-vet-kube-client-4-2-0",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "kube-client@4.2.0:safe-to-deploy",
+      "rationale": "Whole-crate safe-to-deploy certification is withheld because the optional HTTPS proxy path reuses API-server TLS roots, client identity, verification mode, and server name. OxiBelt keeps proxy features disabled and seals its only client construction path behind a tested adapter that rejects every loaded proxy and verification-disabled configuration before client creation.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/120",
+      "reviewedOn": "2026-07-25",
+      "expiresOn": "2026-10-23"
     },
     {
       "id": "rust-license-buffered-reader-1.4.1",

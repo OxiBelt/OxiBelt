@@ -156,8 +156,12 @@ oxibeltctl doctor --kubernetes --kube-context production \
 `--all-namespaces` only when an explicit cluster-wide inventory is intended.
 It never reads Secrets or issues mutations. For safety, doctor refuses
 kubeconfigs containing `exec` or `auth-provider` credentials rather than
-running credential helper commands. In-cluster service-account configuration is
-supported when no kubeconfig is present.
+running credential helper commands. Doctor also requires a direct, verified
+API-server TLS connection: it rejects kubeconfig `proxy-url` settings, proxies
+inherited from `HTTPS_PROXY` or `https_proxy`, and
+`insecure-skip-tls-verify: true`. Cluster CA roots, client identity, and
+`tls-server-name` continue to apply to direct connections. In-cluster
+service-account configuration is supported when no kubeconfig is present.
 
 The deployment checks identify unpinned OxiBelt and Gateway Controller images,
 immutable Gateway Controller target wiring, and configuration-revision
