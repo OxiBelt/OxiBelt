@@ -2,6 +2,7 @@ import * as Crypto from 'node:crypto'
 import * as Fs from 'node:fs'
 import * as Path from 'node:path'
 import * as Process from 'node:process'
+import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 const PolicyPath = 'devops/config/kubernetes-feature-graduation.json'
@@ -11,6 +12,7 @@ const FeatureStatusPath = 'docs/FeatureStatus.md'
 const MaximumInputBytes = 1024 * 1024
 const GeneratedStart = '<!-- BEGIN KUBERNETES GRADUATION GENERATED -->'
 const GeneratedEnd = '<!-- END KUBERNETES GRADUATION GENERATED -->'
+const FullRevision = /^[0-9a-f]{40}$/
 const UtcSecond = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
 
 export const KubernetesGraduationFeatureIds = [
@@ -164,6 +166,7 @@ type CliParameters = {
   workspacePath?: string
   policyPath?: string
   schemaPath?: string
+  expectedSourceRevision?: string
 }
 
 type IdRecord = {
@@ -192,6 +195,31 @@ function ResolveWorkspace(WorkspacePath: string): string {
     throw new Error(`workspace path is not a directory: ${WorkspacePath}`)
   }
   return Root
+}
+
+function ValidateSourceRevision(Value: string, Label: string): string {
+  if (!FullRevision.test(Value)) {
+    throw new Error(`${Label} must be a full lowercase Git commit`)
+  }
+  return Value
+}
+
+function ResolveWorkspaceRevision(Root: string): string {
+  let Revision: string
+  try {
+    Revision = execFileSync(
+      'git',
+      ['-C', Root, 'rev-parse', '--verify', 'HEAD^{commit}'],
+      {
+        encoding: 'utf8',
+        maxBuffer: 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      }
+    ).trim()
+  } catch {
+    throw new Error('could not resolve the checked-out Git source revision')
+  }
+  return ValidateSourceRevision(Revision, 'checked-out Git source revision')
 }
 
 function ResolveRepositoryPath(Root: string, RelativePath: string): string {
@@ -376,6 +404,7 @@ export function ValidateKubernetesGraduationEvidenceObject(
   Value: unknown,
   SchemaValue: unknown,
   Policy: KubernetesGraduationPolicy,
+  ExpectedSourceRevision: string,
   Label = 'Kubernetes graduation evidence'
 ): KubernetesGraduationEvidenceReceipt {
   if (!IsObject(SchemaValue)) {
@@ -383,6 +412,13 @@ export function ValidateKubernetesGraduationEvidenceObject(
   }
   ValidateSchemaValue(Value, SchemaValue as JsonSchema, Label)
   const Receipt = Value as KubernetesGraduationEvidenceReceipt
+  const ExpectedRevision = ValidateSourceRevision(
+    ExpectedSourceRevision,
+    'expected source revision'
+  )
+  if (Receipt.sourceRevision !== ExpectedRevision) {
+    throw new Error(`${Label} does not bind the expected source revision`)
+  }
   if (
     Receipt.policyVersion !== Policy.policyVersion ||
     Receipt.policyDefinitionSha256 !== KubernetesGraduationPolicyDefinitionSha256(Policy)
@@ -454,6 +490,7 @@ export function ValidateKubernetesGraduationEvidenceObject(
 function ValidateEvidence(
   Root: string,
   Policy: KubernetesGraduationPolicy,
+  ExpectedSourceRevision: string,
   GateId: string,
   ReceiptPaths: string[]
 ): void {
@@ -469,6 +506,7 @@ function ValidateEvidence(
       ParseJson(ReadBoundedFile(Root, ReceiptPath), ReceiptPath),
       EvidenceSchema,
       Policy,
+      ExpectedSourceRevision,
       ReceiptPath
     )
     if (!Receipt.gateResults.some(Result => Result.id === GateId && Result.result === 'passed')) {
@@ -479,7 +517,8 @@ function ValidateEvidence(
 
 function ValidatePolicySemantics(
   Policy: KubernetesGraduationPolicy,
-  Root?: string
+  Root?: string,
+  ExpectedSourceRevision?: string
 ): void {
   AssertExactSet(
     'Kubernetes graduation feature ids',
@@ -548,7 +587,16 @@ function ValidatePolicySemantics(
           throw new Error(`passed gate ${Gate.id} must name at least one evidence receipt`)
         }
       } else {
-        ValidateEvidence(Root, Policy, Gate.id, Gate.evidenceReceipts)
+        if (ExpectedSourceRevision === undefined) {
+          throw new Error(`passed gate ${Gate.id} requires an expected source revision`)
+        }
+        ValidateEvidence(
+          Root,
+          Policy,
+          ExpectedSourceRevision,
+          Gate.id,
+          Gate.evidenceReceipts
+        )
       }
     }
   }
@@ -603,12 +651,27 @@ export function ValidateKubernetesGraduationPolicyObject(
 function LoadPolicy(
   Root: string,
   RelativePolicyPath: string,
-  RelativeSchemaPath: string
+  RelativeSchemaPath: string,
+  ExpectedSourceRevision?: string
 ): KubernetesGraduationPolicy {
   const PolicyValue = ParseJson(ReadBoundedFile(Root, RelativePolicyPath), RelativePolicyPath)
   const SchemaValue = ParseJson(ReadBoundedFile(Root, RelativeSchemaPath), RelativeSchemaPath)
   const Policy = ValidateKubernetesGraduationPolicyObject(PolicyValue, SchemaValue)
-  ValidatePolicySemantics(Policy, Root)
+  const RequestedRevision = ExpectedSourceRevision === undefined
+    ? undefined
+    : ValidateSourceRevision(ExpectedSourceRevision, 'expected source revision')
+  let EvidenceRevision = RequestedRevision
+  if (
+    RequestedRevision !== undefined ||
+    Policy.gates.some(Gate => Gate.status === 'passed')
+  ) {
+    const WorkspaceRevision = ResolveWorkspaceRevision(Root)
+    if (RequestedRevision !== undefined && RequestedRevision !== WorkspaceRevision) {
+      throw new Error('expected source revision does not match the checked-out Git source revision')
+    }
+    EvidenceRevision = RequestedRevision ?? WorkspaceRevision
+  }
+  ValidatePolicySemantics(Policy, Root, EvidenceRevision)
   return Policy
 }
 
@@ -713,10 +776,16 @@ function FeatureStatusRows(Content: string): Map<string, string> {
 export function ValidateKubernetesGraduationWorkspace(
   WorkspacePath: string,
   RelativePolicyPath = PolicyPath,
-  RelativeSchemaPath = SchemaPath
+  RelativeSchemaPath = SchemaPath,
+  ExpectedSourceRevision?: string
 ): KubernetesGraduationPolicy {
   const Root = ResolveWorkspace(WorkspacePath)
-  const Policy = LoadPolicy(Root, RelativePolicyPath, RelativeSchemaPath)
+  const Policy = LoadPolicy(
+    Root,
+    RelativePolicyPath,
+    RelativeSchemaPath,
+    ExpectedSourceRevision
+  )
   AssertGeneratedDocument(
     ReadBoundedFile(Root, SupportDocumentPath),
     RenderKubernetesGraduationTables(Policy)
@@ -759,6 +828,9 @@ function ParseCli(Argv: string[]): ParsedCli {
       case '--schema-path':
         Parameters.schemaPath = Value
         break
+      case '--expected-source-revision':
+        Parameters.expectedSourceRevision = Value
+        break
       default:
         throw new Error(`unknown option: ${Option}`)
     }
@@ -772,10 +844,20 @@ function RunCli(): void {
   const RelativePolicyPath = Parameters.policyPath ?? PolicyPath
   const RelativeSchemaPath = Parameters.schemaPath ?? SchemaPath
   if (Command === 'check') {
-    ValidateKubernetesGraduationWorkspace(Root, RelativePolicyPath, RelativeSchemaPath)
+    ValidateKubernetesGraduationWorkspace(
+      Root,
+      RelativePolicyPath,
+      RelativeSchemaPath,
+      Parameters.expectedSourceRevision
+    )
     return
   }
-  const Policy = LoadPolicy(Root, RelativePolicyPath, RelativeSchemaPath)
+  const Policy = LoadPolicy(
+    Root,
+    RelativePolicyPath,
+    RelativeSchemaPath,
+    Parameters.expectedSourceRevision
+  )
   Process.stdout.write(`${RenderKubernetesGraduationTables(Policy)}\n`)
 }
 

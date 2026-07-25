@@ -83,6 +83,11 @@ and graduation rules are in
 [KubernetesSupport.md](KubernetesSupport.md). For a controlled adjacent-version
 upgrade:
 
+A feature-promotion check must validate every passed-gate evidence receipt
+against the exact checked-out Git revision. CI supplies the trusted
+`GITHUB_SHA`; local checks resolve `HEAD` when no expected revision is supplied.
+Malformed, stale, or mismatched source revisions block the lifecycle change.
+
 1. Verify that the source and target are explicitly admitted by the exact
    release entry and retain both immutable image digests.
 2. Apply and establish the release-pinned operator-owned Gateway API standard

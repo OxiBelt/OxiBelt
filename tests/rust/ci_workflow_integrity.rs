@@ -2352,6 +2352,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run lint",
     "pnpm run typecheck",
     "pnpm run test",
+    "pnpm run kubernetes-graduation:check --expected-source-revision \"${GITHUB_SHA}\"",
     "pnpm run versioning:check",
     "pnpm run release-contract:check \\",
     "fetch-depth: 0",
@@ -2368,6 +2369,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run lint",
     "pnpm run typecheck",
     "pnpm run test",
+    "pnpm run kubernetes-graduation:check",
     "pnpm run versioning:check",
   ] {
     assert_eq!(
@@ -2388,6 +2390,9 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   let test = job_text
     .find("pnpm run test")
     .expect("TypeScript release tooling should test");
+  let kubernetes_graduation = job_text
+    .find("name: Validate Kubernetes graduation contract")
+    .expect("TypeScript release tooling should validate Kubernetes graduation evidence");
   let versioning = job_text
     .find("pnpm run versioning:check")
     .expect("TypeScript release tooling should validate committed version state");
@@ -2398,9 +2403,10 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     install < lint
       && lint < typecheck
       && typecheck < test
-      && test < versioning
+      && test < kubernetes_graduation
+      && kubernetes_graduation < versioning
       && versioning < release_contract,
-    "TypeScript release tooling should install, lint, type-check, test, validate version state, and validate the release contract in order"
+    "TypeScript release tooling should install, lint, type-check, test, validate Kubernetes graduation evidence, validate version state, and validate the release contract in order"
   );
   for forbidden in [
     "contents: write",
@@ -2409,6 +2415,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "continue-on-error",
     "pnpm run dependency-admission",
     "pnpm run versioning:release",
+    "pnpm run kubernetes-graduation:check -- --expected-source-revision",
     "pnpm run release-contract:check -- \\",
     "actions/upload-artifact",
     "actions/download-artifact",

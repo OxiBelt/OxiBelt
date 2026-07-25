@@ -367,6 +367,9 @@ jobs:
       - name: Test DevOps tooling
         run: pnpm run test
 
+      - name: Validate Kubernetes graduation contract
+        run: pnpm run kubernetes-graduation:check --expected-source-revision "${GITHUB_SHA}"
+
       - name: Validate committed version state
         run: pnpm run versioning:check
 

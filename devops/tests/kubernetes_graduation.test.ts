@@ -1,4 +1,5 @@
 import * as Assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import * as Fs from 'node:fs'
 import * as Path from 'node:path'
 import test from 'node:test'
@@ -27,6 +28,18 @@ function Policy(): KubernetesGraduationPolicy {
   ))
 }
 
+function GitHead(): string {
+  return execFileSync(
+    'git',
+    ['-C', RepoRoot, 'rev-parse', '--verify', 'HEAD^{commit}'],
+    {
+      encoding: 'utf8',
+      maxBuffer: 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    }
+  ).trim()
+}
+
 test('accepts the repository policy, generated support document, and lifecycle matrix', () => {
   const Loaded = ValidateKubernetesGraduationWorkspace(RepoRoot)
   Assert.equal(Loaded.schemaVersion, 1)
@@ -35,6 +48,21 @@ test('accepts the repository policy, generated support document, and lifecycle m
     [...KubernetesGraduationFeatureIds].sort()
   )
   Assert.ok(Loaded.features.every(Feature => Feature.status === 'experimental'))
+})
+
+test('binds an explicit expected revision to the checked-out Git commit', () => {
+  const Revision = GitHead()
+  ValidateKubernetesGraduationWorkspace(RepoRoot, undefined, undefined, Revision)
+  const MismatchedRevision = `${Revision[0] === '0' ? '1' : '0'}${Revision.slice(1)}`
+  Assert.throws(
+    () => ValidateKubernetesGraduationWorkspace(
+      RepoRoot,
+      undefined,
+      undefined,
+      MismatchedRevision
+    ),
+    /expected source revision does not match the checked-out Git source revision/
+  )
 })
 
 test('rejects schema-unknown fields and incomplete supported promotion', () => {
@@ -87,16 +115,17 @@ test('renders the Kubernetes support tables deterministically', () => {
   Assert.match(First, /`native-riscv64` \| `release_candidate` \| `unmet`/)
 })
 
-test('requires immutable image, chart, report, and log bindings in evidence receipts', () => {
+test('requires exact source, immutable image, chart, report, and log bindings in evidence receipts', () => {
   const Loaded = Policy()
   const EvidenceSchema = ReadJson(
     'devops/config/kubernetes-feature-graduation-evidence.schema.json'
   )
+  const ExpectedSourceRevision = '1'.repeat(40)
   const Receipt: KubernetesGraduationEvidenceReceipt = {
     schemaVersion: 1,
     policyVersion: Loaded.policyVersion,
     policyDefinitionSha256: KubernetesGraduationPolicyDefinitionSha256(Loaded),
-    sourceRevision: '1'.repeat(40),
+    sourceRevision: ExpectedSourceRevision,
     runId: 123,
     runAttempt: 2,
     generatedAt: '2026-07-24T12:00:00Z',
@@ -134,12 +163,44 @@ test('requires immutable image, chart, report, and log bindings in evidence rece
       }
     ]
   }
-  ValidateKubernetesGraduationEvidenceObject(Receipt, EvidenceSchema, Loaded)
+  ValidateKubernetesGraduationEvidenceObject(
+    Receipt,
+    EvidenceSchema,
+    Loaded,
+    ExpectedSourceRevision
+  )
+
+  const StaleRevision = structuredClone(Receipt)
+  StaleRevision.sourceRevision = '6'.repeat(40)
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      StaleRevision,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision
+    ),
+    /does not bind the expected source revision/
+  )
+
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      Receipt,
+      EvidenceSchema,
+      Loaded,
+      'ABC123'
+    ),
+    /expected source revision must be a full lowercase Git commit/
+  )
 
   const MissingArtifacts = structuredClone(Receipt)
   MissingArtifacts.artifactSubjects = []
   Assert.throws(
-    () => ValidateKubernetesGraduationEvidenceObject(MissingArtifacts, EvidenceSchema, Loaded),
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MissingArtifacts,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision
+    ),
     /artifactSubjects must contain at least 2 items/
   )
 
@@ -147,7 +208,12 @@ test('requires immutable image, chart, report, and log bindings in evidence rece
   MutableImage.artifactSubjects[0].reference =
     'ghcr.io/oxibelt/oxibelt-gateway-controller:0.7.0'
   Assert.throws(
-    () => ValidateKubernetesGraduationEvidenceObject(MutableImage, EvidenceSchema, Loaded),
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MutableImage,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision
+    ),
     /reference must end with its immutable digest/
   )
 
@@ -159,7 +225,12 @@ test('requires immutable image, chart, report, and log bindings in evidence rece
     }
   ]
   Assert.throws(
-    () => ValidateKubernetesGraduationEvidenceObject(MissingLog, EvidenceSchema, Loaded),
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MissingLog,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision
+    ),
     /one log hash for every exact job id/
   )
 })
