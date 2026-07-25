@@ -104,37 +104,106 @@ jobs:
 
       - name: Validate Docker image artifact for publish
         env:
+          ARTIFACT_CONTRACT: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
+          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
           OXIBELT_RELEASE_KIND: ${{ inputs.release_kind }}
           OXIBELT_RELEASE_REVISION: ${{ inputs.release_revision }}
           OXIBELT_RELEASE_VERSION: ${{ inputs.release_version }}
+          PUBLISH_IDENTITY: ${{ runner.temp }}/oxibelt-image/publish-image-identity.json
           OXIBELT_SOURCE_URL: ${{ inputs.source_url }}
         run: |
           set -euo pipefail
 
-          python3 - "${IMAGE_PLAN}" "${IMAGE_TAR}" "${OXIBELT_IMAGE_ROLE}" "${OXIBELT_ARTIFACT_PREFIX}" "${OXIBELT_ARTIFACT_ARCH}" "${OXIBELT_GHCR_IMAGE}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          python3 - "${IMAGE_PLAN}" "${IMAGE_TAR}" "${BUILD_METADATA}" "${ARTIFACT_CONTRACT}" "${PUBLISH_IDENTITY}" "${OXIBELT_IMAGE_ROLE}" "${OXIBELT_ARTIFACT_PREFIX}" "${OXIBELT_ARTIFACT_ARCH}" "${OXIBELT_GHCR_IMAGE}" "${OXIBELT_RELEASE_VERSION}" "${OXIBELT_RELEASE_KIND}" "${OXIBELT_RELEASE_REVISION}" "${OXIBELT_SOURCE_URL}" <<'PY'
+          import hashlib
           import json
           import pathlib
+          import re
           import sys
           import tarfile
 
+          maximum_json_bytes = 8 * 1024 * 1024
+          maximum_image_bytes = 4 * 1024 * 1024 * 1024
+          maximum_archive_members = 4096
+          digest_pattern = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
           plan_path = pathlib.Path(sys.argv[1])
           image_tar = pathlib.Path(sys.argv[2])
-          role = sys.argv[3]
-          artifact_prefix = sys.argv[4]
-          artifact_arch = sys.argv[5]
-          image = sys.argv[6]
-          version = sys.argv[7]
-          kind = sys.argv[8]
-          revision = sys.argv[9]
-          source = sys.argv[10]
-          plan = json.loads(plan_path.read_text(encoding="utf-8"))
+          metadata_path = pathlib.Path(sys.argv[3])
+          contract_path = pathlib.Path(sys.argv[4])
+          output_path = pathlib.Path(sys.argv[5])
+          role = sys.argv[6]
+          artifact_prefix = sys.argv[7]
+          artifact_arch = sys.argv[8]
+          image = sys.argv[9]
+          version = sys.argv[10]
+          kind = sys.argv[11]
+          revision = sys.argv[12]
+          source = sys.argv[13]
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def load_json(path, description):
+              if not path.is_file():
+                  fail(f"missing {description}: {path}")
+              if path.stat().st_size > maximum_json_bytes:
+                  fail(f"{description} exceeds the 8 MiB limit: {path}")
+              try:
+                  return json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                  fail(f"cannot read {description} {path}: {error}")
+
+          def parse_digest(value, description):
+              if not isinstance(value, str) or digest_pattern.fullmatch(value) is None:
+                  fail(f"{description} is not a SHA-256 digest")
+              return value
+
+          def safe_member_name(value):
+              if not isinstance(value, str) or "\x00" in value or "\\" in value:
+                  fail(f"unsafe Docker archive member name: {value!r}")
+              path = pathlib.PurePosixPath(value)
+              if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+                  fail(f"unsafe Docker archive member name: {value!r}")
+              return path.as_posix()
+
+          def read_regular_member(archive, name):
+              try:
+                  member = archive.getmember(name)
+              except KeyError:
+                  fail(f"Docker archive is missing {name}")
+              if not member.isfile() or member.size > maximum_json_bytes:
+                  fail(f"Docker archive member {name} is not a bounded regular file")
+              stream = archive.extractfile(member)
+              if stream is None:
+                  fail(f"Docker archive member {name} cannot be read")
+              return stream.read()
+
+          def sha256_file(path):
+              if not path.is_file():
+                  fail(f"missing Docker image tar: {path}")
+              if path.stat().st_size > maximum_image_bytes:
+                  fail(f"Docker image tar exceeds the 4 GiB limit: {path}")
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(block)
+              return f"sha256:{digest.hexdigest()}"
+
+          plan = load_json(plan_path, "image release plan")
+          metadata = load_json(metadata_path, "Buildx metadata")
+          contract = load_json(contract_path, "image artifact contract")
 
           if kind not in ("stable", "beta", "build"):
-              raise SystemExit(f"invalid release kind: {kind}")
-          if plan["schemaVersion"] != 8:
-              raise SystemExit("unsupported image release plan schema")
+              fail(f"invalid release kind: {kind}")
+          if not isinstance(plan, dict) or plan.get("schemaVersion") != 8:
+              fail("unsupported image release plan schema")
+          if not isinstance(metadata, dict):
+              fail("Buildx metadata must be a JSON object")
+          if not isinstance(contract, dict) or contract.get("schema") != 3:
+              fail("unsupported image artifact contract schema")
           if plan["tag"] != version or plan["version"] != version or plan["kind"] != kind or plan["revision"] != revision:
               raise SystemExit("release plan identity does not match workflow outputs")
           if plan["source"] != source:
@@ -191,20 +260,143 @@ jobs:
           expected_aliases = [f"{image}:{major}-alpine-musl-{artifact_arch}"] if kind == "stable" else []
           if artifact["canonicalGhcrTag"] != expected_tag or artifact["aliasGhcrTags"] != expected_aliases:
               raise SystemExit(f"unexpected GHCR tags for {artifact_arch}")
+          expected_local_reference = f"{artifact_prefix}:alpine-musl-{artifact_arch}"
+          if artifact.get("localTag") != expected_local_reference:
+              fail("image release plan local tag does not match the matrix identity")
 
-          if not image_tar.is_file():
-              raise SystemExit(f"missing Docker image tar: {image_tar}")
-          with tarfile.open(image_tar) as docker_tar:
-              manifest_member = docker_tar.extractfile("manifest.json")
-              if manifest_member is None:
-                  raise SystemExit(f"{image_tar} is missing manifest.json")
-              manifest = json.load(manifest_member)
-              if len(manifest) != 1:
-                  raise SystemExit(f"{image_tar} should contain exactly one image")
-              config_member = docker_tar.extractfile(manifest[0]["Config"])
-              if config_member is None:
-                  raise SystemExit(f"{image_tar} is missing image config")
-              config = json.load(config_member)
+          expected_metadata_name = (
+              f"{artifact_prefix}-alpine-musl-{artifact_arch}-build-metadata.json"
+          )
+          for field, expected_value in {
+              "role": role,
+              "artifact_arch": artifact_arch,
+              "image_tar": image_tar_name,
+              "build_metadata": expected_metadata_name,
+          }.items():
+              if contract.get(field) != expected_value:
+                  fail(
+                      f"image artifact contract {field} was "
+                      f"{contract.get(field)!r}, expected {expected_value!r}"
+                  )
+          if metadata_path.name != expected_metadata_name:
+              fail("downloaded build metadata filename does not match the matrix identity")
+          if contract.get("image_tar_sha256") != sha256_file(image_tar):
+              fail("Docker image tar digest does not match the artifact contract")
+
+          config_digest = parse_digest(
+              contract.get("config_digest"), "artifact contract config digest"
+          )
+          manifest_digest = parse_digest(
+              contract.get("image_digest"), "artifact contract image digest"
+          )
+          if contract.get("descriptor_digest") != manifest_digest:
+              fail("artifact contract descriptor and image digests differ")
+          if metadata.get("containerimage.config.digest") != config_digest:
+              fail("Buildx config digest does not match the artifact contract")
+          if metadata.get("containerimage.digest") != manifest_digest:
+              fail("Buildx image digest does not match the artifact contract")
+          descriptor = metadata.get("containerimage.descriptor")
+          if not isinstance(descriptor, dict) or descriptor.get("digest") != manifest_digest:
+              fail("Buildx descriptor digest does not match the artifact contract")
+
+          try:
+              with tarfile.open(image_tar, mode="r:*") as docker_tar:
+                  members = []
+                  for member in docker_tar:
+                      members.append(member)
+                      if len(members) > maximum_archive_members:
+                          fail("Docker archive exceeds the 4096-member limit")
+                  names = [safe_member_name(member.name) for member in members]
+                  if len(names) != len(set(names)):
+                      fail("Docker archive contains duplicate member names")
+                  manifest = json.loads(
+                      read_regular_member(docker_tar, "manifest.json")
+                  )
+                  if not isinstance(manifest, list) or len(manifest) != 1:
+                      fail("Docker archive must contain exactly one image")
+                  entry = manifest[0]
+                  if not isinstance(entry, dict):
+                      fail("Docker archive manifest entry must be an object")
+                  config_name = safe_member_name(entry.get("Config"))
+                  config_bytes = read_regular_member(docker_tar, config_name)
+                  archive_config_digest = (
+                      f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+                  )
+                  config_hash = archive_config_digest.removeprefix("sha256:")
+                  if config_name not in (
+                      f"{config_hash}.json",
+                      f"blobs/sha256/{config_hash}",
+                  ):
+                      fail(
+                          "Docker archive config path is not content addressed "
+                          "by its digest"
+                      )
+                  if archive_config_digest != config_digest:
+                      fail(
+                          "Docker archive config digest does not match the "
+                          "artifact contract"
+                      )
+                  if entry.get("RepoTags") != [expected_local_reference]:
+                      fail("Docker archive repository tag does not match the release plan")
+
+                  index = json.loads(read_regular_member(docker_tar, "index.json"))
+                  if not isinstance(index, dict) or index.get("schemaVersion") != 2:
+                      fail("Docker archive OCI index must use schema version 2")
+                  manifests = index.get("manifests")
+                  if not isinstance(manifests, list) or len(manifests) != 1:
+                      fail("Docker archive OCI index must contain exactly one manifest")
+                  archive_descriptor = manifests[0]
+                  if not isinstance(archive_descriptor, dict):
+                      fail("Docker archive OCI manifest descriptor must be an object")
+                  if (
+                      parse_digest(
+                          archive_descriptor.get("digest"),
+                          "Docker archive OCI manifest descriptor digest",
+                      )
+                      != manifest_digest
+                  ):
+                      fail(
+                          "Docker archive OCI manifest descriptor does not match "
+                          "the artifact contract"
+                      )
+                  manifest_hash = manifest_digest.removeprefix("sha256:")
+                  manifest_bytes = read_regular_member(
+                      docker_tar, f"blobs/sha256/{manifest_hash}"
+                  )
+                  if (
+                      f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+                      != manifest_digest
+                  ):
+                      fail(
+                          "Docker archive OCI manifest blob digest does not match "
+                          "the artifact contract"
+                      )
+                  if archive_descriptor.get("size") != len(manifest_bytes):
+                      fail("Docker archive OCI manifest descriptor size is invalid")
+                  image_manifest = json.loads(manifest_bytes)
+                  if (
+                      not isinstance(image_manifest, dict)
+                      or image_manifest.get("schemaVersion") != 2
+                  ):
+                      fail("Docker archive OCI image manifest must use schema version 2")
+                  image_config = image_manifest.get("config")
+                  if (
+                      not isinstance(image_config, dict)
+                      or parse_digest(
+                          image_config.get("digest"),
+                          "Docker archive OCI config descriptor digest",
+                      )
+                      != config_digest
+                  ):
+                      fail(
+                          "Docker archive OCI image manifest config does not match "
+                          "the validated config"
+                      )
+                  if image_config.get("size") != len(config_bytes):
+                      fail("Docker archive OCI config descriptor size is invalid")
+                  config = json.loads(config_bytes)
+          except (OSError, tarfile.TarError, json.JSONDecodeError) as error:
+              fail(f"invalid Docker archive {image_tar}: {error}")
 
           labels = config.get("config", {}).get("Labels", {})
           for key, expected_value in {
@@ -228,19 +420,31 @@ jobs:
           exposed = sorted(image_config.get("ExposedPorts", {}).keys())
           if exposed != sorted(role_contract["ports"]):
               raise SystemExit(f"{image_tar} has unexpected exposed ports: {exposed}")
+          output_path.write_text(
+              json.dumps(
+                  {
+                      "configDigest": config_digest,
+                      "imageReference": expected_local_reference,
+                      "manifestDigest": manifest_digest,
+                  },
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
 
       - name: Verify platform subject was admitted by the global vulnerability gate
         env:
-          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
           DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
           POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
+          PUBLISH_IDENTITY: ${{ runner.temp }}/oxibelt-image/publish-image-identity.json
         run: |
           set -euo pipefail
 
-          manifest_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
+          manifest_digest="$(jq -er '.manifestDigest' "${PUBLISH_IDENTITY}")"
           if [[ ! "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Buildx metadata contains an invalid image manifest digest: ${manifest_digest}" >&2
+            echo "validated image manifest digest is invalid: ${manifest_digest}" >&2
             exit 1
           fi
           node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
@@ -257,10 +461,10 @@ jobs:
       - name: Push canonical arch-specific GHCR tag
         id: publish
         env:
-          BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
           GHCR_TOKEN: ${{ secrets.ghcr_token }}
           IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
+          PUBLISH_IDENTITY: ${{ runner.temp }}/oxibelt-image/publish-image-identity.json
         run: |
           set -euo pipefail
 
@@ -289,13 +493,35 @@ jobs:
             exit 1
           fi
 
-          local_tag="$(jq -r '.localTag' <<<"${artifact_json}")"
-          if [[ -z "${local_tag}" || "${local_tag}" == "null" ]]; then
-            echo "release plan is missing local tag for ${OXIBELT_ARTIFACT_ARCH}" >&2
+          local_tag="$(jq -er '.imageReference' "${PUBLISH_IDENTITY}")"
+          if [[ "$(jq -er '.localTag' <<<"${artifact_json}")" != "${local_tag}" ]]; then
+            echo "validated local tag does not match the release plan" >&2
+            exit 1
+          fi
+
+          config_digest="$(jq -er '.configDigest' "${PUBLISH_IDENTITY}")"
+          expected_digest="$(jq -er '.manifestDigest' "${PUBLISH_IDENTITY}")"
+          inspect_error="${RUNNER_TEMP}/publish-preexisting-${OXIBELT_ARTIFACT_ARCH}.log"
+          if existing_image_id="$(docker image inspect --format '{{.Id}}' "${local_tag}" 2>"${inspect_error}")"; then
+            echo "refusing to replace preexisting Docker image reference ${local_tag} (${existing_image_id})" >&2
+            exit 1
+          elif ! grep -Eiq 'no such (image|object)' "${inspect_error}"; then
+            cat "${inspect_error}" >&2
+            echo "cannot inspect Docker image reference ${local_tag}" >&2
             exit 1
           fi
 
           docker load --input "${IMAGE_TAR}"
+          image_id="$(docker image inspect --format '{{.Id}}' "${local_tag}")"
+          if [[ "${image_id}" != "${config_digest}" && "${image_id}" != "${expected_digest}" ]]; then
+            echo "loaded image ID ${image_id} is not bound to the validated archive" >&2
+            exit 1
+          fi
+          if [[ "$(docker image inspect --format '{{.Id}}' "${image_id}")" != "${image_id}" ]]; then
+            echo "loaded image ID ${image_id} is not an exact daemon reference" >&2
+            exit 1
+          fi
+
           printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
           canonical_tag="$(jq -r '.canonicalGhcrTag' <<<"${artifact_json}")"
@@ -304,9 +530,8 @@ jobs:
             exit 1
           fi
 
-          expected_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
           if [[ ! "${expected_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Buildx metadata contains an invalid image digest: ${expected_digest}" >&2
+            echo "validated image manifest digest is invalid: ${expected_digest}" >&2
             exit 1
           fi
 

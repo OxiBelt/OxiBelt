@@ -69,9 +69,10 @@ Actions check identity. Missing, stale, duplicate, failed, or mismatched
 evidence blocks release preparation and publication. Benchmark and
 dependency-snapshot submission jobs remain outside the prerequisite, and
 validation artifacts are evidence only: the release rebuilds the 30-image
-matrix after the gate. Run- and attempt-qualified transport artifact names
-keep those official builds separate without changing image-plan names, tar
-filenames, or OCI tags. Each reusable per-architecture row builds an
+matrix after the gate. Run-qualified transport artifact names remain stable
+across failed-job reruns, while vulnerability evidence stays attempt-qualified;
+neither changes image-plan names, tar filenames, or OCI tags. Each reusable
+per-architecture row builds an
 unprivileged image tar, records the Buildx digest metadata used by canonical
 publication, scans the local tar as report-only pre-publish evidence, and
 produces a validated CycloneDX platform SBOM. An isolated package-write job

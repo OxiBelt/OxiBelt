@@ -268,6 +268,7 @@ jobs:
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
             ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   scan:
@@ -299,46 +300,291 @@ jobs:
       - name: Load image for scanning
         id: trivy-image
         env:
+          ARTIFACT_CONTRACT: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-artifact-contract.json
           BUILD_METADATA: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}-build-metadata.json
+          IMAGE_IDENTITY: ${{ runner.temp }}/oxibelt-vulnerability-scan/image-identity.json
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
           IMAGE_TAR: ${{ runner.temp }}/oxibelt-image/${{ env.OXIBELT_ARTIFACT_PREFIX }}-alpine-musl-${{ env.OXIBELT_ARTIFACT_ARCH }}.tar
         run: |
           set -euo pipefail
 
           mkdir -p "${RUNNER_TEMP}/oxibelt-vulnerability-scan"
-          docker load --input "${IMAGE_TAR}"
-
-          expected_image_id="$(python3 - "${IMAGE_TAR}" <<'PY'
+          python3 - \
+            "${IMAGE_PLAN}" \
+            "${IMAGE_TAR}" \
+            "${BUILD_METADATA}" \
+            "${ARTIFACT_CONTRACT}" \
+            "${IMAGE_IDENTITY}" \
+            "${OXIBELT_IMAGE_ROLE}" \
+            "${OXIBELT_ARTIFACT_PREFIX}" \
+            "${OXIBELT_ARTIFACT_ARCH}" <<'PY'
+          import hashlib
           import json
           import pathlib
           import re
           import sys
           import tarfile
 
-          with tarfile.open(sys.argv[1]) as archive:
-              manifest_file = archive.extractfile("manifest.json")
-              if manifest_file is None:
-                  raise SystemExit("Docker archive is missing manifest.json")
-              manifest = json.load(manifest_file)
-          if len(manifest) != 1:
-              raise SystemExit("Docker archive must contain exactly one image")
-          config_name = pathlib.PurePosixPath(manifest[0]["Config"]).name
-          match = re.fullmatch(r"([0-9a-f]{64})\.json", config_name)
-          if match is None:
-              raise SystemExit(f"Docker archive config path is not digest-bound: {config_name}")
-          print(f"sha256:{match.group(1)}")
+          maximum_json_bytes = 8 * 1024 * 1024
+          maximum_image_bytes = 4 * 1024 * 1024 * 1024
+          maximum_archive_members = 4096
+          digest_pattern = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+          plan_path = pathlib.Path(sys.argv[1])
+          image_tar = pathlib.Path(sys.argv[2])
+          metadata_path = pathlib.Path(sys.argv[3])
+          contract_path = pathlib.Path(sys.argv[4])
+          output_path = pathlib.Path(sys.argv[5])
+          role = sys.argv[6]
+          artifact_prefix = sys.argv[7]
+          artifact_arch = sys.argv[8]
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def load_json(path, description):
+              if not path.is_file():
+                  fail(f"missing {description}: {path}")
+              if path.stat().st_size > maximum_json_bytes:
+                  fail(f"{description} exceeds the 8 MiB limit: {path}")
+              try:
+                  return json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                  fail(f"cannot read {description} {path}: {error}")
+
+          def parse_digest(value, description):
+              if not isinstance(value, str) or digest_pattern.fullmatch(value) is None:
+                  fail(f"{description} is not a SHA-256 digest")
+              return value
+
+          def safe_member_name(value):
+              if not isinstance(value, str) or "\x00" in value or "\\" in value:
+                  fail(f"unsafe Docker archive member name: {value!r}")
+              path = pathlib.PurePosixPath(value)
+              if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+                  fail(f"unsafe Docker archive member name: {value!r}")
+              return path.as_posix()
+
+          def read_regular_member(archive, name):
+              try:
+                  member = archive.getmember(name)
+              except KeyError:
+                  fail(f"Docker archive is missing {name}")
+              if not member.isfile() or member.size > maximum_json_bytes:
+                  fail(f"Docker archive member {name} is not a bounded regular file")
+              stream = archive.extractfile(member)
+              if stream is None:
+                  fail(f"Docker archive member {name} cannot be read")
+              return stream.read()
+
+          def sha256_file(path):
+              if not path.is_file():
+                  fail(f"missing Docker image tar: {path}")
+              if path.stat().st_size > maximum_image_bytes:
+                  fail(f"Docker image tar exceeds the 4 GiB limit: {path}")
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(block)
+              return f"sha256:{digest.hexdigest()}"
+
+          plan = load_json(plan_path, "image release plan")
+          metadata = load_json(metadata_path, "Buildx metadata")
+          contract = load_json(contract_path, "image artifact contract")
+          if not isinstance(plan, dict) or plan.get("schemaVersion") != 8:
+              fail("unsupported image release plan schema")
+          if not isinstance(metadata, dict):
+              fail("Buildx metadata must be a JSON object")
+          if not isinstance(contract, dict) or contract.get("schema") != 3:
+              fail("unsupported image artifact contract schema")
+
+          expected_tar_name = f"{artifact_prefix}-alpine-musl-{artifact_arch}.tar"
+          expected_metadata_name = (
+              f"{artifact_prefix}-alpine-musl-{artifact_arch}-build-metadata.json"
+          )
+          for field, expected in {
+              "role": role,
+              "artifact_arch": artifact_arch,
+              "image_tar": expected_tar_name,
+              "build_metadata": expected_metadata_name,
+          }.items():
+              if contract.get(field) != expected:
+                  fail(
+                      f"image artifact contract {field} was "
+                      f"{contract.get(field)!r}, expected {expected!r}"
+                  )
+          if image_tar.name != expected_tar_name or metadata_path.name != expected_metadata_name:
+              fail("downloaded image artifact filenames do not match the matrix identity")
+          if contract.get("image_tar_sha256") != sha256_file(image_tar):
+              fail("Docker image tar digest does not match the artifact contract")
+
+          config_digest = parse_digest(
+              contract.get("config_digest"), "artifact contract config digest"
+          )
+          manifest_digest = parse_digest(
+              contract.get("image_digest"), "artifact contract image digest"
+          )
+          if contract.get("descriptor_digest") != manifest_digest:
+              fail("artifact contract descriptor and image digests differ")
+          if metadata.get("containerimage.config.digest") != config_digest:
+              fail("Buildx config digest does not match the artifact contract")
+          if metadata.get("containerimage.digest") != manifest_digest:
+              fail("Buildx image digest does not match the artifact contract")
+          descriptor = metadata.get("containerimage.descriptor")
+          if not isinstance(descriptor, dict) or descriptor.get("digest") != manifest_digest:
+              fail("Buildx descriptor digest does not match the artifact contract")
+
+          artifacts = [
+              value
+              for value in plan.get("artifacts", [])
+              if isinstance(value, dict)
+              and value.get("role") == role
+              and value.get("artifactArch") == artifact_arch
+          ]
+          if len(artifacts) != 1:
+              fail(f"image release plan must contain one {role}/{artifact_arch} artifact")
+          expected_reference = f"{artifact_prefix}:alpine-musl-{artifact_arch}"
+          if artifacts[0].get("localTag") != expected_reference:
+              fail("image release plan local tag does not match the matrix identity")
+
+          try:
+              with tarfile.open(image_tar, mode="r:*") as archive:
+                  members = []
+                  for member in archive:
+                      members.append(member)
+                      if len(members) > maximum_archive_members:
+                          fail("Docker archive exceeds the 4096-member limit")
+                  names = [safe_member_name(member.name) for member in members]
+                  if len(names) != len(set(names)):
+                      fail("Docker archive contains duplicate member names")
+                  manifest = json.loads(read_regular_member(archive, "manifest.json"))
+                  if not isinstance(manifest, list) or len(manifest) != 1:
+                      fail("Docker archive must contain exactly one image")
+                  entry = manifest[0]
+                  if not isinstance(entry, dict):
+                      fail("Docker archive manifest entry must be an object")
+                  config_name = safe_member_name(entry.get("Config"))
+                  config_bytes = read_regular_member(archive, config_name)
+                  archive_config_digest = f"sha256:{hashlib.sha256(config_bytes).hexdigest()}"
+                  config_hash = archive_config_digest.removeprefix("sha256:")
+                  if config_name not in (
+                      f"{config_hash}.json",
+                      f"blobs/sha256/{config_hash}",
+                  ):
+                      fail(
+                          "Docker archive config path is not content addressed "
+                          "by its digest"
+                      )
+                  if archive_config_digest != config_digest:
+                      fail(
+                          "Docker archive config digest does not match the "
+                          "artifact contract"
+                      )
+                  if entry.get("RepoTags") != [expected_reference]:
+                      fail("Docker archive repository tag does not match the release plan")
+
+                  index = json.loads(read_regular_member(archive, "index.json"))
+                  if not isinstance(index, dict) or index.get("schemaVersion") != 2:
+                      fail("Docker archive OCI index must use schema version 2")
+                  manifests = index.get("manifests")
+                  if not isinstance(manifests, list) or len(manifests) != 1:
+                      fail("Docker archive OCI index must contain exactly one manifest")
+                  archive_descriptor = manifests[0]
+                  if not isinstance(archive_descriptor, dict):
+                      fail("Docker archive OCI manifest descriptor must be an object")
+                  if (
+                      parse_digest(
+                          archive_descriptor.get("digest"),
+                          "Docker archive OCI manifest descriptor digest",
+                      )
+                      != manifest_digest
+                  ):
+                      fail(
+                          "Docker archive OCI manifest descriptor does not match "
+                          "the artifact contract"
+                      )
+                  manifest_hash = manifest_digest.removeprefix("sha256:")
+                  manifest_bytes = read_regular_member(
+                      archive, f"blobs/sha256/{manifest_hash}"
+                  )
+                  if (
+                      f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+                      != manifest_digest
+                  ):
+                      fail(
+                          "Docker archive OCI manifest blob digest does not match "
+                          "the artifact contract"
+                      )
+                  if archive_descriptor.get("size") != len(manifest_bytes):
+                      fail("Docker archive OCI manifest descriptor size is invalid")
+                  image_manifest = json.loads(manifest_bytes)
+                  if (
+                      not isinstance(image_manifest, dict)
+                      or image_manifest.get("schemaVersion") != 2
+                  ):
+                      fail("Docker archive OCI image manifest must use schema version 2")
+                  image_config = image_manifest.get("config")
+                  if (
+                      not isinstance(image_config, dict)
+                      or parse_digest(
+                          image_config.get("digest"),
+                          "Docker archive OCI config descriptor digest",
+                      )
+                      != config_digest
+                  ):
+                      fail(
+                          "Docker archive OCI image manifest config does not match "
+                          "the validated config"
+                      )
+                  if image_config.get("size") != len(config_bytes):
+                      fail("Docker archive OCI config descriptor size is invalid")
+          except (OSError, tarfile.TarError, json.JSONDecodeError) as error:
+              fail(f"invalid Docker archive {image_tar}: {error}")
+
+          output_path.write_text(
+              json.dumps(
+                  {
+                      "configDigest": config_digest,
+                      "imageReference": expected_reference,
+                      "manifestDigest": manifest_digest,
+                  },
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
-          )"
-          image_id="$(docker image inspect --format '{{.Id}}' "${expected_image_id}")"
-          if [[ ! "${image_id}" =~ ^sha256:[0-9a-f]{64}$ || "${image_id}" != "${expected_image_id}" ]]; then
-            echo "loaded image ID ${image_id} does not match archive config ${expected_image_id}" >&2
+
+          config_digest="$(jq -er '.configDigest' "${IMAGE_IDENTITY}")"
+          image_reference="$(jq -er '.imageReference' "${IMAGE_IDENTITY}")"
+          manifest_digest="$(jq -er '.manifestDigest' "${IMAGE_IDENTITY}")"
+
+          inspect_error="${RUNNER_TEMP}/oxibelt-vulnerability-scan/preexisting-image.err"
+          if existing_image_id="$(docker image inspect --format '{{.Id}}' "${image_reference}" 2>"${inspect_error}")"; then
+            echo "refusing to replace preexisting Docker image reference ${image_reference} (${existing_image_id})" >&2
+            exit 1
+          elif ! grep -Eiq 'no such (image|object)' "${inspect_error}"; then
+            cat "${inspect_error}" >&2
+            echo "cannot inspect Docker image reference ${image_reference}" >&2
             exit 1
           fi
 
-          manifest_digest="$(jq -r '."containerimage.digest"' "${BUILD_METADATA}")"
-          if [[ ! "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Buildx metadata contains an invalid image manifest digest: ${manifest_digest}" >&2
+          docker load --input "${IMAGE_TAR}"
+          image_id="$(docker image inspect --format '{{.Id}}' "${image_reference}")"
+          if [[ ! "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "loaded image ID is not a SHA-256 digest: ${image_id}" >&2
             exit 1
           fi
+          if [[ "${image_id}" != "${config_digest}" && "${image_id}" != "${manifest_digest}" ]]; then
+            echo "loaded image ID ${image_id} is not bound to the validated archive" >&2
+            exit 1
+          fi
+          addressed_image_id="$(docker image inspect --format '{{.Id}}' "${image_id}")"
+          if [[ "${addressed_image_id}" != "${image_id}" ]]; then
+            echo "loaded image ID ${image_id} is not an exact daemon reference" >&2
+            exit 1
+          fi
+
           {
             echo "image_id=${image_id}"
             echo "manifest_digest=${manifest_digest}"

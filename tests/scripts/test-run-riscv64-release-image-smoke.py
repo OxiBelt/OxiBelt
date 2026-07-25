@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import hashlib
 import importlib.util
 import io
@@ -30,26 +29,66 @@ def write_json(path: pathlib.Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def docker_archive(path: pathlib.Path) -> str:
+def docker_archive(
+    path: pathlib.Path,
+    *,
+    config_layout: str = "legacy",
+    repository_tag: str = "oxibelt:alpine-musl-riscv64",
+) -> tuple[str, str]:
     config = json.dumps(
         {"architecture": "riscv64", "os": "linux"},
         separators=(",", ":"),
     ).encode("utf-8")
     digest = hashlib.sha256(config).hexdigest()
+    if config_layout == "legacy":
+        config_name = f"{digest}.json"
+    elif config_layout == "oci":
+        config_name = f"blobs/sha256/{digest}"
+    else:
+        raise ValueError(f"unsupported config layout: {config_layout}")
     manifest = json.dumps(
-        [{"Config": f"{digest}.json", "RepoTags": [], "Layers": []}],
+        [{"Config": config_name, "RepoTags": [repository_tag], "Layers": []}],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    image_manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": f"sha256:{digest}",
+                "size": len(config),
+            },
+            "layers": [],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    manifest_digest = hashlib.sha256(image_manifest).hexdigest()
+    index = json.dumps(
+        {
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": f"sha256:{manifest_digest}",
+                    "size": len(image_manifest),
+                }
+            ],
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     with tarfile.open(path, mode="w") as archive:
         for name, content in (
             ("manifest.json", manifest),
-            (f"{digest}.json", config),
+            ("index.json", index),
+            (config_name, config),
+            (f"blobs/sha256/{manifest_digest}", image_manifest),
         ):
             member = tarfile.TarInfo(name)
             member.size = len(content)
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(content))
-    return f"sha256:{digest}"
+    return f"sha256:{digest}", f"sha256:{manifest_digest}"
 
 
 class FakeCrashRunner:
@@ -79,6 +118,113 @@ class FakeCrashRunner:
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
+class FakeImageRunner:
+    def __init__(
+        self,
+        runtime_image_id: str,
+        *,
+        fail_load: bool = False,
+        preexisting_reference_id: str | None = None,
+    ) -> None:
+        self.calls: list[list[str]] = []
+        self.fail_load = fail_load
+        self.runtime_image_id = runtime_image_id
+        self.preexisting_reference_id = preexisting_reference_id
+        self.loaded = False
+        self.archive_reference = "oxibelt:alpine-musl-riscv64"
+
+    def missing(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            "",
+            f"Error response from daemon: No such image: {args[-1]}",
+        )
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, env
+        self.calls.append(args)
+        if args[:2] == ["docker", "load"]:
+            self.loaded = True
+            if self.fail_load:
+                raise SMOKE.SmokeError("simulated partial Docker load failure")
+            return subprocess.CompletedProcess(
+                args, 0, f"Loaded image: {self.archive_reference}\n", ""
+            )
+        if args[:3] != ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        target = args[-1]
+        format_value = args[4] if len(args) >= 6 and args[3] == "--format" else None
+        active_image_id = (
+            self.runtime_image_id
+            if self.loaded or self.preexisting_reference_id is None
+            else self.preexisting_reference_id
+        )
+        if format_value == "{{json .RepoTags}}":
+            if (
+                self.preexisting_reference_id is not None
+                and target == self.preexisting_reference_id
+            ):
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps([self.archive_reference]) + "\n", ""
+                )
+            return self.missing(args)
+        if format_value == "{{.Id}}":
+            if target == self.archive_reference:
+                if not self.loaded:
+                    if self.preexisting_reference_id is None:
+                        return self.missing(args)
+                    return subprocess.CompletedProcess(
+                        args, 0, self.preexisting_reference_id + "\n", ""
+                    )
+                return subprocess.CompletedProcess(
+                    args, 0, self.runtime_image_id + "\n", ""
+                )
+            if target == active_image_id and (
+                self.loaded or self.preexisting_reference_id is not None
+            ):
+                return subprocess.CompletedProcess(
+                    args, 0, active_image_id + "\n", ""
+                )
+            return self.missing(args)
+        if format_value == "{{json .}}" and (
+            self.loaded or self.preexisting_reference_id is not None
+        ) and target in (self.archive_reference, active_image_id):
+            image = {
+                "Id": active_image_id,
+                "Os": "linux",
+                "Architecture": "riscv64",
+                "RepoTags": [self.archive_reference],
+                "Config": {
+                    "User": "10001:10001",
+                    "Labels": {
+                        "io.oxibelt.image.role": "standalone",
+                        "org.opencontainers.image.version": "1.2.3",
+                        "org.opencontainers.image.revision": "a" * 40,
+                        "io.oxibelt.build.source-ref": "refs/tags/1.2.3",
+                        "io.oxibelt.build.dirty": "clean",
+                        "io.oxibelt.build.kind": "official_release",
+                    },
+                },
+            }
+            return subprocess.CompletedProcess(args, 0, json.dumps(image) + "\n", "")
+        if (
+            format_value is None
+            and target == active_image_id
+            and (self.loaded or self.preexisting_reference_id is not None)
+        ):
+            return subprocess.CompletedProcess(args, 0, "{}\n", "")
+        return self.missing(args)
+
+
 class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
@@ -91,8 +237,7 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
 
     def release_args(self) -> argparse.Namespace:
         image = self.root / "oxibelt-alpine-musl-riscv64.tar"
-        config_digest = docker_archive(image)
-        manifest_digest = "sha256:" + "b" * 64
+        config_digest, manifest_digest = docker_archive(image)
         metadata = self.root / "oxibelt-alpine-musl-riscv64-build-metadata.json"
         contract = self.root / "oxibelt-alpine-musl-riscv64-artifact-contract.json"
         plan = self.root / "image-plan.json"
@@ -122,6 +267,7 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                         "dockerArchitecture": "riscv64",
                         "binaries": binaries,
                         "imageTar": image.name,
+                        "localTag": "oxibelt:alpine-musl-riscv64",
                     }
                 ],
             },
@@ -185,9 +331,33 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         self.assertEqual(artifact.image_id, "sha256:" + hashlib.sha256(
             b'{"architecture":"riscv64","os":"linux"}'
         ).hexdigest())
-        self.assertEqual(artifact.manifest_digest, "sha256:" + "b" * 64)
+        self.assertRegex(artifact.manifest_digest, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(artifact.binaries, SMOKE.ROLE_BINARIES["standalone"])
-        self.assertEqual(artifact.archive_references, ())
+        self.assertEqual(
+            artifact.archive_references,
+            ("oxibelt:alpine-musl-riscv64",),
+        )
+
+    def test_accepts_oci_layout_config_path(self) -> None:
+        args = self.release_args()
+        config_digest, manifest_digest = docker_archive(
+            args.image_tar, config_layout="oci"
+        )
+        metadata = json.loads(args.build_metadata.read_text(encoding="utf-8"))
+        metadata["containerimage.config.digest"] = config_digest
+        metadata["containerimage.digest"] = manifest_digest
+        metadata["containerimage.descriptor"]["digest"] = manifest_digest
+        write_json(args.build_metadata, metadata)
+        contract = json.loads(args.artifact_contract.read_text(encoding="utf-8"))
+        contract["config_digest"] = config_digest
+        contract["descriptor_digest"] = manifest_digest
+        contract["image_digest"] = manifest_digest
+        contract["image_tar_sha256"] = SMOKE.sha256_file(args.image_tar)
+        write_json(args.artifact_contract, contract)
+
+        artifact = SMOKE.validate_release_artifact(args)
+
+        self.assertEqual(artifact.image_id, config_digest)
 
     def test_rejects_non_tag_source_and_manifest_digest_mismatch(self) -> None:
         args = self.release_args()
@@ -200,6 +370,24 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         metadata["containerimage.digest"] = "sha256:" + "c" * 64
         write_json(args.build_metadata, metadata)
         with self.assertRaisesRegex(SMOKE.SmokeError, "Buildx image digest"):
+            SMOKE.validate_release_artifact(args)
+
+    def test_rejects_false_manifest_subject_even_when_metadata_agrees(self) -> None:
+        args = self.release_args()
+        false_digest = "sha256:" + "f" * 64
+        metadata = json.loads(args.build_metadata.read_text(encoding="utf-8"))
+        metadata["containerimage.digest"] = false_digest
+        metadata["containerimage.descriptor"]["digest"] = false_digest
+        write_json(args.build_metadata, metadata)
+        contract = json.loads(args.artifact_contract.read_text(encoding="utf-8"))
+        contract["descriptor_digest"] = false_digest
+        contract["image_digest"] = false_digest
+        write_json(args.artifact_contract, contract)
+
+        with self.assertRaisesRegex(
+            SMOKE.SmokeError,
+            "OCI manifest digest does not match the artifact contract",
+        ):
             SMOKE.validate_release_artifact(args)
 
     def test_build_identity_requires_one_exact_marker(self) -> None:
@@ -281,6 +469,7 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         runner = FakeCrashRunner()
         receipt = {"checks": []}
         smoke = SMOKE.DockerSmoke(runner, artifact, args, receipt)
+        smoke.runtime_image_id = artifact.manifest_digest
         try:
             with self.assertRaisesRegex(SMOKE.SmokeError, "code 139"):
                 smoke.run_one_shot("/usr/local/bin/oxibelt", ["--version"])
@@ -304,7 +493,8 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         artifact = SMOKE.validate_release_artifact(args)
         runner = FakeCrashRunner()
         smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
-        smoke.image_preexisting = True
+        smoke.preexisting_image_ids.add(artifact.manifest_digest)
+        smoke.runtime_image_id = artifact.manifest_digest
 
         self.assertEqual(smoke.cleanup(), [])
         self.assertFalse(
@@ -313,11 +503,11 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
 
     def test_load_refuses_to_replace_a_preexisting_archive_tag(self) -> None:
         args = self.release_args()
-        artifact = dataclasses.replace(
-            SMOKE.validate_release_artifact(args),
-            archive_references=("oxibelt:existing",),
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(
+            artifact.manifest_digest,
+            preexisting_reference_id="sha256:" + "d" * 64,
         )
-        runner = FakeCrashRunner()
         smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
         try:
             with self.assertRaisesRegex(
@@ -329,8 +519,145 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                 any(call[:2] == ["docker", "load"] for call in runner.calls)
             )
         finally:
-            smoke.image_preexisting = True
             smoke.cleanup()
+
+    def test_load_uses_containerd_manifest_digest_as_runtime_reference(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(artifact.manifest_digest)
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            smoke.load_and_verify_image()
+
+            self.assertEqual(
+                smoke.runtime_image_reference(),
+                artifact.manifest_digest,
+            )
+            self.assertTrue(
+                any(
+                    call
+                    == [
+                        "docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{json .}}",
+                        "oxibelt:alpine-musl-riscv64",
+                    ]
+                    for call in runner.calls
+                )
+            )
+        finally:
+            smoke.cleanup()
+
+    def test_load_accepts_legacy_config_digest_as_runtime_reference(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(artifact.image_id)
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            smoke.load_and_verify_image()
+
+            self.assertEqual(smoke.runtime_image_reference(), artifact.image_id)
+        finally:
+            smoke.cleanup()
+
+    def test_load_rejects_unbound_daemon_image_id(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner("sha256:" + "d" * 64)
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            with self.assertRaisesRegex(
+                SMOKE.SmokeError,
+                "identity or architecture",
+            ):
+                smoke.load_and_verify_image()
+        finally:
+            self.assertEqual(smoke.cleanup(), [])
+        self.assertTrue(
+            any(
+                call[:4]
+                == [
+                    "docker",
+                    "image",
+                    "rm",
+                    "oxibelt:alpine-musl-riscv64",
+                ]
+                for call in runner.calls
+            )
+        )
+
+    def test_partial_load_failure_cleans_absent_archive_tag(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(artifact.manifest_digest, fail_load=True)
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            with self.assertRaisesRegex(
+                SMOKE.SmokeError,
+                "partial Docker load failure",
+            ):
+                smoke.load_and_verify_image()
+        finally:
+            self.assertEqual(smoke.cleanup(), [])
+
+        self.assertTrue(
+            any(
+                call[:4]
+                == [
+                    "docker",
+                    "image",
+                    "rm",
+                    "oxibelt:alpine-musl-riscv64",
+                ]
+                for call in runner.calls
+            )
+        )
+
+    def test_load_refuses_preexisting_manifest_bound_archive_tag(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(
+            artifact.manifest_digest,
+            preexisting_reference_id=artifact.manifest_digest,
+        )
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            with self.assertRaisesRegex(
+                SMOKE.SmokeError,
+                "refusing to replace preexisting Docker image reference",
+            ):
+                smoke.load_and_verify_image()
+        finally:
+            self.assertEqual(smoke.cleanup(), [])
+
+        self.assertFalse(any(call[:2] == ["docker", "load"] for call in runner.calls))
+        self.assertFalse(
+            any(call[:3] == ["docker", "image", "rm"] for call in runner.calls)
+        )
+
+    def test_load_refuses_preexisting_config_bound_archive_tag(self) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeImageRunner(
+            artifact.manifest_digest,
+            preexisting_reference_id=artifact.image_id,
+        )
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            with self.assertRaisesRegex(
+                SMOKE.SmokeError,
+                "refusing to replace preexisting Docker image reference",
+            ):
+                smoke.load_and_verify_image()
+        finally:
+            self.assertEqual(smoke.cleanup(), [])
+
+        self.assertFalse(any(call[:2] == ["docker", "load"] for call in runner.calls))
+        self.assertFalse(
+            any(call[:3] == ["docker", "image", "rm"] for call in runner.calls)
+        )
 
 
 if __name__ == "__main__":

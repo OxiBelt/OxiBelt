@@ -4120,8 +4120,15 @@ fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
   let smoke_helper = source_file_text("tests/scripts/run-riscv64-release-image-smoke.py");
   for expected in [
     "ROLE_BINARIES = {",
+    "ROLE_PREFIXES = {",
     "DIGEST = re.compile",
     "docker_archive_identity",
+    "f\"blobs/sha256/{config_hash}\"",
+    "Docker archive OCI manifest blob digest does not match ",
+    "Docker archive OCI image manifest config does not match ",
+    "allowed_image_ids = {",
+    "runtime_image_reference",
+    "\"image\", \"inspect\", \"--format\", \"{{.Id}}\", runtime_image_id",
     "inspect_rootfs_inventory",
     "parse_build_identity",
     "wait_for_service",
@@ -5689,6 +5696,21 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       "packages": "write"
     })
   );
+  let transport_artifact_name = "${{ format('release-{0}-{1}-alpine-musl-{2}-image', github.run_id, matrix.artifact_prefix, matrix.artifact_arch) }}";
+  for job_id in ["release-image-arch-scan", "release-image-arch"] {
+    assert_eq!(
+      parsed["jobs"][job_id]["with"]["transport_artifact_name"].as_str(),
+      Some(transport_artifact_name),
+      "{job_id} should consume the run-scoped transport artifact across reruns"
+    );
+  }
+  assert_eq!(
+    parsed["jobs"]["release-image-arch"]["with"]["vulnerability_decision_artifact_name"].as_str(),
+    Some(
+      "${{ format('release-vulnerability-decision-{0}-{1}', github.run_id, github.run_attempt) }}"
+    ),
+    "release admission evidence should remain attempt-scoped"
+  );
   assert!(parsed_scan["on"]["workflow_call"].get("secrets").is_none());
   assert_eq!(
     parsed_arch["on"]["workflow_call"]["inputs"]["vulnerability_decision_artifact_name"]["required"],
@@ -5799,9 +5821,15 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "tests/scripts/build-docker-image-artifact.sh",
     "validate-strict-dataplane-image.py",
     "Upload Docker image artifact",
+    "overwrite: true",
   ] {
     assert!(build.contains(expected));
   }
+  assert_eq!(
+    build.matches("overwrite: true").count(),
+    1,
+    "a full rerun should replace only its run-scoped transport artifact"
+  );
   for forbidden in [
     "packages: write",
     "GITHUB_TOKEN",
@@ -5813,8 +5841,17 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
 
   let scan = workflow_job_text(&scan_workflow, "scan");
   for expected in [
-    "Docker archive config path is not digest-bound",
-    "docker image inspect --format '{{.Id}}' \"${expected_image_id}\"",
+    "Docker archive config path is not content addressed ",
+    "\"by its digest\"",
+    "f\"blobs/sha256/{config_hash}\"",
+    "Docker image tar digest does not match the artifact contract",
+    "Docker archive repository tag does not match the release plan",
+    "Docker archive OCI manifest descriptor does not match ",
+    "Docker archive OCI manifest blob digest does not match ",
+    "Docker archive OCI image manifest config does not match ",
+    "docker image inspect --format '{{.Id}}' \"${image_reference}\"",
+    "docker image inspect --format '{{.Id}}' \"${image_id}\"",
+    "loaded image ID ${image_id} is not bound to the validated archive",
     "image-ref: ${{ steps.trivy-image.outputs.image_id }}",
     "severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
     "exit-code: \"0\"",
@@ -6012,7 +6049,13 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
 
   for expected in [
     "Validate Docker image artifact for publish",
-    "expected_digest=\"$(jq -r '.\"containerimage.digest\"' \"${BUILD_METADATA}\")\"",
+    "Docker image tar digest does not match the artifact contract",
+    "Docker archive OCI manifest blob digest does not match ",
+    "Docker archive OCI image manifest config does not match ",
+    "manifest_digest=\"$(jq -er '.manifestDigest' \"${PUBLISH_IDENTITY}\")\"",
+    "refusing to replace preexisting Docker image reference ${local_tag}",
+    "loaded image ID ${image_id} is not bound to the validated archive",
+    "expected_digest=\"$(jq -er '.manifestDigest' \"${PUBLISH_IDENTITY}\")\"",
     "refusing to replace canonical tag",
     "docker push \"${canonical_tag}\"",
     "retry_command 3 docker buildx imagetools inspect \"${canonical_tag}\"",

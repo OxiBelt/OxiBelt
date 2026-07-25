@@ -811,7 +811,7 @@ jobs:
       release_revision: ${{ needs.prepare-release.outputs.revision }}
       release_version: ${{ needs.prepare-release.outputs.version }}
       source_url: https://github.com/OxiBelt/OxiBelt
-      transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}
+      transport_artifact_name: ${{ format('release-{0}-{1}-alpine-musl-{2}-image', github.run_id, matrix.artifact_prefix, matrix.artifact_arch) }}
 
   release-vulnerability-gate:
     name: Enforce global release image vulnerability policy
@@ -998,7 +998,7 @@ jobs:
       release_revision: ${{ needs.prepare-release.outputs.revision }}
       release_version: ${{ needs.prepare-release.outputs.version }}
       source_url: https://github.com/OxiBelt/OxiBelt
-      transport_artifact_name: ${{ format('release-{0}-{1}-{2}-alpine-musl-{3}-image', github.run_id, github.run_attempt, matrix.artifact_prefix, matrix.artifact_arch) }}
+      transport_artifact_name: ${{ format('release-{0}-{1}-alpine-musl-{2}-image', github.run_id, matrix.artifact_prefix, matrix.artifact_arch) }}
       vulnerability_decision_artifact_name: ${{ format('release-vulnerability-decision-{0}-{1}', github.run_id, github.run_attempt) }}
     secrets:
       ghcr_token: ${{ secrets.GITHUB_TOKEN }}

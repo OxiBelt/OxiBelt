@@ -34,6 +34,7 @@ BUILD_IDENTITY_MARKER = re.compile(
 )
 MAXIMUM_JSON_BYTES = 8 * 1024 * 1024
 MAXIMUM_IMAGE_BYTES = 4 * 1024 * 1024 * 1024
+MAXIMUM_ARCHIVE_MEMBERS = 4096
 MAXIMUM_LOG_BYTES = 128 * 1024
 ONE_SHOT_TIMEOUT_SECONDS = 20
 STARTUP_TIMEOUT_SECONDS = 90
@@ -56,6 +57,15 @@ ROLE_BINARIES = {
     "controller": ("oxibelt-gateway-controller",),
     "tools": ("oxibeltctl",),
     "keysigner": ("oxibelt-keysigner",),
+}
+
+ROLE_PREFIXES = {
+    "standalone": "oxibelt",
+    "dataplane": "oxibelt-dataplane",
+    "dataplane-strict": "oxibelt-dataplane-strict",
+    "controller": "oxibelt-gateway-controller",
+    "tools": "oxibelt-tools",
+    "keysigner": "oxibelt-keysigner",
 }
 
 ROLE_USERS = {
@@ -120,21 +130,32 @@ def sha256_file(path: pathlib.Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def docker_archive_identity(path: pathlib.Path) -> tuple[str, tuple[str, ...]]:
+def docker_archive_identity(
+    path: pathlib.Path,
+) -> tuple[str, str, tuple[str, ...]]:
     try:
         with tarfile.open(path, mode="r:*") as archive:
-            manifest_member = archive.getmember("manifest.json")
-            if (
-                not manifest_member.isfile()
-                or manifest_member.size > MAXIMUM_JSON_BYTES
-            ):
-                raise SmokeError(
-                    "Docker archive manifest is not a bounded regular file"
-                )
-            manifest_stream = archive.extractfile(manifest_member)
-            if manifest_stream is None:
-                raise SmokeError("Docker archive is missing manifest.json")
-            manifest = json.load(manifest_stream)
+            members = []
+            for member in archive:
+                members.append(member)
+                if len(members) > MAXIMUM_ARCHIVE_MEMBERS:
+                    raise SmokeError("Docker archive exceeds the 4096-member limit")
+            names = [member.name for member in members]
+            if len(names) != len(set(names)):
+                raise SmokeError("Docker archive contains duplicate member names")
+
+            def read_regular(name: str) -> bytes:
+                member = archive.getmember(name)
+                if not member.isfile() or member.size > MAXIMUM_JSON_BYTES:
+                    raise SmokeError(
+                        f"Docker archive member {name} is not a bounded regular file"
+                    )
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise SmokeError(f"Docker archive member {name} cannot be read")
+                return stream.read()
+
+            manifest = json.loads(read_regular("manifest.json"))
             if not isinstance(manifest, list) or len(manifest) != 1:
                 raise SmokeError("Docker archive must contain exactly one image")
             manifest_entry = manifest[0]
@@ -161,17 +182,76 @@ def docker_archive_identity(path: pathlib.Path) -> tuple[str, tuple[str, ...]]:
                 raise SmokeError(
                     "Docker archive repository tags are not a bounded string array"
                 )
-            config_member = archive.getmember(config_name)
-            if not config_member.isfile() or config_member.size > MAXIMUM_JSON_BYTES:
-                raise SmokeError("Docker archive config is not a bounded regular file")
-            config_stream = archive.extractfile(config_member)
-            if config_stream is None:
-                raise SmokeError("Docker archive config cannot be read")
-            config_bytes = config_stream.read()
+            config_bytes = read_regular(config_name)
+
+            index = json.loads(read_regular("index.json"))
+            if not isinstance(index, dict) or index.get("schemaVersion") != 2:
+                raise SmokeError(
+                    "Docker archive OCI index must use schema version 2"
+                )
+            manifests = index.get("manifests")
+            if not isinstance(manifests, list) or len(manifests) != 1:
+                raise SmokeError(
+                    "Docker archive OCI index must contain exactly one manifest"
+                )
+            manifest_descriptor = manifests[0]
+            if not isinstance(manifest_descriptor, dict):
+                raise SmokeError(
+                    "Docker archive OCI manifest descriptor must be an object"
+                )
+            manifest_digest = manifest_descriptor.get("digest")
+            if not isinstance(manifest_digest, str) or DIGEST.fullmatch(
+                manifest_digest
+            ) is None:
+                raise SmokeError(
+                    "Docker archive OCI manifest descriptor digest is invalid"
+                )
+            manifest_bytes = read_regular(
+                f"blobs/sha256/{manifest_digest.removeprefix('sha256:')}"
+            )
+            if f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}" != manifest_digest:
+                raise SmokeError(
+                    "Docker archive OCI manifest blob digest does not match "
+                    "its descriptor"
+                )
+            if manifest_descriptor.get("size") != len(manifest_bytes):
+                raise SmokeError(
+                    "Docker archive OCI manifest descriptor size is invalid"
+                )
+            image_manifest = json.loads(manifest_bytes)
+            if (
+                not isinstance(image_manifest, dict)
+                or image_manifest.get("schemaVersion") != 2
+            ):
+                raise SmokeError(
+                    "Docker archive OCI image manifest must use schema version 2"
+                )
+            config_descriptor = image_manifest.get("config")
+            if not isinstance(config_descriptor, dict):
+                raise SmokeError(
+                    "Docker archive OCI config descriptor must be an object"
+                )
     except (KeyError, tarfile.TarError, json.JSONDecodeError) as error:
         raise SmokeError(f"invalid Docker archive {path}: {error}") from error
+    config_hash = hashlib.sha256(config_bytes).hexdigest()
+    config_digest = f"sha256:{config_hash}"
+    if config_name not in (
+        f"{config_hash}.json",
+        f"blobs/sha256/{config_hash}",
+    ):
+        raise SmokeError(
+            "Docker archive config path is not content addressed by its digest"
+        )
+    if config_descriptor.get("digest") != config_digest:
+        raise SmokeError(
+            "Docker archive OCI image manifest config does not match "
+            "the content-addressed config"
+        )
+    if config_descriptor.get("size") != len(config_bytes):
+        raise SmokeError("Docker archive OCI config descriptor size is invalid")
     return (
-        f"sha256:{hashlib.sha256(config_bytes).hexdigest()}",
+        config_digest,
+        manifest_digest,
         references,
     )
 
@@ -248,6 +328,13 @@ def validate_release_artifact(args: argparse.Namespace) -> ReleaseArtifact:
         or artifact.get("imageTar") != args.image_tar.name
     ):
         raise SmokeError("RISC-V release artifact does not match its role contract")
+    expected_archive_reference = (
+        f"{ROLE_PREFIXES[args.role]}:alpine-musl-riscv64"
+    )
+    if artifact.get("localTag") != expected_archive_reference:
+        raise SmokeError(
+            "RISC-V release artifact local tag does not match its role contract"
+        )
 
     for field, expected in {
         "role": args.role,
@@ -301,9 +388,21 @@ def validate_release_artifact(args: argparse.Namespace) -> ReleaseArtifact:
     descriptor = metadata.get("containerimage.descriptor")
     if not isinstance(descriptor, dict) or descriptor.get("digest") != manifest_digest:
         raise SmokeError("Buildx descriptor digest does not match the artifact contract")
-    archive_config_digest, archive_references = docker_archive_identity(args.image_tar)
+    (
+        archive_config_digest,
+        archive_manifest_digest,
+        archive_references,
+    ) = docker_archive_identity(args.image_tar)
     if archive_config_digest != config_digest:
         raise SmokeError("Docker archive config digest does not match the artifact contract")
+    if archive_manifest_digest != manifest_digest:
+        raise SmokeError(
+            "Docker archive OCI manifest digest does not match the artifact contract"
+        )
+    if archive_references != (expected_archive_reference,):
+        raise SmokeError(
+            "Docker archive repository tag does not match the release plan"
+        )
 
     return ReleaseArtifact(
         role=args.role,
@@ -538,9 +637,10 @@ class DockerSmoke:
         self.containers: list[str] = []
         self.volumes: list[str] = []
         self.networks: list[str] = []
-        self.image_preexisting = False
+        self.preexisting_image_ids: set[str] = set()
         self.image_references_before_load: set[str] = set()
         self.loaded_image_references: set[str] = set()
+        self.runtime_image_id: str | None = None
         self.native_helper_preexisting = False
         self.native_helper_pulled = False
         self.sequence = 0
@@ -573,6 +673,11 @@ class DockerSmoke:
     def resource_name(self, kind: str) -> str:
         self.sequence += 1
         return f"oxibelt-riscv64-smoke-{kind}-{self.run_token}-{self.sequence}"[:128]
+
+    def runtime_image_reference(self) -> str:
+        if self.runtime_image_id is None:
+            raise SmokeError("RISC-V release image has not been loaded and verified")
+        return self.runtime_image_id
 
     def target_options(self, *, network: str = "none") -> list[str]:
         return [
@@ -669,7 +774,7 @@ class DockerSmoke:
             else ["--pull", "never", *(options or [])]
         )
         container = self.create_container(
-            image or self.artifact.image_id,
+            image or self.runtime_image_reference(),
             entrypoint,
             command,
             runtime_options,
@@ -851,18 +956,63 @@ class DockerSmoke:
         ]
 
     def load_and_verify_image(self) -> None:
+        allowed_image_ids = {
+            self.artifact.image_id,
+            self.artifact.manifest_digest,
+        }
+        for image_id in sorted(allowed_image_ids):
+            before = self.docker(
+                [
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    image_id,
+                ],
+                check=False,
+            )
+            if before.returncode == 0:
+                try:
+                    image = json.loads(before.stdout)
+                except json.JSONDecodeError as error:
+                    raise SmokeError(
+                        f"cannot parse preexisting image identity: {error}"
+                    ) from error
+                if not isinstance(image, dict):
+                    raise SmokeError(
+                        "preexisting Docker image inspection is not an object"
+                    )
+                canonical_image_id = image.get("Id")
+                if canonical_image_id not in allowed_image_ids:
+                    raise SmokeError(
+                        "preexisting Docker image lookup resolved to an "
+                        "unexpected image ID"
+                    )
+                self.preexisting_image_ids.add(canonical_image_id)
+                references = image.get("RepoTags")
+                if isinstance(references, list):
+                    self.image_references_before_load.update(
+                        value for value in references if isinstance(value, str)
+                    )
+                continue
+            detail = (before.stderr or before.stdout).strip().lower()
+            if "no such image" not in detail and "no such object" not in detail:
+                raise SmokeError(
+                    "cannot determine whether the release image already exists "
+                    f"in the Docker daemon: {detail[-1024:]}"
+                )
+
         for reference in self.artifact.archive_references:
             existing_reference = self.docker(
                 ["image", "inspect", "--format", "{{.Id}}", reference],
                 check=False,
             )
             if existing_reference.returncode == 0:
-                if existing_reference.stdout.strip() != self.artifact.image_id:
-                    raise SmokeError(
-                        f"refusing to replace preexisting Docker image reference "
-                        f"{reference!r}"
-                    )
-                continue
+                existing_image_id = existing_reference.stdout.strip()
+                raise SmokeError(
+                    "refusing to replace preexisting Docker image reference "
+                    f"{reference!r} ({existing_image_id or 'unknown ID'})"
+                )
             detail = (
                 existing_reference.stderr or existing_reference.stdout
             ).strip().lower()
@@ -872,48 +1022,27 @@ class DockerSmoke:
                     f"{detail[-1024:]}"
                 )
 
-        before = self.docker(
-            [
-                "image",
-                "inspect",
-                "--format",
-                "{{json .RepoTags}}",
-                self.artifact.image_id,
-            ],
-            check=False,
+        archive_reference = self.artifact.archive_references[0]
+        self.loaded_image_references.update(
+            set(self.artifact.archive_references)
+            - self.image_references_before_load
         )
-        if before.returncode == 0:
-            self.image_preexisting = True
-            try:
-                references = json.loads(before.stdout)
-            except json.JSONDecodeError as error:
-                raise SmokeError(
-                    f"cannot parse preexisting image references: {error}"
-                ) from error
-            if isinstance(references, list):
-                self.image_references_before_load = {
-                    value for value in references if isinstance(value, str)
-                }
-        else:
-            detail = (before.stderr or before.stdout).strip().lower()
-            if "no such image" not in detail and "no such object" not in detail:
-                raise SmokeError(
-                    "cannot determine whether the release image already exists "
-                    f"in the Docker daemon: {detail[-1024:]}"
-                )
         self.docker(
             ["load", "--input", str(self.args.image_tar)],
             timeout=120,
         )
         result = self.docker(
-            ["image", "inspect", "--format", "{{json .}}", self.artifact.image_id]
+            ["image", "inspect", "--format", "{{json .}}", archive_reference]
         )
         try:
             image = json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise SmokeError(f"cannot parse loaded image inspection: {error}") from error
+        runtime_image_id = image.get("Id")
         if (
-            image.get("Id") != self.artifact.image_id
+            not isinstance(runtime_image_id, str)
+            or DIGEST.fullmatch(runtime_image_id) is None
+            or runtime_image_id not in allowed_image_ids
             or image.get("Os") != "linux"
             or image.get("Architecture") != "riscv64"
         ):
@@ -921,6 +1050,14 @@ class DockerSmoke:
                 "loaded image identity or architecture is not the expected "
                 "RISC-V artifact"
             )
+        addressed = self.docker(
+            ["image", "inspect", "--format", "{{.Id}}", runtime_image_id]
+        )
+        if addressed.stdout.strip() != runtime_image_id:
+            raise SmokeError(
+                "loaded image ID is not an exact Docker daemon reference"
+            )
+        self.runtime_image_id = runtime_image_id
         runtime_config = image.get("Config", {})
         if runtime_config.get("User") != ROLE_USERS[self.artifact.role]:
             raise SmokeError(
@@ -947,7 +1084,7 @@ class DockerSmoke:
 
     def verify_loaded_inventory(self) -> None:
         container = self.create_container(
-            self.artifact.image_id,
+            self.runtime_image_reference(),
             f"/usr/local/bin/{self.artifact.binaries[0]}",
             [],
             self.target_options(),
@@ -1034,7 +1171,7 @@ class DockerSmoke:
         if self.artifact.role == "dataplane-strict":
             options.extend(["--publish", "127.0.0.1::9092"])
         container = self.create_container(
-            self.artifact.image_id,
+            self.runtime_image_reference(),
             f"/usr/local/bin/{server_binary}",
             ["--config", "/etc/oxibelt/config/oxibelt.toml"],
             options,
@@ -1142,7 +1279,7 @@ class DockerSmoke:
                 "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
             ]
             container = self.create_container(
-                self.artifact.image_id,
+                self.runtime_image_reference(),
                 "/usr/local/bin/oxibelt-gateway-controller",
                 [
                     "--health-bind",
@@ -1309,7 +1446,7 @@ class DockerSmoke:
         )
 
         container = self.create_container(
-            self.artifact.image_id,
+            self.runtime_image_reference(),
             "/usr/local/bin/oxibelt-keysigner",
             [
                 "--socket",
@@ -1420,7 +1557,12 @@ class DockerSmoke:
     def cleanup(self) -> list[str]:
         errors: list[str] = []
 
-        def remove(args: list[str], description: str) -> None:
+        def remove(
+            args: list[str],
+            description: str,
+            *,
+            missing_ok: bool = False,
+        ) -> None:
             try:
                 result = self.docker(args, check=False)
             except SmokeError as error:
@@ -1428,6 +1570,12 @@ class DockerSmoke:
                 return
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout).strip()[-1024:]
+                normalized_detail = detail.lower()
+                if missing_ok and (
+                    "no such image" in normalized_detail
+                    or "no such object" in normalized_detail
+                ):
+                    return
                 errors.append(f"{description}: {detail or f'exit {result.returncode}'}")
 
         for container in reversed(self.containers):
@@ -1441,22 +1589,30 @@ class DockerSmoke:
         self.networks.clear()
         try:
             for reference in sorted(self.loaded_image_references):
-                remove(["image", "rm", reference], f"image reference {reference}")
-            if not self.image_preexisting:
+                remove(
+                    ["image", "rm", reference],
+                    f"image reference {reference}",
+                    missing_ok=True,
+                )
+            if (
+                self.runtime_image_id is not None
+                and self.runtime_image_id not in self.preexisting_image_ids
+            ):
+                runtime_image_id = self.runtime_image_id
                 try:
                     remaining = self.docker(
-                        ["image", "inspect", self.artifact.image_id],
+                        ["image", "inspect", runtime_image_id],
                         check=False,
                     )
                 except SmokeError as error:
                     errors.append(
-                        f"inspect image {self.artifact.image_id}: {error}"
+                        f"inspect image {runtime_image_id}: {error}"
                     )
                 else:
                     if remaining.returncode == 0:
                         remove(
-                            ["image", "rm", self.artifact.image_id],
-                            f"image {self.artifact.image_id}",
+                            ["image", "rm", runtime_image_id],
+                            f"image {runtime_image_id}",
                         )
                     else:
                         detail = (
@@ -1467,7 +1623,7 @@ class DockerSmoke:
                             and "no such object" not in detail
                         ):
                             errors.append(
-                                f"inspect image {self.artifact.image_id}: "
+                                f"inspect image {runtime_image_id}: "
                                 f"{detail[-1024:]}"
                             )
             if self.native_helper_pulled and not self.native_helper_preexisting:
