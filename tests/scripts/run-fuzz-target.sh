@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-readonly FUZZ_NIGHTLY="nightly-2026-07-24"
+readonly FUZZ_ASAN_NIGHTLY="nightly-2026-07-23"
 readonly MAX_SEED_FILES=128
 readonly MAX_SEED_BYTES=524288
 readonly MAX_WORKING_CORPUS_FILES=16384
@@ -29,11 +29,27 @@ fail() {
 readonly mode="$1"
 readonly target="$2"
 readonly duration_seconds="${3:-900}"
+readonly fuzz_profile="${OXIBELT_FUZZ_PROFILE:-asan}"
 
 case "$mode" in
   smoke|campaign|cmin|coverage|minimize|report) ;;
   *) usage ;;
 esac
+
+case "$fuzz_profile" in
+  asan)
+    fuzz_toolchain="$FUZZ_ASAN_NIGHTLY"
+    fuzz_sanitizer="address"
+    ;;
+  stable)
+    [[ "$mode" == "smoke" ]] || fail "stable fuzz profile only supports smoke mode"
+    fuzz_toolchain="stable"
+    fuzz_sanitizer="none"
+    ;;
+  *) fail "OXIBELT_FUZZ_PROFILE must be one of: asan, stable" ;;
+esac
+readonly fuzz_toolchain
+readonly fuzz_sanitizer
 
 [[ "$target" =~ ^[a-z0-9_]+$ ]] || fail "invalid target name: $target"
 [[ "$duration_seconds" =~ ^[1-9][0-9]*$ ]] || fail "duration must be a positive integer"
@@ -250,7 +266,11 @@ cd -- "$repo_root"
 
 case "$mode" in
   smoke)
-    configure_sanitizer_environment 0
+    if [[ "$fuzz_profile" == "asan" ]]; then
+      configure_sanitizer_environment 0
+    else
+      unset ASAN_OPTIONS LSAN_OPTIONS
+    fi
     validate_seed_corpus
     temporary_corpus="$(mktemp -d "$runner_temp/oxibelt-fuzz-${target}.XXXXXX")"
     cleanup_temporary_corpus() {
@@ -264,7 +284,7 @@ case "$mode" in
     }
     trap cleanup_temporary_corpus EXIT
     copy_reviewed_seeds "$temporary_corpus"
-    cargo "+$FUZZ_NIGHTLY" fuzz run --sanitizer address "$target" "$temporary_corpus" -- \
+    cargo "+$fuzz_toolchain" fuzz run --sanitizer "$fuzz_sanitizer" "$target" "$temporary_corpus" -- \
       -runs=256 \
       -detect_leaks=0 \
       "${common_fuzzer_arguments[@]}" \
@@ -279,7 +299,7 @@ case "$mode" in
     assert_no_symlinks "$persistent_corpus"
     copy_reviewed_seeds "$persistent_corpus"
     validate_cached_corpus "$persistent_corpus"
-    cargo "+$FUZZ_NIGHTLY" fuzz run --sanitizer address "$target" "$persistent_corpus" -- \
+    cargo "+$FUZZ_ASAN_NIGHTLY" fuzz run --sanitizer address "$target" "$persistent_corpus" -- \
       "-max_total_time=$duration_seconds" \
       -detect_leaks=1 \
       "${common_fuzzer_arguments[@]}" \
@@ -327,7 +347,7 @@ case "$mode" in
 
     copy_corpus_files "$persistent_corpus" "$cmin_staging"
     validate_working_corpus "$cmin_staging"
-    cargo "+$FUZZ_NIGHTLY" fuzz cmin --sanitizer address "$target" "$cmin_staging" -- \
+    cargo "+$FUZZ_ASAN_NIGHTLY" fuzz cmin --sanitizer address "$target" "$cmin_staging" -- \
       "-max_len=$max_input_bytes" \
       "-timeout=$FUZZ_TIMEOUT_SECONDS" \
       -detect_leaks=1 \
@@ -352,7 +372,7 @@ case "$mode" in
   coverage)
     configure_sanitizer_environment 1
     validate_cached_corpus "$persistent_corpus"
-    cargo "+$FUZZ_NIGHTLY" fuzz coverage --sanitizer address "$target" "$persistent_corpus" -- \
+    cargo "+$FUZZ_ASAN_NIGHTLY" fuzz coverage --sanitizer address "$target" "$persistent_corpus" -- \
       "-max_len=$max_input_bytes" \
       "-timeout=$FUZZ_TIMEOUT_SECONDS" \
       -detect_leaks=1
@@ -362,7 +382,7 @@ case "$mode" in
 
     command -v jq >/dev/null 2>&1 || fail "jq is required to locate and validate coverage"
     cargo_target_dir="$(
-      cargo "+$FUZZ_NIGHTLY" metadata --no-deps --format-version 1 \
+      cargo "+$FUZZ_ASAN_NIGHTLY" metadata --no-deps --format-version 1 \
         | jq -er '.target_directory | select(type == "string" and startswith("/"))'
     )"
     readonly cargo_target_dir
@@ -393,7 +413,7 @@ case "$mode" in
     )
     (( ${#coverage_binaries[@]} == 1 )) || fail "expected exactly one instrumented coverage binary"
     readonly coverage_binary="${coverage_binaries[0]}"
-    target_libdir="$(rustc "+$FUZZ_NIGHTLY" --print target-libdir)"
+    target_libdir="$(rustc "+$FUZZ_ASAN_NIGHTLY" --print target-libdir)"
     readonly target_libdir
     llvm_bin="$(dirname -- "$target_libdir")/bin"
     readonly llvm_bin
@@ -450,7 +470,7 @@ case "$mode" in
     )
     for failing_input in "${failing_inputs[@]}"; do
       if ! timeout --signal=TERM --kill-after=15s 300s \
-        cargo "+$FUZZ_NIGHTLY" fuzz tmin --sanitizer address -r 255 "$target" "$failing_input" -- \
+        cargo "+$FUZZ_ASAN_NIGHTLY" fuzz tmin --sanitizer address -r 255 "$target" "$failing_input" -- \
           "-max_len=$max_input_bytes" \
           "-timeout=$FUZZ_TIMEOUT_SECONDS" \
           "-rss_limit_mb=$FUZZ_RSS_LIMIT_MB" \
@@ -473,7 +493,8 @@ case "$mode" in
     {
       echo "commit_sha=$(git rev-parse HEAD)"
       echo "target=$target"
-      echo "toolchain=$FUZZ_NIGHTLY"
+      echo "profile=asan"
+      echo "toolchain=$FUZZ_ASAN_NIGHTLY"
       echo "cargo_fuzz_version=0.13.2"
       echo "sanitizer=address+leak"
       echo "max_input_bytes=$max_input_bytes"

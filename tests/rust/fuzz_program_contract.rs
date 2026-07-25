@@ -622,13 +622,21 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "permissions:\n      contents: read",
       "timeout-minutes: 45",
-      "nightly-2026-07-24",
+      "name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})",
+      "max-parallel: 16",
+      "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-07-23",
+      "rustup toolchain install \"${{ matrix.fuzz_profile.toolchain }}\" --profile minimal",
       "cargo-fuzz --version 0.13.2",
+      "OXIBELT_FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}",
       "tests/scripts/run-fuzz-target.sh smoke",
-      "LSAN_OPTIONS: detect_leaks=0",
+      "name: oxibelt-${{ matrix.fuzz_profile.name }}-${{ matrix.fuzz_target }}-fuzz-artifacts",
       "${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}",
       "retention-days: 90",
     ],
+  );
+  assert!(
+    !smoke.contains("ASAN_OPTIONS:") && !smoke.contains("LSAN_OPTIONS:"),
+    "the fuzz runner, not the workflow, must configure sanitizer environments by profile"
   );
 
   let sustained = read_repo_file(".github/workflows/fuzz-sustained.yml");
@@ -650,7 +658,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "permissions:\n      contents: read",
       "max-parallel: 4",
       "timeout-minutes: 120",
-      "nightly-2026-07-24",
+      "nightly-2026-07-23",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh campaign",
       "LSAN_OPTIONS: detect_leaks=1",
@@ -690,7 +698,14 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "set -Eeuo pipefail",
       "umask 077",
-      "readonly FUZZ_NIGHTLY=\"nightly-2026-07-24\"",
+      "readonly FUZZ_ASAN_NIGHTLY=\"nightly-2026-07-23\"",
+      "readonly fuzz_profile=\"${OXIBELT_FUZZ_PROFILE:-asan}\"",
+      "stable fuzz profile only supports smoke mode",
+      "OXIBELT_FUZZ_PROFILE must be one of: asan, stable",
+      "fuzz_toolchain=\"stable\"",
+      "fuzz_sanitizer=\"none\"",
+      "unset ASAN_OPTIONS LSAN_OPTIONS",
+      "cargo \"+$fuzz_toolchain\" fuzz run --sanitizer \"$fuzz_sanitizer\"",
       "readonly MAX_SEED_FILES=128",
       "readonly MAX_SEED_BYTES=524288",
       "readonly MAX_WORKING_CORPUS_FILES=16384",
@@ -743,6 +758,124 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
 }
 
 #[cfg(unix)]
+#[test]
+fn stable_smoke_uses_stable_without_sanitizer_environment() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let target_dir = repo_root().join("target");
+  fs::create_dir_all(&target_dir).expect("Cargo target directory should be creatable");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-fuzz-stable-smoke-contract-")
+    .tempdir_in(target_dir)
+    .expect("stable smoke contract temp directory should be creatable");
+  let runner_temp = temp_dir.path().join("runner");
+  let bin_dir = temp_dir.path().join("bin");
+  let called_marker = temp_dir.path().join("stable-smoke-called");
+  fs::create_dir_all(&runner_temp).expect("runner temp directory should be creatable");
+  fs::create_dir_all(&bin_dir).expect("fake Cargo directory should be creatable");
+
+  let cargo = bin_dir.join("cargo");
+  fs::write(
+    &cargo,
+    r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$#" -ge 9 ]]
+[[ "$1" == "+stable" ]]
+[[ "$2" == "fuzz" ]]
+[[ "$3" == "run" ]]
+[[ "$4" == "--sanitizer" ]]
+[[ "$5" == "none" ]]
+[[ "$6" == "native_config" ]]
+[[ -d "$7" && ! -L "$7" ]]
+[[ "$8" == "--" ]]
+[[ -z "${ASAN_OPTIONS+x}" ]]
+[[ -z "${LSAN_OPTIONS+x}" ]]
+found_runs=0
+for argument in "$@"; do
+  if [[ "$argument" == "-runs=256" ]]; then
+    found_runs=1
+  fi
+done
+(( found_runs == 1 ))
+printf 'stable smoke invoked\n' >"$FAKE_FUZZ_CALLED"
+"#,
+  )
+  .expect("fake Cargo should be writable");
+  let mut permissions = fs::metadata(&cargo)
+    .expect("fake Cargo should have metadata")
+    .permissions();
+  permissions.set_mode(0o755);
+  fs::set_permissions(&cargo, permissions).expect("fake Cargo should be executable");
+
+  let original_path = std::env::var_os("PATH").unwrap_or_default();
+  let path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+  let output = std::process::Command::new("bash")
+    .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+    .args(["smoke", "native_config"])
+    .current_dir(repo_root())
+    .env("OXIBELT_FUZZ_PROFILE", "stable")
+    .env("RUNNER_TEMP", &runner_temp)
+    .env("FAKE_FUZZ_CALLED", &called_marker)
+    .env("ASAN_OPTIONS", "caller-value-must-not-leak")
+    .env("LSAN_OPTIONS", "caller-value-must-not-leak")
+    .env("PATH", path)
+    .output()
+    .expect("stable smoke contract runner should execute");
+
+  assert!(
+    output.status.success(),
+    "stable smoke should run without sanitizer instrumentation: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    called_marker.is_file(),
+    "stable smoke must invoke cargo with the stable profile"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn stable_profile_is_smoke_only_and_unknown_profiles_fail_closed() {
+  for mode in ["campaign", "cmin", "coverage", "minimize", "report"] {
+    let output = std::process::Command::new("bash")
+      .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+      .args([mode, "native_config", "1"])
+      .current_dir(repo_root())
+      .env("OXIBELT_FUZZ_PROFILE", "stable")
+      .output()
+      .expect("stable profile rejection should execute");
+    assert!(
+      !output.status.success(),
+      "stable profile must reject sustained mode {mode}"
+    );
+    assert!(
+      String::from_utf8_lossy(&output.stderr)
+        .contains("stable fuzz profile only supports smoke mode"),
+      "stable profile should explain the rejected mode {mode}: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  let output = std::process::Command::new("bash")
+    .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+    .args(["smoke", "native_config"])
+    .current_dir(repo_root())
+    .env("OXIBELT_FUZZ_PROFILE", "unknown")
+    .output()
+    .expect("unknown profile rejection should execute");
+  assert!(
+    !output.status.success(),
+    "unknown profiles must fail closed"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .contains("OXIBELT_FUZZ_PROFILE must be one of: asan, stable"),
+    "unknown profile rejection should list the accepted values: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[cfg(unix)]
 struct CminHarness {
   _temp_dir: tempfile::TempDir,
   runner_temp: PathBuf,
@@ -783,7 +916,7 @@ impl CminHarness {
       r#"#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$#" -ge 7 ]]
-[[ "$1" == "+nightly-2026-07-24" ]]
+[[ "$1" == "+nightly-2026-07-23" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "cmin" ]]
 [[ "$6" == "native_config" ]]
@@ -1027,6 +1160,11 @@ fn fuzzing_documentation_covers_the_operational_lifecycle() {
       "## Seeds, dictionaries, and corpus promotion",
       "## Coverage evidence",
       "## Crash triage and regressions",
+      "moving `stable`",
+      "`nightly-2026-07-23`",
+      "OXIBELT_FUZZ_PROFILE=stable",
+      "Stable smoke runs use `--sanitizer none`",
+      "stable lane supplements rather than replaces",
       "tests/scripts/run-fuzz-target.sh smoke",
       "tests/scripts/run-fuzz-target.sh campaign",
       "tests/fixtures/fuzz-regressions/<target>/",

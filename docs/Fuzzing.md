@@ -2,9 +2,11 @@
 
 OxiBelt uses [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) and
 libFuzzer to continuously exercise attacker-controlled parsers, decoders, and
-state transitions. Pull requests run a bounded smoke pass over every target;
-the default branch also runs a longer nightly campaign that accumulates a
-bounded corpus and publishes coverage and failure evidence.
+state transitions. Pull requests run two bounded smoke passes over every
+target: one uses stable Rust without a sanitizer and one uses AddressSanitizer
+on the pinned fuzz nightly. The default branch also runs a longer nightly
+campaign that accumulates a bounded corpus and publishes coverage and failure
+evidence.
 
 The fuzz crate is excluded from the stable workspace `default-members`. Normal
 OxiBelt builds do not enable the `fuzzing` feature or expose its internal
@@ -45,15 +47,27 @@ matrices.
 
 ## Setup and local runs
 
-CI pins `nightly-2026-07-24` and `cargo-fuzz 0.13.2`. Install the same tools so
-local reproduction does not silently use a different compiler or driver:
+CI uses moving `stable` for sanitizer-free smoke coverage and pins the
+AddressSanitizer and sustained profiles to `nightly-2026-07-23`. Both use
+`cargo-fuzz 0.13.2`. Stable Rust cannot enable cargo-fuzz's nightly-only
+sanitizer instrumentation, so the stable lane supplements rather than replaces
+the pinned sanitizer lane. Install the same tools so local reproduction does
+not silently use a different compiler or driver:
 
 ```sh
-rustup toolchain install nightly-2026-07-24 --profile minimal --component llvm-tools-preview
-cargo install cargo-fuzz --version 0.13.2 --locked
+rustup toolchain install stable --profile minimal
+rustup toolchain install nightly-2026-07-23 --profile minimal --component llvm-tools-preview
+cargo +stable install cargo-fuzz --version 0.13.2 --locked
 ```
 
-Run the same 256-iteration pass used by pull requests:
+Run the stable, sanitizer-free 256-iteration pass used by pull requests:
+
+```sh
+OXIBELT_FUZZ_PROFILE=stable tests/scripts/run-fuzz-target.sh smoke tls_client_hello
+```
+
+Run the matching AddressSanitizer pass. The `asan` profile is the default for
+backward-compatible local reproduction:
 
 ```sh
 tests/scripts/run-fuzz-target.sh smoke tls_client_hello
@@ -70,10 +84,13 @@ maximum length there, and confines mutable corpora and crash data to validated
 runner-temporary directories; `cargo fuzz coverage` uses its ignored `fuzz/`
 report directory. The profiles enforce a ten-second input
 timeout, 3,072-MiB RSS limit, 512-MiB allocation limit, and final libFuzzer
-statistics. Pull-request smoke runs disable leak detection for reliability;
-campaigns enable AddressSanitizer and leak detection for every target. An
-exception requires an owner, a written rationale, an expiry, and a tracking
-issue in `fuzz/targets.toml`.
+statistics. Stable smoke runs use `--sanitizer none`; they do not provide
+AddressSanitizer or LeakSanitizer evidence. AddressSanitizer smoke runs disable
+leak detection for reliability, while campaigns enable AddressSanitizer and
+leak detection for every target. The stable profile is accepted only for
+`smoke`; campaign, minimization, coverage, and reporting remain pinned to the
+nightly sanitizer profile. A sanitizer exception requires an owner, a written
+rationale, an expiry, and a tracking issue in `fuzz/targets.toml`.
 
 The runner enforces those AddressSanitizer and LeakSanitizer settings itself,
 so local invocations retain the selected tier's leak policy even when the
@@ -108,7 +125,7 @@ To promote a useful input:
    private identifiers, copyrighted material, and unexpected size.
 2. Verify that it reaches new behavior or protects a confirmed regression.
 3. Minimize a corpus with `tests/scripts/run-fuzz-target.sh cmin <target>` or a
-   crash with `cargo +nightly-2026-07-24 fuzz tmin <target> <reproducer>`.
+   crash with `cargo +nightly-2026-07-23 fuzz tmin <target> <reproducer>`.
 4. Add it under the target's reviewed seed or regression directory and record
    its provenance and digest. Never replace a reviewed seed silently.
 
@@ -143,9 +160,9 @@ Treat every reproducer as untrusted and potentially security-sensitive:
 
 1. Download it only into a temporary directory and verify the recorded digest.
 2. Reproduce with
-   `cargo +nightly-2026-07-24 fuzz run <target> <reproducer>`.
+   `cargo +nightly-2026-07-23 fuzz run <target> <reproducer>`.
 3. Minimize with
-   `cargo +nightly-2026-07-24 fuzz tmin <target> <reproducer>`.
+   `cargo +nightly-2026-07-23 fuzz tmin <target> <reproducer>`.
 4. Classify security-sensitive crashes through the private process in
    [`SECURITY.md`](../SECURITY.md); do not paste them into a public issue.
 5. Add the minimized input under

@@ -388,7 +388,7 @@ jobs:
           fi
 
   fuzz-smoke:
-    name: Fuzz smoke (${{ matrix.fuzz_target }})
+    name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.actor != 'dependabot[bot]'
@@ -396,7 +396,13 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 16
       matrix:
+        fuzz_profile:
+          - name: stable
+            toolchain: stable
+          - name: asan
+            toolchain: nightly-2026-07-23
         fuzz_target:
           - turn_protocol
           - tls_client_hello
@@ -421,26 +427,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Install pinned Rust toolchain
+      - name: Install selected Rust toolchain
         run: |
-          rustup toolchain install nightly-2026-07-24 --profile minimal
+          rustup toolchain install "${{ matrix.fuzz_profile.toolchain }}" --profile minimal
 
       - name: Install pinned cargo-fuzz
         run: |
-          cargo +nightly-2026-07-24 install cargo-fuzz --version 0.13.2 --locked
-          test "$(cargo +nightly-2026-07-24 fuzz --version)" = "cargo-fuzz 0.13.2"
+          cargo +"${{ matrix.fuzz_profile.toolchain }}" install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +"${{ matrix.fuzz_profile.toolchain }}" fuzz --version)" = "cargo-fuzz 0.13.2"
 
-      - name: Run fuzz smoke (${{ matrix.fuzz_target }})
+      - name: Run fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})
         env:
-          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
-          LSAN_OPTIONS: detect_leaks=0
+          OXIBELT_FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}
         run: tests/scripts/run-fuzz-target.sh smoke ${{ matrix.fuzz_target }}
 
       - name: Upload fuzz artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: oxibelt-${{ matrix.fuzz_target }}-fuzz-artifacts
+          name: oxibelt-${{ matrix.fuzz_profile.name }}-${{ matrix.fuzz_target }}-fuzz-artifacts
           path: ${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}
           if-no-files-found: ignore
           retention-days: 90
