@@ -47,7 +47,7 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 httparse = "1.10.1"
-hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
+hyper = { version = "1.11.0", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
 libc = "0.2.189"

@@ -59,7 +59,7 @@ pub(super) async fn handle_admin_tls_connection(
       .unwrap_or_default(),
   );
   serve_admin_http1(
-    TokioIo::new(tls_stream),
+    tls_stream,
     AdminHttp1Context {
       peer_addr,
       listener_bind,
@@ -82,7 +82,7 @@ pub(super) async fn handle_admin_plaintext_connection(
   admin_operations: AdminOperationRuntime,
 ) -> anyhow::Result<()> {
   serve_admin_http1(
-    TokioIo::new(stream),
+    stream,
     AdminHttp1Context {
       peer_addr,
       listener_bind,
@@ -96,7 +96,7 @@ pub(super) async fn handle_admin_plaintext_connection(
   .await
 }
 
-async fn serve_admin_http1<I>(io: TokioIo<I>, context: AdminHttp1Context) -> anyhow::Result<()>
+async fn serve_admin_http1<I>(io: I, context: AdminHttp1Context) -> anyhow::Result<()>
 where
   I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -145,8 +145,9 @@ where
     .max_headers(max_headers)
     .max_buf_size(max_total_header_bytes)
     .keep_alive(true);
+  let io = super::http1_framing_guard::Http1FramingGuard::new(io, max_total_header_bytes);
   builder
-    .serve_connection(io, service)
+    .serve_connection(TokioIo::new(io), service)
     .with_upgrades()
     .await
     .map_err(|error| anyhow::anyhow!(error))

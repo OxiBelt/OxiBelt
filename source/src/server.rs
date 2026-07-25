@@ -117,6 +117,7 @@ mod connection_errors;
 #[cfg(feature = "admin-runtime")]
 mod file_sync_path;
 mod h1_fast_proxy;
+mod http1_framing_guard;
 mod http_io;
 mod listener_sets;
 mod listener_supervisor;

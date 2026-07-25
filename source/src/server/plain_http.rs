@@ -184,6 +184,10 @@ pub(super) async fn handle_connection(
     .max_buf_size(snapshot.config.limits.max_total_header_bytes.max(8192))
     .keep_alive(true);
   let io = super::http_io::InstrumentedDownstreamIo::new(io, snapshot.metrics.clone(), "h1", "tcp");
+  let io = super::http1_framing_guard::Http1FramingGuard::new(
+    io,
+    snapshot.config.limits.max_total_header_bytes.max(8192),
+  );
   let connection = builder.serve_connection(TokioIo::new(io), service);
   let mut graceful_drain = drain;
   let result = if snapshot.http1_upgrades_possible {

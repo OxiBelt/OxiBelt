@@ -127,6 +127,12 @@ criteria = "safe-to-deploy"
 version = "0.3.4"
 notes = "Reviewed the complete 0.3.4 source and 0.3.3 diff; it contains no unsafe, build script, or write side effects, and the update only adds error conversion and caches filenames while preserving caller-controlled lazy filesystem traversal."
 
+[[audits.hyper]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "1.11.0"
+notes = "Reviewed the complete checksum-matched 1.11.0 source and the 1.10.1-to-1.11.0 delta; the changed HTTP/1 parser removes Content-Length and disables keep-alive when Transfer-Encoding is present, changed ReadBufCursor methods preserve initialized-length and capacity invariants, and the remaining unsafe edits are equivalent pointer casts or existing guarded header/index operations. OxiBelt adds a bounded pre-parser guard that retains its stricter rejection policy before service dispatch."
+
 [[audits.jiff]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
