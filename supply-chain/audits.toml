@@ -7,6 +7,12 @@ criteria = "safe-to-deploy"
 version = "1.0.104"
 notes = "Reviewed complete 1.0.104 source and the 1.0.103 delta; error-erasure, downcast, pointer-ownership, and formatting-buffer unsafe invariants are contained, the build script only performs a Cargo-rustc probe in OUT_DIR, and the source delta is documentation-only."
 
+[[audits.base64]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.22.1 -> 0.23.0"
+notes = "Reviewed the complete 0.22.1-to-0.23.0 source delta, including custom-padding and decode-error changes plus the new AVX2 and NEON engines; SIMD loads and stores are guarded by slice bounds, instruction dispatch is runtime-checked or requires explicit unsafe construction, and the scalar implementation remains free of unsafe code. OxiBelt disables the default simd-unsafe feature and selects only std."
+
 [[audits.cc]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
