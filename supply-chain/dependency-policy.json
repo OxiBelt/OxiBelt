@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-07-24",
+  "reviewedOn": "2026-07-25",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
-      "exemptionInventorySha256": "d6d61e2eea0c20fcb6d04dc1be2db659f1c2943b7e45037535185768aafe7d00",
-      "exemptedPackageVersions": 445
+      "lockfileSha256": "17b1d527e4807d7045d3b4b5e753866df0bded756d8b8d40d3e8ba3684f62710",
+      "exemptionInventorySha256": "ba656c28504749c310414043d73475a1ba549163c638cb7a42e47bb5d8399f66",
+      "exemptedPackageVersions": 424
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -188,24 +188,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
+      "subject": "Cargo.lock@sha256:17b1d527e4807d7045d3b4b5e753866df0bded756d8b8d40d3e8ba3684f62710",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-24",
+      "reviewedOn": "2026-07-25",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:a1ae3c9d1758f47cb57378888c6d23cbed4316111dd355f614d7bd347e3ee037",
+      "subject": "Cargo.lock@sha256:17b1d527e4807d7045d3b4b5e753866df0bded756d8b8d40d3e8ba3684f62710",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-24",
+      "reviewedOn": "2026-07-25",
       "expiresOn": "2026-10-19"
     },
     {

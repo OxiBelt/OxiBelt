@@ -779,7 +779,7 @@ jobs:
             --arg rustc "rustc 1.97.1 via ${rust_builder}" \
             --arg cargo "cargo from ${rust_builder}" \
             --arg node "${node_builder}" \
-            --arg pnpm "pnpm 11.16.0" \
+            --arg pnpm "pnpm 11.17.0" \
             --arg buildx "${buildx_version}" \
             --arg buildkit "${OXIBELT_BUILDKIT_IMAGE}" \
             --arg trivy "trivy v0.72.0" \

@@ -21,7 +21,7 @@ undocumented_unsafe_blocks = "deny"
 anyhow = "1.0.104"
 base64 = "0.22.1"
 bytes = "1.12.1"
-futures-util = "0.3.32"
+futures-util = "0.3.33"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }
 http = "1.4.2"
@@ -34,7 +34,7 @@ quinn = { version = "0.11.11", default-features = false, features = ["log", "run
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 serde_json = "1.0.151"
 sha1 = "0.11.0"
-tokio = { version = "1.52.4", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
 url = "2.5.8"
 web-transport-quinn = { version = "0.11.10", default-features = false, features = ["aws-lc-rs"] }

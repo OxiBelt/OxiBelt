@@ -31,7 +31,7 @@ function Environment(): Record<string, unknown> {
     rustc: 'rustc 1.97.1',
     cargo: 'cargo 1.97.1',
     node: 'v24.13.0',
-    pnpm: '11.16.0',
+    pnpm: '11.17.0',
     buildx: 'github.com/docker/buildx v0.35.0',
     buildkit: 'moby/buildkit@sha256:' + '1'.repeat(64),
     trivy: '0.69.3',
