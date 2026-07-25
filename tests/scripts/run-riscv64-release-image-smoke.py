@@ -44,6 +44,12 @@ NATIVE_HELPER_IMAGE = (
     "docker.io/library/alpine:3.24@"
     "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 )
+KEYSIGNER_SEED_COMMAND = (
+    "chmod 0550 /cert && "
+    "chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64 && "
+    "chown 10002:10002 /cert/privkey.pem /cert/keysigner-token.b64 && "
+    "chown 10002:10002 /cert"
+)
 
 ROLE_BINARIES = {
     "standalone": (
@@ -919,6 +925,95 @@ class DockerSmoke:
         cert.chmod(0o444)
         return cert, key
 
+    def generate_controller_pki(
+        self, directory: pathlib.Path, common_name: str
+    ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+        directory.mkdir(parents=True, exist_ok=True)
+        ca_key = directory / "ca-key.pem"
+        ca_cert = directory / "ca.pem"
+        leaf_key = directory / "server-key.pem"
+        leaf_request = directory / "server.csr"
+        leaf_cert = directory / "server.pem"
+        self.runner.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=OxiBelt RISC-V release smoke CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE,pathlen:0",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout",
+                str(ca_key),
+                "-out",
+                str(ca_cert),
+            ],
+            timeout=ONE_SHOT_TIMEOUT_SECONDS,
+        )
+        self.runner.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-subj",
+                f"/CN={common_name}",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-addext",
+                f"subjectAltName=DNS:{common_name}",
+                "-keyout",
+                str(leaf_key),
+                "-out",
+                str(leaf_request),
+            ],
+            timeout=ONE_SHOT_TIMEOUT_SECONDS,
+        )
+        self.runner.run(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                str(leaf_request),
+                "-CA",
+                str(ca_cert),
+                "-CAkey",
+                str(ca_key),
+                "-set_serial",
+                "1",
+                "-days",
+                "1",
+                "-sha256",
+                "-copy_extensions",
+                "copy",
+                "-out",
+                str(leaf_cert),
+            ],
+            timeout=ONE_SHOT_TIMEOUT_SECONDS,
+        )
+        ca_cert.chmod(0o444)
+        leaf_cert.chmod(0o444)
+        leaf_key.chmod(0o400)
+        leaf_request.unlink()
+        ca_key.unlink()
+        return leaf_cert, leaf_key, ca_cert
+
     def prepare_data_fixture(
         self,
     ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
@@ -1241,13 +1336,15 @@ class DockerSmoke:
             raise SmokeError("Gateway controller render output is not the expected managed TOML")
 
         mock_dir = self.root / "controller-mock"
-        cert, key = self.generate_certificate(mock_dir, "host.docker.internal")
+        cert, key, ca_cert = self.generate_controller_pki(
+            mock_dir, "host.docker.internal"
+        )
         service_account = self.root / "service-account"
         service_account.mkdir()
         token = secrets.token_urlsafe(32)
         (service_account / "token").write_text(f"{token}\n", encoding="utf-8")
         (service_account / "namespace").write_text("smoke\n", encoding="utf-8")
-        shutil.copyfile(cert, service_account / "ca.crt")
+        shutil.copyfile(ca_cert, service_account / "ca.crt")
         (service_account / "token").chmod(0o444)
         (service_account / "namespace").chmod(0o444)
         (service_account / "ca.crt").chmod(0o444)
@@ -1412,11 +1509,7 @@ class DockerSmoke:
             "/bin/sh",
             [
                 "-c",
-                (
-                    "chown 10002:10002 /cert /cert/privkey.pem "
-                    "/cert/keysigner-token.b64 && chmod 0550 /cert && "
-                    "chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64"
-                ),
+                KEYSIGNER_SEED_COMMAND,
             ],
             seed_options,
             kind="keysigner-seed",
@@ -1426,7 +1519,11 @@ class DockerSmoke:
             self.docker(["cp", str(token), f"{seed}:/cert/keysigner-token.b64"])
             result = self.docker(["start", "--attach", seed], check=False)
             if result.returncode != 0:
-                raise SmokeError("failed to seed the keysigner certificate volume")
+                detail = (result.stderr or result.stdout).strip()[-4096:]
+                raise SmokeError(
+                    "failed to seed the keysigner certificate volume "
+                    f"with code {result.returncode}: {detail}"
+                )
         finally:
             self.remove_container(seed)
 

@@ -118,6 +118,55 @@ class FakeCrashRunner:
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
+class RecordingCommandRunner(SMOKE.CommandRunner):
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return super().run(args, timeout=timeout, check=check, env=env)
+
+
+class FakeKeysignerSeedRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, env
+        self.calls.append(args)
+        if args[:2] == ["openssl", "genpkey"]:
+            pathlib.Path(args[args.index("-out") + 1]).write_text(
+                "test key\n", encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:4] == ["docker", "image", "inspect", SMOKE.NATIVE_HELPER_IMAGE]:
+            return subprocess.CompletedProcess(args, 0, "{}\n", "")
+        if args[:2] == ["docker", "create"]:
+            return subprocess.CompletedProcess(args, 0, "keysigner-seed\n", "")
+        if args[:4] == ["docker", "start", "--attach", "keysigner-seed"]:
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                f"discarded-prefix-{'x' * 5000}-bounded-tail",
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
 class FakeImageRunner:
     def __init__(
         self,
@@ -460,6 +509,97 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                 clock=lambda: next(moments),
                 sleep=lambda _seconds: None,
             )
+
+    def test_controller_pki_uses_distinct_constrained_ca_and_server_leaf(
+        self,
+    ) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = RecordingCommandRunner()
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        self.addCleanup(smoke.cleanup)
+        leaf_cert, leaf_key, ca_cert = smoke.generate_controller_pki(
+            self.root / "controller-pki",
+            "host.docker.internal",
+        )
+
+        ca_text = runner.run(
+            ["openssl", "x509", "-in", str(ca_cert), "-noout", "-text"],
+            timeout=10,
+        ).stdout
+        leaf_text = runner.run(
+            ["openssl", "x509", "-in", str(leaf_cert), "-noout", "-text"],
+            timeout=10,
+        ).stdout
+        verified = runner.run(
+            [
+                "openssl",
+                "verify",
+                "-CAfile",
+                str(ca_cert),
+                "-verify_hostname",
+                "host.docker.internal",
+                "-purpose",
+                "sslserver",
+                str(leaf_cert),
+            ],
+            timeout=10,
+        )
+
+        self.assertIn("CA:TRUE, pathlen:0", ca_text)
+        self.assertIn("Certificate Sign", ca_text)
+        self.assertIn("CA:FALSE", leaf_text)
+        self.assertIn("TLS Web Server Authentication", leaf_text)
+        self.assertIn("DNS:host.docker.internal", leaf_text)
+        self.assertEqual(verified.stdout.strip(), f"{leaf_cert}: OK")
+        self.assertEqual(leaf_key.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(leaf_cert.stat().st_mode & 0o777, 0o444)
+        self.assertEqual(ca_cert.stat().st_mode & 0o777, 0o444)
+        self.assertFalse((leaf_cert.parent / "ca-key.pem").exists())
+        self.assertFalse((leaf_cert.parent / "server.csr").exists())
+        signing = next(
+            call for call in runner.calls if call[:3] == ["openssl", "x509", "-req"]
+        )
+        self.assertIn("-copy_extensions", signing)
+        self.assertEqual(signing[signing.index("-copy_extensions") + 1], "copy")
+
+    def test_keysigner_seed_keeps_narrow_caps_and_bounded_failure_detail(
+        self,
+    ) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeKeysignerSeedRunner()
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        try:
+            with self.assertRaises(SMOKE.SmokeError) as raised:
+                smoke.run_keysigner_role()
+            message = str(raised.exception)
+            self.assertIn("with code 1", message)
+            self.assertIn("bounded-tail", message)
+            self.assertNotIn("discarded-prefix", message)
+            self.assertLessEqual(len(message), 4200)
+
+            create = next(
+                call for call in runner.calls if call[:2] == ["docker", "create"]
+            )
+            self.assertEqual(
+                create[create.index("-c") + 1],
+                (
+                    "chmod 0550 /cert && "
+                    "chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64 && "
+                    "chown 10002:10002 /cert/privkey.pem "
+                    "/cert/keysigner-token.b64 && "
+                    "chown 10002:10002 /cert"
+                ),
+            )
+            self.assertIn("--cap-drop", create)
+            self.assertEqual(create[create.index("--cap-drop") + 1], "ALL")
+            self.assertIn("--cap-add", create)
+            self.assertEqual(create[create.index("--cap-add") + 1], "CHOWN")
+            self.assertNotIn("FOWNER", create)
+            self.assertEqual(smoke.containers, [])
+        finally:
+            self.assertEqual(smoke.cleanup(), [])
 
     def test_startup_crash_is_retained_for_bounded_diagnostics_and_cleanup(
         self,
