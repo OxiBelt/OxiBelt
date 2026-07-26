@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "7ad97cb35e3d6d4b39f371dc6e0e78b49d52ab7da398401afe7361c818abe623",
+      "lockfileSha256": "60c6c5f82dc8281a132c34814bdf0992f056101e55eed935f8445528701d7e47",
       "exemptionInventorySha256": "ba656c28504749c310414043d73475a1ba549163c638cb7a42e47bb5d8399f66",
       "exemptedPackageVersions": 424
     },
@@ -72,8 +72,9 @@
         "packages": {
           "aes-gcm": ["0.11.0"],
           "argon2": ["0.5.3"],
-          "aws-lc-rs": ["1.17.1"],
-          "aws-lc-sys": ["0.42.0"],
+          "aws-lc-fips-sys": ["0.13.16"],
+          "aws-lc-rs": ["1.17.3"],
+          "aws-lc-sys": ["0.43.0"],
           "chacha20poly1305": ["0.11.0"],
           "hkdf": ["0.13.0"],
           "hmac": ["0.13.0"],
@@ -189,7 +190,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:7ad97cb35e3d6d4b39f371dc6e0e78b49d52ab7da398401afe7361c818abe623",
+      "subject": "Cargo.lock@sha256:60c6c5f82dc8281a132c34814bdf0992f056101e55eed935f8445528701d7e47",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -201,7 +202,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:7ad97cb35e3d6d4b39f371dc6e0e78b49d52ab7da398401afe7361c818abe623",
+      "subject": "Cargo.lock@sha256:60c6c5f82dc8281a132c34814bdf0992f056101e55eed935f8445528701d7e47",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,

@@ -7,6 +7,24 @@ criteria = "safe-to-deploy"
 version = "1.0.104"
 notes = "Reviewed complete 1.0.104 source and the 1.0.103 delta; error-erasure, downcast, pointer-ownership, and formatting-buffer unsafe invariants are contained, the build script only performs a Cargo-rustc probe in OUT_DIR, and the source delta is documentation-only."
 
+[[audits.aws-lc-fips-sys]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.13.15 -> 0.13.16"
+notes = "Reviewed the complete checksum-matched 0.13.15-to-0.13.16 source delta and verified its embedded upstream commit signature. The FIPS native module is unchanged; generated bindings retain their layouts and signatures apart from the versioned symbol prefix and a layout-preserving va_list alias, while build changes add a bounded header-derived module-version constant and share the reviewed compiler-probe and system-library validation changes from aws-lc-sys."
+
+[[audits.aws-lc-rs]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.17.1 -> 1.17.3"
+notes = "Reviewed the complete checksum-matched 1.17.1-to-1.17.3 source delta and verified its embedded upstream commit signature. The facade adds version reporting over a static AWS-LC string, clarifies ML-DSA seed and expanded-key serialization, and otherwise delegates to separately audited sys deltas; the new CStr conversion uses an initialized library-owned NUL-terminated constant and does not alter OxiBelt's selected algorithms or features."
+
+[[audits.aws-lc-sys]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.42.0 -> 0.43.0"
+notes = "Reviewed the complete checksum-matched 0.42.0-to-0.43.0 source delta and verified its embedded upstream commit signature. Generated FFI remains layout-compatible, Windows prebuilt NASM disassembly and relocations are unchanged after symbol-prefix normalization, and the native delta adds CTS APIs, null-checks optional AEAD cleanup, honors explicitly configured unexpected-EOF handling, and adds opt-in shared-library symbol versioning. Build-script changes remain confined to toolchain probes, caller-selected system-library inputs, and OUT_DIR; OxiBelt retains vendored static AWS-LC with the existing bindgen-only RISC-V feature."
+
 [[audits.base64]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

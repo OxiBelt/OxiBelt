@@ -19,7 +19,7 @@ mutation-pqc = ["admin-runtime", "aws-lc-rs/unstable"]
 anyhow = "1.0.104"
 aho-corasick = "1.1.4"
 arc-swap = "1.9.2"
-aws-lc-rs = { version = "1.17.1", default-features = false }
+aws-lc-rs = { version = "1.17.3", default-features = false }
 argon2 = { version = "0.5.3", features = ["std"] }
 async-compression = { version = "0.4.42", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.0", default-features = false, features = ["aes", "alloc"] }
@@ -96,7 +96,7 @@ oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
-aws-lc-rs = { version = "1.17.1", default-features = false, features = ["bindgen"] }
+aws-lc-rs = { version = "1.17.3", default-features = false, features = ["bindgen"] }
 
 [dev-dependencies]
 clubcard = { version = "0.3.3", features = ["builder"] }
