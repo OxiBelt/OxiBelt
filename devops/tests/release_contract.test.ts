@@ -238,6 +238,67 @@ test('rejects compatibility-surface changes without a release-contract document 
   }
 })
 
+test('rejects deleted compatibility surfaces without a release-contract document update', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    const Base = Commit(Root, 'baseline')
+    Fs.rmSync(Path.join(Root, 'source/src/config/example.rs'))
+    const DeletedHead = Commit(Root, 'delete config')
+
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: DeletedHead
+      }),
+      /without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+
+    WriteFile(
+      Root,
+      'docs/Upgrading.md',
+      '# Upgrading\n\n## Upgrade from 0.6.5\n\nDocument the removed configuration surface.\n'
+    )
+    const DocumentedHead = Commit(Root, 'document config deletion')
+    ValidateRepositoryReleaseContract({
+      workspacePath: Root,
+      changeBase: Base,
+      changeHead: DocumentedHead
+    })
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects renaming a compatibility surface outside governed paths', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    Git(Root, ['config', 'diff.renames', 'true'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    const Base = Commit(Root, 'baseline')
+    Fs.mkdirSync(Path.join(Root, 'misc'), { recursive: true })
+    Fs.renameSync(
+      Path.join(Root, 'source/src/config/example.rs'),
+      Path.join(Root, 'misc/example.rs')
+    )
+    const Head = Commit(Root, 'rename config outside governed paths')
+
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: Head
+      }),
+      /without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('classifies the Kubernetes graduation registry as a feature lifecycle surface', () => {
   const Root = CreateContractWorkspace()
   try {
@@ -324,6 +385,50 @@ test('requires a substantive candidate section for each changed compatibility su
       }),
       /changes the Configuration compatibility surface but marks that section unchanged/
     )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('requires a substantive candidate section for deleted compatibility surfaces', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+    const PlaceholderEntry = GovernedEntry()
+      .replace(
+        '- Add a person-reviewed configuration compatibility statement.',
+        '- No changes for this release.'
+      )
+      .replace(
+        '### Security\n\n- No changes for this release.',
+        '### Security\n\n- Preserve the existing release validation boundary.'
+      )
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${PlaceholderEntry}\n${BaselineEntry}`)
+    Fs.rmSync(Path.join(Root, 'source/src/config/example.rs'))
+    const DeletedRevision = Commit(Root, 'release with config deletion')
+    Git(Root, ['tag', '0.7.0'])
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.7.0',
+        revision: DeletedRevision
+      }),
+      /changes the Configuration compatibility surface but marks that section unchanged/
+    )
+
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${GovernedEntry()}\n${BaselineEntry}`)
+    const DocumentedRevision = Commit(Root, 'document config deletion')
+    Git(Root, ['tag', '--force', '0.7.0', DocumentedRevision])
+    const Result = BuildReleaseCandidate({
+      workspacePath: Root,
+      ref: 'refs/tags/0.7.0',
+      revision: DocumentedRevision
+    })
+    Assert.equal(Result.receipt.revision, DocumentedRevision)
   } finally {
     RemoveWorkspace(Root)
   }

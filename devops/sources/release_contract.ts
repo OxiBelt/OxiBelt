@@ -659,7 +659,14 @@ function ResolveRevision(Root: string, Revisionish: string): string {
 }
 
 function ChangedPaths(Root: string, Base: string, Head: string): string[] {
-  const Output = RunGit(Root, ['diff', '--name-only', '--diff-filter=ACMR', `${Base}..${Head}`, '--'])
+  const Output = RunGit(Root, [
+    'diff',
+    '--name-only',
+    '--no-renames',
+    '--diff-filter=ACDMR',
+    `${Base}..${Head}`,
+    '--'
+  ])
   return Output === '' ? [] : Output.split('\n')
 }
 
