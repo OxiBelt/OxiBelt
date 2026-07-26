@@ -249,6 +249,12 @@ pub(super) async fn serve_ops_listener(
         else {
           continue;
         };
+        let max_total_header_bytes = state
+          .snapshot()
+          .config
+          .limits
+          .max_total_header_bytes
+          .max(8192);
         connections.spawn(async move {
           let _control_connection = control_connection;
           let service = service_fn(move |request: hyper::Request<Incoming>| {
@@ -267,8 +273,12 @@ pub(super) async fn serve_ops_listener(
               Ok::<_, Infallible>(ops_response(request, state, kind))
             }
           });
+          let io = super::http1_framing_guard::Http1FramingGuard::new(
+            stream,
+            max_total_header_bytes,
+          );
           if let Err(error) = hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
+            .serve_connection(TokioIo::new(io), service)
             .await
           {
             warn!(peer = %peer_addr, error = %error, "ops connection failed");

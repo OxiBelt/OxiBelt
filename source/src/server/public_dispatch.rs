@@ -224,6 +224,14 @@ pub(super) async fn handle_connection(
       .keep_alive(true);
     let io =
       http_io::InstrumentedDownstreamIo::new(io, handshake_state.metrics.clone(), "h1", "tls");
+    let io = http1_framing_guard::Http1FramingGuard::new(
+      io,
+      handshake_state
+        .config
+        .limits
+        .max_total_header_bytes
+        .max(8192),
+    );
     let connection = builder.serve_connection(TokioIo::new(io), service);
     let mut graceful_drain = drain;
     let result = if handshake_state.http1_upgrades_possible {

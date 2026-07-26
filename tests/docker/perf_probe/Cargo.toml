@@ -27,7 +27,7 @@ h3-quinn = { version = "0.0.10", features = ["datagram"] }
 hdrhistogram = "7.6.0"
 http = "1.4.2"
 http-body-util = "0.1.4"
-hyper = { version = "1.10.1", features = ["client", "http1", "http2", "server"] }
+hyper = { version = "1.11.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.20", features = ["http1", "http2", "server", "service", "tokio"] }
 quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
