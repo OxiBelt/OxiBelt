@@ -167,6 +167,39 @@ class FakeKeysignerSeedRunner:
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
+class FakeKeysignerSocketInitRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: int,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, env
+        self.calls.append(args)
+        if args[:2] == ["openssl", "genpkey"]:
+            pathlib.Path(args[args.index("-out") + 1]).write_text(
+                "test key\n", encoding="utf-8"
+            )
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:4] == ["docker", "image", "inspect", SMOKE.NATIVE_HELPER_IMAGE]:
+            return subprocess.CompletedProcess(args, 0, "{}\n", "")
+        if args[:2] == ["docker", "create"]:
+            command = args[args.index("-c") + 1] if "-c" in args else ""
+            if command == SMOKE.KEYSIGNER_SEED_COMMAND:
+                return subprocess.CompletedProcess(args, 0, "keysigner-seed\n", "")
+            if command == "chmod 0770 /sock && chown 10002:10002 /sock":
+                return subprocess.CompletedProcess(
+                    args, 0, "keysigner-socket-init\n", ""
+                )
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
 class FakeImageRunner:
     def __init__(
         self,
@@ -602,6 +635,108 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
             self.assertEqual(smoke.containers, [])
         finally:
             self.assertEqual(smoke.cleanup(), [])
+
+    def test_keysigner_socket_init_sets_mode_before_owner_with_narrow_caps(
+        self,
+    ) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = FakeKeysignerSocketInitRunner()
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        smoke.runtime_image_id = artifact.manifest_digest
+        try:
+            with self.assertRaisesRegex(
+                SMOKE.SmokeError,
+                "docker create did not return a container ID",
+            ):
+                smoke.run_keysigner_role()
+
+            socket_create = next(
+                call
+                for call in runner.calls
+                if call[:2] == ["docker", "create"]
+                and "-c" in call
+                and call[call.index("-c") + 1]
+                == "chmod 0770 /sock && chown 10002:10002 /sock"
+            )
+            socket_mounts = [
+                socket_create[index + 1]
+                for index, value in enumerate(socket_create)
+                if value == "--mount"
+            ]
+            self.assertEqual(len(socket_mounts), 1)
+            socket_mount = socket_mounts[0]
+            self.assertEqual(
+                socket_create,
+                [
+                    "docker",
+                    "create",
+                    "--name",
+                    socket_create[3],
+                    "--label",
+                    smoke.label,
+                    "--pull",
+                    "never",
+                    "--network",
+                    "none",
+                    "--user",
+                    "0:0",
+                    "--read-only",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--pids-limit",
+                    "64",
+                    "--memory",
+                    "128m",
+                    "--cpus",
+                    "1",
+                    "--cap-add",
+                    "CHOWN",
+                    "--mount",
+                    socket_mount,
+                    "--entrypoint",
+                    "/bin/sh",
+                    SMOKE.NATIVE_HELPER_IMAGE,
+                    "-c",
+                    "chmod 0770 /sock && chown 10002:10002 /sock",
+                ],
+            )
+            self.assertRegex(
+                socket_mount,
+                (
+                    r"^type=volume,src=oxibelt-riscv64-smoke-keysigner-socket-"
+                    r".+,dst=/sock$"
+                ),
+            )
+            socket_start = runner.calls.index(
+                [
+                    "docker",
+                    "start",
+                    "--attach",
+                    "keysigner-socket-init",
+                ]
+            )
+            socket_remove = runner.calls.index(
+                [
+                    "docker",
+                    "rm",
+                    "--force",
+                    "keysigner-socket-init",
+                ]
+            )
+            self.assertLess(runner.calls.index(socket_create), socket_start)
+            self.assertLess(socket_start, socket_remove)
+            self.assertEqual(smoke.containers, [])
+        finally:
+            volumes = list(smoke.volumes)
+            self.assertEqual(len(volumes), 2)
+            self.assertEqual(smoke.cleanup(), [])
+
+        for volume in volumes:
+            self.assertIn(["docker", "volume", "rm", volume], runner.calls)
+        self.assertEqual(smoke.volumes, [])
 
     def test_startup_crash_is_retained_for_bounded_diagnostics_and_cleanup(
         self,

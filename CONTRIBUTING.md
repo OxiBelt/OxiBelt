@@ -125,6 +125,34 @@ compatibility surfaces with:
 pnpm run release-contract:check
 ```
 
+Before pushing a stable or beta tag, create the intended signed annotated tag
+locally at the exact validated commit and exercise the same candidate contract
+used by the tag workflow:
+
+```sh
+release_tag=0.7.0-beta.2
+release_revision="$(git rev-parse HEAD)"
+release_preflight_dir="$(mktemp -d)"
+
+git tag --sign --annotate "${release_tag}" \
+  --message "Release ${release_tag}" "${release_revision}"
+git verify-tag "${release_tag}"
+pnpm run release-contract:candidate \
+  --ref "refs/tags/${release_tag}" \
+  --revision "${release_revision}" \
+  --receipt-output "${release_preflight_dir}/release-contract.json" \
+  --body-output "${release_preflight_dir}/release-body.md"
+jq . "${release_preflight_dir}/release-contract.json"
+sed -n '1,$p' "${release_preflight_dir}/release-body.md"
+```
+
+Review the complete receipt and body, then remove the temporary directory.
+Push the already-validated tag object only after the canonical default-branch
+validation for `release_revision` succeeds. If local candidate validation
+fails, an unpushed local tag may be deleted and recreated after the defect is
+fixed. A tag that reached the remote is immutable and must never be moved,
+replaced, or deleted; advance to the next release version instead.
+
 When a stable or beta tag is pushed, the tag workflow binds the entry to the
 exact tag commit and prepares a draft GitHub Release. It never publishes the
 draft and never overwrites a differing draft or published release. A person

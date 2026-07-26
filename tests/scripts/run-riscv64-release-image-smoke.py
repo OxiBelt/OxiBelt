@@ -1530,7 +1530,7 @@ class DockerSmoke:
 
         self.run_one_shot(
             "/bin/sh",
-            ["-c", "chown 10002:10002 /sock && chmod 0770 /sock"],
+            ["-c", "chmod 0770 /sock && chown 10002:10002 /sock"],
             options=[
                 *self.native_helper_options(user="0:0"),
                 "--cap-add",
