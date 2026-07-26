@@ -45,6 +45,7 @@ NATIVE_HELPER_IMAGE = (
     "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 )
 KEYSIGNER_SEED_COMMAND = (
+    "chown 0:0 /cert/privkey.pem /cert/keysigner-token.b64 && "
     "chmod 0550 /cert && "
     "chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64 && "
     "chown 10002:10002 /cert/privkey.pem /cert/keysigner-token.b64 && "

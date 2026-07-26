@@ -585,6 +585,8 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
             self.assertEqual(
                 create[create.index("-c") + 1],
                 (
+                    "chown 0:0 /cert/privkey.pem "
+                    "/cert/keysigner-token.b64 && "
                     "chmod 0550 /cert && "
                     "chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64 && "
                     "chown 10002:10002 /cert/privkey.pem "
