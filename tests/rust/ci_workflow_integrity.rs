@@ -2552,6 +2552,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "sha256sum --check --status",
     "CI event values are untrusted input",
     "OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS must be a decimal value from 60 through 900",
+    "controller_readiness_revocation_timeout_seconds=45",
+    "wait_for \"controller readiness revocation after Lease deletion\" \\\n  \"${controller_readiness_revocation_timeout_seconds}\" controller_pods_are_unready",
     "dataplane-image-values.yaml",
     "controller-image-values.yaml",
     "kind create cluster",
