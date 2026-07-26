@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-07-25",
+  "reviewedOn": "2026-07-26",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,8 +17,8 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
-      "exemptionInventorySha256": "6ebb225f468132471a1d2188f7c846d311109c92f3cf390e19c433253aa57193",
+      "lockfileSha256": "b09de37472646cb70a975fce71add925bf43825cbe96340fe105703992796274",
+      "exemptionInventorySha256": "2f0846b1abe63ab0003d9f281ac2cdad441f1c0fd04647499d73c18071aa1d8e",
       "exemptedPackageVersions": 423
     },
     "reviewTriggers": [
@@ -106,7 +106,8 @@
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.13"],
           "web-transport-proto": ["0.6.0"],
-          "web-transport-quinn": ["0.11.10"]
+          "web-transport-quinn": ["0.11.10"],
+          "web-transport-trait": ["0.3.7"]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
       },
@@ -190,7 +191,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
+      "subject": "Cargo.lock@sha256:b09de37472646cb70a975fce71add925bf43825cbe96340fe105703992796274",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -202,12 +203,23 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:d5f642cfef1e3e98d0437141fde6e27f7c750117b4672450bc5e0b6f1bba03cf",
+      "subject": "Cargo.lock@sha256:b09de37472646cb70a975fce71add925bf43825cbe96340fe105703992796274",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
       "reviewedOn": "2026-07-25",
+      "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-cargo-vet-web-transport-trait-0.3.7",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "web-transport-trait@0.3.7:safe-to-deploy",
+      "rationale": "The generic RecvStream::read_buf default remains unsuitable for whole-crate certification. OxiBelt consumes the selected web-transport-quinn 0.11.10 receive stream through Tokio AsyncRead into initialized storage; retain an exact-version exception pending an upstream API redesign or dependency removal.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
+      "reviewedOn": "2026-07-26",
       "expiresOn": "2026-10-19"
     },
     {
