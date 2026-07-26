@@ -46,6 +46,7 @@ admin_server_name=""
 admin_service_name="${workload_name}-admin"
 controller_selector="app.kubernetes.io/name=oxibelt-gateway-controller"
 leader_lease_name="oxibelt-gateway-controller"
+controller_readiness_revocation_timeout_seconds=45
 
 die() {
   echo "kubernetes immutable rollout test: $*" >&2
@@ -1560,9 +1561,12 @@ wait_for "Programmed proof after rolling controller upgrade" "${rollout_timeout_
 
 # Deleting the selected Lease revokes both writers. The controller lacks create
 # permission, so only reapplying the Helm release can recreate the exact object.
+# Kubernetes' default readiness probe budget is 30 seconds. Keep a bounded
+# propagation margin for the kubelet to publish both failed Pod conditions.
 old_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.metadata.uid}')"
 kube -n "${namespace}" delete lease "${leader_lease_name}" --wait=true >/dev/null
-wait_for "controller readiness revocation after Lease deletion" 30 controller_pods_are_unready
+wait_for "controller readiness revocation after Lease deletion" \
+  "${controller_readiness_revocation_timeout_seconds}" controller_pods_are_unready
 helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   --reuse-values \
