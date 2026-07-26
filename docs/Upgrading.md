@@ -155,6 +155,14 @@ Before upgrading:
   or external audit anchoring;
 - decide whether the deployment requires the compatibility `dataplane` Admin
   surface or the Admin-free `dataplane-strict` role;
+- audit downstream HTTP/1 clients before rollout: public, Admin, and operations
+  listeners reject conflicting or malformed `Content-Length` and
+  `Transfer-Encoding` framing before service dispatch, return `400 Bad Request`,
+  and close the connection; request heads above the existing configured limit
+  return `431 Request Header Fields Too Large`. Valid fixed-length and chunked
+  requests, successful `101 Switching Protocols` upgrades, successful `2xx`
+  `CONNECT` tunnels, and configuration syntax remain unchanged, so no
+  configuration migration is required;
 - keep controller and data-plane images on the same release revision.
 
 The exact stable or beta changelog entry must complete the validation,
