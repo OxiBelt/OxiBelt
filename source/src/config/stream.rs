@@ -420,9 +420,7 @@ pub(crate) fn shared_udp_flow_lease_timing_ms(
 }
 
 pub(crate) fn shared_udp_renew_parallelism(max_connections: u32) -> u64 {
-  u64::from(max_connections.saturating_sub(1))
-    .max(1)
-    .min(SHARED_UDP_RENEW_PARALLEL_BATCHES)
+  u64::from(max_connections.saturating_sub(1)).clamp(1, SHARED_UDP_RENEW_PARALLEL_BATCHES)
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

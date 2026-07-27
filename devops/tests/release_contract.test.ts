@@ -124,6 +124,17 @@ function Commit(Root: string, Message: string): string {
   return Git(Root, ['rev-parse', 'HEAD'])
 }
 
+function CommitBuildTagRevision(Root: string): string {
+  for (let Attempt = 0; Attempt < 64; Attempt += 1) {
+    WriteFile(Root, '.build-tag-nonce', `${Attempt}\n`)
+    const Revision = Commit(Root, `build ${Attempt}`)
+    if (!/^0[0-9]{7}$/.test(Revision.slice(0, 8))) {
+      return Revision
+    }
+  }
+  throw new Error('could not create a strict-SemVer build-tag revision after 64 attempts')
+}
+
 function RemoveWorkspace(Root: string): void {
   Fs.rmSync(Root, { force: true, recursive: true })
 }
@@ -438,7 +449,7 @@ test('build tags produce no changelog body or GitHub Release metadata', () => {
   const Root = CreateContractWorkspace()
   try {
     Git(Root, ['init', '-q'])
-    const Revision = Commit(Root, 'build')
+    const Revision = CommitBuildTagRevision(Root)
     const Tag = `0.7.0-build.${Revision.slice(0, 8)}`
     Git(Root, ['tag', Tag])
     const Result = BuildReleaseCandidate({

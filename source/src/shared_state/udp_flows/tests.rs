@@ -319,6 +319,16 @@ fn one_refilled_token_is_granted_without_waiting_for_the_full_request() {
   assert_eq!(balance, 0);
 }
 
+#[test]
+fn available_token_grant_saturates_before_narrowing() {
+  let mut balance = u64::MAX;
+  assert_eq!(take_available_tokens(&mut balance, u32::MAX), u32::MAX);
+  assert_eq!(
+    balance,
+    u64::MAX - u64::from(u32::MAX).saturating_mul(TOKEN_MICROS)
+  );
+}
+
 #[tokio::test]
 async fn backend_errors_and_successes_update_udp_failure_health() {
   let store = store([0x82; 32], [0x83; 32]);

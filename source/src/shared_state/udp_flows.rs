@@ -211,6 +211,10 @@ impl UdpFlowConnectionMarker {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+  clippy::large_enum_variant,
+  reason = "durable flow records remain inline to avoid a lookup-path allocation"
+)]
 pub(crate) enum UdpFlowLookupOutcome {
   Missing { server_now_ms: i64 },
   Found(UdpFlowRecord),
@@ -247,6 +251,10 @@ pub(crate) struct UdpFlowTouchRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+  clippy::large_enum_variant,
+  reason = "bounded renewal batches keep leases inline to avoid one allocation per flow"
+)]
 pub(crate) enum UdpFlowTouchOutcome {
   Renewed(UdpFlowLease),
   Lost { server_now_ms: i64 },
@@ -408,12 +416,12 @@ impl UdpFlowStore {
     validate_derivation_material(scope_material, "UDP flow scope")?;
     validate_derivation_material(flow_material, "UDP flow identity")?;
     let scope = Digest(keyed_digest(
-      &**self.identity_secret,
+      &self.identity_secret,
       IDENTITY_SCOPE_DOMAIN,
       &[scope_material],
     ));
     let flow = Digest(keyed_digest(
-      &**self.identity_secret,
+      &self.identity_secret,
       IDENTITY_FLOW_DOMAIN,
       &[&scope.0, flow_material],
     ));
@@ -426,7 +434,7 @@ impl UdpFlowStore {
   ) -> anyhow::Result<UdpFlowGeneration> {
     validate_derivation_material(configuration_material, "UDP flow configuration")?;
     Ok(UdpFlowGeneration(Digest(keyed_digest(
-      &**self.identity_secret,
+      &self.identity_secret,
       GENERATION_DOMAIN,
       &[configuration_material],
     ))))
@@ -436,12 +444,12 @@ impl UdpFlowStore {
     validate_derivation_material(instance_material, "UDP flow owner")?;
     Ok(UdpFlowOwner {
       id: Digest(keyed_digest(
-        &**self.identity_secret,
+        &self.identity_secret,
         OWNER_ID_DOMAIN,
         &[instance_material],
       )),
       generation: Digest(keyed_digest(
-        &**self.identity_secret,
+        &self.identity_secret,
         OWNER_GENERATION_DOMAIN,
         &[self.boot_generation.as_ref()],
       )),
@@ -456,14 +464,14 @@ impl UdpFlowStore {
     validate_derivation_material(route_material, "UDP flow route")?;
     validate_derivation_material(target_material, "UDP flow target")?;
     let route = Digest(keyed_digest(
-      &**self.identity_secret,
+      &self.identity_secret,
       ROUTE_ID_DOMAIN,
       &[route_material],
     ));
     Ok(UdpFlowTarget {
       route,
       target: Digest(keyed_digest(
-        &**self.identity_secret,
+        &self.identity_secret,
         TARGET_ID_DOMAIN,
         &[&route.0, target_material],
       )),
@@ -475,12 +483,12 @@ impl UdpFlowStore {
     let fence = lease.fence().to_be_bytes();
     UdpFlowConnectionMarker {
       marker: Digest(keyed_digest(
-        &**self.identity_secret,
+        &self.identity_secret,
         CONNECTION_MARKER_DOMAIN,
         &[&identity.scope.0, &identity.flow.0],
       )),
       holder: Digest(keyed_digest(
-        &**self.identity_secret,
+        &self.identity_secret,
         CONNECTION_HOLDER_DOMAIN,
         &[
           &lease.generation().0.0,
@@ -866,10 +874,11 @@ fn initial_token_micros(tokens: u32) -> u64 {
 }
 
 fn take_available_tokens(balance_micros: &mut u64, requested_tokens: u32) -> u32 {
-  let available_tokens = *balance_micros / TOKEN_MICROS;
-  let granted_tokens = u64::from(requested_tokens).min(available_tokens);
-  *balance_micros = balance_micros.saturating_sub(granted_tokens.saturating_mul(TOKEN_MICROS));
-  u32::try_from(granted_tokens).expect("granted durable UDP tokens are bounded by the u32 request")
+  let available_tokens = u32::try_from(*balance_micros / TOKEN_MICROS).unwrap_or(u32::MAX);
+  let granted_tokens = requested_tokens.min(available_tokens);
+  *balance_micros =
+    balance_micros.saturating_sub(u64::from(granted_tokens).saturating_mul(TOKEN_MICROS));
+  granted_tokens
 }
 
 fn retry_after_ms(deficit_micros: u64, refill_micros_per_second: u64) -> u64 {

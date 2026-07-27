@@ -318,6 +318,14 @@ test('strict release tag parser accepts stable, beta, and build tags', () => {
     kind: 'build',
     buildCommitPrefix: '4f43abcd'
   })
+  Assert.deepEqual(ParseReleaseTag('1.5.0-build.44372848'), {
+    tag: '1.5.0-build.44372848',
+    major: '1',
+    minor: '5',
+    patch: '0',
+    kind: 'build',
+    buildCommitPrefix: '44372848'
+  })
 })
 
 test('strict release tag parser rejects v prefixes and unsupported semver shapes', () => {
@@ -329,6 +337,7 @@ test('strict release tag parser rejects v prefixes and unsupported semver shapes
     '1.2.3+build.4',
     '1.2.3-alpha.1',
     '1.2.3-beta.01',
+    '1.2.3-build.01234567',
     '1.2.3-build.4f43abc',
     '1.2.3-build.4f43abcg',
     '1.2'

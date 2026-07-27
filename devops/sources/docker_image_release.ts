@@ -278,11 +278,13 @@ export function ParseReleaseTag(Tag: string): ReleaseTagInfo {
     }
   }
 
+  const ParsedBuildCommitPrefix = Parsed.prerelease.length === 2 &&
+    Parsed.prerelease[0] === 'build'
+    ? String(Parsed.prerelease[1])
+    : undefined
   if (
-    Parsed.prerelease.length === 2 &&
-    Parsed.prerelease[0] === 'build' &&
-    typeof Parsed.prerelease[1] === 'string' &&
-    BuildCommitPrefix.test(Parsed.prerelease[1])
+    ParsedBuildCommitPrefix !== undefined &&
+    BuildCommitPrefix.test(ParsedBuildCommitPrefix)
   ) {
     return {
       tag: Tag,
@@ -290,7 +292,7 @@ export function ParseReleaseTag(Tag: string): ReleaseTagInfo {
       minor: String(Parsed.minor),
       patch: String(Parsed.patch),
       kind: 'build',
-      buildCommitPrefix: Parsed.prerelease[1]
+      buildCommitPrefix: ParsedBuildCommitPrefix
     }
   }
 

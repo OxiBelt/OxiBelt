@@ -383,14 +383,13 @@ impl UdpProxyContext<'_> {
       .get(&peer_addr)
       .and_then(|session| session.durable.as_ref())
       .is_some_and(|durable| !durable.fence.is_valid())
+      && let Some(session) = flows.remove(&peer_addr)
     {
-      if let Some(session) = flows.remove(&peer_addr) {
-        state
-          .snapshot()
-          .metrics
-          .record_stream_udp_flow_fence_rejection(&config.name);
-        release_udp_session(session, state, &config.name, false, true).await;
-      }
+      state
+        .snapshot()
+        .metrics
+        .record_stream_udp_flow_fence_rejection(&config.name);
+      release_udp_session(session, state, &config.name, false, true).await;
     }
     let known_flow = flows.contains_key(&peer_addr);
     if !udp_flow_admitted(allow_new_flow, known_flow) {
@@ -995,7 +994,7 @@ async fn durable_udp_rate_allows(
     durable.local_tokens -= 1;
     return Ok(DurableRateDecision::Allowed);
   }
-  let requested_tokens = rate.burst.min(MAX_SHARED_TOKEN_LEASE).max(1);
+  let requested_tokens = rate.burst.clamp(1, MAX_SHARED_TOKEN_LEASE);
   match context
     .store
     .lease_tokens(UdpFlowTokenRequest {
