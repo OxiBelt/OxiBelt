@@ -32,6 +32,7 @@ fn args() -> SharedArgs {
     l4_bind_address: std::net::Ipv4Addr::UNSPECIFIED.into(),
     l4_connect_timeout_ms: 3000,
     l4_idle_timeout_ms: 75_000,
+    udp_flow_state: crate::cli::UdpFlowState::Disabled,
     udp_max_flows: 8192,
     udp_new_flow_rate: "200r/s".to_string(),
     udp_new_flow_burst: 400,
@@ -621,4 +622,8 @@ fn generated_toml_validates(rendered_toml: &str) {
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("generated config should validate");
+}
+
+fn generated_toml_parses(rendered_toml: &str) {
+  toml::from_str::<toml::Value>(rendered_toml).expect("generated TOML should parse");
 }

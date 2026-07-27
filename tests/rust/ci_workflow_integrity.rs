@@ -2561,6 +2561,14 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d",
+    "redis_image=\"valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328\"",
+    "docker pull \"${redis_image}\"",
+    "valkey/valkey@${redis_image##*@}",
+    "reviewed linux/amd64 Valkey image",
+    "oxibelt-udp-flow-redis",
+    "oxibelt-udp-flow-state",
+    "udp-backend-a",
+    "udp-backend-b",
     "runAsUser: 65532",
     "runAsGroup: 65532",
     "kind: TCPRoute",
@@ -2571,9 +2579,14 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "RefNotPermitted",
     "same-namespace TCPRoute and UDPRoute programming",
     "probe_l4_round_trips",
+    "verify_udp_flow_survives_data_plane_rollout",
+    "oxibelt_stream_udp_flows_restored_total",
+    "l4.udp.flowState=shared_required",
+    "udp_flow_state = \"shared_required\"",
     "OXIBELT_L4_EXPECTED_NAMESPACE",
     "verify_kind_node_l4_probe_runtime",
     "/usr/bin/perl",
+    "/usr/bin/touch --version",
     "IO::Socket::IP",
     "IO::Select",
     "SOCK_STREAM",
@@ -2667,6 +2680,13 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   for expected in [
     "tcp-probe, protocol: TCP, port: 9300, targetPort: 19300",
     "udp-probe, protocol: UDP, port: 5300, targetPort: 15300",
+    "name: OXIBELT_UDP_FLOW_IDENTITY_KEY",
+    "name: oxibelt-udp-flow-state",
+    "udp_flow_identity_key_env = \"OXIBELT_UDP_FLOW_IDENTITY_KEY\"",
+    "connection_limits_backend = \"udp-flows\"",
+    "udp_flows_backend = \"udp-flows\"",
+    "connection_url = \"redis://oxibelt-udp-flow-redis:6379/0\"",
+    "udp_flows = \"reject_new_only\"",
   ] {
     assert!(
       l4_values.contains(expected),
@@ -2744,6 +2764,104 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 }
 
 #[test]
+fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
+  let script = kubernetes_immutable_rollout_script_text();
+  let l4_values = fs::read_to_string(repo_root().join("tests/fixtures/gateway-api-l4-values.yaml"))
+    .expect("Gateway API L4 integration values should be readable");
+  let restart_proof = script
+    .split_once("verify_udp_flow_survives_data_plane_rollout() {")
+    .expect("rollout harness should define the UDP flow restart proof")
+    .1
+    .split_once("\n}\n\ncontroller_has_two_ready_replicas() {")
+    .expect("UDP flow restart proof should precede controller readiness checks")
+    .0;
+
+  for expected in [
+    "openssl rand -base64 32 | tr -d '\\r\\n' >\"${work_dir}/udp-flow-identity-key\"",
+    "grep -Eq '^[A-Za-z0-9+/]{43}=$' \"${work_dir}/udp-flow-identity-key\"",
+    "create secret generic oxibelt-udp-flow-state",
+    "--from-file=identity-key=",
+    "image: valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328",
+    "--maxmemory",
+    "32mb",
+    "--maxmemory-policy",
+    "noeviction",
+    "readOnlyRootFilesystem: true",
+    "emptyDir: { sizeLimit: 16Mi }",
+    "rollout status deployment/oxibelt-udp-flow-redis",
+    "\"${dataplane_image}\" \"${controller_image}\" \"${redis_image}\"",
+    "--set \"l4.idleTimeoutMs=3600000\"",
+    "--set-string \"l4.udp.flowState=shared_required\"",
+    "grep -Fq 'udp_flow_state = \"shared_required\"'",
+    "verify_udp_flow_survives_data_plane_rollout",
+  ] {
+    assert!(
+      script.contains(expected),
+      "shared UDP flow qualification should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    script
+      .matches("--set-string \"l4.udp.flowState=shared_required\"")
+      .count(),
+    2,
+    "both scoped and cross-namespace controller upgrades must retain the explicit shared UDP mode"
+  );
+  assert!(
+    !script.contains("image: valkey/valkey:9-alpine\n"),
+    "the in-cluster shared-state backend must not use the mutable Valkey tag"
+  );
+
+  for expected in [
+    "OXIBELT_L4_CONTINUE_FILE",
+    "my $connection = IO::Socket::IP->new(",
+    "my $first_written = $connection->send($first_request)",
+    "my $written = $connection->send($second_request)",
+    "kube -n \"${namespace}\" rollout restart \"deployment/${workload_name}\"",
+    "data_plane_pods_replaced \"${old_uids}\"",
+    "second response on the same UDP client socket",
+    ".[1].service == .[0].service",
+    ".[1].pod == .[0].pod",
+    "udp-backend-a",
+    "udp-backend-b",
+    "verify_udp_restore_metric",
+  ] {
+    assert!(
+      restart_proof.contains(expected),
+      "same-socket UDP restart proof should preserve {expected}"
+    );
+  }
+  assert!(
+    script.contains("oxibelt_stream_udp_flows_restored_total"),
+    "the rollout harness must inspect the durable UDP restore metric"
+  );
+
+  for expected in [
+    "name: OXIBELT_UDP_FLOW_IDENTITY_KEY",
+    "valueFrom:",
+    "secretKeyRef:",
+    "name: oxibelt-udp-flow-state",
+    "key: identity-key",
+    "enabled = true",
+    "redis_plaintext_policy = \"allow\"",
+    "udp_flow_identity_key_env = \"OXIBELT_UDP_FLOW_IDENTITY_KEY\"",
+    "connection_limits_backend = \"udp-flows\"",
+    "udp_flows_backend = \"udp-flows\"",
+    "udp_flows = \"reject_new_only\"",
+    "connection_url = \"redis://oxibelt-udp-flow-redis:6379/0\"",
+  ] {
+    assert!(
+      l4_values.contains(expected),
+      "shared UDP flow values should preserve {expected}"
+    );
+  }
+  assert!(
+    !script.contains("GATEWAY-UDP") && !script.contains("GATEWAY-TCP"),
+    "the focused restart proof must not claim a Gateway API conformance profile"
+  );
+}
+
+#[test]
 fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
   let script = kubernetes_immutable_rollout_script_text();
   let probes = script
@@ -2756,6 +2874,7 @@ fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
 
   for expected in [
     "/usr/bin/perl",
+    "/usr/bin/touch --version",
     "-MIO::Socket::IP",
     "-MIO::Select",
     "-MSocket=SOCK_STREAM,SOCK_DGRAM",
@@ -2780,7 +2899,7 @@ fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
     ".[0].request == \"oxibelt-udp-probe\"",
     ".[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE",
     ".[0].service == \"tcp-backend\"",
-    ".[0].service == \"udp-backend\"",
+    "$expected_services | index($service) != null",
     "TCP listener remained reachable without ReferenceGrant",
     "UDP listener remained reachable without ReferenceGrant",
   ] {
@@ -2791,8 +2910,8 @@ fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
   }
   assert_eq!(
     probes.matches("/usr/bin/perl").count(),
-    4,
-    "the L4 harness should preflight Perl once and use it for the TCP, UDP, and denied probes"
+    5,
+    "the L4 harness should preflight Perl once and use it for TCP, UDP, denied, and same-socket restart probes"
   );
   assert!(
     script

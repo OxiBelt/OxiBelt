@@ -7,7 +7,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use serde_json::{Value, json};
 
 use super::cli::{
-  BackendResolution, DEFAULT_CONTROLLER_NAME, DEFAULT_MANAGED_CONFIG_PATH, SharedArgs, UdpBatchMode,
+  BackendResolution, DEFAULT_CONTROLLER_NAME, DEFAULT_MANAGED_CONFIG_PATH, SharedArgs,
+  UdpBatchMode, UdpFlowState,
 };
 use super::model::KubernetesObject;
 use super::rollout::RolloutState;
@@ -161,6 +162,7 @@ fn translation_args(endpoint_slice_watch: bool) -> SharedArgs {
     l4_bind_address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     l4_connect_timeout_ms: 3_000,
     l4_idle_timeout_ms: 75_000,
+    udp_flow_state: UdpFlowState::SharedRequired,
     udp_max_flows: 8_192,
     udp_new_flow_rate: "200r/s".to_string(),
     udp_new_flow_burst: 400,

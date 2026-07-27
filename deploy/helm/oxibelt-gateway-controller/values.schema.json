@@ -81,8 +81,9 @@
         "udp": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["maxFlows", "newFlowRate", "newFlowBurst", "datagramRate", "datagramBurst", "batch", "batchSize"],
+          "required": ["flowState", "maxFlows", "newFlowRate", "newFlowBurst", "datagramRate", "datagramBurst", "batch", "batchSize"],
           "properties": {
+            "flowState": { "type": "string", "enum": ["disabled", "shared_required"] },
             "maxFlows": { "type": "integer", "minimum": 1, "maximum": 1048576 },
             "newFlowRate": { "type": "string", "pattern": "^[1-9][0-9]*(r/s|r/m)$" },
             "newFlowBurst": { "type": "integer", "minimum": 1, "maximum": 1048576 },

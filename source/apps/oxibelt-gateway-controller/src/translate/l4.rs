@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use super::super::cli::SharedArgs;
+use super::super::cli::{SharedArgs, UdpFlowState};
 use super::super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref};
 use super::{
   GeneratedStreamListener, GeneratedStreamPool, GeneratedStreamServer, RouteAttachment,
-  ServiceTargetPort, TranslationState, backend_ref_is_service, backend_service_port, sanitize_name,
-  string_at, u32_at, unsupported_field,
+  ServiceTargetPort, TranslationState, UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC, backend_ref_is_service,
+  backend_service_port, sanitize_name, string_at, u32_at, unsupported_field,
 };
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -50,6 +50,13 @@ impl TranslationState {
         continue;
       }
       let servers = self.l4_backend_servers(route, network);
+      if route.kind == "UDPRoute" && args.udp_flow_state == UdpFlowState::Disabled {
+        self.diagnostics.push(Diagnostic::error(
+          object_ref(route),
+          UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC,
+        ));
+        continue;
+      }
       for attachment in attachments {
         let listener_name = attachment
           .listener

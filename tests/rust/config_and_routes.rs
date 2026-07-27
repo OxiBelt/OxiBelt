@@ -24,8 +24,9 @@ use oxibelt::config::{
   RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
   StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
   Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
-  TlsServerResumptionMode, TlsVersion, TrailerMode, UpstreamDiscoveryProvider, UpstreamEchMode,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
+  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
+  resolve_auto_worker_count,
 };
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
@@ -5096,6 +5097,7 @@ namespace = "matrix"
 default_backend = "redis-main"
 rate_limits_backend = "redis-main"
 connection_limits_backend = "redis-main"
+udp_flows_backend = "postgres-main"
 person_proof_backend = "postgres-main"
 upstream_health_backend = "redis-main"
 cache_backend = "postgres-main"
@@ -5108,6 +5110,7 @@ cache_lock_ms = 5000
 [shared_state.failure_policies]
 rate_limits = "local_fallback"
 connection_limits = "reject_new_only"
+udp_flows = "reject_new_only"
 person_proof = "fail_closed"
 upstream_health = "stale_snapshot"
 sticky_sessions = "local_fallback"
@@ -5161,6 +5164,14 @@ max_connections = 2
     config.shared_state.dynamic_policy_backend.as_deref(),
     Some("postgres-main")
   );
+  assert_eq!(
+    config.shared_state.udp_flows_backend.as_deref(),
+    Some("postgres-main")
+  );
+  assert_eq!(
+    config.shared_state.udp_flow_identity_key_env,
+    "OXIBELT_UDP_FLOW_IDENTITY_KEY"
+  );
   let redis_pool = config.shared_state.backends[0]
     .redis_pool
     .as_ref()
@@ -5178,6 +5189,10 @@ max_connections = 2
     BackendFailureMode::RejectNewOnly
   );
   assert_eq!(
+    config.shared_state.failure_policies.udp_flows,
+    BackendFailureMode::RejectNewOnly
+  );
+  assert_eq!(
     config.shared_state.failure_policies.cache,
     BackendFailureMode::FailOpen
   );
@@ -5192,6 +5207,7 @@ fn shared_state_failure_policy_defaults_preserve_existing_behavior() {
     defaults.connection_limits,
     BackendFailureMode::RejectNewOnly
   );
+  assert_eq!(defaults.udp_flows, BackendFailureMode::RejectNewOnly);
   assert_eq!(defaults.person_proof, BackendFailureMode::FailClosed);
   assert_eq!(defaults.upstream_health, BackendFailureMode::StaleSnapshot);
   assert_eq!(defaults.sticky_sessions, BackendFailureMode::LocalFallback);
@@ -5265,6 +5281,41 @@ connection_url = "redis://mock-redis:6379/0"
     error
       .to_string()
       .contains("shared_state.failure_policies.upstream_health does not support fail_open"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_state_udp_flow_failure_policy_is_fixed_reject_new_only() {
+  let temp_dir = common::TempDir::new("shared-state-udp-flow-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-udp-flow-policy");
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+
+[shared_state.failure_policies]
+udp_flows = "fail_open"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("UDP flow state must reject new flows when its backend fails");
+  assert!(
+    error.to_string().contains(
+      "shared_state.failure_policies.udp_flows does not support fail_open; supported mode(s): reject_new_only"
+    ),
     "unexpected error: {error}"
   );
 }
@@ -10009,11 +10060,380 @@ udp_datagram_burst = 20
   assert_eq!(config.stream_upstream_pools.len(), 2);
   assert_eq!(config.stream_listeners[1].network, StreamNetwork::Udp);
   assert_eq!(
+    config.stream_listeners[1].udp_flow_state,
+    UdpFlowState::Local
+  );
+  assert_eq!(
     config.stream_listeners[0].sni_rules[0]
       .upstream_pool
       .as_deref(),
     None
   );
+}
+
+#[test]
+fn shared_required_udp_flow_state_rejects_tcp_listeners() {
+  let temp_dir = common::TempDir::new("stream-shared-udp-tcp");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-tcp");
+  let raw = format!(
+    r#"
+{}
+
+[[stream_listeners]]
+name = "tcp"
+network = "tcp"
+bind = "127.0.0.1:15445"
+target = "tcp.internal.example:15445"
+udp_flow_state = "shared_required"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("shared UDP state must not apply to TCP listeners");
+  assert!(
+    error
+      .to_string()
+      .contains("udp_flow_state = \"shared_required\" requires network = \"udp\""),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_required_udp_flow_state_requires_enabled_shared_state_and_explicit_backend() {
+  let temp_dir = common::TempDir::new("stream-shared-udp-prerequisites");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-prerequisites");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let listener = r#"
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_flow_state = "shared_required"
+"#;
+
+  let config: Config = toml::from_str(&format!("{base}\n{listener}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("shared UDP state must require shared state activation");
+  assert!(
+    error
+      .to_string()
+      .contains("requires shared_state.enabled = true"),
+    "unexpected error: {error}"
+  );
+
+  let shared = r#"
+[shared_state]
+enabled = true
+
+[[shared_state.backends]]
+name = "state"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+"#;
+  let config: Config =
+    toml::from_str(&format!("{base}\n{shared}\n{listener}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("shared UDP state must require an explicit backend mapping");
+  assert!(
+    error
+      .to_string()
+      .contains("requires shared_state.udp_flows_backend"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_required_udp_flow_state_enforces_timeout_and_connection_backend_invariants() {
+  let temp_dir = common::TempDir::new("stream-shared-udp-invariants");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-invariants");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let shared = r#"
+[shared_state]
+enabled = true
+default_backend = "limits"
+connection_limits_backend = "limits"
+udp_flows_backend = "flows"
+operation_timeout_ms = 500
+
+[[shared_state.backends]]
+name = "limits"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+
+[[shared_state.backends]]
+name = "flows"
+kind = "postgres"
+connection_url = "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt"
+"#;
+  let listener = r#"
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_flow_state = "shared_required"
+idle_timeout_ms = 3000
+"#;
+
+  let config: Config =
+    toml::from_str(&format!("{base}\n{shared}\n{listener}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("binding and permit state must not use different backends");
+  assert!(
+    error
+      .to_string()
+      .contains("shared UDP flows and shared connection limits must use the same backend"),
+    "unexpected error: {error}"
+  );
+
+  let same_backend = shared
+    .replace(
+      "connection_limits_backend = \"limits\"",
+      "connection_limits_backend = \"flows\"",
+    )
+    .replace(
+      "default_backend = \"limits\"",
+      "default_backend = \"flows\"",
+    );
+  let too_short = listener.replace("idle_timeout_ms = 3000", "idle_timeout_ms = 2999");
+  let config: Config =
+    toml::from_str(&format!("{base}\n{same_backend}\n{too_short}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable flow idle timeout must cover bounded store operations");
+  assert!(
+    error.to_string().contains(
+      "idle_timeout_ms must be at least six times shared_state.operation_timeout_ms (3000)"
+    ),
+    "unexpected error: {error}"
+  );
+
+  let too_long = listener.replace("idle_timeout_ms = 3000", "idle_timeout_ms = 604800001");
+  let config: Config =
+    toml::from_str(&format!("{base}\n{same_backend}\n{too_long}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable flow idle timeout must fit the backend TTL bound");
+  assert!(
+    error
+      .to_string()
+      .contains("idle_timeout_ms must not exceed 604800000"),
+    "unexpected error: {error}"
+  );
+
+  let one_millisecond_backend =
+    same_backend.replace("operation_timeout_ms = 500", "operation_timeout_ms = 1");
+  let six_millisecond_idle = listener.replace("idle_timeout_ms = 3000", "idle_timeout_ms = 6");
+  let config: Config = toml::from_str(&format!(
+    "{base}\n{one_millisecond_backend}\n{six_millisecond_idle}"
+  ))
+  .expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable renewal timing must fit the scheduler floor");
+  assert!(
+    error
+      .to_string()
+      .contains("shared_required renewal interval must be at least 10ms"),
+    "unexpected error: {error}"
+  );
+
+  let config: Config =
+    toml::from_str(&format!("{base}\n{same_backend}\n{listener}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable flow capacity must fit the bounded renewal window");
+  assert!(
+    error
+      .to_string()
+      .contains("max_udp_flows must not exceed 192 for shared_required renewal timing"),
+    "unexpected error: {error}"
+  );
+
+  let one_connection = same_backend.replace(
+    "connection_url = \"postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt\"",
+    "connection_url = \"postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt\"\nmax_connections = 1",
+  );
+  let one_flow = listener.replace(
+    "idle_timeout_ms = 3000",
+    "idle_timeout_ms = 3000\nmax_udp_flows = 1",
+  );
+  let config: Config =
+    toml::from_str(&format!("{base}\n{one_connection}\n{one_flow}")).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("durable renewal must reserve foreground backend capacity");
+  assert!(
+    error
+      .to_string()
+      .contains("must configure at least 2 max_connections"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_required_udp_flow_state_accepts_redis_and_postgres_backends_with_a_valid_identity_key() {
+  const KEY_ENV: &str = "OXIBELT_UDP_FLOW_IDENTITY_KEY_CONFIG_TEST";
+  if common::run_test_in_subprocess_with_env(
+    "shared_required_udp_flow_state_accepts_redis_and_postgres_backends_with_a_valid_identity_key",
+    &[(KEY_ENV, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")],
+  ) {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("stream-shared-udp-backends");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-backends");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  for (kind, connection_url) in [
+    ("redis", "redis://mock-redis:6379/0"),
+    (
+      "postgres",
+      "postgres://oxibelt:oxibelt@mock-postgres:5432/oxibelt",
+    ),
+  ] {
+    let raw = format!(
+      r#"
+{base}
+
+[shared_state]
+enabled = true
+udp_flows_backend = "state"
+connection_limits_backend = "state"
+udp_flow_identity_key_env = "{KEY_ENV}"
+operation_timeout_ms = 500
+
+[[shared_state.backends]]
+name = "state"
+kind = "{kind}"
+connection_url = "{connection_url}"
+
+[[stream_listeners]]
+name = "udp-{kind}"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_flow_state = "shared_required"
+idle_timeout_ms = 3000
+max_udp_flows = 192
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    config
+      .validate()
+      .unwrap_or_else(|error| panic!("{kind} shared UDP flow state should validate: {error:#}"));
+    assert_eq!(
+      config.stream_listeners[0].udp_flow_state,
+      UdpFlowState::SharedRequired
+    );
+  }
+}
+
+#[test]
+fn shared_required_udp_flow_state_rejects_an_invalid_identity_key() {
+  const KEY_ENV: &str = "OXIBELT_UDP_FLOW_IDENTITY_KEY_INVALID_CONFIG_TEST";
+  if common::run_test_in_subprocess_with_env(
+    "shared_required_udp_flow_state_rejects_an_invalid_identity_key",
+    &[(KEY_ENV, "not-base64")],
+  ) {
+    return;
+  }
+
+  let temp_dir = common::TempDir::new("stream-shared-udp-identity-key");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-identity-key");
+  let raw = format!(
+    r#"
+{}
+
+[shared_state]
+enabled = true
+udp_flows_backend = "state"
+connection_limits_backend = "state"
+udp_flow_identity_key_env = "{KEY_ENV}"
+
+[[shared_state.backends]]
+name = "state"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_flow_state = "shared_required"
+max_udp_flows = 3072
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("shared UDP flow identity key must be 32-byte base64");
+  assert!(
+    error
+      .to_string()
+      .contains("shared_state.udp_flow_identity_key_env must contain base64"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn shared_required_udp_flow_state_rejects_unrepresentable_rates() {
+  let temp_dir = common::TempDir::new("stream-shared-udp-rate-bounds");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "stream-shared-udp-rate-bounds");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  for (field, rate) in [
+    ("udp_datagram_rate", "0.0000009r/s"),
+    ("udp_new_flow_rate", "1048577r/s"),
+  ] {
+    let raw = format!(
+      r#"
+{base}
+
+[shared_state]
+enabled = true
+udp_flows_backend = "state"
+connection_limits_backend = "state"
+
+[[shared_state.backends]]
+name = "state"
+kind = "redis"
+connection_url = "redis://mock-redis:6379/0"
+
+[[stream_listeners]]
+name = "udp"
+network = "udp"
+bind = "127.0.0.1:15445"
+target = "udp.internal.example:15445"
+udp_flow_state = "shared_required"
+{field} = "{rate}"
+{field}_burst = 1
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("unrepresentable shared UDP rate must fail closed");
+    assert!(
+      error
+        .to_string()
+        .contains("must be between 0.000001 and 1048576 requests per second"),
+      "unexpected error for {field}: {error}"
+    );
+  }
 }
 
 #[test]

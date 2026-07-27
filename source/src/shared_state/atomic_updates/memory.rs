@@ -42,6 +42,40 @@ impl MemoryBackend {
     purge_expired_counters(&mut counters, now);
     leases.retain(|_, lease| lease.expires_at_ms > now);
     if let Some(existing) = leases.get(&lease.marker_key) {
+      if lease.adoptable {
+        let stored_configuration =
+          SharedCounterLease::stored_configuration_fingerprint(existing.fingerprint.as_bytes())
+            .ok_or_else(|| {
+              anyhow::anyhow!("adoptable shared connection lease marker is malformed")
+            })?;
+        if stored_configuration != lease.configuration_fingerprint.as_bytes() {
+          bail!("shared connection lease adoption configuration mismatch");
+        }
+        if keys.iter().any(|key| {
+          counters.get(key).is_none_or(|counter| {
+            counter.counter <= 0
+              || counter
+                .expires_at_ms
+                .is_none_or(|expires_at_ms| expires_at_ms <= now)
+          })
+        }) {
+          bail!("shared connection lease adoption found an inactive counter");
+        }
+        let expires_at_ms = expiry_after(now, ttl);
+        for key in keys {
+          if let Some(counter) = counters.get_mut(key) {
+            counter.expires_at_ms = Some(expires_at_ms);
+          }
+        }
+        leases.insert(
+          lease.marker_key.clone(),
+          MemoryLease {
+            fingerprint: lease.fingerprint.clone(),
+            expires_at_ms,
+          },
+        );
+        return Ok(None);
+      }
       if existing.fingerprint != lease.fingerprint {
         bail!("shared connection lease idempotency fingerprint mismatch");
       }
@@ -90,6 +124,9 @@ impl MemoryBackend {
     };
     if marker.fingerprint != lease.fingerprint {
       leases.insert(lease.marker_key.clone(), marker);
+      if lease.adoptable {
+        return Ok(());
+      }
       bail!("shared connection lease release fingerprint mismatch");
     }
     if marker.expires_at_ms <= now {

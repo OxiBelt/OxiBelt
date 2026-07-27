@@ -56,7 +56,10 @@ l4:
   connectTimeoutMs: 3000
   idleTimeoutMs: 75000
   udp:
-    maxFlows: 8192
+    # Generated UDPRoute listeners stay disabled unless every target data-plane
+    # Pod is configured for required shared UDP flow state.
+    flowState: disabled # disabled | shared_required
+    maxFlows: 3072
     newFlowRate: 200r/s
     newFlowBurst: 400
     datagramRate: 200r/s

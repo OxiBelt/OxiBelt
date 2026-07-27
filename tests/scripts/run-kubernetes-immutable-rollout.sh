@@ -12,6 +12,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 gateway_api_version="v1.6.1"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
 gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
+redis_image="valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328"
 # The scheduled qualification matrix may select only these reviewed Kind node
 # manifests. Arbitrary environment-provided images are rejected before Docker
 # or Kind creates resources.
@@ -41,6 +42,7 @@ selector="app.kubernetes.io/name=oxibelt,app.kubernetes.io/instance=${data_relea
 managed_config_path="conf.d/gateway-api.generated.toml"
 empty_config_digest="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 port_forward_pid=""
+udp_flow_probe_pid=""
 cluster_created=0
 admin_server_name=""
 admin_service_name="${workload_name}-admin"
@@ -88,6 +90,10 @@ cleanup() {
     kill "${port_forward_pid}" >/dev/null 2>&1 || true
     wait "${port_forward_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${udp_flow_probe_pid}" ]]; then
+    kill "${udp_flow_probe_pid}" >/dev/null 2>&1 || true
+    wait "${udp_flow_probe_pid}" >/dev/null 2>&1 || true
+  fi
 
   if ((status != 0)); then
     print_admin_probe_diagnostics
@@ -105,6 +111,10 @@ cleanup() {
       --all-containers=true --prefix --tail=200 >&2 || true
     kube -n "${namespace}" logs -l "${selector}" \
       --all-containers=true --prefix --previous --tail=200 >&2 || true
+    kube -n "${namespace}" logs deployment/oxibelt-udp-flow-redis \
+      --all-containers=true --prefix --tail=120 >&2 || true
+    kube -n "${namespace}" logs deployment/oxibelt-udp-flow-redis \
+      --all-containers=true --prefix --previous --tail=120 >&2 || true
     kube -n "${namespace}" logs -l 'oxibelt.dev/test=stale-config' \
       --all-containers=true --prefix --tail=80 >&2 || true
     kube -n "${outside_namespace}" get deployments,pods --ignore-not-found >&2 || true
@@ -237,13 +247,29 @@ verify_kind_node_l4_probe_runtime() {
     -MSocket=SOCK_STREAM,SOCK_DGRAM \
     -e 'exit 0' \
     || die "Kind control-plane node lacks the package-free Perl L4 probe runtime"
+  docker exec "${node}" /usr/bin/touch --version >/dev/null \
+    || die "Kind control-plane node lacks the package-free UDP restart marker runtime"
 }
 
 probe_l4_round_trips() {
   local expected_namespace="$1"
+  local expected_udp_backend="${2:-single}"
+  local expected_udp_services
   local node="${cluster_name}-control-plane"
   local tcp_response
   local udp_response
+
+  case "${expected_udp_backend}" in
+    paired)
+      expected_udp_services='["udp-backend-a","udp-backend-b"]'
+      ;;
+    single)
+      expected_udp_services='["udp-backend"]'
+      ;;
+    *)
+      die "refusing unexpected UDP backend probe mode: ${expected_udp_backend}"
+      ;;
+  esac
 
   tcp_response="$(
     docker exec \
@@ -331,11 +357,11 @@ print STDOUT $response;
 '
   )" || return 1
   OXIBELT_L4_EXPECTED_NAMESPACE="${expected_namespace}" \
-    jq -s -e '
+    jq -s -e --argjson expected_services "${expected_udp_services}" '
       length == 1
         and .[0].request == "oxibelt-udp-probe"
         and .[0].namespace == env.OXIBELT_L4_EXPECTED_NAMESPACE
-        and .[0].service == "udp-backend"
+        and (.[0].service as $service | $expected_services | index($service) != null)
     ' >/dev/null <<<"${udp_response}" || return 1
 }
 
@@ -378,6 +404,236 @@ my $peer = $udp->recv(my $response, 4096);
 exit 0 unless defined $peer;
 die "UDP listener remained reachable without ReferenceGrant\n";
 '
+}
+
+udp_flow_probe_first_response_ready() {
+  if [[ -z "${udp_flow_probe_pid}" ]] || ! kill -0 "${udp_flow_probe_pid}" 2>/dev/null; then
+    [[ -f "${work_dir}/udp-flow-restart-probe.log" ]] \
+      && tail -n 40 -- "${work_dir}/udp-flow-restart-probe.log" >&2
+    die "same-socket UDP flow probe exited before its first response"
+  fi
+  grep -q $'^FIRST\t{' "${work_dir}/udp-flow-restart-probe.log"
+}
+
+udp_flow_probe_finished() {
+  [[ -n "${udp_flow_probe_pid}" ]] && ! kill -0 "${udp_flow_probe_pid}" 2>/dev/null
+}
+
+data_plane_pods_replaced() {
+  local old_uids="$1"
+  local pods
+
+  pods="$(kube -n "${namespace}" get pods -l "${selector}" -o json 2>/dev/null)" || return 1
+  jq -e --argjson old_uids "${old_uids}" '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | ($pods | length) == 3
+      and all($pods[];
+        ((.status.conditions // []) | any(.type == "Ready" and .status == "True"))
+          and (.metadata.uid as $uid | $old_uids | index($uid) == null))
+  ' >/dev/null <<<"${pods}"
+}
+
+metrics_port_forward_is_ready() {
+  local port="$1"
+  local log="$2"
+
+  [[ -n "${port_forward_pid}" ]] \
+    && kill -0 "${port_forward_pid}" 2>/dev/null \
+    && grep -Fq "Forwarding from 127.0.0.1:${port} -> 9090" "${log}"
+}
+
+pod_has_udp_restore_metric() {
+  local pod="$1"
+  local port="$2"
+  local log="${work_dir}/udp-restore-metric-${pod}.log"
+  local metrics
+  local observed=1
+
+  [[ -z "${port_forward_pid}" ]] || die "a metrics port-forward is already active"
+  kubectl --context "kind-${cluster_name}" -n "${namespace}" port-forward \
+    --address 127.0.0.1 "pod/${pod}" "${port}:9090" \
+    >"${log}" 2>&1 &
+  port_forward_pid="$!"
+  wait_for "metrics port-forward bind for ${pod}" 30 \
+    metrics_port_forward_is_ready "${port}" "${log}"
+
+  if metrics="$(curl --fail --silent --show-error --max-time 5 \
+    "http://127.0.0.1:${port}/metrics")" \
+    && awk '
+      $1 == "oxibelt_stream_udp_flows_restored_total" && ($2 + 0) >= 1 {
+        found = 1
+      }
+      END { exit found ? 0 : 1 }
+    ' <<<"${metrics}"; then
+    observed=0
+  fi
+
+  kill "${port_forward_pid}" >/dev/null 2>&1 || true
+  wait "${port_forward_pid}" >/dev/null 2>&1 || true
+  port_forward_pid=""
+  return "${observed}"
+}
+
+verify_udp_restore_metric() {
+  local pods_json
+  local index=0
+  local pod
+
+  pods_json="$(kube -n "${namespace}" get pods -l "${selector}" -o json)" \
+    || die "could not list replacement data-plane Pods for UDP restore metrics"
+  while IFS= read -r pod; do
+    if pod_has_udp_restore_metric "${pod}" "$((22000 + RANDOM % 7000 + index))"; then
+      return 0
+    fi
+    index=$((index + 1))
+  done < <(jq -r '
+    .items
+    | map(select(.metadata.deletionTimestamp == null))
+    | sort_by(.metadata.name)
+    | .[].metadata.name
+  ' <<<"${pods_json}")
+  die "no replacement data-plane Pod reported oxibelt_stream_udp_flows_restored_total >= 1"
+}
+
+verify_udp_flow_survives_data_plane_rollout() {
+  local node="${cluster_name}-control-plane"
+  local continue_file="/tmp/oxibelt-udp-flow-${run_id}.continue"
+  local probe_log="${work_dir}/udp-flow-restart-probe.log"
+  local old_pods_json
+  local old_uids
+  local first_response
+  local second_response
+
+  old_pods_json="$(kube -n "${namespace}" get pods -l "${selector}" -o json)" \
+    || die "could not capture data-plane Pod identities before the UDP restart proof"
+  old_uids="$(jq -ce '
+    [.items[]
+      | select(.metadata.deletionTimestamp == null)
+      | .metadata.uid]
+    | select(length == 3)
+  ' <<<"${old_pods_json}")" \
+    || die "UDP restart proof requires exactly three live data-plane Pod UIDs"
+
+  [[ -z "${udp_flow_probe_pid}" ]] || die "a same-socket UDP flow probe is already active"
+  docker exec \
+    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
+    --env OXIBELT_L4_CONTINUE_FILE="${continue_file}" \
+    --env OXIBELT_L4_RESTART_TIMEOUT="${rollout_timeout_seconds}" \
+    "${node}" /usr/bin/perl \
+    -MIO::Socket::IP \
+    -MIO::Select \
+    -MSocket=SOCK_DGRAM \
+    -e '
+use strict;
+use warnings;
+
+$| = 1;
+my $connection = IO::Socket::IP->new(
+    PeerHost => $ENV{OXIBELT_L4_ADDRESS},
+    PeerPort => 5300,
+    Type => SOCK_DGRAM,
+    Timeout => 5,
+) or die "UDP restart probe socket creation failed: $!\n";
+my $selector = IO::Select->new($connection);
+
+sub receive_response {
+    my ($socket, $readable, $timeout, $label) = @_;
+    $readable->can_read($timeout) or die "$label timed out\n";
+    my $peer = $socket->recv(my $response, 4096);
+    defined $peer or die "$label read failed: $!\n";
+    length($response) > 0 or die "$label was empty\n";
+    $response =~ s/[\r\n]+\z//;
+    return $response;
+}
+
+my $first_request = "oxibelt-udp-before-restart";
+my $first_written = $connection->send($first_request);
+defined $first_written && $first_written == length($first_request)
+    or die "UDP restart probe first write failed: $!\n";
+my $first_response = receive_response(
+    $connection,
+    $selector,
+    10,
+    "UDP restart probe first response",
+);
+print STDOUT "FIRST\t$first_response\n";
+
+my $continue_file = $ENV{OXIBELT_L4_CONTINUE_FILE};
+my $restart_timeout = $ENV{OXIBELT_L4_RESTART_TIMEOUT};
+$restart_timeout =~ /\A[1-9][0-9]{1,2}\z/
+    or die "invalid UDP restart probe timeout\n";
+my $continue_deadline = time() + $restart_timeout + 60;
+while (!-e $continue_file) {
+    time() < $continue_deadline
+        or die "UDP restart probe continuation timed out\n";
+    select undef, undef, undef, 0.1;
+}
+
+my $second_request = "oxibelt-udp-after-restart";
+my $response_deadline = time() + 90;
+while (time() < $response_deadline) {
+    my $written = $connection->send($second_request);
+    if (defined $written && $written == length($second_request)
+        && $selector->can_read(1)) {
+        my $peer = $connection->recv(my $response, 4096);
+        if (defined $peer && length($response) > 0) {
+            $response =~ s/[\r\n]+\z//;
+            print STDOUT "SECOND\t$response\n";
+            exit 0;
+        }
+    }
+    select undef, undef, undef, 0.1;
+}
+die "UDP restart probe second response timed out\n";
+' >"${probe_log}" 2>&1 &
+  udp_flow_probe_pid="$!"
+
+  wait_for "first response on the persistent UDP client socket" 30 \
+    udp_flow_probe_first_response_ready
+
+  kube -n "${namespace}" rollout restart "deployment/${workload_name}" >/dev/null
+  kube -n "${namespace}" rollout status "deployment/${workload_name}" \
+    --timeout "${rollout_timeout_seconds}s"
+  wait_for "replacement of every data-plane Pod" "${rollout_timeout_seconds}" \
+    data_plane_pods_replaced "${old_uids}"
+  wait_for "committed immutable state after data-plane Pod replacement" \
+    "${rollout_timeout_seconds}" deployment_is_committed
+
+  docker exec "${node}" /usr/bin/touch -- "${continue_file}" \
+    || die "could not release the bounded same-socket UDP flow probe"
+  wait_for "second response on the same UDP client socket" 120 udp_flow_probe_finished
+  if wait "${udp_flow_probe_pid}"; then
+    udp_flow_probe_pid=""
+  else
+    udp_flow_probe_pid=""
+    tail -n 40 -- "${probe_log}" >&2
+    die "same-socket UDP flow probe failed after data-plane Pod replacement"
+  fi
+
+  first_response="$(awk -F '\t' '$1 == "FIRST" {sub(/^FIRST\t/, ""); print; exit}' \
+    "${probe_log}")"
+  second_response="$(awk -F '\t' '$1 == "SECOND" {sub(/^SECOND\t/, ""); print; exit}' \
+    "${probe_log}")"
+  jq -s -e --arg expected_namespace "${namespace}" '
+    length == 2
+      and .[0].request == "oxibelt-udp-before-restart"
+      and .[1].request == "oxibelt-udp-after-restart"
+      and .[0].namespace == $expected_namespace
+      and .[1].namespace == $expected_namespace
+      and (. as $responses
+        | ["udp-backend-a", "udp-backend-b"]
+        | index($responses[0].service) != null)
+      and .[1].service == .[0].service
+      and (.[0].pod | type == "string" and length > 0)
+      and .[1].pod == .[0].pod
+  ' >/dev/null <<<"${first_response}"$'\n'"${second_response}" \
+    || die "restored UDP flow did not retain its distinguishable backend Service and Pod identity"
+
+  verify_udp_restore_metric
+  wait_for "Gateway Programmed=True after data-plane Pod replacement" \
+    "${rollout_timeout_seconds}" gateway_is_programmed
+  wait_for "L4 route programming after data-plane Pod replacement" \
+    "${rollout_timeout_seconds}" l4_routes_are_programmed
 }
 
 controller_has_two_ready_replicas() {
@@ -795,6 +1051,8 @@ verify_cross_namespace_l4_reference_grants() {
     --namespace "${namespace}" \
     -f "${controller_image_values}" \
     --set "watchAllNamespaces=true" \
+    --set "l4.idleTimeoutMs=3600000" \
+    --set-string "l4.udp.flowState=shared_required" \
     --set-string "managedConfigPath=${managed_config_path}" \
     --set-string "statusService=${namespace}/${workload_name}" \
     --set-string "statusAddresses[0]=${status_service_address}" \
@@ -1038,6 +1296,13 @@ controller_image_tag="${controller_image##*:}"
 docker version --format '{{.Server.Version}}' >/dev/null
 docker image inspect "${dataplane_image}" >/dev/null
 docker image inspect "${controller_image}" >/dev/null
+docker pull "${redis_image}" >/dev/null
+docker image inspect "${redis_image}" >/dev/null
+docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${redis_image}" \
+  | grep -Fqx "valkey/valkey@${redis_image##*@}" \
+  || die "rootless Docker did not retain the exact reviewed Valkey repo digest"
+[[ "$(docker image inspect --format '{{.Architecture}}/{{.Os}}' "${redis_image}")" == "amd64/linux" ]] \
+  || die "the Kubernetes qualification requires the reviewed linux/amd64 Valkey image"
 dataplane_effective_version="$(docker image inspect \
   --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
   "${dataplane_image}")"
@@ -1079,7 +1344,8 @@ kind create cluster \
 cluster_created=1
 verify_kind_node_l4_probe_runtime
 
-kind load docker-image --name "${cluster_name}" "${dataplane_image}" "${controller_image}"
+kind load docker-image --name "${cluster_name}" \
+  "${dataplane_image}" "${controller_image}" "${redis_image}"
 
 curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
   --silent --show-error \
@@ -1180,6 +1446,13 @@ kube -n "${namespace}" create secret generic oxibelt-admin-token \
   --from-file=token="${work_dir}/admin-token" \
   >/dev/null
 
+openssl rand -base64 32 | tr -d '\r\n' >"${work_dir}/udp-flow-identity-key"
+grep -Eq '^[A-Za-z0-9+/]{43}=$' "${work_dir}/udp-flow-identity-key" \
+  || die "failed to generate an exact 32-byte base64 UDP flow identity key"
+kube -n "${namespace}" create secret generic oxibelt-udp-flow-state \
+  --from-file=identity-key="${work_dir}/udp-flow-identity-key" \
+  >/dev/null
+
 kube -n "${namespace}" apply -f - >/dev/null <<'EOF'
 apiVersion: v1
 kind: Service
@@ -1207,10 +1480,103 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: udp-backend
+  name: oxibelt-udp-flow-redis
 spec:
   selector:
-    app: udp-backend
+    app: oxibelt-udp-flow-redis
+  ports:
+  - name: redis
+    protocol: TCP
+    port: 6379
+    targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oxibelt-udp-flow-redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: oxibelt-udp-flow-redis
+  template:
+    metadata:
+      labels:
+        app: oxibelt-udp-flow-redis
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: redis
+        image: valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328
+        imagePullPolicy: IfNotPresent
+        command: ["valkey-server"]
+        args:
+        - --save
+        - ""
+        - --appendonly
+        - "no"
+        - --maxmemory
+        - 32mb
+        - --maxmemory-policy
+        - noeviction
+        - --protected-mode
+        - "no"
+        ports:
+        - { name: redis, containerPort: 6379, protocol: TCP }
+        startupProbe:
+          tcpSocket: { port: redis }
+          periodSeconds: 1
+          failureThreshold: 60
+        readinessProbe:
+          tcpSocket: { port: redis }
+          periodSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: { port: redis }
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests: { cpu: 25m, memory: 32Mi }
+          limits: { cpu: 250m, memory: 96Mi }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - { name: data, mountPath: /data }
+      volumes:
+      - name: data
+        emptyDir: { sizeLimit: 16Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-backend-a
+spec:
+  selector:
+    app: udp-backend-a
+  ports:
+  - name: udp
+    protocol: UDP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udp-backend-b
+spec:
+  selector:
+    app: udp-backend-b
   ports:
   - name: udp
     protocol: UDP
@@ -1257,16 +1623,16 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: udp-backend
+  name: udp-backend-a
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: udp-backend
+      app: udp-backend-a
   template:
     metadata:
       labels:
-        app: udp-backend
+        app: udp-backend-a
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -1282,7 +1648,45 @@ spec:
         env:
         - { name: UDP_ECHO_SERVER, value: "1" }
         - { name: UDP_PORT, value: "8080" }
-        - { name: SERVICE_NAME, value: udp-backend }
+        - { name: SERVICE_NAME, value: udp-backend-a }
+        - name: NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udp-backend-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: udp-backend-b
+  template:
+    metadata:
+      labels:
+        app: udp-backend-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: echo
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: UDP_ECHO_SERVER, value: "1" }
+        - { name: UDP_PORT, value: "8080" }
+        - { name: SERVICE_NAME, value: udp-backend-b }
         - name: NAMESPACE
           valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
         - name: POD_NAME
@@ -1358,12 +1762,16 @@ spec:
     sectionName: udp-probe
   rules:
   - backendRefs:
-    - name: udp-backend
+    - name: udp-backend-a
+      port: 8080
+    - name: udp-backend-b
       port: 8080
 EOF
 
+kube -n "${namespace}" rollout status deployment/oxibelt-udp-flow-redis --timeout=120s
 kube -n "${namespace}" rollout status deployment/tcp-backend --timeout=120s
-kube -n "${namespace}" rollout status deployment/udp-backend --timeout=120s
+kube -n "${namespace}" rollout status deployment/udp-backend-a --timeout=120s
+kube -n "${namespace}" rollout status deployment/udp-backend-b --timeout=120s
 
 helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
   --namespace "${namespace}" \
@@ -1381,6 +1789,17 @@ helm upgrade --install "${data_release}" "${repo_root}/deploy/helm/oxibelt" \
 # remain unready until the controller assigns generated configuration; that
 # fail-closed behavior must not be weakened by the rollout harness.
 bootstrap_deployment_json="$(kube -n "${namespace}" get deployment "${workload_name}" -o json)"
+jq -e '
+  any(.spec.template.spec.containers[]?;
+    .name == "oxibelt"
+      and ([.env[]? | select(.name == "OXIBELT_UDP_FLOW_IDENTITY_KEY")] | length) == 1
+      and any(.env[]?;
+        .name == "OXIBELT_UDP_FLOW_IDENTITY_KEY"
+          and (has("value") | not)
+          and .valueFrom.secretKeyRef.name == "oxibelt-udp-flow-state"
+          and .valueFrom.secretKeyRef.key == "identity-key"))
+' >/dev/null <<<"${bootstrap_deployment_json}" \
+  || die "data-plane workload must receive the UDP flow identity only through the focused Secret reference"
 bootstrap_revision="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-revision"] // empty' \
   <<<"${bootstrap_deployment_json}")"
 bootstrap_digest="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-digest"] // empty' \
@@ -1440,6 +1859,8 @@ status_service_address="$(kube -n "${namespace}" get service "${workload_name}" 
 helm upgrade --install "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   -f "${controller_image_values}" \
+  --set "l4.idleTimeoutMs=3600000" \
+  --set-string "l4.udp.flowState=shared_required" \
   --set-string "managedConfigPath=${managed_config_path}" \
   --set-string "watchNamespace=${namespace}" \
   --set-string "statusService=${namespace}/${workload_name}" \
@@ -1526,7 +1947,8 @@ wait_for "Gateway Programmed=True after full rollout convergence" "${rollout_tim
 wait_for "same-namespace TCPRoute and UDPRoute programming" \
   "${rollout_timeout_seconds}" l4_routes_are_programmed
 wait_for "same-namespace TCP and UDP round trips" 60 \
-  probe_l4_round_trips "${namespace}"
+  probe_l4_round_trips "${namespace}" paired
+verify_udp_flow_survives_data_plane_rollout
 wait_for "two Ready controller replicas" 60 controller_has_two_ready_replicas
 wait_for "one live Lease holder among two simultaneous replicas" 60 lease_has_live_unique_holder
 
@@ -1582,6 +2004,17 @@ wait_for "Programmed proof after Lease recreation" "${rollout_timeout_seconds}" 
 verify_cross_namespace_l4_reference_grants
 
 deployment_json="$(kube -n "${namespace}" get deployment "${workload_name}" -o json)"
+jq -e '
+  any(.spec.template.spec.containers[]?;
+    .name == "oxibelt"
+      and ([.env[]? | select(.name == "OXIBELT_UDP_FLOW_IDENTITY_KEY")] | length) == 1
+      and any(.env[]?;
+        .name == "OXIBELT_UDP_FLOW_IDENTITY_KEY"
+          and (has("value") | not)
+          and .valueFrom.secretKeyRef.name == "oxibelt-udp-flow-state"
+          and .valueFrom.secretKeyRef.key == "identity-key"))
+' >/dev/null <<<"${deployment_json}" \
+  || die "controller rollout must preserve the Secret-backed UDP flow identity reference"
 revision="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-revision"] // empty' <<<"${deployment_json}")"
 digest="$(jq -r '.spec.template.metadata.annotations["oxibelt.dev/config-digest"] // empty' <<<"${deployment_json}")"
 [[ "${revision}" =~ ^oxibelt-gateway-config-deployment-oxibelt-[a-f0-9]{64}$ ]] \
@@ -1670,6 +2103,8 @@ jq -e --arg revision "${revision}" --arg digest "${digest}" --arg managed_path "
 
 kube -n "${namespace}" get configmap "${revision}" \
   -o jsonpath='{.data.gateway-api\.generated\.toml}' >"${work_dir}/gateway-api.generated.toml"
+grep -Fq 'udp_flow_state = "shared_required"' "${work_dir}/gateway-api.generated.toml" \
+  || die "focused UDPRoute qualification did not render shared_required flow state"
 actual_digest="$(sha256sum "${work_dir}/gateway-api.generated.toml" | awk '{print $1}')"
 [[ "${actual_digest}" == "${digest}" ]] \
   || die "ConfigMap raw bytes do not match the Pod-assigned digest"

@@ -134,6 +134,54 @@ rollback inside the declared window, restore the prior data plane before the
 prior controller, then return to `exact`. Never downgrade or delete
 operator-owned Gateway API CRDs as an implicit Helm rollback.
 
+### Durable UDP flow-state transition
+
+Native UDP stream listeners retain `udp_flow_state = "local"` by default.
+Generated `UDPRoute` is stricter: the new controller defaults
+`l4.udp.flowState` to `disabled` and refuses to publish process-local generated
+flow state. Treat migration from an older generated process-local `UDPRoute` as
+a maintenance transition; there is no mixed-version zero-loss conversion of
+live sockets or NAT state.
+
+Use this staged sequence:
+
+1. Stop new UDP admission and drain the existing generated listeners. Observe
+   `oxibelt_stream_udp_flows_active` reach zero or wait through the longest
+   configured idle timeout before assuming old process-local flows are gone.
+2. Upgrade the controller and data plane using the version-skew procedure
+   above while generated UDP remains disabled.
+3. Provision one Redis-compatible or PostgreSQL backend and configure every
+   selected data-plane Pod with the same `shared_state.namespace`, explicit
+   `udp_flows_backend`, and `udp_flow_identity_key_env` name resolving to the
+   same Secret-backed 32-byte base64 key. Configure the effective shared
+   connection-limit backend to the same backend and preserve the required
+   `idle_timeout_ms >= 6 * operation_timeout_ms` bound.
+4. Roll all selected data-plane Pods and verify readiness and shared-state
+   health before setting controller `l4.udp.flowState: shared_required`.
+   Re-enable UDP admission only after the generated configuration is committed
+   and all selected Pods report the intended build/configuration identity.
+5. During the observation window, compare created/restored flows and alert on
+   persistence errors, fence rejections, admission rejections, or dropped
+   datagrams.
+
+Do not run selected Pods with different UDP identity keys, namespaces, or
+backend mappings. Key rotation deliberately creates a new opaque identity
+domain: disable generated UDP, drain active flows, rotate the Secret on every
+Pod, complete the data-plane rollout, and only then re-enable
+`shared_required`. Follow the same disable/drain/all-Pod rollout for a Redis to
+PostgreSQL migration or any backend-name change; OxiBelt does not mirror UDP
+flow records between backends.
+
+For rollback to a version without durable UDP support, first disable generated
+UDP and drain new-version owners, then restore the prior data-plane
+configuration and image before the prior controller. Keep the previous key and
+backend available until the rollback decision is complete, but do not expect
+an old binary to consume durable records. Records left behind are
+idle-expiring operational state, not a backup of sockets or application
+sessions. Rollback cannot restore the old upstream source port,
+NAT/conntrack/exact Service endpoint selection, datagrams in flight, or
+application/session state.
+
 ## Rollback contract
 
 Rollback means restoring the previous version's exact image repositories,

@@ -77,7 +77,8 @@ for expected in \
   "--l4-bind-address=0.0.0.0" \
   "--l4-connect-timeout-ms=3000" \
   "--l4-idle-timeout-ms=75000" \
-  "--udp-max-flows=8192" \
+  "--udp-flow-state=disabled" \
+  "--udp-max-flows=3072" \
   "--udp-new-flow-rate=200r/s" \
   "--udp-new-flow-burst=400" \
   "--udp-datagram-rate=200r/s" \
@@ -98,6 +99,19 @@ assert_not_contains "type: Recreate"
 assert_not_contains "verbs: [\"get\", \"watch\", \"patch\", \"create\"]"
 assert_not_contains "--compatibility-previous-version="
 assert_not_contains "--compatibility-deadline="
+
+helm template controller-shared-udp "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
+  --set "l4.udp.flowState=shared_required" \
+  >"${work_dir}/shared-udp.yaml"
+grep -F -- "--udp-flow-state=shared_required" "${work_dir}/shared-udp.yaml" >/dev/null \
+  || die "shared UDP manifest is missing the required controller activation argument"
+if helm template controller-invalid-udp "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
+  --set "l4.udp.flowState=local" \
+  >"${work_dir}/invalid-udp.yaml" 2>"${work_dir}/invalid-udp.log"; then
+  die "controller chart accepted unsupported process-local UDP flow state"
+fi
 
 helm template controller-versioned "${chart_dir}" --namespace control \
   --kube-version "${kubernetes_version}" \

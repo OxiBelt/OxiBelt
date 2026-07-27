@@ -38,7 +38,9 @@ pub struct SharedArgs {
   pub l4_connect_timeout_ms: u64,
   #[arg(long, global = true, default_value_t = 75_000)]
   pub l4_idle_timeout_ms: u64,
-  #[arg(long, global = true, default_value_t = 8192)]
+  #[arg(long, global = true, value_enum, default_value = "disabled")]
+  pub udp_flow_state: UdpFlowState,
+  #[arg(long, global = true, default_value_t = 3072)]
   pub udp_max_flows: usize,
   #[arg(long, global = true, default_value = "200r/s")]
   pub udp_new_flow_rate: String,
@@ -75,6 +77,23 @@ pub enum UdpBatchMode {
   Auto,
   Off,
   Required,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum UdpFlowState {
+  #[default]
+  Disabled,
+  SharedRequired,
+}
+
+impl UdpFlowState {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Disabled => "disabled",
+      Self::SharedRequired => "shared_required",
+    }
+  }
 }
 
 impl UdpBatchMode {
@@ -168,7 +187,7 @@ pub struct RenderArgs {
 
 #[cfg(test)]
 mod tests {
-  use super::{Cli, Command, CompatibilityMode};
+  use super::{Cli, Command, CompatibilityMode, UdpFlowState};
   use clap::Parser;
 
   #[test]
@@ -210,5 +229,34 @@ mod tests {
       args.compatibility_deadline.as_deref(),
       Some("2026-07-25T00:00:00Z")
     );
+  }
+
+  #[test]
+  fn udp_flow_state_defaults_disabled_and_accepts_shared_required() {
+    let default = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("default CLI should parse");
+    assert_eq!(default.shared.udp_flow_state, UdpFlowState::Disabled);
+
+    let shared = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--udp-flow-state=shared_required",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("shared-required CLI should parse");
+    assert_eq!(shared.shared.udp_flow_state, UdpFlowState::SharedRequired);
+
+    let invalid = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--udp-flow-state=local",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect_err("controller CLI must reject process-local UDP flow activation");
+    assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
   }
 }

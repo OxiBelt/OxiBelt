@@ -137,6 +137,10 @@ fn secret_reference_metadata_covers_runtime_credential_boundaries() {
       NativeConfigSecretClass::FileReference,
     ),
     (
+      "shared_state.udp_flow_identity_key_env",
+      NativeConfigSecretClass::EnvironmentReference,
+    ),
+    (
       "tls.certificates[0].private_key",
       NativeConfigSecretClass::FileReference,
     ),
@@ -229,6 +233,29 @@ fn generated_schema_preserves_metadata_through_array_items() {
   assert_eq!(
     deprecated["x-oxibelt-replacement"],
     "upstream_pools[].health_check.healthy_threshold"
+  );
+
+  let udp_flow_state = schema_node_for_metadata_path(&schema, "stream_listeners[].udp_flow_state");
+  assert_eq!(
+    udp_flow_state["enum"],
+    serde_json::json!(["local", "shared_required"])
+  );
+  assert_eq!(udp_flow_state["default"], "local");
+
+  let udp_failure_policy =
+    schema_node_for_metadata_path(&schema, "shared_state.failure_policies.udp_flows");
+  assert_eq!(
+    udp_failure_policy["enum"],
+    serde_json::json!(["reject_new_only"])
+  );
+  assert_eq!(udp_failure_policy["default"], "reject_new_only");
+
+  let identity_key =
+    schema_node_for_metadata_path(&schema, "shared_state.udp_flow_identity_key_env");
+  assert_eq!(identity_key["default"], "OXIBELT_UDP_FLOW_IDENTITY_KEY");
+  assert_eq!(
+    identity_key["x-oxibelt-secret-class"],
+    "environment_reference"
   );
 }
 

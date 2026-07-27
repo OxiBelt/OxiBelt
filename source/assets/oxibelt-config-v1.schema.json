@@ -21788,6 +21788,18 @@
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
+            "udp_flows": {
+              "default": "reject_new_only",
+              "description": "OxiBelt native field `shared_state.failure_policies.udp_flows`. Production Rust validation is authoritative.",
+              "enum": [
+                "reject_new_only"
+              ],
+              "type": "string",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "upstream_health": {
               "anyOf": [
                 {
@@ -22015,6 +22027,61 @@
             }
           ],
           "description": "OxiBelt native field `shared_state.sticky_sessions_backend`. Production Rust validation is authoritative.",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "udp_flow_identity_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "default": "OXIBELT_UDP_FLOW_IDENTITY_KEY",
+          "description": "OxiBelt native field `shared_state.udp_flow_identity_key_env`. Production Rust validation is authoritative.",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "full_reload",
+          "x-oxibelt-secret-class": "environment_reference"
+        },
+        "udp_flows_backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "object"
+            }
+          ],
+          "description": "OxiBelt native field `shared_state.udp_flows_backend`. Production Rust validation is authoritative.",
           "x-oxibelt-config-activation": "full_reload",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
@@ -22753,6 +22820,19 @@
               }
             ],
             "description": "OxiBelt native field `stream_listeners[].udp_datagram_rate`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "udp_flow_state": {
+            "default": "local",
+            "description": "OxiBelt native field `stream_listeners[].udp_flow_state`. Production Rust validation is authoritative.",
+            "enum": [
+              "local",
+              "shared_required"
+            ],
+            "type": "string",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

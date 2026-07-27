@@ -243,9 +243,31 @@ return value
     validate_lease_inputs(keys, limits)?;
     let script = r#"
 local marker = redis.call('GET', KEYS[1])
-local ttl = tonumber(ARGV[#ARGV - 1])
-local fingerprint = ARGV[#ARGV]
+local ttl = tonumber(ARGV[#ARGV - 3])
+local fingerprint = ARGV[#ARGV - 2]
+local configuration = ARGV[#ARGV - 1]
+local adoptable = ARGV[#ARGV] == '1'
 if marker then
+  if adoptable then
+    if string.len(marker) ~= 129
+      or string.sub(marker, 65, 65) ~= ':'
+      or not string.match(marker, '^[0-9a-f]+:[0-9a-f]+$')
+      or string.sub(marker, 1, 64) ~= configuration then
+      return -1
+    end
+    for i = 2, #KEYS do
+      local current = tonumber(redis.call('GET', KEYS[i]) or '0')
+      local counter_ttl = redis.call('PTTL', KEYS[i])
+      if current < 1 or counter_ttl < 1 then
+        return -2
+      end
+    end
+    for i = 2, #KEYS do
+      redis.call('PEXPIRE', KEYS[i], ttl)
+    end
+    redis.call('PSETEX', KEYS[1], ttl, fingerprint)
+    return 0
+  end
   if marker == fingerprint then
     return 0
   end
@@ -275,8 +297,11 @@ return 0
     args.extend(limits.iter().map(|limit| limit.to_string().into_bytes()));
     args.push(ttl_millis(ttl).to_string().into_bytes());
     args.push(lease.fingerprint.as_bytes().to_vec());
+    args.push(lease.configuration_fingerprint.as_bytes().to_vec());
+    args.push(u8::from(lease.adoptable).to_string().into_bytes());
     let value = self.command(&args).await?.into_i64()?;
     match value {
+      -2 => bail!("shared connection lease adoption found a missing counter"),
       -1 => bail!("shared connection lease idempotency fingerprint mismatch"),
       0 => Ok(None),
       value if value > 0 => Ok(Some(value as usize - 1)),
@@ -291,6 +316,9 @@ return 0
     let script = r#"
 local marker = redis.call('GET', KEYS[1])
 if not marker then
+  return 0
+end
+if marker ~= ARGV[1] and ARGV[2] == '1' then
   return 0
 end
 if marker ~= ARGV[1] then
@@ -315,6 +343,7 @@ return 1
     ];
     args.extend(lease.keys.iter().map(|key| key.as_bytes().to_vec()));
     args.push(lease.fingerprint.as_bytes().to_vec());
+    args.push(u8::from(lease.adoptable).to_string().into_bytes());
     match self.command(&args).await?.into_i64()? {
       -1 => bail!("shared connection lease release fingerprint mismatch"),
       0 | 1 => Ok(()),

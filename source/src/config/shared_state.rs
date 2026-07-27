@@ -29,6 +29,8 @@ pub struct SharedStateConfig {
   pub redis_plaintext_policy: RedisPlaintextPolicy,
   #[serde(default = "default_shared_state_instance_id_env")]
   pub instance_id_env: String,
+  #[serde(default = "default_udp_flow_identity_key_env")]
+  pub udp_flow_identity_key_env: String,
   #[serde(default)]
   pub default_backend: Option<String>,
   #[serde(default = "default_shared_state_operation_timeout_ms")]
@@ -45,6 +47,8 @@ pub struct SharedStateConfig {
   pub rate_limits_backend: Option<String>,
   #[serde(default)]
   pub connection_limits_backend: Option<String>,
+  #[serde(default)]
+  pub udp_flows_backend: Option<String>,
   #[serde(default)]
   pub person_proof_backend: Option<String>,
   #[serde(default)]
@@ -76,6 +80,7 @@ impl Default for SharedStateConfig {
       namespace: default_shared_state_namespace(),
       redis_plaintext_policy: RedisPlaintextPolicy::default(),
       instance_id_env: default_shared_state_instance_id_env(),
+      udp_flow_identity_key_env: default_udp_flow_identity_key_env(),
       default_backend: None,
       operation_timeout_ms: default_shared_state_operation_timeout_ms(),
       enumeration_page_size: default_shared_state_enumeration_page_size(),
@@ -85,6 +90,7 @@ impl Default for SharedStateConfig {
       cache_lock_ms: default_shared_state_cache_lock_ms(),
       rate_limits_backend: None,
       connection_limits_backend: None,
+      udp_flows_backend: None,
       person_proof_backend: None,
       upstream_health_backend: None,
       sticky_sessions_backend: None,
@@ -138,6 +144,8 @@ pub struct SharedStateFailurePolicies {
   pub rate_limits: BackendFailureMode,
   #[serde(default = "default_connection_limits_failure_mode")]
   pub connection_limits: BackendFailureMode,
+  #[serde(default = "default_udp_flows_failure_mode")]
+  pub udp_flows: BackendFailureMode,
   #[serde(default = "default_person_proof_failure_mode")]
   pub person_proof: BackendFailureMode,
   #[serde(default = "default_upstream_health_failure_mode")]
@@ -155,6 +163,7 @@ impl Default for SharedStateFailurePolicies {
     Self {
       rate_limits: default_rate_limits_failure_mode(),
       connection_limits: default_connection_limits_failure_mode(),
+      udp_flows: default_udp_flows_failure_mode(),
       person_proof: default_person_proof_failure_mode(),
       upstream_health: default_upstream_health_failure_mode(),
       sticky_sessions: default_sticky_sessions_failure_mode(),
@@ -169,6 +178,10 @@ const fn default_rate_limits_failure_mode() -> BackendFailureMode {
 }
 
 const fn default_connection_limits_failure_mode() -> BackendFailureMode {
+  BackendFailureMode::RejectNewOnly
+}
+
+const fn default_udp_flows_failure_mode() -> BackendFailureMode {
   BackendFailureMode::RejectNewOnly
 }
 
@@ -201,6 +214,10 @@ impl SharedStateConfig {
     validate_optional_non_empty("shared_state.namespace", Some(&self.namespace))?;
     validate_shared_state_namespace(&self.namespace)?;
     validate_optional_non_empty("shared_state.instance_id_env", Some(&self.instance_id_env))?;
+    validate_optional_non_empty(
+      "shared_state.udp_flow_identity_key_env",
+      Some(&self.udp_flow_identity_key_env),
+    )?;
     if self.operation_timeout_ms == 0 || self.connection_lease_ms == 0 || self.cache_lock_ms == 0 {
       bail!("shared_state timeout and lease values must be greater than 0");
     }
@@ -251,6 +268,10 @@ impl SharedStateConfig {
         self.connection_limits_backend.as_deref(),
       ),
       (
+        "shared_state.udp_flows_backend",
+        self.udp_flows_backend.as_deref(),
+      ),
+      (
         "shared_state.person_proof_backend",
         self.person_proof_backend.as_deref(),
       ),
@@ -284,6 +305,11 @@ impl SharedStateConfig {
 
 impl SharedStateFailurePolicies {
   fn validate(&self) -> anyhow::Result<()> {
+    validate_failure_mode(
+      "udp_flows",
+      self.udp_flows,
+      &[BackendFailureMode::RejectNewOnly],
+    )?;
     if self.person_proof != BackendFailureMode::FailClosed {
       bail!(
         "shared_state.failure_policies.person_proof must be fail_closed to preserve Person proof replay and revocation enforcement"
@@ -687,6 +713,10 @@ pub(crate) fn default_shared_state_namespace() -> String {
 
 fn default_shared_state_instance_id_env() -> String {
   "OXIBELT_INSTANCE_ID".to_string()
+}
+
+fn default_udp_flow_identity_key_env() -> String {
+  "OXIBELT_UDP_FLOW_IDENTITY_KEY".to_string()
 }
 
 fn default_shared_state_operation_timeout_ms() -> u64 {

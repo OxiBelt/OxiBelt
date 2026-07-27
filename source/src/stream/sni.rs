@@ -16,10 +16,17 @@ pub(crate) enum StreamRouteTarget<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreamRoute<'a> {
   pub(crate) name: &'a str,
+  pub(crate) identity: StreamRouteIdentity<'a>,
   pub(crate) target: StreamRouteTarget<'a>,
   pub(crate) connect_timeout: Duration,
   pub(crate) idle_timeout: Duration,
   pub(crate) proxy_protocol_egress: ProxyProtocolEgressMode,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum StreamRouteIdentity<'a> {
+  Default,
+  Rule(&'a str),
 }
 
 pub(crate) fn select_stream_route<'a>(
@@ -32,6 +39,28 @@ pub(crate) fn select_stream_route<'a>(
     return route_from_rule(rule);
   }
   default_route(listener)
+}
+
+/// Resolves a durable route identifier only through the active listener.
+///
+/// UDP recovery calls this before inspecting the next datagram, which may no
+/// longer contain a QUIC Initial.  The name is therefore a lookup key, never
+/// a serialized target.
+pub(crate) fn select_default_stream_route(
+  listener: &StreamListenerConfig,
+) -> Option<StreamRoute<'_>> {
+  default_route(listener)
+}
+
+pub(crate) fn select_stream_rule_by_name<'a>(
+  listener: &'a StreamListenerConfig,
+  route_name: &str,
+) -> Option<StreamRoute<'a>> {
+  listener
+    .sni_rules
+    .iter()
+    .find(|rule| rule.name == route_name)
+    .and_then(route_from_rule)
 }
 
 fn matching_rule<'a>(
@@ -78,6 +107,7 @@ fn route_from_rule(rule: &StreamSniRuleConfig) -> Option<StreamRoute<'_>> {
   };
   Some(StreamRoute {
     name: &rule.name,
+    identity: StreamRouteIdentity::Rule(&rule.name),
     target,
     connect_timeout: Duration::from_millis(rule.connect_timeout_ms),
     idle_timeout: Duration::from_millis(rule.idle_timeout_ms),
@@ -96,6 +126,7 @@ fn default_route(listener: &StreamListenerConfig) -> Option<StreamRoute<'_>> {
   };
   Some(StreamRoute {
     name: "default",
+    identity: StreamRouteIdentity::Default,
     target,
     connect_timeout: Duration::from_millis(listener.connect_timeout_ms),
     idle_timeout: Duration::from_millis(listener.idle_timeout_ms),

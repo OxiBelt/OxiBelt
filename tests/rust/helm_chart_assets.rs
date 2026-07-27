@@ -768,7 +768,8 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["l4"]["bindAddress"], "0.0.0.0");
   assert_eq!(values["l4"]["connectTimeoutMs"], 3000);
   assert_eq!(values["l4"]["idleTimeoutMs"], 75000);
-  assert_eq!(values["l4"]["udp"]["maxFlows"], 8192);
+  assert_eq!(values["l4"]["udp"]["flowState"], "disabled");
+  assert_eq!(values["l4"]["udp"]["maxFlows"], 3072);
   assert_eq!(values["l4"]["udp"]["newFlowRate"], "200r/s");
   assert_eq!(values["l4"]["udp"]["batch"], "auto");
   assert_eq!(values["l4"]["udp"]["batchSize"], 16);
@@ -827,6 +828,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(schema["properties"]["statusAddresses"]["maxItems"], 16);
   assert_eq!(schema["properties"]["statusAddresses"]["uniqueItems"], true);
   assert_eq!(
+    schema["properties"]["l4"]["properties"]["udp"]["properties"]["flowState"]["enum"][1],
+    "shared_required"
+  );
+  assert_eq!(
     schema["properties"]["l4"]["properties"]["udp"]["properties"]["maxFlows"]["maximum"],
     1048576
   );
@@ -864,6 +869,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
     "--l4-bind-address=",
     "--l4-connect-timeout-ms=",
     "--l4-idle-timeout-ms=",
+    "--udp-flow-state=",
     "--udp-max-flows=",
     "--udp-new-flow-rate=",
     "--udp-new-flow-burst=",

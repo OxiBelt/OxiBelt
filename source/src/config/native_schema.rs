@@ -145,6 +145,10 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
   ),
   secret(
+    "shared_state.udp_flow_identity_key_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
     "ipm.credentials[].bearer_token_env",
     NativeConfigSecretClass::EnvironmentReference,
   ),
@@ -686,6 +690,14 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       "runtime.main_runtime",
       vec!["compio", "tokio_hyper", "auto"],
     ),
+    (
+      "shared_state.failure_policies.udp_flows",
+      vec!["reject_new_only"],
+    ),
+    (
+      "stream_listeners.udp_flow_state",
+      vec!["local", "shared_required"],
+    ),
     ("tls.min_version", vec!["tls1.2", "tls1.3"]),
     ("tls.max_version", vec!["tls1.2", "tls1.3"]),
     ("tls.resumption.mode", vec!["off", "stateful", "stateless"]),
@@ -717,6 +729,9 @@ fn default_value(path: &str) -> Option<Value> {
     "runtime.hot_reload.mode" => json!("off"),
     "runtime.main_runtime" => json!("compio"),
     "runtime.worker_threads" => json!("auto"),
+    "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
+    "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
+    "stream_listeners.udp_flow_state" => json!("local"),
     "tls.max_version" | "tls.min_version" => json!("tls1.3"),
     "tls.ssl_early_data" => json!("off"),
     _ => return None,

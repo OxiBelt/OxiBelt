@@ -170,5 +170,6 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   )
   .execute(pool)
   .await?;
+  udp_flows::init_postgres_udp_flows(pool).await?;
   Ok(())
 }

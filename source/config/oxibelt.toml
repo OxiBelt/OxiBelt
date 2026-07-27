@@ -1124,6 +1124,7 @@ namespace = "oxibelt"
 # allow preserves existing redis:// deployments; use deny for remote/secure profiles.
 redis_plaintext_policy = "allow" # allow | loopback_only | deny
 instance_id_env = "OXIBELT_INSTANCE_ID"
+udp_flow_identity_key_env = "OXIBELT_UDP_FLOW_IDENTITY_KEY"
 # default_backend = "cluster"
 operation_timeout_ms = 500
 # Shared-state enumeration is cursor-based and bounded by these limits.
@@ -1133,6 +1134,7 @@ connection_lease_ms = 120000
 cache_lock_ms = 10000
 # rate_limits_backend = "cluster"
 # connection_limits_backend = "cluster"
+# udp_flows_backend = "cluster"
 # person_proof_backend = "cluster"
 # upstream_health_backend = "cluster"
 # sticky_sessions_backend = "cluster"
@@ -1145,6 +1147,7 @@ cache_lock_ms = 10000
 # relax backend startup/prewarm requirements.
 rate_limits = "fail_closed"
 connection_limits = "reject_new_only"
+udp_flows = "reject_new_only"
 person_proof = "fail_closed"
 upstream_health = "stale_snapshot"
 sticky_sessions = "local_fallback"
@@ -1556,6 +1559,7 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # network = "udp"
 # bind = "0.0.0.0:10443"
 # upstream_pool = "edge-quic"
+# udp_flow_state = "local" # local | shared_required
 # max_udp_flows = 4096
 # udp_new_flow_rate = "200r/s"
 # udp_new_flow_burst = 400

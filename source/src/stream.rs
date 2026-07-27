@@ -28,6 +28,7 @@ mod sni;
 mod target;
 mod udp;
 mod udp_batch;
+mod udp_flow_state;
 #[cfg(feature = "fuzzing")]
 pub(crate) use udp_batch::fuzz_socket_address_boundary;
 
@@ -37,6 +38,7 @@ const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_mill
 pub(crate) struct StreamListenerTask {
   pub(crate) options: TcpListenOptions,
   pub(crate) config: StreamListenerConfig,
+  pub(crate) shared_state_config: crate::config::SharedStateConfig,
   quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -164,6 +166,7 @@ impl BoundStreamListener {
     let task_name = name.clone();
     let accept_error_backoff = self.accept_error_backoff;
     let snapshot = state.snapshot();
+    let shared_state_config = snapshot.config.shared_state.clone();
     let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
@@ -237,6 +240,7 @@ impl BoundStreamListener {
     StreamListenerTask {
       options,
       config,
+      shared_state_config,
       quiesce,
       shutdown,
       connections,

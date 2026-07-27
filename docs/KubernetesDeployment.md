@@ -705,7 +705,8 @@ l4:
   connectTimeoutMs: 3000
   idleTimeoutMs: 75000
   udp:
-    maxFlows: 8192
+    flowState: disabled # disabled | shared_required
+    maxFlows: 3072
     newFlowRate: 200r/s
     newFlowBurst: 400
     datagramRate: 200r/s
@@ -716,7 +717,29 @@ l4:
 
 `statusAddresses` emits repeated explicit `--status-address` values and takes
 precedence in controller behavior over Service-derived addresses. UDP flow
-state is Pod-local and is reset during Pod replacement or rollout.
+generation is disabled by default. `flowState: disabled` refuses `UDPRoute`
+translation and status programming instead of emitting process-local data-plane
+state.
+
+Before setting `flowState: shared_required`, configure every selected data-plane
+Pod with `[shared_state].enabled = true`, one explicit
+`udp_flows_backend`, the same `shared_state.namespace`, and the same
+`udp_flow_identity_key_env` name resolving to the same Secret-backed 32-byte
+base64 key. Redis-compatible and PostgreSQL backends are supported. The effective
+`connection_limits_backend` must resolve to that same backend, and each
+generated listener's 75-second default idle timeout must remain at least six
+times `shared_state.operation_timeout_ms`. Mount the identity key only into the
+data-plane container; the Gateway Controller neither reads nor owns that
+Secret.
+
+Shared mode allows a replacement Pod to recover the same configured
+`backendRef` identity while the record is inside its idle window. Fencing keeps
+an older Pod generation from renewing or releasing the replacement's record.
+It does not migrate the old socket, upstream source port, Service
+NAT/conntrack selection, exact endpoint Pod, datagrams already in flight, or
+application/session protocol state. During a shared-state outage,
+already-local owned flows may continue, but a packet that needs a lookup,
+claim, recovery, or distributed token decision is rejected.
 
 The controller chart defaults to two replicas with `RollingUpdate`
 (`maxUnavailable: 0`, `maxSurge: 1`), a `minAvailable: 1` PDB, and preferred

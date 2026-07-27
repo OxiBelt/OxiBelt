@@ -11,7 +11,8 @@ use url::Url;
 use super::{
   Config, LoadBalancingAlgorithm, ProxyProtocolEgressMode, UpstreamPoolServerState,
   default_client_idle_timeout_ms, default_connect_timeout_ms, default_pool_server_weight,
-  normalize_sni_pattern, validate_runtime_identifier, validate_sni_server_name,
+  normalize_sni_pattern, validate_base64_32_byte_env, validate_runtime_identifier,
+  validate_sni_server_name,
 };
 
 const DEFAULT_MAX_UDP_FLOWS: usize = 8192;
@@ -19,6 +20,11 @@ const DEFAULT_UDP_RATE_LIMIT_BURST: u32 = 0;
 const MAX_UDP_FLOWS: usize = 1_048_576;
 const MAX_UDP_RATE_LIMIT_BURST: u32 = 1_048_576;
 const MAX_UDP_BATCH_SIZE: usize = 1024;
+pub(crate) const MIN_SHARED_UDP_RATE_PER_SECOND: f64 = 0.000_001;
+pub(crate) const MAX_SHARED_UDP_RATE_PER_SECOND: u64 = 1_048_576;
+pub(crate) const SHARED_UDP_RENEW_BATCH_SIZE: u64 = 64;
+pub(crate) const SHARED_UDP_RENEW_PARALLEL_BATCHES: u64 = 8;
+pub(crate) const MAX_SHARED_UDP_IDLE_TIMEOUT_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl Config {
   pub(super) fn validate_stream_upstream_pools(&self) -> anyhow::Result<()> {
@@ -135,6 +141,7 @@ impl Config {
             listener.name
           );
         }
+        validate_shared_udp_rate(listener, "udp_datagram_rate", rate.per_second())?;
         if listener.udp_datagram_burst == 0 {
           bail!(
             "stream listener {} udp_datagram_burst must be greater than 0 when udp_datagram_rate is set",
@@ -162,6 +169,7 @@ impl Config {
             listener.name
           );
         }
+        validate_shared_udp_rate(listener, "udp_new_flow_rate", rate.per_second())?;
         if listener.udp_new_flow_burst == 0 {
           bail!(
             "stream listener {} udp_new_flow_burst must be greater than 0 when udp_new_flow_rate is set",
@@ -188,6 +196,7 @@ impl Config {
           listener.name
         );
       }
+      validate_udp_flow_state(self, listener)?;
       validate_stream_default_target(self, listener)?;
       let mut rule_names = HashSet::new();
       let mut patterns = HashSet::new();
@@ -197,6 +206,23 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn validate_shared_udp_rate(
+  listener: &StreamListenerConfig,
+  field: &str,
+  per_second: f64,
+) -> anyhow::Result<()> {
+  if listener.udp_flow_state == UdpFlowState::SharedRequired
+    && !(MIN_SHARED_UDP_RATE_PER_SECOND..=MAX_SHARED_UDP_RATE_PER_SECOND as f64)
+      .contains(&per_second)
+  {
+    bail!(
+      "stream listener {} {field} must be between {MIN_SHARED_UDP_RATE_PER_SECOND} and {MAX_SHARED_UDP_RATE_PER_SECOND} requests per second when udp_flow_state = \"shared_required\"",
+      listener.name
+    );
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -215,6 +241,8 @@ pub struct StreamListenerConfig {
   pub idle_timeout_ms: u64,
   #[serde(default)]
   pub proxy_protocol_egress: ProxyProtocolEgressMode,
+  #[serde(default)]
+  pub udp_flow_state: UdpFlowState,
   #[serde(default = "default_max_udp_flows")]
   pub max_udp_flows: usize,
   #[serde(default)]
@@ -250,7 +278,16 @@ pub enum UdpBatchMode {
   Required,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UdpFlowState {
+  #[default]
+  Local,
+  SharedRequired,
+}
+
 pub const STREAM_NETWORK_WIRE_VALUES: &[&str] = &["tcp", "udp"];
+pub const UDP_FLOW_STATE_WIRE_VALUES: &[&str] = &["local", "shared_required"];
 pub const STREAM_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES: &[&str] = &[
   "power_of_two_choices",
   "weighted_least_conn",
@@ -259,6 +296,134 @@ pub const STREAM_POOL_LOAD_BALANCING_ALGORITHM_WIRE_VALUES: &[&str] = &[
 ];
 pub const STREAM_UPSTREAM_POOL_SERVER_STATE_WIRE_VALUES: &[&str] =
   &["ready", "drain", "down", "maintenance"];
+
+fn validate_udp_flow_state(config: &Config, listener: &StreamListenerConfig) -> anyhow::Result<()> {
+  if listener.udp_flow_state == UdpFlowState::Local {
+    return Ok(());
+  }
+  if listener.network != StreamNetwork::Udp {
+    bail!(
+      "stream listener {} udp_flow_state = \"shared_required\" requires network = \"udp\"",
+      listener.name
+    );
+  }
+  if !config.shared_state.enabled {
+    bail!(
+      "stream listener {} udp_flow_state = \"shared_required\" requires shared_state.enabled = true",
+      listener.name
+    );
+  }
+  let Some(udp_backend_name) = config.shared_state.udp_flows_backend.as_deref() else {
+    bail!(
+      "stream listener {} udp_flow_state = \"shared_required\" requires shared_state.udp_flows_backend",
+      listener.name
+    );
+  };
+  let connection_backend_name = config
+    .shared_state
+    .connection_limits_backend
+    .as_deref()
+    .or(config.shared_state.default_backend.as_deref())
+    .or_else(|| {
+      config
+        .shared_state
+        .backends
+        .first()
+        .map(|backend| backend.name.as_str())
+    });
+  if connection_backend_name.is_some_and(|name| name != udp_backend_name) {
+    bail!(
+      "stream listener {} shared UDP flows and shared connection limits must use the same backend",
+      listener.name
+    );
+  }
+  let minimum_idle_timeout_ms = config
+    .shared_state
+    .operation_timeout_ms
+    .checked_mul(6)
+    .ok_or_else(|| {
+      anyhow!(
+        "shared_state.operation_timeout_ms is too large for shared UDP flow timeout validation"
+      )
+    })?;
+  if listener.idle_timeout_ms < minimum_idle_timeout_ms {
+    bail!(
+      "stream listener {} idle_timeout_ms must be at least six times shared_state.operation_timeout_ms ({minimum_idle_timeout_ms}) when udp_flow_state = \"shared_required\"",
+      listener.name
+    );
+  }
+  if listener.idle_timeout_ms > MAX_SHARED_UDP_IDLE_TIMEOUT_MS {
+    bail!(
+      "stream listener {} idle_timeout_ms must not exceed {MAX_SHARED_UDP_IDLE_TIMEOUT_MS} when udp_flow_state = \"shared_required\"",
+      listener.name
+    );
+  }
+  let (renew_interval_ms, owner_ttl_ms) = shared_udp_flow_lease_timing_ms(
+    config.shared_state.operation_timeout_ms,
+    listener.idle_timeout_ms,
+  );
+  if renew_interval_ms < 10 {
+    bail!(
+      "stream listener {} shared_required renewal interval must be at least 10ms; increase idle_timeout_ms or shared_state.operation_timeout_ms",
+      listener.name
+    );
+  }
+  let renewal_waves = owner_ttl_ms
+    .saturating_sub(renew_interval_ms)
+    .checked_div(config.shared_state.operation_timeout_ms)
+    .unwrap_or(0)
+    .saturating_sub(1);
+  let Some(udp_backend) = config
+    .shared_state
+    .backends
+    .iter()
+    .find(|backend| backend.name == udp_backend_name)
+  else {
+    bail!(
+      "stream listener {} shared UDP backend {udp_backend_name} is not configured",
+      listener.name
+    );
+  };
+  if udp_backend.max_connections < 2 {
+    bail!(
+      "stream listener {} shared UDP backend {udp_backend_name} must configure at least 2 max_connections",
+      listener.name
+    );
+  }
+  let backend_parallelism = shared_udp_renew_parallelism(udp_backend.max_connections);
+  let renewable_capacity = renewal_waves
+    .saturating_mul(SHARED_UDP_RENEW_BATCH_SIZE)
+    .saturating_mul(backend_parallelism)
+    .min(MAX_UDP_FLOWS as u64);
+  if u64::try_from(listener.max_udp_flows).unwrap_or(u64::MAX) > renewable_capacity {
+    bail!(
+      "stream listener {} max_udp_flows must not exceed {renewable_capacity} for shared_required renewal timing (operation_timeout_ms={}, idle_timeout_ms={}, backend_parallelism={backend_parallelism})",
+      listener.name,
+      config.shared_state.operation_timeout_ms,
+      listener.idle_timeout_ms
+    );
+  }
+  validate_base64_32_byte_env(
+    "shared_state.udp_flow_identity_key_env",
+    &config.shared_state.udp_flow_identity_key_env,
+  )
+}
+
+pub(crate) fn shared_udp_flow_lease_timing_ms(
+  operation_timeout_ms: u64,
+  idle_timeout_ms: u64,
+) -> (u64, u64) {
+  let renew_interval_ms =
+    operation_timeout_ms.max(5_000_u64.min(idle_timeout_ms.saturating_div(6)));
+  let owner_ttl_ms = renew_interval_ms.saturating_mul(3).min(idle_timeout_ms);
+  (renew_interval_ms, owner_ttl_ms)
+}
+
+pub(crate) fn shared_udp_renew_parallelism(max_connections: u32) -> u64 {
+  u64::from(max_connections.saturating_sub(1))
+    .max(1)
+    .min(SHARED_UDP_RENEW_PARALLEL_BATCHES)
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct StreamSniRuleConfig {

@@ -576,6 +576,7 @@ fn shared_args() -> SharedArgs {
     l4_bind_address: std::net::Ipv4Addr::UNSPECIFIED.into(),
     l4_connect_timeout_ms: 3000,
     l4_idle_timeout_ms: 75_000,
+    udp_flow_state: super::super::cli::UdpFlowState::Disabled,
     udp_max_flows: 8192,
     udp_new_flow_rate: "200r/s".to_string(),
     udp_new_flow_burst: 400,

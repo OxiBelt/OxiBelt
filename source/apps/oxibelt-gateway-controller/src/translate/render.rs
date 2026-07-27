@@ -1,4 +1,4 @@
-use super::super::cli::SharedArgs;
+use super::super::cli::{SharedArgs, UdpFlowState};
 use super::{GENERATED_HEADER, GeneratedKubernetesDiscoveryPort, TranslationState};
 
 pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String {
@@ -141,6 +141,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     out.push_str(&args.l4_idle_timeout_ms.to_string());
     out.push('\n');
     if listener.network == "udp" {
+      if args.udp_flow_state == UdpFlowState::SharedRequired {
+        out.push_str("udp_flow_state = ");
+        out.push_str(&toml_string(args.udp_flow_state.as_str()));
+        out.push('\n');
+      }
       out.push_str("max_udp_flows = ");
       out.push_str(&args.udp_max_flows.to_string());
       out.push('\n');

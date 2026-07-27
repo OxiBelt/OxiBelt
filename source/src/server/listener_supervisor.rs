@@ -247,12 +247,24 @@ impl ListenerSupervisor {
       .config
       .stream_listeners
       .iter()
-      .map(|listener| (listener.clone(), tcp_options))
+      .map(|listener| {
+        (
+          listener.clone(),
+          tcp_options,
+          snapshot.config.shared_state.clone(),
+        )
+      })
       .collect::<Vec<_>>();
     let current_streams = self
       .streams
       .iter()
-      .map(|listener| (listener.config.clone(), listener.options))
+      .map(|listener| {
+        (
+          listener.config.clone(),
+          listener.options,
+          listener.shared_state_config.clone(),
+        )
+      })
       .collect::<Vec<_>>();
     let streams = if desired_streams != current_streams {
       let mut bound = Vec::with_capacity(snapshot.config.stream_listeners.len());

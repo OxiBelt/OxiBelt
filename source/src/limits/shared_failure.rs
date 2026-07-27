@@ -7,6 +7,7 @@ use http::StatusCode;
 use crate::config::{BackendFailureMode, LimitMode};
 use crate::shared_state::{
   ConnectionScope, SharedConnectionAcquire, SharedRateLimitOutcome, SharedStateFeature,
+  UdpFlowConnectionMarker,
 };
 
 use super::{
@@ -17,6 +18,14 @@ impl LimitState {
   pub(super) async fn acquire_scopes_async(
     self: &Arc<Self>,
     specs: Vec<ConnectionAcquireSpec>,
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self.acquire_scopes_async_with_marker(specs, None).await
+  }
+
+  pub(super) async fn acquire_scopes_async_with_marker(
+    self: &Arc<Self>,
+    specs: Vec<ConnectionAcquireSpec>,
+    udp_marker: Option<&UdpFlowConnectionMarker>,
   ) -> Result<ConnectionPermit, StatusCode> {
     if let Some(shared) = &self.shared_state
       && shared.has_connection_limits()
@@ -29,7 +38,14 @@ impl LimitState {
           status: spec.status,
         })
         .collect::<Vec<_>>();
-      let acquired = shared.acquire_connections(&scopes).await;
+      let acquired = match udp_marker {
+        Some(marker) => {
+          shared
+            .acquire_connections_with_udp_marker(&scopes, marker)
+            .await
+        }
+        None => shared.acquire_connections(&scopes).await,
+      };
       drop(scopes);
       return match acquired {
         Ok(SharedConnectionAcquire::Acquired(lease)) => Ok(ConnectionPermit {

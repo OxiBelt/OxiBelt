@@ -65,6 +65,7 @@ spec:
         - "--l4-bind-address={{ .Values.l4.bindAddress }}"
         - "--l4-connect-timeout-ms={{ .Values.l4.connectTimeoutMs }}"
         - "--l4-idle-timeout-ms={{ .Values.l4.idleTimeoutMs }}"
+        - "--udp-flow-state={{ .Values.l4.udp.flowState }}"
         - "--udp-max-flows={{ .Values.l4.udp.maxFlows }}"
         - "--udp-new-flow-rate={{ .Values.l4.udp.newFlowRate }}"
         - "--udp-new-flow-burst={{ .Values.l4.udp.newFlowBurst }}"

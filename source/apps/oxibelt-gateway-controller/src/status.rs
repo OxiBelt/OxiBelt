@@ -10,6 +10,7 @@ use super::model::{
   Diagnostic, DiagnosticSeverity, KubernetesObject, ObjectKey, object_ref as model_object_ref,
 };
 use super::rollout_status::RolloutStatus;
+use super::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC;
 
 const CONDITION_TRUE: &str = "True";
 const CONDITION_FALSE: &str = "False";
@@ -394,6 +395,10 @@ fn route_parent_status(
       .message
       .contains("Accepted but not Programmed because older")
   });
+  let udp_flow_state_disabled = object.kind == "UDPRoute"
+    && object_errors
+      .iter()
+      .any(|diagnostic| diagnostic.message == UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC);
   let error_reason = route_error_reason(&object_errors);
   let resolved_refs = !has_reference_error;
   let has_nonreference_error = object_errors.iter().any(|diagnostic| {
@@ -415,6 +420,8 @@ fn route_parent_status(
           "Accepted"
         } else if !listener_matches {
           "NoMatchingListener"
+        } else if udp_flow_state_disabled {
+          "UnsupportedValue"
         } else {
           error_reason
         },
@@ -422,6 +429,8 @@ fn route_parent_status(
           "Route is accepted by OxiBelt"
         } else if !listener_matches {
           "Route does not match an in-scope listener on the parent Gateway"
+        } else if udp_flow_state_disabled {
+          UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
         } else {
           "Route contains unsupported or invalid fields for OxiBelt Gateway API controller v1"
         },
@@ -443,9 +452,15 @@ fn route_parent_status(
       condition(
         "Programmed",
         bool_status(programmed.programmed),
-        if not_programmed_by_precedence { "NotProgrammed" } else { programmed.reason },
+        if not_programmed_by_precedence || udp_flow_state_disabled {
+          "NotProgrammed"
+        } else {
+          programmed.reason
+        },
         if not_programmed_by_precedence {
           "An older TCPRoute/UDPRoute owns this listener; the route remains Accepted"
+        } else if udp_flow_state_disabled {
+          UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
         } else {
           &programmed.message
         },

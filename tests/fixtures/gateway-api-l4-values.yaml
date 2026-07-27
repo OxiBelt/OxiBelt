@@ -5,3 +5,109 @@ service:
   additionalPorts:
     - { name: tcp-probe, protocol: TCP, port: 9300, targetPort: 19300 }
     - { name: udp-probe, protocol: UDP, port: 5300, targetPort: 15300 }
+
+# The focused UDP restart proof injects only a Secret reference. The generated
+# 32-byte identity key remains outside Helm values, rendered manifests, and
+# data-plane command-line arguments.
+extraEnv:
+  - name: OXIBELT_UDP_FLOW_IDENTITY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: oxibelt-udp-flow-state
+        key: identity-key
+
+# Keep the ordinary chart base configuration while opting this isolated Kind
+# qualification into the bounded in-cluster Redis backend created by the test
+# harness. The controller owns only conf.d/gateway-api.generated.toml.
+config:
+  inline: |
+    include = ["conf.d/*.toml"]
+
+    [config]
+    strict_unknown_fields = true
+    warn_on_deprecated_fields = true
+
+    [logging]
+    level = "info"
+
+    [runtime]
+    linux_only = true
+    read_only_rootfs_compatible = true
+    memory_only_state = true
+    unprivileged_mode = true
+
+    [runtime.hot_reload]
+    mode = "off"
+
+    [runtime.accept]
+    reuse_port = true
+
+    [quic.socket]
+    reuse_port = true
+
+    [listeners]
+    http_binds = ["0.0.0.0:8080"]
+    https_binds = ["0.0.0.0:8443"]
+    http_mode = "redirect_to_https"
+    http1 = true
+    http2 = true
+    http3 = true
+
+    [tls]
+    cert_chain = "tls.crt"
+    private_key = "tls.key"
+    min_version = "tls1.3"
+    max_version = "tls1.3"
+    {{ include "oxibelt.publicTlsConfig" . }}
+
+    [health]
+    enabled = true
+    bind = "0.0.0.0:{{ .Values.health.port }}"
+    ready_path = "{{ .Values.health.readyPath }}"
+    live_path = "{{ .Values.health.livePath }}"
+
+    [metrics]
+    enabled = {{ .Values.metrics.enabled }}
+    bind = "0.0.0.0:9090"
+    format = "prometheus"
+    detail = {{ if .Values.operationalProfile.name }}"detailed"{{ else }}"basic"{{ end }}
+
+    [overload]
+    enabled = {{ if .Values.operationalProfile.name }}true{{ else }}false{{ end }}
+
+    [circuit_breakers]
+    enabled = true
+
+    [shared_state]
+    enabled = true
+    namespace = "gateway-api-l4"
+    redis_plaintext_policy = "allow"
+    udp_flow_identity_key_env = "OXIBELT_UDP_FLOW_IDENTITY_KEY"
+    default_backend = "udp-flows"
+    connection_limits_backend = "udp-flows"
+    udp_flows_backend = "udp-flows"
+    operation_timeout_ms = 250
+    connection_lease_ms = 30000
+
+    [shared_state.failure_policies]
+    udp_flows = "reject_new_only"
+
+    [[shared_state.backends]]
+    name = "udp-flows"
+    kind = "redis"
+    connection_url = "redis://oxibelt-udp-flow-redis:6379/0"
+    max_connections = 8
+
+    [shared_state.backends.redis_pool]
+    min_idle_connections = 1
+    max_waiters = 16
+    pool_wait_timeout_ms = 250
+    command_timeout_ms = 250
+    idle_timeout_ms = 60000
+    health_check_interval_ms = 15000
+    reconnect_min_backoff_ms = 50
+    reconnect_max_backoff_ms = 1000
+    circuit_breaker_failure_threshold = 3
+    circuit_breaker_open_timeout_ms = 1000
+
+    {{ include "oxibelt.adminConfig" . }}

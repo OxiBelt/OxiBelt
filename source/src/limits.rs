@@ -17,7 +17,7 @@ use crate::config::{
 use crate::runtime_health::{
   PROCESS_GENERATION, RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemError, RuntimeSubsystemState,
 };
-use crate::shared_state::{SharedCounterLease, SharedState};
+use crate::shared_state::{SharedCounterLease, SharedState, UdpFlowConnectionMarker};
 use crate::waf::PersonProofTokenBinding;
 
 #[path = "limits/context.rs"]
@@ -257,6 +257,21 @@ impl LimitState {
   ) -> Result<ConnectionPermit, StatusCode> {
     self
       .acquire_scopes_async(Self::connection_specs(ip, limits, connection_limits))
+      .await
+  }
+
+  pub(crate) async fn acquire_connection_with_udp_marker_async(
+    self: &Arc<Self>,
+    ip: IpAddr,
+    limits: &LimitsConfig,
+    connection_limits: &[ConnectionLimitConfig],
+    marker: &UdpFlowConnectionMarker,
+  ) -> Result<ConnectionPermit, StatusCode> {
+    self
+      .acquire_scopes_async_with_marker(
+        Self::connection_specs(ip, limits, connection_limits),
+        Some(marker),
+      )
       .await
   }
 

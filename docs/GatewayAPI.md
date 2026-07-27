@@ -115,13 +115,28 @@ reference valid.
 
 ## UDP Safety Bounds
 
-Generated UDP listeners default to a 75-second idle timeout, 8,192 process-local
+Generated UDP listeners default to a 75-second idle timeout, 3,072 bounded
 flows, a `200r/s` new-flow rate with burst 400, a `200r/s` per-flow datagram
 rate with burst 400, automatic batching, and batch size 16. Configure these
-bounded controller-wide defaults under chart `l4.udp`. UDP flows are pinned to
-one weighted backend until idle expiry or eviction and do not survive Pod
-replacement or immutable rollout. Stateful continuity, source-IP preservation,
-UDP PROXY, BackendTLSPolicy, and arbitrary filters are not approximated.
+controller-wide bounds under chart `l4.udp`.
+
+The controller defaults `l4.udp.flowState` to `disabled` and refuses to render
+or program a `UDPRoute` while it remains disabled; it does not silently emit
+process-local generated flow state. Set it to `shared_required` only after
+every selected data-plane Pod is configured with the same
+`shared_state.namespace`, 32-byte base64 identity key, and explicit
+`udp_flows_backend`. The backend may be Redis-compatible or PostgreSQL and
+must also be the effective shared connection-limit backend. Invalid or missing
+prerequisites keep the generated data-plane configuration from activating.
+
+Within the idle window, shared recovery restores the same still-configured
+weighted `backendRef` identity and fences stale owners. It does not restore the
+old socket or source port, NAT/conntrack state, the exact endpoint Pod behind a
+Service, in-flight or upstream-initiated datagrams, or application/session
+state. A shared-state outage preserves already-local owned work but rejects
+lookups, claims, recoveries, and distributed token decisions for unknown or
+displaced flows. Source-IP preservation, UDP PROXY, BackendTLSPolicy, and
+arbitrary filters are not approximated.
 
 ## HTTPRoute Mapping
 
@@ -188,7 +203,7 @@ not applicable to `GRPCRoute`.
 | `GRPCRoute` service/method/header matches | Partial | Exact service+method and service-only matches only. |
 | `TLSRoute` passthrough | Partial | Requires `tls.mode = Passthrough`; emits `sni_forward` rules. |
 | `TCPRoute` | Experimental | One rule, weighted core Service backends, deterministic listener winner, and explicit operator-owned port exposure. |
-| `UDPRoute` | Experimental | Same bounded Service mapping plus process-local flow, admission, and datagram limits. |
+| `UDPRoute` | Experimental | Same bounded Service mapping plus required Redis-compatible or PostgreSQL logical flow affinity, fenced ownership, admission, and datagram limits. Disabled unless the controller is explicitly set to `shared_required`. |
 | `BackendTLSPolicy` | Experimental/partial | Stable-core hostname plus System or one ConfigMap `ca.crt`; extensions, Secrets, mTLS, pins, and SAN overrides are rejected. |
 
 Cross-namespace `Service` references require a `ReferenceGrant` in the target

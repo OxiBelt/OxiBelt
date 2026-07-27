@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
+use base64::Engine as _;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
@@ -49,6 +50,7 @@ mod runtime;
 mod sticky_sessions;
 #[cfg(test)]
 mod test_support;
+mod udp_flows;
 
 use failure_policy::{BackendFailureBinding, BackendFailureRegistry};
 use redis_pool::RedisPool;
@@ -73,6 +75,12 @@ use helpers::{purge_expired_counters, purge_expired_values};
 pub use person_proof::{
   PersonProofSharedClearance, PersonProofSharedClearancePage, PersonProofSharedStatus,
 };
+pub(crate) use udp_flows::{
+  UdpFlowClaimOutcome, UdpFlowClaimRequest, UdpFlowConnectionMarker, UdpFlowLease,
+  UdpFlowLookupOutcome, UdpFlowOwner, UdpFlowRateLimit, UdpFlowReleaseOutcome, UdpFlowStore,
+  UdpFlowTarget, UdpFlowTokenOutcome, UdpFlowTokenRequest, UdpFlowTouchOutcome,
+  UdpFlowTouchRequest,
+};
 
 #[derive(Clone, Debug)]
 pub struct SharedState {
@@ -86,6 +94,8 @@ pub struct SharedState {
   backends: HashMap<String, Arc<Backend>>,
   rate_limits: Option<Arc<Backend>>,
   connection_limits: Option<Arc<Backend>>,
+  udp_flows: Option<UdpFlowStore>,
+  udp_flow_boot_generation: Arc<[u8; 32]>,
   person_proof: Option<Arc<Backend>>,
   upstream_health: Option<Arc<Backend>>,
   pool_warning_limiter: Arc<SharedPoolWarningLimiter>,
@@ -123,6 +133,7 @@ struct MemoryBackend {
   counters: Arc<Mutex<HashMap<String, MemoryCounter>>>,
   leases: Arc<Mutex<HashMap<String, MemoryLease>>>,
   rate_indexes: Arc<Mutex<HashMap<String, HashMap<String, i64>>>>,
+  udp_flows: Arc<Mutex<HashMap<String, udp_flows::MemoryUdpFlowScope>>>,
   fail_next_operation: Arc<AtomicBool>,
 }
 
@@ -161,6 +172,8 @@ pub struct ConnectionScope<'a> {
 pub(crate) struct SharedCounterLease {
   marker_key: String,
   fingerprint: String,
+  configuration_fingerprint: String,
+  adoptable: bool,
   keys: Vec<String>,
 }
 
@@ -168,10 +181,49 @@ impl SharedCounterLease {
   fn new(marker_key: String, fingerprint: String, keys: Vec<String>) -> Self {
     Self {
       marker_key,
+      configuration_fingerprint: fingerprint.clone(),
       fingerprint,
+      adoptable: false,
       keys,
     }
   }
+
+  fn new_adoptable(
+    marker_key: String,
+    configuration_fingerprint: String,
+    holder_fingerprint: String,
+    keys: Vec<String>,
+  ) -> anyhow::Result<Self> {
+    if !is_lower_hex_digest(&configuration_fingerprint) || !is_lower_hex_digest(&holder_fingerprint)
+    {
+      bail!("adoptable shared connection lease fingerprints must be SHA-256 hex digests");
+    }
+    Ok(Self {
+      marker_key,
+      fingerprint: format!("{configuration_fingerprint}:{holder_fingerprint}"),
+      configuration_fingerprint,
+      adoptable: true,
+      keys,
+    })
+  }
+
+  fn stored_configuration_fingerprint(value: &[u8]) -> Option<&[u8]> {
+    (value.len() == 129
+      && value.get(64) == Some(&b':')
+      && is_lower_hex_bytes(&value[..64])
+      && is_lower_hex_bytes(&value[65..]))
+    .then_some(&value[..64])
+  }
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+  value.len() == 64 && is_lower_hex_bytes(value.as_bytes())
+}
+
+fn is_lower_hex_bytes(value: &[u8]) -> bool {
+  value
+    .iter()
+    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[derive(Debug)]
@@ -299,6 +351,21 @@ impl Default for HealthRecord {
   }
 }
 
+fn load_udp_flow_identity_secret(env_name: &str) -> anyhow::Result<[u8; 32]> {
+  let encoded = zeroize::Zeroizing::new(std::env::var(env_name).with_context(|| {
+    format!("failed to read shared_state.udp_flow_identity_key_env {env_name}")
+  })?);
+  let decoded = zeroize::Zeroizing::new(
+    base64::engine::general_purpose::STANDARD
+      .decode(encoded.trim())
+      .context("shared_state.udp_flow_identity_key_env must contain base64")?,
+  );
+  decoded
+    .as_slice()
+    .try_into()
+    .map_err(|_| anyhow!("shared_state.udp_flow_identity_key_env must contain exactly 32 bytes"))
+}
+
 impl SharedState {
   pub async fn new(config: &Config, metrics: Arc<Metrics>) -> anyhow::Result<Option<Arc<Self>>> {
     Self::new_with_previous(config, metrics, None).await
@@ -348,6 +415,20 @@ impl SharedState {
       .unwrap_or_else(|| format!("{}-{}", std::process::id(), now_unix_ms()));
     let rate_limits = pick(&shared.rate_limits_backend);
     let connection_limits = pick(&shared.connection_limits_backend);
+    let udp_flow_backend = shared
+      .udp_flows_backend
+      .as_deref()
+      .and_then(|name| backends.get(name).cloned());
+    let udp_flow_boot_generation = match previous {
+      Some(state) => state.udp_flow_boot_generation.clone(),
+      None => {
+        let mut generation = [0_u8; 32];
+        crate::crypto::random_fill(&mut generation)
+          .context("failed to generate durable UDP flow boot generation")?;
+        Arc::new(generation)
+      }
+    };
+    let namespace: Arc<str> = Arc::from(shared.namespace.as_str());
     let person_proof = pick(&shared.person_proof_backend);
     let upstream_health = pick(&shared.upstream_health_backend);
     let sticky_sessions = pick(&shared.sticky_sessions_backend);
@@ -358,6 +439,7 @@ impl SharedState {
       [
         BackendFailureBinding::from_backend(rate_limits.as_deref()),
         BackendFailureBinding::from_backend(connection_limits.as_deref()),
+        BackendFailureBinding::from_backend(udp_flow_backend.as_deref()),
         BackendFailureBinding::from_backend(person_proof.as_deref()),
         BackendFailureBinding::from_backend(upstream_health.as_deref()),
         BackendFailureBinding::from_backend(sticky_sessions.as_deref()),
@@ -366,8 +448,22 @@ impl SharedState {
       ],
       metrics,
     ));
+    let udp_flows = udp_flow_backend
+      .as_ref()
+      .map(|backend| {
+        load_udp_flow_identity_secret(&shared.udp_flow_identity_key_env).map(|secret| {
+          UdpFlowStore::new(
+            namespace.clone(),
+            backend.clone(),
+            secret,
+            udp_flow_boot_generation.clone(),
+            failure_registry.clone(),
+          )
+        })
+      })
+      .transpose()?;
     let state = Arc::new(Self {
-      namespace: Arc::from(shared.namespace.as_str()),
+      namespace,
       instance_id: Arc::from(instance_id),
       connection_lease: Duration::from_millis(shared.connection_lease_ms),
       cache_lock: Duration::from_millis(shared.cache_lock_ms),
@@ -380,6 +476,8 @@ impl SharedState {
       backends,
       rate_limits,
       connection_limits,
+      udp_flows,
+      udp_flow_boot_generation,
       person_proof,
       upstream_health,
       pool_warning_limiter: Self::inherited_pool_warning_limiter(previous),
@@ -522,6 +620,22 @@ impl SharedState {
     &self,
     scopes: &[ConnectionScope<'_>],
   ) -> anyhow::Result<SharedConnectionAcquire> {
+    self.acquire_connections_inner(scopes, None).await
+  }
+
+  pub(crate) async fn acquire_connections_with_udp_marker(
+    &self,
+    scopes: &[ConnectionScope<'_>],
+    marker: &UdpFlowConnectionMarker,
+  ) -> anyhow::Result<SharedConnectionAcquire> {
+    self.acquire_connections_inner(scopes, Some(marker)).await
+  }
+
+  async fn acquire_connections_inner(
+    &self,
+    scopes: &[ConnectionScope<'_>],
+    udp_marker: Option<&UdpFlowConnectionMarker>,
+  ) -> anyhow::Result<SharedConnectionAcquire> {
     let Some(backend) = &self.connection_limits else {
       return Ok(SharedConnectionAcquire::Acquired(SharedCounterLease::new(
         String::new(),
@@ -534,11 +648,22 @@ impl SharedState {
       .map(|scope| self.key(&format!("conn:{}", scope.key)))
       .collect::<Vec<_>>();
     let limits = scopes.iter().map(|scope| scope.limit).collect::<Vec<_>>();
-    let lease = SharedCounterLease::new(
-      self.key(&format!("lease:connection:{}", random_hex(16)?)),
-      connection_lease_fingerprint(&keys, &limits, self.connection_lease),
-      keys,
-    );
+    let configuration_fingerprint =
+      connection_lease_fingerprint(&keys, &limits, self.connection_lease);
+    let lease = if let Some(marker) = udp_marker {
+      SharedCounterLease::new_adoptable(
+        self.key(&format!("lease:connection:udp:{}", marker.marker_hex())),
+        configuration_fingerprint,
+        marker.holder_hex(),
+        keys,
+      )?
+    } else {
+      SharedCounterLease::new(
+        self.key(&format!("lease:connection:{}", random_hex(16)?)),
+        configuration_fingerprint,
+        keys,
+      )
+    };
     let result = match backend
       .connection_acquire(&lease.keys, &limits, self.connection_lease, &lease)
       .await

@@ -131,6 +131,43 @@ impl StreamPoolState {
     })
   }
 
+  /// Restores an earlier logical flow selection against the active pool.
+  ///
+  /// The stored server identifier is never treated as an origin.  Recovery
+  /// succeeds only while the current configuration still contains the same
+  /// enabled, healthy, protocol-compatible server and its local connection
+  /// bound admits another socket.
+  pub fn select_exact(
+    &self,
+    pool_name: &str,
+    server_id: &str,
+    network: StreamNetwork,
+  ) -> anyhow::Result<StreamPoolSelection> {
+    let Some(pool) = self.pools.get(pool_name).cloned() else {
+      bail!("unknown stream upstream pool {pool_name}");
+    };
+    let Some((index, server)) = pool
+      .servers
+      .iter()
+      .enumerate()
+      .find(|(_, server)| server.server_id == server_id)
+    else {
+      bail!("stream upstream pool {pool_name} has no server {server_id}");
+    };
+    let config = &pool.config.servers[index];
+    if !server_available(server, config, network) {
+      bail!("stream upstream pool {pool_name} server {server_id} is unavailable");
+    }
+
+    server.active.fetch_add(1, Ordering::Relaxed);
+    Ok(StreamPoolSelection {
+      pool_name: pool_name.to_string(),
+      server_id: server.server_id.clone(),
+      origin: server.origin.clone(),
+      server: server.clone(),
+    })
+  }
+
   pub fn snapshots(&self) -> Vec<StreamPoolSnapshot> {
     let mut snapshots = self
       .pools
@@ -331,6 +368,78 @@ fn mix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn exact_restore_pool(state: UpstreamPoolServerState, max_conns: usize) -> StreamPoolState {
+    let state = StreamPoolState::new(&[StreamUpstreamPoolConfig {
+      name: "udp-pool".to_string(),
+      algorithm: LoadBalancingAlgorithm::PowerOfTwoChoices,
+      hash_key: None,
+      servers: vec![StreamUpstreamPoolServerConfig {
+        id: Some("stable-backend".to_string()),
+        origin: Url::parse("udp://127.0.0.1:5300").unwrap(),
+        weight: 1,
+        max_conns,
+        backup: false,
+        state,
+      }],
+    }]);
+    match Arc::try_unwrap(state) {
+      Ok(state) => state,
+      Err(_) => panic!("test pool should have one owner"),
+    }
+  }
+
+  #[test]
+  fn exact_restore_resolves_only_current_authorized_server() {
+    let state = exact_restore_pool(UpstreamPoolServerState::Ready, 0);
+    let selection = state
+      .select_exact("udp-pool", "stable-backend", StreamNetwork::Udp)
+      .expect("configured UDP server should restore");
+
+    assert_eq!(selection.pool_name, "udp-pool");
+    assert_eq!(selection.server_id, "stable-backend");
+    assert_eq!(selection.origin.as_str(), "udp://127.0.0.1:5300");
+    assert!(
+      state
+        .select_exact("udp-pool", "removed-backend", StreamNetwork::Udp)
+        .is_err(),
+      "a stored identifier must not become arbitrary routing authority"
+    );
+    assert!(
+      state
+        .select_exact("udp-pool", "stable-backend", StreamNetwork::Tcp)
+        .is_err(),
+      "a stored identifier must not cross protocol boundaries"
+    );
+  }
+
+  #[test]
+  fn exact_restore_honors_state_and_connection_bounds() {
+    let unavailable = exact_restore_pool(UpstreamPoolServerState::Drain, 0);
+    assert!(
+      unavailable
+        .select_exact("udp-pool", "stable-backend", StreamNetwork::Udp)
+        .is_err()
+    );
+
+    let bounded = exact_restore_pool(UpstreamPoolServerState::Ready, 1);
+    let first = bounded
+      .select_exact("udp-pool", "stable-backend", StreamNetwork::Udp)
+      .expect("first restored selection should fit");
+    assert!(
+      bounded
+        .select_exact("udp-pool", "stable-backend", StreamNetwork::Udp)
+        .is_err(),
+      "restoration must not bypass max_conns"
+    );
+    drop(first);
+    assert!(
+      bounded
+        .select_exact("udp-pool", "stable-backend", StreamNetwork::Udp)
+        .is_ok(),
+      "dropping the restored selection should release its active count"
+    );
+  }
 
   #[test]
   fn stream_pool_weight_biases_bounded_candidate_sampling() {

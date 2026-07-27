@@ -306,6 +306,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "udp_datagram_rate",
       "udp_batch",
       "udp_batch_size",
+      "udp_flow_state",
       "udp_new_flow_burst",
       "udp_new_flow_rate",
       "upstream_pool",

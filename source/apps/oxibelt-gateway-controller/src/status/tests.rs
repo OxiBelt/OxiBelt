@@ -10,6 +10,7 @@ fn args() -> SharedArgs {
     l4_bind_address: std::net::Ipv4Addr::UNSPECIFIED.into(),
     l4_connect_timeout_ms: 3000,
     l4_idle_timeout_ms: 75_000,
+    udp_flow_state: crate::cli::UdpFlowState::Disabled,
     udp_max_flows: 8192,
     udp_new_flow_rate: "200r/s".to_string(),
     udp_new_flow_burst: 400,
@@ -279,6 +280,68 @@ spec:
   assert_eq!(
     younger.status["parents"][0]["conditions"][2]["reason"],
     "NotProgrammed"
+  );
+}
+
+#[test]
+fn udp_route_status_reports_shared_flow_state_activation_requirement() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - {name: dns, protocol: UDP, port: 5353}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata: {name: dns, namespace: default}
+spec:
+  parentRefs:
+  - {name: edge, sectionName: dns}
+"#,
+    ),
+  ];
+  let diagnostics = vec![Diagnostic::error(
+    "UDPRoute/default/dns",
+    crate::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC,
+  )];
+  let patches = build_status_patches(&objects, &args(), &diagnostics, &committed_rollout());
+  let route = patches
+    .iter()
+    .find(|patch| patch.resource == "udproutes" && patch.name == "dns")
+    .expect("UDPRoute patch");
+  let conditions = route.status["parents"][0]["conditions"]
+    .as_array()
+    .expect("route conditions");
+
+  assert_eq!(conditions[0]["status"], CONDITION_FALSE);
+  assert_eq!(conditions[0]["reason"], "UnsupportedValue");
+  assert_eq!(
+    conditions[0]["message"],
+    crate::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
+  );
+  assert_eq!(conditions[1]["status"], CONDITION_TRUE);
+  assert_eq!(conditions[1]["reason"], "ResolvedRefs");
+  assert_eq!(conditions[2]["status"], CONDITION_FALSE);
+  assert_eq!(conditions[2]["reason"], "NotProgrammed");
+  assert_eq!(
+    conditions[2]["message"],
+    crate::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
   );
 }
 

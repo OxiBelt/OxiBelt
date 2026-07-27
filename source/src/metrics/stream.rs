@@ -15,6 +15,9 @@ pub(super) struct StreamMetrics {
   udp_rate_limited_total: AtomicU64,
   udp_flows_active: AtomicU64,
   udp_flows_created_total: AtomicU64,
+  udp_flows_restored_total: AtomicU64,
+  udp_flow_persistence_errors_total: AtomicU64,
+  udp_flow_fence_rejections_total: AtomicU64,
   udp_flows_expired_total: AtomicU64,
   udp_flows_evicted_total: AtomicU64,
   udp_flow_admission_rejections_total: AtomicU64,
@@ -71,15 +74,49 @@ impl Metrics {
       .fetch_add(1, Ordering::Relaxed);
   }
 
+  pub fn record_stream_udp_flow_restored(&self, _listener: &str) {
+    self.stream.udp_flows_active.fetch_add(1, Ordering::Relaxed);
+    self
+      .stream
+      .udp_flows_restored_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_stream_udp_flow_persistence_error(&self, _listener: &str) {
+    self
+      .stream
+      .udp_flow_persistence_errors_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn record_stream_udp_flow_fence_rejection(&self, _listener: &str) {
+    self
+      .stream
+      .udp_flow_fence_rejections_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
   pub fn record_stream_udp_flow_expired(&self, _listener: &str) {
-    self.record_stream_udp_flow_ended(&self.stream.udp_flows_expired_total);
+    self.record_stream_udp_flow_ended_with_counter(&self.stream.udp_flows_expired_total);
   }
 
   pub fn record_stream_udp_flow_evicted(&self, _listener: &str) {
-    self.record_stream_udp_flow_ended(&self.stream.udp_flows_evicted_total);
+    self.record_stream_udp_flow_ended_with_counter(&self.stream.udp_flows_evicted_total);
+  }
+
+  pub fn record_stream_udp_flow_ended(&self, _listener: &str) {
+    self.record_stream_udp_flows_ended(1);
   }
 
   pub fn record_stream_udp_flows_forced_shutdown(&self, _listener: &str, count: usize) {
+    self.record_stream_udp_flows_ended(count);
+    self
+      .stream
+      .udp_flows_forced_shutdown_total
+      .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::Relaxed);
+  }
+
+  pub fn record_stream_udp_flows_ended(&self, count: usize) {
     let count = u64::try_from(count).unwrap_or(u64::MAX);
     let _ =
       self
@@ -88,10 +125,6 @@ impl Metrics {
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
           Some(active.saturating_sub(count))
         });
-    self
-      .stream
-      .udp_flows_forced_shutdown_total
-      .fetch_add(count, Ordering::Relaxed);
   }
 
   pub fn record_stream_udp_flow_admission_rejection(&self, _listener: &str) {
@@ -108,14 +141,8 @@ impl Metrics {
       .fetch_add(1, Ordering::Relaxed);
   }
 
-  fn record_stream_udp_flow_ended(&self, counter: &AtomicU64) {
-    let _ =
-      self
-        .stream
-        .udp_flows_active
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
-          Some(active.saturating_sub(1))
-        });
+  fn record_stream_udp_flow_ended_with_counter(&self, counter: &AtomicU64) {
+    self.record_stream_udp_flows_ended(1);
     counter.fetch_add(1, Ordering::Relaxed);
   }
 
@@ -167,6 +194,30 @@ impl Metrics {
       "oxibelt_stream_udp_flows_created_total",
       "counter",
       self.stream.udp_flows_created_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      output,
+      "oxibelt_stream_udp_flows_restored_total",
+      "counter",
+      self.stream.udp_flows_restored_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      output,
+      "oxibelt_stream_udp_flow_persistence_errors_total",
+      "counter",
+      self
+        .stream
+        .udp_flow_persistence_errors_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      output,
+      "oxibelt_stream_udp_flow_fence_rejections_total",
+      "counter",
+      self
+        .stream
+        .udp_flow_fence_rejections_total
+        .load(Ordering::Relaxed),
     );
     append_metric(
       output,
@@ -222,8 +273,12 @@ mod tests {
     metrics.record_stream_udp_flow_expired("listener-a");
     metrics.record_stream_udp_flow_evicted("listener-b");
     metrics.record_stream_udp_flow_created("listener-a");
+    metrics.record_stream_udp_flow_restored("listener-a");
+    metrics.record_stream_udp_flow_ended("listener-a");
+    metrics.record_stream_udp_flow_persistence_error("listener-a");
+    metrics.record_stream_udp_flow_fence_rejection("listener-b");
     metrics.record_stream_udp_flow_created("listener-b");
-    metrics.record_stream_udp_flows_forced_shutdown("listener-a", 2);
+    metrics.record_stream_udp_flows_forced_shutdown("listener-a", 3);
     metrics.record_stream_udp_flow_admission_rejection("listener-a");
     metrics.record_stream_udp_datagram_dropped("listener-b");
 
@@ -232,10 +287,13 @@ mod tests {
 
     assert!(output.contains("oxibelt_stream_udp_flows_active 0\n"));
     assert!(output.contains("oxibelt_stream_udp_flows_created_total 4\n"));
+    assert!(output.contains("oxibelt_stream_udp_flows_restored_total 1\n"));
+    assert!(output.contains("oxibelt_stream_udp_flow_persistence_errors_total 1\n"));
+    assert!(output.contains("oxibelt_stream_udp_flow_fence_rejections_total 1\n"));
     assert!(output.contains("oxibelt_stream_udp_flows_expired_total 1\n"));
     assert!(output.contains("oxibelt_stream_udp_flows_evicted_total 1\n"));
     assert!(output.contains("oxibelt_stream_udp_flow_admission_rejections_total 1\n"));
-    assert!(output.contains("oxibelt_stream_udp_flows_forced_shutdown_total 2\n"));
+    assert!(output.contains("oxibelt_stream_udp_flows_forced_shutdown_total 3\n"));
     assert!(output.contains("oxibelt_stream_udp_datagrams_dropped_total 1\n"));
     assert!(!output.contains("listener-a"));
     assert!(!output.contains("listener-b"));

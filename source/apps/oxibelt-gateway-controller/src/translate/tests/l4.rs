@@ -161,7 +161,7 @@ spec:
 }
 
 #[test]
-fn udp_route_renders_bounded_flow_admission_settings() {
+fn udp_route_requires_shared_flow_state_and_renders_bounded_admission_settings() {
   let raw = r#"
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -202,14 +202,32 @@ spec:
 "#;
   let mut args = args();
   args.status_service = Some("default/edge".to_string());
+  let disabled = translate_objects(&objects(raw), &args).expect("translate disabled UDPRoute");
+
+  assert!(!disabled.toml.contains("network = \"udp\""));
+  assert!(!disabled.toml.contains("[[stream_upstream_pools]]"));
+  assert!(!disabled.toml.contains("udp_flow_state"));
+  assert!(disabled.diagnostics.iter().any(|diagnostic| {
+    diagnostic.object == "UDPRoute/default/dns"
+      && diagnostic.severity == crate::model::DiagnosticSeverity::Error
+      && diagnostic.message == crate::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
+  }));
+  generated_toml_validates(&disabled.toml);
+
+  args.udp_flow_state = crate::cli::UdpFlowState::SharedRequired;
   let rendered = translate_objects(&objects(raw), &args).expect("translate");
 
   assert!(rendered.toml.contains("network = \"udp\""));
+  assert!(
+    rendered
+      .toml
+      .contains("udp_flow_state = \"shared_required\"")
+  );
   assert!(rendered.toml.contains("udp_new_flow_rate = \"200r/s\""));
   assert!(rendered.toml.contains("udp_new_flow_burst = 400"));
   assert!(rendered.toml.contains("max_udp_flows = 8192"));
   assert!(rendered.toml.contains("udp_batch_size = 16"));
-  generated_toml_validates(&rendered.toml);
+  generated_toml_parses(&rendered.toml);
 }
 
 #[test]
@@ -273,6 +291,7 @@ spec:
 "#;
   let mut args = args();
   args.status_service = Some("default/edge".to_string());
+  args.udp_flow_state = crate::cli::UdpFlowState::SharedRequired;
   let rendered = translate_objects(&objects(raw), &args).expect("translate");
 
   pretty_assertions::assert_eq!(rendered.toml.matches("bind = \"0.0.0.0:19000\"").count(), 2);
@@ -284,5 +303,5 @@ spec:
       .iter()
       .any(|diagnostic| { diagnostic.message.contains("duplicate process bind") })
   );
-  generated_toml_validates(&rendered.toml);
+  generated_toml_parses(&rendered.toml);
 }

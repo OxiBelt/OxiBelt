@@ -222,6 +222,52 @@ impl PostgresBackend {
       let fingerprint: Vec<u8> = row.try_get("fingerprint")?;
       let expiry: i64 = row.try_get("expires_at_ms")?;
       if expiry > now {
+        if lease.adoptable {
+          let stored_configuration =
+            SharedCounterLease::stored_configuration_fingerprint(&fingerprint).ok_or_else(
+              || anyhow::anyhow!("adoptable shared connection lease marker is malformed"),
+            )?;
+          if stored_configuration != lease.configuration_fingerprint.as_bytes() {
+            bail!("shared connection lease adoption configuration mismatch");
+          }
+          let mut ordered_keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
+          ordered_keys.sort_unstable();
+          for key in ordered_keys {
+            let row = sqlx::query(
+              "SELECT counter, expires_at_ms
+               FROM oxibelt_shared_counters WHERE key = $1 FOR UPDATE",
+            )
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(row) = row else {
+              bail!("shared connection lease adoption found a missing counter");
+            };
+            let counter: i64 = row.try_get("counter")?;
+            let counter_expiry: Option<i64> = row.try_get("expires_at_ms")?;
+            if counter <= 0 || counter_expiry.is_none_or(|expiry| expiry <= now) {
+              bail!("shared connection lease adoption found an inactive counter");
+            }
+            sqlx::query("UPDATE oxibelt_shared_counters SET expires_at_ms = $2 WHERE key = $1")
+              .bind(key)
+              .bind(expires_at_ms)
+              .execute(&mut *tx)
+              .await?;
+          }
+          sqlx::query(
+            "UPDATE oxibelt_shared_idempotency
+             SET fingerprint = $2, result = $3, expires_at_ms = $4
+             WHERE record_key = $1",
+          )
+          .bind(&lease.marker_key)
+          .bind(lease.fingerprint.as_bytes())
+          .bind(b"lease".as_slice())
+          .bind(expires_at_ms)
+          .execute(&mut *tx)
+          .await?;
+          tx.commit().await?;
+          return Ok(None);
+        }
         if fingerprint.as_slice() != lease.fingerprint.as_bytes() {
           bail!("shared connection lease idempotency fingerprint mismatch");
         }
@@ -314,6 +360,10 @@ impl PostgresBackend {
     };
     let fingerprint: Vec<u8> = row.try_get("fingerprint")?;
     if fingerprint.as_slice() != lease.fingerprint.as_bytes() {
+      if lease.adoptable {
+        tx.commit().await?;
+        return Ok(());
+      }
       bail!("shared connection lease release fingerprint mismatch");
     }
     let expires_at_ms: i64 = row.try_get("expires_at_ms")?;

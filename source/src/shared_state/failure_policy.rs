@@ -13,7 +13,7 @@ use crate::metrics::Metrics;
 use super::failure_epoch::FailureEpoch;
 use super::{Backend, now_unix_ms};
 
-const FEATURE_COUNT: usize = 7;
+const FEATURE_COUNT: usize = 8;
 
 /// The fixed shared-state feature set governed by `[shared_state.failure_policies]`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -21,6 +21,7 @@ const FEATURE_COUNT: usize = 7;
 pub(crate) enum SharedStateFeature {
   RateLimits,
   ConnectionLimits,
+  UdpFlows,
   PersonProof,
   UpstreamHealth,
   StickySessions,
@@ -32,6 +33,7 @@ impl SharedStateFeature {
   const ALL: [Self; FEATURE_COUNT] = [
     Self::RateLimits,
     Self::ConnectionLimits,
+    Self::UdpFlows,
     Self::PersonProof,
     Self::UpstreamHealth,
     Self::StickySessions,
@@ -43,6 +45,7 @@ impl SharedStateFeature {
     match self {
       Self::RateLimits => "rate_limits",
       Self::ConnectionLimits => "connection_limits",
+      Self::UdpFlows => "udp_flows",
       Self::PersonProof => "person_proof",
       Self::UpstreamHealth => "upstream_health",
       Self::StickySessions => "sticky_sessions",
@@ -266,6 +269,7 @@ const fn mode_for(
   match feature {
     SharedStateFeature::RateLimits => policies.rate_limits,
     SharedStateFeature::ConnectionLimits => policies.connection_limits,
+    SharedStateFeature::UdpFlows => policies.udp_flows,
     SharedStateFeature::PersonProof => policies.person_proof,
     SharedStateFeature::UpstreamHealth => policies.upstream_health,
     SharedStateFeature::StickySessions => policies.sticky_sessions,

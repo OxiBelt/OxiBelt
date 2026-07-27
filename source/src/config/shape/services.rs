@@ -369,6 +369,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "rate_limits_backend",
       "reload_backend",
       "sticky_sessions_backend",
+      "udp_flow_identity_key_env",
+      "udp_flows_backend",
       "upstream_health_backend",
     ][..],
     "shared_state.failure_policies" => &[
@@ -378,6 +380,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "rate_limits",
       "reload",
       "sticky_sessions",
+      "udp_flows",
       "upstream_health",
     ][..],
     "shared_state.backends" => &[

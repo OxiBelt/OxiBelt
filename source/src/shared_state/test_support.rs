@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::failure_policy::{BackendFailureBinding, BackendFailureRegistry};
 use super::redis_pool::RedisPool;
 use super::runtime::{BackendRuntime, CleanupDispatcher};
-use super::{Backend, MemoryBackend, RedisBackend, SharedState};
+use super::{Backend, MemoryBackend, RedisBackend, SharedState, UdpFlowStore};
 use crate::config::{
   CryptoConfig, RedisPlaintextPolicy, SharedStateBackendConfig, SharedStateBackendKind,
   SharedStateFailurePolicies,
@@ -34,6 +34,7 @@ impl SharedState {
         BackendFailureBinding::from_backend(Some(backend.as_ref())),
         BackendFailureBinding::from_backend(Some(backend.as_ref())),
         BackendFailureBinding::from_backend(Some(backend.as_ref())),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
       ],
       Metrics::new(),
     ));
@@ -51,6 +52,14 @@ impl SharedState {
       backends: HashMap::new(),
       rate_limits: Some(backend.clone()),
       connection_limits: Some(backend.clone()),
+      udp_flows: Some(UdpFlowStore::new(
+        Arc::from(namespace),
+        backend.clone(),
+        [0x11; 32],
+        Arc::new([0x5a; 32]),
+        failure_registry.clone(),
+      )),
+      udp_flow_boot_generation: Arc::new([0x5a; 32]),
       person_proof: Some(backend.clone()),
       upstream_health: Some(backend.clone()),
       pool_warning_limiter: Arc::default(),
@@ -135,6 +144,7 @@ impl SharedState {
       [
         BackendFailureBinding::from_backend(None),
         BackendFailureBinding::from_backend(None),
+        BackendFailureBinding::from_backend(Some(backend.as_ref())),
         BackendFailureBinding::from_backend(person_proof.then_some(backend.as_ref())),
         BackendFailureBinding::from_backend(Some(backend.as_ref())),
         BackendFailureBinding::from_backend(None),
@@ -157,6 +167,14 @@ impl SharedState {
       backends,
       rate_limits: None,
       connection_limits: None,
+      udp_flows: Some(UdpFlowStore::new(
+        Arc::from(namespace),
+        backend.clone(),
+        [0x11; 32],
+        Arc::new([0x5a; 32]),
+        failure_registry.clone(),
+      )),
+      udp_flow_boot_generation: Arc::new([0x5a; 32]),
       person_proof: person_proof.then_some(backend.clone()),
       upstream_health: Some(backend.clone()),
       pool_warning_limiter: Arc::default(),
