@@ -172,6 +172,14 @@ Pod, complete the data-plane rollout, and only then re-enable
 PostgreSQL migration or any backend-name change; OxiBelt does not mirror UDP
 flow records between backends.
 
+The Rust `1.97.1` lint-compatibility cleanup applied after this durable-flow
+implementation does not change `udp_flow_state` or shared-state configuration
+syntax, defaults, or validation; opaque flow-identity derivation;
+Redis-compatible or PostgreSQL record formats; or lease, fencing, renewal, and
+token-accounting behavior. Existing configurations and durable records require
+no migration or additional drain beyond the transition and rollback procedures
+in this section.
+
 For rollback to a version without durable UDP support, first disable generated
 UDP and drain new-version owners, then restore the prior data-plane
 configuration and image before the prior controller. Keep the previous key and
