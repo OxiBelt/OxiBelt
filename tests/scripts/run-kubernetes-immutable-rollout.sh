@@ -12,7 +12,9 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 gateway_api_version="v1.6.1"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
 gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
-redis_image="valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328"
+redis_source_image="valkey/valkey:9-alpine@sha256:3fe38a705227d29534a199e876b38d5474dec4d3baca980ac6894df539416562"
+redis_source_digest="${redis_source_image##*@sha256:}"
+redis_kind_image=""
 # The scheduled qualification matrix may select only these reviewed Kind node
 # manifests. Arbitrary environment-provided images are rejected before Docker
 # or Kind creates resources.
@@ -44,6 +46,7 @@ empty_config_digest="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 port_forward_pid=""
 udp_flow_probe_pid=""
 cluster_created=0
+redis_kind_image_created=0
 admin_server_name=""
 admin_service_name="${workload_name}-admin"
 controller_selector="app.kubernetes.io/name=oxibelt-gateway-controller"
@@ -129,6 +132,9 @@ cleanup() {
     # The Kind cluster is named from this invocation only. Do not run broad
     # Docker or Kubernetes cleanup commands here.
     kind delete cluster --name "${cluster_name}" >/dev/null 2>&1 || true
+  fi
+  if ((redis_kind_image_created == 1)); then
+    docker image rm --no-prune "${redis_kind_image}" >/dev/null 2>&1 || true
   fi
 
   case "${work_dir}" in
@@ -1246,7 +1252,7 @@ assert_controller_can_i() {
   fi
 }
 
-for command in docker kind kubectl helm curl jq openssl sha256sum tail tr; do
+for command in docker kind kubectl helm curl jq openssl sed sha256sum tail tr; do
   require_command "${command}"
 done
 
@@ -1263,6 +1269,11 @@ run_id="$(printf '%s' "${run_seed}" | sha256sum)"
 run_id="${run_id%% *}"
 run_id="${run_id:0:24}"
 [[ "${run_id}" =~ ^[a-f0-9]{24}$ ]] || die "failed to derive a safe test run identifier"
+[[ "${redis_source_digest}" =~ ^[a-f0-9]{64}$ ]] \
+  || die "the reviewed Valkey source image must use an exact sha256 manifest digest"
+redis_kind_image="oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}"
+[[ "${redis_kind_image}" =~ ^oxibelt-ci/valkey:sha256-[a-f0-9]{64}-[a-f0-9]{24}$ ]] \
+  || die "failed to derive a safe Kind-local Valkey image alias"
 cluster_name="oxibelt-rollout-${run_id}"
 namespace="oxibelt-rollout-${run_id}"
 outside_namespace="oxibelt-outside-${run_id}"
@@ -1296,13 +1307,21 @@ controller_image_tag="${controller_image##*:}"
 docker version --format '{{.Server.Version}}' >/dev/null
 docker image inspect "${dataplane_image}" >/dev/null
 docker image inspect "${controller_image}" >/dev/null
-docker pull "${redis_image}" >/dev/null
-docker image inspect "${redis_image}" >/dev/null
-docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${redis_image}" \
-  | grep -Fqx "valkey/valkey@${redis_image##*@}" \
+docker pull "${redis_source_image}" >/dev/null
+docker image inspect "${redis_source_image}" >/dev/null
+docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${redis_source_image}" \
+  | grep -Fqx "valkey/valkey@${redis_source_image##*@}" \
   || die "rootless Docker did not retain the exact reviewed Valkey repo digest"
-[[ "$(docker image inspect --format '{{.Architecture}}/{{.Os}}' "${redis_image}")" == "amd64/linux" ]] \
+[[ "$(docker image inspect --format '{{.Architecture}}/{{.Os}}' "${redis_source_image}")" == "amd64/linux" ]] \
   || die "the Kubernetes qualification requires the reviewed linux/amd64 Valkey image"
+redis_source_image_id="$(docker image inspect --format '{{.Id}}' "${redis_source_image}")"
+if docker image inspect "${redis_kind_image}" >/dev/null 2>&1; then
+  die "refusing to reuse an existing Kind-local Valkey image alias: ${redis_kind_image}"
+fi
+redis_kind_image_created=1
+docker tag "${redis_source_image}" "${redis_kind_image}"
+[[ "$(docker image inspect --format '{{.Id}}' "${redis_kind_image}")" == "${redis_source_image_id}" ]] \
+  || die "rootless Docker did not create the reviewed Valkey Kind alias"
 dataplane_effective_version="$(docker image inspect \
   --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
   "${dataplane_image}")"
@@ -1345,7 +1364,10 @@ cluster_created=1
 verify_kind_node_l4_probe_runtime
 
 kind load docker-image --name "${cluster_name}" \
-  "${dataplane_image}" "${controller_image}" "${redis_image}"
+  "${dataplane_image}" "${controller_image}" "${redis_kind_image}"
+docker exec "${cluster_name}-control-plane" \
+  crictl inspecti "docker.io/${redis_kind_image}" >/dev/null \
+  || die "Kind CRI did not retain the reviewed Valkey image alias"
 
 curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
   --silent --show-error \
@@ -1453,7 +1475,8 @@ kube -n "${namespace}" create secret generic oxibelt-udp-flow-state \
   --from-file=identity-key="${work_dir}/udp-flow-identity-key" \
   >/dev/null
 
-kube -n "${namespace}" apply -f - >/dev/null <<'EOF'
+sed "s|OXIBELT_REDIS_KIND_IMAGE|${redis_kind_image}|g" <<'EOF' \
+  | kube -n "${namespace}" apply -f - >/dev/null
 apiVersion: v1
 kind: Service
 metadata:
@@ -1516,8 +1539,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: redis
-        image: valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328
-        imagePullPolicy: IfNotPresent
+        image: OXIBELT_REDIS_KIND_IMAGE
+        imagePullPolicy: Never
         command: ["valkey-server"]
         args:
         - --save

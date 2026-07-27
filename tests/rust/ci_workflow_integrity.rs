@@ -2561,10 +2561,20 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d",
-    "redis_image=\"valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328\"",
-    "docker pull \"${redis_image}\"",
-    "valkey/valkey@${redis_image##*@}",
+    "redis_source_image=\"valkey/valkey:9-alpine@sha256:3fe38a705227d29534a199e876b38d5474dec4d3baca980ac6894df539416562\"",
+    "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
+    "redis_kind_image=\"oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
+    "redis_kind_image_created=0",
+    "docker pull \"${redis_source_image}\"",
+    "valkey/valkey@${redis_source_image##*@}",
     "reviewed linux/amd64 Valkey image",
+    "refusing to reuse an existing Kind-local Valkey image alias",
+    "docker tag \"${redis_source_image}\" \"${redis_kind_image}\"",
+    "rootless Docker did not create the reviewed Valkey Kind alias",
+    "docker image rm --no-prune \"${redis_kind_image}\"",
+    "crictl inspecti \"docker.io/${redis_kind_image}\"",
+    "Kind CRI did not retain the reviewed Valkey image alias",
+    "sed \"s|OXIBELT_REDIS_KIND_IMAGE|${redis_kind_image}|g\"",
     "oxibelt-udp-flow-redis",
     "oxibelt-udp-flow-state",
     "udp-backend-a",
@@ -2781,7 +2791,8 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
     "grep -Eq '^[A-Za-z0-9+/]{43}=$' \"${work_dir}/udp-flow-identity-key\"",
     "create secret generic oxibelt-udp-flow-state",
     "--from-file=identity-key=",
-    "image: valkey/valkey:9-alpine@sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328",
+    "image: OXIBELT_REDIS_KIND_IMAGE",
+    "imagePullPolicy: Never",
     "--maxmemory",
     "32mb",
     "--maxmemory-policy",
@@ -2789,7 +2800,7 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
     "readOnlyRootFilesystem: true",
     "emptyDir: { sizeLimit: 16Mi }",
     "rollout status deployment/oxibelt-udp-flow-redis",
-    "\"${dataplane_image}\" \"${controller_image}\" \"${redis_image}\"",
+    "\"${dataplane_image}\" \"${controller_image}\" \"${redis_kind_image}\"",
     "--set \"l4.idleTimeoutMs=3600000\"",
     "--set-string \"l4.udp.flowState=shared_required\"",
     "grep -Fq 'udp_flow_state = \"shared_required\"'",
@@ -2808,8 +2819,12 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
     "both scoped and cross-namespace controller upgrades must retain the explicit shared UDP mode"
   );
   assert!(
-    !script.contains("image: valkey/valkey:9-alpine\n"),
-    "the in-cluster shared-state backend must not use the mutable Valkey tag"
+    !script.contains("sha256:ee91f7a174ac4d6a6b0685b3a60e321f0a9dbbb691f9b0e285be2ba1d1be8328"),
+    "the shared-state qualification must not restore the partially pulled multi-platform Valkey index"
+  );
+  assert!(
+    !script.contains("image: valkey/valkey:9-alpine"),
+    "the in-cluster shared-state backend must use the verified Kind-local Valkey alias"
   );
 
   for expected in [
