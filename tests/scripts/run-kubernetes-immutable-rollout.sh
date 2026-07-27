@@ -250,11 +250,9 @@ verify_kind_node_l4_probe_runtime() {
   docker exec "${node}" /usr/bin/perl \
     -MIO::Socket::IP \
     -MIO::Select \
-    -MSocket=SOCK_STREAM,SOCK_DGRAM \
+    -MSocket=AI_NUMERICHOST,SOCK_DGRAM,SOCK_STREAM,getaddrinfo \
     -e 'exit 0' \
     || die "Kind control-plane node lacks the package-free Perl L4 probe runtime"
-  docker exec "${node}" /usr/bin/touch --version >/dev/null \
-    || die "Kind control-plane node lacks the package-free UDP restart marker runtime"
 }
 
 probe_l4_round_trips() {
@@ -418,7 +416,8 @@ udp_flow_probe_first_response_ready() {
       && tail -n 40 -- "${work_dir}/udp-flow-restart-probe.log" >&2
     die "same-socket UDP flow probe exited before its first response"
   fi
-  grep -q $'^FIRST\t{' "${work_dir}/udp-flow-restart-probe.log"
+  grep -q $'^SOURCE\t' "${work_dir}/udp-flow-restart-probe.log" \
+    && grep -q $'^FIRST\t{' "${work_dir}/udp-flow-restart-probe.log"
 }
 
 udp_flow_probe_finished() {
@@ -448,10 +447,21 @@ metrics_port_forward_is_ready() {
     && grep -Fq "Forwarding from 127.0.0.1:${port} -> 9090" "${log}"
 }
 
+data_plane_pod_logged_udp_peer() {
+  local pod="$1"
+  local peer="$2"
+  local logs
+
+  logs="$(kube -n "${namespace}" logs "pod/${pod}" -c oxibelt --tail=200 2>/dev/null)" \
+    || return 1
+  grep -F "UDP stream flow started" <<<"${logs}" | grep -Fq -- "${peer}"
+}
+
 pod_has_udp_restore_metric() {
   local pod="$1"
   local port="$2"
   local log="${work_dir}/udp-restore-metric-${pod}.log"
+  local metric_log="${work_dir}/udp-restore-metrics-${pod}.log"
   local metrics
   local observed=1
 
@@ -464,14 +474,20 @@ pod_has_udp_restore_metric() {
     metrics_port_forward_is_ready "${port}" "${log}"
 
   if metrics="$(curl --fail --silent --show-error --max-time 5 \
-    "http://127.0.0.1:${port}/metrics")" \
-    && awk '
+    "http://127.0.0.1:${port}/metrics")"; then
+    awk '
+      $1 ~ /^oxibelt_stream_udp_(flows_(created|restored)|flow_(persistence_errors|fence_rejections))_total$/ {
+        print
+      }
+    ' <<<"${metrics}" >"${metric_log}"
+    if awk '
       $1 == "oxibelt_stream_udp_flows_restored_total" && ($2 + 0) >= 1 {
         found = 1
       }
       END { exit found ? 0 : 1 }
     ' <<<"${metrics}"; then
-    observed=0
+      observed=0
+    fi
   fi
 
   kill "${port_forward_pid}" >/dev/null 2>&1 || true
@@ -481,32 +497,35 @@ pod_has_udp_restore_metric() {
 }
 
 verify_udp_restore_metric() {
-  local pods_json
-  local index=0
-  local pod
+  local pod="$1"
+  local metric_log="${work_dir}/udp-restore-metrics-${pod}.log"
 
-  pods_json="$(kube -n "${namespace}" get pods -l "${selector}" -o json)" \
-    || die "could not list replacement data-plane Pods for UDP restore metrics"
-  while IFS= read -r pod; do
-    if pod_has_udp_restore_metric "${pod}" "$((22000 + RANDOM % 7000 + index))"; then
-      return 0
-    fi
-    index=$((index + 1))
-  done < <(jq -r '
-    .items
-    | map(select(.metadata.deletionTimestamp == null))
-    | sort_by(.metadata.name)
-    | .[].metadata.name
-  ' <<<"${pods_json}")
-  die "no replacement data-plane Pod reported oxibelt_stream_udp_flows_restored_total >= 1"
+  if pod_has_udp_restore_metric "${pod}" "$((22000 + RANDOM % 7000))"; then
+    return 0
+  fi
+  if [[ -f "${metric_log}" ]]; then
+    echo "UDP restore metric diagnostics for ${pod}:" >&2
+    tail -n 40 -- "${metric_log}" >&2
+  fi
+  die "replacement data-plane Pod ${pod} did not report oxibelt_stream_udp_flows_restored_total >= 1"
 }
 
 verify_udp_flow_survives_data_plane_rollout() {
   local node="${cluster_name}-control-plane"
-  local continue_file="/tmp/oxibelt-udp-flow-${run_id}.continue"
+  local node_replacement_target_file="/tmp/oxibelt-udp-flow-${run_id}.target"
   local probe_log="${work_dir}/udp-flow-restart-probe.log"
+  local old_probe_log="${work_dir}/udp-flow-old-pod.log"
+  local replacement_probe_log="${work_dir}/udp-flow-replacement-pod.log"
   local old_pods_json
   local old_uids
+  local old_probe_target
+  local old_probe_pod
+  local old_probe_ip
+  local replacement_pods_json
+  local replacement_probe_target
+  local replacement_probe_pod
+  local replacement_probe_ip
+  local source_peer
   local first_response
   local second_response
 
@@ -519,28 +538,48 @@ verify_udp_flow_survives_data_plane_rollout() {
     | select(length == 3)
   ' <<<"${old_pods_json}")" \
     || die "UDP restart proof requires exactly three live data-plane Pod UIDs"
+  old_probe_target="$(jq -er '
+    [.items[]
+      | select(.metadata.deletionTimestamp == null)
+      | select((.status.conditions // []) | any(.type == "Ready" and .status == "True"))
+      | select(.status.podIP | type == "string" and test("^[0-9]+([.][0-9]+){3}$"))]
+    | sort_by(.metadata.name)
+    | select(length > 0)
+    | first
+    | [.metadata.name, .status.podIP]
+    | @tsv
+  ' <<<"${old_pods_json}")" \
+    || die "could not select a Ready old data-plane Pod with an IPv4 address"
+  IFS=$'\t' read -r old_probe_pod old_probe_ip <<<"${old_probe_target}"
 
   [[ -z "${udp_flow_probe_pid}" ]] || die "a same-socket UDP flow probe is already active"
   docker exec \
-    --env OXIBELT_L4_ADDRESS="${status_service_address}" \
-    --env OXIBELT_L4_CONTINUE_FILE="${continue_file}" \
+    --env OXIBELT_L4_INITIAL_POD_ADDRESS="${old_probe_ip}" \
+    --env OXIBELT_L4_REPLACEMENT_TARGET_FILE="${node_replacement_target_file}" \
     --env OXIBELT_L4_RESTART_TIMEOUT="${rollout_timeout_seconds}" \
     "${node}" /usr/bin/perl \
     -MIO::Socket::IP \
     -MIO::Select \
-    -MSocket=SOCK_DGRAM \
+    -MSocket=AI_NUMERICHOST,SOCK_DGRAM,getaddrinfo \
     -e '
 use strict;
 use warnings;
 
 $| = 1;
 my $connection = IO::Socket::IP->new(
-    PeerHost => $ENV{OXIBELT_L4_ADDRESS},
-    PeerPort => 5300,
+    PeerHost => $ENV{OXIBELT_L4_INITIAL_POD_ADDRESS},
+    PeerPort => 15300,
     Type => SOCK_DGRAM,
     Timeout => 5,
 ) or die "UDP restart probe socket creation failed: $!\n";
 my $selector = IO::Select->new($connection);
+my $source_host = $connection->sockhost;
+my $source_port = $connection->sockport;
+$source_host =~ /\A[0-9]+(?:[.][0-9]+){3}\z/
+    or die "UDP restart probe selected a non-IPv4 source address\n";
+$source_port =~ /\A[1-9][0-9]{0,4}\z/ && $source_port <= 65535
+    or die "UDP restart probe selected an invalid source port\n";
+print STDOUT "SOURCE\t$source_host:$source_port\n";
 
 sub receive_response {
     my ($socket, $readable, $timeout, $label) = @_;
@@ -564,16 +603,40 @@ my $first_response = receive_response(
 );
 print STDOUT "FIRST\t$first_response\n";
 
-my $continue_file = $ENV{OXIBELT_L4_CONTINUE_FILE};
+my $target_file = $ENV{OXIBELT_L4_REPLACEMENT_TARGET_FILE};
 my $restart_timeout = $ENV{OXIBELT_L4_RESTART_TIMEOUT};
 $restart_timeout =~ /\A[1-9][0-9]{1,2}\z/
     or die "invalid UDP restart probe timeout\n";
-my $continue_deadline = time() + $restart_timeout + 60;
-while (!-e $continue_file) {
-    time() < $continue_deadline
-        or die "UDP restart probe continuation timed out\n";
+my $target_deadline = time() + $restart_timeout + 60;
+while (!-f $target_file) {
+    time() < $target_deadline
+        or die "UDP restart probe replacement target timed out\n";
     select undef, undef, undef, 0.1;
 }
+open my $target_handle, "<", $target_file
+    or die "UDP restart probe could not open replacement target: $!\n";
+my $replacement_address = <$target_handle>;
+defined $replacement_address
+    or die "UDP restart probe replacement target was empty\n";
+close $target_handle
+    or die "UDP restart probe could not close replacement target: $!\n";
+unlink $target_file
+    or die "UDP restart probe could not remove replacement target: $!\n";
+$replacement_address =~ s/[\r\n]+\z//;
+my ($address_error, @addresses) = getaddrinfo(
+    $replacement_address,
+    15300,
+    {
+        flags => AI_NUMERICHOST,
+        socktype => SOCK_DGRAM,
+    },
+);
+$address_error == 0 && @addresses == 1
+    or die "UDP restart probe replacement target was not one numeric UDP address\n";
+$connection->connect($addresses[0]->{addr})
+    or die "UDP restart probe could not select the replacement Pod: $!\n";
+$connection->sockhost eq $source_host && $connection->sockport == $source_port
+    or die "UDP restart probe source tuple changed across Pod replacement\n";
 
 my $second_request = "oxibelt-udp-after-restart";
 my $response_deadline = time() + 90;
@@ -596,6 +659,14 @@ die "UDP restart probe second response timed out\n";
 
   wait_for "first response on the persistent UDP client socket" 30 \
     udp_flow_probe_first_response_ready
+  source_peer="$(awk -F '\t' '$1 == "SOURCE" {print $2; exit}' "${probe_log}")"
+  [[ "${source_peer}" =~ ^[0-9]+([.][0-9]+){3}:[1-9][0-9]{0,4}$ ]] \
+    || die "same-socket UDP flow probe did not report a bounded IPv4 source tuple"
+  wait_for "old data-plane Pod to log the stable UDP peer" 30 \
+    data_plane_pod_logged_udp_peer "${old_probe_pod}" "${source_peer}"
+  kube -n "${namespace}" logs "pod/${old_probe_pod}" -c oxibelt --tail=200 \
+    >"${old_probe_log}" \
+    || die "could not capture the old data-plane Pod UDP flow log"
 
   kube -n "${namespace}" rollout restart "deployment/${workload_name}" >/dev/null
   kube -n "${namespace}" rollout status "deployment/${workload_name}" \
@@ -605,8 +676,43 @@ die "UDP restart probe second response timed out\n";
   wait_for "committed immutable state after data-plane Pod replacement" \
     "${rollout_timeout_seconds}" deployment_is_committed
 
-  docker exec "${node}" /usr/bin/touch -- "${continue_file}" \
-    || die "could not release the bounded same-socket UDP flow probe"
+  replacement_pods_json="$(kube -n "${namespace}" get pods -l "${selector}" -o json)" \
+    || die "could not capture replacement data-plane Pod identities for the UDP restart proof"
+  replacement_probe_target="$(jq -er --argjson old_uids "${old_uids}" '
+    [.items[]
+      | select(.metadata.deletionTimestamp == null)
+      | select(.metadata.uid as $uid | $old_uids | index($uid) == null)
+      | select((.status.conditions // []) | any(.type == "Ready" and .status == "True"))
+      | select(.status.podIP | type == "string" and test("^[0-9]+([.][0-9]+){3}$"))]
+    | sort_by(.metadata.name)
+    | select(length > 0)
+    | first
+    | [.metadata.name, .status.podIP]
+    | @tsv
+  ' <<<"${replacement_pods_json}")" \
+    || die "could not select a Ready replacement data-plane Pod with an IPv4 address"
+  IFS=$'\t' read -r replacement_probe_pod replacement_probe_ip \
+    <<<"${replacement_probe_target}"
+  docker exec \
+    --env OXIBELT_L4_REPLACEMENT_POD_ADDRESS="${replacement_probe_ip}" \
+    --env OXIBELT_L4_REPLACEMENT_TARGET_FILE="${node_replacement_target_file}" \
+    "${node}" /usr/bin/perl \
+    -e '
+use strict;
+use warnings;
+
+my $target_file = $ENV{OXIBELT_L4_REPLACEMENT_TARGET_FILE};
+my $pending_file = "$target_file.pending";
+open my $target_handle, ">", $pending_file
+    or die "could not create the pending UDP replacement target: $!\n";
+print {$target_handle} $ENV{OXIBELT_L4_REPLACEMENT_POD_ADDRESS}, "\n"
+    or die "could not write the pending UDP replacement target: $!\n";
+close $target_handle
+    or die "could not close the pending UDP replacement target: $!\n";
+rename $pending_file, $target_file
+    or die "could not publish the UDP replacement target: $!\n";
+' \
+    || die "could not provide the bounded same-socket UDP probe with its replacement target"
   wait_for "second response on the same UDP client socket" 120 udp_flow_probe_finished
   if wait "${udp_flow_probe_pid}"; then
     udp_flow_probe_pid=""
@@ -635,11 +741,18 @@ die "UDP restart probe second response timed out\n";
   ' >/dev/null <<<"${first_response}"$'\n'"${second_response}" \
     || die "restored UDP flow did not retain its distinguishable backend Service and Pod identity"
 
-  verify_udp_restore_metric
+  wait_for "replacement data-plane Pod to log the stable UDP peer" 30 \
+    data_plane_pod_logged_udp_peer "${replacement_probe_pod}" "${source_peer}"
+  kube -n "${namespace}" logs "pod/${replacement_probe_pod}" -c oxibelt --tail=200 \
+    >"${replacement_probe_log}" \
+    || die "could not capture the replacement data-plane Pod UDP flow log"
+  verify_udp_restore_metric "${replacement_probe_pod}"
   wait_for "Gateway Programmed=True after data-plane Pod replacement" \
     "${rollout_timeout_seconds}" gateway_is_programmed
   wait_for "L4 route programming after data-plane Pod replacement" \
     "${rollout_timeout_seconds}" l4_routes_are_programmed
+  wait_for "same-namespace TCP and UDP round trips after data-plane Pod replacement" 60 \
+    probe_l4_round_trips "${namespace}" paired
 }
 
 controller_has_two_ready_replicas() {

@@ -2596,7 +2596,6 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "OXIBELT_L4_EXPECTED_NAMESPACE",
     "verify_kind_node_l4_probe_runtime",
     "/usr/bin/perl",
-    "/usr/bin/touch --version",
     "IO::Socket::IP",
     "IO::Select",
     "SOCK_STREAM",
@@ -2828,24 +2827,48 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
   );
 
   for expected in [
-    "OXIBELT_L4_CONTINUE_FILE",
+    "OXIBELT_L4_INITIAL_POD_ADDRESS",
+    "OXIBELT_L4_REPLACEMENT_TARGET_FILE",
     "my $connection = IO::Socket::IP->new(",
+    "PeerPort => 15300",
+    "my $source_host = $connection->sockhost",
+    "my $source_port = $connection->sockport",
+    "print STDOUT \"SOURCE\\t$source_host:$source_port\\n\"",
     "my $first_written = $connection->send($first_request)",
+    "getaddrinfo(",
+    "flags => AI_NUMERICHOST",
+    "$connection->connect($addresses[0]->{addr})",
+    "UDP restart probe source tuple changed across Pod replacement",
     "my $written = $connection->send($second_request)",
+    "OXIBELT_L4_REPLACEMENT_POD_ADDRESS",
+    "my $pending_file = \"$target_file.pending\"",
+    "rename $pending_file, $target_file",
     "kube -n \"${namespace}\" rollout restart \"deployment/${workload_name}\"",
     "data_plane_pods_replaced \"${old_uids}\"",
+    "data_plane_pod_logged_udp_peer \"${old_probe_pod}\" \"${source_peer}\"",
+    "data_plane_pod_logged_udp_peer \"${replacement_probe_pod}\" \"${source_peer}\"",
     "second response on the same UDP client socket",
     ".[1].service == .[0].service",
     ".[1].pod == .[0].pod",
     "udp-backend-a",
     "udp-backend-b",
-    "verify_udp_restore_metric",
+    "verify_udp_restore_metric \"${replacement_probe_pod}\"",
+    "same-namespace TCP and UDP round trips after data-plane Pod replacement",
   ] {
     assert!(
       restart_proof.contains(expected),
       "same-socket UDP restart proof should preserve {expected}"
     );
   }
+  assert!(
+    !restart_proof.contains("status_service_address"),
+    "the durable UDP restart proof must bypass node-originated Service NAT and control the peer tuple explicitly"
+  );
+  assert_eq!(
+    restart_proof.matches("| select(length > 0)").count(),
+    2,
+    "the old and replacement Pod selectors must both fail closed when no Ready IPv4 target exists"
+  );
   assert!(
     script.contains("oxibelt_stream_udp_flows_restored_total"),
     "the rollout harness must inspect the durable UDP restore metric"
@@ -2889,10 +2912,9 @@ fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
 
   for expected in [
     "/usr/bin/perl",
-    "/usr/bin/touch --version",
     "-MIO::Socket::IP",
     "-MIO::Select",
-    "-MSocket=SOCK_STREAM,SOCK_DGRAM",
+    "-MSocket=AI_NUMERICHOST,SOCK_DGRAM,SOCK_STREAM,getaddrinfo",
     "PeerHost => $ENV{OXIBELT_L4_ADDRESS}",
     "PeerPort => 9300",
     "PeerPort => 5300",
@@ -2925,8 +2947,8 @@ fn kubernetes_immutable_rollout_l4_probes_use_pinned_package_free_runtime() {
   }
   assert_eq!(
     probes.matches("/usr/bin/perl").count(),
-    5,
-    "the L4 harness should preflight Perl once and use it for TCP, UDP, denied, and same-socket restart probes"
+    6,
+    "the L4 harness should preflight Perl once and use it for TCP, UDP, denied, and same-socket restart probe and handoff"
   );
   assert!(
     script
@@ -3357,6 +3379,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "install_only: true",
     "MINIKUBE_VERSION: v1.38.1",
     "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
+    "curl --fail --location --retry 3 --retry-all-errors --retry-delay 2",
     "sha256sum --check --status",
     "tests/scripts/run-kubernetes-network-policy.sh --cni \"${{ matrix.cni }}\"",
     "OXIBELT_NETWORK_POLICY_TIMEOUT_SECONDS: \"600\"",

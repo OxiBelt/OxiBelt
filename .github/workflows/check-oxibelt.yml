@@ -1814,7 +1814,7 @@ jobs:
         run: |
           minikube_dir="${RUNNER_TEMP}/minikube"
           mkdir -p "${minikube_dir}/bin"
-          curl --fail --location --retry 3 --retry-delay 2 \
+          curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 \
             "https://github.com/kubernetes/minikube/releases/download/${MINIKUBE_VERSION}/minikube-linux-amd64" \
             --output "${minikube_dir}/minikube"
           printf '%s  %s\n' "${MINIKUBE_SHA256}" "${minikube_dir}/minikube" | sha256sum --check --status
