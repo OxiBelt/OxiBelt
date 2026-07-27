@@ -6493,6 +6493,14 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     }),
     "independent rebuild workflow must remain globally read-only"
   );
+  assert_eq!(
+    jobs["resolve"]["runs-on"], "ubuntu-26.04",
+    "independent rebuild planning should retain its reviewed runner"
+  );
+  assert_eq!(
+    jobs["verify"]["runs-on"], "ubuntu-24.04",
+    "independent rebuild containers should run on the stable hosted runner"
+  );
 
   for expected in [
     "workflows: [\"Release OxiBelt images\"]",
@@ -6505,7 +6513,13 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
     "version: v29.6.2",
     "rootless: true",
+    "daemon-config: |",
+    "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
     "index(\"name=rootless\") != null",
+    "index(\"name=cgroupns\") != null",
+    "index(\"name=seccomp,profile=builtin\") != null",
+    "docker info --format '{{.CgroupDriver}}'",
+    "rootless verifier must use no host cgroup resource controller",
     "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec",
     "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",

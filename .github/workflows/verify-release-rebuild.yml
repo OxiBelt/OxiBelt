@@ -180,7 +180,7 @@ jobs:
   verify:
     name: Rebuild ${{ matrix.role }}/${{ matrix.artifact_arch }} independently
     needs: resolve
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -200,12 +200,26 @@ jobs:
           version: v29.6.2
           rootless: true
           set-host: true
+          # Hosted runners do not delegate systemd cgroup scopes to rootless Docker.
+          daemon-config: |
+            {
+              "exec-opts": ["native.cgroupdriver=cgroupfs"]
+            }
 
       - name: Assert rootless Docker boundary
         run: |
           set -euo pipefail
           docker info --format '{{json .SecurityOptions}}' |
-            jq -e 'index("name=rootless") != null' >/dev/null
+            jq -e '
+              index("name=rootless") != null and
+              index("name=cgroupns") != null and
+              index("name=seccomp,profile=builtin") != null
+            ' >/dev/null
+          cgroup_driver="$(docker info --format '{{.CgroupDriver}}')"
+          if [[ "${cgroup_driver}" != "none" ]]; then
+            echo "rootless verifier must use no host cgroup resource controller, got ${cgroup_driver}" >&2
+            exit 1
+          fi
 
       - name: Pre-pull pinned BuildKit
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
