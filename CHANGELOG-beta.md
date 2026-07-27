@@ -15,11 +15,122 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.7.0-beta.3] - 2026-07-27
+
+> Recovery beta for the `0.7.0` line. The immutable published
+> `0.7.0-beta.2` cut stopped during `linux/riscv64` keysigner runtime
+> qualification before official release assets, manifests, attestations, or
+> images were published.
+
+- Changes since: `0.7.0-beta.2`
+- Supported upgrade sources: `0.7.0-beta.2`, `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.0 line](docs/Upgrading.md#upgrade-from-065-to-the-070-line)
+
+### Configuration
+
+- No changes for this release.
+
+### Schema epochs
+
+- No changes for this release.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- No changes for this release.
+
+### Feature lifecycle
+
+- No changes for this release.
+
+### Rulepack compatibility
+
+- No changes for this release.
+
+### Executables and images
+
+- Preserve the keysigner image's writable Unix-socket directory as
+  `/run/oxibelt-keysigner`, owned by `10002:10002` with mode `0770`, when the
+  directory is copied into the role-specific scratch image.
+- Initialize the existing shared tracing subscriber in `oxibelt-keysigner` so
+  its readiness event and compatibility-mode peer-allowlist warning reach
+  container logs without changing CLI flags, token handling, key material, or
+  signer protocol behavior.
+- Prevent Docker empty-volume copy-up from replacing the release smoke's
+  preinitialized socket-volume metadata, and validate the packaged directory
+  owner and mode from the exported image root filesystem before target
+  execution.
+
+### Storage and state
+
+- No changes for this release.
+
+### Upgrade validation
+
+- When upgrading directly from `0.6.5`, create and inspect the epoch-1 review
+  tree with the target `oxibeltctl`, then validate the complete migrated
+  configuration and all referenced files before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Treat `0.7.0-beta.1` and `0.7.0-beta.2` only as source-build recovery
+  identities. Deploy `0.7.0-beta.3` only after its person-reviewed release,
+  complete role/architecture image qualification, vulnerability admission,
+  attestations, and independent-rebuild evidence succeed.
+
+### Rollback and irreversible steps
+
+- Retain the exact prior role-specific image digests, configuration tree,
+  referenced assets, PostgreSQL backup, controller rollback ConfigMaps, and
+  Gateway API Lease before rollout. Stop all new-version Admin writers before
+  restoring prior images and data; epoch-1 migration has no automatic
+  down-migration, so restore the epoch-0 configuration and pre-upgrade
+  PostgreSQL backup or roll forward.
+- Roll back the data plane before the Gateway Controller. Before returning to a
+  controller without Lease fencing, run one controller replica and wait for
+  replacement; never downgrade or delete operator-owned Gateway API CRDs as an
+  implicit Helm rollback. Externally witnessed audit checkpoints remain
+  append-only and must not be rewritten during recovery.
+
+### Known issues
+
+- The Kubernetes Gateway Controller, its Helm integration, and its Gateway API
+  features remain `experimental`; their native `linux/riscv64` cluster-runner
+  graduation evidence is still unmet.
+- UDP stream-listener and generated `UDPRoute` flow state is process-local and
+  does not survive a process restart or Pod replacement.
+- Existing admission policies that require the retired OxiBelt-managed Cosign
+  signature or OCI-referrer contract reject the GitHub API-attested images
+  until an operator installs and validates a replacement admission policy.
+
+### Security
+
+- Preserve the fail-closed stable/beta image gate for every `CRITICAL`
+  vulnerability and every fixable `HIGH` vulnerability, with exact-revision
+  SLSA provenance, CycloneDX SBOMs, and independent-rebuild evidence for each
+  role and architecture.
+- Keep the RISC-V keysigner helper rootless and read-only with
+  `--cap-drop ALL`, `no-new-privileges`, and `CAP_CHOWN` as its sole added
+  capability. The repair does not add `CAP_FOWNER`, privileged mode, network
+  access, or another writable mount.
+
 ## [0.7.0-beta.2] - 2026-07-26
 
-> First publishable beta for the `0.7.0` line. Relative to the immutable
-> `0.7.0-beta.1` source revision, this cut changes release qualification and
-> metadata only; it does not change OxiBelt runtime behavior.
+> Immutable published failed cut. The GitHub prerelease exists, but its
+> release-image workflow failed during `linux/riscv64` keysigner runtime smoke
+> before official assets, manifests, attestations, or images were published.
+> This cut has no deployable official release artifacts.
 
 - Changes since: `0.7.0-beta.1`
 - Supported upgrade sources: `0.7.0-beta.1`, `0.6.5`
@@ -51,10 +162,11 @@ for the governed entry format.
 
 ### Executables and images
 
-- Correct release-only `linux/riscv64` runtime-smoke socket preparation so the
-  helper sets the directory mode before transferring ownership. The helper
-  retains `--cap-drop ALL` with only `CAP_CHOWN`; no OxiBelt executable, image
-  filesystem, runtime user, or runtime capability contract changes.
+- Attempt to correct release-only `linux/riscv64` runtime-smoke socket
+  preparation by setting the directory mode before transferring ownership.
+  Docker subsequently replaced the empty volume's initialized metadata from
+  the role image, so the keysigner could not bind its Unix socket and the
+  release stopped before official artifact publication.
 - Record the failed `0.7.0-beta.1` cut in the governed beta ledger so the
   immutable tag remains attributable without creating or rewriting a release
   for that tag.
@@ -79,10 +191,10 @@ oxibeltctl config validate \
   --local-only
 ```
 
-- For a source build made from `0.7.0-beta.1`, the same epoch-1 configuration
-  remains valid, but deploy only person-reviewed `0.7.0-beta.2` release
-  artifacts after verifying their exact repositories, digests, build identity,
-  GitHub attestations, and independent-rebuild result.
+- For source builds made from `0.7.0-beta.1` or `0.7.0-beta.2`, the same
+  epoch-1 configuration remains valid, but neither failed cut has official
+  release artifacts to deploy. Advance to a later person-reviewed beta whose
+  complete role/architecture image and evidence gates succeed.
 
 ### Rollback and irreversible steps
 
@@ -100,6 +212,11 @@ oxibeltctl config validate \
 
 ### Known issues
 
+- The `linux/riscv64` keysigner role cannot bind its Unix socket in the release
+  runtime smoke because Docker replaces the preinitialized empty socket-volume
+  metadata with the role image's `root:root` `0755` directory metadata. The
+  release therefore produced no official assets, manifests, attestations, or
+  images.
 - The Kubernetes Gateway Controller, its Helm integration, and its Gateway API
   features remain `experimental`; their native `linux/riscv64` cluster-runner
   graduation evidence is still unmet.

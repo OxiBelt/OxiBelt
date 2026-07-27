@@ -375,7 +375,7 @@ LABEL org.opencontainers.image.title="OxiBelt keysigner" \
       io.oxibelt.image.role="keysigner"
 
 COPY --from=runtime /etc/oxibelt/cert /etc/oxibelt/cert
-COPY --from=runtime /run/oxibelt-keysigner /run/oxibelt-keysigner
+COPY --from=runtime --chown=10002:10002 --chmod=0770 /run/oxibelt-keysigner /run/oxibelt-keysigner
 COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner
 
 USER 10002:10002

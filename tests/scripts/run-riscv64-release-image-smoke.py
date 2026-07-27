@@ -441,10 +441,13 @@ def parse_build_identity(output: str, expected: dict[str, str]) -> dict[str, str
 
 
 def inspect_rootfs_inventory(
-    rootfs_tar: pathlib.Path, expected_binaries: tuple[str, ...]
+    rootfs_tar: pathlib.Path,
+    expected_binaries: tuple[str, ...],
+    role: str,
 ) -> None:
     expected = {f"usr/local/bin/{name}" for name in expected_binaries}
     actual: dict[str, tarfile.TarInfo] = {}
+    keysigner_socket_directory: tarfile.TarInfo | None = None
     try:
         with tarfile.open(rootfs_tar, mode="r:*") as archive:
             for member in archive:
@@ -452,6 +455,8 @@ def inspect_rootfs_inventory(
                 while name.startswith("./"):
                     name = name[2:]
                 name = name.lstrip("/")
+                if name.rstrip("/") == "run/oxibelt-keysigner":
+                    keysigner_socket_directory = member
                 if name == "usr/local/bin" and not member.isdir():
                     raise SmokeError("/usr/local/bin is not a directory")
                 if not name.startswith("usr/local/bin/"):
@@ -469,6 +474,22 @@ def inspect_rootfs_inventory(
     for path, member in actual.items():
         if not member.isfile() or member.mode & 0o111 == 0:
             raise SmokeError(f"loaded role executable {path} is not an executable file")
+    if role == "keysigner":
+        if keysigner_socket_directory is None or not keysigner_socket_directory.isdir():
+            raise SmokeError(
+                "loaded keysigner image lacks the /run/oxibelt-keysigner directory"
+            )
+        actual_metadata = (
+            keysigner_socket_directory.uid,
+            keysigner_socket_directory.gid,
+            keysigner_socket_directory.mode & 0o7777,
+        )
+        if actual_metadata != (10002, 10002, 0o770):
+            raise SmokeError(
+                "loaded keysigner socket directory metadata was "
+                f"{actual_metadata[0]}:{actual_metadata[1]} "
+                f"{actual_metadata[2]:04o}, expected 10002:10002 0770"
+            )
 
 
 def wait_for_service(
@@ -1192,7 +1213,7 @@ class DockerSmoke:
                 ["export", "--output", str(rootfs), container],
                 timeout=120,
             )
-            inspect_rootfs_inventory(rootfs, self.artifact.binaries)
+            inspect_rootfs_inventory(rootfs, self.artifact.binaries, self.args.role)
         finally:
             self.remove_container(container)
 
@@ -1567,7 +1588,7 @@ class DockerSmoke:
                 "--mount",
                 (
                     f"type=volume,src={socket_volume},"
-                    "dst=/run/oxibelt-keysigner"
+                    "dst=/run/oxibelt-keysigner,volume-nocopy"
                 ),
                 "--mount",
                 (

@@ -1036,6 +1036,7 @@ fn alpine_dockerfile_bundles_operations_binaries() {
     "io.oxibelt.image.role=\"standalone\"",
     "COPY --from=controller-builder /tmp/oxibelt-gateway-controller /usr/local/bin/oxibelt-gateway-controller",
     "COPY --from=tools-builder /tmp/oxibeltctl /usr/local/bin/oxibeltctl",
+    "COPY --from=runtime --chown=10002:10002 --chmod=0770 /run/oxibelt-keysigner /run/oxibelt-keysigner",
     "COPY --from=keysigner-builder /tmp/oxibelt-keysigner /usr/local/bin/oxibelt-keysigner",
     "COPY --from=netport-builder /tmp/oxibelt-netport-switcher /usr/local/bin/oxibelt-netport-switcher",
     "sh source/ops/verify-static-elf.sh /tmp/oxibelt-gateway-controller",

@@ -28,10 +28,12 @@ be used as a supported production upgrade source or target.
 | Source | Target | Status | Contract |
 | --- | --- | --- | --- |
 | `0.6.5` | `0.7.0-beta.1` | Unpublished failed cut | The immutable tag failed the exact-revision release-contract job before draft creation. It has no GitHub Release or official artifacts and is not a deployable beta target. |
-| `0.6.5` | `0.7.0-beta.2` | Release candidate | Follow [Upgrade from 0.6.5 to the 0.7.0 line](#upgrade-from-065-to-the-070-line). Treat the target as available only after a person reviews and publishes its draft and all official artifact gates pass. |
-| `0.7.0-beta.1` | `0.7.0-beta.2` | Recovery source only | The later entry admits the exact beta tag for source-build recovery, but no official `beta.1` artifact can be promoted or republished. |
-| `0.6.5` | `0.7.0` | Held for beta evidence | The stable entry is intentionally absent until the `beta.2` publication, independent rebuild, and evidence soak complete. |
-| `0.7.0-beta.2` | `0.7.0` | Held for beta evidence | Require at least 24 hours after successful beta publication and independent-rebuild evidence with no release-blocking issue before preparing the stable entry or tag. |
+| `0.6.5` | `0.7.0-beta.2` | Published failed cut | The immutable GitHub prerelease exists, but its `linux/riscv64` keysigner runtime smoke failed before official assets, manifests, attestations, or images were published. It is not a deployable beta target. |
+| `0.7.0-beta.1` | `0.7.0-beta.2` | Recovery source only | The later entry admits the exact beta tag for source-build recovery, but neither failed cut has an official artifact that can be promoted or republished. |
+| `0.6.5` | `0.7.0-beta.3` | Release candidate | Follow [Upgrade from 0.6.5 to the 0.7.0 line](#upgrade-from-065-to-the-070-line). Treat the target as available only after a person reviews and publishes its draft and every official artifact gate passes. |
+| `0.7.0-beta.2` | `0.7.0-beta.3` | Recovery source only | The later entry admits the exact beta.2 source revision, but no beta.2 official image or release asset can be promoted. |
+| `0.6.5` | `0.7.0` | Held for beta evidence | The stable entry is intentionally absent until the `beta.3` publication, independent rebuild, and evidence soak complete. |
+| `0.7.0-beta.3` | `0.7.0` | Held for beta evidence | Require at least 24 hours after successful beta publication and independent-rebuild evidence with no release-blocking issue before preparing the stable entry or tag. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -39,22 +41,24 @@ The release-specific changelog entry is authoritative when a row is marked
 prepare a GitHub draft release until the matching entry and upgrade link pass
 the repository release-contract checker.
 
-### Recovery from the `0.7.0-beta.1` failed cut
+### Recovery from the `0.7.0-beta.1` and `0.7.0-beta.2` failed cuts
 
-The remote `0.7.0-beta.1` tag is immutable: do not move, delete, recreate, or
-publish a hand-written release for it. Its exact revision lacks the governed
-entry required by the tag workflow, so adding the historical record on a later
-commit cannot make that failed cut publishable.
+The remote `0.7.0-beta.1` and `0.7.0-beta.2` tags are immutable: do not move,
+delete, or recreate either tag. Do not publish a hand-written release for
+beta.1 or repurpose the published beta.2 prerelease by attaching artifacts
+after its exact release workflow failed. Preserve both cuts as attributable
+release-history evidence and advance to the next beta.
 
-If a local source build identifies itself as `0.7.0-beta.1`, stop it before
-release rollout and retain its configuration and state only as a recovery
-source. After `0.7.0-beta.2` is person-reviewed and published, deploy only its
-official role-specific digests and verify the release body, build identity,
-GitHub attestations, vulnerability admission, and independent-rebuild result.
-There is no `beta.1` image or release asset to promote.
+If a local source build identifies itself as `0.7.0-beta.1` or
+`0.7.0-beta.2`, stop it before release rollout and retain its configuration and
+state only as a recovery source. After `0.7.0-beta.3` is person-reviewed and
+published, deploy only its official role-specific digests and verify the
+release body, build identity, GitHub attestations, vulnerability admission, and
+independent-rebuild result. Neither failed cut has an official image or release
+asset to promote.
 
 The stable `0.7.0` changelog entry remains intentionally deferred. Start its
-minimum 24-hour evidence soak only after the `0.7.0-beta.2` release and all
+minimum 24-hour evidence soak only after the `0.7.0-beta.3` release and all
 official artifacts, attestations, and independent rebuild evidence have
 succeeded. Record any observed beta issue in the eventual stable entry before
 creating the stable tag.
@@ -165,9 +169,10 @@ commands, durable Admin operations, fixed-member Admin cluster rollout,
 atomic typed secret-reference activation, external audit anchoring, expanded
 Gateway API support, and the optional `dataplane-strict` image role.
 
-The immutable `0.7.0-beta.1` tag is an unpublished failed cut with no official
-artifacts; do not use it as an upgrade target. Use `0.7.0-beta.2` only after its
-person-reviewed release and artifact publication complete.
+The immutable `0.7.0-beta.1` tag is an unpublished failed cut, and the immutable
+published `0.7.0-beta.2` cut failed before official artifact publication. Do
+not use either as an upgrade target. Use `0.7.0-beta.3` only after its
+person-reviewed release and complete artifact publication succeed.
 
 Before upgrading:
 

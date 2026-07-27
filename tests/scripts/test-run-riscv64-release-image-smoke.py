@@ -196,7 +196,35 @@ class FakeKeysignerSocketInitRunner:
                 return subprocess.CompletedProcess(
                     args, 0, "keysigner-socket-init\n", ""
                 )
+            if command == "test -S /sock/smoke.sock":
+                return subprocess.CompletedProcess(
+                    args, 0, "keysigner-socket-probe\n", ""
+                )
+            if (
+                "--entrypoint" in args
+                and args[args.index("--entrypoint") + 1]
+                == "/usr/local/bin/oxibelt-keysigner"
+            ):
+                return subprocess.CompletedProcess(
+                    args, 0, "keysigner-runtime\n", ""
+                )
             return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:4] in (
+            ["docker", "start", "--attach", "keysigner-seed"],
+            ["docker", "start", "--attach", "keysigner-socket-init"],
+            ["docker", "start", "--attach", "keysigner-socket-probe"],
+        ):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["docker", "start", "keysigner-runtime"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ["docker", "inspect"] and args[-1] == "keysigner-runtime":
+            return subprocess.CompletedProcess(
+                args, 0, '{"Running":true,"ExitCode":0}\n', ""
+            )
+        if args[:3] == ["docker", "logs", "--tail"] and args[-1] == "keysigner-runtime":
+            return subprocess.CompletedProcess(
+                args, 0, "remote private-key signer listening\n", ""
+            )
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -492,13 +520,26 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                 expected,
             )
 
-    def rootfs(self, entries: list[tuple[str, int]]) -> pathlib.Path:
+    def rootfs(
+        self,
+        entries: list[tuple[str, int]],
+        *,
+        keysigner_directory: tuple[int, int, int] | None = None,
+    ) -> pathlib.Path:
         path = self.root / f"rootfs-{len(list(self.root.glob('rootfs-*')))}.tar"
         with tarfile.open(path, mode="w") as archive:
             directory = tarfile.TarInfo("usr/local/bin")
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o755
             archive.addfile(directory)
+            if keysigner_directory is not None:
+                mode, uid, gid = keysigner_directory
+                socket_directory = tarfile.TarInfo("run/oxibelt-keysigner")
+                socket_directory.type = tarfile.DIRTYPE
+                socket_directory.mode = mode
+                socket_directory.uid = uid
+                socket_directory.gid = gid
+                archive.addfile(socket_directory)
             for name, mode in entries:
                 content = b"binary"
                 member = tarfile.TarInfo(f"usr/local/bin/{name}")
@@ -509,7 +550,9 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
 
     def test_rootfs_inventory_rejects_missing_and_unexpected_executables(self) -> None:
         expected = ("oxibelt",)
-        SMOKE.inspect_rootfs_inventory(self.rootfs([("oxibelt", 0o755)]), expected)
+        SMOKE.inspect_rootfs_inventory(
+            self.rootfs([("oxibelt", 0o755)]), expected, "standalone"
+        )
         with self.assertRaisesRegex(SMOKE.SmokeError, "unexpected=.*oxibelt-admin"):
             SMOKE.inspect_rootfs_inventory(
                 self.rootfs(
@@ -519,9 +562,42 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                     ]
                 ),
                 expected,
+                "standalone",
             )
         with self.assertRaisesRegex(SMOKE.SmokeError, "missing=.*oxibelt"):
-            SMOKE.inspect_rootfs_inventory(self.rootfs([]), expected)
+            SMOKE.inspect_rootfs_inventory(self.rootfs([]), expected, "standalone")
+
+    def test_keysigner_rootfs_requires_socket_directory_metadata(self) -> None:
+        expected = ("oxibelt-keysigner",)
+        SMOKE.inspect_rootfs_inventory(
+            self.rootfs(
+                [("oxibelt-keysigner", 0o755)],
+                keysigner_directory=(0o770, 10002, 10002),
+            ),
+            expected,
+            "keysigner",
+        )
+        with self.assertRaisesRegex(
+            SMOKE.SmokeError,
+            "lacks the /run/oxibelt-keysigner directory",
+        ):
+            SMOKE.inspect_rootfs_inventory(
+                self.rootfs([("oxibelt-keysigner", 0o755)]),
+                expected,
+                "keysigner",
+            )
+        with self.assertRaisesRegex(
+            SMOKE.SmokeError,
+            "0:0 0755, expected 10002:10002 0770",
+        ):
+            SMOKE.inspect_rootfs_inventory(
+                self.rootfs(
+                    [("oxibelt-keysigner", 0o755)],
+                    keysigner_directory=(0o755, 0, 0),
+                ),
+                expected,
+                "keysigner",
+            )
 
     def test_readiness_fails_immediately_on_startup_crash(self) -> None:
         with self.assertRaisesRegex(SMOKE.SmokeError, "code 139"):
@@ -645,11 +721,7 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
         smoke.runtime_image_id = artifact.manifest_digest
         try:
-            with self.assertRaisesRegex(
-                SMOKE.SmokeError,
-                "docker create did not return a container ID",
-            ):
-                smoke.run_keysigner_role()
+            smoke.run_keysigner_role()
 
             socket_create = next(
                 call
@@ -728,6 +800,50 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
             )
             self.assertLess(runner.calls.index(socket_create), socket_start)
             self.assertLess(socket_start, socket_remove)
+
+            runtime_create = next(
+                call
+                for call in runner.calls
+                if call[:2] == ["docker", "create"]
+                and "--entrypoint" in call
+                and call[call.index("--entrypoint") + 1]
+                == "/usr/local/bin/oxibelt-keysigner"
+            )
+            runtime_mounts = [
+                runtime_create[index + 1]
+                for index, value in enumerate(runtime_create)
+                if value == "--mount"
+            ]
+            self.assertEqual(len(runtime_mounts), 2)
+            self.assertRegex(
+                runtime_mounts[0],
+                (
+                    r"^type=volume,src=oxibelt-riscv64-smoke-keysigner-socket-"
+                    r".+,dst=/run/oxibelt-keysigner,volume-nocopy$"
+                ),
+            )
+            self.assertRegex(
+                runtime_mounts[1],
+                (
+                    r"^type=volume,src=oxibelt-riscv64-smoke-keysigner-cert-"
+                    r".+,dst=/etc/oxibelt/cert,readonly$"
+                ),
+            )
+            self.assertIn("--read-only", runtime_create)
+            self.assertIn("--cap-drop", runtime_create)
+            self.assertEqual(
+                runtime_create[runtime_create.index("--cap-drop") + 1], "ALL"
+            )
+            self.assertIn("--network", runtime_create)
+            self.assertEqual(
+                runtime_create[runtime_create.index("--network") + 1], "none"
+            )
+            self.assertNotIn("--cap-add", runtime_create)
+            self.assertNotIn("--privileged", runtime_create)
+            self.assertIn(
+                ["docker", "logs", "--tail", "200", "keysigner-runtime"],
+                runner.calls,
+            )
             self.assertEqual(smoke.containers, [])
         finally:
             volumes = list(smoke.volumes)

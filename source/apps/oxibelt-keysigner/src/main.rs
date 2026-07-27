@@ -60,6 +60,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
+  oxibelt::runtime::init_tracing(&oxibelt::config::LoggingConfig::default())?;
   oxibelt::tls::install_default_provider()?;
   remote_signer::serve_with_audit_checkpoint_keys(
     SignerServerConfig {
