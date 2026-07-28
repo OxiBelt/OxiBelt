@@ -252,8 +252,8 @@ async fn stream_bind_failure_keeps_last_good_state_and_task() {
     initial_bind,
   )];
   let initial_raw = stream_reload_config(
-    &relative_cert_path,
-    &relative_key_path,
+    relative_cert_path,
+    relative_key_path,
     https_bind,
     &initial_listeners,
   );
@@ -306,8 +306,8 @@ async fn stream_bind_failure_keeps_last_good_state_and_task() {
     occupied_addr,
   ));
   let candidate_raw = stream_reload_config(
-    &relative_cert_path,
-    &relative_key_path,
+    relative_cert_path,
+    relative_key_path,
     https_bind,
     &candidate_listeners,
   );
