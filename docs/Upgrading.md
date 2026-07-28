@@ -197,6 +197,16 @@ managed-service ACLs that cannot expose `INFO memory` are unsupported for
 Redis-backed durable UDP; use a dedicated permitted account or PostgreSQL
 instead.
 
+Treat same-path Redis password, CA, client-certificate, or client-key rotation
+as a stream-listener drain boundary. A successful full reload builds and
+prewarms the replacement shared-state runtime, then quiesces the old
+stream-listener set and starts its replacement. New `shared_required` UDP
+flows use the prepared runtime while prior owned flows drain. Because stream
+listeners are replaced as one supervised set, a mixed set can also drain local
+UDP or TCP listeners during this rotation; schedule the change accordingly. A
+local-only stream-listener set does not restart for a shared-runtime identity
+change alone.
+
 The Rust `1.97.1` lint-compatibility cleanup applied after this durable-flow
 implementation does not change `udp_flow_state` or shared-state configuration
 syntax, defaults, or validation; opaque flow-identity derivation;

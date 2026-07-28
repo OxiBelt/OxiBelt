@@ -2,6 +2,7 @@
 //! Stream handling keeps transport metadata available for WAF and limit decisions.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -11,13 +12,17 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{SniForwardClientHelloParseMethod, StreamListenerConfig, StreamNetwork};
+use crate::config::{
+  SharedStateConfig, SniForwardClientHelloParseMethod, StreamListenerConfig, StreamNetwork,
+  UdpFlowState,
+};
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::limits::ConnectionPermit;
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
 use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::shared_state::SharedState;
 use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
 use crate::state::AppHandle;
 use crate::stream::sni::select_stream_route;
@@ -36,9 +41,7 @@ const STREAM_TLS_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
 const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 pub(crate) struct StreamListenerTask {
-  pub(crate) options: TcpListenOptions,
-  pub(crate) config: StreamListenerConfig,
-  pub(crate) shared_state_config: crate::config::SharedStateConfig,
+  pub(crate) generation: StreamListenerGeneration,
   quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -47,10 +50,78 @@ pub(crate) struct StreamListenerTask {
 }
 
 pub(crate) struct BoundStreamListener {
-  pub(crate) config: StreamListenerConfig,
-  options: TcpListenOptions,
+  generation: StreamListenerGeneration,
   accept_error_backoff: Duration,
   transport: BoundStreamTransport,
+}
+
+#[derive(Clone)]
+pub(crate) struct StreamListenerGeneration {
+  config: StreamListenerConfig,
+  options: TcpListenOptions,
+  shared_state_config: SharedStateConfig,
+  shared_state_runtime: Option<Arc<SharedState>>,
+}
+
+#[derive(Clone)]
+pub(super) struct SharedUdpListenerRuntime {
+  shared_state_config: SharedStateConfig,
+  shared_state: Arc<SharedState>,
+}
+
+impl StreamListenerGeneration {
+  pub(crate) fn new(
+    config: StreamListenerConfig,
+    options: TcpListenOptions,
+    shared_state_config: SharedStateConfig,
+    shared_state_runtime: Option<Arc<SharedState>>,
+  ) -> anyhow::Result<Self> {
+    let shared_state_runtime = if config.network == StreamNetwork::Udp
+      && config.udp_flow_state == UdpFlowState::SharedRequired
+    {
+      Some(
+        shared_state_runtime
+          .context("shared-required UDP listener has no active shared-state runtime")?,
+      )
+    } else {
+      None
+    };
+    Ok(Self {
+      config,
+      options,
+      shared_state_config,
+      shared_state_runtime,
+    })
+  }
+}
+
+impl PartialEq for StreamListenerGeneration {
+  fn eq(&self, other: &Self) -> bool {
+    let shared_state_runtime_matches = match (
+      self.shared_state_runtime.as_ref(),
+      other.shared_state_runtime.as_ref(),
+    ) {
+      (Some(current), Some(desired)) => Arc::ptr_eq(current, desired),
+      (None, None) => true,
+      _ => false,
+    };
+    self.config == other.config
+      && self.options == other.options
+      && self.shared_state_config == other.shared_state_config
+      && shared_state_runtime_matches
+  }
+}
+
+impl StreamListenerGeneration {
+  fn shared_udp_runtime(&self) -> Option<SharedUdpListenerRuntime> {
+    self
+      .shared_state_runtime
+      .as_ref()
+      .map(|shared_state| SharedUdpListenerRuntime {
+        shared_state_config: self.shared_state_config.clone(),
+        shared_state: shared_state.clone(),
+      })
+  }
 }
 
 enum BoundStreamTransport {
@@ -75,11 +146,11 @@ impl StreamListenerTask {
         connections,
         graceful_timeout,
         mut tasks,
-        config,
+        generation,
         ..
       } = self;
       let _ = quiesce.send(true);
-      if config.network == StreamNetwork::Tcp {
+      if generation.config.network == StreamNetwork::Tcp {
         let _ = shutdown.send(true);
       }
       if tokio::time::timeout(
@@ -93,7 +164,7 @@ impl StreamListenerTask {
       }
 
       let _ = shutdown.send(true);
-      if config.network == StreamNetwork::Tcp {
+      if generation.config.network == StreamNetwork::Tcp {
         connections.abort_all();
       }
       if tokio::time::timeout(
@@ -121,32 +192,31 @@ async fn wait_for_stream_tasks(tasks: &mut [JoinHandle<()>], connections: &TaskR
 
 impl BoundStreamListener {
   pub(crate) fn bind(
-    config: StreamListenerConfig,
-    options: TcpListenOptions,
+    generation: StreamListenerGeneration,
     accept_error_backoff: Duration,
   ) -> anyhow::Result<Self> {
-    let transport = match config.network {
+    let transport = match generation.config.network {
       StreamNetwork::Tcp => {
-        let listeners = bind_tcp_listeners(config.bind, options, "stream").with_context(|| {
-          format!(
-            "failed to bind stream listener {} to {}",
-            config.name, config.bind
-          )
-        })?;
+        let listeners = bind_tcp_listeners(generation.config.bind, generation.options, "stream")
+          .with_context(|| {
+            format!(
+              "failed to bind stream listener {} to {}",
+              generation.config.name, generation.config.bind
+            )
+          })?;
         BoundStreamTransport::Tcp(listeners)
       }
-      StreamNetwork::Udp => {
-        BoundStreamTransport::Udp(udp::bind_udp_socket(config.bind).with_context(|| {
+      StreamNetwork::Udp => BoundStreamTransport::Udp(
+        udp::bind_udp_socket(generation.config.bind).with_context(|| {
           format!(
             "failed to bind UDP stream listener {} to {}",
-            config.name, config.bind
+            generation.config.name, generation.config.bind
           )
-        })?)
-      }
+        })?,
+      ),
     };
     Ok(Self {
-      config,
-      options,
+      generation,
       accept_error_backoff,
       transport,
     })
@@ -159,14 +229,13 @@ impl BoundStreamListener {
   ) -> StreamListenerTask {
     let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let name = self.config.name.clone();
-    let options = self.options;
-    let config = self.config;
+    let generation = self.generation;
+    let name = generation.config.name.clone();
+    let config = generation.config.clone();
     let transport = self.transport;
     let task_name = name.clone();
     let accept_error_backoff = self.accept_error_backoff;
     let snapshot = state.snapshot();
-    let shared_state_config = snapshot.config.shared_state.clone();
     let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
@@ -213,6 +282,7 @@ impl BoundStreamListener {
         let worker_error_tx = error_tx.clone();
         let worker_task_name = task_name.clone();
         let worker_connections = connections.clone();
+        let worker_shared_udp_runtime = generation.shared_udp_runtime();
         vec![tokio::spawn(async move {
           let socket =
             UdpSocket::from_std(socket).context("failed to register UDP stream listener socket");
@@ -222,6 +292,7 @@ impl BoundStreamListener {
                 socket,
                 worker_config,
                 worker_state,
+                worker_shared_udp_runtime,
                 worker_quiesce,
                 worker_shutdown,
                 worker_connections,
@@ -238,9 +309,7 @@ impl BoundStreamListener {
       }
     };
     StreamListenerTask {
-      options,
-      config,
-      shared_state_config,
+      generation,
       quiesce,
       shutdown,
       connections,

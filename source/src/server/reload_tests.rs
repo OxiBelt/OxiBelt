@@ -9,15 +9,111 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::*;
-use crate::config::{Config, RuntimeOverrides};
+use crate::config::{
+  Config, RuntimeOverrides, SharedStateConfig, StreamListenerConfig, StreamNetwork, UdpFlowState,
+};
+use crate::listener_socket::TcpListenOptions;
 use crate::reload::{ReloadManager, ReloadTrigger};
+use crate::shared_state::SharedState;
 use crate::state::{AppHandle, AppSnapshot};
+use crate::stream::StreamListenerGeneration;
 
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/rust/common/mod.rs"
   ));
+}
+
+#[test]
+fn shared_required_udp_listener_generation_tracks_runtime_identity() {
+  let config = test_stream_listener(StreamNetwork::Udp, UdpFlowState::SharedRequired);
+  let options = test_stream_listener_options();
+  let shared_config = SharedStateConfig::default();
+  let initial_runtime = SharedState::test_memory("listener-generation");
+  let replacement_runtime = SharedState::test_memory("listener-generation");
+  let initial = StreamListenerGeneration::new(
+    config.clone(),
+    options,
+    shared_config.clone(),
+    Some(initial_runtime.clone()),
+  )
+  .expect("initial shared-required generation should build");
+  let unchanged = StreamListenerGeneration::new(
+    config.clone(),
+    options,
+    shared_config.clone(),
+    Some(initial_runtime),
+  )
+  .expect("unchanged shared-required generation should build");
+  let replacement = StreamListenerGeneration::new(
+    config.clone(),
+    options,
+    shared_config.clone(),
+    Some(replacement_runtime),
+  )
+  .expect("replacement shared-required generation should build");
+
+  assert!(
+    initial == unchanged,
+    "the same shared-state runtime must retain the listener generation"
+  );
+  assert!(
+    initial != replacement,
+    "a replacement shared-state runtime must replace the listener generation"
+  );
+  assert!(
+    StreamListenerGeneration::new(config, options, shared_config, None).is_err(),
+    "shared-required UDP must fail closed without an active shared-state runtime"
+  );
+}
+
+#[test]
+fn local_udp_and_tcp_listener_generations_ignore_runtime_identity() {
+  let options = test_stream_listener_options();
+  let shared_config = SharedStateConfig::default();
+  let initial_runtime = SharedState::test_memory("listener-generation");
+  let replacement_runtime = SharedState::test_memory("listener-generation");
+  for config in [
+    test_stream_listener(StreamNetwork::Udp, UdpFlowState::Local),
+    test_stream_listener(StreamNetwork::Tcp, UdpFlowState::Local),
+  ] {
+    let initial = StreamListenerGeneration::new(
+      config.clone(),
+      options,
+      shared_config.clone(),
+      Some(initial_runtime.clone()),
+    )
+    .expect("non-durable listener generation should build");
+    let replacement = StreamListenerGeneration::new(
+      config,
+      options,
+      shared_config.clone(),
+      Some(replacement_runtime.clone()),
+    )
+    .expect("non-durable listener replacement generation should build");
+    assert!(
+      initial == replacement,
+      "non-durable listener keys must ignore shared runtime identity changes"
+    );
+  }
+}
+
+#[test]
+fn stream_listener_generation_preserves_serialized_config_matching() {
+  let config = test_stream_listener(StreamNetwork::Udp, UdpFlowState::Local);
+  let options = test_stream_listener_options();
+  let initial =
+    StreamListenerGeneration::new(config.clone(), options, SharedStateConfig::default(), None)
+      .expect("initial local generation should build");
+  let mut changed_shared_config = SharedStateConfig::default();
+  changed_shared_config.enabled = true;
+  let changed = StreamListenerGeneration::new(config, options, changed_shared_config, None)
+    .expect("changed local generation should build");
+  assert!(
+    initial != changed,
+    "serialized shared-state config changes must preserve existing listener replacement behavior"
+  );
 }
 
 #[tokio::test]
@@ -311,6 +407,32 @@ async fn listener_reload_adds_plain_http_bind_without_rebinding_existing_listene
   upstream_task
     .await
     .expect("path echo upstream task should not panic");
+}
+
+fn test_stream_listener(
+  network: StreamNetwork,
+  udp_flow_state: UdpFlowState,
+) -> StreamListenerConfig {
+  let network = match network {
+    StreamNetwork::Tcp => "tcp",
+    StreamNetwork::Udp => "udp",
+  };
+  let udp_flow_state = match udp_flow_state {
+    UdpFlowState::Local => "local",
+    UdpFlowState::SharedRequired => "shared_required",
+  };
+  toml::from_str(&format!(
+    "name = \"generation-test\"\nnetwork = \"{network}\"\nbind = \"127.0.0.1:0\"\nudp_flow_state = \"{udp_flow_state}\"\n"
+  ))
+  .expect("test stream listener should parse")
+}
+
+fn test_stream_listener_options() -> TcpListenOptions {
+  TcpListenOptions {
+    workers: 1,
+    reuse_port: false,
+    backlog: 16,
+  }
 }
 
 fn plain_http_listener_config(

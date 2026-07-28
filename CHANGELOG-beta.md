@@ -205,6 +205,11 @@ oxibeltctl config validate \
 - Fail Redis-backed durable UDP activation when memory retention cannot be
   verified as non-evicting, and reject detectable scope/index/flow divergence
   before it can reset cluster-wide capacity, token, or fencing state.
+- Bind each `shared_required` UDP listener generation to the exact selected
+  shared-state runtime. A full reload that replaces same-path Redis
+  credentials, trust roots, or client identity now drains and replaces the
+  stream-listener set instead of retaining a task backed by the retired pool;
+  local-only listener sets do not react to runtime identity alone.
 - Preserve the fail-closed stable/beta image gate for every `CRITICAL`
   vulnerability and every fixable `HIGH` vulnerability, with exact-revision
   SLSA provenance, CycloneDX SBOMs, and independent-rebuild evidence for each

@@ -28,6 +28,7 @@ use crate::shared_state::{
 };
 use crate::sni_forward::quic::extract_initial_sni;
 use crate::state::AppHandle;
+use crate::stream::SharedUdpListenerRuntime;
 use crate::stream::sni::{
   select_default_stream_route, select_stream_route, select_stream_rule_by_name,
 };
@@ -65,6 +66,7 @@ pub(super) async fn serve_udp_listener(
   socket: UdpSocket,
   config: StreamListenerConfig,
   state: AppHandle,
+  shared_udp_runtime: Option<SharedUdpListenerRuntime>,
   mut quiesce: watch::Receiver<bool>,
   mut shutdown: watch::Receiver<bool>,
   connections: TaskRegistry,
@@ -76,7 +78,7 @@ pub(super) async fn serve_udp_listener(
   let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
   let mut udp_batch = udp_batch_enabled(config.udp_batch);
   let mut quiescing = *quiesce.borrow();
-  let durable = durable_udp_context(&state, &config)?;
+  let durable = durable_udp_context(shared_udp_runtime.as_ref(), &config)?;
   let expiry_interval = Duration::from_millis(config.idle_timeout_ms.div_ceil(2).clamp(10, 5_000));
   let maintenance_interval = durable
     .as_ref()
@@ -585,35 +587,30 @@ enum DurableRateDecision {
 }
 
 fn durable_udp_context(
-  state: &AppHandle,
+  shared_udp_runtime: Option<&SharedUdpListenerRuntime>,
   config: &StreamListenerConfig,
 ) -> anyhow::Result<Option<DurableUdpContext>> {
   if config.udp_flow_state == UdpFlowState::Local {
     return Ok(None);
   }
-  let snapshot = state.snapshot();
-  let shared = snapshot
-    .shared_state
-    .as_deref()
+  let shared_udp_runtime = shared_udp_runtime
     .context("shared-required UDP flow state has no active shared-state runtime")?;
+  let shared = shared_udp_runtime.shared_state.as_ref();
+  let shared_state_config = &shared_udp_runtime.shared_state_config;
   let store = shared
     .udp_flow_store()
     .context("shared-required UDP flow state has no configured durable store")?;
-  let operation_timeout_ms = snapshot.config.shared_state.operation_timeout_ms;
+  let operation_timeout_ms = shared_state_config.operation_timeout_ms;
   let idle_ttl = Duration::from_millis(config.idle_timeout_ms);
   let (renew_interval_ms, owner_ttl_ms) =
     shared_udp_flow_lease_timing_ms(operation_timeout_ms, config.idle_timeout_ms);
   let renew_interval = Duration::from_millis(renew_interval_ms);
   let owner_ttl = Duration::from_millis(owner_ttl_ms);
-  let backend_name = snapshot
-    .config
-    .shared_state
+  let backend_name = shared_state_config
     .udp_flows_backend
     .as_deref()
     .context("shared-required UDP flow state has no configured backend name")?;
-  let backend = snapshot
-    .config
-    .shared_state
+  let backend = shared_state_config
     .backends
     .iter()
     .find(|backend| backend.name == backend_name)
