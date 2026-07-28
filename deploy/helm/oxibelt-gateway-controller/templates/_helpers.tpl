@@ -32,6 +32,15 @@ oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt-gateway-controller.decimalInteger" -}}
+{{- $name := required "decimal integer name is required" .name -}}
+{{- $encoded := mustToJson .value -}}
+{{- if not (regexMatch "^(0|[1-9][0-9]*)$" $encoded) -}}
+{{- fail (printf "%s must be an unsigned decimal integer" $name) -}}
+{{- end -}}
+{{- $encoded -}}
+{{- end -}}
+
 {{- define "oxibelt-gateway-controller.validateManagedConfigPath" -}}
 {{- $path := .Values.managedConfigPath -}}
 {{- if not (hasSuffix ".toml" $path) -}}

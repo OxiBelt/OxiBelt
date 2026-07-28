@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Validate the Gateway controller HA rendering and fail-closed Lease RBAC
-# without creating Kubernetes or Docker resources.
+# Validate the Gateway controller HA rendering, upgrade-safe integer arguments,
+# and fail-closed Lease RBAC without creating Kubernetes or Docker resources.
 set -euo pipefail
 
 umask 077
@@ -99,6 +99,38 @@ assert_not_contains "type: Recreate"
 assert_not_contains "verbs: [\"get\", \"watch\", \"patch\", \"create\"]"
 assert_not_contains "--compatibility-previous-version="
 assert_not_contains "--compatibility-deadline="
+
+helm template controller-integral-floats "${chart_dir}" --namespace control \
+  --kube-version "${kubernetes_version}" \
+  --set-json rollout.timeoutSeconds=300.0 \
+  --set-json leaderElection.leaseDurationSeconds=15.0 \
+  --set-json leaderElection.renewDeadlineSeconds=10.0 \
+  --set-json leaderElection.retryPeriodSeconds=2.0 \
+  --set-json l4.connectTimeoutMs=60000.0 \
+  --set-json l4.idleTimeoutMs=3600000.0 \
+  --set-json l4.udp.maxFlows=1048576.0 \
+  --set-json l4.udp.newFlowBurst=1048576.0 \
+  --set-json l4.udp.datagramBurst=1048576.0 \
+  --set-json l4.udp.batchSize=1024.0 \
+  >"${work_dir}/integral-floats.yaml"
+for expected in \
+  "--rollout-timeout-seconds=300" \
+  "--leader-election-lease-duration-seconds=15" \
+  "--leader-election-renew-deadline-seconds=10" \
+  "--leader-election-retry-period-seconds=2" \
+  "--l4-connect-timeout-ms=60000" \
+  "--l4-idle-timeout-ms=3600000" \
+  "--udp-max-flows=1048576" \
+  "--udp-new-flow-burst=1048576" \
+  "--udp-datagram-burst=1048576" \
+  "--udp-batch-size=1024"; do
+  grep -Fx -- "        - \"${expected}\"" "${work_dir}/integral-floats.yaml" >/dev/null \
+    || die "integral float manifest is missing canonical decimal argument: ${expected}"
+done
+if grep -Eq -- '--[a-z0-9-]+=[0-9]+(\.[0-9]+)?e[+-]?[0-9]+' \
+  "${work_dir}/integral-floats.yaml"; then
+  die "integral float manifest contains a scientific-notation controller argument"
+fi
 
 helm template controller-shared-udp "${chart_dir}" --namespace control \
   --kube-version "${kubernetes_version}" \
@@ -199,6 +231,9 @@ expect_failure rolling_upgrade_invalid_deadline \
   --set-string compatibility.mode=rolling_upgrade \
   --set-string compatibility.previousVersion=0.0.0 \
   --set-string compatibility.deadline=2026-07-24
+expect_failure fractional_integer_argument \
+  "l4.idleTimeoutMs must be an unsigned decimal integer" \
+  --set-json l4.idleTimeoutMs=75000.5
 
 helm template controller-single "${chart_dir}" --namespace control \
   --kube-version "${kubernetes_version}" \
