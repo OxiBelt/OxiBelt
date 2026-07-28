@@ -166,7 +166,11 @@ Use this staged sequence:
    `udp_flows_backend`, and `udp_flow_identity_key_env` name resolving to the
    same Secret-backed 32-byte base64 key. Configure the effective shared
    connection-limit backend to the same backend and preserve the required
-   `idle_timeout_ms >= 6 * operation_timeout_ms` bound.
+   `idle_timeout_ms >= 6 * operation_timeout_ms` bound. When Redis is selected,
+   its configured account must be able to run `INFO memory`, and the response
+   must prove either `maxmemory = 0` or
+   `maxmemory_policy = noeviction`; unsafe, missing, malformed, or
+   access-denied policy evidence fails activation.
 4. Roll all selected data-plane Pods and verify readiness and shared-state
    health before setting controller `l4.udp.flowState: shared_required`.
    Re-enable UDP admission only after the generated configuration is committed
@@ -182,6 +186,16 @@ Pod, complete the data-plane rollout, and only then re-enable
 `shared_required`. Follow the same disable/drain/all-Pod rollout for a Redis to
 PostgreSQL migration or any backend-name change; OxiBelt does not mirror UDP
 flow records between backends.
+
+Do not change a selected Redis backend to an eviction-capable policy behind an
+active listener. OxiBelt verifies the policy at activation and every
+configuration reload, then relies on the trusted backend to preserve it for
+that runtime snapshot. Stop new UDP admission before changing Redis memory
+settings, keep the resulting policy non-evicting, and require every replica to
+reload and pass policy verification before resuming admission. Restrictive
+managed-service ACLs that cannot expose `INFO memory` are unsupported for
+Redis-backed durable UDP; use a dedicated permitted account or PostgreSQL
+instead.
 
 The Rust `1.97.1` lint-compatibility cleanup applied after this durable-flow
 implementation does not change `udp_flow_state` or shared-state configuration

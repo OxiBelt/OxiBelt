@@ -419,6 +419,20 @@ impl SharedState {
       .udp_flows_backend
       .as_deref()
       .and_then(|name| backends.get(name).cloned());
+    if let Some(Backend::Redis(redis)) = udp_flow_backend.as_deref() {
+      redis
+        .runtime
+        .execute("udp_flow_activation", || {
+          redis.verify_udp_flow_non_eviction()
+        })
+        .await
+        .with_context(|| {
+          format!(
+            "failed to verify non-evicting Redis policy for shared_state.udp_flows_backend {}",
+            redis.runtime.name
+          )
+        })?;
+    }
     let udp_flow_boot_generation = match previous {
       Some(state) => state.udp_flow_boot_generation.clone(),
       None => {

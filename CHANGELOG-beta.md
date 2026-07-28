@@ -39,6 +39,11 @@ for the governed entry format.
   effective shared connection-limit backend to match `udp_flows_backend`, and
   validate the backend connection budget, idle/operation timing, flow
   capacity, and token-rate bounds before activation.
+- Require a Redis-compatible `udp_flows_backend` to expose `INFO memory` and
+  prove either `maxmemory = 0` or `maxmemory_policy = noeviction` at activation
+  and every configuration reload. An unsafe or unverifiable eviction policy
+  fails activation; PostgreSQL and Redis backends not selected for durable UDP
+  are unchanged.
 - Default generated `UDPRoute` flow state to `disabled`. The Gateway
   Controller refuses to publish generated UDP listeners until
   `l4.udp.flowState` or `--udp-flow-state` is explicitly set to
@@ -108,6 +113,11 @@ for the governed entry format.
   pinned to their stored generation and target, while distinct new tuples may
   enter through the active generation without bypassing the shared admission
   bounds.
+- Reject Redis scope, expiry-index, and target-flow partial state, including an
+  expiry-index cardinality that disagrees with the stored active-flow count,
+  before garbage collection, counter initialization, or new-flow admission.
+  This prevents partial backend state loss from resetting shared capacity,
+  rate, or fence counters.
 
 ### Upgrade validation
 
@@ -137,6 +147,11 @@ oxibeltctl config validate \
   flows, configure one common namespace, backend mapping, and identity key on
   every selected Pod, then roll all selected data-plane Pods and verify
   readiness before enabling controller `shared_required`.
+- For a Redis-compatible UDP backend, grant the configured account permission
+  to run `INFO memory`, configure unlimited Redis memory or `noeviction`, and
+  verify every selected Pod activates successfully. Stop UDP admission before
+  changing either setting and require every replica to reload and revalidate
+  the safe policy before resuming.
 - Deploy `0.7.0-beta.4` only after its person-reviewed release, all 30
   role/architecture image subjects, vulnerability admission, attestations,
   and independent-rebuild receipts succeed. Do not reuse beta.3's incomplete
@@ -187,6 +202,9 @@ oxibeltctl config validate \
   authority. A missing or inconsistent key, backend mapping, routing
   generation, target, lease, fence, capacity decision, or token decision fails
   activation or rejects the affected new/recovered flow.
+- Fail Redis-backed durable UDP activation when memory retention cannot be
+  verified as non-evicting, and reject detectable scope/index/flow divergence
+  before it can reset cluster-wide capacity, token, or fencing state.
 - Preserve the fail-closed stable/beta image gate for every `CRITICAL`
   vulnerability and every fixable `HIGH` vulnerability, with exact-revision
   SLSA provenance, CycloneDX SBOMs, and independent-rebuild evidence for each

@@ -50,7 +50,15 @@ if not max_flows or not rate or not burst or not owner_ttl or not idle_ttl
   return {'error', now, 'invalid_argument'}
 end
 local full_balance = burst * token
-if redis.call('EXISTS', KEYS[1]) == 0 then
+-- Resetting capacity or fencing is safe only when this scope has no surviving
+-- index or target-flow state from an independently evicted scope key.
+local scope_exists = redis.call('EXISTS', KEYS[1])
+local index_exists = redis.call('EXISTS', KEYS[2])
+local flow_exists = redis.call('EXISTS', KEYS[3])
+if scope_exists == 0 then
+  if index_exists ~= 0 or flow_exists ~= 0 then
+    return {'error', now, 'partial_scope'}
+  end
   redis.call('HSET', KEYS[1],
     'v',version,'g',generation,'m',max_flows,'a',0,'f',0,
     'rr',rate,'rb',burst,'rl',full_balance,'rt',now,'u',now)
@@ -70,6 +78,13 @@ if not active or active < 0 or not next_fence or next_fence < 0
    or not stored_rate or stored_rate < 0 or not stored_burst or stored_burst < 0
    or not balance or balance < 0 or not refill_at or refill_at < 0 then
   return {'error', now, 'scope_number'}
+end
+local indexed_flows = redis.call('ZCARD', KEYS[2])
+if indexed_flows ~= active or (active == 0 and flow_exists ~= 0) then
+  return {'error', now, 'partial_scope'}
+end
+if flow_exists ~= 0 and redis.call('ZSCORE', KEYS[2], ARGV[14]) == false then
+  return {'error', now, 'partial_scope'}
 end
 
 local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, ARGV[15])
@@ -327,6 +342,19 @@ return {'aborted', now}
 "#;
 
 impl RedisBackend {
+  pub(in crate::shared_state) async fn verify_udp_flow_non_eviction(&self) -> anyhow::Result<()> {
+    let response = self
+      .command(&[b"INFO".to_vec(), b"memory".to_vec()])
+      .await?;
+    let Resp::Bulk(Some(info)) = response else {
+      bail!(
+        "Redis backend selected by shared_state.udp_flows_backend must permit INFO memory for non-eviction verification"
+      );
+    };
+    let info = String::from_utf8(info).context("Redis INFO memory must be UTF-8")?;
+    validate_udp_flow_memory_info(&info)
+  }
+
   pub(super) async fn udp_flow_lookup(
     &self,
     keys: &RedisUdpFlowKeys,
@@ -624,6 +652,44 @@ impl RedisBackend {
     let command = udp_flow_eval_command(script, keys, arguments);
     self.command(&command).await
   }
+}
+
+fn validate_udp_flow_memory_info(info: &str) -> anyhow::Result<()> {
+  let maxmemory = redis_memory_info_value(info, "maxmemory")?
+    .parse::<u64>()
+    .context("Redis INFO memory contains invalid maxmemory")?;
+  if maxmemory == 0 {
+    return Ok(());
+  }
+  let policy = redis_memory_info_value(info, "maxmemory_policy")?;
+  if policy == "noeviction" {
+    return Ok(());
+  }
+  bail!(
+    "Redis backend selected by shared_state.udp_flows_backend must use maxmemory 0 or maxmemory_policy noeviction, found maxmemory {maxmemory} and policy {policy}"
+  )
+}
+
+fn redis_memory_info_value<'a>(info: &'a str, field: &str) -> anyhow::Result<&'a str> {
+  let mut value = None;
+  for line in info.lines() {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let Some((name, candidate)) = line.split_once(':') else {
+      continue;
+    };
+    if name != field {
+      continue;
+    }
+    if value.replace(candidate.trim()).is_some() {
+      bail!("Redis INFO memory contains duplicate {field}");
+    }
+  }
+  value.ok_or_else(|| anyhow!("Redis INFO memory omitted {field}"))
+}
+
+#[cfg(test)]
+pub(super) fn validate_udp_flow_memory_info_for_test(info: &str) -> anyhow::Result<()> {
+  validate_udp_flow_memory_info(info)
 }
 
 fn udp_flow_eval_command<const N: usize>(

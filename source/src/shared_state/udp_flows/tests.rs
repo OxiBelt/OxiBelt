@@ -608,6 +608,77 @@ fn redis_scope_admission_ignores_generation_but_flow_fencing_does_not() {
 }
 
 #[test]
+fn redis_claim_rejects_partial_scope_state_before_resetting_shared_counters() {
+  let (claim, _) = super::redis::redis_generation_scripts_for_test();
+  let scope_presence = claim
+    .split_once("local scope_exists = redis.call('EXISTS', KEYS[1])")
+    .expect("Redis claim script should inspect scope presence")
+    .1
+    .split_once("local s = redis.call('HMGET', KEYS[1]")
+    .expect("partial-state checks should precede scope reads")
+    .0;
+  assert!(scope_presence.contains("local index_exists = redis.call('EXISTS', KEYS[2])"));
+  assert!(scope_presence.contains("local flow_exists = redis.call('EXISTS', KEYS[3])"));
+  assert!(scope_presence.contains("if scope_exists == 0 then"));
+  assert!(scope_presence.contains("if index_exists ~= 0 or flow_exists ~= 0 then"));
+  assert!(scope_presence.contains("return {'error', now, 'partial_scope'}"));
+  assert!(
+    scope_presence
+      .find("return {'error', now, 'partial_scope'}")
+      .expect("partial state should be rejected")
+      < scope_presence
+        .find("redis.call('HSET', KEYS[1]")
+        .expect("an entirely empty scope should still initialize"),
+    "partial state must fail before capacity and fence counters are reset"
+  );
+
+  let scope_consistency = claim
+    .split_once("local active = tonumber(s[4])")
+    .expect("Redis claim script should parse the active count")
+    .1
+    .split_once("local expired = redis.call('ZRANGEBYSCORE'")
+    .expect("scope consistency should be checked before garbage collection")
+    .0;
+  assert!(scope_consistency.contains("local indexed_flows = redis.call('ZCARD', KEYS[2])"));
+  assert!(scope_consistency.contains("indexed_flows ~= active"));
+  assert!(scope_consistency.contains("(active == 0 and flow_exists ~= 0)"));
+  assert!(
+    scope_consistency
+      .contains("flow_exists ~= 0 and redis.call('ZSCORE', KEYS[2], ARGV[14]) == false")
+  );
+  assert!(scope_consistency.contains("return {'error', now, 'partial_scope'}"));
+}
+
+#[test]
+fn redis_udp_flow_memory_policy_requires_non_eviction() {
+  let validate = super::redis::validate_udp_flow_memory_info_for_test;
+  assert!(
+    validate("# Memory\r\nmaxmemory:0\r\nmaxmemory_policy:allkeys-lru\r\nused_memory:1024\r\n")
+      .is_ok(),
+    "an unlimited Redis deployment cannot evict durable UDP keys for memory pressure"
+  );
+  assert!(
+    validate(
+      "# Memory\r\nmaxmemory:33554432\r\nmaxmemory_policy:noeviction\r\nused_memory:1024\r\n"
+    )
+    .is_ok(),
+    "a bounded Redis deployment is safe only with noeviction"
+  );
+
+  for info in [
+    "# Memory\r\nmaxmemory:33554432\r\nmaxmemory_policy:allkeys-lru\r\n",
+    "# Memory\r\nmaxmemory:33554432\r\n",
+    "# Memory\r\nmaxmemory:not-a-number\r\nmaxmemory_policy:noeviction\r\n",
+    "# Memory\r\nmaxmemory:0\r\nmaxmemory:1\r\nmaxmemory_policy:noeviction\r\n",
+  ] {
+    assert!(
+      validate(info).is_err(),
+      "unsafe or unverifiable Redis memory configuration must fail closed: {info:?}"
+    );
+  }
+}
+
+#[test]
 fn postgres_scope_generation_remains_compatibility_metadata() {
   let postgres = include_str!("postgres.rs");
   let abort = postgres
