@@ -2213,15 +2213,17 @@ wait_for "two fully updated controller replicas after rolling upgrade" 60 \
 wait_for "one leader after rolling controller upgrade" 60 lease_has_live_unique_holder
 wait_for "Programmed proof after rolling controller upgrade" "${rollout_timeout_seconds}" gateway_is_programmed
 
-# Reconcile the out-of-band rollout restart while the Lease is healthy. The
-# subsequent Helm recovery must recreate only the Lease, not combine fencing
-# recovery with another controller rollout.
+# Reconcile the release while the Lease is healthy, then capture the fully
+# ready live Deployment as the stable no-churn baseline. Helm's three-way merge
+# may retain live-only Pod-template additions such as the rollout restart
+# annotation; Lease recovery is isolated by comparing live controller identity
+# before and after the recovery upgrade.
 helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   --reuse-values \
   --wait \
   --timeout "${rollout_timeout_seconds}s"
-wait_for "two Helm-converged controller replicas before Lease deletion" 60 \
+wait_for "two stable Helm-reconciled controller replicas before Lease deletion" 60 \
   controller_has_two_ready_replicas
 wait_for "one leader after Helm reconciles the controller rollout" 60 \
   lease_has_live_unique_holder
@@ -2232,10 +2234,6 @@ wait_for "Programmed proof after Helm reconciles the controller rollout" \
 
 controller_deployment_before="$(kube -n "${namespace}" get deployment \
   "${controller_release}" -o json)"
-jq -e '
-  .spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] == null
-' >/dev/null <<<"${controller_deployment_before}" \
-  || die "Helm did not remove the out-of-band controller restart annotation"
 controller_deployment_uid="$(jq -er '.metadata.uid' <<<"${controller_deployment_before}")"
 controller_generation_before="$(jq -er '.metadata.generation' <<<"${controller_deployment_before}")"
 controller_template_digest_before="$(

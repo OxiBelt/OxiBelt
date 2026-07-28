@@ -2849,8 +2849,7 @@ fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
     "controller_pod_runtime_identities() {",
     "controller_replicaset_uids() {",
     "assert_controller_can_i no create leases.coordination.k8s.io",
-    "two Helm-converged controller replicas before Lease deletion",
-    ".spec.template.metadata.annotations[\"kubectl.kubernetes.io/restartedAt\"] == null",
+    "two stable Helm-reconciled controller replicas before Lease deletion",
     "controller_generation_before=",
     "controller_template_digest_before=",
     "controller_pod_uids_before=",
@@ -2885,6 +2884,18 @@ fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
     );
   }
 
+  for forbidden in [
+    "--force",
+    "kube -n \"${namespace}\" replace",
+    "rollout undo",
+    "kubectl.kubernetes.io/restartedAt-",
+  ] {
+    assert!(
+      !controller_phase.contains(forbidden),
+      "controller recovery must not force replacement or remove live-only rollout state with {forbidden}"
+    );
+  }
+
   assert_eq!(
     controller_phase.matches("--reuse-values").count(),
     2,
@@ -2900,8 +2911,8 @@ fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
     .find("rollout restart \"deployment/${controller_release}\"")
     .expect("controller phase should start an explicit RollingUpdate");
   let healthy_reconcile = controller_phase
-    .find("# Reconcile the out-of-band rollout restart while the Lease is healthy.")
-    .expect("controller phase should reconcile restart drift while the Lease is healthy");
+    .find("# Reconcile the release while the Lease is healthy, then capture the fully")
+    .expect("controller phase should establish a stable live baseline while the Lease is healthy");
   let helm_upgrades = controller_phase
     .match_indices("helm upgrade \"${controller_release}\"")
     .map(|(position, _)| position)
@@ -2929,7 +2940,7 @@ fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
       && baseline < delete_lease
       && delete_lease < recovery_helm
       && recovery_helm < compare_identity,
-    "controller restart, healthy Helm reconciliation, baseline capture, Lease revocation, recovery, and no-churn comparison must remain ordered"
+    "controller restart, stable live baseline capture, Lease revocation, recovery, and no-churn comparison must remain ordered"
   );
 }
 
