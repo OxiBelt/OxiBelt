@@ -70,6 +70,10 @@ pub(super) struct SharedUdpListenerRuntime {
 }
 
 impl StreamListenerGeneration {
+  pub(crate) fn name(&self) -> &str {
+    &self.config.name
+  }
+
   pub(crate) fn new(
     config: StreamListenerConfig,
     options: TcpListenOptions,
@@ -92,6 +96,14 @@ impl StreamListenerGeneration {
       shared_state_config,
       shared_state_runtime,
     })
+  }
+
+  #[cfg(test)]
+  pub(crate) fn test_uses_shared_state(&self, shared_state: &Arc<SharedState>) -> bool {
+    self
+      .shared_state_runtime
+      .as_ref()
+      .is_some_and(|runtime| Arc::ptr_eq(runtime, shared_state))
   }
 }
 
@@ -130,6 +142,11 @@ enum BoundStreamTransport {
 }
 
 impl StreamListenerTask {
+  #[cfg(test)]
+  pub(crate) fn test_identity(&self) -> watch::Receiver<bool> {
+    self.quiesce.subscribe()
+  }
+
   pub(crate) fn quiesce(&self) {
     let _ = self.quiesce.send(true);
   }

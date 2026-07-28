@@ -163,6 +163,8 @@ mod public_dispatch;
 #[cfg(test)]
 mod reload_tests;
 mod rollout_identity;
+#[cfg(test)]
+mod stream_reload_tests;
 #[cfg(not(feature = "admin-runtime"))]
 mod strict_runtime;
 mod tls_metadata;
