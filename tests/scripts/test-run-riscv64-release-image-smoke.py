@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -671,6 +672,24 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
         )
         self.assertIn("-copy_extensions", signing)
         self.assertEqual(signing[signing.index("-copy_extensions") + 1], "copy")
+
+    def test_controller_mock_tls_requires_tls12_and_disables_compression(
+        self,
+    ) -> None:
+        args = self.release_args()
+        artifact = SMOKE.validate_release_artifact(args)
+        runner = RecordingCommandRunner()
+        smoke = SMOKE.DockerSmoke(runner, artifact, args, {"checks": []})
+        self.addCleanup(smoke.cleanup)
+        leaf_cert, leaf_key, _ = smoke.generate_controller_pki(
+            self.root / "controller-tls",
+            "host.docker.internal",
+        )
+
+        context = SMOKE.kubernetes_lease_server_context(leaf_cert, leaf_key)
+
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        self.assertTrue(context.options & ssl.OP_NO_COMPRESSION)
 
     def test_keysigner_seed_keeps_narrow_caps_and_bounded_failure_detail(
         self,

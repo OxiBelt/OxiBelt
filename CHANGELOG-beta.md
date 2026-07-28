@@ -15,6 +15,187 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.7.0-beta.4] - 2026-07-28
+
+> Qualification beta for the `0.7.0` stable candidate. The published
+> `0.7.0-beta.3` release completed its image-publication workflow, but its
+> automatic independent rebuild stopped during hosted rootless Buildx setup
+> before the complete role/architecture evidence matrix was produced. This
+> cut supersedes that incomplete qualification with the durable UDP and
+> release-validation changes made afterward.
+
+- Changes since: `0.7.0-beta.3`
+- Supported upgrade sources: `0.7.0-beta.3`, `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.0 line](docs/Upgrading.md#upgrade-from-065-to-the-070-line)
+
+### Configuration
+
+- Add opt-in `udp_flow_state = "shared_required"` for native UDP stream
+  listeners while retaining `local` as the compatibility default. Shared mode
+  requires enabled shared state, an explicit `udp_flows_backend` naming a
+  Redis-compatible or PostgreSQL backend, and one deployment-wide 32-byte
+  base64 identity key named by `udp_flow_identity_key_env`.
+- Fix the UDP shared-state failure policy at `reject_new_only`, require the
+  effective shared connection-limit backend to match `udp_flows_backend`, and
+  validate the backend connection budget, idle/operation timing, flow
+  capacity, and token-rate bounds before activation.
+- Default generated `UDPRoute` flow state to `disabled`. The Gateway
+  Controller refuses to publish generated UDP listeners until
+  `l4.udp.flowState` or `--udp-flow-state` is explicitly set to
+  `shared_required`; it never generates process-local UDP flow state.
+
+### Schema epochs
+
+- Keep native configuration schema epoch `1`. Add optional epoch-1 metadata
+  for `stream_listeners[].udp_flow_state`,
+  `shared_state.udp_flows_backend`,
+  `shared_state.udp_flow_identity_key_env`, and
+  `shared_state.failure_policies.udp_flows`; existing beta.3 epoch-1
+  configurations require no schema migration and retain local/disabled
+  defaults.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- No changes for this release.
+
+### Feature lifecycle
+
+- Keep the Kubernetes Gateway Controller, Helm integration, and generated
+  `UDPRoute` support `experimental`. Generated UDP now fails closed until the
+  operator explicitly selects required shared flow state and supplies matching
+  shared-state configuration to every selected data-plane Pod.
+
+### Rulepack compatibility
+
+- No changes for this release.
+
+### Executables and images
+
+- Add the Gateway Controller's `--udp-flow-state` argument and corresponding
+  Helm `l4.udp.flowState` value. Render controller integer arguments as
+  canonical decimal digits so Helm cannot emit scientific notation into the
+  container argument vector.
+- Repair the independent release rebuild on hosted rootless Docker by using
+  the `cgroupfs` driver without a host cgroup resource controller while still
+  requiring rootless isolation, a cgroup namespace, and the built-in seccomp
+  profile.
+- Restore strict all-numeric build-tag parsing and the release build's pinned
+  Rust `1.97.1` compatibility checks without changing committed `0.0.0`
+  package-version sentinels.
+- Strengthen the Kubernetes qualification harness with a reviewed Valkey
+  manifest, isolated controller Lease recovery, live-controller recovery
+  baselines, and deterministic UDP rollout checks.
+
+### Storage and state
+
+- Add one atomic, fenced UDP flow-record contract across the memory,
+  Redis-compatible, and PostgreSQL adapters. The memory adapter exercises the
+  same contract but remains process-local; only Redis-compatible and
+  PostgreSQL backends provide records that another process or replacement Pod
+  can recover.
+- Persist opaque keyed listener, peer, route, target, owner, and routing-
+  generation identities with bounded capacity, new-flow and per-flow token
+  state, server-time expiry, ownership leases, and monotonic fencing. Recovery
+  reauthorizes the stored route and target against the active configuration
+  and rejects stale owners, missing targets, generation drift, or uncertain
+  admission decisions.
+- Preserve one listener-wide capacity, new-flow-token, and monotonic-fence
+  scope while routing generations overlap. Existing client tuples remain
+  pinned to their stored generation and target, while distinct new tuples may
+  enter through the active generation without bypassing the shared admission
+  bounds.
+
+### Upgrade validation
+
+- A beta.3 configuration that does not opt into shared UDP remains valid with
+  process-local native listeners and disabled generated `UDPRoute`. Validate
+  the complete configuration before replacing an image:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+- When upgrading directly from `0.6.5`, create and inspect the epoch-1 review
+  tree with the target `oxibeltctl`, then validate the complete migrated
+  configuration and all referenced files before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Before enabling shared UDP, stop new admission, drain existing process-local
+  flows, configure one common namespace, backend mapping, and identity key on
+  every selected Pod, then roll all selected data-plane Pods and verify
+  readiness before enabling controller `shared_required`.
+- Deploy `0.7.0-beta.4` only after its person-reviewed release, all 30
+  role/architecture image subjects, vulnerability admission, attestations,
+  and independent-rebuild receipts succeed. Do not reuse beta.3's incomplete
+  independent-rebuild evidence.
+
+### Rollback and irreversible steps
+
+- Before returning to beta.3 or `0.6.5`, disable generated UDP, stop new UDP
+  admission, and drain beta.4 owners. Restore the prior data-plane
+  configuration and immutable image digests before the prior controller, and
+  retain the beta.4 identity key and shared backend until the rollback
+  decision is complete.
+- Older binaries do not consume beta.4 UDP flow records. Leave them to expire
+  or remove them only after every beta.4 owner has drained; rollback does not
+  recreate a prior socket, upstream source port, NAT/conntrack entry, exact
+  Kubernetes Service endpoint, in-flight datagram, or application session.
+- For a direct `0.6.5` rollback, also restore the epoch-0 configuration tree
+  and pre-upgrade PostgreSQL backup or roll forward. Externally witnessed
+  audit checkpoints remain append-only, and operator-owned Gateway API CRDs
+  must not be deleted as an implicit Helm rollback.
+
+### Known issues
+
+- The Kubernetes Gateway Controller, its Helm integration, and its Gateway API
+  features remain `experimental`; their native `linux/riscv64` cluster-runner
+  graduation evidence is still unmet.
+- Durable UDP preserves logical flow ownership, route/target affinity, and
+  bounded admission only. It does not preserve the connected socket, upstream
+  source port, NAT or conntrack state, exact endpoint selected behind a
+  Kubernetes Service, upstream-initiated or in-flight datagrams, or
+  application/session protocol state across restart.
+- Existing admission policies that require the retired OxiBelt-managed Cosign
+  signature or OCI-referrer contract reject the GitHub API-attested images
+  until an operator installs and validates a replacement admission policy.
+
+### Security
+
+- Escape existing backslashes before Markdown table delimiters when rendering
+  vulnerability findings into the GitHub Actions step summary. The
+  machine-readable image decision and its fail-closed admission semantics are
+  unchanged.
+- Require TLS 1.2 or newer and disable TLS compression in the local
+  Kubernetes Lease mock used by the RISC-V release-image smoke; its generated
+  CA, certificate, bearer token, and Docker-only trust boundary remain
+  test-scoped.
+- Derive opaque shared-store identities with the deployment key instead of
+  storing raw peers, route names, origins, or resolved endpoints as record
+  authority. A missing or inconsistent key, backend mapping, routing
+  generation, target, lease, fence, capacity decision, or token decision fails
+  activation or rejects the affected new/recovered flow.
+- Preserve the fail-closed stable/beta image gate for every `CRITICAL`
+  vulnerability and every fixable `HIGH` vulnerability, with exact-revision
+  SLSA provenance, CycloneDX SBOMs, and independent-rebuild evidence for each
+  role and architecture.
+- Keep the independent verifier rootless and seccomp-confined. Its hosted
+  `cgroupfs` configuration deliberately exposes no host cgroup resource
+  controller; the ephemeral runner, job timeout, and bounded parallelism
+  remain its resource-exhaustion controls.
+
 ## [0.7.0-beta.3] - 2026-07-27
 
 > Recovery beta for the `0.7.0` line. The immutable published
