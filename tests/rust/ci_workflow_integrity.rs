@@ -2677,7 +2677,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "OXIBELT_CONFIG_DIGEST does not match the exact bytes of OXIBELT_CONFIG_REVISION_FILE",
     "stale-config-${run_id}",
     "oxibelt.dev/config-digest",
-    "logs \"deployment/${controller_release}\"",
+    "logs \"${controller_pod}\"",
     "--all-containers=true --prefix --previous --tail=200",
     "logs -l 'oxibelt.dev/test=stale-config'",
   ] {
@@ -2770,6 +2770,167 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "Kubernetes immutable rollout script must not contain unsafe or secret-disclosing operation {forbidden}"
     );
   }
+}
+
+#[test]
+fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
+  let script = kubernetes_immutable_rollout_script_text();
+  let cleanup = script
+    .split_once("cleanup() {")
+    .expect("rollout harness should define scoped cleanup")
+    .1
+    .split_once("\n}\ntrap cleanup EXIT")
+    .expect("rollout cleanup should precede the EXIT trap")
+    .0;
+  let convergence = script
+    .split_once("controller_has_two_ready_replicas() {")
+    .expect("rollout harness should define controller convergence")
+    .1
+    .split_once("\n}\n\ncontroller_pod_uids() {")
+    .expect("controller convergence should precede Pod UID capture")
+    .0;
+  let pod_uids = script
+    .split_once("controller_pod_uids() {")
+    .expect("rollout harness should capture controller Pod UIDs")
+    .1
+    .split_once("\n}\n\ncontroller_pod_runtime_identities() {")
+    .expect("controller Pod UID capture should precede container identity capture")
+    .0;
+  let controller_phase = script
+    .split_once("# Exercise the Deployment's RollingUpdate strategy.")
+    .expect("rollout harness should exercise controller RollingUpdate")
+    .1
+    .split_once("\n\nverify_cross_namespace_l4_reference_grants")
+    .expect("controller recovery should precede cross-namespace qualification")
+    .0;
+
+  for expected in [
+    ".status.observedGeneration == .metadata.generation",
+    ".status.replicas == 2",
+    ".status.updatedReplicas == 2",
+    ".status.readyReplicas == 2",
+    ".status.availableReplicas == 2",
+    "(.status.unavailableReplicas // 0) == 0",
+    ".spec.strategy.rollingUpdate.maxUnavailable == 0",
+    ".spec.strategy.rollingUpdate.maxSurge == 1",
+    "($pods | length) == 2",
+    ".type == \"Ready\" and .status == \"True\"",
+  ] {
+    assert!(
+      convergence.contains(expected),
+      "controller convergence must fail closed on missing invariant {expected}"
+    );
+  }
+  assert!(
+    pod_uids.contains("($pods | length) == 2")
+      && pod_uids.contains(".type == \"Ready\" and .status == \"True\""),
+    "controller Pod UID capture must reject a partial, unready, or surge baseline"
+  );
+
+  for expected in [
+    "while IFS= read -r controller_pod",
+    "get pods -l \"${controller_selector}\"",
+    "logs \"${controller_pod}\"",
+    "--all-containers=true --prefix --tail=200",
+    "--all-containers=true --prefix --previous --tail=200",
+  ] {
+    assert!(
+      cleanup.contains(expected),
+      "controller failure diagnostics should preserve {expected}"
+    );
+  }
+  assert!(
+    !cleanup.contains("logs \"deployment/${controller_release}\""),
+    "controller diagnostics must not select only one Deployment Pod"
+  );
+
+  for expected in [
+    "controller_pod_uids() {",
+    "controller_pod_runtime_identities() {",
+    "controller_replicaset_uids() {",
+    "assert_controller_can_i no create leases.coordination.k8s.io",
+    "two Helm-converged controller replicas before Lease deletion",
+    ".spec.template.metadata.annotations[\"kubectl.kubernetes.io/restartedAt\"] == null",
+    "controller_generation_before=",
+    "controller_template_digest_before=",
+    "controller_pod_uids_before=",
+    "controller_pod_runtime_identities_before=",
+    "controller_replicaset_uids_before=",
+    "controller readiness revocation after Lease deletion",
+    "\"${controller_pod_runtime_identities_before}\"",
+    "two unchanged controller replicas after Lease recreation",
+    "new_lease_uid",
+    "controller_generation_after=",
+    "controller_template_digest_after=",
+    "controller_pod_uids_after=",
+    "controller_pod_runtime_identities_after=",
+    "controller_replicaset_uids_after=",
+    ".state.running != null",
+    "container_id: .containerID",
+    "restart_count: .restartCount",
+    "Lease recreation unexpectedly changed the controller Deployment generation",
+    "Lease recreation unexpectedly changed the controller Pod template",
+    "Lease recreation unexpectedly replaced a controller Pod",
+    "Lease recreation unexpectedly restarted a controller container",
+    "Lease recreation unexpectedly changed the controller ReplicaSet set",
+    r#"[[ "${controller_generation_after}" == "${controller_generation_before}" ]]"#,
+    r#"[[ "${controller_template_digest_after}" == "${controller_template_digest_before}" ]]"#,
+    r#"[[ "${controller_pod_uids_after}" == "${controller_pod_uids_before}" ]]"#,
+    r#"[[ "${controller_pod_runtime_identities_after}" == "${controller_pod_runtime_identities_before}" ]]"#,
+    r#"[[ "${controller_replicaset_uids_after}" == "${controller_replicaset_uids_before}" ]]"#,
+  ] {
+    assert!(
+      script.contains(expected),
+      "Lease recovery isolation should preserve {expected}"
+    );
+  }
+
+  assert_eq!(
+    controller_phase.matches("--reuse-values").count(),
+    2,
+    "healthy reconciliation and Lease recovery must both reuse the reviewed release values"
+  );
+  assert_eq!(
+    controller_phase.matches("\n  --wait \\").count(),
+    2,
+    "healthy reconciliation and Lease recovery must both remain fail-closed on readiness"
+  );
+
+  let restart = controller_phase
+    .find("rollout restart \"deployment/${controller_release}\"")
+    .expect("controller phase should start an explicit RollingUpdate");
+  let healthy_reconcile = controller_phase
+    .find("# Reconcile the out-of-band rollout restart while the Lease is healthy.")
+    .expect("controller phase should reconcile restart drift while the Lease is healthy");
+  let helm_upgrades = controller_phase
+    .match_indices("helm upgrade \"${controller_release}\"")
+    .map(|(position, _)| position)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    helm_upgrades.len(),
+    2,
+    "controller phase should perform one healthy reconciliation and one Lease recovery"
+  );
+  let healthy_helm = helm_upgrades[0];
+  let recovery_helm = helm_upgrades[1];
+  let baseline = controller_phase
+    .find("controller_deployment_before=")
+    .expect("controller phase should capture the Helm-converged baseline");
+  let delete_lease = controller_phase
+    .find("delete lease \"${leader_lease_name}\"")
+    .expect("controller phase should revoke the Helm-owned Lease");
+  let compare_identity = controller_phase
+    .find("Lease recreation unexpectedly changed the controller Deployment generation")
+    .expect("Lease recovery should compare the controller identity");
+  assert!(
+    restart < healthy_reconcile
+      && healthy_reconcile < healthy_helm
+      && healthy_helm < baseline
+      && baseline < delete_lease
+      && delete_lease < recovery_helm
+      && recovery_helm < compare_identity,
+    "controller restart, healthy Helm reconciliation, baseline capture, Lease revocation, recovery, and no-churn comparison must remain ordered"
+  );
 }
 
 #[test]

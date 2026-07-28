@@ -87,6 +87,7 @@ kube() {
 
 cleanup() {
   local status="$?"
+  local controller_pod
   set +e
 
   if [[ -n "${port_forward_pid}" ]]; then
@@ -106,10 +107,14 @@ cleanup() {
     echo "Kubernetes immutable rollout diagnostics for ${cluster_name}/${namespace}:" >&2
     kube -n "${namespace}" get deployments,replicasets,pods --ignore-not-found >&2 || true
     kube -n "${namespace}" get events --sort-by=.metadata.creationTimestamp >&2 || true
-    kube -n "${namespace}" logs "deployment/${controller_release}" \
-      --all-containers=true --prefix --tail=200 >&2 || true
-    kube -n "${namespace}" logs "deployment/${controller_release}" \
-      --all-containers=true --prefix --previous --tail=200 >&2 || true
+    while IFS= read -r controller_pod; do
+      [[ -n "${controller_pod}" ]] || continue
+      kube -n "${namespace}" logs "${controller_pod}" \
+        --all-containers=true --prefix --tail=200 >&2 || true
+      kube -n "${namespace}" logs "${controller_pod}" \
+        --all-containers=true --prefix --previous --tail=200 >&2 || true
+    done < <(kube -n "${namespace}" get pods -l "${controller_selector}" \
+      -o name 2>/dev/null)
     kube -n "${namespace}" logs -l "${selector}" \
       --all-containers=true --prefix --tail=200 >&2 || true
     kube -n "${namespace}" logs -l "${selector}" \
@@ -757,15 +762,91 @@ rename $pending_file, $target_file
 
 controller_has_two_ready_replicas() {
   local deployment
+  local pods
   deployment="$(kube -n "${namespace}" get deployment "${controller_release}" -o json 2>/dev/null)" \
+    || return 1
+  pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
     || return 1
   jq -e '
     .spec.replicas == 2
+      and .status.observedGeneration == .metadata.generation
+      and .status.replicas == 2
+      and .status.updatedReplicas == 2
       and .status.readyReplicas == 2
+      and .status.availableReplicas == 2
+      and (.status.unavailableReplicas // 0) == 0
       and .spec.strategy.type == "RollingUpdate"
       and .spec.strategy.rollingUpdate.maxUnavailable == 0
       and .spec.strategy.rollingUpdate.maxSurge == 1
-  ' >/dev/null <<<"${deployment}"
+  ' >/dev/null <<<"${deployment}" || return 1
+  jq -e '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | ($pods | length) == 2
+      and all($pods[];
+        any(.status.conditions[]?;
+          .type == "Ready" and .status == "True"))
+  ' >/dev/null <<<"${pods}"
+}
+
+controller_pod_uids() {
+  local pods
+  pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
+    || return 1
+  jq -er '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | if (($pods | length) == 2
+        and all($pods[];
+          any(.status.conditions[]?;
+            .type == "Ready" and .status == "True")))
+      then ([$pods[].metadata.uid] | sort | join(","))
+      else empty
+      end
+  ' <<<"${pods}"
+}
+
+controller_pod_runtime_identities() {
+  local pods
+  pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
+    || return 1
+  jq -cer '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | [$pods[] as $pod
+      | $pod.status.containerStatuses[]?
+      | select(.name == "controller")
+      | select(.state.running != null)
+      | select(.containerID | type == "string" and length > 0)
+      | {
+          pod_uid: $pod.metadata.uid,
+          container_id: .containerID,
+          restart_count: .restartCount
+        }] as $identities
+    | if (($pods | length) == 2
+        and all($pods[];
+          any(.status.conditions[]?;
+            .type == "Ready" and .status == "True"))
+        and ($identities | length) == 2)
+      then ($identities | sort_by(.pod_uid))
+      else empty
+      end
+  ' <<<"${pods}"
+}
+
+controller_replicaset_uids() {
+  local deployment_uid="$1"
+  local replicasets
+  replicasets="$(kube -n "${namespace}" get replicasets -l "${controller_selector}" \
+    -o json 2>/dev/null)" || return 1
+  jq -er --arg deployment_uid "${deployment_uid}" '
+    [.items[]
+      | select(.metadata.deletionTimestamp == null)
+      | select(any(.metadata.ownerReferences[]?;
+          .controller == true and .uid == $deployment_uid))
+      | .metadata.uid] as $uids
+    | if ($uids | length) >= 1
+      then ($uids | sort | join(","))
+      else empty
+      end
+  ' <<<"${replicasets}"
 }
 
 lease_holder_pod() {
@@ -797,13 +878,26 @@ lease_holder_changed() {
 }
 
 controller_pods_are_unready() {
+  local expected_runtime_identities="$1"
   local pods
   pods="$(kube -n "${namespace}" get pods -l "${controller_selector}" -o json 2>/dev/null)" \
     || return 1
-  jq -e '
+  jq -e --argjson expected_runtime_identities "${expected_runtime_identities}" '
     [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
-    | ($pods | length) >= 1
+    | [$pods[] as $pod
+        | $pod.status.containerStatuses[]?
+        | select(.name == "controller")
+        | select(.state.running != null)
+        | select(.containerID | type == "string" and length > 0)
+        | {
+            pod_uid: $pod.metadata.uid,
+            container_id: .containerID,
+            restart_count: .restartCount
+          }] as $runtime_identities
+    | ($pods | length) == 2
       and all($pods[]; all(.status.conditions[]?; .type != "Ready" or .status != "True"))
+      and ($runtime_identities | length) == 2
+      and (($runtime_identities | sort_by(.pod_uid)) == $expected_runtime_identities)
   ' >/dev/null <<<"${pods}"
 }
 
@@ -2114,8 +2208,46 @@ next_epoch="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpat
 # PDB must keep an election participant available throughout replacement.
 kube -n "${namespace}" rollout restart "deployment/${controller_release}" >/dev/null
 kube -n "${namespace}" rollout status "deployment/${controller_release}" --timeout=120s
+wait_for "two fully updated controller replicas after rolling upgrade" 60 \
+  controller_has_two_ready_replicas
 wait_for "one leader after rolling controller upgrade" 60 lease_has_live_unique_holder
 wait_for "Programmed proof after rolling controller upgrade" "${rollout_timeout_seconds}" gateway_is_programmed
+
+# Reconcile the out-of-band rollout restart while the Lease is healthy. The
+# subsequent Helm recovery must recreate only the Lease, not combine fencing
+# recovery with another controller rollout.
+helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
+  --namespace "${namespace}" \
+  --reuse-values \
+  --wait \
+  --timeout "${rollout_timeout_seconds}s"
+wait_for "two Helm-converged controller replicas before Lease deletion" 60 \
+  controller_has_two_ready_replicas
+wait_for "one leader after Helm reconciles the controller rollout" 60 \
+  lease_has_live_unique_holder
+wait_for "committed rollout after Helm reconciles the controller rollout" \
+  "${rollout_timeout_seconds}" deployment_is_committed
+wait_for "Programmed proof after Helm reconciles the controller rollout" \
+  "${rollout_timeout_seconds}" gateway_is_programmed
+
+controller_deployment_before="$(kube -n "${namespace}" get deployment \
+  "${controller_release}" -o json)"
+jq -e '
+  .spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] == null
+' >/dev/null <<<"${controller_deployment_before}" \
+  || die "Helm did not remove the out-of-band controller restart annotation"
+controller_deployment_uid="$(jq -er '.metadata.uid' <<<"${controller_deployment_before}")"
+controller_generation_before="$(jq -er '.metadata.generation' <<<"${controller_deployment_before}")"
+controller_template_digest_before="$(
+  jq -cS '.spec.template' <<<"${controller_deployment_before}" | sha256sum
+)"
+controller_template_digest_before="${controller_template_digest_before%% *}"
+controller_pod_uids_before="$(controller_pod_uids)" \
+  || die "could not capture exactly two controller Pod UIDs before Lease deletion"
+controller_pod_runtime_identities_before="$(controller_pod_runtime_identities)" \
+  || die "could not capture two running controller container identities before Lease deletion"
+controller_replicaset_uids_before="$(controller_replicaset_uids "${controller_deployment_uid}")" \
+  || die "could not capture controller ReplicaSet UIDs before Lease deletion"
 
 # Deleting the selected Lease revokes both writers. The controller lacks create
 # permission, so only reapplying the Helm release can recreate the exact object.
@@ -2124,16 +2256,42 @@ wait_for "Programmed proof after rolling controller upgrade" "${rollout_timeout_
 old_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.metadata.uid}')"
 kube -n "${namespace}" delete lease "${leader_lease_name}" --wait=true >/dev/null
 wait_for "controller readiness revocation after Lease deletion" \
-  "${controller_readiness_revocation_timeout_seconds}" controller_pods_are_unready
+  "${controller_readiness_revocation_timeout_seconds}" controller_pods_are_unready \
+  "${controller_pod_runtime_identities_before}"
 helm upgrade "${controller_release}" "${repo_root}/deploy/helm/oxibelt-gateway-controller" \
   --namespace "${namespace}" \
   --reuse-values \
   --wait \
   --timeout "${rollout_timeout_seconds}s"
+wait_for "two unchanged controller replicas after Lease recreation" 60 \
+  controller_has_two_ready_replicas
 wait_for "leadership after Helm recreates the exact Lease" 60 lease_has_live_unique_holder
 new_lease_uid="$(kube -n "${namespace}" get lease "${leader_lease_name}" -o jsonpath='{.metadata.uid}')"
 [[ "${new_lease_uid}" != "${old_lease_uid}" ]] \
   || die "recreated Lease did not receive a new UID fencing domain"
+controller_deployment_after="$(kube -n "${namespace}" get deployment \
+  "${controller_release}" -o json)"
+controller_generation_after="$(jq -er '.metadata.generation' <<<"${controller_deployment_after}")"
+controller_template_digest_after="$(
+  jq -cS '.spec.template' <<<"${controller_deployment_after}" | sha256sum
+)"
+controller_template_digest_after="${controller_template_digest_after%% *}"
+controller_pod_uids_after="$(controller_pod_uids)" \
+  || die "could not capture exactly two controller Pod UIDs after Lease recreation"
+controller_pod_runtime_identities_after="$(controller_pod_runtime_identities)" \
+  || die "could not capture two running controller container identities after Lease recreation"
+controller_replicaset_uids_after="$(controller_replicaset_uids "${controller_deployment_uid}")" \
+  || die "could not capture controller ReplicaSet UIDs after Lease recreation"
+[[ "${controller_generation_after}" == "${controller_generation_before}" ]] \
+  || die "Lease recreation unexpectedly changed the controller Deployment generation"
+[[ "${controller_template_digest_after}" == "${controller_template_digest_before}" ]] \
+  || die "Lease recreation unexpectedly changed the controller Pod template"
+[[ "${controller_pod_uids_after}" == "${controller_pod_uids_before}" ]] \
+  || die "Lease recreation unexpectedly replaced a controller Pod"
+[[ "${controller_pod_runtime_identities_after}" == "${controller_pod_runtime_identities_before}" ]] \
+  || die "Lease recreation unexpectedly restarted a controller container"
+[[ "${controller_replicaset_uids_after}" == "${controller_replicaset_uids_before}" ]] \
+  || die "Lease recreation unexpectedly changed the controller ReplicaSet set"
 wait_for "rollout recovery after Lease recreation" "${rollout_timeout_seconds}" deployment_is_committed
 wait_for "Programmed proof after Lease recreation" "${rollout_timeout_seconds}" gateway_is_programmed
 
