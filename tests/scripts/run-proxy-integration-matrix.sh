@@ -695,8 +695,9 @@ slow_body_client_request() {
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
+  else
+    status=$?
   fi
-  status=$?
   append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "slow body client request failed with status ${status}" >&2
@@ -749,8 +750,9 @@ split_body_client_request() {
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
+  else
+    status=$?
   fi
-  status=$?
   append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "split body client request failed with status ${status}" >&2
@@ -759,6 +761,16 @@ split_body_client_request() {
 }
 
 chunked_body_client_request() {
+  chunked_body_client_request_impl false "$@"
+}
+
+early_rejection_chunked_body_client_request() {
+  chunked_body_client_request_impl true "$@"
+}
+
+chunked_body_client_request_impl() {
+  local read_response_after_body_write_error="$1"
+  shift
   local host="$1"
   local path="$2"
   local expect_status="$3"
@@ -774,6 +786,14 @@ chunked_body_client_request() {
   local output=""
   local status=0
   local client_container=""
+  local early_response_args=()
+
+  if [[ "${read_response_after_body_write_error}" == "true" ]]; then
+    early_response_args+=(--read-response-after-body-write-error)
+  elif [[ "${read_response_after_body_write_error}" != "false" ]]; then
+    fail_with_diagnostics \
+      "invalid chunked body early-response mode ${read_response_after_body_write_error}"
+  fi
 
   client_container="$(unique_docker_container_name "oxibelt-chunked-body-client")"
   docker create \
@@ -793,6 +813,7 @@ chunked_body_client_request() {
     --dump-response-json \
     --expect-status "${expect_status}" \
     --timeout 10 \
+    "${early_response_args[@]}" \
     "${header_args[@]}" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
@@ -800,8 +821,9 @@ chunked_body_client_request() {
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     printf '%s' "${output}"
     return 0
+  else
+    status=$?
   fi
-  status=$?
   append_container_stderr "${client_container}"
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
   echo "chunked body client request failed with status ${status}" >&2

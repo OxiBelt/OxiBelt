@@ -82,7 +82,6 @@ pub(in crate::shared_state) async fn init_postgres_udp_flows(
 
 #[derive(Debug)]
 struct PostgresScope {
-  generation: UdpFlowGeneration,
   max_flows: usize,
   active_flows: usize,
   next_fence: u64,
@@ -118,11 +117,11 @@ impl PostgresScope {
         }
         _ => bail!("durable UDP flow scope has incomplete new-flow token state"),
       };
+    // Retain and validate the original scope field for storage compatibility,
+    // but keep routing authorization on each flow record.
+    let _legacy_generation =
+      digest_from_bytes(row.try_get("config_generation")?, "config_generation")?;
     let scope = Self {
-      generation: UdpFlowGeneration(Digest(digest_from_bytes(
-        row.try_get("config_generation")?,
-        "config_generation",
-      )?)),
       max_flows: positive_usize(row.try_get("max_flows")?, "max_flows")?,
       active_flows: nonnegative_usize(row.try_get("active_flows")?, "active_flows")?,
       next_fence: nonnegative_u64(row.try_get("next_fence")?, "next_fence")?,
@@ -142,13 +141,10 @@ impl PostgresScope {
   }
 
   fn configuration_matches(&self, request: &UdpFlowClaimRequest) -> bool {
-    self.generation == request.generation
-      && self.max_flows == request.max_flows
-      && self.new_flow_rate == request.new_flow_rate
+    udp_flow_scope_configuration_matches(self.max_flows, self.new_flow_rate, request)
   }
 
   fn reconfigure(&mut self, request: &UdpFlowClaimRequest, now: i64) {
-    self.generation = request.generation;
     self.max_flows = request.max_flows;
     self.new_flow_rate = request.new_flow_rate;
     self.new_flow_token_balance_micros = request
@@ -578,9 +574,6 @@ impl PostgresBackend {
       tx.commit().await?;
       return Ok(UdpFlowAbortOutcome::GenerationMismatch { server_now_ms: now });
     }
-    if scope.generation != record.generation {
-      bail!("durable UDP flow and scope generation diverged during abort");
-    }
     if !lease_owns(&record, lease) {
       tx.commit().await?;
       return Ok(UdpFlowAbortOutcome::Lost { server_now_ms: now });
@@ -857,17 +850,16 @@ async fn write_scope(
   };
   let result = sqlx::query(
     "UPDATE oxibelt_udp_flow_scopes
-     SET record_version = $3, config_generation = $4, max_flows = $5,
-         active_flows = $6, next_fence = $7,
-         new_flow_rate_micros_per_second = $8, new_flow_burst = $9,
-         new_flow_token_balance_micros = $10, new_flow_token_refill_at_ms = $11,
-         updated_at_ms = $12
+     SET record_version = $3, max_flows = $4,
+         active_flows = $5, next_fence = $6,
+         new_flow_rate_micros_per_second = $7, new_flow_burst = $8,
+         new_flow_token_balance_micros = $9, new_flow_token_refill_at_ms = $10,
+         updated_at_ms = $11
      WHERE namespace = $1 AND scope_digest = $2",
   )
   .bind(namespace)
   .bind(scope_digest.0.as_slice())
   .bind(i16::from(UDP_FLOW_RECORD_VERSION))
-  .bind(scope.generation.0.0.as_slice())
   .bind(i64::try_from(scope.max_flows)?)
   .bind(i64::try_from(scope.active_flows)?)
   .bind(i64::try_from(scope.next_fence)?)

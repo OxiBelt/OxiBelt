@@ -85,8 +85,7 @@ end
 redis.call('HSET', KEYS[1], 'a', active, 'u', now)
 
 local config_matches =
-  s[2] == generation and tonumber(s[3]) == max_flows
-  and stored_rate == rate and stored_burst == burst
+  tonumber(s[3]) == max_flows and stored_rate == rate and stored_burst == burst
 if not config_matches and active ~= 0 then
   return {'generation_mismatch', now}
 end
@@ -96,7 +95,7 @@ if active == 0 and not config_matches then
   balance = full_balance
   refill_at = now
   redis.call('HSET', KEYS[1],
-    'g',generation,'m',max_flows,'rr',rate,'rb',burst,
+    'm',max_flows,'rr',rate,'rb',burst,
     'rl',balance,'rt',refill_at,'u',now)
 end
 
@@ -315,7 +314,7 @@ for i = 1, 3 do
   if s[i] == false then return {'error', now, 'malformed_scope'} end
 end
 local active = tonumber(s[3])
-if s[1] ~= ARGV[1] or s[2] ~= ARGV[2] or not active or active < 1 then
+if s[1] ~= ARGV[1] or not active or active < 1 then
   return {'error', now, 'scope_state'}
 end
 if redis.call('ZSCORE', KEYS[2], ARGV[6]) == false then
@@ -668,6 +667,11 @@ pub(super) fn redis_claim_arguments(
     TOKEN_MICROS.to_string(),
     MAX_EXACT_BACKEND_INTEGER.to_string(),
   ])
+}
+
+#[cfg(test)]
+pub(super) fn redis_generation_scripts_for_test() -> (&'static str, &'static str) {
+  (CLAIM_SCRIPT, ABORT_CREATED_SCRIPT)
 }
 
 struct RedisReply {

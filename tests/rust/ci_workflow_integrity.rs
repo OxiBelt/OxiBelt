@@ -2956,6 +2956,13 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
     .split_once("\n}\n\ncontroller_has_two_ready_replicas() {")
     .expect("UDP flow restart proof should precede controller readiness checks")
     .0;
+  let cross_namespace_proof = script
+    .split_once("verify_cross_namespace_l4_reference_grants() {")
+    .expect("rollout harness should define the cross-namespace L4 proof")
+    .1
+    .split_once("\n}\n\nassert_controller_can_i() {")
+    .expect("cross-namespace proof should precede controller permission checks")
+    .0;
 
   for expected in [
     "openssl rand -base64 32 | tr -d '\\r\\n' >\"${work_dir}/udp-flow-identity-key\"",
@@ -3044,6 +3051,31 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
   assert!(
     script.contains("oxibelt_stream_udp_flows_restored_total"),
     "the rollout harness must inspect the durable UDP restore metric"
+  );
+  for expected in [
+    "patch udproute udp-probe",
+    "cross-namespace TCP and UDP round trips",
+    "probe_l4_round_trips \"${outside_namespace}\"",
+  ] {
+    assert!(
+      cross_namespace_proof.contains(expected),
+      "the cross-namespace proof should preserve the same-scope generation transition {expected}"
+    );
+  }
+  assert!(
+    !script.contains("udp-cross-probe")
+      && !cross_namespace_proof.contains("FLUSHDB")
+      && !cross_namespace_proof.contains("FLUSHALL"),
+    "the durable UDP generation regression must not switch listeners or clear shared state"
+  );
+  assert!(
+    script
+      .rfind("verify_udp_flow_survives_data_plane_rollout")
+      .expect("rollout harness should run the durable UDP replacement proof")
+      < script
+        .rfind("verify_cross_namespace_l4_reference_grants")
+        .expect("rollout harness should run the cross-namespace generation proof"),
+    "an active durable UDP flow must exist before the same listener changes routing generation"
   );
 
   for expected in [
@@ -4205,6 +4237,84 @@ fn holding_upgrade_client_waits_for_confirmed_protocol_switch() {
   assert!(
     !upgrade_helper.contains("sleep 1"),
     "holding upgrade readiness must not rely on a fixed one-second delay"
+  );
+}
+
+#[test]
+fn ambiguous_framing_client_reads_an_exact_early_error_response() {
+  let workflow = workflow_text();
+  let script = docker_integration_matrix_script_text();
+  let client = source_file_text("tests/docker/mock_upstream/client.py");
+  let fixture = source_file_text(
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/security/fast-general-proxy-equivalence/checks.sh",
+  );
+  let send_http_request = client
+    .split_once("def send_http_request(")
+    .expect("mock client should define send_http_request")
+    .1
+    .split_once("\n\ndef send_chunked_body(")
+    .expect("send_http_request should precede send_chunked_body")
+    .0;
+
+  for expected in [
+    "parser.add_argument(\"--read-response-after-body-write-error\", action=\"store_true\")",
+    "--read-response-after-body-write-error requires --chunked-body",
+    "--expect-status in the 400-599 range",
+    "response.status == args.expect_status",
+  ] {
+    assert!(
+      client.contains(expected),
+      "the mock client should preserve early-response invariant {expected}"
+    );
+  }
+  for expected in [
+    "except (BrokenPipeError, ConnectionResetError):",
+    "if not read_response_after_body_write_error:",
+    "return read_http_response(sock, method, hold_after_headers_ms)",
+  ] {
+    assert!(
+      send_http_request.contains(expected),
+      "body-write recovery should preserve {expected}"
+    );
+  }
+  assert!(
+    !send_http_request.contains("except OSError"),
+    "body-write recovery must not suppress unrelated socket failures"
+  );
+
+  for expected in [
+    "early_rejection_chunked_body_client_request() {",
+    "chunked_body_client_request_impl true \"$@\"",
+    "early_response_args+=(--read-response-after-body-write-error)",
+  ] {
+    assert!(
+      script.contains(expected),
+      "the Docker integration helper should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    fixture
+      .matches("early_rejection_chunked_body_client_request")
+      .count(),
+    2,
+    "only the fast and general ambiguous-framing requests should opt into early-response recovery"
+  );
+  assert!(
+    fixture.lines().all(|line| {
+      let line = line.trim_start();
+      !line.starts_with("chunked_body_client_request \"example.test\" \"/fast/ambiguous")
+        && !line.starts_with("chunked_body_client_request \"example.test\" \"/general/ambiguous")
+    }),
+    "ambiguous-framing checks must use the dedicated early-rejection helper"
+  );
+  assert_eq!(
+    script.matches("else\n    status=$?\n  fi").count(),
+    3,
+    "slow, split, and chunked body helpers should retain the real failed container status"
+  );
+  assert!(
+    workflow.contains("python3 -m unittest tests/scripts/test-mock-upstream-client.py"),
+    "source-structure CI should run the deterministic mock-client regression"
   );
 }
 

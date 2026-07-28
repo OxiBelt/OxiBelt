@@ -134,6 +134,7 @@ def send_http_request(
   body_split_at=None,
   body_split_delay_ms=0,
   chunked_body=False,
+  read_response_after_body_write_error=False,
 ):
   request_lines = [
     f"{method} {target_path} HTTP/1.1",
@@ -160,7 +161,11 @@ def send_http_request(
   if slow_body_delay_ms > 0 and body:
     time.sleep(slow_body_delay_ms / 1000.0)
   if chunked_body:
-    send_chunked_body(sock, body, body_split_at, body_split_delay_ms)
+    try:
+      send_chunked_body(sock, body, body_split_at, body_split_delay_ms)
+    except (BrokenPipeError, ConnectionResetError):
+      if not read_response_after_body_write_error:
+        raise
   elif body_split_at is None:
     sock.sendall(body)
   else:
@@ -204,6 +209,7 @@ def request_direct(args, target_path, host_header, headers, body):
       args.body_split_at,
       args.body_split_delay_ms,
       args.chunked_body,
+      args.read_response_after_body_write_error,
     )
   finally:
     sock.close()
@@ -225,6 +231,7 @@ def request_with_proxy_protocol(args, target_path, host_header, headers, body):
       args.body_split_at,
       args.body_split_delay_ms,
       args.chunked_body,
+      args.read_response_after_body_write_error,
     )
   finally:
     sock.close()
@@ -334,10 +341,22 @@ def main() -> int:
   parser.add_argument("--body-split-at", type=int)
   parser.add_argument("--body-split-delay-ms", type=int, default=0)
   parser.add_argument("--chunked-body", action="store_true")
+  parser.add_argument("--read-response-after-body-write-error", action="store_true")
   args = parser.parse_args()
 
   try:
     args.method = validate_http_token(args.method, "HTTP method")
+    if args.read_response_after_body_write_error and not args.chunked_body:
+      raise ValueError(
+        "--read-response-after-body-write-error requires --chunked-body"
+      )
+    if args.read_response_after_body_write_error and (
+      args.expect_status is None or not 400 <= args.expect_status <= 599
+    ):
+      raise ValueError(
+        "--read-response-after-body-write-error requires "
+        "--expect-status in the 400-599 range"
+      )
     if args.signal_upgrade_ready and not args.upgrade_token:
       raise ValueError("--signal-upgrade-ready requires --upgrade-token")
     if args.signal_upgrade_ready and args.connect_tunnel:

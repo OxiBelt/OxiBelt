@@ -6,7 +6,6 @@ use super::*;
 
 #[derive(Debug)]
 pub(in crate::shared_state) struct MemoryUdpFlowScope {
-  generation: UdpFlowGeneration,
   max_flows: usize,
   next_fence: u64,
   new_flow_rate: Option<UdpFlowRateLimit>,
@@ -23,7 +22,6 @@ impl MemoryUdpFlowScope {
       .map(|rate| initial_token_micros(rate.burst))
       .unwrap_or(0);
     Self {
-      generation: request.generation,
       max_flows: request.max_flows,
       next_fence: 0,
       new_flow_rate: request.new_flow_rate,
@@ -35,13 +33,10 @@ impl MemoryUdpFlowScope {
   }
 
   fn configuration_matches(&self, request: &UdpFlowClaimRequest) -> bool {
-    self.generation == request.generation
-      && self.max_flows == request.max_flows
-      && self.new_flow_rate == request.new_flow_rate
+    udp_flow_scope_configuration_matches(self.max_flows, self.new_flow_rate, request)
   }
 
   fn reconfigure(&mut self, request: &UdpFlowClaimRequest, now: i64) {
-    self.generation = request.generation;
     self.max_flows = request.max_flows;
     self.new_flow_rate = request.new_flow_rate;
     self.new_flow_token_balance_micros = request

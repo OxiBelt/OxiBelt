@@ -138,8 +138,8 @@ run_case_checks() {
   assert_not_modified_no_body "${h2_general}"
   assert_same_not_modified_content_length "${h2_fast}" "${h2_general}"
 
-  fast_bad="$(chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
-  general_bad="$(chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
+  fast_bad="$(early_rejection_chunked_body_client_request "example.test" "/fast/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
+  general_bad="$(early_rejection_chunked_body_client_request "example.test" "/general/ambiguous" 400 "POST" "abcd" "Content-Type: text/plain" "Content-Length: 4")"
   assert_response_jq "${fast_bad}" '.status == 400'
   assert_response_jq "${general_bad}" '.status == 400'
 

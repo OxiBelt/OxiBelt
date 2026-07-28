@@ -194,6 +194,14 @@ pub(crate) struct UdpFlowRateLimit {
   pub(crate) burst: u32,
 }
 
+fn udp_flow_scope_configuration_matches(
+  max_flows: usize,
+  new_flow_rate: Option<UdpFlowRateLimit>,
+  request: &UdpFlowClaimRequest,
+) -> bool {
+  max_flows == request.max_flows && new_flow_rate == request.new_flow_rate
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UdpFlowConnectionMarker {
   marker: Digest,

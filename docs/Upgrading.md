@@ -180,6 +180,15 @@ token-accounting behavior. Existing configurations and durable records require
 no migration or additional drain beyond the transition and rollback procedures
 in this section.
 
+Durable listeners also retain one capacity, new-flow token, and monotonic-fence
+scope while routing generations overlap during an ordinary configuration
+rollout. Existing client tuples remain pinned to their stored generation and
+target and fail closed if another generation tries to reuse them. Distinct new
+client tuples may use the active routing generation while older records drain,
+and every generation continues to count against the same listener-wide
+admission bounds. This correction does not change Redis-compatible or
+PostgreSQL record formats and requires no state migration or additional drain.
+
 For rollback to a version without durable UDP support, first disable generated
 UDP and drain new-version owners, then restore the prior data-plane
 configuration and image before the prior controller. Keep the previous key and
