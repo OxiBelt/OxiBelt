@@ -1,6 +1,6 @@
 //! Listener set comparison helpers for reload preparation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
 use tokio::sync::mpsc;
@@ -10,8 +10,9 @@ use crate::listener_socket::TcpListenOptions;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::{
-  BoundHttp3Listener, BoundTcpListener, DrainTimeouts, Http3ListenerTask, TcpListenerKind,
-  TcpListenerTask, bind_http3_listener, bind_tcp_listener,
+  BoundHttp3Listener, BoundStreamListener, BoundTcpListener, DrainTimeouts, Http3ListenerTask,
+  StreamListenerGeneration, StreamListenerTask, TcpListenerKind, TcpListenerTask,
+  bind_http3_listener, bind_tcp_listener,
 };
 
 pub(super) struct PendingTcpListenerSetUpdate {
@@ -25,6 +26,11 @@ pub(super) struct PendingHttp3ListenerSetUpdate {
   socket: crate::config::QuicSocketConfig,
   transport: crate::config::QuicTransportConfig,
   bound: Vec<BoundHttp3Listener>,
+}
+
+pub(super) struct PendingStreamListenerSetUpdate {
+  desired: BTreeMap<String, StreamListenerGeneration>,
+  bound: BTreeMap<String, BoundStreamListener>,
 }
 
 pub(super) fn tcp_listener_set_matches(
@@ -51,6 +57,18 @@ pub(super) fn http3_listener_set_matches(
       current
         .get(bind)
         .is_some_and(|task| task.socket == *socket && task.transport == *transport)
+    })
+}
+
+pub(super) fn stream_listener_set_matches(
+  current: &BTreeMap<String, StreamListenerTask>,
+  desired: &BTreeMap<String, StreamListenerGeneration>,
+) -> bool {
+  current.len() == desired.len()
+    && desired.iter().all(|(name, generation)| {
+      current
+        .get(name)
+        .is_some_and(|task| task.generation == *generation)
     })
 }
 
@@ -120,6 +138,46 @@ pub(super) fn prepare_http3_listener_set_update(
     }),
     false,
   ))
+}
+
+pub(super) fn prepare_stream_listener_set_update(
+  current: &BTreeMap<String, StreamListenerTask>,
+  generations: Vec<StreamListenerGeneration>,
+  accept_error_backoff_ms: u64,
+) -> anyhow::Result<Option<PendingStreamListenerSetUpdate>> {
+  let mut desired = BTreeMap::new();
+  for generation in generations {
+    let name = generation.name().to_string();
+    if desired.insert(name.clone(), generation).is_some() {
+      anyhow::bail!("duplicate stream listener name in prepared configuration: {name}");
+    }
+  }
+  if stream_listener_set_matches(current, &desired) {
+    return Ok(None);
+  }
+
+  let mut bound = BTreeMap::new();
+  let mut expected_bound_names = BTreeSet::new();
+  for (name, generation) in &desired {
+    if current
+      .get(name)
+      .is_some_and(|task| task.generation == *generation)
+    {
+      continue;
+    }
+    expected_bound_names.insert(name.clone());
+    bound.insert(
+      name.clone(),
+      BoundStreamListener::bind(
+        generation.clone(),
+        std::time::Duration::from_millis(accept_error_backoff_ms),
+      )?,
+    );
+  }
+  if bound.keys().ne(expected_bound_names.iter()) {
+    anyhow::bail!("prepared stream listener bindings do not match the changed listener set");
+  }
+  Ok(Some(PendingStreamListenerSetUpdate { desired, bound }))
 }
 
 pub(super) fn commit_tcp_listener_set_update(
@@ -218,6 +276,40 @@ pub(super) fn commit_http3_listener_set_update(
   }
   *current = next;
   refresh_http3_server_config(current, snapshot);
+}
+
+pub(super) fn commit_stream_listener_set_update(
+  current: &mut BTreeMap<String, StreamListenerTask>,
+  update: PendingStreamListenerSetUpdate,
+  state: AppHandle,
+  error_tx: mpsc::UnboundedSender<anyhow::Error>,
+) {
+  let mut next = BTreeMap::new();
+  for (name, task) in std::mem::take(current) {
+    if update
+      .desired
+      .get(&name)
+      .is_some_and(|generation| task.generation == *generation)
+    {
+      next.insert(name, task);
+    } else {
+      task.quiesce();
+      task.drain_background();
+    }
+  }
+  for (name, listener) in update.bound {
+    assert!(
+      next
+        .insert(name, listener.start(state.clone(), error_tx.clone()))
+        .is_none(),
+      "prepared stream listener update overlapped a retained task"
+    );
+  }
+  assert!(
+    next.keys().eq(update.desired.keys()),
+    "committed stream listener names did not match the prepared desired set"
+  );
+  *current = next;
 }
 
 pub(super) fn refresh_http3_server_config(

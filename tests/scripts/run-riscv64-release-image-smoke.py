@@ -543,6 +543,17 @@ class CommandRunner:
         return result
 
 
+def kubernetes_lease_server_context(
+    cert_path: pathlib.Path,
+    key_path: pathlib.Path,
+) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.options |= ssl.OP_NO_COMPRESSION
+    context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    return context
+
+
 class KubernetesLeaseMock:
     def __init__(
         self,
@@ -621,8 +632,7 @@ class KubernetesLeaseMock:
 
         self.server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         self.server.daemon_threads = True
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        context = kubernetes_lease_server_context(cert_path, key_path)
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(
             target=self.server.serve_forever,

@@ -23,6 +23,37 @@ fn metrics_body(snapshot: &AppSnapshot) -> String {
   )
 }
 
+async fn redis_memory_info_fixture(
+  info: &str,
+) -> (String, tokio::task::JoinHandle<anyhow::Result<()>>) {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("Redis fixture should bind");
+  let address = listener
+    .local_addr()
+    .expect("Redis fixture should expose its address");
+  let info = info.as_bytes().to_vec();
+  let server = tokio::spawn(async move {
+    let (mut stream, _) = listener.accept().await?;
+    let expected = b"*2\r\n$4\r\nINFO\r\n$6\r\nmemory\r\n";
+    let mut command = vec![0; expected.len()];
+    stream.read_exact(&mut command).await?;
+    anyhow::ensure!(
+      command == expected,
+      "unexpected Redis fixture command: {command:?}"
+    );
+    stream
+      .write_all(format!("${}\r\n", info.len()).as_bytes())
+      .await?;
+    stream.write_all(&info).await?;
+    stream.write_all(b"\r\n").await?;
+    Ok(())
+  });
+  (format!("redis://{address}/"), server)
+}
+
 #[test]
 fn effective_direct_h1_io_falls_back_when_active_runtime_is_tokio_hyper() {
   let temp_dir = common::TempDir::new("effective-direct-h1-fallback");
@@ -345,6 +376,93 @@ connect_timeout_ms = 50
     "unchanged Redis backends must retain their persistent pool over reload"
   );
   assert!(!reloaded.should_log_pool_warning());
+}
+
+#[tokio::test]
+async fn shared_state_udp_redis_rejects_evicting_policy_during_startup() {
+  let (url, server) =
+    redis_memory_info_fixture("# Memory\r\nmaxmemory:33554432\r\nmaxmemory_policy:allkeys-lru\r\n")
+      .await;
+  let temp_dir = common::TempDir::new("shared-state-udp-redis-policy-startup");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-udp-redis-policy-startup");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + &format!(
+      r#"
+
+[shared_state]
+enabled = true
+namespace = "udp-policy-startup"
+operation_timeout_ms = 250
+udp_flows_backend = "udp-policy"
+
+[[shared_state.backends]]
+name = "udp-policy"
+kind = "redis"
+connection_url = "{url}"
+max_connections = 2
+connect_timeout_ms = 100
+"#
+    );
+
+  let error = SharedState::new(&parse_config(&raw), Metrics::new())
+    .await
+    .expect_err("an evicting Redis policy must reject UDP-flow activation");
+  let message = format!("{error:#}");
+  assert!(
+    message.contains("must use maxmemory 0 or maxmemory_policy noeviction"),
+    "unexpected activation error: {message}"
+  );
+  tokio::time::timeout(std::time::Duration::from_secs(1), server)
+    .await
+    .expect("Redis fixture should complete")
+    .expect("Redis fixture task should not panic")
+    .expect("Redis fixture should serve INFO memory");
+}
+
+#[tokio::test]
+async fn shared_state_udp_redis_rechecks_evicting_policy_on_reused_pool_reload() {
+  let (url, server) = redis_memory_info_fixture(
+    "# Memory\r\nmaxmemory:33554432\r\nmaxmemory_policy:volatile-lru\r\n",
+  )
+  .await;
+  let metrics = Metrics::new();
+  let previous = SharedState::test_redis("udp-policy-reload", &url, metrics.clone());
+  let temp_dir = common::TempDir::new("shared-state-udp-redis-policy-reload");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "shared-state-udp-redis-policy-reload");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + &format!(
+      r#"
+
+[shared_state]
+enabled = true
+namespace = "udp-policy-reload"
+operation_timeout_ms = 250
+udp_flows_backend = "pool-warning-test"
+
+[[shared_state.backends]]
+name = "pool-warning-test"
+kind = "redis"
+connection_url = "{url}"
+max_connections = 64
+connect_timeout_ms = 100
+"#
+    );
+
+  let error = SharedState::new_with_previous(&parse_config(&raw), metrics, Some(previous.as_ref()))
+    .await
+    .expect_err("reload must recheck an unchanged UDP-flow Redis pool");
+  let message = format!("{error:#}");
+  assert!(
+    message.contains("must use maxmemory 0 or maxmemory_policy noeviction"),
+    "unexpected reload error: {message}"
+  );
+  tokio::time::timeout(std::time::Duration::from_secs(1), server)
+    .await
+    .expect("Redis fixture should complete")
+    .expect("Redis fixture task should not panic")
+    .expect("Redis fixture should serve INFO memory");
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ pub(crate) struct ListenerSupervisor {
   pub(super) admin: Option<AdminListenerTask>,
   #[cfg(feature = "admin-runtime")]
   pub(super) admin_h3: Option<admin_h3::AdminHttp3ListenerTask>,
-  pub(super) streams: Vec<StreamListenerTask>,
+  pub(super) streams: BTreeMap<String, StreamListenerTask>,
   pub(super) turns: Vec<TurnListenerTask>,
   pub(super) error_tx: mpsc::UnboundedSender<anyhow::Error>,
   #[cfg(feature = "admin-runtime")]
@@ -85,11 +85,18 @@ pub(crate) struct PendingListenerUpdate {
   admin: Option<Option<BoundAdminListener>>,
   #[cfg(feature = "admin-runtime")]
   admin_h3: Option<Option<admin_h3::BoundAdminHttp3Listener>>,
-  streams: Option<Vec<BoundStreamListener>>,
+  streams: Option<listener_sets::PendingStreamListenerSetUpdate>,
   turns: Option<Vec<BoundTurnListener>>,
   refresh_http3_config: bool,
   #[cfg(feature = "admin-runtime")]
   refresh_admin_h3_config: bool,
+}
+
+#[cfg(test)]
+impl PendingListenerUpdate {
+  pub(super) fn has_stream_update(&self) -> bool {
+    self.streams.is_some()
+  }
 }
 
 #[derive(Clone, Copy)]
@@ -126,7 +133,7 @@ impl ListenerSupervisor {
       admin: None,
       #[cfg(feature = "admin-runtime")]
       admin_h3: None,
-      streams: Vec::new(),
+      streams: BTreeMap::new(),
       turns: Vec::new(),
       error_tx,
       #[cfg(feature = "admin-runtime")]
@@ -150,7 +157,7 @@ impl ListenerSupervisor {
       tcp: BTreeMap::new(),
       http: BTreeMap::new(),
       http3: BTreeMap::new(),
-      streams: Vec::new(),
+      streams: BTreeMap::new(),
       turns: Vec::new(),
       error_tx,
       quiescing: false,
@@ -248,37 +255,19 @@ impl ListenerSupervisor {
       .stream_listeners
       .iter()
       .map(|listener| {
-        (
+        StreamListenerGeneration::new(
           listener.clone(),
           tcp_options,
           snapshot.config.shared_state.clone(),
+          snapshot.shared_state.clone(),
         )
       })
-      .collect::<Vec<_>>();
-    let current_streams = self
-      .streams
-      .iter()
-      .map(|listener| {
-        (
-          listener.config.clone(),
-          listener.options,
-          listener.shared_state_config.clone(),
-        )
-      })
-      .collect::<Vec<_>>();
-    let streams = if desired_streams != current_streams {
-      let mut bound = Vec::with_capacity(snapshot.config.stream_listeners.len());
-      for listener in &snapshot.config.stream_listeners {
-        bound.push(BoundStreamListener::bind(
-          listener.clone(),
-          tcp_options,
-          Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
-        )?);
-      }
-      Some(bound)
-    } else {
-      None
-    };
+      .collect::<anyhow::Result<Vec<_>>>()?;
+    let streams = listener_sets::prepare_stream_listener_set_update(
+      &self.streams,
+      desired_streams,
+      snapshot.config.runtime.accept.accept_error_backoff_ms,
+    )?;
 
     let desired_turns = snapshot
       .config
@@ -415,14 +404,12 @@ impl ListenerSupervisor {
       None => {}
     }
     if let Some(streams) = pending.streams {
-      let old = std::mem::take(&mut self.streams);
-      for task in old {
-        task.drain_background();
-      }
-      self.streams = streams
-        .into_iter()
-        .map(|stream| stream.start(state.clone(), self.error_tx.clone()))
-        .collect();
+      listener_sets::commit_stream_listener_set_update(
+        &mut self.streams,
+        streams,
+        state.clone(),
+        self.error_tx.clone(),
+      );
     }
     if let Some(turns) = pending.turns {
       let old = std::mem::take(&mut self.turns);
@@ -457,7 +444,7 @@ impl ListenerSupervisor {
     if let Some(task) = self.admin_h3.take() {
       tasks.push(task.drain());
     }
-    for task in std::mem::take(&mut self.streams) {
+    for task in std::mem::take(&mut self.streams).into_values() {
       tasks.push(task.drain());
     }
     for task in std::mem::take(&mut self.turns) {
@@ -481,7 +468,7 @@ impl ListenerSupervisor {
     for task in self.http3.values() {
       task.quiesce();
     }
-    for task in &self.streams {
+    for task in self.streams.values() {
       task.quiesce();
     }
     for task in &self.turns {
@@ -509,7 +496,7 @@ impl Drop for ListenerSupervisor {
     if let Some(task) = self.admin_h3.take() {
       task.drain_background();
     }
-    for task in std::mem::take(&mut self.streams) {
+    for task in std::mem::take(&mut self.streams).into_values() {
       task.drain_background();
     }
   }
