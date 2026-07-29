@@ -3879,6 +3879,12 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
   let state_data = read("tests/rust/oxibelt_docker_integration_matrix/state_data.rs");
   let docs = read("tests/README.md");
   let mock_upstream = read("tests/docker/mock_upstream/server.py");
+  let mock_upstream_client = read("tests/docker/mock_upstream/client.py");
+  let burst_client = read("tests/docker/mock_upstream/burst_client.py");
+  let mock_upstream_dockerfile = read("tests/docker/mock_upstream/Dockerfile");
+  let retry_storm_config_text = read(
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/upstream-pools/retry-storm-budget/config/oxibelt.toml",
+  );
   let scripts = [
     read("tests/scripts/run-bounded-http-burst.sh"),
     read(
@@ -3959,12 +3965,69 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
     "timeout_seconds < 1 || timeout_seconds > 30",
     "docker rm -f \"${container}\"",
     "--label \"${test_label}\"",
+    "container=\"oxibelt-http-burst-${burst_id}\"",
+    "/opt/mock_upstream/burst_client.py",
+    "--concurrency \"${concurrency}\"",
+    "timeout_seconds * 2 + 5",
+    "([.[].burst_index] | sort) == [range(1; $concurrency + 1)]",
+    ".status as $status",
+    "sort_by(.burst_index)",
+    "docker cp \"${ca_file}\" \"${container}:/tmp/proxy-ca.pem\"",
   ] {
     assert!(
       burst.contains(expected),
       "bounded burst helper should preserve {expected}"
     );
   }
+  for forbidden in ["containers=()", "pids=()", "/opt/mock_upstream/client.py"] {
+    assert!(
+      !burst.contains(forbidden),
+      "bounded burst helper should not retain per-request launcher path {forbidden}"
+    );
+  }
+
+  assert!(
+    mock_upstream_dockerfile
+      .contains("COPY server.py client.py burst_client.py /opt/mock_upstream/"),
+    "the mock-upstream image should package the synchronized burst client"
+  );
+  assert!(
+    mock_upstream_client.contains("def response_document(response, response_body_bytes):"),
+    "the single-request and burst clients should share one response document serializer"
+  );
+  for expected in [
+    "MAX_CONCURRENCY = 64",
+    "MAX_TIMEOUT_SECONDS = 30",
+    "barrier = threading.Barrier(args.concurrency)",
+    "max_workers=args.concurrency",
+    "barrier.abort()",
+    "return sorted(results, key=lambda result: result[\"burst_index\"])",
+  ] {
+    assert!(
+      burst_client.contains(expected),
+      "the synchronized burst client should preserve {expected}"
+    );
+  }
+  let burst_request = burst_client
+    .split_once("def run_request(")
+    .expect("burst client should define run_request")
+    .1
+    .split_once("\n\ndef run_burst(")
+    .expect("run_request should precede run_burst")
+    .0;
+  let preconnect = burst_request
+    .find("sock = open_socket(args)")
+    .expect("burst requests should preconnect their sockets");
+  let barrier = burst_request
+    .find("barrier.wait(timeout=args.timeout + BARRIER_GRACE_SECONDS)")
+    .expect("burst requests should wait at the launch barrier");
+  let send = burst_request
+    .find("response, response_body_bytes = send_request(")
+    .expect("burst requests should send after synchronization");
+  assert!(
+    preconnect < barrier && barrier < send,
+    "every burst socket must connect before the barrier releases HTTP sends"
+  );
 
   let lifecycle = &scripts[4];
   for expected in [
@@ -4000,6 +4063,28 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
   );
 
   let retry_storm = &scripts[2];
+  let retry_storm_config: toml::Value = toml::from_str(&retry_storm_config_text)
+    .expect("the retry-storm fixture config should parse as TOML");
+  let retry_policy = retry_storm_config
+    .get("proxy")
+    .and_then(toml::Value::as_table)
+    .and_then(|proxy| proxy.get("retry"))
+    .and_then(toml::Value::as_table)
+    .expect("the retry-storm fixture should configure proxy retry policy");
+  assert_eq!(
+    retry_policy
+      .get("total_budget_ms")
+      .and_then(toml::Value::as_integer),
+    Some(5_000),
+    "the retry-storm fixture should retain a five-second total retry budget"
+  );
+  assert_eq!(
+    retry_policy
+      .get("per_attempt_timeout_ms")
+      .and_then(toml::Value::as_integer),
+    Some(5_000),
+    "the retry-storm first attempt should not expire before its total retry budget"
+  );
   for expected in [
     "retry_storm_proxy_request() {",
     "docker exec \"${http_container}\" python /opt/mock_upstream/client.py",

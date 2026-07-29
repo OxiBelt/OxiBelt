@@ -244,6 +244,16 @@ def read_http_response(sock, method="GET", hold_after_headers_ms=0):
   return response, response.read()
 
 
+def response_document(response, response_body_bytes):
+  return {
+    "status": response.status,
+    "reason": response.reason,
+    "headers": {key.lower(): value for key, value in response.getheaders()},
+    "body": response_body_bytes.decode("utf-8", "replace"),
+    "body_base64": base64.b64encode(response_body_bytes).decode("ascii"),
+  }
+
+
 def perform_connect_tunnel(args, host_header, target_path, headers):
   sock = open_proxy_socket(args)
   try:
@@ -426,17 +436,13 @@ def main() -> int:
         headers,
         body,
       )
-    response_body = response_body_bytes.decode("utf-8", "replace")
     if args.dump_response_json:
-      sys.stdout.write(json.dumps({
-        "status": response.status,
-        "reason": response.reason,
-        "headers": {key.lower(): value for key, value in response.getheaders()},
-        "body": response_body,
-        "body_base64": base64.b64encode(response_body_bytes).decode("ascii"),
-      }, sort_keys=True))
+      sys.stdout.write(json.dumps(
+        response_document(response, response_body_bytes),
+        sort_keys=True,
+      ))
     else:
-      sys.stdout.write(response_body)
+      sys.stdout.write(response_body_bytes.decode("utf-8", "replace"))
 
     if args.expect_status is not None:
       return 0 if response.status == args.expect_status else 1

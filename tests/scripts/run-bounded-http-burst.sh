@@ -70,79 +70,81 @@ fi
 
 burst_id="${BASHPID:-$$}-${RANDOM}-$(date +%s%N)"
 work_dir="$(mktemp -d /tmp/oxibelt-http-burst.XXXXXX)"
-containers=()
-pids=()
+container="oxibelt-http-burst-${burst_id}"
+response_file="${work_dir}/responses.json"
+stderr_file="${work_dir}/burst.stderr"
 
 cleanup() {
-  local container
-  for container in "${containers[@]}"; do
-    docker rm -f "${container}" >/dev/null 2>&1 || true
-  done
+  docker rm -f "${container}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}"
 }
 trap cleanup EXIT
 
-for index in $(seq 1 "${concurrency}"); do
-  container="oxibelt-http-burst-${burst_id}-${index}"
-  containers+=("${container}")
-  create_args=(
-    create
-    --name "${container}"
-    --label "${test_label}"
-    --label "oxibelt.test.burst=${burst_id}"
-    --network "${network}"
-    --entrypoint python
-    "${image}"
-    /opt/mock_upstream/client.py
-    --target-host "${target_host}"
-    --scheme "${scheme}"
-    --path "${request_path}"
-    --host "${authority}"
-    --port "${port}"
-    --method GET
-    --body ""
-    --dump-response-json
-    --timeout "${timeout_seconds}"
-  )
-  if [[ "${scheme}" == "https" ]]; then
-    create_args+=(--ca-file /tmp/proxy-ca.pem)
-  fi
-  docker "${create_args[@]}" >/dev/null
-  if [[ "${scheme}" == "https" ]]; then
-    docker cp "${ca_file}" "${container}:/tmp/proxy-ca.pem"
-  fi
-done
+create_args=(
+  create
+  --name "${container}"
+  --label "${test_label}"
+  --label "oxibelt.test.burst=${burst_id}"
+  --network "${network}"
+  --entrypoint python
+  "${image}"
+  /opt/mock_upstream/burst_client.py
+  --target-host "${target_host}"
+  --scheme "${scheme}"
+  --path "${request_path}"
+  --host "${authority}"
+  --port "${port}"
+  --concurrency "${concurrency}"
+  --timeout "${timeout_seconds}"
+)
+if [[ "${scheme}" == "https" ]]; then
+  create_args+=(--ca-file /tmp/proxy-ca.pem)
+fi
+docker "${create_args[@]}" >/dev/null
+if [[ "${scheme}" == "https" ]]; then
+  docker cp "${ca_file}" "${container}:/tmp/proxy-ca.pem"
+fi
 
-# Every client container exists before any is started. This provides a bounded
-# synchronized launch without shell evaluation or unbounded process creation.
-for index in $(seq 1 "${concurrency}"); do
-  container="${containers[index - 1]}"
-  timeout --foreground "$((timeout_seconds + 2))s" \
-    docker start -a "${container}" \
-    >"${work_dir}/${index}.json" 2>"${work_dir}/${index}.stderr" &
-  pids+=("$!")
-done
+# The in-container client preconnects every TCP/TLS socket before its barrier
+# releases any HTTP request. The outer timeout covers both bounded socket phases.
+start_status=0
+if timeout --foreground "$((timeout_seconds * 2 + 5))s" \
+  docker start -a "${container}" >"${response_file}" 2>"${stderr_file}"; then
+  :
+else
+  start_status=$?
+fi
 
-for index in $(seq 1 "${concurrency}"); do
-  wait "${pids[index - 1]}" || true
-done
-
-for index in $(seq 1 "${concurrency}"); do
-  response_file="${work_dir}/${index}.json"
-  if ! jq -e --arg allowed ",${allowed_statuses}," '
-    .status as $status
-    | ($status | type == "number")
-      and ($allowed | contains("," + ($status | tostring) + ","))
+valid_output=1
+if ! jq -e \
+  --arg allowed ",${allowed_statuses}," \
+  --argjson concurrency "${concurrency}" '
+    type == "array"
+    and length == $concurrency
+    and ([.[].burst_index] | sort) == [range(1; $concurrency + 1)]
+    and all(.[];
+      (has("error") | not)
+      and (.status | type == "number")
+      and (.status as $status
+        | ($allowed | contains("," + ($status | tostring) + ",")))
+    )
   ' "${response_file}" >/dev/null 2>&1; then
-    echo "bounded HTTP burst request ${index} failed or returned a disallowed status" >&2
-    jq -c '{status, reason}' "${response_file}" >&2 2>/dev/null || true
-    if [[ -s "${work_dir}/${index}.stderr" ]]; then
-      sed -n '1,20p' "${work_dir}/${index}.stderr" >&2
-    fi
-    exit 1
+  valid_output=0
+fi
+
+if ((start_status != 0 || valid_output != 1)); then
+  echo "bounded HTTP burst failed or returned a disallowed response set" >&2
+  if jq -e 'type == "array"' "${response_file}" >/dev/null 2>&1; then
+    jq -c '.[] | {burst_index, status, reason, error}' \
+      "${response_file}" 2>/dev/null | sed -n '1,20p' >&2 || true
+  elif [[ -s "${response_file}" ]]; then
+    sed -n '1,20p' "${response_file}" >&2
   fi
-done
+  if [[ -s "${stderr_file}" ]]; then
+    sed -n '1,20p' "${stderr_file}" >&2
+  fi
+  exit 1
+fi
 
 mkdir -p "$(dirname -- "${output_file}")"
-jq -s 'to_entries | map(.value + {burst_index: (.key + 1)})' \
-  "${work_dir}"/*.json >"${output_file}"
+jq 'sort_by(.burst_index)' "${response_file}" >"${output_file}"
