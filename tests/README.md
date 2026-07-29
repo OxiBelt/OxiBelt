@@ -70,8 +70,12 @@ evidence blocks release preparation and publication. Benchmark and
 dependency-snapshot submission jobs remain outside the prerequisite, and
 validation artifacts are evidence only: the release rebuilds the 30-image
 matrix after the gate. Run-qualified transport artifact names remain stable
-across failed-job reruns, while vulnerability evidence stays attempt-qualified;
-neither changes image-plan names, tar filenames, or OCI tags. Each reusable
+across failed-job reruns, while raw vulnerability evidence stays immutable and
+attempt-qualified. The global gate selects the newest available same-run
+evidence attempt per subject, rejects a malformed newest bundle without
+fallback, and records that provenance in its current-attempt decision. The
+current build-and-scan matrix must still succeed. These retry lifetimes do not
+change image-plan names, tar filenames, or OCI tags. Each reusable
 per-architecture row builds an
 unprivileged image tar, records the Buildx digest metadata used by canonical
 publication, scans the local tar as report-only pre-publish evidence, and

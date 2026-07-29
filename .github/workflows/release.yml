@@ -834,9 +834,9 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          pattern: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-*
+          pattern: trivy-release-${{ github.run_id }}-*
           path: ${{ runner.temp }}/oxibelt-vulnerability-scans
-          merge-multiple: true
+          merge-multiple: false
 
       - name: Evaluate complete release image vulnerability matrix
         id: evaluate
@@ -851,18 +851,15 @@ jobs:
           set -euo pipefail
 
           mkdir -p "$(dirname "${DECISION}")" "${SCAN_ROOT}"
-          scan_args=()
-          while IFS= read -r -d '' contract; do
-            scan_args+=(--scan-contract "${contract}")
-          done < <(find "${SCAN_ROOT}" -type f -name 'scan-contract-*.json' -print0 | sort -z)
-          while IFS= read -r -d '' report; do
-            scan_args+=(--scan-report "${report}")
-          done < <(find "${SCAN_ROOT}" -type f -name 'trivy-results-*.json' -print0 | sort -z)
+          scan_bundle_args=()
+          while IFS= read -r -d '' bundle; do
+            scan_bundle_args+=(--scan-bundle "${bundle}")
+          done < <(find "${SCAN_ROOT}" -mindepth 1 -maxdepth 1 -print0 | sort -z)
 
           node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" evaluate \
             --policy "${POLICY}" \
             --image-plan "${IMAGE_PLAN}" \
-            "${scan_args[@]}" \
+            "${scan_bundle_args[@]}" \
             --revision "${{ needs.prepare-release.outputs.revision }}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \

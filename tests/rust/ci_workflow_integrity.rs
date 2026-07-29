@@ -6375,10 +6375,11 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   let gate = workflow_job_text(&workflow, "release-vulnerability-gate");
   for expected in [
     "if: ${{ always() && needs.prepare-release.result == 'success' }}",
-    "pattern: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-*",
+    "pattern: trivy-release-${{ github.run_id }}-*",
+    "merge-multiple: false",
+    "find \"${SCAN_ROOT}\" -mindepth 1 -maxdepth 1 -print0",
     "image_vulnerability_policy.mjs\" evaluate",
-    "--scan-contract",
-    "--scan-report",
+    "--scan-bundle",
     "--output \"${DECISION}\"",
     "--markdown-output \"${DECISION_MARKDOWN}\"",
     "Upload controlled vulnerability gate decision",
@@ -6405,6 +6406,10 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "id-token:",
     "actions/checkout",
     "docker login",
+    "pattern: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-*",
+    "merge-multiple: true",
+    "--scan-contract",
+    "--scan-report",
   ] {
     assert!(!gate.contains(forbidden));
   }

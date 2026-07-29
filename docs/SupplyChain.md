@@ -303,8 +303,13 @@ loaded image's full immutable SHA-256 image ID rather than a mutable local or
 GHCR tag. A scan contract binds that ID, the raw Trivy report, release run and
 attempt, source revision, role, architecture, policy hash, and expected OCI
 manifest digest. Publication must later resolve to that exact manifest digest.
-A missing, duplicate, malformed, stale-attempt, wrong-revision, or
-hash-mismatched report or contract fails closed.
+Raw scan artifacts remain immutable and attempt-qualified. On a failed-job
+rerun, the global gate selects each subject's highest available evidence
+attempt from the same release run that is no newer than the current attempt.
+The selected artifact name, contract attempt, and subject must agree exactly;
+a malformed or incomplete newest artifact fails closed without falling back
+to older evidence. Missing, duplicate, future-attempt, wrong-run,
+wrong-revision, or hash-mismatched evidence also fails closed.
 
 The channel thresholds are:
 
@@ -340,10 +345,14 @@ exception that no longer matches the scan is stale and also fails. Excepted
 findings remain visible in the raw report.
 
 One read-only global gate evaluates the complete 30-subject matrix before any
-job with `packages: write` can start. Each publisher revalidates that its role,
-architecture, run attempt, revision, policy hash, and manifest digest appear
-in the allowed decision before registry login or push. This prevents a clean
-matrix leg from publishing while another subject is missing or blocked.
+job with `packages: write` can start. The `schemaVersion: 2` decision remains
+bound to the current gate attempt and records `evidenceAttempt` for every
+subject. The current build-and-scan matrix must still succeed; prior evidence
+cannot admit a currently failed row. Each publisher revalidates that its role,
+architecture, current run attempt, revision, policy hash, evidence provenance,
+and manifest digest appear in the allowed decision before registry login or
+push. This prevents a clean matrix leg from publishing while another subject
+is missing or blocked.
 
 The versioned multi-architecture index is not redundantly vulnerability-scanned
 because it contains no package inventory beyond its platform children. Its
