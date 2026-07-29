@@ -15,6 +15,363 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.7.1-beta.2] - 2026-07-29
+
+> Recovery candidate for the `0.7.1` line. The immutable
+> `0.7.1-beta.1` tag was rejected before draft creation because its exact
+> revision had no governed beta entry. This cut preserves that failed tag as
+> attributable history and advances the release contract without moving,
+> deleting, recreating, or hand-publishing it.
+
+- Changes since: `0.7.1-beta.1`
+- Supported upgrade sources: `0.7.1-beta.1`, `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.1 line](docs/Upgrading.md#upgrade-from-065-to-the-071-line)
+
+### Configuration
+
+- No changes for this release.
+
+### Schema epochs
+
+- No changes for this release.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- No changes for this release.
+
+### Feature lifecycle
+
+- No changes for this release.
+
+### Rulepack compatibility
+
+- No changes for this release.
+
+### Executables and images
+
+- Carry forward the `0.7.1-beta.1` same-run vulnerability-evidence repair
+  without changing runtime source behavior, image roles, configuration, or
+  packaging layout. Build every official artifact again with the exact
+  `0.7.1-beta.2` identity. A later gate attempt may select the newest available
+  scan bundle at or below the current attempt independently for each subject,
+  while the current scan matrix and current-attempt publication decision
+  remain mandatory.
+- Record the failed `0.7.1-beta.1` cut in the governed beta ledger so its
+  signed immutable tag remains attributable without creating or rewriting a
+  GitHub Release for that tag.
+
+### Storage and state
+
+- No changes for this release.
+
+### Upgrade validation
+
+- A source build from `0.7.1-beta.1` has the same runtime, configuration,
+  schema, and persisted-state behavior as this recovery candidate, but it has
+  a different build identity and is not an official beta.2 artifact. Validate
+  the complete configuration before replacing it:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+- When upgrading directly from `0.6.5`, create and inspect the epoch-1 review
+  tree with the target `oxibeltctl`, then validate the complete migrated
+  configuration and all referenced files before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Deploy `0.7.1-beta.2` only after its person-reviewed release, all 30
+  role/architecture image subjects, vulnerability admission, attestations,
+  provenance, and independent-rebuild receipts succeed. Produce a new
+  evidence set for this exact revision; do not reuse `0.7.0-beta.4` or
+  `0.7.1-beta.1` release evidence.
+
+### Rollback and irreversible steps
+
+- The failed `0.7.1-beta.1` cut has no official image or release asset to
+  restore. Retain the exact prior deployable image digests, configuration
+  tree, referenced assets, PostgreSQL backup, controller rollback ConfigMaps,
+  Gateway API Lease, and shared UDP identity key and backend until the
+  `0.7.1-beta.2` rollback decision is complete.
+- Stop all new-version Admin writers and new UDP admission before restoring
+  prior images and data. Roll back the data plane before the Gateway
+  Controller, drain durable UDP owners, and restore the epoch-0 configuration
+  and pre-upgrade PostgreSQL backup when returning to `0.6.5`; there is no
+  automatic epoch-1 down-migration.
+- Externally witnessed audit checkpoints remain append-only, and
+  operator-owned Gateway API CRDs must not be deleted as an implicit rollback.
+  Rollback does not recreate a prior UDP socket, upstream source port,
+  NAT/conntrack entry, exact Kubernetes Service endpoint, in-flight datagram,
+  or application session.
+
+### Known issues
+
+- The immutable `0.7.1-beta.1` tag cannot be repaired or republished. It has
+  no draft, GitHub Release, official asset, manifest, attestation, or image;
+  retain it only as source-build recovery history.
+- The Kubernetes Gateway Controller, its Helm integration, and its Gateway API
+  features remain `experimental`; their native `linux/riscv64` cluster-runner
+  graduation evidence is still unmet.
+- Durable UDP preserves logical flow ownership, route/target affinity, and
+  bounded admission only. It does not preserve the connected socket, upstream
+  source port, NAT or conntrack state, exact endpoint selected behind a
+  Kubernetes Service, upstream-initiated or in-flight datagrams, or
+  application/session protocol state across restart.
+- Existing admission policies that require the retired OxiBelt-managed Cosign
+  signature or OCI-referrer contract reject the GitHub API-attested images
+  until an operator installs and validates a replacement admission policy.
+
+### Security
+
+- Preserve attempt-qualified raw Trivy artifacts and select the highest
+  same-run evidence attempt not greater than the current attempt for each
+  expected image subject. Artifact name, run, subject, revision, channel,
+  policy, report hash, immutable image identity, and manifest digest must all
+  agree; a malformed newest bundle fails closed without falling back.
+- Keep the current scan matrix successful, emit only a current-attempt
+  schema-2 decision with per-subject `evidenceAttempt`, and require publishers
+  to recheck that provenance and the complete 30-subject manifest set before
+  registry login.
+- Preserve the stable/beta block on every `CRITICAL` vulnerability and every
+  fixable `HIGH` vulnerability, with exact-revision SLSA provenance,
+  CycloneDX SBOMs, GitHub attestations, and independent-rebuild evidence for
+  each role and architecture.
+
+## [0.7.1-beta.1] - 2026-07-29
+
+> Immutable unpublished failed cut. The tag workflow rejected this tag before
+> draft creation because the exact tagged revision had no governed beta entry.
+> No GitHub Release or official release artifact was produced, and this tag is
+> not a published beta.
+
+- Changes since: `0.6.5`
+- Supported upgrade sources: `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.1 line](docs/Upgrading.md#upgrade-from-065-to-the-071-line)
+
+### Configuration
+
+- Add opt-in PostgreSQL-backed Admin operation persistence, fixed-member
+  `admin_cluster` rollout, atomic typed secret-reference activation, and
+  external audit anchoring. Activation validates prerequisites and fails
+  closed rather than silently falling back.
+- Add raw TCP/UDP stream pools and Gateway API `TCPRoute`, `UDPRoute`, and
+  `BackendTLSPolicy` inputs, including bounded UDP flow controls and explicit
+  upstream TLS trust policy. Helm values add the strict data-plane role,
+  controller high availability, additional L4 ports, and their least-privilege
+  policy controls.
+- Add opt-in `udp_flow_state = "shared_required"` for native UDP listeners,
+  backed by an explicitly selected Redis-compatible or PostgreSQL
+  `udp_flows_backend` and one deployment-wide identity key. Keep `local` as
+  the native compatibility default and generated `UDPRoute` flow state
+  disabled until the operator explicitly selects `shared_required`.
+- Require Redis-compatible durable UDP backends to prove unlimited memory or
+  `maxmemory_policy = noeviction` at activation and reload. An unsafe or
+  unverifiable eviction policy, backend mismatch, identity-key mismatch, or
+  invalid capacity/timing bound fails activation.
+
+### Schema epochs
+
+- Establish native configuration schema epoch `1`, publish its JSON Schema,
+  and add local `oxibeltctl config schema`, `validate`, `explain`, and
+  deterministic epoch-0-to-1 sibling-tree migration commands. Rust semantic
+  validation remains authoritative.
+- Add optional epoch-1 metadata for durable UDP listener policy, backend
+  selection, identity-key lookup, and fixed `reject_new_only` failure policy.
+  Existing configurations retain local native UDP and disabled generated
+  `UDPRoute` defaults unless they opt in.
+
+### Deprecations and removals
+
+- Migrate legacy `tls.key_exchange_groups` to
+  `tls.1_3.key_exchange_groups`, `tls.session_tickets` to
+  `tls.resumption.mode`, and `tls.session_ticket_rotation_seconds` to
+  `tls.resumption.rotation_seconds`. The epoch-1 validator accepts documented
+  compatibility aliases only where they do not conflict with canonical
+  fields.
+- Migrate `upstream_pools[].health_check.rise` to `healthy_threshold` and
+  `upstream_pools[].health_check.fall` to `unhealthy_threshold`; configuring
+  an alias with its canonical field is invalid.
+- Remove OxiBelt's bundled Sigstore Policy Controller and Cosign/OCI-referrer
+  admission assets. Official image evidence uses GitHub API-hosted
+  attestations and requires an operator-owned admission policy where cluster
+  admission is needed.
+
+### Admin API
+
+- Add durable long-running operation journals, recovery classes, progress,
+  bounded encrypted artifacts, terminal receipts, cancellation, and
+  restart-safe fencing; process-local WebTransport snapshot/drain work remains
+  explicitly ephemeral.
+- Add redacted configuration schema, validation, and explanation surfaces;
+  fixed-member rollout diagnostics and all-member acknowledgement; atomic
+  secret-reference activation; external audit-anchor status; and canonical
+  build identity metadata.
+
+### Feature lifecycle
+
+- Mark native schema tooling, role-specific OCI artifacts, dependency
+  admission, the strict data-plane artifact, durable Admin operation control,
+  fixed-member Admin rollout, atomic secret activation, and external audit
+  anchoring as `supported`.
+- Keep the Gateway Controller, its Helm charts, Gateway API route translation,
+  generated `UDPRoute`, and `BackendTLSPolicy` integration `experimental`.
+  Generated UDP fails closed until every selected data-plane Pod has matching
+  required shared-flow state.
+
+### Rulepack compatibility
+
+- Require catalog `min_oxibelt_version` values to use strict SemVer. A gated
+  rulepack is compatible only when `oxibeltctl` has an official clean
+  exact-tag identity at or above the requested version; untagged, dirty, and
+  source-archive identities fail closed. Catalog entries without this field
+  retain their existing compatibility.
+
+### Executables and images
+
+- Add the `oxibelt-dataplane-strict` package, executable, OCI repository, and
+  Helm role. It retains public proxy, WAF, Person Proof, health, metrics,
+  reload, and lifecycle behavior while compiling out Admin listeners,
+  mutations, operations, cluster runtime, and the Admin OpenAPI asset.
+- Expand `oxibeltctl` with local configuration schema, migration, validation,
+  explanation, and external audit verification commands. Bind binaries, Admin
+  metadata, OCI labels, attestations, and release subjects to one validated
+  build identity while retaining Cargo's committed `0.0.0` sentinel.
+- Define standalone, compatibility data-plane, strict data-plane, Gateway
+  Controller, tools, and keysigner release roles across the five supported
+  architecture subjects, with exact executable inventory, role-confusion,
+  native `linux/riscv64`, and immutable manifest checks.
+- Package `/run/oxibelt-keysigner` with owner `10002:10002` and mode `0770`,
+  initialize keysigner tracing, and keep the release smoke rootless,
+  read-only, and limited to `CAP_CHOWN` for its socket-volume helper.
+- Add the Gateway Controller's `--udp-flow-state` and Helm
+  `l4.udp.flowState` controls, render integer arguments as canonical decimal
+  digits, and strengthen Kubernetes qualification with reviewed Valkey,
+  Lease-recovery, rollout, and UDP probes.
+- Repair hosted rootless independent rebuild setup without exposing a host
+  cgroup controller, retain strict all-numeric build-tag parsing and Rust
+  `1.97.1` release compatibility, and keep release package metadata at the
+  committed `0.0.0` sentinel.
+- Preserve immutable attempt-qualified Trivy reports while allowing a later
+  gate attempt to reevaluate the newest available same-run evidence per
+  subject. The gate emits a current-attempt `schemaVersion: 2` decision with
+  per-subject `evidenceAttempt` and never uses prior evidence to rescue a
+  failed current matrix.
+
+### Storage and state
+
+- Add additive PostgreSQL state for durable Admin operations, fixed-member
+  rollout, encrypted commands/checkpoints, external audit-anchor outbox and
+  authority records, and bounded retention. Old binaries do not understand
+  these rows, so rollback requires stopping new writers and restoring
+  compatible data. Atomic secret activation retains bounded rollback grace and
+  redacted reference-set fingerprints.
+- Persist opaque keyed durable UDP listener, peer, route, target, owner, and
+  routing-generation identities with bounded capacity, token state,
+  server-time expiry, ownership leases, and monotonic fencing across memory,
+  Redis-compatible, and PostgreSQL adapters. Only shared backends allow
+  another process or replacement Pod to recover a record.
+- Preserve one listener-wide capacity, new-flow-token, and monotonic-fence
+  scope across overlapping routing generations. Recovery reauthorizes the
+  stored route and target and rejects stale owners, missing targets,
+  generation drift, partial backend state, or uncertain admission.
+
+### Upgrade validation
+
+- Create and inspect the epoch-1 review tree with the target `oxibeltctl`, then
+  validate the complete migrated configuration and every referenced
+  certificate, key, rule, and other external file before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Before enabling fixed-member rollout, durable operations, secret activation,
+  or external anchoring, validate matching build/capability identity,
+  membership and deployment epochs, PostgreSQL authority, signer keys,
+  expected audit streams, and rollback witnesses on every member.
+- Before enabling shared UDP, stop new admission, drain existing process-local
+  flows, configure one namespace, backend mapping, identity key, and safe
+  Redis eviction policy on every selected Pod, then roll the Pods and verify
+  readiness before enabling controller `shared_required`.
+- Do not deploy this failed cut. Use only a subsequent person-reviewed beta
+  whose exact-tag draft, complete 30-subject artifact matrix, vulnerability
+  decision, attestations, provenance, and independent rebuild all succeed.
+
+### Rollback and irreversible steps
+
+- Retain the exact `0.6.5` image digests, epoch-0 configuration and referenced
+  assets, PostgreSQL backup, controller rollback ConfigMaps, Gateway API
+  Lease, and any durable UDP identity key and backend until rollback is
+  complete. Stop new-version Admin writers and UDP admission before restoring
+  prior images and data.
+- Roll back the data plane before the Gateway Controller and drain durable UDP
+  owners before returning to an older binary. There is no automatic epoch-1
+  down-migration; restore the epoch-0 tree and pre-upgrade PostgreSQL backup or
+  roll forward.
+- External audit checkpoints and independently retained witnesses are
+  append-only. Do not rewrite or delete them, do not delete operator-owned
+  Gateway API CRDs as an implicit Helm rollback, and do not expect rollback to
+  recreate sockets, NAT/conntrack state, endpoints, datagrams, or sessions.
+
+### Known issues
+
+- This tag cannot be repaired or republished: release-tag policy prohibits
+  update and deletion, and its exact revision cannot satisfy the governed
+  entry contract. No draft, GitHub Release, or official artifact exists for
+  `0.7.1-beta.1`; use `0.7.1-beta.2` or a later person-reviewed release.
+- The Kubernetes Gateway Controller, its Helm integration, and its Gateway API
+  features remain `experimental`; native `linux/riscv64` cluster-runner
+  graduation evidence is still unmet.
+- Durable UDP preserves logical ownership, route/target affinity, and bounded
+  admission only. It does not preserve the socket, upstream source port,
+  NAT/conntrack state, exact Kubernetes Service endpoint, upstream-initiated
+  or in-flight datagrams, or application/session protocol state across
+  restart.
+- OxiBelt no longer ships its former Cosign/OCI-referrer admission policy.
+  Deployments enforcing that contract must install and validate an
+  operator-approved GitHub-attestation policy before adopting later images.
+
+### Security
+
+- Reject ambiguous or malformed HTTP/1 `Content-Length` and
+  `Transfer-Encoding` framing before public, Admin, or operations dispatch
+  while preserving valid fixed-length, chunked, upgrade, and tunnel behavior.
+- Add secret-reference preflight and redaction, database-time rollout fencing,
+  all-member acknowledgement, external append-only audit anchoring,
+  fail-closed dependency admission, exact-revision release identity, SLSA
+  provenance, CycloneDX SBOMs, GitHub attestations, and independent rebuilds.
+- Derive durable UDP identities with the deployment key, require safe
+  non-evicting Redis retention, reject partial state, and reauthorize every
+  recovered route and target under the active routing generation. Missing or
+  inconsistent identity, backend, target, lease, fence, capacity, or token
+  state fails activation or rejects the affected flow.
+- Keep stable and beta releases fail closed for every `CRITICAL`
+  vulnerability and every fixable `HIGH` vulnerability. Same-run evidence
+  reuse remains subject-specific, exact-name and exact-content bound,
+  current-policy reevaluated, and unable to override a failed current matrix
+  or malformed newest bundle.
+- Update security-sensitive dependencies including `aws-lc-rs` `1.17.3`,
+  Hyper `1.11.0`, and `web-transport-trait` `0.3.7`.
+
 ## [0.7.0-beta.4] - 2026-07-28
 
 > Qualification beta for the `0.7.0` stable candidate. The published

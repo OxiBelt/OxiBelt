@@ -32,17 +32,20 @@ be used as a supported production upgrade source or target.
 | `0.7.0-beta.1` | `0.7.0-beta.2` | Recovery source only | The later entry admits the exact beta tag for source-build recovery, but neither failed cut has an official artifact that can be promoted or republished. |
 | `0.6.5` | `0.7.0-beta.3` | Published, not qualified | The person-reviewed release and image publication completed, but the automatic independent rebuild stopped during hosted rootless Buildx setup before all 30 subject receipts existed. Do not use beta.3 as stable qualification evidence. |
 | `0.7.0-beta.2` | `0.7.0-beta.3` | Recovery source only | The later entry admits the exact beta.2 source revision, but no beta.2 official image or release asset can be promoted. |
-| `0.6.5` | `0.7.0-beta.4` | Release candidate | Follow [Upgrade from 0.6.5 to the 0.7.0 line](#upgrade-from-065-to-the-070-line). Treat the target as available only after a person reviews and publishes its draft and every official artifact gate passes. |
-| `0.7.0-beta.3` | `0.7.0-beta.4` | Release candidate | Existing beta.3 configurations retain local native UDP and disabled generated `UDPRoute` defaults unless the operator performs the shared-flow transition. Beta.4 requires a new complete artifact and independent-rebuild evidence set. |
-| `0.6.5` | `0.7.0` | Held for beta.4 evidence | The stable entry is intentionally absent until beta.4 publication, all 30 independent-rebuild receipts, and the evidence soak complete. |
-| `0.7.0-beta.3` | `0.7.0` | Not qualified | Beta.3 did not complete independent rebuild and is not the planned beta-to-stable source. Advance through beta.4 rather than promoting beta.3 directly. |
-| `0.7.0-beta.4` | `0.7.0` | Held for beta.4 evidence | Require at least 24 hours after successful beta.4 publication and complete independent-rebuild evidence, with no release-blocking issue, before preparing the stable entry or tag. |
+| `0.6.5` | `0.7.0-beta.4` | Published, not qualified | The prerelease exists, but its release-image workflow failed after publication and produced no official assets. Do not reuse its incomplete evidence for another cut. |
+| `0.7.0-beta.3` | `0.7.0-beta.4` | Published, not qualified | Existing beta.3 configurations retain local native UDP and disabled generated `UDPRoute` defaults unless the operator performs the shared-flow transition, but beta.4 did not complete artifact publication or independent rebuild. |
+| `0.6.5` | `0.7.0` | Unpublished failed cut | The immutable stable tag failed exact-revision release-contract validation before draft creation because `CHANGELOG.md` had no governed `0.7.0` entry. It has no GitHub Release or official artifacts. |
+| `0.7.0-beta.3` | `0.7.0` | Not qualified | Beta.3 did not complete independent rebuild, and the later beta.4 and stable cuts also failed. None qualifies as a stable source or target. |
+| `0.7.0-beta.4` | `0.7.0` | Unpublished failed cut | Beta.4 did not complete its release-image workflow, and the immutable stable tag was created without its governed entry. Neither cut qualifies as a stable source or target. |
+| `0.6.5` | `0.7.1-beta.1` | Unpublished failed cut | The immutable tag failed exact-revision release-contract validation before draft creation because `CHANGELOG-beta.md` had no governed entry. It has no GitHub Release or official artifacts. |
+| `0.6.5` | `0.7.1-beta.2` | Recovery candidate | Follow [Upgrade from 0.6.5 to the 0.7.1 line](#upgrade-from-065-to-the-071-line). Treat the target as available only after person review and every exact-revision artifact and evidence gate succeeds. |
+| `0.7.1-beta.1` | `0.7.1-beta.2` | Recovery source only | The later entry admits the immutable beta.1 source revision, but beta.1 has no official image or release asset to promote. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
-`Release candidate` or `Conditional`, or is held for beta evidence. A tag
-cannot prepare a GitHub draft release until the matching entry and upgrade
-link pass the repository release-contract checker.
+`Recovery candidate` or `Conditional`. A tag cannot prepare a GitHub draft
+release until the matching entry and upgrade link pass the repository
+release-contract checker.
 
 ### Recovery from the `0.7.0-beta.1` and `0.7.0-beta.2` failed cuts
 
@@ -66,13 +69,34 @@ changes also landed after that tag. Preserve beta.3 as release history; do not
 rerun or reinterpret it as the stable candidate, and do not reuse its partial
 evidence for beta.4.
 
-The stable `0.7.0` changelog entry remains intentionally deferred. Start its
-minimum 24-hour evidence soak only after `0.7.0-beta.4` is person-reviewed and
-published and all official artifacts, attestations, and 30 independent rebuild
-receipts have succeeded. Any source, configuration, schema, dependency,
-workflow, Helm, controller, or packaging change during qualification requires
-a later beta and a restarted soak. Record any observed beta issue in the
-eventual stable entry before creating the stable tag.
+The published `0.7.0-beta.4` prerelease subsequently failed its release-image
+workflow and has no official release assets. The immutable `0.7.0` tag was
+then rejected before draft creation because its exact revision had no governed
+stable entry. Preserve both tags and the beta.4 prerelease as failed release
+history; do not attach artifacts, synthesize a stable release, or reinterpret
+their incomplete evidence as qualification for a later cut.
+
+### Recovery from the `0.7.0` and `0.7.1-beta.1` failed cuts
+
+The remote `0.7.0` and `0.7.1-beta.1` tags are signed immutable release
+history. Do not move, delete, recreate, or repush either tag, and do not
+prepare a hand-written GitHub Release for either failed cut. Their exact
+revisions cannot acquire the missing governed entries after the fact.
+
+Keep `0.6.5` as the immediately preceding stable release because `0.7.0`
+never produced a GitHub Release or deployable official artifact. Preserve the
+failed `0.7.1-beta.1` source revision in the governed beta ledger and advance
+to `0.7.1-beta.2`. The recovery beta requires a fresh exact-revision draft,
+complete 30-subject artifact matrix, vulnerability decision, attestations,
+provenance, and independent-rebuild receipts; no evidence from
+`0.7.0-beta.4` or `0.7.1-beta.1` may be promoted or reused.
+
+Start the stable `0.7.1` qualification soak only after `0.7.1-beta.2` is
+person-reviewed and published and every official evidence gate has succeeded.
+Any source, configuration, schema, dependency, workflow, Helm, controller, or
+packaging change during qualification requires a later beta and a restarted
+soak. Record observed beta issues in the eventual stable entry before creating
+the stable tag.
 
 ## General upgrade procedure
 
@@ -272,10 +296,12 @@ Gateway API support, and the optional `dataplane-strict` image role.
 The immutable `0.7.0-beta.1` tag is an unpublished failed cut, and the immutable
 published `0.7.0-beta.2` cut failed before official artifact publication. Do
 not use either as an upgrade target. The published `0.7.0-beta.3` cut did not
-complete independent rebuild and is not the stable candidate. Use
-`0.7.0-beta.4` only after its person-reviewed release, complete artifact
-publication, vulnerability admission, attestations, and all 30 independent
-rebuild receipts succeed.
+complete independent rebuild, the published `0.7.0-beta.4` cut failed its
+release-image workflow without official assets, and the immutable `0.7.0`
+stable tag failed before draft creation. None is a qualified stable target.
+Preserve every cut as release history and advance through the governed
+`0.7.1` recovery instead of attaching, promoting, or reusing their artifacts
+or evidence.
 
 Before upgrading:
 
@@ -302,3 +328,49 @@ Before upgrading:
 The exact stable or beta changelog entry must complete the validation,
 rollback, known-issue, and security details before its tag can prepare a draft
 GitHub Release.
+
+## Upgrade from 0.6.5 to the 0.7.1 line
+
+The `0.7.1` line carries forward the epoch-1 configuration, Admin durability,
+Gateway API, strict data-plane, release-image, and durable UDP behavior
+described in [Upgrade from 0.6.5 to the 0.7.0 line](#upgrade-from-065-to-the-070-line).
+The additional source change at the failed `0.7.1-beta.1` cut repairs
+same-run vulnerability-evidence selection for a failed-jobs rerun; it does not
+change runtime, configuration, schema, API, rulepack, or persisted-state
+behavior.
+
+Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
+target. Both failed exact-revision release-contract validation before draft
+creation and have no GitHub Release or official artifact. Use
+`0.7.1-beta.2` only after its person-reviewed release and its new
+exact-revision artifact, vulnerability, attestation, provenance, and
+independent-rebuild evidence all succeed.
+
+When upgrading directly from `0.6.5`, follow the complete epoch-0-to-1
+migration, backup, role-selection, HTTP/1 compatibility, fixed-member Admin,
+Gateway Controller, and durable UDP preparation in the `0.7.0` guide above.
+Create the review tree and validate every referenced file before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+A local source build from `0.7.1-beta.1` may be retained only as recovery
+history. Before replacing it with a person-reviewed later release, validate
+the active epoch-1 configuration and referenced files, retain all prior
+digests and backups, and confirm that controller and data-plane roles use the
+same target revision:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+Do not reuse the failed beta.1 workflow run, its absent release artifacts, or
+the incomplete beta.4 evidence. The `0.7.1-beta.2` release must produce its
+own complete 30-subject image and evidence set before rollout.
