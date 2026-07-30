@@ -320,6 +320,7 @@ guarantees.
 
 | Feature ID | Security consequence |
 | --- | --- |
+| `compio-direct-h1-io` | Operator-selected upstream responses remain untrusted at this Linux-only experimental parser/transport boundary. The path must preserve bounded metadata processing across arbitrary fragmentation, fail closed on ambiguous or unsupported framing, avoid duplicate dispatch and failed-connection reuse, and cancel request-local resources; Hyper differential, fuzz, and resource-stability evidence remain promotion gates. |
 | `crlite` | Revocation filter coverage, managed downloads, cache integrity, and degraded-allow behavior require deployment-specific review. |
 | `tls-upstream-revocation` | Outbound OCSP/CRLite reachability, freshness, and failure policy can affect upstream availability and trust. |
 | `root-netport-switcher` | The privileged bind broker expands the local capability and Unix-socket boundary. |
