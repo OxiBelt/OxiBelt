@@ -27,16 +27,11 @@ fn decode_all_with_limits(
   let mut events = Vec::new();
   for chunk in response.chunks(fragment.max(1)) {
     pending.extend_from_slice(chunk);
-    loop {
-      match engine.decode(&mut pending, false)? {
-        ResponseStep::Event(event) => {
-          let complete = matches!(&event, ResponseEvent::Complete);
-          events.push(event);
-          if complete {
-            return Ok(events);
-          }
-        }
-        ResponseStep::NeedInput => break,
+    while let ResponseStep::Event(event) = engine.decode(&mut pending, false)? {
+      let complete = matches!(&event, ResponseEvent::Complete);
+      events.push(event);
+      if complete {
+        return Ok(events);
       }
     }
   }
@@ -185,6 +180,12 @@ fn zero_limits_are_rejected() {
   ] {
     assert!(limits.validate().is_err());
   }
+}
+
+#[cfg(feature = "fuzzing")]
+#[test]
+fn fuzz_harness_accepts_chunk_line_dominant_metadata_bound() {
+  crate::fuzzing::exercise_compio_h1_response(&[], &[], [0, 0, 0, 0, 95, 0, 0, 0, 0]);
 }
 
 #[test]

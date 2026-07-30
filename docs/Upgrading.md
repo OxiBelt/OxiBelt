@@ -339,6 +339,25 @@ same-run vulnerability-evidence selection for a failed-jobs rerun; it does not
 change runtime, configuration, schema, API, rulepack, or persisted-state
 behavior.
 
+Post-`0.7.1-beta.2` development keeps `compio-direct-h1-io` experimental.
+The checked-in production example now explicitly recommends
+`runtime.main_runtime = "tokio_hyper"` with
+`runtime.direct_h1_io = "auto"`. This recommendation does not change the
+configuration schema or deserialization defaults: omitted values still
+resolve to `compio` and `auto`, existing explicit values remain valid, and no
+configuration or persisted-state migration is required.
+
+Operators that deliberately select an active Compio runtime with
+`runtime.direct_h1_io = "compio"` must continue to treat the Linux-only path
+as experimental, not promoted. Its bounded response engine fails closed on
+malformed, ambiguous, or unsupported HTTP/1 response framing. Before opting
+in, validate representative upstream responses and monitor
+`oxibelt_http_direct_h1_response_protocol_failures_total`.
+
+This post-beta.2 compatibility change requires a later governed beta and
+fresh exact-revision evidence; it is not part of beta.2's immutable release
+record.
+
 Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
 target. Both failed exact-revision release-contract validation before draft
 creation and have no GitHub Release or official artifact. Use

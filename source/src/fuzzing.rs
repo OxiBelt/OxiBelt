@@ -137,10 +137,11 @@ pub fn exercise_compio_h1_response(
   let limits = ResponseProtocolLimits::from_selectors(limit_selectors);
   let expected_metadata_bound = limits
     .max_response_head_bytes
-    .max(limits.max_chunk_size_line_bytes.saturating_add(1))
+    .max(limits.max_chunk_size_line_bytes.saturating_add(2))
     .max(limits.max_trailer_block_bytes);
-  let mut engine =
-    ResponseProtocolEngine::new(Method::GET, limits).expect("normalized fuzz limits must validate");
+  let Ok(mut engine) = ResponseProtocolEngine::new(Method::GET, limits) else {
+    panic!("normalized fuzz limits must validate");
+  };
   assert_eq!(
     engine.max_buffered_metadata_bytes(),
     expected_metadata_bound
@@ -167,12 +168,12 @@ pub fn exercise_compio_h1_response(
   }
 
   if engine.state() == ResponseState::FailedNonReusable {
-    let first = engine
-      .decode(&mut input, true)
-      .expect_err("failed parser must preserve its terminal error");
-    let repeated = engine
-      .decode(&mut input, true)
-      .expect_err("failed parser must remain failed");
+    let Err(first) = engine.decode(&mut input, true) else {
+      panic!("failed parser must preserve its terminal error");
+    };
+    let Err(repeated) = engine.decode(&mut input, true) else {
+      panic!("failed parser must remain failed");
+    };
     assert_eq!(first, repeated);
   }
 }
