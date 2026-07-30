@@ -92,7 +92,7 @@ pub(super) struct FastPathMetrics {
   request_body_counters: [StripedCounter; REQUEST_BODY_COUNTER_COUNT],
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
-  direct_h1_response_protocol_counters: [StripedCounter; DIRECT_H1_RESPONSE_PROTOCOL_COUNTER_COUNT],
+  direct_h1_response_protocol_counters: Box<[StripedCounter]>,
   direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
   direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
   static_fast_path_counters: [StripedCounter; static_response::COUNTER_COUNT],
@@ -108,7 +108,9 @@ impl Default for FastPathMetrics {
       request_body_counters: std::array::from_fn(|_| StripedCounter::default()),
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
-      direct_h1_response_protocol_counters: std::array::from_fn(|_| StripedCounter::default()),
+      direct_h1_response_protocol_counters: (0..DIRECT_H1_RESPONSE_PROTOCOL_COUNTER_COUNT)
+        .map(|_| StripedCounter::default())
+        .collect(),
       direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_io_backend_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
