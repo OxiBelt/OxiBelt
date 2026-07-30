@@ -34,6 +34,6 @@
   },
   "dependencies": {
     "semver": "7.8.5",
-    "smol-toml": "1.7.0"
+    "smol-toml": "1.7.1"
   }
 }
