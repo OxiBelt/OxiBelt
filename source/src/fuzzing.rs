@@ -1,6 +1,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 
+use bytes::BytesMut;
 use h3::ext::Protocol;
 use http::header::{CONNECTION, HOST, TE, UPGRADE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request};
@@ -120,6 +121,83 @@ pub fn exercise_http_semantics(data: &[u8]) {
   );
 
   let _ = select_upstream_http_version(input.bool(), input.http_version(), input.http_version());
+}
+
+pub fn exercise_compio_h1_response(
+  response: &[u8],
+  fragment_sizes: &[u8],
+  limit_selectors: [u8; 9],
+) {
+  use crate::proxy::http::fast_path::direct_h1::response_protocol::{
+    ResponseProtocolEngine, ResponseProtocolLimits, ResponseState,
+  };
+
+  const MAX_RESPONSE_BYTES: usize = 128 * 1024;
+  let response = &response[..response.len().min(MAX_RESPONSE_BYTES)];
+  let limits = ResponseProtocolLimits::from_selectors(limit_selectors);
+  let expected_metadata_bound = limits
+    .max_response_head_bytes
+    .max(limits.max_chunk_size_line_bytes.saturating_add(1))
+    .max(limits.max_trailer_block_bytes);
+  let mut engine =
+    ResponseProtocolEngine::new(Method::GET, limits).expect("normalized fuzz limits must validate");
+  assert_eq!(
+    engine.max_buffered_metadata_bytes(),
+    expected_metadata_bound
+  );
+
+  let mut input = BytesMut::new();
+  let mut offset = 0usize;
+  let mut fragment_index = 0usize;
+  let mut completed = false;
+  while offset < response.len() && !completed {
+    let selected = fragment_sizes
+      .get(fragment_index % fragment_sizes.len().max(1))
+      .copied()
+      .unwrap_or(1);
+    fragment_index = fragment_index.saturating_add(1);
+    let fragment_len = usize::from(selected).saturating_add(1);
+    let end = offset.saturating_add(fragment_len).min(response.len());
+    input.extend_from_slice(&response[offset..end]);
+    offset = end;
+    completed = drain_compio_response_events(&mut engine, &mut input, false);
+  }
+  if !completed {
+    let _ = drain_compio_response_events(&mut engine, &mut input, true);
+  }
+
+  if engine.state() == ResponseState::FailedNonReusable {
+    let first = engine
+      .decode(&mut input, true)
+      .expect_err("failed parser must preserve its terminal error");
+    let repeated = engine
+      .decode(&mut input, true)
+      .expect_err("failed parser must remain failed");
+    assert_eq!(first, repeated);
+  }
+}
+
+fn drain_compio_response_events(
+  engine: &mut crate::proxy::http::fast_path::direct_h1::response_protocol::ResponseProtocolEngine,
+  input: &mut BytesMut,
+  eof: bool,
+) -> bool {
+  use crate::proxy::http::fast_path::direct_h1::response_protocol::{ResponseEvent, ResponseStep};
+
+  loop {
+    match engine.decode(input, eof) {
+      Ok(ResponseStep::Event(ResponseEvent::Complete)) => return true,
+      Ok(ResponseStep::Event(_)) => {}
+      Ok(ResponseStep::NeedInput) => {
+        assert!(
+          engine.buffered_metadata_bytes(input) <= engine.max_buffered_metadata_bytes(),
+          "incremental response metadata exceeded the validated engine bound"
+        );
+        return false;
+      }
+      Err(_) => return false,
+    }
+  }
 }
 
 pub fn exercise_http3_webtransport(data: &[u8]) {

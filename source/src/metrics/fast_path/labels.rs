@@ -73,6 +73,82 @@ impl FastPathMetricProtocol {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
+pub(crate) enum DirectH1ResponseProtocolFailure {
+  HeadTooLarge = 0,
+  TooManyHeaders = 1,
+  HeaderFieldTooLarge = 2,
+  TooManyInterimResponses = 3,
+  InvalidStatusLine = 4,
+  InvalidHeaderSyntax = 5,
+  InvalidTransferCodingSequence = 6,
+  ChunkLineTooLarge = 7,
+  InvalidChunkSize = 8,
+  InvalidChunkExtension = 9,
+  InvalidChunkTerminator = 10,
+  ChunkExtensionTooLarge = 11,
+  TrailerBlockTooLarge = 12,
+  TooManyTrailers = 13,
+  InvalidTrailerField = 14,
+  TrailerFieldTooLarge = 15,
+  UnexpectedEof = 16,
+  IdleTimeout = 17,
+  DownstreamCancellation = 18,
+  UnsupportedUpgrade = 19,
+}
+
+impl DirectH1ResponseProtocolFailure {
+  pub(crate) const ALL: [Self; 20] = [
+    Self::HeadTooLarge,
+    Self::TooManyHeaders,
+    Self::HeaderFieldTooLarge,
+    Self::TooManyInterimResponses,
+    Self::InvalidStatusLine,
+    Self::InvalidHeaderSyntax,
+    Self::InvalidTransferCodingSequence,
+    Self::ChunkLineTooLarge,
+    Self::InvalidChunkSize,
+    Self::InvalidChunkExtension,
+    Self::InvalidChunkTerminator,
+    Self::ChunkExtensionTooLarge,
+    Self::TrailerBlockTooLarge,
+    Self::TooManyTrailers,
+    Self::InvalidTrailerField,
+    Self::TrailerFieldTooLarge,
+    Self::UnexpectedEof,
+    Self::IdleTimeout,
+    Self::DownstreamCancellation,
+    Self::UnsupportedUpgrade,
+  ];
+  pub(crate) const COUNT: usize = Self::ALL.len();
+
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::HeadTooLarge => "head_too_large",
+      Self::TooManyHeaders => "too_many_headers",
+      Self::HeaderFieldTooLarge => "header_field_too_large",
+      Self::TooManyInterimResponses => "too_many_interim_responses",
+      Self::InvalidStatusLine => "invalid_status_line",
+      Self::InvalidHeaderSyntax => "invalid_header_syntax",
+      Self::InvalidTransferCodingSequence => "invalid_transfer_coding_sequence",
+      Self::ChunkLineTooLarge => "chunk_line_too_large",
+      Self::InvalidChunkSize => "invalid_chunk_size",
+      Self::InvalidChunkExtension => "invalid_chunk_extension",
+      Self::InvalidChunkTerminator => "invalid_chunk_terminator",
+      Self::ChunkExtensionTooLarge => "chunk_extension_too_large",
+      Self::TrailerBlockTooLarge => "trailer_block_too_large",
+      Self::TooManyTrailers => "too_many_trailers",
+      Self::InvalidTrailerField => "invalid_trailer_field",
+      Self::TrailerFieldTooLarge => "trailer_field_too_large",
+      Self::UnexpectedEof => "unexpected_eof",
+      Self::IdleTimeout => "idle_timeout",
+      Self::DownstreamCancellation => "downstream_cancellation",
+      Self::UnsupportedUpgrade => "unsupported_upgrade",
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 pub(crate) enum FastPathPlainProxyMissReason {
   PlanDisabled = 0,
   UnsupportedVersion = 1,

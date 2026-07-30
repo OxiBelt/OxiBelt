@@ -13,6 +13,27 @@ fn typed_transport_errors_drive_direct_h1_miss_classification() {
     direct_h1_transport_miss_reason(&send_error),
     FastPathTransportMissReason::SendError
   );
+
+  let protocol_error =
+    DirectH1TransportError::response_protocol(anyhow::anyhow!("invalid response framing"));
+  assert_eq!(
+    direct_h1_transport_miss_reason(&protocol_error),
+    FastPathTransportMissReason::ResponseError
+  );
+  assert_eq!(
+    direct_h1_upstream_error_kind(&protocol_error),
+    Some(DirectH1UpstreamErrorKind::Protocol)
+  );
+
+  let timeout_error = DirectH1TransportError::read_timeout(anyhow::anyhow!("idle timeout"));
+  assert_eq!(
+    direct_h1_transport_miss_reason(&timeout_error),
+    FastPathTransportMissReason::ResponseError
+  );
+  assert_eq!(
+    direct_h1_upstream_error_kind(&timeout_error),
+    Some(DirectH1UpstreamErrorKind::ReadTimeout)
+  );
 }
 
 #[cfg(target_os = "linux")]
@@ -49,6 +70,7 @@ async fn compio_connect_backoff_routes_h2_to_hyper_direct_h1() -> anyhow::Result
     DirectH1RuntimeBackend::Compio,
     true,
     None,
+    crate::config::EarlyHintsMode::Drop,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: true,

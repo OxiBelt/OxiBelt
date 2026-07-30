@@ -13,6 +13,7 @@ use super::*;
 mod runtime_backend;
 mod streaming;
 mod transport_error;
+mod upgrade_guard;
 
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
 
@@ -606,6 +607,7 @@ async fn send_and_recycle_direct_get(
     DirectH1RuntimeBackend::TokioHyper,
     true,
     None,
+    crate::config::EarlyHintsMode::Drop,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: false,

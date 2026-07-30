@@ -29,6 +29,30 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "compio_h1_response"
+path = "fuzz/seeds/compio_h1_response/fixed-length.http"
+sha256 = "c3e166b65962c92ed2882d6f933549f5837fc8e1afc2906473893665549721d7"
+origin = "Repository-authored structured fuzz input containing a synthetic fixed-length HTTP/1 response."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "compio_h1_response"
+path = "fuzz/seeds/compio_h1_response/chunked-trailers.http"
+sha256 = "d26dfc2aac42dedb8d01135b117890e3ab132679ab0e423a04f5072fcfbb7058"
+origin = "Repository-authored structured fuzz input containing synthetic chunk extensions and trailers."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "compio_h1_response"
+path = "fuzz/seeds/compio_h1_response/interim-chain.http"
+sha256 = "962e664e4eb41b21123c8877b9e6ba7eee58a136170ad8bc2e2aacdcd74c111f"
+origin = "Repository-authored structured fuzz input containing synthetic 100, 103, and final responses."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "http3_webtransport"
 path = "fuzz/seeds/http3_webtransport/extended-connect.headers"
 sha256 = "f9e448d3c3acb932333c218f3d40377b26adec966f1eab8c9316db9bd88a6035"

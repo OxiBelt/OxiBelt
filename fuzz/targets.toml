@@ -54,6 +54,19 @@ regression_path = "tests/fixtures/fuzz-regressions/http_semantics"
 leak_policy = "enabled"
 
 [[target]]
+name = "compio_h1_response"
+owner = "Compio direct-H1 response protocol maintainers"
+max_input_bytes = 131072
+input_contract = "Untrusted structured input supplies at most 128 KiB of upstream HTTP/1 response bytes, at most thirty-two fragmentation sizes, and nine selectors mapped to validated small protocol limits."
+invariants = ["incremental parsing and every terminal outcome remain deterministic without panicking", "response-head, chunk-metadata, and trailer buffering never exceed the validated selected limits", "malformed framing fails closed without making the connection reusable"]
+unsupported_states = ["live upstream or downstream sockets", "transport timeouts and background task cancellation", "changes to the established Hyper implementation"]
+seed_dir = "fuzz/seeds/compio_h1_response"
+dictionary = "fuzz/dictionaries/http.dict"
+coverage_landmarks = ["source/src/fuzzing.rs:exercise_compio_h1_response", "source/src/proxy/http/fast_path/direct_h1/response_protocol/mod.rs:ResponseProtocolEngine"]
+regression_path = "tests/fixtures/fuzz-regressions/compio_h1_response"
+leak_policy = "enabled"
+
+[[target]]
 name = "http3_webtransport"
 owner = "HTTP/3 and WebTransport maintainers"
 max_input_bytes = 4096

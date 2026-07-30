@@ -37,6 +37,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "compio_h1_response"
+path = "fuzz_targets/compio_h1_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "http3_webtransport"
 path = "fuzz_targets/http3_webtransport.rs"
 test = false

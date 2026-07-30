@@ -26,6 +26,7 @@ matrices, and this metadata from drifting apart.
 | `turn_protocol` | Bounded STUN, ChannelData, attributes, and authentication material; malformed lengths fail closed | Live sockets, relay allocation, credential lookup |
 | `tls_client_hello` | Raw and TLS-record-framed ClientHello parsing and SNI normalization | Live handshakes, keys, remote signers |
 | `http_semantics` | Methods, URIs, authority, versions, and headers; ambiguous framing and forwarding state fail closed | Network I/O, connections, streaming bodies |
+| `compio_h1_response` | At most 128 KiB of response bytes, bounded fragmentation, and validated small protocol limits; framing and metadata remain deterministic and bounded | Live sockets, transport cancellation, and changes to Hyper |
 | `http3_webtransport` | HTTP/3 metadata, early-data state, and extended CONNECT protocols | Live QUIC/H3 sessions and datagrams |
 | `websocket_frame` | At most eight bounded data/control frames and WAF prefix inspection | Upgraded sockets and unbounded reassembly |
 | `webrtc_turn` | TURN/STUN integrity, nonce, fingerprint, padding, and address cases | Relay listeners, databases, network allocation |
@@ -71,6 +72,14 @@ backward-compatible local reproduction:
 
 ```sh
 tests/scripts/run-fuzz-target.sh smoke tls_client_hello
+```
+
+For example, exercise the Compio HTTP/1 response protocol engine under both
+pull-request profiles:
+
+```sh
+OXIBELT_FUZZ_PROFILE=stable tests/scripts/run-fuzz-target.sh smoke compio_h1_response
+tests/scripts/run-fuzz-target.sh smoke compio_h1_response
 ```
 
 Run the fifteen-minute campaign profile locally:

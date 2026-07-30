@@ -2,9 +2,9 @@
 
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
-  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
-  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathPlainProxyMissReason,
-  FastPathRequestBodyOutcome, FastPathTransportMissReason,
+  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, DirectH1ResponseProtocolFailure,
+  FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage,
+  FastPathPlainProxyMissReason, FastPathRequestBodyOutcome, FastPathTransportMissReason,
 };
 
 impl Metrics {
@@ -76,6 +76,16 @@ impl Metrics {
 
   pub(crate) fn record_direct_h1_pool_event_id(&self, event: DirectH1PoolEvent) {
     self.fast_path.record_direct_h1_pool_event_id(event);
+  }
+
+  pub(crate) fn record_direct_h1_response_protocol_failure_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    reason: DirectH1ResponseProtocolFailure,
+  ) {
+    self
+      .fast_path
+      .record_direct_h1_response_protocol_failure_id(protocol, reason);
   }
 
   pub(crate) fn record_direct_h1_io_backend_id(

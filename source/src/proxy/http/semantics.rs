@@ -36,9 +36,16 @@ pub(crate) struct InterimResponse {
   pub(crate) headers: HeaderMap,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EarlyHintCaptureOutcome {
+  Ignored,
+  Captured,
+  AtCapacity,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct EarlyHintsCapture {
-  inner: Arc<Mutex<Vec<InterimResponse>>>,
+  inner: Arc<Mutex<InterimResponses>>,
 }
 
 impl EarlyHintsCapture {
@@ -47,9 +54,7 @@ impl EarlyHintsCapture {
       .inner
       .lock()
       .unwrap_or_else(|poisoned| poisoned.into_inner());
-    InterimResponses {
-      responses: std::mem::take(&mut *inner),
-    }
+    std::mem::take(&mut *inner)
   }
 }
 
@@ -120,18 +125,41 @@ pub(crate) fn attach_early_hints_capture<B>(
   let capture = EarlyHintsCapture::default();
   let callback_capture = capture.clone();
   hyper::ext::on_informational(request, move |response| {
-    if response.status() != StatusCode::EARLY_HINTS {
-      return;
-    }
-    if let Some(interim) = sanitize_interim_response(response.status(), response.headers()) {
-      callback_capture
-        .inner
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(interim);
-    }
+    let mut interim = callback_capture
+      .inner
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Hyper owns the informational-response parser, so retain its established
+    // capture behavior. Bounded protocol engines pass their validated limit.
+    let _ = capture_early_hint(
+      &mut interim,
+      mode,
+      response.status(),
+      response.headers(),
+      usize::MAX,
+    );
   });
   Some(capture)
+}
+
+pub(crate) fn capture_early_hint(
+  interim: &mut InterimResponses,
+  mode: EarlyHintsMode,
+  status: StatusCode,
+  headers: &HeaderMap,
+  max_responses: usize,
+) -> EarlyHintCaptureOutcome {
+  if mode == EarlyHintsMode::Drop || status != StatusCode::EARLY_HINTS {
+    return EarlyHintCaptureOutcome::Ignored;
+  }
+  if interim.responses.len() >= max_responses {
+    return EarlyHintCaptureOutcome::AtCapacity;
+  }
+  let Some(response) = sanitize_interim_response(status, headers) else {
+    return EarlyHintCaptureOutcome::Ignored;
+  };
+  interim.responses.push(response);
+  EarlyHintCaptureOutcome::Captured
 }
 
 pub(crate) fn sanitize_interim_response(
@@ -356,7 +384,7 @@ mod tests {
   use http_body_util::BodyExt;
   use hyper::body::Frame;
 
-  use crate::config::{Config, ExpectContinueMode, TrailerMode};
+  use crate::config::{Config, EarlyHintsMode, ExpectContinueMode, TrailerMode};
 
   use super::*;
   use crate::proxy::http::body::channel_body;
@@ -382,6 +410,70 @@ mod tests {
       validate_expect(&headers, ExpectContinueMode::Reject),
       Err(ExpectRejection::Disabled)
     );
+  }
+
+  #[test]
+  fn early_hint_capture_applies_mode_sanitization_and_capacity() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+      LINK,
+      HeaderValue::from_static("</app.css>; rel=preload; as=style"),
+    );
+    headers.append(
+      LINK,
+      HeaderValue::from_static("</app.js>; rel=preload; as=script"),
+    );
+    headers.insert(
+      HeaderName::from_static("x-origin-secret"),
+      HeaderValue::from_static("do-not-forward"),
+    );
+    let mut interim = InterimResponses::default();
+
+    assert_eq!(
+      capture_early_hint(
+        &mut interim,
+        EarlyHintsMode::Drop,
+        StatusCode::EARLY_HINTS,
+        &headers,
+        1,
+      ),
+      EarlyHintCaptureOutcome::Ignored
+    );
+    for status in [
+      StatusCode::CONTINUE,
+      StatusCode::SWITCHING_PROTOCOLS,
+      StatusCode::PROCESSING,
+      StatusCode::OK,
+    ] {
+      assert_eq!(
+        capture_early_hint(&mut interim, EarlyHintsMode::Pass, status, &headers, 1,),
+        EarlyHintCaptureOutcome::Ignored
+      );
+    }
+    assert_eq!(
+      capture_early_hint(
+        &mut interim,
+        EarlyHintsMode::Pass,
+        StatusCode::EARLY_HINTS,
+        &headers,
+        1,
+      ),
+      EarlyHintCaptureOutcome::Captured
+    );
+    assert_eq!(interim.responses.len(), 1);
+    assert_eq!(interim.responses[0].headers.get_all(LINK).iter().count(), 2);
+    assert!(!interim.responses[0].headers.contains_key("x-origin-secret"));
+    assert_eq!(
+      capture_early_hint(
+        &mut interim,
+        EarlyHintsMode::Pass,
+        StatusCode::EARLY_HINTS,
+        &headers,
+        1,
+      ),
+      EarlyHintCaptureOutcome::AtCapacity
+    );
+    assert_eq!(interim.responses.len(), 1);
   }
 
   #[test]

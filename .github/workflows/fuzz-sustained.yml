@@ -32,6 +32,7 @@ jobs:
           - turn_protocol
           - tls_client_hello
           - http_semantics
+          - compio_h1_response
           - http3_webtransport
           - websocket_frame
           - webrtc_turn

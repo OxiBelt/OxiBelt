@@ -15,7 +15,9 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::config::{HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig};
+use crate::config::{
+  EarlyHintsMode, HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig,
+};
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::{
   DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
@@ -23,17 +25,19 @@ use crate::metrics::fast_path::labels::{
 use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
+use crate::proxy::http::headers::is_upgrade_request;
 
 use super::request_body::FastPathRequestBodyMode;
 use super::stage_timing as timing;
 
 #[cfg(target_os = "linux")]
 mod compio_transport;
-#[cfg(target_os = "linux")]
+#[cfg(test)]
 pub(crate) mod delimiters;
 mod origin;
 mod request;
 mod response;
+pub(crate) mod response_protocol;
 mod runtime_backend;
 mod send_attempt;
 mod transport_error;
@@ -46,7 +50,10 @@ use self::response::DirectH1Response;
 pub(super) use self::response::{DirectH1Lease, recycle_response_body};
 use self::runtime_backend::DirectH1RuntimeBackend;
 use self::send_attempt::{DirectH1SendAttemptError, send_request_with_timing};
+pub(super) use self::transport_error::direct_h1_upstream_error_response;
 use self::transport_error::{DirectH1TransportError, direct_h1_transport_miss_reason};
+#[cfg(test)]
+pub(super) use self::transport_error::{DirectH1UpstreamErrorKind, direct_h1_upstream_error_kind};
 
 const DIRECT_H1_MAX_SHARDS: usize = 16;
 #[cfg(target_os = "linux")]
@@ -260,6 +267,7 @@ pub(super) async fn try_send_direct_h1(
   allow_reconnect_retry: bool,
   overload: Option<Arc<OverloadRuntime>>,
   direct_h1_io_mode: RuntimeDirectH1IoMode,
+  early_hints_mode: EarlyHintsMode,
   outbound: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
   hot_path_metrics: bool,
@@ -314,6 +322,7 @@ pub(super) async fn try_send_direct_h1(
     DirectH1RuntimeBackend::from_config(direct_h1_io_mode),
     allow_reconnect_retry,
     overload,
+    early_hints_mode,
     DirectH1SendMetricOptions {
       hot_path_metrics,
       diagnostic_metrics,
@@ -349,6 +358,7 @@ fn direct_h1_guard_miss(
     request_version,
     http::Version::HTTP_11 | http::Version::HTTP_2 | http::Version::HTTP_3
   ) || !direct_selection_used
+    || is_upgrade_request(outbound)
   {
     return Some(FastPathTransportMissReason::UnsupportedRequest);
   }
@@ -384,6 +394,7 @@ async fn send_prepared_request(
   runtime_backend: DirectH1RuntimeBackend,
   allow_reconnect_retry: bool,
   overload: Option<Arc<OverloadRuntime>>,
+  early_hints_mode: EarlyHintsMode,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
   if metric_options.hot_path_metrics {
@@ -405,6 +416,7 @@ async fn send_prepared_request(
       protocol,
       prepared,
       timeouts,
+      early_hints_mode,
       metric_options,
     )
     .await;

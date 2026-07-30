@@ -7,52 +7,55 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use compio::buf::IntoInner;
 use compio::{BufResult, driver::OpCode};
 use compio_driver::op::{Recv, RecvFlags, Send, SendFlags};
 use compio_driver::{Proactor, PushEntry, SharedFd};
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Version};
+use http::header::TRANSFER_ENCODING;
+use http::{HeaderMap, Request, Response, Version};
 use hyper::body::{Body, Frame};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::config::EarlyHintsMode;
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, BoxError, ProxyBody, ProxyBodyFrame};
+use crate::proxy::http::semantics::{
+  InterimResponses, attach_interim_responses, capture_early_hint,
+};
 
-use super::delimiters::{AppendOnlyDelimiterSearch, crlf, response_header_end, trailer_end};
 use super::request::PreparedDirectH1Request;
+use super::response_protocol::{
+  ResponseBodyMode, ResponseEvent, ResponseProtocolEngine, ResponseProtocolError,
+  ResponseProtocolFailureReason, ResponseProtocolLimits, ResponseState, ResponseStep,
+};
 use super::{
   DirectH1Pool, DirectH1Response, DirectH1SendMetricOptions, DirectH1TransportError, timing,
 };
 
+mod cancellation;
+mod failure;
 #[cfg(test)]
 mod tests;
 
-const RESPONSE_HEAD_BUFFER_LIMIT: usize = 64 * 1024;
+use self::cancellation::CancellationToken;
+#[cfg(test)]
+use self::failure::metric_reason;
+use self::failure::{
+  cancellation_failure, cancellation_failure_with_source, protocol_failure,
+  protocol_failure_with_source, timeout_failure,
+};
+
 const RESPONSE_IO_BUFFER_BYTES: usize = 16 * 1024;
 const BODY_CHANNEL_CAPACITY: usize = 16;
-const MAX_RESPONSE_HEADERS: usize = 128;
 
 struct ResponseHead {
   version: Version,
-  status: StatusCode,
-  headers: Vec<(HeaderName, HeaderValue)>,
-}
-
-enum ResponseBodyMode {
-  None,
-  ContentLength(u64),
-  Chunked,
-  UntilClose,
-}
-
-struct ParsedResponse {
-  head: ResponseHead,
-  body_mode: ResponseBodyMode,
-  initial_body: Vec<u8>,
+  status: http::StatusCode,
+  headers: HeaderMap,
+  interim: InterimResponses,
 }
 
 pub(super) async fn send_prepared_request(
@@ -61,10 +64,13 @@ pub(super) async fn send_prepared_request(
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
   timeouts: EffectiveTimeouts,
+  early_hints_mode: EarlyHintsMode,
   metric_options: DirectH1SendMetricOptions,
 ) -> anyhow::Result<DirectH1Response> {
   let request = prepared.into_request();
   let (body_sender, body) = body::channel_body(BODY_CHANNEL_CAPACITY);
+  let (cancellation, cancellation_guard) = CancellationToken::pair();
+  let body = body::with_drop_guard(body, cancellation_guard);
   let (head_sender, head_receiver) = oneshot::channel();
   tokio::task::spawn_blocking(move || {
     run_compio_transaction(
@@ -73,7 +79,9 @@ pub(super) async fn send_prepared_request(
       protocol,
       request,
       timeouts,
+      early_hints_mode,
       metric_options,
+      cancellation,
       head_sender,
       body_sender,
     );
@@ -96,50 +104,60 @@ fn run_compio_transaction(
   protocol: FastPathMetricProtocol,
   request: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
+  early_hints_mode: EarlyHintsMode,
   metric_options: DirectH1SendMetricOptions,
+  cancellation: CancellationToken,
   head_sender: oneshot::Sender<anyhow::Result<ResponseHead>>,
   body_sender: mpsc::Sender<ProxyBodyFrame>,
 ) {
-  let result = run_compio_until_head(&pool, &metrics, protocol, request, timeouts, metric_options);
-  let (mut driver, fd, parsed) = match result {
-    Ok(parsed) => parsed,
-    Err(error) => {
-      let _ = head_sender.send(Err(error));
-      return;
-    }
-  };
-
-  if head_sender.send(Ok(parsed.head)).is_err() {
-    return;
-  }
-
-  let body_result = stream_response_body(
-    &mut driver,
-    &fd,
-    parsed.initial_body,
-    parsed.body_mode,
-    timeouts.upstream_read,
+  let mut head_sender = Some(head_sender);
+  let result = run_compio_transaction_inner(
+    &pool,
+    &metrics,
+    protocol,
+    request,
+    timeouts,
+    early_hints_mode,
+    metric_options,
+    &cancellation,
+    &mut head_sender,
     &body_sender,
   );
-  if let Err(error) = body_result {
-    send_body_error(&body_sender, error);
+  if let Err(error) = result {
+    if let Some(head_sender) = head_sender {
+      let _ = head_sender.send(Err(error));
+    } else if !cancellation.is_cancelled() {
+      send_body_error(&body_sender, error);
+    }
   }
 }
 
-fn run_compio_until_head(
+#[allow(clippy::too_many_arguments)]
+fn run_compio_transaction_inner(
   pool: &DirectH1Pool,
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   request: Request<ProxyBody>,
   timeouts: EffectiveTimeouts,
+  early_hints_mode: EarlyHintsMode,
   metric_options: DirectH1SendMetricOptions,
-) -> anyhow::Result<(Proactor, SharedFd<TcpStream>, ParsedResponse)> {
+  cancellation: &CancellationToken,
+  head_sender: &mut Option<oneshot::Sender<anyhow::Result<ResponseHead>>>,
+  body_sender: &mpsc::Sender<ProxyBodyFrame>,
+) -> anyhow::Result<()> {
   let mut driver = Proactor::new()
     .context("failed to build Compio direct H1 proactor")
     .map_err(DirectH1TransportError::connect)?;
+  cancellation.install_driver_waker(driver.waker());
+  let limits = ResponseProtocolLimits::default();
+  let mut engine = ResponseProtocolEngine::new(request.method().clone(), limits)
+    .context("default direct H1 response limits are invalid")?;
+  if cancellation.is_cancelled() {
+    return Err(cancellation_failure(metrics, protocol, &engine));
+  }
+
   let connect_started = timing::start(metric_options.timing_enabled);
-  let fd = connect_upstream(&mut driver, pool, timeouts.upstream_connect)
-    .map_err(DirectH1TransportError::connect);
+  let fd = connect_upstream(&mut driver, pool, timeouts.upstream_connect, cancellation);
   timing::record_metrics_plain_result(
     metrics,
     protocol,
@@ -147,15 +165,36 @@ fn run_compio_until_head(
     fd.is_ok(),
     connect_started,
   );
-  let fd = fd?;
+  let fd = match fd {
+    Ok(fd) => fd,
+    Err(error)
+      if error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted) =>
+    {
+      return Err(cancellation_failure_with_source(
+        metrics, protocol, &engine, error,
+      ));
+    }
+    Err(error) => return Err(DirectH1TransportError::connect(error)),
+  };
   if metric_options.hot_path_metrics {
     metrics.record_http_upstream_h1_http_primary_connection_created();
+  }
+  if cancellation.is_cancelled() {
+    return Err(cancellation_failure(metrics, protocol, &engine));
   }
 
   let serialized = serialize_empty_h1_request(&request).map_err(DirectH1TransportError::send)?;
   let request_started = timing::start(metric_options.timing_enabled);
   let submit_started = timing::start(metric_options.timing_enabled);
-  let write_result = send_all(&mut driver, &fd, &serialized, timeouts.upstream_send);
+  let write_result = send_all(
+    &mut driver,
+    &fd,
+    &serialized,
+    timeouts.upstream_send,
+    cancellation,
+  );
   timing::record_metrics_plain_result(
     metrics,
     protocol,
@@ -163,40 +202,180 @@ fn run_compio_until_head(
     write_result.is_ok(),
     submit_started,
   );
-  write_result
-    .map_err(anyhow::Error::new)
-    .map_err(DirectH1TransportError::send)?;
+  if let Err(error) = write_result {
+    if error.kind() == io::ErrorKind::Interrupted {
+      return Err(cancellation_failure(metrics, protocol, &engine));
+    }
+    return Err(DirectH1TransportError::send(error.into()));
+  }
 
   let response_head_started = timing::start(metric_options.timing_enabled);
-  let parsed = read_response_head(
-    &mut driver,
-    &fd,
-    request.method(),
-    timeouts.upstream_first_byte,
-  );
-  let success = parsed.is_ok();
-  timing::record_metrics_plain_result(
-    metrics,
-    protocol,
-    timing::STAGE_DIRECT_H1_RESPONSE_HEAD,
-    success,
-    response_head_started,
-  );
-  timing::record_metrics_plain_result(
-    metrics,
-    protocol,
-    timing::STAGE_DIRECT_H1_SEND_REQUEST,
-    success,
-    request_started,
-  );
-  let parsed = parsed.map_err(DirectH1TransportError::send)?;
-  Ok((driver, fd, parsed))
+  let first_head_deadline = deadline(timeouts.upstream_first_byte);
+  let mut pending = BytesMut::with_capacity(RESPONSE_IO_BUFFER_BYTES);
+  let mut interim = InterimResponses::default();
+  let mut eof = false;
+  let mut head_delivered = false;
+
+  let result = loop {
+    let step = match engine.decode(&mut pending, eof) {
+      Ok(step) => step,
+      Err(error) => break Err(protocol_failure(metrics, protocol, error)),
+    };
+    match step {
+      ResponseStep::Event(ResponseEvent::InterimHead { status, headers }) => {
+        let _ = capture_early_hint(
+          &mut interim,
+          early_hints_mode,
+          status,
+          &headers,
+          limits.max_interim_responses,
+        );
+      }
+      ResponseStep::Event(ResponseEvent::FinalHead {
+        version,
+        status,
+        headers,
+        body_mode,
+      }) => {
+        debug_assert!(response_body_mode_matches_state(body_mode, &engine.state()));
+        let response_head = ResponseHead {
+          version,
+          status,
+          headers,
+          interim: std::mem::take(&mut interim),
+        };
+        let Some(sender) = head_sender.take() else {
+          break Err(cancellation_failure(metrics, protocol, &engine));
+        };
+        if sender.send(Ok(response_head)).is_err() {
+          break Err(cancellation_failure(metrics, protocol, &engine));
+        }
+        head_delivered = true;
+        timing::record_metrics_plain_result(
+          metrics,
+          protocol,
+          timing::STAGE_DIRECT_H1_RESPONSE_HEAD,
+          true,
+          response_head_started,
+        );
+        timing::record_metrics_plain_result(
+          metrics,
+          protocol,
+          timing::STAGE_DIRECT_H1_SEND_REQUEST,
+          true,
+          request_started,
+        );
+      }
+      ResponseStep::Event(ResponseEvent::Body(bytes)) => {
+        if let Err(error) = send_body_data(body_sender, bytes) {
+          break Err(cancellation_failure_with_source(
+            metrics, protocol, &engine, error,
+          ));
+        }
+      }
+      ResponseStep::Event(ResponseEvent::Trailers(trailers)) => {
+        if let Err(error) = send_body_trailers(body_sender, trailers) {
+          break Err(cancellation_failure_with_source(
+            metrics, protocol, &engine, error,
+          ));
+        }
+      }
+      ResponseStep::Event(ResponseEvent::Complete) => break Ok(()),
+      ResponseStep::NeedInput => {
+        if eof {
+          break Err(protocol_failure(
+            metrics,
+            protocol,
+            ResponseProtocolError::new(
+              ResponseProtocolFailureReason::UnexpectedEof,
+              engine.state_label(),
+            ),
+          ));
+        }
+        if cancellation.is_cancelled() {
+          break Err(cancellation_failure(metrics, protocol, &engine));
+        }
+        let read_timeout = match response_read_timeout(
+          head_delivered,
+          first_head_deadline,
+          timeouts.upstream_read,
+        ) {
+          Ok(timeout) => timeout,
+          Err(error) => break Err(timeout_failure(metrics, protocol, &engine, error)),
+        };
+        let read_capacity = next_read_capacity(&engine, pending.len());
+        let bytes = match recv_once(&mut driver, &fd, read_capacity, read_timeout, cancellation) {
+          Ok(bytes) => bytes,
+          Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            break Err(cancellation_failure_with_source(
+              metrics, protocol, &engine, error,
+            ));
+          }
+          Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            break Err(timeout_failure(metrics, protocol, &engine, error));
+          }
+          Err(error) => {
+            let protocol_error = ResponseProtocolError::new(
+              ResponseProtocolFailureReason::UnexpectedEof,
+              engine.state_label(),
+            );
+            break Err(protocol_failure_with_source(
+              metrics,
+              protocol,
+              protocol_error,
+              error,
+            ));
+          }
+        };
+        if bytes.is_empty() {
+          eof = true;
+        } else {
+          pending.extend_from_slice(&bytes);
+        }
+      }
+    }
+  };
+
+  if result.is_err() && !head_delivered {
+    timing::record_metrics_plain_result(
+      metrics,
+      protocol,
+      timing::STAGE_DIRECT_H1_RESPONSE_HEAD,
+      false,
+      response_head_started,
+    );
+    timing::record_metrics_plain_result(
+      metrics,
+      protocol,
+      timing::STAGE_DIRECT_H1_SEND_REQUEST,
+      false,
+      request_started,
+    );
+  }
+  result
+}
+
+fn response_body_mode_matches_state(mode: ResponseBodyMode, state: &ResponseState) -> bool {
+  matches!(
+    (mode, state),
+    (ResponseBodyMode::None, ResponseState::Completed)
+      | (
+        ResponseBodyMode::ContentLength(_),
+        ResponseState::FixedLength { .. }
+      )
+      | (ResponseBodyMode::Chunked, ResponseState::ChunkSizeLine)
+      | (
+        ResponseBodyMode::CloseDelimited,
+        ResponseState::CloseDelimited
+      )
+  )
 }
 
 fn connect_upstream(
   driver: &mut Proactor,
   pool: &DirectH1Pool,
   timeout: Duration,
+  cancellation: &CancellationToken,
 ) -> anyhow::Result<SharedFd<TcpStream>> {
   let mut last_error = None;
   let addrs = (pool.origin.host.as_str(), pool.origin.port)
@@ -208,8 +387,14 @@ fn connect_upstream(
       )
     })?;
   for addr in addrs {
+    if cancellation.is_cancelled() {
+      return Err(cancelled_io_error().into());
+    }
     match TcpStream::connect_timeout(&addr, timeout) {
       Ok(stream) => {
+        if cancellation.is_cancelled() {
+          return Err(cancelled_io_error().into());
+        }
         stream
           .set_nodelay(true)
           .context("failed to enable TCP_NODELAY for compio direct H1 upstream")?;
@@ -264,6 +449,7 @@ fn send_all(
   fd: &SharedFd<TcpStream>,
   bytes: &[u8],
   timeout: Duration,
+  cancellation: &CancellationToken,
 ) -> io::Result<()> {
   let deadline = deadline(timeout);
   let mut written = 0;
@@ -274,6 +460,7 @@ fn send_all(
       driver,
       Send::new(fd.clone(), buffer, SendFlags::empty()),
       remaining,
+      cancellation,
     )?;
     if count == 0 {
       return Err(io::Error::new(
@@ -289,310 +476,68 @@ fn send_all(
 fn recv_once(
   driver: &mut Proactor,
   fd: &SharedFd<TcpStream>,
+  capacity: usize,
   timeout: Duration,
+  cancellation: &CancellationToken,
 ) -> io::Result<Vec<u8>> {
-  let buffer = vec![0; RESPONSE_IO_BUFFER_BYTES];
+  let buffer = vec![0; capacity.max(1)];
   let (count, op) = push_and_wait(
     driver,
     Recv::new(fd.clone(), buffer, RecvFlags::empty()),
     timeout,
+    cancellation,
   )?;
   let mut buffer = op.into_inner();
   buffer.truncate(count);
   Ok(buffer)
 }
 
-fn read_response_head(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  request_method: &Method,
-  timeout: Duration,
-) -> anyhow::Result<ParsedResponse> {
-  let end = deadline(timeout);
-  let mut buffer = Vec::with_capacity(RESPONSE_IO_BUFFER_BYTES);
-  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
-  loop {
-    if let Some(head_end) = response_header_end(&mut delimiter_search, &buffer) {
-      return parse_response(buffer, head_end, request_method);
+fn next_read_capacity(engine: &ResponseProtocolEngine, pending_len: usize) -> usize {
+  let limits = engine.limits();
+  match engine.state() {
+    ResponseState::ReadingHead
+    | ResponseState::ProcessingInterim
+    | ResponseState::WaitingForFinalHead => limits
+      .max_response_head_bytes
+      .saturating_sub(pending_len)
+      .max(1),
+    ResponseState::ChunkSizeLine => limits
+      .max_chunk_size_line_bytes
+      .saturating_add(2)
+      .saturating_sub(pending_len)
+      .max(1),
+    ResponseState::ChunkTerminator => 2usize.saturating_sub(pending_len).max(1),
+    ResponseState::Trailers => limits
+      .max_trailer_block_bytes
+      .saturating_sub(pending_len)
+      .max(1),
+    ResponseState::FixedLength { remaining } | ResponseState::ChunkData { remaining } => {
+      usize::try_from(remaining)
+        .unwrap_or(usize::MAX)
+        .clamp(1, RESPONSE_IO_BUFFER_BYTES)
     }
-    if buffer.len() >= RESPONSE_HEAD_BUFFER_LIMIT {
-      bail!("compio direct H1 response head exceeded {RESPONSE_HEAD_BUFFER_LIMIT} bytes");
-    }
-    let chunk = recv_once(driver, fd, remaining_timeout(end)?)
-      .context("failed to read compio direct H1 response head")?;
-    if chunk.is_empty() {
-      bail!("compio direct H1 upstream closed before response head");
-    }
-    buffer.extend_from_slice(&chunk);
+    ResponseState::CloseDelimited => RESPONSE_IO_BUFFER_BYTES,
+    ResponseState::Completed | ResponseState::FailedNonReusable => 1,
   }
 }
 
-fn parse_response(
-  buffer: Vec<u8>,
-  head_end: usize,
-  request_method: &Method,
-) -> anyhow::Result<ParsedResponse> {
-  let mut parsed_headers = [httparse::EMPTY_HEADER; MAX_RESPONSE_HEADERS];
-  let mut response = httparse::Response::new(&mut parsed_headers);
-  let status = match response.parse(&buffer[..head_end])? {
-    httparse::Status::Complete(_) => response.code.context("upstream response omitted status")?,
-    httparse::Status::Partial => bail!("partial response head after delimiter"),
-  };
-  let version = match response.version {
-    Some(0) => Version::HTTP_10,
-    Some(1) => Version::HTTP_11,
-    _ => bail!("unsupported upstream HTTP response version"),
-  };
-  let headers = response
-    .headers
-    .iter()
-    .map(|header| {
-      let name = HeaderName::from_bytes(header.name.as_bytes())
-        .context("upstream response header name is invalid")?;
-      let value = HeaderValue::from_bytes(header.value)
-        .context("upstream response header value is invalid")?;
-      Ok((name, value))
-    })
-    .collect::<anyhow::Result<Vec<_>>>()?;
-  let status = StatusCode::from_u16(status).context("upstream response status is invalid")?;
-  let body_mode = response_body_mode(request_method, status, &headers)?;
-  Ok(ParsedResponse {
-    head: ResponseHead {
-      version,
-      status,
-      headers,
-    },
-    body_mode,
-    initial_body: buffer[head_end..].to_vec(),
-  })
+fn response_read_timeout(
+  head_delivered: bool,
+  first_head_deadline: Instant,
+  idle_timeout: Duration,
+) -> io::Result<Duration> {
+  if head_delivered {
+    return Ok(idle_timeout);
+  }
+  Ok(idle_timeout.min(remaining_timeout(first_head_deadline)?))
 }
 
-fn response_body_mode(
-  request_method: &Method,
-  status: StatusCode,
-  headers: &[(HeaderName, HeaderValue)],
-) -> anyhow::Result<ResponseBodyMode> {
-  if request_method == Method::HEAD
-    || status.is_informational()
-    || status == StatusCode::NO_CONTENT
-    || status == StatusCode::NOT_MODIFIED
-  {
-    return Ok(ResponseBodyMode::None);
-  }
-  let chunked = transfer_encoding_is_chunked(headers);
-  let length = content_length(headers)?;
-  if chunked {
-    if length.is_some() {
-      bail!("ambiguous upstream response framing: transfer-encoding chunked with content-length");
-    }
-    return Ok(ResponseBodyMode::Chunked);
-  }
-  if let Some(length) = length {
-    return Ok(ResponseBodyMode::ContentLength(length));
-  }
-  Ok(ResponseBodyMode::UntilClose)
-}
-
-fn transfer_encoding_is_chunked(headers: &[(HeaderName, HeaderValue)]) -> bool {
-  headers
-    .iter()
-    .filter(|(name, _)| name == TRANSFER_ENCODING)
-    .any(|(_, value)| {
-      value
-        .as_bytes()
-        .split(|byte| *byte == b',')
-        .filter_map(|part| std::str::from_utf8(part).ok())
-        .any(|part| part.trim().eq_ignore_ascii_case("chunked"))
-    })
-}
-
-fn content_length(headers: &[(HeaderName, HeaderValue)]) -> anyhow::Result<Option<u64>> {
-  let mut observed = None;
-  for (_, value) in headers.iter().filter(|(name, _)| name == CONTENT_LENGTH) {
-    let parsed = std::str::from_utf8(value.as_bytes())
-      .context("content-length is not utf-8")?
-      .trim()
-      .parse::<u64>()
-      .context("content-length is not an integer")?;
-    if observed.is_some_and(|existing| existing != parsed) {
-      bail!("conflicting content-length headers");
-    }
-    observed = Some(parsed);
-  }
-  Ok(observed)
-}
-
-fn stream_response_body(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  initial_body: Vec<u8>,
-  mode: ResponseBodyMode,
-  timeout: Duration,
-  sender: &mpsc::Sender<ProxyBodyFrame>,
-) -> anyhow::Result<()> {
-  match mode {
-    ResponseBodyMode::None => Ok(()),
-    ResponseBodyMode::ContentLength(length) => {
-      stream_content_length(driver, fd, initial_body, length, timeout, sender)
-    }
-    ResponseBodyMode::Chunked => stream_chunked(driver, fd, initial_body, timeout, sender),
-    ResponseBodyMode::UntilClose => stream_until_close(driver, fd, initial_body, timeout, sender),
-  }
-}
-
-fn stream_content_length(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  mut pending: Vec<u8>,
-  length: u64,
-  timeout: Duration,
-  sender: &mpsc::Sender<ProxyBodyFrame>,
-) -> anyhow::Result<()> {
-  let mut remaining = usize::try_from(length).context("content-length does not fit usize")?;
-  while remaining > 0 {
-    if pending.is_empty() {
-      pending = recv_once(driver, fd, timeout).context("failed to read response body")?;
-      if pending.is_empty() {
-        bail!("upstream closed before content-length response body completed");
-      }
-    }
-    let take = remaining.min(pending.len());
-    send_body_data(sender, pending[..take].to_vec())?;
-    pending.drain(..take);
-    remaining -= take;
-  }
-  Ok(())
-}
-
-fn stream_until_close(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  pending: Vec<u8>,
-  timeout: Duration,
-  sender: &mpsc::Sender<ProxyBodyFrame>,
-) -> anyhow::Result<()> {
-  send_body_data(sender, pending)?;
-  loop {
-    let chunk = recv_once(driver, fd, timeout).context("failed to read response body")?;
-    if chunk.is_empty() {
-      return Ok(());
-    }
-    send_body_data(sender, chunk)?;
-  }
-}
-
-fn stream_chunked(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  mut pending: Vec<u8>,
-  timeout: Duration,
-  sender: &mpsc::Sender<ProxyBodyFrame>,
-) -> anyhow::Result<()> {
-  loop {
-    let line = read_chunk_line(driver, fd, &mut pending, timeout)?;
-    let size = parse_chunk_size(&line)?;
-    if size == 0 {
-      read_chunk_trailers(driver, fd, &mut pending, timeout, sender)?;
-      return Ok(());
-    }
-    let mut remaining = size;
-    while remaining > 0 {
-      if pending.is_empty() {
-        pending = recv_once(driver, fd, timeout).context("failed to read chunk body")?;
-        if pending.is_empty() {
-          bail!("upstream closed before chunk completed");
-        }
-      }
-      let take = remaining.min(pending.len());
-      send_body_data(sender, pending[..take].to_vec())?;
-      pending.drain(..take);
-      remaining -= take;
-    }
-    read_exact_discard(driver, fd, &mut pending, 2, timeout)?;
-  }
-}
-
-fn read_chunk_trailers(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  pending: &mut Vec<u8>,
-  timeout: Duration,
-  sender: &mpsc::Sender<ProxyBodyFrame>,
-) -> anyhow::Result<()> {
-  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
-  loop {
-    if let Some(end) = trailer_end(&mut delimiter_search, pending) {
-      let trailers = parse_trailers(&pending[..end])?;
-      pending.drain(..end);
-      send_body_trailers(sender, trailers)?;
-      return Ok(());
-    }
-    let chunk = recv_once(driver, fd, timeout).context("failed to read chunk trailers")?;
-    if chunk.is_empty() {
-      bail!("upstream closed before chunk trailers completed");
-    }
-    pending.extend_from_slice(&chunk);
-  }
-}
-
-fn read_chunk_line(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  pending: &mut Vec<u8>,
-  timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
-  let mut delimiter_search = AppendOnlyDelimiterSearch::default();
-  loop {
-    if let Some(line_end) = crlf(&mut delimiter_search, pending) {
-      let line = pending[..line_end].to_vec();
-      pending.drain(..line_end + 2);
-      return Ok(line);
-    }
-    let chunk = recv_once(driver, fd, timeout).context("failed to read chunk line")?;
-    if chunk.is_empty() {
-      bail!("upstream closed before chunk line completed");
-    }
-    pending.extend_from_slice(&chunk);
-  }
-}
-
-fn read_exact_discard(
-  driver: &mut Proactor,
-  fd: &SharedFd<TcpStream>,
-  pending: &mut Vec<u8>,
-  len: usize,
-  timeout: Duration,
-) -> anyhow::Result<()> {
-  while pending.len() < len {
-    let chunk = recv_once(driver, fd, timeout).context("failed to read chunk delimiter")?;
-    if chunk.is_empty() {
-      bail!("upstream closed before chunk delimiter completed");
-    }
-    pending.extend_from_slice(&chunk);
-  }
-  if &pending[..len] != b"\r\n" {
-    bail!("invalid chunk delimiter");
-  }
-  pending.drain(..len);
-  Ok(())
-}
-
-fn parse_chunk_size(line: &[u8]) -> anyhow::Result<usize> {
-  let size = line
-    .split(|byte| *byte == b';')
-    .next()
-    .unwrap_or(line)
-    .trim_ascii();
-  let size = std::str::from_utf8(size).context("chunk size is not utf-8")?;
-  usize::from_str_radix(size, 16).context("chunk size is invalid")
-}
-
-fn send_body_data(sender: &mpsc::Sender<ProxyBodyFrame>, bytes: Vec<u8>) -> anyhow::Result<()> {
+fn send_body_data(sender: &mpsc::Sender<ProxyBodyFrame>, bytes: Bytes) -> anyhow::Result<()> {
   if bytes.is_empty() {
     return Ok(());
   }
   sender
-    .blocking_send(Ok(Frame::data(Bytes::from(bytes))))
+    .blocking_send(Ok(Frame::data(bytes)))
     .map_err(|_| anyhow::anyhow!("downstream response body receiver dropped"))
 }
 
@@ -613,58 +558,54 @@ fn send_body_error(sender: &mpsc::Sender<ProxyBodyFrame>, error: anyhow::Error) 
   let _ = sender.blocking_send(Err(error));
 }
 
-fn parse_trailers(bytes: &[u8]) -> anyhow::Result<HeaderMap> {
-  if bytes == b"\r\n" {
-    return Ok(HeaderMap::new());
-  }
-  let mut trailers = HeaderMap::new();
-  let header_bytes = bytes
-    .strip_suffix(b"\r\n")
-    .context("chunk trailers missing final CRLF")?;
-  for line in header_bytes.split(|byte| *byte == b'\n') {
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    if line.is_empty() {
-      continue;
-    }
-    let Some(colon) = memchr::memchr(b':', line) else {
-      bail!("chunk trailer omitted ':' separator");
-    };
-    let name = HeaderName::from_bytes(&line[..colon]).context("chunk trailer name is invalid")?;
-    let value = trim_header_value(&line[colon + 1..]);
-    let value = HeaderValue::from_bytes(value).context("chunk trailer value is invalid")?;
-    trailers.append(name, value);
-  }
-  Ok(trailers)
-}
-
-fn trim_header_value(bytes: &[u8]) -> &[u8] {
-  let start = bytes
-    .iter()
-    .position(|byte| *byte != b' ' && *byte != b'\t')
-    .unwrap_or(bytes.len());
-  let end = bytes
-    .iter()
-    .rposition(|byte| *byte != b' ' && *byte != b'\t')
-    .map(|index| index + 1)
-    .unwrap_or(start);
-  &bytes[start..end]
-}
-
-fn push_and_wait<O>(driver: &mut Proactor, op: O, timeout: Duration) -> io::Result<(usize, O)>
+fn push_and_wait<O>(
+  driver: &mut Proactor,
+  op: O,
+  timeout: Duration,
+  cancellation: &CancellationToken,
+) -> io::Result<(usize, O)>
 where
   O: OpCode + 'static,
 {
+  if cancellation.is_cancelled() {
+    return Err(cancelled_io_error());
+  }
   let end = deadline(timeout);
   match driver.push(op) {
     PushEntry::Ready(result) => result_parts(result),
     PushEntry::Pending(mut key) => loop {
-      driver.poll(Some(remaining_timeout(end)?))?;
+      if cancellation.is_cancelled() {
+        let _ = driver.cancel(key);
+        return Err(cancelled_io_error());
+      }
+      let remaining = match remaining_timeout(end) {
+        Ok(remaining) => remaining,
+        Err(error) => {
+          let _ = driver.cancel(key);
+          return Err(error);
+        }
+      };
+      if let Err(error) = driver.poll(Some(remaining)) {
+        let _ = driver.cancel(key);
+        return Err(error);
+      }
+      if cancellation.is_cancelled() {
+        let _ = driver.cancel(key);
+        return Err(cancelled_io_error());
+      }
       match driver.pop(key) {
         PushEntry::Ready(result) => return result_parts(result),
         PushEntry::Pending(pending) => key = pending,
       }
     },
   }
+}
+
+fn cancelled_io_error() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::Interrupted,
+    "compio direct H1 operation cancelled by downstream",
+  )
 }
 
 fn result_parts<O>(result: BufResult<usize, O>) -> io::Result<(usize, O)> {
@@ -696,9 +637,8 @@ impl ResponseHead {
       .status(self.status)
       .body(body)
       .context("failed to build compio direct H1 response")?;
-    for (name, value) in self.headers {
-      response.headers_mut().append(name, value);
-    }
+    *response.headers_mut() = self.headers;
+    attach_interim_responses(&mut response, self.interim);
     Ok(response)
   }
 }

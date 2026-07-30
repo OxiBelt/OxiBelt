@@ -41,8 +41,8 @@ read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
 worker_threads = "auto"
-main_runtime = "compio" # compio | tokio_hyper | auto
-direct_h1_io = "compio" # auto | tokio_hyper | compio
+main_runtime = "tokio_hyper" # compio | tokio_hyper | auto
+direct_h1_io = "auto" # auto | tokio_hyper | compio
 
 [runtime.worker_multipliers]
 runtime = 1.0

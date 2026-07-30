@@ -75,6 +75,7 @@ pub(super) async fn attempt_direct_transport(
       !state.overload.retries_disabled() && state.overload.retry_budget_multiplier() >= 1.0,
       Some(state.overload.clone()),
       state.effective_direct_h1_io,
+      state.config.proxy.http.early_hints,
       outbound,
       timeouts,
       state.request_path_features.hot_path_metrics,

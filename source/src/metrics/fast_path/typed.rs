@@ -1,12 +1,14 @@
 //! Typed fast-path metric recorders used by hot call sites.
 
 use super::labels::{
-  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, FastPathMetricOutcome,
-  FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage, FastPathMetricTransport,
-  FastPathPlainProxyMissReason, FastPathRequestBodyOutcome, FastPathTransportMissReason,
+  DirectH1IoBackend, DirectH1IoBackendOutcome, DirectH1PoolEvent, DirectH1ResponseProtocolFailure,
+  FastPathMetricOutcome, FastPathMetricPath, FastPathMetricProtocol, FastPathMetricStage,
+  FastPathMetricTransport, FastPathPlainProxyMissReason, FastPathRequestBodyOutcome,
+  FastPathTransportMissReason,
 };
 use super::{
-  FastPathMetrics, OUTCOMES_PER_PROTOCOL, direct_h1_io, transport_counter_index_by_parts,
+  FastPathMetrics, OUTCOMES_PER_PROTOCOL, direct_h1_io, direct_h1_response_protocol_counter_index,
+  transport_counter_index_by_parts,
 };
 
 impl FastPathMetrics {
@@ -59,6 +61,16 @@ impl FastPathMetrics {
 
   pub(super) fn record_direct_h1_pool_event_id(&self, event: DirectH1PoolEvent) {
     self.direct_h1_pool_counters[event.index()].increment();
+  }
+
+  pub(super) fn record_direct_h1_response_protocol_failure_id(
+    &self,
+    protocol: FastPathMetricProtocol,
+    reason: DirectH1ResponseProtocolFailure,
+  ) {
+    self.direct_h1_response_protocol_counters
+      [direct_h1_response_protocol_counter_index(protocol, reason)]
+    .increment();
   }
 
   pub(super) fn record_direct_h1_io_backend_id(

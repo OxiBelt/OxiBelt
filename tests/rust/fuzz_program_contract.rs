@@ -9,6 +9,7 @@ const EXPECTED_TARGETS: &[&str] = &[
   "admin_mutation_envelope",
   "cache_metadata_key",
   "cluster_rollout_state",
+  "compio_h1_response",
   "gateway_api_translation",
   "http3_webtransport",
   "http_body_coding",
@@ -198,7 +199,7 @@ fn catalog_defines_the_complete_bounded_program() {
   assert_eq!(
     targets.keys().cloned().collect::<BTreeSet<_>>(),
     string_set(EXPECTED_TARGETS.iter().copied()),
-    "the fuzz catalog must preserve all sixteen Phase 10 targets"
+    "the fuzz catalog must preserve all seventeen registered targets"
   );
 
   assert_eq!(table_integer(&program, "max_seed_files_per_target"), 128);
@@ -504,6 +505,48 @@ fn reviewed_seeds_are_complete_bounded_and_non_secret() {
   assert_eq!(
     actual, paths,
     "every reviewed seed file must have manifest provenance"
+  );
+}
+
+#[test]
+fn compio_h1_response_target_preserves_structured_bounds() {
+  let (_, targets) = catalog();
+  let target = targets
+    .get("compio_h1_response")
+    .expect("Compio response target should be registered");
+  assert_eq!(
+    target.max_input_bytes, 131_072,
+    "response bytes must remain bounded at the catalog boundary"
+  );
+  assert!(
+    target
+      .input_contract
+      .contains("thirty-two fragmentation sizes")
+      && target.input_contract.contains("nine selectors"),
+    "the catalog must document both structured fragmentation and limit inputs"
+  );
+
+  let wrapper = read_repo_file("fuzz/fuzz_targets/compio_h1_response.rs");
+  for required in [
+    "struct CompioH1ResponseInput",
+    "const LIMIT_SELECTOR_COUNT: usize = 9;",
+    "const MAX_FRAGMENT_SIZES: usize = 32;",
+    "limit_selectors: [u8; LIMIT_SELECTOR_COUNT]",
+    "exercise_compio_h1_response(",
+  ] {
+    assert!(
+      wrapper.contains(required),
+      "Compio response wrapper must preserve structured bound `{required}`"
+    );
+  }
+
+  let seed_count = seed_manifest()
+    .iter()
+    .filter(|seed| seed.target == "compio_h1_response")
+    .count();
+  assert_eq!(
+    seed_count, 3,
+    "the Compio response target must retain three reviewed framing seeds"
   );
 }
 
