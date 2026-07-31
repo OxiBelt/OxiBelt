@@ -2560,7 +2560,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind create cluster",
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
-    "registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d",
+    "registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66",
     "redis_source_image=\"valkey/valkey:9-alpine@sha256:3fe38a705227d29534a199e876b38d5474dec4d3baca980ac6894df539416562\"",
     "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
     "redis_kind_image=\"oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
@@ -3631,7 +3631,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--label \"oxibelt.network-policy-test=${run_id}\"",
     "\"${script_dir}/retry-docker-pull.sh\" \"${agnhost_image}\"",
     "--pull=never",
-    "registry.k8s.io/e2e-test-images/agnhost:2.52@sha256:",
+    "registry.k8s.io/e2e-test-images/agnhost:2.61@sha256:",
     "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
     "registry.k8s.io/coredns/coredns:v1.14.6@sha256:",
     "minikube delete --profile \"${profile_name}\"",
@@ -6844,10 +6844,10 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   );
   assert_eq!(
     workflow
-      .matches("actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0")
+      .matches("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1")
       .count()
       + arch_workflow
-        .matches("actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0")
+        .matches("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1")
         .count(),
     6
   );
@@ -6907,7 +6907,7 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "packages: read",
     "Validate immutable platform attestation subject",
     "canonical platform tag ${canonical_tag} resolved to ${resolved_digest}, expected ${DIGEST}",
-    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
     "Publish signed platform provenance",
     "Publish signed platform SBOM",
     "Publish signed platform rebuild recipe",
@@ -7003,7 +7003,7 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "packages: read",
     "Validate immutable index attestation subject",
     "[.children[].artifactArch] == [\"amd64\", \"arm64\", \"riscv64\"]",
-    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
     "Publish signed index provenance",
     "Publish signed index SBOM",
     "Publish signed index rebuild recipe",
@@ -7134,7 +7134,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
-    "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
     "https://oxibelt.dev/attestations/rebuild/v1",
     "rebuild_recipe.mjs",
     "push-to-registry: false",
@@ -7210,7 +7210,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "expected_count=30",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.6.2",
+    "version: v29.7.0",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
@@ -7663,17 +7663,17 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
       && dockerfile.contains(
         "ARG WRK_SHA256=172dd2788b22b210d37a68f11c91e82fdba6583d2a544f04b398a66507031229"
       )
-      && dockerfile.contains("ARG NGHTTP2_VERSION=1.69.0")
+      && dockerfile.contains("ARG NGHTTP2_VERSION=1.70.0")
       && dockerfile.contains(
-        "ARG NGHTTP2_SHA256=1fb324b6ec2c56f6bde0658f4139ffd8209fa9e77ce98fd7a5f63af8d0e508ad"
+        "ARG NGHTTP2_SHA256=e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2"
       )
-      && dockerfile.contains("ARG NGHTTP3_VERSION=1.17.0")
+      && dockerfile.contains("ARG NGHTTP3_VERSION=1.18.0")
       && dockerfile.contains(
-        "ARG NGHTTP3_SHA256=e8b798272b9282045cb83577dcf7bd7fcd22bb3a43aec0eb1a24f675b4cef0b8"
+        "ARG NGHTTP3_SHA256=aad782c23d3f01bd4bb52c8bac7a553b631ef8115fd1612703df6183449fef19"
       )
-      && dockerfile.contains("ARG NGTCP2_VERSION=1.24.0")
+      && dockerfile.contains("ARG NGTCP2_VERSION=1.25.0")
       && dockerfile.contains(
-        "ARG NGTCP2_SHA256=7fa5ec2be0f0cbed8bc4ec89c0787dfa9d8ce678f1ed9477c52f30eb1a591207"
+        "ARG NGTCP2_SHA256=2a34d2484ba17847a5d11965704e9dd0fac4c6d8efc75ffe1ec7de66d8c6b6fb"
       )
       && dockerfile.matches("sha256sum -c -").count() == 4
       && dockerfile.contains("./configure --prefix=/opt/nghttp2 --enable-app --enable-http3")

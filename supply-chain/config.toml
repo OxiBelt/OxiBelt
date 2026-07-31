@@ -567,10 +567,6 @@ version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.granit-parser]]
-version = "0.0.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.granit-parser]]
 version = "0.0.7"
 criteria = "safe-to-deploy"
 
@@ -779,7 +775,7 @@ version = "4.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.kube-client]]
-version = "4.0.0"
+version = "4.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.kube-core]]
@@ -1188,10 +1184,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sequoia-openpgp]]
 version = "2.4.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.serde-saphyr]]
-version = "0.0.27"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde-saphyr]]

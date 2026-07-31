@@ -1332,7 +1332,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: echo
-        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66
         imagePullPolicy: IfNotPresent
         env:
         - { name: TCP_ECHO_SERVER, value: "1" }
@@ -1369,7 +1369,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: echo
-        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66
         imagePullPolicy: IfNotPresent
         env:
         - { name: UDP_ECHO_SERVER, value: "1" }
@@ -1836,7 +1836,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: echo
-        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66
         imagePullPolicy: IfNotPresent
         env:
         - { name: TCP_ECHO_SERVER, value: "1" }
@@ -1873,7 +1873,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: echo
-        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66
         imagePullPolicy: IfNotPresent
         env:
         - { name: UDP_ECHO_SERVER, value: "1" }
@@ -1911,7 +1911,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: echo
-        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0-dev.2@sha256:5dd376a93d8ec7cb8c15b46973bdb1c686db48135058d2606f2e0cf30f8dd63d
+        image: registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66
         imagePullPolicy: IfNotPresent
         env:
         - { name: UDP_ECHO_SERVER, value: "1" }

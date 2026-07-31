@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "8507297bcfbb824aa3bfd428dc4a043943d6a40d7d811072bb81e80c79675326",
-      "exemptionInventorySha256": "2f0846b1abe63ab0003d9f281ac2cdad441f1c0fd04647499d73c18071aa1d8e",
-      "exemptedPackageVersions": 423
+      "lockfileSha256": "f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
+      "exemptionInventorySha256": "40d9bc34e0647219920215d20a455622783a778729adfdba0104f91801fe5bc7",
+      "exemptedPackageVersions": 421
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -47,7 +47,6 @@
       "foldhash": ["0.1", "0.2"],
       "generic-array": ["0.14", "1"],
       "getrandom": ["0.2", "0.3", "0.4"],
-      "granit-parser": ["0.0.3", "0.0.7"],
       "hashbrown": ["0.15", "0.16", "0.17"],
       "inout": ["0.1", "0.2"],
       "itertools": ["0.13", "0.14"],
@@ -55,7 +54,6 @@
       "r-efi": ["5", "6"],
       "rand": ["0.10", "0.8"],
       "rand_core": ["0.10", "0.6"],
-      "serde-saphyr": ["0.0.27", "0.0.29"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
       "spki": ["0.7", "0.8"],
@@ -94,7 +92,7 @@
           "h3": ["0.0.8"],
           "h3-quinn": ["0.0.10"],
           "h3-webtransport": ["0.1.2"],
-          "http": ["1.4.2"],
+          "http": ["1.5.0"],
           "httparse": ["1.10.1"],
           "hyper": ["1.11.0"],
           "hyper-rustls": ["0.27.9"],
@@ -102,11 +100,11 @@
           "quinn": ["0.11.11"],
           "quinn-proto": ["0.11.16"],
           "quinn-udp": ["0.5.15"],
-          "rustls": ["0.23.42"],
+          "rustls": ["0.23.43"],
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.13"],
           "web-transport-proto": ["0.6.0"],
-          "web-transport-quinn": ["0.11.10"],
+          "web-transport-quinn": ["0.11.12"],
           "web-transport-trait": ["0.3.7"]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
@@ -114,11 +112,11 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.48.5"],
+          "jsonschema": ["0.49.2"],
           "serde": ["1.0.229"],
           "serde-saphyr": ["0.0.29"],
           "serde_json": ["1.0.151"],
-          "toml": ["1.1.3+spec-1.1.0"],
+          "toml": ["1.1.4+spec-1.1.0"],
           "toml_edit": ["0.25.13+spec-1.1.0"]
         },
         "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, and format compatibility"
@@ -126,7 +124,7 @@
       {
         "category": "compression",
         "packages": {
-          "async-compression": ["0.4.42"],
+          "async-compression": ["0.4.43"],
           "brotli": ["8.0.4"],
           "flate2": ["1.1.9"],
           "zstd": ["0.13.3"]
@@ -146,10 +144,10 @@
         "category": "kubernetes",
         "packages": {
           "k8s-openapi": ["0.28.0"],
-          "kube": ["4.0.0"],
-          "kube-client": ["4.0.0"],
-          "kube-core": ["4.0.0"],
-          "kube-runtime": ["4.0.0"]
+          "kube": ["4.2.0"],
+          "kube-client": ["4.2.0"],
+          "kube-core": ["4.2.0"],
+          "kube-runtime": ["4.2.0"]
         },
         "reviewBoundary": "API version selection, authentication, TLS, watch-stream parsing, and controller retry behavior"
       }
@@ -191,32 +189,43 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:8507297bcfbb824aa3bfd428dc4a043943d6a40d7d811072bb81e80c79675326",
+      "subject": "Cargo.lock@sha256:f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-25",
+      "reviewedOn": "2026-07-31",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:8507297bcfbb824aa3bfd428dc4a043943d6a40d7d811072bb81e80c79675326",
+      "subject": "Cargo.lock@sha256:f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-25",
+      "reviewedOn": "2026-07-31",
       "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-cargo-vet-kube-client-4.2.0",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "kube-client@4.2.0:safe-to-deploy",
+      "rationale": "Whole-crate certification remains withheld because the optional HTTPS proxy connector can reuse cluster TLS roots and identity. OxiBelt does not enable kube-client's HTTP or SOCKS proxy features; deployment diagnostics rejects command-based kubeconfig credentials and performs read-only API calls, while otherwise honoring operator-selected kubeconfig TLS settings.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/120",
+      "reviewedOn": "2026-07-31",
+      "expiresOn": "2026-10-23"
     },
     {
       "id": "rust-cargo-vet-web-transport-trait-0.3.7",
       "ecosystem": "rust",
       "control": "cargo-vet",
       "subject": "web-transport-trait@0.3.7:safe-to-deploy",
-      "rationale": "The generic RecvStream::read_buf default remains unsuitable for whole-crate certification. OxiBelt consumes the selected web-transport-quinn 0.11.10 receive stream through Tokio AsyncRead into initialized storage; retain an exact-version exception pending an upstream API redesign or dependency removal.",
+      "rationale": "The generic RecvStream::read_buf default remains unsuitable for whole-crate certification. OxiBelt consumes the selected web-transport-quinn 0.11.12 receive stream through Tokio AsyncRead into initialized storage; retain an exact-version exception pending an upstream API redesign or dependency removal.",
       "owner": "@piquark6046",
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
       "reviewedOn": "2026-07-26",
