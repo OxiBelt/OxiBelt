@@ -665,6 +665,10 @@ static_fast_path_gate_label() {{
   return 1
 }}
 
+runtime_direct_h1_paired_load_label() {{
+  return 1
+}}
+
 {functions}
 
 run_load "${{LOAD_LABEL:?}}" h2 oxibelt "/perf/h2?body=ok" 1 1
@@ -1174,8 +1178,16 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
   for expected in [
     "run_runtime_direct_h1_group()",
     "runtime-direct-h1)",
+    "oxibelt-runtime-direct-h1-control-h1",
     "oxibelt-runtime-direct-h1-control-h2",
+    "oxibelt-runtime-direct-h1-control-h3",
+    "oxibelt-runtime-direct-h1-control-post-1k-json-h2",
+    "oxibelt-runtime-direct-h1-control-chunked-post-16k-h1",
+    "oxibelt-runtime-direct-h1-experiment-h1",
     "oxibelt-runtime-direct-h1-experiment-h2",
+    "oxibelt-runtime-direct-h1-experiment-h3",
+    "oxibelt-runtime-direct-h1-experiment-post-1k-json-h2",
+    "oxibelt-runtime-direct-h1-experiment-chunked-post-16k-h1",
     "oxibelt-h3-inline-fast-path-experiment",
     "assert_min_rps_regression_gate \"oxibelt-h3-inline-fast-path-experiment\"",
     "--direct-h1-io-compio",
@@ -1188,10 +1200,49 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
     "--detailed-hot-path-diagnostics",
     "direct_h1_io_backend_metrics",
     "fast_path.io_backend.direct_h1",
+    "append_runtime_direct_h1_cpu_evidence",
+    "append_runtime_direct_h1_thread_cpu_evidence",
+    "container_procfs_process_ticks",
+    "container_procfs_thread_ticks",
+    ".total_requests_including_warmup // .requests // 0",
+    "requests_observed_during_cpu_window",
+    "compio_direct_h1_service_metrics",
+    "fast_path.compio_direct_h1",
+    "run_runtime_direct_h1_soak_gate",
+    "OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS",
+    "OB-P1-01-persistent-compio-30m-soak",
+    "duration_seconds >= 1800",
+    "$fd_delta == 0",
+    "$thread_delta == 0",
+    "16777216",
+    "$after_service.connections.active",
+    "$after_service.queue_occupancy",
   ] {
     assert!(
       script.contains(expected),
       "performance script should include runtime-direct-h1 experiment evidence: {expected}"
+    );
+  }
+}
+
+#[test]
+fn performance_harness_creates_private_unpredictable_artifacts_and_validates_load_inputs() {
+  let script = performance_script_text();
+
+  for expected in [
+    "umask 077",
+    "work_root=\"${repo_root}/tests/.tmp\"",
+    "! -O \"${work_root}\"",
+    "chmod 0700 -- \"${work_root}\"",
+    "mktemp -d -- \"${work_root}/performance-${run_id}-XXXXXX\"",
+    "\"OXIBELT_PERF_DURATION_SECONDS:${duration_seconds}\"",
+    "\"OXIBELT_PERF_CONCURRENCY:${concurrency}\"",
+    "\"OXIBELT_PERF_SOAK_SECONDS:${soak_seconds}\"",
+    "OXIBELT_PERF_WARMUP_SECONDS must be a non-negative integer",
+  ] {
+    assert!(
+      script.contains(expected),
+      "performance harness is missing artifact/input hardening: {expected}"
     );
   }
 }
@@ -1220,6 +1271,19 @@ fn runtime_direct_h1_experiment_request_errors_are_diagnostic() {
   assert!(
     !diagnostic.events.contains("ASSERT "),
     "diagnostic experiment rows should bypass the primary assertion path"
+  );
+
+  let bodyful_diagnostic = run_load_profile_harness_with_errors(
+    "",
+    "oxibelt-runtime-direct-h1-experiment-post-1k-json-h2",
+    "1",
+  );
+  assert!(
+    bodyful_diagnostic.output.status.success()
+      && bodyful_diagnostic.events.contains("\"diagnostic\":true")
+      && !bodyful_diagnostic.events.contains("ASSERT "),
+    "bodyful experiment rows should remain diagnostic no-dup controls:\n{}",
+    bodyful_diagnostic.events
   );
 
   let primary =
@@ -1408,6 +1472,74 @@ configure_performance_circuit_breakers "$1"
       scope.max_decompression_jobs,
       CapacitySetting::Auto,
       "{scope_name}.max_decompression_jobs should keep exercising automatic resource sizing"
+    );
+  }
+}
+
+#[test]
+fn runtime_direct_h1_performance_config_fits_the_compio_resource_projection() {
+  let script = performance_script_text();
+  let temp = HarnessTempDir::new("oxibelt-runtime-direct-h1-performance-budget-");
+  let config_path = temp.join("oxibelt.toml");
+  let harness_path = temp.join("configure.sh");
+  let baseline_path = oxibelt_performance_fixture_root().join("baseline/config/oxibelt.toml");
+  fs::copy(&baseline_path, &config_path).unwrap_or_else(|error| {
+    panic!(
+      "failed to copy {} to the harness: {error}",
+      baseline_path.display()
+    )
+  });
+  fs::write(
+    &harness_path,
+    format!(
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+serving_type=runtime-direct-h1
+
+{}
+
+{}
+
+configure_performance_circuit_breakers "$1"
+"#,
+      extract_bash_function(&script, "upsert_oxibelt_config_scalar"),
+      extract_bash_function(&script, "configure_performance_circuit_breakers")
+    ),
+  )
+  .expect("runtime direct-H1 budget harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .arg(&config_path)
+    .output()
+    .expect("runtime direct-H1 budget harness should run");
+  assert!(
+    output.status.success(),
+    "runtime direct-H1 budget harness failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let config_text = fs::read_to_string(&config_path).expect("config should be readable");
+  let config: Config =
+    toml::from_str(&config_text).expect("runtime direct-H1 performance config should parse");
+  assert_eq!(
+    config.runtime.worker_threads, 4,
+    "paired Hyper and Compio rows should use one deterministic worker topology"
+  );
+  for (scope_name, scope) in [
+    ("global", &config.circuit_breakers.global),
+    ("route_defaults", &config.circuit_breakers.route_defaults),
+    ("pool_defaults", &config.circuit_breakers.pool_defaults),
+  ] {
+    assert_eq!(
+      scope.max_connections,
+      CapacitySetting::Fixed(120),
+      "{scope_name}.max_connections should remain within the Compio memory and FD resource projection"
+    );
+    assert_eq!(
+      scope.max_pending_requests,
+      CapacitySetting::Fixed(0),
+      "{scope_name}.max_pending_requests should remain an immediate rejection boundary"
     );
   }
 }
@@ -3428,6 +3560,19 @@ fn perf_probe_resolves_tcp_load_and_handshake_targets_once_per_phase() {
       && source.contains("tls_connect_to_addr(")
       && source.contains("tls_connect_with_config_to_addr("),
     "perf-probe TCP clients should use bounded connects to the resolved SocketAddr while preserving TLS SNI separately"
+  );
+}
+
+#[test]
+fn perf_probe_reports_every_request_inside_the_process_cpu_window() {
+  let source = perf_probe_source_text();
+
+  assert!(
+    source.contains("let warmup_requests = if args.warmup > Duration::ZERO")
+      && source.contains("let total_requests_including_warmup =")
+      && source.contains("\"warmup_requests\": warmup_requests")
+      && source.contains("\"total_requests_including_warmup\": total_requests_including_warmup"),
+    "perf-probe should expose exact warmup and measured request counts so process CPU/request does not divide a warmup-inclusive CPU window by measured requests alone"
   );
 }
 

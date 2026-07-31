@@ -77,6 +77,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
     "## External benchmark validation",
     "## Diagnostic profiling",
     "## Pool/concurrency experiments",
+    "## Runtime direct-H1 paired evidence",
     "## OxiBelt-only results",
     "## Skipped/missing comparator rows",
     "## Sample quorum",
@@ -659,6 +660,81 @@ fn direct_h2_diagnostic_row(
   row
 }
 
+fn runtime_direct_h1_row(
+  label: &str,
+  protocol: &str,
+  rps: f64,
+  p99_ms: f64,
+  cpu_time_per_request_ns: Option<f64>,
+  expected_backend: &str,
+) -> Value {
+  let io_backend = match expected_backend {
+    "compio" => json!({
+        (protocol): {
+            "compio": {
+                "selected": 1000
+            }
+        }
+    }),
+    "tokio_hyper" => json!({
+        (protocol): {
+            "compio": {
+                "fallback": 1000
+            },
+            "tokio_hyper": {
+                "selected": 1000
+            }
+        }
+    }),
+    other => panic!("unsupported runtime direct-H1 backend {other}"),
+  };
+  let mut row = json!({
+      "type": "load",
+      "label": label,
+      "protocol": protocol,
+      "requests": 1000,
+      "rps": rps,
+      "p50_ms": 1.0,
+      "p90_ms": 2.0,
+      "p95_ms": 3.0,
+      "p99_ms": p99_ms,
+      "errors": 0,
+      "fast_path": {
+          "io_backend": {
+              "direct_h1": io_backend
+          },
+          "pool": {
+              "direct_h1": if expected_backend == "tokio_hyper" {
+                  json!({"hit": 990, "miss": 10})
+              } else {
+                  json!({})
+              }
+          },
+          "compio_direct_h1": {
+              "connection_events": if expected_backend == "compio" {
+                  json!({"created": 10, "reused": 990})
+              } else {
+                  json!({})
+              }
+          }
+      }
+  });
+  if let Some(cpu_time_per_request_ns) = cpu_time_per_request_ns {
+    row
+      .as_object_mut()
+      .expect("runtime direct-H1 row should be an object")
+      .insert(
+        "cpu_time".to_owned(),
+        json!({
+            "status": "available",
+            "source": "container_procfs_process_ticks",
+            "cpu_time_per_request_ns": cpu_time_per_request_ns
+        }),
+      );
+  }
+  row
+}
+
 fn with_target_cpu(mut row: Value, target_cpu: &str) -> Value {
   row
     .as_object_mut()
@@ -1223,6 +1299,15 @@ fn find_direct_h2_promotion_evidence<'a>(
     })
 }
 
+fn find_runtime_direct_h1_comparison<'a>(report: &'a Value, workload: &str) -> &'a Value {
+  report["runtime_direct_h1_comparisons"]
+    .as_array()
+    .expect("runtime direct-H1 comparisons should be an array")
+    .iter()
+    .find(|row| row["workload"] == workload)
+    .unwrap_or_else(|| panic!("missing runtime direct-H1 comparison for {workload}"))
+}
+
 fn find_delta<'a>(report: &'a Value, group: &str, scenario: &str, comparator: &str) -> &'a Value {
   report["rows"]
     .as_array()
@@ -1445,7 +1530,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 30);
+  assert_eq!(report["schema_version"], 31);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1905,6 +1990,181 @@ fn direct_h2_diagnostics_record_promotion_evidence_without_blocking_gates() {
 }
 
 #[test]
+fn runtime_direct_h1_pairs_gate_cpu_request_latency_and_backend_with_three_samples() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+  let workloads = [
+    ("h1", "h1", "compio"),
+    ("h2", "h2", "compio"),
+    ("h3", "h3", "compio"),
+    ("post-1k-json-h2", "h2", "tokio_hyper"),
+    ("chunked-post-16k-h1", "h1", "tokio_hyper"),
+  ];
+  let mut rows = Vec::new();
+  for (workload, protocol, expected_backend) in workloads {
+    for _ in 0..3 {
+      rows.push(runtime_direct_h1_row(
+        &format!("oxibelt-runtime-direct-h1-control-{workload}"),
+        protocol,
+        1000.0,
+        10.0,
+        Some(100.0),
+        "tokio_hyper",
+      ));
+      rows.push(runtime_direct_h1_row(
+        &format!("oxibelt-runtime-direct-h1-experiment-{workload}"),
+        protocol,
+        500.0,
+        10.4,
+        Some(102.0),
+        expected_backend,
+      ));
+    }
+  }
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-benchmark-runtime-direct-h1/run-1"),
+    rows,
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  assert_eq!(report["schema_version"], 31);
+  for (workload, _, expected_backend) in workloads {
+    let comparison = find_runtime_direct_h1_comparison(&report, workload);
+    assert_eq!(comparison["expected_experiment_backend"], expected_backend);
+    assert_eq!(comparison["control_sample_count"], 3);
+    assert_eq!(comparison["experiment_sample_count"], 3);
+    assert_eq!(comparison["status"], "pass");
+    assert_close(
+      comparison["experiment_cpu_time_per_request_ratio_vs_control"]
+        .as_f64()
+        .expect("CPU/request ratio should exist"),
+      1.02,
+    );
+    assert_close(
+      comparison["experiment_p99_ratio_vs_control"]
+        .as_f64()
+        .expect("p99 ratio should exist"),
+      1.04,
+    );
+    assert_close(
+      comparison["experiment_rps_ratio_vs_control"]
+        .as_f64()
+        .expect("informational RPS ratio should exist"),
+      0.5,
+    );
+    assert!(
+      comparison["control_tokio_hyper_pool_hit"]
+        .as_u64()
+        .is_some_and(|value| value > 0),
+      "control row should prove Hyper connection reuse"
+    );
+    if expected_backend == "compio" {
+      assert!(
+        comparison["experiment_compio_connection_reused"]
+          .as_u64()
+          .is_some_and(|value| value > 0),
+        "Compio experiment should prove service connection reuse"
+      );
+    } else {
+      assert!(
+        comparison["experiment_tokio_hyper_pool_hit"]
+          .as_u64()
+          .is_some_and(|value| value > 0),
+        "bodyful control should prove Hyper connection reuse"
+      );
+    }
+  }
+
+  let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+    .expect("markdown report should be readable");
+  assert!(markdown.contains("## Runtime direct-H1 paired evidence"));
+  assert!(markdown.contains("RPS ratio (informational)"));
+  assert!(markdown.contains("CPU/request ratio"));
+  assert!(markdown.contains("| `post-1k-json-h2` | `h2` | `tokio_hyper`"));
+}
+
+#[test]
+fn runtime_direct_h1_pairs_do_not_substitute_rps_for_missing_cpu_evidence() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+  let mut rows = Vec::new();
+  for _ in 0..3 {
+    rows.push(runtime_direct_h1_row(
+      "oxibelt-runtime-direct-h1-control-h1",
+      "h1",
+      1000.0,
+      10.0,
+      None,
+      "tokio_hyper",
+    ));
+    rows.push(runtime_direct_h1_row(
+      "oxibelt-runtime-direct-h1-experiment-h1",
+      "h1",
+      1200.0,
+      9.0,
+      None,
+      "compio",
+    ));
+  }
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-benchmark-runtime-direct-h1/run-1"),
+    rows,
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let comparison = find_runtime_direct_h1_comparison(&report, "h1");
+  assert_eq!(comparison["status"], "missing_cpu_evidence");
+  assert!(
+    comparison["reason"]
+      .as_str()
+      .expect("missing CPU reason should exist")
+      .contains("RPS is informational")
+  );
+}
+
+#[test]
+fn runtime_direct_h1_pairs_require_three_complete_samples_per_side() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+  let mut rows = Vec::new();
+  for _ in 0..2 {
+    rows.push(runtime_direct_h1_row(
+      "oxibelt-runtime-direct-h1-control-h1",
+      "h1",
+      1000.0,
+      10.0,
+      Some(100.0),
+      "tokio_hyper",
+    ));
+    rows.push(runtime_direct_h1_row(
+      "oxibelt-runtime-direct-h1-experiment-h1",
+      "h1",
+      1000.0,
+      10.0,
+      Some(100.0),
+      "compio",
+    ));
+  }
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-benchmark-runtime-direct-h1/run-1"),
+    rows,
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let comparison = find_runtime_direct_h1_comparison(&report, "h1");
+  assert_eq!(comparison["status"], "missing_evidence");
+  assert!(
+    comparison["reason"]
+      .as_str()
+      .expect("sample-count reason should exist")
+      .contains("at least 3")
+  );
+}
+
+#[test]
 fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
   let temp_dir = TempDir::new();
   let input_dir = temp_dir.path().join("input");
@@ -1924,7 +2184,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 30);
+  assert_eq!(report["schema_version"], 31);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

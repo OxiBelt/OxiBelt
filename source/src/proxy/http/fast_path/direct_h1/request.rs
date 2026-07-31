@@ -11,7 +11,6 @@ use super::origin::DirectH1Origin;
 
 pub(super) struct PreparedDirectH1Request {
   request: Request<ProxyBody>,
-  retry_request: Option<RetryDirectH1Request>,
 }
 
 #[derive(Clone)]
@@ -36,7 +35,6 @@ impl PreparedDirectH1Request {
     origin: &DirectH1Origin,
   ) -> anyhow::Result<Self> {
     let (mut parts, body) = request.into_parts();
-    let retry_body_empty = body.is_end_stream();
     let prevalidated = parts
       .extensions
       .remove::<PrevalidatedDirectH1Request>()
@@ -59,29 +57,21 @@ impl PreparedDirectH1Request {
         Uri::from_parts(uri_parts).context("failed to build direct H1 origin-form URI")?;
     }
     parts.version = http::Version::HTTP_11;
-    let retry_request = retry_body_empty.then(|| RetryDirectH1Request {
-      method: parts.method.clone(),
-      uri: parts.uri.clone(),
-      headers: parts.headers.clone(),
-    });
     Ok(Self {
       request: Request::from_parts(parts, body),
-      retry_request,
     })
   }
 
   pub(super) fn retry_request(&self) -> Option<RetryDirectH1Request> {
-    self.retry_request.clone()
-  }
-
-  pub(super) fn retry_prepared(&self) -> Option<Self> {
-    self.retry_request.clone().map(|retry_request| {
-      let request = retry_request.clone().into_request();
-      Self {
-        request,
-        retry_request: Some(retry_request),
-      }
-    })
+    self
+      .request
+      .body()
+      .is_end_stream()
+      .then(|| RetryDirectH1Request {
+        method: self.request.method().clone(),
+        uri: self.request.uri().clone(),
+        headers: self.request.headers().clone(),
+      })
   }
 
   pub(super) fn compio_empty_body_wire_eligible(&self) -> bool {
@@ -93,6 +83,39 @@ impl PreparedDirectH1Request {
         .get_all(CONTENT_LENGTH)
         .iter()
         .all(|value| value.as_bytes().trim_ascii() == b"0")
+  }
+
+  pub(super) fn request(&self) -> &Request<ProxyBody> {
+    &self.request
+  }
+
+  /// Serialize the already-normalized, bodyless request into an owned worker
+  /// buffer. Callers retain `self` until the first socket write is submitted,
+  /// which keeps pre-dispatch fallback ownership explicit.
+  pub(super) fn serialize_compio_wire(&self, bytes: &mut Vec<u8>) -> anyhow::Result<()> {
+    if !self.compio_empty_body_wire_eligible() {
+      anyhow::bail!("Compio direct-H1 only serializes prevalidated empty request bodies");
+    }
+    bytes.clear();
+    bytes.reserve(512usize.saturating_add(self.request.headers().len().saturating_mul(48)));
+    bytes.extend_from_slice(self.request.method().as_str().as_bytes());
+    bytes.push(b' ');
+    let target = self
+      .request
+      .uri()
+      .path_and_query()
+      .map(|target| target.as_str())
+      .unwrap_or("/");
+    bytes.extend_from_slice(target.as_bytes());
+    bytes.extend_from_slice(b" HTTP/1.1\r\n");
+    for (name, value) in self.request.headers() {
+      bytes.extend_from_slice(name.as_str().as_bytes());
+      bytes.extend_from_slice(b": ");
+      bytes.extend_from_slice(value.as_bytes());
+      bytes.extend_from_slice(b"\r\n");
+    }
+    bytes.extend_from_slice(b"\r\n");
+    Ok(())
   }
 
   pub(super) fn into_request(self) -> Request<ProxyBody> {

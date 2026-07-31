@@ -48,6 +48,7 @@ use http::StatusCode;
 use std::collections::HashMap;
 use std::sync::Arc;
 mod alt_svc;
+mod compio_direct_h1;
 mod generation;
 pub(crate) mod handle;
 mod http1_upgrade;
@@ -58,7 +59,7 @@ mod stream_pool_update;
 mod upstream_clients;
 mod upstream_precompute;
 pub(crate) use alt_svc::{AltSvcHeaderValues, build_alt_svc_header_values};
-use generation::next_upstream_pool_generation;
+use generation::{next_direct_h1_plan_generation, next_upstream_pool_generation};
 pub use handle::AppHandle;
 pub(crate) use request_path_features::RequestPathFeaturePlan;
 use stream_pool_update::next_stream_pool_generation;
@@ -85,6 +86,15 @@ pub struct AppSnapshot {
   pub(crate) control_http: ControlHttpClient,
   pub(crate) h3_clients: UpstreamH3Pools,
   pub(crate) outbound_revocation: tls::OutboundRevocationRuntime,
+  pub(crate) compio_direct_h1_budget: Option<crate::circuit_breakers::CompioDirectH1Budget>,
+  pub(crate) compio_direct_h1_overlap_budget: Arc<compio_direct_h1::CompioDirectH1OverlapBudget>,
+  pub(crate) direct_h1_plan_generation: u64,
+  pub(crate) compio_direct_h1_service:
+    Option<Arc<crate::proxy::http::fast_path::direct_h1::CompioDirectH1Service>>,
+  pub(crate) staged_compio_direct_h1_service:
+    Option<crate::proxy::http::fast_path::direct_h1::CompioDirectH1Staged>,
+  pub(crate) compio_direct_h1_fleet_reservation:
+    Option<Arc<compio_direct_h1::CompioDirectH1FleetReservation>>,
   pub upstream_pool_generation: u64,
   pub stream_pool_generation: u64,
   pub limits: Arc<LimitState>,
@@ -223,7 +233,7 @@ impl AppSnapshot {
       &config.upstream_pools,
     )
     .context("failed to build upstream HTTP clients")?;
-    let direct_h1_pools = DirectH1Pools::new(&upstreams);
+    let direct_h1_pools = DirectH1Pools::new(&upstreams, circuit_breakers.clone());
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -484,6 +494,28 @@ impl AppSnapshot {
     let stream_pool_generation = next_stream_pool_generation(&config, previous);
     let effective_direct_h1_io =
       effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
+    let compio_direct_h1_budget = (effective_direct_h1_io == RuntimeDirectH1IoMode::Compio)
+      .then(|| crate::circuit_breakers::compio_direct_h1_budget(&config))
+      .transpose()?;
+    let direct_h1_plan_generation = next_direct_h1_plan_generation(
+      &config,
+      effective_direct_h1_io,
+      compio_direct_h1_budget,
+      previous,
+    );
+    let (
+      compio_direct_h1_overlap_budget,
+      compio_direct_h1_service,
+      staged_compio_direct_h1_service,
+      compio_direct_h1_fleet_reservation,
+    ) = compio_direct_h1::stage_service(
+      effective_direct_h1_io,
+      compio_direct_h1_budget,
+      direct_h1_plan_generation,
+      metrics.clone(),
+      runtime_health.clone(),
+      previous,
+    )?;
     let compiled_fast_path_actions = build_compiled_fast_path_actions(
       &config,
       &route_table,
@@ -510,6 +542,12 @@ impl AppSnapshot {
       control_http,
       h3_clients,
       outbound_revocation,
+      compio_direct_h1_budget,
+      compio_direct_h1_overlap_budget,
+      direct_h1_plan_generation,
+      compio_direct_h1_service,
+      staged_compio_direct_h1_service,
+      compio_direct_h1_fleet_reservation,
       upstream_pool_generation,
       stream_pool_generation,
       limits,
@@ -584,7 +622,7 @@ impl AppSnapshot {
       &config.upstream_pools,
     )
     .context("failed to build upstream HTTP clients")?;
-    let direct_h1_pools = DirectH1Pools::new(&upstreams);
+    let direct_h1_pools = DirectH1Pools::new(&upstreams, circuit_breakers.clone());
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -660,6 +698,28 @@ impl AppSnapshot {
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
     let effective_direct_h1_io =
       effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
+    let compio_direct_h1_budget = (effective_direct_h1_io == RuntimeDirectH1IoMode::Compio)
+      .then(|| crate::circuit_breakers::compio_direct_h1_budget(&config))
+      .transpose()?;
+    let direct_h1_plan_generation = next_direct_h1_plan_generation(
+      &config,
+      effective_direct_h1_io,
+      compio_direct_h1_budget,
+      Some(previous),
+    );
+    let (
+      compio_direct_h1_overlap_budget,
+      compio_direct_h1_service,
+      staged_compio_direct_h1_service,
+      compio_direct_h1_fleet_reservation,
+    ) = compio_direct_h1::stage_service(
+      effective_direct_h1_io,
+      compio_direct_h1_budget,
+      direct_h1_plan_generation,
+      metrics.clone(),
+      runtime_health.clone(),
+      Some(previous),
+    )?;
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       previous.cache.enabled(),
@@ -693,6 +753,12 @@ impl AppSnapshot {
       control_http: control_http.clone(),
       h3_clients,
       outbound_revocation: previous.outbound_revocation.clone(),
+      compio_direct_h1_budget,
+      compio_direct_h1_overlap_budget,
+      direct_h1_plan_generation,
+      compio_direct_h1_service,
+      staged_compio_direct_h1_service,
+      compio_direct_h1_fleet_reservation,
       upstream_pool_generation,
       stream_pool_generation,
       limits: previous.limits.clone(),

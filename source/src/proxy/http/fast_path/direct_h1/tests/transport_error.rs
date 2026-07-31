@@ -63,6 +63,7 @@ async fn compio_connect_backoff_routes_h2_to_hyper_direct_h1() -> anyhow::Result
 
   let mut response = send_prepared_request(
     pool,
+    None,
     &metrics,
     FastPathMetricProtocol::H2,
     prepared,

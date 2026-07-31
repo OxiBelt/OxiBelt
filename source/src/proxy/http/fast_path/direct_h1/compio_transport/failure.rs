@@ -10,7 +10,7 @@ use super::super::response_protocol::{
   ResponseProtocolEngine, ResponseProtocolError, ResponseProtocolFailureReason,
 };
 
-pub(super) fn protocol_failure(
+pub(in crate::proxy::http::fast_path::direct_h1) fn protocol_failure(
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   error: ResponseProtocolError,
@@ -19,7 +19,7 @@ pub(super) fn protocol_failure(
   DirectH1TransportError::response_protocol(error.into())
 }
 
-pub(super) fn protocol_failure_with_source(
+pub(in crate::proxy::http::fast_path::direct_h1) fn protocol_failure_with_source(
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   error: ResponseProtocolError,
@@ -29,7 +29,7 @@ pub(super) fn protocol_failure_with_source(
   DirectH1TransportError::response_protocol(anyhow::anyhow!("{error}: {source}"))
 }
 
-pub(super) fn timeout_failure(
+pub(in crate::proxy::http::fast_path::direct_h1) fn timeout_failure(
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   engine: &ResponseProtocolEngine,
@@ -47,7 +47,7 @@ pub(super) fn timeout_failure(
   DirectH1TransportError::read_timeout(anyhow::anyhow!("{error}: {source}"))
 }
 
-pub(super) fn cancellation_failure(
+pub(in crate::proxy::http::fast_path::direct_h1) fn cancellation_failure(
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   engine: &ResponseProtocolEngine,
@@ -60,7 +60,7 @@ pub(super) fn cancellation_failure(
   )
 }
 
-pub(super) fn cancellation_failure_with_source(
+pub(in crate::proxy::http::fast_path::direct_h1) fn cancellation_failure_with_source(
   metrics: &Metrics,
   protocol: FastPathMetricProtocol,
   engine: &ResponseProtocolEngine,

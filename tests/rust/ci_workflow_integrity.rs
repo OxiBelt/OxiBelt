@@ -4122,6 +4122,295 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
 }
 
 #[test]
+fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() {
+  let root = repo_root();
+  let read = |path: &str| {
+    fs::read_to_string(root.join(path))
+      .unwrap_or_else(|error| panic!("{path} should be readable: {error}"))
+  };
+  let order = read("tests/rust/oxibelt_docker_integration_matrix/mod.rs");
+  let proxy = read("tests/rust/oxibelt_docker_integration_matrix/proxy.rs");
+  let mock_upstream = read("tests/docker/mock_upstream/server.py");
+  let checks = read(
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-transport-service/checks.sh",
+  );
+  let config_text = read(
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-transport-service/config/oxibelt.toml",
+  );
+
+  assert!(
+    proxy.contains("\"compio-transport-service\"")
+      && order.contains("(\"http-semantics\", \"compio-transport-service\")"),
+    "the Compio transport fixture should remain registered in deterministic proxy-matrix order"
+  );
+
+  for expected in [
+    "REQUEST_COUNT_KEY_RE = re.compile(r\"^[A-Za-z0-9._-]{1,64}$\")",
+    "REQUEST_COUNT_LIMIT = 256",
+    "H1_FAULTS = frozenset({",
+    "\"bad_chunk_size\"",
+    "\"close_after_body\"",
+    "\"half_close_after_head\"",
+    "\"malformed_head\"",
+    "\"truncated_fixed\"",
+    "CountingThreadingHTTPServer",
+    "ThreadingHTTPServer((\"127.0.0.1\", control_port), ControlHandler)",
+    "if self.path != \"/__control/stats\"",
+    "if h1_fault not in H1_FAULTS",
+    "self.connection.sendall(responses[fault])",
+  ] {
+    assert!(
+      mock_upstream.contains(expected),
+      "the bounded Compio origin fixture should preserve {expected}"
+    );
+  }
+  for forbidden in [
+    "eval(",
+    "exec(",
+    "shell=True",
+    "0.0.0.0\", control_port",
+    "query.get(\"raw_response\"",
+  ] {
+    assert!(
+      !mock_upstream.contains(forbidden),
+      "the mock origin control plane must not contain {forbidden}"
+    );
+  }
+
+  for expected in [
+    "--target-host 127.0.0.1",
+    "--port 18081",
+    "--path /__control/stats",
+    "accepted_after - accepted_before != 1",
+    "h1_fault=malformed_head",
+    "h1_fault=half_close_after_head",
+    "h1_fault=close_after_body",
+    "compio_transport_expect_response_body_failure",
+    "operation_id=fixed-post",
+    "operation_id=split-post",
+    "compio_selected_after - compio_selected_before != 0",
+    "compio_fallback_after - compio_fallback_before != 2",
+    "hyper_selected_after - hyper_selected_before != 2",
+    "oxibelt_http_compio_direct_h1_queue_occupancy",
+    "retired_protocol",
+    "retired_eof",
+    "retired_peer_close",
+    "predispatch_fallback",
+  ] {
+    assert!(
+      checks.contains(expected),
+      "the Compio transport fixture should preserve {expected}"
+    );
+  }
+  for forbidden in [
+    "docker-rootful",
+    "--privileged",
+    "--network host",
+    "docker system prune",
+    "docker container prune",
+    "docker network prune",
+    "iptables",
+    "tc qdisc",
+    "eval ",
+  ] {
+    assert!(
+      !checks.contains(forbidden),
+      "the Compio transport fixture must not contain unsafe operation {forbidden}"
+    );
+  }
+
+  let config: toml::Value =
+    toml::from_str(&config_text).expect("the Compio transport fixture config should parse");
+  assert_eq!(
+    config["runtime"]["worker_threads"].as_integer(),
+    Some(1),
+    "the functional fixture should use one deterministic runtime worker"
+  );
+  assert_eq!(config["runtime"]["direct_h1_io"].as_str(), Some("compio"));
+  assert_eq!(
+    config["circuit_breakers"]["global"]["max_pending_requests"].as_integer(),
+    Some(4),
+    "the functional fixture should keep a small bounded submission budget"
+  );
+}
+
+#[test]
+fn compio_transport_metric_values_are_validated_before_arithmetic() {
+  let checks_path = repo_root().join(
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-transport-service/checks.sh",
+  );
+  let checks =
+    fs::read_to_string(&checks_path).expect("Compio transport checks should be readable");
+  assert!(
+    checks.contains("if [[ ! \"${value}\" =~ ^(0|[1-9][0-9]*)$ ]]; then")
+      && checks
+        .matches("compio_transport_require_canonical_nonnegative_decimal")
+        .count()
+        == 6,
+    "all Prometheus and mock-origin count extractors should require canonical nonnegative decimal values"
+  );
+
+  let run_case = |kind: &str, value: &str, mode: &str| {
+    Command::new("bash")
+      .arg("-e")
+      .arg("-u")
+      .arg("-o")
+      .arg("pipefail")
+      .arg("-c")
+      .arg(
+        r#"
+source "$1"
+fail_with_diagnostics() {
+  printf '%s\n' "$1" >&2
+  return 0
+}
+
+kind="$2"
+value="$3"
+mode="$4"
+case "${kind}" in
+  connection)
+    stats="$(
+      jq -cn --arg value "${value}" \
+        '{body: ({connections: {accepted: $value}} | tojson)}'
+    )"
+    if extracted="$(compio_transport_connection_count "${stats}" accepted)"; then
+      status=0
+    else
+      status=$?
+    fi
+    ;;
+  operation)
+    stats="$(
+      jq -cn --arg value "${value}" \
+        '{body: ({request_counts: {"operation.test": $value}} | tojson)}'
+    )"
+    if extracted="$(compio_transport_operation_count "${stats}" test)"; then
+      status=0
+    else
+      status=$?
+    fi
+    ;;
+  backend)
+    printf -v body \
+      'oxibelt_http_direct_h1_io_backend_total{backend="compio",protocol="h1",outcome="selected"} %s\n' \
+      "${value}"
+    metrics="$(jq -cn --arg body "${body}" '{body: $body}')"
+    if extracted="$(compio_transport_backend_metric_value "${metrics}" compio selected)"; then
+      status=0
+    else
+      status=$?
+    fi
+    ;;
+  service)
+    printf -v body \
+      'oxibelt_http_compio_direct_h1_submissions_total{outcome="immediate"} %s\n' \
+      "${value}"
+    metrics="$(jq -cn --arg body "${body}" '{body: $body}')"
+    if extracted="$(
+      compio_transport_service_metric_value \
+        "${metrics}" \
+        oxibelt_http_compio_direct_h1_submissions_total \
+        outcome \
+        immediate
+    )"; then
+      status=0
+    else
+      status=$?
+    fi
+    ;;
+  unlabelled)
+    printf -v body 'oxibelt_http_compio_direct_h1_queue_occupancy %s\n' "${value}"
+    metrics="$(jq -cn --arg body "${body}" '{body: $body}')"
+    if extracted="$(
+      compio_transport_unlabelled_metric_value \
+        "${metrics}" \
+        oxibelt_http_compio_direct_h1_queue_occupancy
+    )"; then
+      status=0
+    else
+      status=$?
+    fi
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+
+if [[ "${mode}" == "accept" ]]; then
+  (( status == 0 ))
+  printf '%s' "${extracted}"
+  exit 0
+fi
+if (( status != 0 )); then
+  exit 0
+fi
+if [[ "${mode}" == "exploit-regression" ]]; then
+  proxy_runtime_args=()
+  (( extracted - 0 != 0 )) || true
+fi
+printf 'invalid metric value was accepted\n' >&2
+exit 1
+"#,
+      )
+      .arg("compio-transport-metric-test")
+      .arg(&checks_path)
+      .arg(kind)
+      .arg(value)
+      .arg(mode)
+      .current_dir(repo_root())
+      .output()
+      .unwrap_or_else(|error| panic!("Compio metric case {kind}/{mode} should execute: {error}"))
+  };
+
+  for (kind, value) in [
+    ("connection", "3"),
+    ("operation", "4"),
+    ("backend", "0"),
+    ("backend", "18446744073709551615"),
+    ("service", "42"),
+    ("unlabelled", "7"),
+  ] {
+    let output = run_case(kind, value, "accept");
+    assert!(
+      output.status.success(),
+      "legitimate {kind} metric value {value} should pass: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), value);
+  }
+
+  for value in ["01", "-1", "1.0", "1e3", " 1"] {
+    let output = run_case("backend", value, "reject");
+    assert!(
+      output.status.success(),
+      "non-canonical metric value {value:?} should be rejected"
+    );
+  }
+
+  let exploit_value =
+    "proxy_runtime_args[$(printf${IFS}NESTED_SUBSTITUTION_EXECUTED>&2;printf${IFS}0)]";
+  for kind in [
+    "connection",
+    "operation",
+    "backend",
+    "service",
+    "unlabelled",
+  ] {
+    let output = run_case(kind, exploit_value, "exploit-regression");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+      output.status.success(),
+      "{kind} extractor should reject the arithmetic payload: {stderr}"
+    );
+    assert!(
+      !stderr.contains("NESTED_SUBSTITUTION_EXECUTED"),
+      "{kind} extractor must reject the payload before Bash arithmetic can execute it"
+    );
+  }
+}
+
+#[test]
 fn docker_integration_helper_image_job_builds_reusable_artifact() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
@@ -8091,6 +8380,29 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
     "summary job should fail on insufficient evidence reported by sample quorum"
   );
   assert!(
+    summary_job.contains("runtime_direct_h1_gate_errors=\"$(jq -c '")
+      && summary_job.contains("if .profile == \"benchmark\" then")
+      && summary_job.contains("def runtime_direct_h1_key:")
+      && summary_job.contains("\"h1|h1|compio\"")
+      && summary_job.contains("\"h2|h2|compio\"")
+      && summary_job.contains("\"h3|h3|compio\"")
+      && summary_job.contains("\"post-1k-json-h2|h2|tokio_hyper\"")
+      && summary_job.contains("\"chunked-post-16k-h1|h1|tokio_hyper\"")
+      && summary_job.contains("(.runtime_direct_h1_comparisons // null) as $actual")
+      && summary_job.contains("if ($actual | type) != \"array\" then")
+      && summary_job.contains("if ($matches | length) == 0 then")
+      && summary_job.contains("elif ($matches | length) > 1 then")
+      && summary_job.contains("elif ($matches[0].status // \"unknown\") != \"pass\" then")
+      && summary_job.contains("runtime_direct_h1_comparisons contains an unexpected row")
+      && summary_job.contains("::error title=Runtime direct-H1 acceptance gate::")
+      && summary_job.contains(
+        "Runtime direct-H1 benchmark acceptance gate reported ${runtime_direct_h1_failure_count} invalid comparison row condition(s)"
+      )
+      && summary_job.contains("if (( runtime_direct_h1_failure_count > 0 )); then")
+      && !summary_job.contains(".runtime_direct_h1_comparisons[]?"),
+    "summary job should require exactly the five passing runtime direct-H1 benchmark comparisons without gating other profiles"
+  );
+  assert!(
     workflow.contains(".artifact_discovery.unsupported_cpu.count // 0"),
     "summary job should surface unsupported AMD64 v3 benchmark runner counts"
   );
@@ -8113,6 +8425,141 @@ fn docker_performance_summary_aggregates_uploaded_artifacts() {
   assert!(
     workflow.contains("name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-comparison"),
     "summary job should upload a profile-scoped comparison artifact"
+  );
+}
+
+#[test]
+fn runtime_direct_h1_workflow_gate_requires_the_exact_benchmark_evidence_set() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check workflow should parse as YAML");
+  let gate_script = parsed
+    .pointer("/jobs/docker-performance-summary/steps")
+    .and_then(serde_json::Value::as_array)
+    .and_then(|steps| {
+      steps.iter().find_map(|step| {
+        (step.get("name").and_then(serde_json::Value::as_str)
+          == Some("Evaluate Docker performance regression gates"))
+        .then(|| step.get("run").and_then(serde_json::Value::as_str))
+        .flatten()
+      })
+    })
+    .expect("Docker performance summary should expose its regression-gate script");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-runtime-direct-h1-gate-")
+    .tempdir()
+    .expect("runtime direct-H1 gate temp directory should be creatable");
+  let report_dir = temp_dir.path().join("oxibelt-performance-comparison");
+  fs::create_dir_all(&report_dir).expect("performance report directory should be creatable");
+  let report_path = report_dir.join("performance-comparison.json");
+
+  let passing_rows = serde_json::json!([
+    {
+      "workload": "h1",
+      "protocol": "h1",
+      "expected_experiment_backend": "compio",
+      "status": "pass"
+    },
+    {
+      "workload": "h2",
+      "protocol": "h2",
+      "expected_experiment_backend": "compio",
+      "status": "pass"
+    },
+    {
+      "workload": "h3",
+      "protocol": "h3",
+      "expected_experiment_backend": "compio",
+      "status": "pass"
+    },
+    {
+      "workload": "post-1k-json-h2",
+      "protocol": "h2",
+      "expected_experiment_backend": "tokio_hyper",
+      "status": "pass"
+    },
+    {
+      "workload": "chunked-post-16k-h1",
+      "protocol": "h1",
+      "expected_experiment_backend": "tokio_hyper",
+      "status": "pass"
+    }
+  ]);
+  let run_case = |profile: &str, rows: serde_json::Value| {
+    let report = serde_json::json!({
+      "profile": profile,
+      "artifact_discovery": {
+        "results_files": 1,
+        "unsupported_cpu": {"count": 0},
+        "missing_expected_paths": []
+      },
+      "quorum": {"status": "pass", "violations": []},
+      "runtime_direct_h1_comparisons": rows,
+      "external_benchmarks": [],
+      "profiling": [],
+      "regression_gates": {"status": "pass", "violations": []}
+    });
+    fs::write(
+      &report_path,
+      serde_json::to_vec(&report).expect("performance report fixture should serialize"),
+    )
+    .expect("performance report fixture should be writable");
+    Command::new("bash")
+      .arg("-e")
+      .arg("-u")
+      .arg("-o")
+      .arg("pipefail")
+      .arg("-c")
+      .arg(gate_script)
+      .current_dir(repo_root())
+      .env("RUNNER_TEMP", temp_dir.path())
+      .env("OXIBELT_ACTIONS_VARS_JSON", "{}")
+      .output()
+      .expect("runtime direct-H1 workflow gate should execute")
+  };
+
+  let passing = run_case("benchmark", passing_rows.clone());
+  assert!(
+    passing.status.success(),
+    "the exact five passing benchmark rows should pass: {}",
+    String::from_utf8_lossy(&passing.stderr)
+  );
+
+  let absent = run_case("benchmark", serde_json::json!([]));
+  assert!(
+    !absent.status.success(),
+    "an empty runtime direct-H1 benchmark comparison set must fail closed"
+  );
+  assert!(
+    String::from_utf8_lossy(&absent.stderr)
+      .contains("reported 5 invalid comparison row condition(s)"),
+    "the empty-set failure should report every missing required tuple"
+  );
+
+  let mut duplicate = passing_rows.clone();
+  duplicate
+    .as_array_mut()
+    .expect("passing rows should be an array")
+    .push(passing_rows[0].clone());
+  let duplicate_output = run_case("benchmark", duplicate);
+  assert!(
+    !duplicate_output.status.success(),
+    "a duplicate required benchmark tuple must fail closed"
+  );
+
+  let mut non_pass = passing_rows.clone();
+  non_pass[0]["status"] = serde_json::json!("missing_evidence");
+  let non_pass_output = run_case("benchmark", non_pass);
+  assert!(
+    !non_pass_output.status.success(),
+    "a required non-pass benchmark tuple must fail closed"
+  );
+
+  let smoke = run_case("smoke", serde_json::json!([]));
+  assert!(
+    smoke.status.success(),
+    "non-benchmark profiles should remain outside the dedicated runtime direct-H1 gate: {}",
+    String::from_utf8_lossy(&smoke.stderr)
   );
 }
 

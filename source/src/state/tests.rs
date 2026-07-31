@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::*;
 
@@ -122,6 +123,51 @@ async fn snapshot_for_explicit_tokio_runtime_keeps_raw_config_but_disables_compi
 }
 
 #[tokio::test]
+async fn direct_h1_plan_generation_changes_only_for_transport_relevant_state() {
+  let temp_dir = common::TempDir::new("direct-h1-plan-generation");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "direct-h1-plan-generation");
+  let snapshot = AppSnapshot::new(parse_config(&common::minimal_config_toml(
+    &cert_path, &key_path,
+  )))
+  .await
+  .expect("snapshot should initialize");
+
+  let unchanged = generation::next_direct_h1_plan_generation(
+    &snapshot.config,
+    snapshot.effective_direct_h1_io,
+    snapshot.compio_direct_h1_budget,
+    Some(&snapshot),
+  );
+  assert_eq!(unchanged, snapshot.direct_h1_plan_generation);
+
+  let mut unrelated = snapshot.config.clone();
+  unrelated.compression.enabled = !unrelated.compression.enabled;
+  let unrelated_generation = generation::next_direct_h1_plan_generation(
+    &unrelated,
+    snapshot.effective_direct_h1_io,
+    snapshot.compio_direct_h1_budget,
+    Some(&snapshot),
+  );
+  assert_eq!(unrelated_generation, snapshot.direct_h1_plan_generation);
+
+  let mut changed_upstream = snapshot.config.clone();
+  changed_upstream.upstreams[0].idle_timeout_ms = changed_upstream.upstreams[0]
+    .idle_timeout_ms
+    .saturating_add(1);
+  let changed_generation = generation::next_direct_h1_plan_generation(
+    &changed_upstream,
+    snapshot.effective_direct_h1_io,
+    snapshot.compio_direct_h1_budget,
+    Some(&snapshot),
+  );
+  assert_eq!(
+    changed_generation,
+    snapshot.direct_h1_plan_generation.saturating_add(1)
+  );
+}
+
+#[tokio::test]
 async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   let temp_dir = common::TempDir::new("app-generation-drain");
   let (cert_path, key_path) =
@@ -150,6 +196,95 @@ async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   let new_connection = handle.connection_snapshot();
   assert!(!new_connection.snapshot.config.compression.enabled);
   assert!(!*new_connection.data_plane_drain.borrow());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_restages_retired_compio_fleet_with_bounded_overlap() {
+  let temp_dir = common::TempDir::new("compio-rollback-restage");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "compio-rollback-restage");
+  let mut initial = AppSnapshot::new(parse_config(&common::minimal_config_toml(
+    &cert_path, &key_path,
+  )))
+  .await
+  .expect("initial snapshot should initialize");
+  initial.effective_direct_h1_io = RuntimeDirectH1IoMode::Compio;
+  initial.compio_direct_h1_budget = Some(crate::circuit_breakers::CompioDirectH1Budget {
+    worker_count: 1,
+    queue_capacity_per_worker: 2,
+    max_waiters: 1,
+    queue_wait_timeout: Duration::from_millis(25),
+    max_connections_global: 2,
+    max_connections_per_origin: 2,
+  });
+  initial.direct_h1_plan_generation = 7;
+  initial
+    .restage_compio_direct_h1_service_for_publication()
+    .expect("initial Compio fleet should stage");
+
+  let overlap_budget = initial.compio_direct_h1_overlap_budget.clone();
+  let handle = AppHandle::new(initial);
+  let original = handle.snapshot();
+  let rollback = original.as_ref().clone();
+  let original_service = original
+    .compio_direct_h1_service
+    .clone()
+    .expect("initial Compio fleet should be active");
+  assert_eq!(overlap_budget.fleets(), 1);
+
+  let mut replacement = rollback.clone();
+  replacement.direct_h1_plan_generation = 8;
+  replacement
+    .restage_compio_direct_h1_service_for_publication()
+    .expect("one replacement Compio fleet should stage");
+  let replacement_service = replacement
+    .compio_direct_h1_service
+    .clone()
+    .expect("replacement Compio fleet should be staged");
+  assert!(!Arc::ptr_eq(&original_service, &replacement_service));
+  assert_eq!(overlap_budget.fleets(), 2);
+
+  let mut excess = rollback.clone();
+  excess.direct_h1_plan_generation = 9;
+  let error = excess
+    .restage_compio_direct_h1_service_for_publication()
+    .expect_err("a third overlapping Compio fleet must be rejected");
+  assert!(error.to_string().contains("overlap budget exhausted"));
+  assert_eq!(overlap_budget.fleets(), 2);
+
+  assert!(handle.replace_if_current(&original, replacement));
+  tokio::time::timeout(Duration::from_secs(2), async {
+    while overlap_budget.fleets() != 1 {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .expect("retired initial Compio fleet should release its reservation");
+
+  let current = handle.snapshot();
+  assert!(handle.replace_if_current(&current, rollback));
+  let restored = handle.snapshot();
+  let restored_service = restored
+    .compio_direct_h1_service
+    .clone()
+    .expect("rollback should publish a fresh Compio fleet");
+  assert!(!Arc::ptr_eq(&restored_service, &original_service));
+  assert!(!Arc::ptr_eq(&restored_service, &replacement_service));
+  assert!(restored_service.is_healthy());
+
+  tokio::time::timeout(Duration::from_secs(2), async {
+    while overlap_budget.fleets() != 1 {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .expect("retired replacement Compio fleet should release its reservation");
+  assert!(restored.runtime_health.is_ready());
+
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+  handle.shutdown_compio_direct_h1(deadline).await;
+  assert_eq!(overlap_budget.fleets(), 0);
 }
 
 #[cfg(feature = "admin-runtime")]

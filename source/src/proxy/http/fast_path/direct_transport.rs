@@ -64,6 +64,7 @@ pub(super) async fn attempt_direct_transport(
   let attempt = match transport {
     Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
       &state.direct_h1_pools,
+      state.compio_direct_h1_service.as_ref(),
       &state.metrics,
       upstream_index,
       upstream,

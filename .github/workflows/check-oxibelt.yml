@@ -3379,6 +3379,71 @@ jobs:
             failed=1
           fi
 
+          runtime_direct_h1_gate_errors="$(jq -c '
+            def runtime_direct_h1_key:
+              [
+                (.workload // "<missing>"),
+                (.protocol // "<missing>"),
+                (.expected_experiment_backend // "<missing>")
+              ] | join("|");
+            if .profile == "benchmark" then
+              [
+                "h1|h1|compio",
+                "h2|h2|compio",
+                "h3|h3|compio",
+                "post-1k-json-h2|h2|tokio_hyper",
+                "chunked-post-16k-h1|h1|tokio_hyper"
+              ] as $expected
+              | (.runtime_direct_h1_comparisons // null) as $actual
+              | if ($actual | type) != "array" then
+                  ["runtime_direct_h1_comparisons must be an array containing exactly five required rows"]
+                else
+                  (
+                    [
+                      $expected[] as $key
+                      | [
+                          $actual[]
+                          | objects
+                          | select(runtime_direct_h1_key == $key)
+                        ] as $matches
+                      | if ($matches | length) == 0 then
+                          "missing required runtime direct-H1 comparison " + $key
+                        elif ($matches | length) > 1 then
+                          "duplicate runtime direct-H1 comparison " + $key
+                        elif ($matches[0].status // "unknown") != "pass" then
+                          "required runtime direct-H1 comparison " + $key + " did not pass"
+                        else
+                          empty
+                        end
+                    ]
+                    +
+                    [
+                      $actual[]
+                      | if type != "object" then
+                          "runtime_direct_h1_comparisons contains a malformed row"
+                        else
+                          runtime_direct_h1_key as $key
+                          | if ($expected | index($key)) == null then
+                              "runtime_direct_h1_comparisons contains an unexpected row"
+                            else
+                              empty
+                            end
+                        end
+                    ]
+                  )
+                end
+            else
+              []
+            end
+          ' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
+          runtime_direct_h1_failure_count="$(jq -r 'length' <<<"${runtime_direct_h1_gate_errors}")"
+          if (( runtime_direct_h1_failure_count > 0 )); then
+            jq -r '.[] | "::error title=Runtime direct-H1 acceptance gate::" + .' \
+              <<<"${runtime_direct_h1_gate_errors}"
+            echo "Runtime direct-H1 benchmark acceptance gate reported ${runtime_direct_h1_failure_count} invalid comparison row condition(s)" >&2
+            failed=1
+          fi
+
           external_diagnostic_count="$(jq -r '[.external_benchmarks[]? | select((.classification // "") == "benchmark_infrastructure_diagnostic") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), tool: (.tool // "unknown"), scenario: (.scenario // "unknown"), protocol: (.protocol // "unknown"), diagnostic_reason: (.diagnostic_reason // "benchmark infrastructure diagnostic")}] | unique | length' "${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.json")"
           if (( external_diagnostic_count > 0 )); then
             jq -r '[.external_benchmarks[]? | select((.classification // "") == "benchmark_infrastructure_diagnostic") | {serving_type: (.serving_type // "unknown"), amd64_target_cpu: (.amd64_target_cpu // "unknown"), tool: (.tool // "unknown"), scenario: (.scenario // "unknown"), protocol: (.protocol // "unknown"), diagnostic_reason: (.diagnostic_reason // "benchmark infrastructure diagnostic")}] | unique | .[] | "::warning title=External benchmark diagnostic::" + .tool + " " + .serving_type + " " + .scenario + "/" + .protocol + " on " + .amd64_target_cpu + ": " + .diagnostic_reason' \

@@ -4,6 +4,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use super::types::{ResponseBodyMode, ResponseProtocolFailureReason, ResponseProtocolLimits};
 
 const MAX_HEADER_NAME_BYTES: usize = 128;
+const STACK_RESPONSE_HEADER_FIELDS: usize = 128;
 
 pub(super) fn parse_head(
   bytes: &[u8],
@@ -21,8 +22,15 @@ pub(super) fn parse_head(
     ResponseProtocolFailureReason::InvalidHeaderSyntax,
   )?;
 
-  let mut parsed_headers = vec![httparse::EMPTY_HEADER; limits.max_response_header_fields];
-  let mut response = httparse::Response::new(&mut parsed_headers);
+  let mut stack_headers = [httparse::EMPTY_HEADER; STACK_RESPONSE_HEADER_FIELDS];
+  let mut heap_headers = Vec::new();
+  let parsed_headers = if limits.max_response_header_fields <= stack_headers.len() {
+    &mut stack_headers[..limits.max_response_header_fields]
+  } else {
+    heap_headers.resize(limits.max_response_header_fields, httparse::EMPTY_HEADER);
+    heap_headers.as_mut_slice()
+  };
+  let mut response = httparse::Response::new(parsed_headers);
   let status = response.parse(bytes).map_err(|error| match error {
     httparse::Error::TooManyHeaders => ResponseProtocolFailureReason::TooManyHeaders,
     httparse::Error::Status | httparse::Error::Version => {

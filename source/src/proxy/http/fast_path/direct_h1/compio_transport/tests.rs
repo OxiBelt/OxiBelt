@@ -1,9 +1,85 @@
 use super::*;
+use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::proxy::http::fast_path::direct_h1::response_protocol::ResponseProtocolLimits;
 use crate::proxy::http::fast_path::direct_h1::{
   DirectH1UpstreamErrorKind, direct_h1_upstream_error_kind,
 };
+use url::Url;
+
+fn test_upstream(origin: &str) -> UpstreamConfig {
+  UpstreamConfig {
+    name: "backend".to_string(),
+    origin: Url::parse(origin).expect("test upstream URL should parse"),
+    max_http_version: HttpVersion::H1,
+    connect_timeout_ms: 100,
+    request_timeout_ms: 100,
+    first_byte_timeout_ms: 100,
+    read_timeout_ms: 100,
+    send_timeout_ms: 100,
+    idle_timeout_ms: 100,
+    max_lifetime_ms: 3_600_000,
+    pool_max_idle_per_host: 1,
+    preserve_host: false,
+    websocket: false,
+    webrtc: false,
+    webtransport: false,
+    proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+    tls: Default::default(),
+    extra_trusted_ca_certs: Vec::new(),
+  }
+}
+
+#[tokio::test]
+async fn resolution_followers_spend_their_own_connect_deadline() {
+  let pool = DirectH1Pool::new(&test_upstream("http://localhost:18080"))
+    .expect("plain upstream should be Compio eligible");
+  let _refresh = pool
+    .compio_resolution_gate
+    .acquire()
+    .await
+    .expect("test resolution gate should remain open");
+  let started = Instant::now();
+
+  let error = resolve_origin(&pool, std::time::Duration::from_millis(5))
+    .await
+    .expect_err("a follower blocked behind refresh must time out");
+
+  assert!(error.to_string().contains("waiter timed out"));
+  assert!(
+    started.elapsed() < std::time::Duration::from_secs(1),
+    "resolution follower escaped its bounded deadline"
+  );
+}
+
+#[tokio::test]
+async fn fresh_resolution_cache_does_not_wait_for_the_refresh_gate() {
+  let pool = DirectH1Pool::new(&test_upstream("http://localhost:18080"))
+    .expect("plain upstream should be Compio eligible");
+  let expected: Arc<[SocketAddr]> = vec![
+    "127.0.0.1:18080"
+      .parse()
+      .expect("test socket address should parse"),
+  ]
+  .into();
+  pool
+    .compio_resolution
+    .store(Some(Arc::new(CompioDirectH1Resolution {
+      expires_at: Instant::now() + std::time::Duration::from_secs(1),
+      addresses: Arc::clone(&expected),
+    })));
+  let _refresh = pool
+    .compio_resolution_gate
+    .acquire()
+    .await
+    .expect("test resolution gate should remain open");
+
+  let resolved = resolve_origin(&pool, std::time::Duration::from_millis(5))
+    .await
+    .expect("fresh cache should preserve normal resolution behavior");
+
+  assert_eq!(resolved.as_ref(), expected.as_ref());
+}
 
 #[test]
 fn serializer_preserves_request_target_and_headers() -> anyhow::Result<()> {

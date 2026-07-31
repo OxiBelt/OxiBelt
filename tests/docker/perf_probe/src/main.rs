@@ -1055,11 +1055,17 @@ fn status_from_path(path: &str) -> Option<StatusCode> {
 }
 
 async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
-  if args.warmup > Duration::ZERO {
-    let _ = run_load_phase(args.clone(), args.warmup, false).await?;
-  }
+  let warmup_requests = if args.warmup > Duration::ZERO {
+    run_load_phase(args.clone(), args.warmup, false)
+      .await?
+      .snapshot()
+      .requests
+  } else {
+    0
+  };
   let stats = run_load_phase(args.clone(), args.duration, true).await?;
   let snapshot = stats.snapshot();
+  let total_requests_including_warmup = warmup_requests.saturating_add(snapshot.requests);
   let elapsed = args.duration.as_secs_f64();
   println!(
     "{}",
@@ -1077,6 +1083,8 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "request_body_bytes": args.request_body.len(),
         "chunked_request_body": args.chunked_request_body,
         "requests": snapshot.requests,
+        "warmup_requests": warmup_requests,
+        "total_requests_including_warmup": total_requests_including_warmup,
         "errors": snapshot.errors,
         "rps": rate(snapshot.requests, elapsed),
         "p50_ms": snapshot.p50_ms,
@@ -2056,6 +2064,7 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
       "io_backend": {
           "direct_h1": direct_h1_io_backend_metrics_json(metrics)
       },
+      "compio_direct_h1": compio_direct_h1_service_metrics_json(metrics),
       "static_responses": static_fast_path_responses_json(metrics),
       "stage_timing": fast_path_stage_timing_json(metrics)
   })
@@ -2231,6 +2240,84 @@ fn direct_h1_io_backend_metrics_json(metrics: &str) -> serde_json::Value {
     backend_object.insert(outcome.clone(), serde_json::json!(current + value));
   }
   serde_json::Value::Object(protocols)
+}
+
+fn compio_direct_h1_service_metrics_json(metrics: &str) -> serde_json::Value {
+  serde_json::json!({
+      "submission_outcomes": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_submissions_total",
+        "outcome",
+      ),
+      "queue_occupancy": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_queue_occupancy",
+      ),
+      "workers": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_workers",
+        "state",
+      ),
+      "connections": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_connections",
+        "state",
+      ),
+      "connection_events": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_connection_events_total",
+        "event",
+      ),
+      "dispatch_outcomes": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_dispatch_total",
+        "outcome",
+      ),
+      "buffer_events": prometheus_label_value_map(
+        metrics,
+        "oxibelt_http_compio_direct_h1_buffer_events_total",
+        "event",
+      ),
+      "operation_wait_observations": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_operation_wait_observations_total",
+      ),
+      "operation_wait_duration_ns": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total",
+      ),
+      "connect_observations": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_connect_observations_total",
+      ),
+      "connect_duration_ns": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_connect_duration_ns_total",
+      ),
+      "cancellation_observations": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_cancellation_observations_total",
+      ),
+      "cancellation_duration_ns": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_cancellation_duration_ns_total",
+      ),
+      "copied_bytes": prometheus_u64(
+        metrics,
+        "oxibelt_http_compio_direct_h1_copied_bytes_total",
+      ),
+  })
+}
+
+fn prometheus_label_value_map(metrics: &str, name: &str, label: &str) -> serde_json::Value {
+  let mut values = BTreeMap::new();
+  for (labels, value) in prometheus_labeled_u64_samples(metrics, name) {
+    let Some(label_value) = labels.get(label) else {
+      continue;
+    };
+    *values.entry(label_value.clone()).or_insert(0) += value;
+  }
+  serde_json::json!(values)
 }
 
 fn static_fast_path_responses_json(metrics: &str) -> serde_json::Value {
@@ -3668,6 +3755,43 @@ oxibelt_tls_server_session_storage_put_duration_ns_total 23
     assert_eq!(parsed["take_count"], 17);
     assert_eq!(parsed["lock_wait_ns"], 19);
     assert_eq!(parsed["put_duration_ns"], 23);
+  }
+
+  #[test]
+  fn metrics_parser_extracts_bounded_compio_direct_h1_service_evidence() {
+    let metrics = "\
+oxibelt_http_compio_direct_h1_submissions_total{outcome=\"immediate\"} 19
+oxibelt_http_compio_direct_h1_queue_occupancy 2
+oxibelt_http_compio_direct_h1_workers{state=\"healthy\"} 4
+oxibelt_http_compio_direct_h1_connections{state=\"idle\"} 3
+oxibelt_http_compio_direct_h1_connection_events_total{event=\"created\"} 4
+oxibelt_http_compio_direct_h1_connection_events_total{event=\"reused\"} 15
+oxibelt_http_compio_direct_h1_dispatch_total{outcome=\"predispatch_fallback\"} 2
+oxibelt_http_compio_direct_h1_buffer_events_total{event=\"reuse\"} 11
+oxibelt_http_compio_direct_h1_operation_wait_observations_total 19
+oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total 200
+oxibelt_http_compio_direct_h1_connect_observations_total 4
+oxibelt_http_compio_direct_h1_connect_duration_ns_total 300
+oxibelt_http_compio_direct_h1_cancellation_observations_total 1
+oxibelt_http_compio_direct_h1_cancellation_duration_ns_total 25
+oxibelt_http_compio_direct_h1_copied_bytes_total 4096
+";
+    let parsed = compio_direct_h1_service_metrics_json(metrics);
+    assert_eq!(parsed["submission_outcomes"]["immediate"], 19);
+    assert_eq!(parsed["queue_occupancy"], 2);
+    assert_eq!(parsed["workers"]["healthy"], 4);
+    assert_eq!(parsed["connections"]["idle"], 3);
+    assert_eq!(parsed["connection_events"]["created"], 4);
+    assert_eq!(parsed["connection_events"]["reused"], 15);
+    assert_eq!(parsed["dispatch_outcomes"]["predispatch_fallback"], 2);
+    assert_eq!(parsed["buffer_events"]["reuse"], 11);
+    assert_eq!(parsed["operation_wait_observations"], 19);
+    assert_eq!(parsed["operation_wait_duration_ns"], 200);
+    assert_eq!(parsed["connect_observations"], 4);
+    assert_eq!(parsed["connect_duration_ns"], 300);
+    assert_eq!(parsed["cancellation_observations"], 1);
+    assert_eq!(parsed["cancellation_duration_ns"], 25);
+    assert_eq!(parsed["copied_bytes"], 4096);
   }
 
   #[test]

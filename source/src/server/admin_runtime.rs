@@ -17,9 +17,22 @@ use super::admin_operations::AdminOperationRuntime;
 use super::ops::OpsTasks;
 use super::process_signals::{
   ProcessSignal, ProcessSignals, begin_process_predrain, graceful_process_shutdown,
+  shutdown_compio_direct_h1_after_error,
 };
 
 pub async fn serve(
+  state: AppHandle,
+  config_path: Option<PathBuf>,
+  runtime_overrides: RuntimeOverrides,
+) -> anyhow::Result<()> {
+  let result = serve_inner(state.clone(), config_path, runtime_overrides).await;
+  if result.is_err() {
+    shutdown_compio_direct_h1_after_error(&state).await;
+  }
+  result
+}
+
+async fn serve_inner(
   state: AppHandle,
   config_path: Option<PathBuf>,
   runtime_overrides: RuntimeOverrides,

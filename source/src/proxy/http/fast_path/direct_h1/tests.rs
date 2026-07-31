@@ -17,6 +17,47 @@ mod upgrade_guard;
 
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelled_compio_predispatch_never_restarts_the_request_on_hyper() {
+  assert!(!compio_predispatch_allows_hyper_fallback(
+    CompioDirectH1PredispatchReason::Cancelled
+  ));
+  for reason in [
+    CompioDirectH1PredispatchReason::QueueFull,
+    CompioDirectH1PredispatchReason::Unhealthy,
+    CompioDirectH1PredispatchReason::Draining,
+    CompioDirectH1PredispatchReason::ConnectionLimit,
+    CompioDirectH1PredispatchReason::Resolve,
+    CompioDirectH1PredispatchReason::Connect,
+  ] {
+    assert!(compio_predispatch_allows_hyper_fallback(reason));
+  }
+}
+
+#[test]
+fn direct_h1_pools_share_process_connection_admission() {
+  let config: crate::config::Config =
+    toml::from_str(include_str!("../../../../../config/oxibelt.toml"))
+      .expect("example configuration should parse");
+  let circuit_breakers = crate::circuit_breakers::CircuitBreakerRuntime::new(&config);
+  let pools = DirectH1Pools::new(
+    &[upstream("http://backend.internal:18080")],
+    circuit_breakers.clone(),
+  );
+  let pool = pools
+    .for_upstream_index(0)
+    .expect("plain upstream should create a direct-H1 pool");
+
+  assert!(
+    pool
+      .circuit_breakers
+      .as_ref()
+      .is_some_and(|runtime| Arc::ptr_eq(runtime, &circuit_breakers)),
+    "Compio connection ownership must use the process-wide circuit-breaker runtime"
+  );
+}
+
 #[test]
 fn guard_accepts_direct_empty_http11_get_to_plain_h1_upstream() {
   let upstream = upstream("http://backend.internal:18080");
@@ -231,6 +272,19 @@ fn prevalidated_prepared_request_preserves_origin_form_and_synthesizes_host() {
       .get::<PrevalidatedDirectH1Request>()
       .is_none()
   );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compio_worker_sharding_stripes_one_origin_across_the_fleet() {
+  let upstream = upstream("http://backend.internal:18080");
+  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
+  let mut shards = (0..4)
+    .map(|_| pool.compio_worker_shard(4))
+    .collect::<Vec<_>>();
+  shards.sort_unstable();
+  shards.dedup();
+  assert_eq!(shards, vec![0, 1, 2, 3]);
 }
 
 #[tokio::test]
@@ -600,6 +654,7 @@ async fn send_and_recycle_direct_get(
   let prepared = PreparedDirectH1Request::from_request(request, &pool.origin)?;
   let mut direct = send_prepared_request(
     pool,
+    None,
     metrics,
     FastPathMetricProtocol::H1,
     prepared,

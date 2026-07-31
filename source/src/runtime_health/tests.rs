@@ -77,6 +77,40 @@ fn admin_mutation_cluster_health_uses_fixed_labels_and_fails_closed() {
   assert!(metrics.contains("subsystem=\"admin_mutation\""));
 }
 
+#[test]
+fn compio_direct_h1_health_uses_fixed_labels_and_can_fail_readiness() {
+  let health = RuntimeHealth::default();
+  let generation = health.allocate_generation();
+  health.activate_generation(generation);
+  health.set_subsystem_state(
+    generation,
+    RuntimeSubsystem::CompioDirectH1,
+    RuntimeSubsystemState::Failed,
+    true,
+  );
+  health.set_task_state(
+    generation,
+    RuntimeTaskKind::CompioDirectH1Worker,
+    RuntimeTaskPolicy::Contained,
+    RuntimeSubsystemState::Failed,
+  );
+
+  assert!(!health.is_ready());
+  assert_eq!(
+    health.snapshot().failed_subsystems,
+    vec!["compio_direct_h1"]
+  );
+  assert_eq!(
+    health.snapshot().failed_tasks,
+    vec!["compio_direct_h1_worker"]
+  );
+
+  let mut metrics = String::new();
+  health.append_prometheus(&mut metrics);
+  assert!(metrics.contains("subsystem=\"compio_direct_h1\""));
+  assert!(metrics.contains("task=\"compio_direct_h1_worker\""));
+}
+
 #[tokio::test(start_paused = true)]
 async fn critical_task_restarts_unready_then_recovers() {
   let health = Arc::new(RuntimeHealth::default());

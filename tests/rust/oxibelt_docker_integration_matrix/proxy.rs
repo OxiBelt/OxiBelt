@@ -70,6 +70,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "http-semantics",
+      "compio-transport-service",
+      "persistent Compio direct-H1 reuses clean connections and keeps bodyful controls on Hyper",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
       "expect-priority",
       "HTTP semantics validates Expect and can strip Priority headers",
       ExpectStart::Success,

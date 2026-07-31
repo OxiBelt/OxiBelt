@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat >&2 <<'EOF'
@@ -27,6 +28,10 @@ Environment:
   OXIBELT_PERF_WARMUP_SECONDS      warmup duration override
   OXIBELT_PERF_CONCURRENCY         load concurrency override
   OXIBELT_PERF_SOAK_SECONDS        soak duration override
+  OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS
+                                      persistent Compio soak duration; at least 1800 for profile=soak (default: 1800)
+  OXIBELT_PERF_RUNTIME_DIRECT_H1_CLEANUP_WAIT_SECONDS
+                                      bounded wait for queue/active connections to return to zero (default: 30)
   OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS
                                       fixed aggressive stress phase duration (default: 180)
   OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES
@@ -134,7 +139,18 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 fixture_root="${repo_root}/tests/fixtures/oxibelt-docker-performance"
 run_id="$(date +%s)-$$-${RANDOM}"
-work_dir="${repo_root}/tests/.tmp/performance-${run_id}"
+work_root="${repo_root}/tests/.tmp"
+if [[ -L "${work_root}" || ( -e "${work_root}" && ! -d "${work_root}" ) ]]; then
+  echo "performance work root must be a real directory: ${work_root}" >&2
+  exit 1
+fi
+mkdir -p -- "${work_root}"
+chmod 0700 -- "${work_root}"
+if [[ ! -O "${work_root}" ]]; then
+  echo "performance work root must be owned by the current user: ${work_root}" >&2
+  exit 1
+fi
+work_dir="$(mktemp -d -- "${work_root}/performance-${run_id}-XXXXXX")"
 logs_dir="${work_dir}/logs"
 probe_logs_dir="${work_dir}/probe-logs"
 profiles_dir="${work_dir}/profiles"
@@ -153,6 +169,7 @@ summary_md="${work_dir}/summary.md"
 stats_jsonl="${work_dir}/docker-stats.jsonl"
 resource_snapshots_jsonl="${work_dir}/resource-snapshots.jsonl"
 resource_drift_json="${work_dir}/resource-drift.json"
+runtime_direct_h1_soak_json="${work_dir}/runtime-direct-h1-soak.json"
 external_h2load_dir="${work_dir}/external-h2load"
 external_oha_dir="${work_dir}/external-oha"
 external_wrk_dir="${work_dir}/external-wrk"
@@ -204,6 +221,8 @@ duration_seconds="${OXIBELT_PERF_DURATION_SECONDS:-${default_duration}}"
 warmup_seconds="${OXIBELT_PERF_WARMUP_SECONDS:-${default_warmup}}"
 concurrency="${OXIBELT_PERF_CONCURRENCY:-${default_concurrency}}"
 soak_seconds="${OXIBELT_PERF_SOAK_SECONDS:-${default_soak}}"
+runtime_direct_h1_soak_seconds="${OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS:-1800}"
+runtime_direct_h1_cleanup_wait_seconds="${OXIBELT_PERF_RUNTIME_DIRECT_H1_CLEANUP_WAIT_SECONDS:-30}"
 aggressive_stress_seconds="${OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS:-180}"
 max_p99_ms="${OXIBELT_PERF_MAX_P99_MS:-10000}"
 max_load_errors_per_million="${OXIBELT_PERF_MAX_LOAD_ERRORS_PER_MILLION:-100}"
@@ -277,7 +296,12 @@ if [[ ! "${external_oha_max_error_rate}" =~ ^(0|0[.][0-9]+|1|1[.]0+)$ ]]; then
   exit 2
 fi
 for integer_env in \
+  "OXIBELT_PERF_DURATION_SECONDS:${duration_seconds}" \
+  "OXIBELT_PERF_CONCURRENCY:${concurrency}" \
+  "OXIBELT_PERF_SOAK_SECONDS:${soak_seconds}" \
   "OXIBELT_PERF_AGGRESSIVE_STRESS_SECONDS:${aggressive_stress_seconds}" \
+  "OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS:${runtime_direct_h1_soak_seconds}" \
+  "OXIBELT_PERF_RUNTIME_DIRECT_H1_CLEANUP_WAIT_SECONDS:${runtime_direct_h1_cleanup_wait_seconds}" \
   "OXIBELT_PERF_RESOURCE_MAX_MEMORY_DELTA_BYTES:${resource_max_memory_delta_bytes}" \
   "OXIBELT_PERF_RESOURCE_MAX_FD_DELTA:${resource_max_fd_delta}" \
   "OXIBELT_PERF_RESOURCE_MAX_TASK_DELTA:${resource_max_task_delta}"; do
@@ -288,6 +312,15 @@ for integer_env in \
     exit 2
   fi
 done
+if [[ ! "${warmup_seconds}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  echo "OXIBELT_PERF_WARMUP_SECONDS must be a non-negative integer; got '${warmup_seconds}'" >&2
+  exit 2
+fi
+if [[ "${profile}" == "soak" && "${serving_type}" == "runtime-direct-h1" ]] \
+  && (( runtime_direct_h1_soak_seconds < 1800 )); then
+  echo "OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS must be at least 1800 for the runtime-direct-h1 soak profile; got '${runtime_direct_h1_soak_seconds}'" >&2
+  exit 2
+fi
 if [[ ! "${resource_settle_seconds}" =~ ^(0|[1-9][0-9]*)$ ]]; then
   echo "OXIBELT_PERF_RESOURCE_SETTLE_SECONDS must be a non-negative integer; got '${resource_settle_seconds}'" >&2
   exit 2
@@ -1576,9 +1609,173 @@ runtime_direct_h1_diagnostic_load_label() {
   local protocol="$2"
   local host="$3"
   case "${host}:${label}:${protocol}" in
-    oxibelt:oxibelt-runtime-direct-h1-experiment-h1:h1|oxibelt:oxibelt-runtime-direct-h1-experiment-h2:h2|oxibelt:oxibelt-runtime-direct-h1-experiment-h3:h3) return 0 ;;
+    oxibelt:oxibelt-runtime-direct-h1-experiment-*:h1|oxibelt:oxibelt-runtime-direct-h1-experiment-*:h2|oxibelt:oxibelt-runtime-direct-h1-experiment-*:h3) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+runtime_direct_h1_paired_load_label() {
+  local label="$1"
+  case "${label}" in
+    oxibelt-runtime-direct-h1-control-*|oxibelt-runtime-direct-h1-experiment-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+proxy_cpu_ticks() {
+  local sample
+  [[ -n "${active_proxy_container:-}" ]] || return 1
+  sample="$(docker exec "${active_proxy_container}" sh -c '
+    stat="$(cat /proc/1/stat 2>/dev/null)" || exit 1
+    rest="${stat##*) }"
+    set -- ${rest}
+    user_ticks="${12:-}"
+    system_ticks="${13:-}"
+    ticks_per_second="$(getconf CLK_TCK 2>/dev/null || true)"
+    case "${user_ticks}:${system_ticks}:${ticks_per_second}" in
+      *[!0-9:]*|::*|*:|:) exit 1 ;;
+    esac
+    [ "${ticks_per_second}" -gt 0 ] || exit 1
+    printf "%s %s\n" "$((user_ticks + system_ticks))" "${ticks_per_second}"
+  ' 2>/dev/null)" || return 1
+  [[ "${sample}" =~ ^[0-9]+[[:space:]][1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "${sample}"
+}
+
+proxy_thread_cpu_ticks() {
+  [[ -n "${active_proxy_container:-}" ]] || return 1
+  docker exec "${active_proxy_container}" sh -c '
+    ticks_per_second="$(getconf CLK_TCK 2>/dev/null || true)"
+    case "${ticks_per_second}" in
+      ""|*[!0-9]*) exit 1 ;;
+    esac
+    [ "${ticks_per_second}" -gt 0 ] || exit 1
+    compio_ticks=0
+    other_ticks=0
+    observed=0
+    for stat_path in /proc/1/task/[0-9]*/stat; do
+      stat="$(cat "${stat_path}" 2>/dev/null)" || continue
+      comm="${stat#*(}"
+      comm="${comm%%)* }"
+      rest="${stat##*) }"
+      set -- ${rest}
+      user_ticks="${12:-}"
+      system_ticks="${13:-}"
+      case "${user_ticks}:${system_ticks}" in
+        *[!0-9:]*|::*|*:|:) exit 1 ;;
+      esac
+      ticks="$((user_ticks + system_ticks))"
+      case "${comm}" in
+        oxibelt-compio*) compio_ticks="$((compio_ticks + ticks))" ;;
+        *) other_ticks="$((other_ticks + ticks))" ;;
+      esac
+      observed="$((observed + 1))"
+    done
+    [ "${observed}" -gt 0 ] || exit 1
+    printf "%s %s %s %s\n" \
+      "${compio_ticks}" "${other_ticks}" "${ticks_per_second}" "${observed}"
+  ' 2>/dev/null
+}
+
+append_runtime_direct_h1_cpu_evidence() {
+  local json="$1"
+  local before="$2"
+  local after="$3"
+  local requests measured_requests warmup_requests before_ticks before_hz after_ticks after_hz
+  requests="$(jq -r '.total_requests_including_warmup // .requests // 0' <<<"${json}")"
+  measured_requests="$(jq -r '.requests // 0' <<<"${json}")"
+  warmup_requests="$(jq -r '.warmup_requests // 0' <<<"${json}")"
+  if [[ "${before}" =~ ^([0-9]+)[[:space:]]([1-9][0-9]*)$ ]]; then
+    before_ticks="${BASH_REMATCH[1]}"
+    before_hz="${BASH_REMATCH[2]}"
+  fi
+  if [[ "${after}" =~ ^([0-9]+)[[:space:]]([1-9][0-9]*)$ ]]; then
+    after_ticks="${BASH_REMATCH[1]}"
+    after_hz="${BASH_REMATCH[2]}"
+  fi
+  if [[ -n "${before_ticks:-}" && -n "${after_ticks:-}" \
+    && "${before_hz}" == "${after_hz}" \
+    && "${after_ticks}" -ge "${before_ticks}" \
+    && "${requests}" =~ ^[1-9][0-9]*$ ]]; then
+    jq -c \
+      --argjson before_ticks "${before_ticks}" \
+      --argjson after_ticks "${after_ticks}" \
+      --argjson ticks_per_second "${before_hz}" \
+      --argjson requests "${requests}" \
+      --argjson measured_requests "${measured_requests}" \
+      --argjson warmup_requests "${warmup_requests}" \
+      '. + {
+        cpu_time: {
+          status: "available",
+          source: "container_procfs_process_ticks",
+          ticks_per_second: $ticks_per_second,
+          cpu_ticks_delta: ($after_ticks - $before_ticks),
+          cpu_time_ns_delta: ((($after_ticks - $before_ticks) * 1000000000) / $ticks_per_second),
+          requests_observed_during_cpu_window: $requests,
+          measured_requests: $measured_requests,
+          warmup_requests: $warmup_requests,
+          cpu_time_per_request_ns: (((($after_ticks - $before_ticks) * 1000000000) / $ticks_per_second) / $requests)
+        }
+      }' <<<"${json}"
+  else
+    jq -c \
+      '. + {
+        cpu_time: {
+          status: "unavailable",
+          source: "container_procfs_process_ticks",
+          reason: "paired process CPU ticks or positive request count unavailable"
+        }
+      }' <<<"${json}"
+  fi
+}
+
+append_runtime_direct_h1_thread_cpu_evidence() {
+  local json="$1"
+  local before="$2"
+  local after="$3"
+  local before_compio before_other before_hz before_threads
+  local after_compio after_other after_hz after_threads
+  if [[ "${before}" =~ ^([0-9]+)[[:space:]]([0-9]+)[[:space:]]([1-9][0-9]*)[[:space:]]([1-9][0-9]*)$ ]]; then
+    before_compio="${BASH_REMATCH[1]}"
+    before_other="${BASH_REMATCH[2]}"
+    before_hz="${BASH_REMATCH[3]}"
+    before_threads="${BASH_REMATCH[4]}"
+  fi
+  if [[ "${after}" =~ ^([0-9]+)[[:space:]]([0-9]+)[[:space:]]([1-9][0-9]*)[[:space:]]([1-9][0-9]*)$ ]]; then
+    after_compio="${BASH_REMATCH[1]}"
+    after_other="${BASH_REMATCH[2]}"
+    after_hz="${BASH_REMATCH[3]}"
+    after_threads="${BASH_REMATCH[4]}"
+  fi
+  if [[ -n "${before_compio:-}" && -n "${after_compio:-}" \
+    && "${before_hz}" == "${after_hz}" \
+    && "${after_compio}" -ge "${before_compio}" \
+    && "${after_other}" -ge "${before_other}" ]]; then
+    jq -c \
+      --argjson before_compio "${before_compio}" \
+      --argjson after_compio "${after_compio}" \
+      --argjson before_other "${before_other}" \
+      --argjson after_other "${after_other}" \
+      --argjson ticks_per_second "${before_hz}" \
+      --argjson threads_before "${before_threads}" \
+      --argjson threads_after "${after_threads}" \
+      '.cpu_time.thread_ticks = {
+        status: "available",
+        source: "container_procfs_thread_ticks",
+        ticks_per_second: $ticks_per_second,
+        compio_worker_ticks_delta: ($after_compio - $before_compio),
+        other_process_ticks_delta: ($after_other - $before_other),
+        threads_before: $threads_before,
+        threads_after: $threads_after
+      }' <<<"${json}"
+  else
+    jq -c \
+      '.cpu_time.thread_ticks = {
+        status: "unavailable",
+        source: "container_procfs_thread_ticks",
+        reason: "thread CPU counters changed identity or were unavailable"
+      }' <<<"${json}"
+  fi
 }
 
 h2_multiplex_diagnostic_load_label() {
@@ -2118,7 +2315,7 @@ run_load() {
   shift 6
   local extra_args=("$@")
   local port="8443"
-  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta direct_h2_pool_before direct_h2_pool_after direct_h2_pool_delta direct_h1_io_backend_before direct_h1_io_backend_after direct_h1_io_backend_delta_json stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta
+  local json fast_path_protocol direct_transport fast_path_before fast_path_after fast_path_delta request_body_before request_body_after request_body_delta direct_h1_before direct_h1_after direct_h1_delta direct_h2_before direct_h2_after direct_h2_delta direct_h1_pool_before direct_h1_pool_after direct_h1_pool_delta direct_h2_pool_before direct_h2_pool_after direct_h2_pool_delta direct_h1_io_backend_before direct_h1_io_backend_after direct_h1_io_backend_delta_json stage_timing_before stage_timing_after stage_timing_delta_json static_fast_path_before static_fast_path_after static_fast_path_delta compio_service_before="" compio_service_after="" compio_service_delta="" cpu_ticks_before="" cpu_ticks_after="" thread_cpu_ticks_before="" thread_cpu_ticks_after=""
   if [[ "${protocol}" == "h1c" ]]; then
     port="8080"
   fi
@@ -2138,6 +2335,11 @@ run_load() {
   fi
   if static_fast_path_gate_label "${label}" "${protocol}" "${host}"; then
     static_fast_path_before="$(static_fast_path_metrics "${host}" "${label}-static-fast-path-before")"
+  fi
+  if runtime_direct_h1_paired_load_label "${label}"; then
+    compio_service_before="$(compio_direct_h1_service_metrics "${host}" "${label}-compio-service-before")"
+    cpu_ticks_before="$(proxy_cpu_ticks || true)"
+    thread_cpu_ticks_before="$(proxy_thread_cpu_ticks || true)"
   fi
   local -a probe_args=(
     load
@@ -2181,6 +2383,14 @@ run_load() {
       fi
       fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
     fi
+  fi
+  if runtime_direct_h1_paired_load_label "${label}"; then
+    cpu_ticks_after="$(proxy_cpu_ticks || true)"
+    thread_cpu_ticks_after="$(proxy_thread_cpu_ticks || true)"
+    json="$(append_runtime_direct_h1_cpu_evidence "${json}" "${cpu_ticks_before}" "${cpu_ticks_after}")"
+    json="$(append_runtime_direct_h1_thread_cpu_evidence "${json}" "${thread_cpu_ticks_before}" "${thread_cpu_ticks_after}")"
+    compio_service_after="$(compio_direct_h1_service_metrics "${host}" "${label}-compio-service-after")"
+    compio_service_delta="$(compio_direct_h1_service_delta "${compio_service_before}" "${compio_service_after}")"
   fi
   if [[ -n "${fast_path_protocol}" ]]; then
     fast_path_after="$(plain_proxy_fast_path_metrics "${host}" "${label}-fast-path-after" "${fast_path_protocol}")"
@@ -2239,6 +2449,9 @@ run_load() {
     static_fast_path_after="$(static_fast_path_metrics "${host}" "${label}-static-fast-path-after")"
     static_fast_path_delta="$(static_fast_path_delta "${static_fast_path_before}" "${static_fast_path_after}")"
     json="$(jq -c --argjson static_fast_path "${static_fast_path_delta}" '. + {fast_path: ((.fast_path // {}) + {static_responses: $static_fast_path})}' <<<"${json}")"
+  fi
+  if [[ -n "${compio_service_delta}" ]]; then
+    json="$(jq -c --argjson compio_service "${compio_service_delta}" '. + {fast_path: ((.fast_path // {}) + {compio_direct_h1: $compio_service})}' <<<"${json}")"
   fi
   json="$(normalize_diagnostic_load_result "$(normalize_diagnostic_comparator_result "${json}")")"
   append_result "${json}"
@@ -2543,6 +2756,57 @@ direct_h1_io_backend_metrics() {
     sleep 1
   done
   fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+compio_direct_h1_service_metrics() {
+  local host="$1"
+  local label="$2"
+  local attempt json
+  for attempt in $(seq 1 10); do
+    if json="$(run_probe_json metrics \
+      --label "${label}-${attempt}" \
+      --host "${host}" \
+      --port 9090 \
+      --authority ops.test \
+      --path /metrics)"; then
+      jq -c '.fast_path.compio_direct_h1 // {}' <<<"${json}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail_with_diagnostics "metrics endpoint did not become ready for ${label}"
+}
+
+compio_direct_h1_service_delta() {
+  local before="$1"
+  local after="$2"
+  jq -n -c \
+    --argjson before "${before}" \
+    --argjson after "${after}" \
+    'def diff($name):
+       (($after[$name] // 0) - ($before[$name] // 0)) as $value
+       | if $value < 0 then 0 else $value end;
+     def map_diff($name):
+       ((($before[$name] // {}) + ($after[$name] // {})) | keys_unsorted) as $keys
+       | reduce $keys[] as $key ({};
+           (($after[$name][$key] // 0) - ($before[$name][$key] // 0)) as $value
+           | .[$key] = (if $value < 0 then 0 else $value end));
+     {
+       submission_outcomes: map_diff("submission_outcomes"),
+       queue_occupancy_after: ($after.queue_occupancy // 0),
+       workers_after: ($after.workers // {}),
+       connections_after: ($after.connections // {}),
+       connection_events: map_diff("connection_events"),
+       dispatch_outcomes: map_diff("dispatch_outcomes"),
+       buffer_events: map_diff("buffer_events"),
+       operation_wait_observations: diff("operation_wait_observations"),
+       operation_wait_duration_ns: diff("operation_wait_duration_ns"),
+       connect_observations: diff("connect_observations"),
+       connect_duration_ns: diff("connect_duration_ns"),
+       cancellation_observations: diff("cancellation_observations"),
+       cancellation_duration_ns: diff("cancellation_duration_ns"),
+       copied_bytes: diff("copied_bytes")
+     }'
 }
 
 static_fast_path_metrics() {
@@ -3050,17 +3314,29 @@ upsert_oxibelt_config_scalar() {
 configure_performance_circuit_breakers() {
   local config_path="$1"
   local capacity=200000
+  local connection_capacity="${capacity}"
   local scope
 
   # Performance fixtures already admit this many downstream connections. Keep
   # circuit breakers enabled, but use the same deterministic bound so cgroup-
   # derived auto capacities do not reject the benchmark workload. Disable the
   # pending queue so a real capacity overrun remains an immediate hard failure.
+  #
+  # The persistent Compio service additionally validates native worker and
+  # physical connection ownership against both its conservative memory
+  # fallback and the container's default 1024-FD process limit. After reserved
+  # descriptors and two-fleet overlap, 120 is the largest accepted connection
+  # bound. Pin the paired control and experiment to that same worker topology
+  # and connection bound so startup remains fail closed.
+  if [[ "${serving_type:-all}" == "runtime-direct-h1" ]]; then
+    connection_capacity=120
+    upsert_oxibelt_config_scalar "${config_path}" "runtime" "worker_threads" "4"
+  fi
   upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers" "enabled" "true"
   for scope in global route_defaults pool_defaults; do
     upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_active_requests" "${capacity}"
     upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_pending_requests" "0"
-    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_connections" "${capacity}"
+    upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_connections" "${connection_capacity}"
     upsert_oxibelt_config_scalar "${config_path}" "circuit_breakers.${scope}" "max_streams" "${capacity}"
   done
 }
@@ -4002,6 +4278,126 @@ run_pool_concurrency_group() {
   run_pool_concurrency_experiments_group
 }
 
+wait_for_compio_direct_h1_idle() {
+  local attempt metrics=""
+  for attempt in $(seq 1 "${runtime_direct_h1_cleanup_wait_seconds}"); do
+    metrics="$(compio_direct_h1_service_metrics oxibelt "runtime-direct-h1-idle-${attempt}")"
+    if jq -e '
+      (.queue_occupancy // -1) == 0
+      and ((.connections.active // -1) == 0)
+    ' >/dev/null <<<"${metrics}"; then
+      printf '%s\n' "${metrics}"
+      return 0
+    fi
+    sleep 1
+  done
+  printf '%s\n' "${metrics}"
+  return 1
+}
+
+run_runtime_direct_h1_soak_gate() {
+  local before_service after_service cleanup_status before_resource after_resource status
+
+  if ! before_service="$(wait_for_compio_direct_h1_idle)"; then
+    fail_with_diagnostics "persistent Compio soak could not establish an idle pre-load baseline within ${runtime_direct_h1_cleanup_wait_seconds}s"
+  fi
+  sample_resource_snapshot "runtime-direct-h1-soak-before"
+  run_load "oxibelt-runtime-direct-h1-soak-h1" h1 oxibelt \
+    "/perf/runtime-direct-h1-soak?body=ok" \
+    "${runtime_direct_h1_soak_seconds}" "${concurrency}"
+
+  cleanup_status=pass
+  if ! after_service="$(wait_for_compio_direct_h1_idle)"; then
+    cleanup_status=timeout
+  fi
+  sample_resource_snapshot "runtime-direct-h1-soak-after"
+  before_resource="$(jq -c 'select(.sample == "runtime-direct-h1-soak-before")' "${resource_snapshots_jsonl}" | tail -n 1)"
+  after_resource="$(jq -c 'select(.sample == "runtime-direct-h1-soak-after")' "${resource_snapshots_jsonl}" | tail -n 1)"
+  if [[ -z "${before_resource}" || -z "${after_resource}" ]]; then
+    fail_with_diagnostics "persistent Compio soak is missing required procfs resource snapshots"
+  fi
+
+  jq -n \
+    --argjson duration_seconds "${runtime_direct_h1_soak_seconds}" \
+    --argjson cleanup_wait_seconds "${runtime_direct_h1_cleanup_wait_seconds}" \
+    --arg cleanup_status "${cleanup_status}" \
+    --argjson before_service "${before_service}" \
+    --argjson after_service "${after_service}" \
+    --argjson before_resource "${before_resource}" \
+    --argjson after_resource "${after_resource}" \
+    'def delta($before; $after): ($after // 0) - ($before // 0);
+     (delta($before_resource.memory_rss_bytes; $after_resource.memory_rss_bytes)) as $rss_growth |
+     (delta($before_resource.fd_count; $after_resource.fd_count)) as $fd_delta |
+     (delta($before_resource.thread_count; $after_resource.thread_count)) as $thread_delta |
+     (delta($before_service.connection_events.reused; $after_service.connection_events.reused)) as $reused_delta |
+     (delta($before_service.submission_outcomes.immediate; $after_service.submission_outcomes.immediate)) as $immediate_delta |
+     ([16777216, (($before_resource.memory_rss_bytes // 0) / 20 | floor)] | max) as $rss_growth_limit |
+     {
+       schema_version: 1,
+       gate: "OB-P1-01-persistent-compio-30m-soak",
+       duration_seconds: $duration_seconds,
+       cleanup_wait_seconds: $cleanup_wait_seconds,
+       evidence_sources: {
+         resources: "container /proc/1/status, /proc/1/fd, and /proc/1/task",
+         queue: "oxibelt_http_compio_direct_h1_queue_occupancy",
+         connections: "oxibelt_http_compio_direct_h1_connections{state}",
+         submissions: "oxibelt_http_compio_direct_h1_submissions_total{outcome}",
+         connection_events: "oxibelt_http_compio_direct_h1_connection_events_total{event}"
+       },
+       before: {
+         service: $before_service,
+         resources: $before_resource
+       },
+       after: {
+         service: $after_service,
+         resources: $after_resource
+       },
+       observed: {
+         fd_delta: $fd_delta,
+         thread_delta: $thread_delta,
+         rss_growth_bytes: $rss_growth,
+         compio_reused_delta: $reused_delta,
+         immediate_submission_delta: $immediate_delta,
+         queue_occupancy_after: ($after_service.queue_occupancy // null),
+         active_connections_after: ($after_service.connections.active // null),
+         cleanup_status: $cleanup_status
+       },
+       limits: {
+         fd_delta: 0,
+         thread_delta: 0,
+         rss_growth_bytes: $rss_growth_limit,
+         queue_occupancy_after: 0,
+         active_connections_after: 0
+       },
+       status:
+         if $duration_seconds >= 1800
+           and $cleanup_status == "pass"
+           and $fd_delta == 0
+           and $thread_delta == 0
+           and $rss_growth <= $rss_growth_limit
+           and ($after_service.queue_occupancy // -1) == 0
+           and ($after_service.connections.active // -1) == 0
+           and $reused_delta > 0
+           and $immediate_delta > 0
+         then "pass"
+         else "fail"
+         end
+     }' >"${runtime_direct_h1_soak_json}"
+
+  status="$(jq -r '.status' "${runtime_direct_h1_soak_json}")"
+  printf '| `%s` | `soak` | `h1` | duration %ss, FD delta %s, threads delta %s, RSS growth %s / limit %s bytes | status=%s |\n' \
+    "oxibelt-runtime-direct-h1-soak-h1" \
+    "${runtime_direct_h1_soak_seconds}" \
+    "$(jq -r '.observed.fd_delta' "${runtime_direct_h1_soak_json}")" \
+    "$(jq -r '.observed.thread_delta' "${runtime_direct_h1_soak_json}")" \
+    "$(jq -r '.observed.rss_growth_bytes' "${runtime_direct_h1_soak_json}")" \
+    "$(jq -r '.limits.rss_growth_bytes' "${runtime_direct_h1_soak_json}")" \
+    "${status}" >>"${summary_md}"
+  if [[ "${status}" != "pass" ]]; then
+    fail_with_diagnostics "persistent Compio 30-minute soak stability gate failed; see runtime-direct-h1-soak.json"
+  fi
+}
+
 run_runtime_direct_h1_group() {
   if ! has_comparator oxibelt; then
     return
@@ -4015,6 +4411,18 @@ run_runtime_direct_h1_group() {
   else
     fail_with_diagnostics "mandatory HTTP/3 probe failed for direct-H1 runtime control rows"
   fi
+  run_load "oxibelt-runtime-direct-h1-control-post-1k-json-h2" h2 oxibelt \
+    "/perf/runtime-direct-h1-post-1k?json_body_bytes=1024&content_type=application/json" \
+    "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 1024 \
+    --request-body-kind json
+  run_load "oxibelt-runtime-direct-h1-control-chunked-post-16k-h1" h1 oxibelt \
+    "/perf/runtime-direct-h1-chunked-post?json_body_bytes=1024&content_type=application/json" \
+    "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --chunked-request-body 1
 
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \
     --detailed-hot-path-diagnostics \
@@ -4025,6 +4433,21 @@ run_runtime_direct_h1_group() {
     run_load "oxibelt-runtime-direct-h1-experiment-h3" h3 oxibelt "/perf/h3?body=ok" "${duration_seconds}" "${concurrency}"
   else
     fail_with_diagnostics "mandatory HTTP/3 probe failed for direct-H1 runtime experiment rows"
+  fi
+  run_load "oxibelt-runtime-direct-h1-experiment-post-1k-json-h2" h2 oxibelt \
+    "/perf/runtime-direct-h1-post-1k?json_body_bytes=1024&content_type=application/json" \
+    "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 1024 \
+    --request-body-kind json
+  run_load "oxibelt-runtime-direct-h1-experiment-chunked-post-16k-h1" h1 oxibelt \
+    "/perf/runtime-direct-h1-chunked-post?json_body_bytes=1024&content_type=application/json" \
+    "${duration_seconds}" "${concurrency}" \
+    --method POST \
+    --request-body-bytes 16384 \
+    --chunked-request-body 1
+  if [[ "${profile}" == "soak" ]]; then
+    run_runtime_direct_h1_soak_gate
   fi
 
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt \

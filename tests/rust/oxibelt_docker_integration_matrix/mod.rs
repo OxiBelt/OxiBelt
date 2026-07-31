@@ -51,6 +51,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("config-valid", "https-grease-trusted-ca"),
   ("http-semantics", "early-hints-pass"),
   ("http-semantics", "compio-response-engine"),
+  ("http-semantics", "compio-transport-service"),
   ("http-semantics", "expect-priority"),
   ("http-semantics", "sse-grpc-errors"),
   ("security", "hardened-default-seccomp-runtime"),

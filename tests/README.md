@@ -135,6 +135,7 @@ The CI cadences below apply to non-Dependabot workflow events. Dependabot-trigge
 | Retry storm | `upstream-pools/retry-storm-budget` releases a synchronized burst into a one-active, zero-queued retry budget | Original and retry metrics reconcile with upstream attempts, retry concurrency never exceeds one, budget rejection prevents amplification, gauges drain, and the same route succeeds after fault removal | `proxy` Docker matrix on every workflow event |
 | Cache-fill stampede | `cache/collapsed-forwarding-metrics` gates one leader while synchronized followers join the fill | One origin response fills the cache, all followers receive the same generation, waiter metrics reconcile, no lock timeout/error occurs, and a later cache hit succeeds | `cache` Docker matrix on every workflow event |
 | Active H2/H3 shutdown | `lifecycle/process-signal-h2-h3-drain` gates active H2 and H3 requests before pre-drain and `SIGTERM` | Readiness fails while liveness remains healthy, in-flight requests finish before the single graceful deadline, the process exits successfully, and a restarted process serves fresh H2/H3 requests | `config-runtime` Docker matrix on every workflow event |
+| Compio direct-H1 reuse and retirement | `http-semantics/compio-transport-service` uses an origin-side accepted-connection counter plus allowlisted malformed-head, half-close, and peer-close responses | Clean empty-body requests reuse one upstream connection, uncertain framing, EOF, and peer close retire it, half-close truncation fails the downstream body, and fixed or split bodyful requests stay on Hyper and reach the origin exactly once | `proxy` Docker matrix on every workflow event |
 
 The Docker fault cases use only rootless `docker`, unique run labels, isolated networks, exact container names, bounded control inputs, and label-scoped cleanup. They do not use privileged containers, host networking, `netem`, `iptables`, broad prune operations, or `docker-rootful`. Failed matrix jobs retain the existing case materialization, proxy/upstream/probe logs, and container diagnostics through `OXIBELT_TEST_ARTIFACT_DIR`.
 
@@ -147,4 +148,5 @@ tests/scripts/run-proxy-integration-matrix.sh shared-state redis-disconnect-reco
 tests/scripts/run-proxy-integration-matrix.sh upstream-pools retry-storm-budget
 tests/scripts/run-proxy-integration-matrix.sh cache collapsed-forwarding-metrics
 tests/scripts/run-proxy-integration-matrix.sh lifecycle process-signal-h2-h3-drain
+tests/scripts/run-proxy-integration-matrix.sh http-semantics compio-transport-service
 ```

@@ -46,6 +46,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
   for (feature_id, expected_status) in [
     ("downstream-http-protocols", "supported"),
     ("upstream-http-protocols", "supported"),
+    ("compio-direct-h1-io", "experimental"),
     ("route-matchers", "supported"),
     ("route-actions", "supported"),
     ("upstream-pool-algorithms", "supported"),
@@ -93,6 +94,75 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
       statuses.get(feature_id).map(String::as_str),
       Some(expected_status),
       "docs/FeatureStatus.md must list {feature_id} as {expected_status}"
+    );
+  }
+}
+
+#[test]
+fn compio_direct_h1_status_preserves_experimental_no_duplicate_boundary() {
+  let description = feature_status_description("compio-direct-h1-io");
+  for expected in [
+    "persistent bounded worker fleet",
+    "Bodyful, chunked, streaming, upgrade, CONNECT",
+    "remain on Hyper",
+    "pre-dispatch fallback",
+    "post-dispatch failure never implicitly replays",
+    "at least three paired Hyper/Compio samples",
+    "CPU/request and p99",
+    "30-minute FD/thread/RSS/active-connection soak gate",
+  ] {
+    assert!(
+      description.contains(expected),
+      "compio-direct-h1-io lifecycle notes should preserve {expected:?}"
+    );
+  }
+}
+
+#[test]
+fn compio_direct_h1_operator_docs_define_service_upgrade_and_evidence_contracts() {
+  let configuration = read_repo_file("docs/Configuration.md");
+  for expected in [
+    "persistent service at subsystem startup",
+    "bounded submission queue",
+    "there are no independent public Compio tuning knobs",
+    "before an upstream request byte is written",
+    "never implicitly replays the operation through Hyper",
+    "returned to the bounded idle pool only after complete unambiguous response framing",
+  ] {
+    assert!(
+      configuration.contains(expected),
+      "docs/Configuration.md should preserve {expected:?}"
+    );
+  }
+
+  let upgrading = read_repo_file("docs/Upgrading.md");
+  for expected in [
+    "internal resource-model change, not a configuration migration",
+    "Bodyful, chunked, streaming, upgrade, CONNECT",
+    "does not implicitly replay the request",
+    "runtime.direct_h1_io = \"auto\"",
+    "oxibelt_http_compio_direct_h1_*",
+  ] {
+    assert!(
+      upgrading.contains(expected),
+      "docs/Upgrading.md should preserve {expected:?}"
+    );
+  }
+
+  let performance = read_repo_file("docs/Performance.md");
+  for expected in [
+    "Aggregate schema `31` requires at least three complete control samples",
+    "CPU-time-per-request ratio at `<= 1.03`",
+    "median p99 ratio at `<= 1.05`",
+    "RPS remains visible but informational",
+    "FD delta `0`",
+    "thread delta `0`",
+    "active Compio connections `0`",
+    "max(16 MiB, 5% of baseline)",
+  ] {
+    assert!(
+      performance.contains(expected),
+      "docs/Performance.md should preserve {expected:?}"
     );
   }
 }

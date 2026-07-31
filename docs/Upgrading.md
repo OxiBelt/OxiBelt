@@ -350,9 +350,26 @@ configuration or persisted-state migration is required.
 Operators that deliberately select an active Compio runtime with
 `runtime.direct_h1_io = "compio"` must continue to treat the Linux-only path
 as experimental, not promoted. Its bounded response engine fails closed on
-malformed, ambiguous, or unsupported HTTP/1 response framing. Before opting
-in, validate representative upstream responses and monitor
-`oxibelt_http_direct_h1_response_protocol_failures_total`.
+malformed, ambiguous, or unsupported HTTP/1 response framing. The selected
+path now starts persistent workers, uses bounded admission, and can reuse only
+cleanly framed generation-current HTTP/1.1 connections. This is an
+internal resource-model change, not a configuration migration: worker, queue, waiter,
+and connection limits derive from the resolved runtime and circuit-breaker
+budgets, while upstream idle and absolute lifetimes retain their existing
+configuration meaning.
+
+Only guarded empty `GET` and `HEAD` operations can select the Compio service.
+Bodyful, chunked, streaming, upgrade, CONNECT, or otherwise ineligible
+operations continue through Hyper. Queue or worker failure can fall back only
+before upstream bytes are written; a post-dispatch failure closes the
+connection and does not implicitly replay the request. Before opting in,
+validate representative upstream responses and monitor
+`oxibelt_http_direct_h1_response_protocol_failures_total` together with the
+`oxibelt_http_compio_direct_h1_*` queue, worker, connection, dispatch, wait,
+connect, cancellation, buffer, and copied-byte metrics. Roll back by restoring
+`runtime.direct_h1_io = "auto"` or `"tokio_hyper"` and restarting the process;
+do not treat a hot reload that changes the resolved runtime worker plan as
+supported.
 
 This post-beta.2 compatibility change requires a later governed beta and
 fresh exact-revision evidence; it is not part of beta.2's immutable release

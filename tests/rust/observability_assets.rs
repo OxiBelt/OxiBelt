@@ -119,6 +119,46 @@ fn observability_docs_keep_opt_in_private_defaults() {
 }
 
 #[test]
+fn observability_docs_publish_fixed_compio_direct_h1_service_metrics() {
+  let docs = read_repo("docs/Observability.md");
+  for metric in [
+    "oxibelt_http_compio_direct_h1_submissions_total{outcome}",
+    "oxibelt_http_compio_direct_h1_queue_occupancy",
+    "oxibelt_http_compio_direct_h1_workers{state}",
+    "oxibelt_http_compio_direct_h1_connections{state}",
+    "oxibelt_http_compio_direct_h1_connection_events_total{event}",
+    "oxibelt_http_compio_direct_h1_dispatch_total{outcome}",
+    "oxibelt_http_compio_direct_h1_buffer_events_total{event}",
+    "oxibelt_http_compio_direct_h1_operation_wait_observations_total",
+    "oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total",
+    "oxibelt_http_compio_direct_h1_connect_observations_total",
+    "oxibelt_http_compio_direct_h1_connect_duration_ns_total",
+    "oxibelt_http_compio_direct_h1_cancellation_observations_total",
+    "oxibelt_http_compio_direct_h1_cancellation_duration_ns_total",
+    "oxibelt_http_compio_direct_h1_copied_bytes_total",
+  ] {
+    assert!(
+      docs.contains(metric),
+      "Compio direct-H1 observability contract should document {metric}"
+    );
+  }
+  for boundary in [
+    "predispatch_fallback",
+    "postdispatch_failure",
+    "retired_residual_bytes",
+    "retired_pool_full",
+    "retired_io_error",
+    "Any retirement reason means that connection was not returned to the idle pool.",
+    "never label an origin, host, route, path, peer, request, or raw error",
+  ] {
+    assert!(
+      docs.contains(boundary),
+      "Compio direct-H1 observability contract should preserve {boundary:?}"
+    );
+  }
+}
+
+#[test]
 fn public_observability_assets_avoid_sensitive_examples() {
   let mut scanned = Vec::new();
   collect_files(&repo_root().join(OBSERVABILITY_DIR), &mut scanned);

@@ -5,8 +5,24 @@
 //! therefore always has a safe one-core / modest-memory fallback.
 
 use std::fs;
+use std::time::Duration;
 
 use crate::config::{CircuitBreakerScopeConfig, Config};
+use anyhow::{Context, ensure};
+
+const MAX_COMPIO_DIRECT_H1_WORKERS: usize = 256;
+const MAX_COMPIO_DIRECT_H1_QUEUE_ENTRIES: usize = 4_096;
+const MAX_COMPIO_DIRECT_H1_CONNECTIONS: usize = 4_096;
+const COMPIO_DIRECT_H1_WORKER_MEMORY_RESERVATION_BYTES: u64 = 8 * 1024 * 1024;
+const COMPIO_DIRECT_H1_QUEUE_ENTRY_MEMORY_BYTES: u64 = 64 * 1024;
+const COMPIO_DIRECT_H1_CONNECTION_MEMORY_BYTES: u64 = 32 * 1024;
+/// Reload keeps the active fleet alive while one replacement fleet is staged.
+const COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS: u64 = 2;
+/// Independent resource partitions keep two overlapping fleets below the
+/// discovered process memory ceiling: workers 1/2, queues 1/8, connections 1/4.
+const COMPIO_DIRECT_H1_WORKER_MEMORY_PARTITION: u64 = 2;
+const COMPIO_DIRECT_H1_QUEUE_MEMORY_PARTITION: u64 = 8;
+const COMPIO_DIRECT_H1_CONNECTION_MEMORY_PARTITION: u64 = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RuntimeResources {
@@ -37,17 +53,13 @@ impl RuntimeResources {
     let memory_request = std::env::var("OXIBELT_KUBERNETES_MEMORY_REQUEST_BYTES")
       .ok()
       .and_then(|value| value.parse::<u64>().ok());
-    let memory_bytes = cgroup_memory
-      .or(memory_request)
-      .unwrap_or(512 * 1024 * 1024)
-      .max(64 * 1024 * 1024);
+    let memory_bytes = effective_memory_bytes(cgroup_memory, memory_request);
     let buffering_bytes = config.proxy.buffering.max_memory_body_bytes.max(64 * 1024) as u64;
     let decoded_body_bytes = config
       .waf
       .http_body_compression
       .max_decoded_body_bytes
       .max(64 * 1024) as u64;
-    let file_descriptors = file_descriptor_limit().unwrap_or(1_024).max(64);
     let reserved_file_descriptors = config
       .overload
       .reserved_capacity
@@ -56,9 +68,10 @@ impl RuntimeResources {
     Self {
       cpu,
       memory_bytes,
-      usable_file_descriptors: file_descriptors
-        .saturating_sub(reserved_file_descriptors)
-        .max(1),
+      usable_file_descriptors: effective_usable_file_descriptors(
+        file_descriptor_limit(),
+        reserved_file_descriptors,
+      ),
       buffering_bytes,
       decoded_body_bytes,
     }
@@ -100,7 +113,7 @@ impl RuntimeResources {
   pub(super) fn connections(self, scope: AutoScope, global: usize) -> usize {
     match scope {
       AutoScope::Global => clamp_ceil(64.0 * self.cpu, 16, 2_048)
-        .min((self.usable_file_descriptors / 4).max(1) as usize),
+        .min(usize::try_from(self.usable_file_descriptors / 4).unwrap_or(usize::MAX)),
       AutoScope::Route => global.min(clamp_ceil(16.0 * self.cpu, 4, 512)),
       AutoScope::Pool => global.min(clamp_ceil(16.0 * self.cpu, 4, 512)),
     }
@@ -145,6 +158,13 @@ pub(super) fn configured_queue_capacity(
   setting.fixed().unwrap_or(automatic)
 }
 
+fn configured_connection_capacity(
+  setting: crate::config::CapacitySetting,
+  automatic: usize,
+) -> usize {
+  setting.fixed().unwrap_or(automatic)
+}
+
 pub(super) fn scope_defaults(
   resources: RuntimeResources,
   scope: AutoScope,
@@ -179,7 +199,7 @@ pub(super) fn scope_defaults(
   ResolvedAutoScope {
     active_requests: configured_capacity(config.max_active_requests, active_automatic),
     pending_requests: configured_queue_capacity(config.max_pending_requests, pending_automatic),
-    connections: configured_capacity(config.max_connections, connection_automatic),
+    connections: configured_connection_capacity(config.max_connections, connection_automatic),
     streams: configured_capacity(config.max_streams, stream_automatic),
     inspection_jobs: configured_capacity(config.max_body_inspection_jobs, inspection_automatic),
     decompression_jobs: configured_capacity(config.max_decompression_jobs, inspection_automatic),
@@ -196,8 +216,144 @@ pub(super) struct ResolvedAutoScope {
   pub(super) decompression_jobs: usize,
 }
 
+/// A bounded transport-service projection of the existing process-local circuit-breaker policy.
+///
+/// This is deliberately not a second configuration surface. The Compio direct-H1 service uses
+/// the same resolved queue, timeout, and connection budgets as the established admission layer.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CompioDirectH1Budget {
+  pub(crate) worker_count: usize,
+  pub(crate) queue_capacity_per_worker: usize,
+  pub(crate) max_waiters: usize,
+  pub(crate) queue_wait_timeout: Duration,
+  pub(crate) max_connections_global: usize,
+  pub(crate) max_connections_per_origin: usize,
+}
+
+pub(crate) fn compio_direct_h1_budget(config: &Config) -> anyhow::Result<CompioDirectH1Budget> {
+  let worker_count = config.runtime.worker_threads;
+  ensure!(
+    worker_count > 0,
+    "runtime.worker_threads must be greater than 0 before resolving the Compio direct-H1 budget"
+  );
+
+  let resources = RuntimeResources::discover(config);
+  let safe_worker_count = compio_worker_memory_limit(resources.memory_bytes);
+  ensure!(
+    worker_count <= safe_worker_count,
+    "resolved Compio direct-H1 worker count {worker_count} exceeds the internal resource safety limit {safe_worker_count}"
+  );
+  let global = scope_defaults(
+    resources,
+    AutoScope::Global,
+    &config.circuit_breakers.global,
+    None,
+  );
+  let per_origin = scope_defaults(
+    resources,
+    AutoScope::Pool,
+    &config.circuit_breakers.pool_defaults,
+    Some(&global),
+  );
+  let memory_connection_limit = compio_connection_memory_limit(resources.memory_bytes);
+  let file_descriptor_connection_limit = usize::try_from(
+    resources.usable_file_descriptors / 4 / COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS,
+  )
+  .unwrap_or(usize::MAX);
+  let safe_connection_limit = memory_connection_limit
+    .min(file_descriptor_connection_limit)
+    .min(MAX_COMPIO_DIRECT_H1_CONNECTIONS);
+  ensure!(
+    global.connections <= safe_connection_limit,
+    "resolved Compio direct-H1 global connection capacity {} exceeds the internal resource safety limit {safe_connection_limit}",
+    global.connections
+  );
+  let max_connections_per_origin = per_origin.connections.min(global.connections);
+  ensure!(
+    max_connections_per_origin <= safe_connection_limit,
+    "resolved Compio direct-H1 per-origin connection capacity {max_connections_per_origin} exceeds the internal resource safety limit {safe_connection_limit}"
+  );
+  ensure!(
+    global.connections > 0 && max_connections_per_origin > 0,
+    "resolved Compio direct-H1 connection capacity is zero after process resource reservations"
+  );
+  // Worker handoff slots cover both the configured external pending share and
+  // the worker's share of the already-bounded active-operation ceiling. The
+  // global operation semaphore still caps queued plus active work at
+  // `global.connections`; this capacity prevents a one-slot cross-runtime
+  // convoy without admitting additional operations.
+  let queue_capacity_per_worker = global
+    .pending_requests
+    .div_ceil(worker_count)
+    .max(global.connections.div_ceil(worker_count))
+    .max(1);
+  let physical_queue_capacity = worker_count
+    .checked_mul(queue_capacity_per_worker)
+    .context("resolved Compio direct-H1 submission capacity is too large")?;
+  let combined_queue_capacity = physical_queue_capacity
+    .checked_add(global.pending_requests)
+    .context("resolved Compio direct-H1 combined queue and waiter capacity is too large")?;
+  let safe_queue_capacity = compio_queue_memory_limit(resources.memory_bytes);
+  ensure!(
+    combined_queue_capacity <= safe_queue_capacity,
+    "resolved Compio direct-H1 queue capacity {physical_queue_capacity} with {} waiters has combined capacity {combined_queue_capacity}, which exceeds the internal memory safety limit {safe_queue_capacity}",
+    global.pending_requests
+  );
+
+  Ok(CompioDirectH1Budget {
+    worker_count,
+    queue_capacity_per_worker,
+    max_waiters: global.pending_requests,
+    queue_wait_timeout: Duration::from_millis(
+      config.circuit_breakers.global.pending_queue_timeout_ms,
+    ),
+    max_connections_global: global.connections,
+    max_connections_per_origin,
+  })
+}
+
 fn clamp_ceil(value: f64, min: usize, max: usize) -> usize {
   value.ceil().clamp(min as f64, max as f64) as usize
+}
+
+fn effective_memory_bytes(cgroup: Option<u64>, kubernetes_request: Option<u64>) -> u64 {
+  cgroup.or(kubernetes_request).unwrap_or(512 * 1024 * 1024)
+}
+
+fn effective_usable_file_descriptors(discovered: Option<u64>, reserved: u64) -> u64 {
+  discovered.unwrap_or(1_024).saturating_sub(reserved)
+}
+
+fn compio_worker_memory_limit(memory_bytes: u64) -> usize {
+  usize::try_from(
+    memory_bytes
+      / COMPIO_DIRECT_H1_WORKER_MEMORY_PARTITION
+      / COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS
+      / COMPIO_DIRECT_H1_WORKER_MEMORY_RESERVATION_BYTES,
+  )
+  .unwrap_or(usize::MAX)
+  .min(MAX_COMPIO_DIRECT_H1_WORKERS)
+}
+
+fn compio_queue_memory_limit(memory_bytes: u64) -> usize {
+  usize::try_from(
+    memory_bytes
+      / COMPIO_DIRECT_H1_QUEUE_MEMORY_PARTITION
+      / COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS
+      / COMPIO_DIRECT_H1_QUEUE_ENTRY_MEMORY_BYTES,
+  )
+  .unwrap_or(usize::MAX)
+  .min(MAX_COMPIO_DIRECT_H1_QUEUE_ENTRIES)
+}
+
+fn compio_connection_memory_limit(memory_bytes: u64) -> usize {
+  usize::try_from(
+    memory_bytes
+      / COMPIO_DIRECT_H1_CONNECTION_MEMORY_PARTITION
+      / COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS
+      / COMPIO_DIRECT_H1_CONNECTION_MEMORY_BYTES,
+  )
+  .unwrap_or(usize::MAX)
 }
 
 fn cgroup_cpu_limit() -> Option<f64> {
@@ -295,5 +451,44 @@ mod tests {
     assert_eq!(parse_cpu("250m"), Some(0.25));
     assert_eq!(parse_cpu("1.5"), Some(1.5));
     assert_eq!(parse_cpu("0m"), None);
+  }
+
+  #[test]
+  fn known_memory_limits_are_not_inflated_to_the_fallback_floor() {
+    assert_eq!(
+      effective_memory_bytes(Some(8 * 1024 * 1024), None),
+      8 * 1024 * 1024
+    );
+    assert_eq!(
+      effective_memory_bytes(None, Some(12 * 1024 * 1024)),
+      12 * 1024 * 1024
+    );
+    assert_eq!(effective_memory_bytes(None, None), 512 * 1024 * 1024);
+  }
+
+  #[test]
+  fn known_file_descriptor_limits_are_not_inflated() {
+    assert_eq!(effective_usable_file_descriptors(Some(32), 8), 24);
+    assert_eq!(effective_usable_file_descriptors(Some(8), 32), 0);
+    assert_eq!(effective_usable_file_descriptors(None, 24), 1_000);
+  }
+
+  #[test]
+  fn overlapping_fleet_memory_partitions_remain_below_the_process_limit() {
+    let memory_bytes = 512 * 1024 * 1024;
+    let workers = compio_worker_memory_limit(memory_bytes) as u64
+      * COMPIO_DIRECT_H1_WORKER_MEMORY_RESERVATION_BYTES
+      * COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS;
+    let queues = compio_queue_memory_limit(memory_bytes) as u64
+      * COMPIO_DIRECT_H1_QUEUE_ENTRY_MEMORY_BYTES
+      * COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS;
+    let connections = compio_connection_memory_limit(memory_bytes) as u64
+      * COMPIO_DIRECT_H1_CONNECTION_MEMORY_BYTES
+      * COMPIO_DIRECT_H1_MAX_OVERLAPPING_FLEETS;
+
+    assert!(workers <= memory_bytes / COMPIO_DIRECT_H1_WORKER_MEMORY_PARTITION);
+    assert!(queues <= memory_bytes / COMPIO_DIRECT_H1_QUEUE_MEMORY_PARTITION);
+    assert!(connections <= memory_bytes / COMPIO_DIRECT_H1_CONNECTION_MEMORY_PARTITION);
+    assert!(workers + queues + connections <= memory_bytes * 7 / 8);
   }
 }

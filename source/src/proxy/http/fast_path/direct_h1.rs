@@ -1,11 +1,15 @@
 //! Direct upstream HTTP/1.1 transport for the plain-proxy fast path.
 //! It bypasses the legacy pooled client only for tightly guarded H1 requests.
 
+#[cfg(target_os = "linux")]
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+#[cfg(target_os = "linux")]
+use arc_swap::ArcSwapOption;
 use http::header::CONNECTION;
 use http::{HeaderMap, Method, Request};
 use http_body_util::BodyExt;
@@ -15,10 +19,13 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
+use crate::circuit_breakers::CircuitBreakerRuntime;
 use crate::config::{
   EarlyHintsMode, HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig,
 };
 use crate::metrics::Metrics;
+#[cfg(target_os = "linux")]
+use crate::metrics::compio_direct_h1::CompioDirectH1DispatchOutcome;
 use crate::metrics::fast_path::labels::{
   DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
 };
@@ -31,6 +38,11 @@ use super::request_body::FastPathRequestBodyMode;
 use super::stage_timing as timing;
 
 #[cfg(target_os = "linux")]
+mod compio_service;
+#[cfg(not(target_os = "linux"))]
+#[path = "direct_h1/compio_service_portable.rs"]
+mod compio_service;
+#[cfg(target_os = "linux")]
 mod compio_transport;
 #[cfg(test)]
 pub(crate) mod delimiters;
@@ -41,6 +53,12 @@ pub(crate) mod response_protocol;
 mod runtime_backend;
 mod send_attempt;
 mod transport_error;
+#[cfg(target_os = "linux")]
+use self::compio_service::CompioDirectH1PredispatchReason;
+pub(crate) use self::compio_service::{
+  CompioDirectH1Service, CompioDirectH1ServicePlan, CompioDirectH1ShutdownSummary,
+  CompioDirectH1Staged,
+};
 use self::origin::DirectH1Origin;
 use self::request::PreparedDirectH1Request;
 pub(super) use self::request::mark_prevalidated_direct_h1_request;
@@ -58,17 +76,25 @@ pub(super) use self::transport_error::{DirectH1UpstreamErrorKind, direct_h1_upst
 const DIRECT_H1_MAX_SHARDS: usize = 16;
 #[cfg(target_os = "linux")]
 const COMPIO_CONNECT_ERROR_BACKOFF: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const COMPIO_RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(30);
 #[derive(Clone, Default)]
 pub(crate) struct DirectH1Pools {
   pools: Vec<Option<Arc<DirectH1Pool>>>,
 }
 
 impl DirectH1Pools {
-  pub(crate) fn new(upstreams: &[UpstreamConfig]) -> Self {
+  pub(crate) fn new(
+    upstreams: &[UpstreamConfig],
+    circuit_breakers: Arc<CircuitBreakerRuntime>,
+  ) -> Self {
     Self {
       pools: upstreams
         .iter()
-        .map(|upstream| DirectH1Pool::new(upstream).map(Arc::new))
+        .map(|upstream| {
+          DirectH1Pool::new_with_circuit_breakers(upstream, Some(circuit_breakers.clone()))
+            .map(Arc::new)
+        })
         .collect(),
     }
   }
@@ -86,11 +112,23 @@ struct DirectH1Pool {
   origin: DirectH1Origin,
   connect_timeout: Duration,
   idle_timeout: Duration,
+  max_lifetime: Duration,
   max_idle: usize,
   idle_count: AtomicUsize,
   next_shard: AtomicUsize,
   idle_shards: Vec<Mutex<Vec<DirectH1IdleConnection>>>,
   compio_connect_backoff_until: Mutex<Option<Instant>>,
+  #[cfg(target_os = "linux")]
+  compio_resolution: ArcSwapOption<CompioDirectH1Resolution>,
+  #[cfg(target_os = "linux")]
+  compio_resolution_gate: tokio::sync::Semaphore,
+  circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+}
+
+#[cfg(target_os = "linux")]
+struct CompioDirectH1Resolution {
+  expires_at: Instant,
+  addresses: Arc<[SocketAddr]>,
 }
 
 struct DirectH1TakeSender {
@@ -112,7 +150,15 @@ enum DirectH1PutError {
 }
 
 impl DirectH1Pool {
+  #[cfg(test)]
   fn new(upstream: &UpstreamConfig) -> Option<Self> {
+    Self::new_with_circuit_breakers(upstream, None)
+  }
+
+  fn new_with_circuit_breakers(
+    upstream: &UpstreamConfig,
+    circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  ) -> Option<Self> {
     let origin = DirectH1Origin::from_url(&upstream.origin)?;
     let max_idle = upstream.pool_max_idle_per_host;
     let shard_count = max_idle.clamp(1, DIRECT_H1_MAX_SHARDS);
@@ -120,11 +166,17 @@ impl DirectH1Pool {
       origin,
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
+      max_lifetime: Duration::from_millis(upstream.max_lifetime_ms),
       max_idle,
       idle_count: AtomicUsize::new(0),
       next_shard: AtomicUsize::new(0),
       idle_shards: (0..shard_count).map(|_| Mutex::new(Vec::new())).collect(),
       compio_connect_backoff_until: Mutex::new(None),
+      #[cfg(target_os = "linux")]
+      compio_resolution: ArcSwapOption::empty(),
+      #[cfg(target_os = "linux")]
+      compio_resolution_gate: tokio::sync::Semaphore::new(1),
+      circuit_breakers,
     })
   }
 
@@ -140,6 +192,14 @@ impl DirectH1Pool {
       *backoff_until = None;
     }
     false
+  }
+
+  #[cfg(target_os = "linux")]
+  fn compio_worker_shard(&self, worker_count: usize) -> usize {
+    debug_assert!(worker_count > 0);
+    let origin_shard = self.origin.worker_shard(worker_count);
+    let sequence = self.next_shard.fetch_add(1, Ordering::Relaxed);
+    origin_shard.wrapping_add(sequence) % worker_count
   }
 
   #[cfg(target_os = "linux")]
@@ -256,6 +316,7 @@ struct DirectH1SendMetricOptions {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_send_direct_h1(
   pools: &DirectH1Pools,
+  compio_service: Option<&Arc<CompioDirectH1Service>>,
   metrics: &Arc<Metrics>,
   upstream_index: usize,
   upstream: &UpstreamConfig,
@@ -315,6 +376,7 @@ pub(super) async fn try_send_direct_h1(
 
   let result = send_prepared_request(
     pool,
+    compio_service,
     metrics,
     protocol,
     prepared,
@@ -387,6 +449,7 @@ fn direct_h1_guard_miss(
 #[allow(clippy::too_many_arguments)]
 async fn send_prepared_request(
   pool: Arc<DirectH1Pool>,
+  compio_service: Option<&Arc<CompioDirectH1Service>>,
   metrics: &Arc<Metrics>,
   protocol: FastPathMetricProtocol,
   prepared: PreparedDirectH1Request,
@@ -402,15 +465,23 @@ async fn send_prepared_request(
   }
   let use_compio_transport = runtime_backend == DirectH1RuntimeBackend::Compio
     && compio_transport_eligible(protocol, &prepared)
-    && !pool.compio_connect_backoff_active();
+    && !pool.compio_connect_backoff_active()
+    && compio_service.is_some();
   if metric_options.diagnostic_metrics {
     record_runtime_backend_selection(metrics, protocol, runtime_backend, use_compio_transport);
+  }
+  #[cfg(target_os = "linux")]
+  if runtime_backend == DirectH1RuntimeBackend::Compio && !use_compio_transport {
+    metrics.record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PredispatchFallback);
   }
 
   #[cfg(target_os = "linux")]
   if use_compio_transport {
-    let fallback_prepared = prepared.retry_prepared();
+    let Some(compio_service) = compio_service else {
+      unreachable!("Compio service presence is part of transport eligibility");
+    };
     let result = compio_transport::send_prepared_request(
+      compio_service,
       pool.clone(),
       metrics.clone(),
       protocol,
@@ -420,38 +491,75 @@ async fn send_prepared_request(
       metric_options,
     )
     .await;
-    if result.is_err() && metric_options.diagnostic_metrics {
-      runtime_backend.record_error(metrics, protocol);
-    }
     match result {
-      Ok(response) => return Ok(response),
-      Err(error)
-        if direct_h1_transport_miss_reason(&error) == FastPathTransportMissReason::ConnectError =>
-      {
-        pool.note_compio_connect_error();
-        if let Some(prepared) = fallback_prepared {
+      compio_transport::CompioDirectH1SendResult::NotSubmitted {
+        prepared,
+        reason,
+        source,
+      } => {
+        if !compio_predispatch_allows_hyper_fallback(reason) {
           if metric_options.diagnostic_metrics {
-            DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
+            runtime_backend.record_error(metrics, protocol);
+          }
+          let source = source.unwrap_or_else(|| {
+            anyhow::anyhow!("Compio direct-H1 operation was cancelled before dispatch")
+          });
+          debug!(
+            error = %source,
+            ?reason,
+            "Compio direct H1 was cancelled before dispatch; suppressing upstream fallback"
+          );
+          return Err(source);
+        }
+        metrics
+          .record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PredispatchFallback);
+        if matches!(
+          reason,
+          CompioDirectH1PredispatchReason::Resolve | CompioDirectH1PredispatchReason::Connect
+        ) {
+          pool.note_compio_connect_error();
+        }
+        if metric_options.diagnostic_metrics {
+          runtime_backend.record_fallback(metrics, protocol);
+          DirectH1RuntimeBackend::TokioHyper.record_selected(metrics, protocol);
+        }
+        if let Some(source) = source.as_ref() {
+          debug!(
+            error = %source,
+            ?reason,
+            "Compio direct H1 did not submit upstream bytes; falling back to Hyper direct H1"
+          );
+        }
+        return send_prepared_request_hyper(
+          pool,
+          metrics,
+          protocol,
+          *prepared,
+          timeouts,
+          allow_reconnect_retry,
+          overload,
+          metric_options,
+        )
+        .await;
+      }
+      compio_transport::CompioDirectH1SendResult::Sent {
+        result,
+        visibility,
+        bytes_written,
+      } => {
+        if result.is_err() {
+          metrics
+            .record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PostdispatchFailure);
+          if metric_options.diagnostic_metrics {
+            runtime_backend.record_error(metrics, protocol);
           }
           debug!(
-            error = %error,
-            "Compio direct H1 failed before request write; falling back to Hyper direct H1"
+            ?visibility,
+            bytes_written, "Compio direct H1 failed after the no-fallback boundary"
           );
-          return send_prepared_request_hyper(
-            pool,
-            metrics,
-            protocol,
-            prepared,
-            timeouts,
-            allow_reconnect_retry,
-            overload,
-            metric_options,
-          )
-          .await;
         }
-        return Err(error);
+        return result;
       }
-      Err(error) => return Err(error),
     }
   }
 
@@ -474,6 +582,11 @@ async fn send_prepared_request(
     metric_options,
   )
   .await
+}
+
+#[cfg(target_os = "linux")]
+fn compio_predispatch_allows_hyper_fallback(reason: CompioDirectH1PredispatchReason) -> bool {
+  reason != CompioDirectH1PredispatchReason::Cancelled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -643,7 +756,7 @@ async fn connect_sender_inner(
   }
   let stream = tokio::time::timeout(
     pool.connect_timeout,
-    TcpStream::connect((pool.origin.host.as_str(), pool.origin.port)),
+    TcpStream::connect((pool.origin.host.as_ref(), pool.origin.port)),
   )
   .await
   .context("direct H1 upstream connect timed out")?

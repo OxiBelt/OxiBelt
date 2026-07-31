@@ -771,6 +771,7 @@ checksum = "e5cf9e29d3c2d2a37078198795631b61d2b5c9cab68191e31526fe342d742135"
 dependencies = [
  "compio-buf",
  "compio-driver",
+ "compio-io",
  "compio-log",
  "compio-runtime",
 ]

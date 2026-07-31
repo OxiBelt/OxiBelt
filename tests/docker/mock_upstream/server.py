@@ -2,6 +2,7 @@ import json
 import base64
 import os
 import re
+import socket
 import ssl
 import threading
 import time
@@ -21,11 +22,73 @@ CAPTURE_REQUESTS = os.environ.get("CAPTURE_REQUESTS", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 REQUEST_COUNTS = {}
 REQUEST_COUNTS_LOCK = threading.Lock()
+REQUEST_COUNT_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+REQUEST_COUNT_LIMIT = 256
 FAULT_GATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 FAULT_GATE_LIMIT = 256
 FAULT_GATE_MAX_TIMEOUT_MS = 30_000
 FAULT_GATES = {}
 FAULT_GATES_CONDITION = threading.Condition()
+CONNECTION_STATS = {
+  "accepted": 0,
+  "active": 0,
+  "closed": 0,
+}
+CONNECTION_STATS_LOCK = threading.Lock()
+H1_FAULTS = frozenset({
+  "bad_chunk_size",
+  "close_after_body",
+  "half_close_after_head",
+  "malformed_head",
+  "prefabricated_response",
+  "truncated_fixed",
+})
+
+
+class CountingThreadingHTTPServer(ThreadingHTTPServer):
+  def get_request(self):
+    request, client_address = super().get_request()
+    with CONNECTION_STATS_LOCK:
+      CONNECTION_STATS["accepted"] += 1
+      CONNECTION_STATS["active"] += 1
+    return request, client_address
+
+  def close_request(self, request):
+    try:
+      super().close_request(request)
+    finally:
+      with CONNECTION_STATS_LOCK:
+        CONNECTION_STATS["active"] = max(0, CONNECTION_STATS["active"] - 1)
+        CONNECTION_STATS["closed"] += 1
+
+
+class ControlHandler(BaseHTTPRequestHandler):
+  protocol_version = "HTTP/1.1"
+
+  def do_GET(self):
+    if self.path != "/__control/stats":
+      self._send_json(404, {"error": "unknown control endpoint"})
+      return
+    with CONNECTION_STATS_LOCK:
+      connections = dict(CONNECTION_STATS)
+    with REQUEST_COUNTS_LOCK:
+      request_counts = dict(sorted(REQUEST_COUNTS.items()))
+    self._send_json(200, {
+      "connections": connections,
+      "request_counts": request_counts,
+    })
+
+  def log_message(self, format, *args):
+    return
+
+  def _send_json(self, status, payload):
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    self.send_response(status)
+    self.send_header("content-type", "application/json")
+    self.send_header("content-length", str(len(encoded)))
+    self.send_header("connection", "close")
+    self.end_headers()
+    self.wfile.write(encoded)
 
 
 class EchoHandler(BaseHTTPRequestHandler):
@@ -90,7 +153,22 @@ class EchoHandler(BaseHTTPRequestHandler):
       return
     if not self._wait_on_fault_gate(query):
       return
-    sequence_index = _sequence_index(parsed.path, query)
+    try:
+      _record_operation(query)
+      sequence_index = _sequence_index(parsed.path, query)
+    except ValueError as error:
+      self.send_error(400, str(error))
+      return
+    except OverflowError as error:
+      self.send_error(429, str(error))
+      return
+    h1_fault = query.get("h1_fault", [""])[0]
+    if h1_fault:
+      if h1_fault not in H1_FAULTS:
+        self.send_error(400, "h1_fault is not an allowlisted fault")
+        return
+      self._write_h1_fault(h1_fault)
+      return
     try:
       header_delay_ms = _sequence_delay_ms(query, sequence_index)
     except ValueError as error:
@@ -234,6 +312,52 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.wfile.write(encoded[body_split_at:])
     else:
       self.wfile.write(encoded)
+
+  def _write_h1_fault(self, fault):
+    responses = {
+      "bad_chunk_size": (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"not-hex\r\nbad\r\n"
+      ),
+      "close_after_body": (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 2\r\n"
+        b"Connection: close\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"ok"
+      ),
+      "half_close_after_head": (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 4\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+      ),
+      "malformed_head": b"HTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+      "prefabricated_response": (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 2\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"ok"
+        b"HTTP/1.1 599 Prefabricated\r\n"
+        b"Content-Length: 8\r\n"
+        b"Connection: close\r\n\r\n"
+        b"poisoned"
+      ),
+      "truncated_fixed": (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 5\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"ab"
+      ),
+    }
+    self.connection.sendall(responses[fault])
+    if fault == "half_close_after_head":
+      try:
+        self.connection.shutdown(socket.SHUT_WR)
+      except OSError:
+        pass
+    self.close_connection = fault != "prefabricated_response"
 
   def _handle_fault_gate_control(self, path):
     prefix = "/__fault/gates/"
@@ -389,7 +513,23 @@ def _sequence_index(path, query):
   ):
     return 0
   key = query.get("sequence_key", [path])[0]
+  return _bounded_request_increment(key)
+
+
+def _record_operation(query):
+  operation_id = query.get("operation_id", [""])[0]
+  if not operation_id:
+    return
+  _bounded_request_increment(f"operation.{operation_id}")
+
+
+def _bounded_request_increment(key):
+  normalized_key = key.removeprefix("operation.")
+  if not REQUEST_COUNT_KEY_RE.fullmatch(normalized_key):
+    raise ValueError("request count key must contain 1 to 64 safe characters")
   with REQUEST_COUNTS_LOCK:
+    if key not in REQUEST_COUNTS and len(REQUEST_COUNTS) >= REQUEST_COUNT_LIMIT:
+      raise OverflowError("request count key limit reached")
     index = REQUEST_COUNTS.get(key, 0)
     REQUEST_COUNTS[key] = index + 1
     return index
@@ -442,7 +582,9 @@ def _safe_header_value(key, value):
 
 def main():
   port = int(os.environ.get("LISTEN_PORT", "18080"))
-  server = ThreadingHTTPServer(("0.0.0.0", port), EchoHandler)
+  control_port = int(os.environ.get("CONTROL_PORT", "18081"))
+  server = CountingThreadingHTTPServer(("0.0.0.0", port), EchoHandler)
+  control_server = ThreadingHTTPServer(("127.0.0.1", control_port), ControlHandler)
   if TLS_ENABLED:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -450,7 +592,18 @@ def main():
     context.load_cert_chain(TLS_CERT_FILE, TLS_KEY_FILE)
     server.socket = context.wrap_socket(server.socket, server_side=True)
 
-  server.serve_forever()
+  control_thread = threading.Thread(
+    target=control_server.serve_forever,
+    name="mock-upstream-control",
+    daemon=True,
+  )
+  control_thread.start()
+  try:
+    server.serve_forever()
+  finally:
+    control_server.shutdown()
+    control_server.server_close()
+    control_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

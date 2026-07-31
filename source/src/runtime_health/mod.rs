@@ -60,10 +60,11 @@ pub(crate) enum RuntimeSubsystem {
   AdminAudit,
   AdminMutation,
   Waf,
+  CompioDirectH1,
 }
 
 impl RuntimeSubsystem {
-  pub(crate) const ALL: [Self; 15] = [
+  pub(crate) const ALL: [Self; 16] = [
     Self::AppState,
     Self::TaskRegistry,
     Self::ResponseCache,
@@ -79,6 +80,7 @@ impl RuntimeSubsystem {
     Self::AdminAudit,
     Self::AdminMutation,
     Self::Waf,
+    Self::CompioDirectH1,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -100,6 +102,7 @@ impl RuntimeSubsystem {
       Self::AdminAudit => "admin_audit",
       Self::AdminMutation => "admin_mutation",
       Self::Waf => "waf",
+      Self::CompioDirectH1 => "compio_direct_h1",
     }
   }
 }
@@ -121,10 +124,11 @@ pub(crate) enum RuntimeTaskKind {
   AdminMutationMember,
   AdminMutationCoordinator,
   AdminAuditAnchor,
+  CompioDirectH1Worker,
 }
 
 impl RuntimeTaskKind {
-  pub(crate) const ALL: [Self; 14] = [
+  pub(crate) const ALL: [Self; 15] = [
     Self::HttpConnection,
     Self::AdminConnection,
     Self::OpsConnection,
@@ -139,6 +143,7 @@ impl RuntimeTaskKind {
     Self::AdminMutationMember,
     Self::AdminMutationCoordinator,
     Self::AdminAuditAnchor,
+    Self::CompioDirectH1Worker,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -159,6 +164,7 @@ impl RuntimeTaskKind {
       Self::AdminMutationMember => "admin_mutation_member",
       Self::AdminMutationCoordinator => "admin_mutation_coordinator",
       Self::AdminAuditAnchor => "admin_audit_anchor",
+      Self::CompioDirectH1Worker => "compio_direct_h1_worker",
     }
   }
 }

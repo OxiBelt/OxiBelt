@@ -87,7 +87,7 @@ x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd = "0.13.3"
 zeroize = "1.9.0"
-compio = { version = "0.19.1", default-features = false, features = ["io-uring", "polling", "runtime"] }
+compio = { version = "0.19.1", default-features = false, features = ["bytes", "io-uring", "polling", "runtime", "time"] }
 compio-driver = { version = "0.12.4", default-features = false, features = ["io-uring", "polling"] }
 crc32fast = "1.5.0"
 memchr = "2.8.3"
