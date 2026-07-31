@@ -542,6 +542,7 @@ fn root_public_modules_match_the_reviewed_compatibility_surface() {
   let actual = public_module_names(&source).expect("source/src/lib.rs should parse");
   let expected = [
     "access_log",
+    "activation_plan",
     "admin_audit",
     "admin_client",
     "admin_mutation",
