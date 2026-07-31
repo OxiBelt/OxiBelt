@@ -96,7 +96,7 @@ pub(super) struct FastPathMetrics {
   direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
   direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
   static_fast_path_counters: [StripedCounter; static_response::COUNTER_COUNT],
-  selection_counters: [StripedCounter; selection::COUNTER_COUNT],
+  selection_counters: Box<[StripedCounter]>,
   stage: stage::FastPathStageMetrics,
 }
 
@@ -114,7 +114,9 @@ impl Default for FastPathMetrics {
       direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_io_backend_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
-      selection_counters: std::array::from_fn(|_| StripedCounter::default()),
+      selection_counters: (0..selection::COUNTER_COUNT)
+        .map(|_| StripedCounter::default())
+        .collect(),
       stage: stage::FastPathStageMetrics::default(),
     }
   }
