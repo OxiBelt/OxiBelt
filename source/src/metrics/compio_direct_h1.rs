@@ -155,16 +155,22 @@ impl CompioDirectH1ConnectionEvent {
 #[repr(usize)]
 pub(crate) enum CompioDirectH1DispatchOutcome {
   PredispatchFallback,
+  PredispatchRejection,
   PostdispatchFailure,
 }
 
 impl CompioDirectH1DispatchOutcome {
-  const ALL: [Self; 2] = [Self::PredispatchFallback, Self::PostdispatchFailure];
+  const ALL: [Self; 3] = [
+    Self::PredispatchFallback,
+    Self::PredispatchRejection,
+    Self::PostdispatchFailure,
+  ];
   const COUNT: usize = Self::ALL.len();
 
   const fn as_str(self) -> &'static str {
     match self {
       Self::PredispatchFallback => "predispatch_fallback",
+      Self::PredispatchRejection => "predispatch_rejection",
       Self::PostdispatchFailure => "postdispatch_failure",
     }
   }
@@ -497,6 +503,7 @@ mod tests {
     metrics.set_compio_direct_h1_connection_count(CompioDirectH1ConnectionState::Idle, 1);
     metrics.record_compio_direct_h1_connection_event(CompioDirectH1ConnectionEvent::Reused);
     metrics.record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PredispatchFallback);
+    metrics.record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PredispatchRejection);
     metrics.record_compio_direct_h1_buffer_event(CompioDirectH1BufferEvent::Discard);
     metrics.observe_compio_direct_h1_wait(Duration::from_millis(2));
     metrics.observe_compio_direct_h1_connect(Duration::from_millis(3));
@@ -521,6 +528,9 @@ mod tests {
     );
     assert!(output.contains(
       "oxibelt_http_compio_direct_h1_dispatch_total{outcome=\"predispatch_fallback\"} 1"
+    ));
+    assert!(output.contains(
+      "oxibelt_http_compio_direct_h1_dispatch_total{outcome=\"predispatch_rejection\"} 1"
     ));
     assert!(
       output.contains("oxibelt_http_compio_direct_h1_buffer_events_total{event=\"discard\"} 1")

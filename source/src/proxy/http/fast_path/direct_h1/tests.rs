@@ -19,20 +19,71 @@ const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
 
 #[cfg(target_os = "linux")]
 #[test]
-fn cancelled_compio_predispatch_never_restarts_the_request_on_hyper() {
-  assert!(!compio_predispatch_allows_hyper_fallback(
-    CompioDirectH1PredispatchReason::Cancelled
-  ));
+fn compio_predispatch_fallback_policy_fails_closed_for_capacity() {
   for reason in [
     CompioDirectH1PredispatchReason::QueueFull,
+    CompioDirectH1PredispatchReason::ConnectionLimit,
+    CompioDirectH1PredispatchReason::Cancelled,
+  ] {
+    assert!(!compio_predispatch_allows_hyper_fallback(reason));
+  }
+  for reason in [
     CompioDirectH1PredispatchReason::Unhealthy,
     CompioDirectH1PredispatchReason::Draining,
-    CompioDirectH1PredispatchReason::ConnectionLimit,
     CompioDirectH1PredispatchReason::Resolve,
     CompioDirectH1PredispatchReason::Connect,
   ] {
     assert!(compio_predispatch_allows_hyper_fallback(reason));
   }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compio_predispatch_capacity_rejections_use_typed_admission_errors() {
+  let pool = DirectH1Pool::new(&upstream("http://backend.internal:18080"))
+    .expect("plain upstream should create a direct-H1 pool");
+
+  for (reason, expected) in [
+    (
+      CompioDirectH1PredispatchReason::QueueFull,
+      crate::circuit_breakers::AdmissionRejectionReason::QueueFull,
+    ),
+    (
+      CompioDirectH1PredispatchReason::ConnectionLimit,
+      crate::circuit_breakers::AdmissionRejectionReason::ActiveLimit,
+    ),
+  ] {
+    let error = compio_predispatch_rejection_source(&pool, reason, None);
+    let rejection = error
+      .downcast_ref::<crate::circuit_breakers::AdmissionRejection>()
+      .expect("capacity rejection should remain typed");
+    assert_eq!(rejection.reason, expected);
+    assert_eq!(rejection.retry_after, Duration::ZERO);
+  }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn compio_predispatch_preserves_existing_admission_rejection() {
+  let pool = DirectH1Pool::new(&upstream("http://backend.internal:18080"))
+    .expect("plain upstream should create a direct-H1 pool");
+  let expected = crate::circuit_breakers::AdmissionRejection {
+    reason: crate::circuit_breakers::AdmissionRejectionReason::QueueTimeout,
+    retry_after: Duration::from_secs(7),
+  };
+
+  let error = compio_predispatch_rejection_source(
+    &pool,
+    CompioDirectH1PredispatchReason::ConnectionLimit,
+    Some(anyhow::Error::new(expected)),
+  );
+
+  assert_eq!(
+    error
+      .downcast_ref::<crate::circuit_breakers::AdmissionRejection>()
+      .copied(),
+    Some(expected)
+  );
 }
 
 #[test]

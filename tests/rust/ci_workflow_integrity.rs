@@ -4141,6 +4141,7 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
 
   assert!(
     proxy.contains("\"compio-transport-service\"")
+      && proxy.contains("fails closed on capacity")
       && order.contains("(\"http-semantics\", \"compio-transport-service\")"),
     "the Compio transport fixture should remain registered in deterministic proxy-matrix order"
   );
@@ -4193,7 +4194,22 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
   for expected in [
     "--target-host 127.0.0.1",
     "--port 18081",
+    "--port 18082",
     "--path /__control/stats",
+    "--authority capacity.example.test",
+    "operation_id=capacity-burst",
+    "gate=compio-capacity",
+    ".waiting == 2 and .released == false",
+    "wait \"${capacity_burst_pid}\"",
+    "--allowed-statuses 200,503",
+    "--concurrency 3",
+    "capacity_expected_connections=\"$((capacity_gate_polls + 3))\"",
+    "capacity_accepted_after - capacity_accepted_before != capacity_expected_connections",
+    "capacity_compio_selected_after - capacity_compio_selected_before != 3",
+    "capacity_compio_error_after - capacity_compio_error_before != 1",
+    "capacity_hyper_selected_after - capacity_hyper_selected_before != 0",
+    "capacity_dispatch_rejection_after - capacity_dispatch_rejection_before != 1",
+    ".headers[\"retry-after\"] == \"3\"",
     "accepted_after - accepted_before != 1",
     "h1_fault=malformed_head",
     "h1_fault=half_close_after_head",
@@ -4216,6 +4232,7 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     "retired_eof",
     "retired_peer_close",
     "predispatch_fallback",
+    "predispatch_rejection",
   ] {
     assert!(
       checks.contains(expected),
@@ -4256,6 +4273,16 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     config["circuit_breakers"]["global"]["max_pending_requests"].as_integer(),
     Some(4),
     "the functional fixture should keep a small bounded submission budget"
+  );
+  assert_eq!(
+    config["circuit_breakers"]["pool_defaults"]["max_connections"].as_integer(),
+    Some(2),
+    "the functional fixture should exercise the per-origin Compio connection ceiling"
+  );
+  assert_eq!(
+    config["circuit_breakers"]["capacity_retry_after_ms"].as_integer(),
+    Some(2300),
+    "the functional fixture should prove configured Retry-After propagation"
   );
 }
 

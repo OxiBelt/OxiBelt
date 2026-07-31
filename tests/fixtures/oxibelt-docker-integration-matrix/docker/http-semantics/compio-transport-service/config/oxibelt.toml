@@ -55,6 +55,7 @@ fail_policy = "closed"
 
 [circuit_breakers]
 enabled = true
+capacity_retry_after_ms = 2300
 
 [circuit_breakers.global]
 max_active_requests = 16
@@ -64,6 +65,9 @@ max_connections = 4
 max_streams = 16
 max_body_inspection_jobs = 1
 max_decompression_jobs = 1
+
+[circuit_breakers.pool_defaults]
+max_connections = 2
 
 [[upstreams]]
 name = "http-upstream"
@@ -84,8 +88,33 @@ webtransport = false
 [upstreams.tls.ech]
 mode = "disabled"
 
+[[upstreams]]
+name = "capacity-upstream"
+origin = "http://mock-alt:18081/capacity"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+first_byte_timeout_ms = 3000
+read_timeout_ms = 2500
+send_timeout_ms = 3000
+idle_timeout_ms = 10000
+pool_max_idle_per_host = 2
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
 [[routes]]
 name = "main-route"
 hosts = ["example.test"]
 path_prefix = "/"
 upstream = "http-upstream"
+
+[[routes]]
+name = "capacity-route"
+hosts = ["capacity.example.test"]
+path_prefix = "/"
+upstream = "capacity-upstream"

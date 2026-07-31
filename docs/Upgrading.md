@@ -381,10 +381,12 @@ configuration meaning.
 
 Only guarded empty `GET` and `HEAD` operations can select the Compio service.
 Bodyful, chunked, streaming, upgrade, CONNECT, or otherwise ineligible
-operations continue through Hyper. Queue or worker failure can fall back only
-before upstream bytes are written; a post-dispatch failure closes the
-connection and does not implicitly replay the request. Before opting in,
-validate representative upstream responses and monitor
+operations continue through Hyper. An unhealthy or draining service, or a
+resolution or connection failure, can fall back only before upstream bytes are
+written. Queue saturation and connection-capacity rejection return the
+configured admission response without rerouting through Hyper; a post-dispatch
+failure closes the connection and does not implicitly replay the request.
+Before opting in, validate representative upstream responses and monitor
 `oxibelt_http_direct_h1_response_protocol_failures_total` together with the
 `oxibelt_http_compio_direct_h1_*` queue, worker, connection, dispatch, wait,
 connect, cancellation, buffer, and copied-byte metrics. Roll back by restoring

@@ -12,6 +12,35 @@ compio_transport_control_stats() {
     --timeout 2
 }
 
+compio_transport_alt_control_stats() {
+  docker exec "${alt_container}" python /opt/mock_upstream/client.py \
+    --target-host 127.0.0.1 \
+    --scheme http \
+    --port 18082 \
+    --host mock-control \
+    --method GET \
+    --path /__control/stats \
+    --body "" \
+    --dump-response-json \
+    --expect-status 200 \
+    --timeout 2
+}
+
+compio_transport_alt_gate_request() {
+  local method="$1" path="$2"
+  docker exec "${alt_container}" python /opt/mock_upstream/client.py \
+    --target-host 127.0.0.1 \
+    --scheme http \
+    --port 18081 \
+    --host mock-alt \
+    --method "${method}" \
+    --path "${path}" \
+    --body "" \
+    --dump-response-json \
+    --expect-status 200 \
+    --timeout 2
+}
+
 compio_transport_connection_count() {
   local stats="$1" field="$2"
   local value
@@ -164,11 +193,161 @@ run_case_checks() {
   local compio_selected_before compio_selected_after
   local compio_fallback_before compio_fallback_after
   local hyper_selected_before hyper_selected_after
+  local capacity_stats_before capacity_stats_after
+  local capacity_accepted_before capacity_accepted_after capacity_burst_file capacity_burst_pid
+  local capacity_expected_connections capacity_gate_polls=0 capacity_gate_status
+  local capacity_metrics_before capacity_metrics_after
+  local capacity_compio_selected_before capacity_compio_selected_after
+  local capacity_compio_fallback_before capacity_compio_fallback_after
+  local capacity_compio_error_before capacity_compio_error_after
+  local capacity_hyper_selected_before capacity_hyper_selected_after
+  local capacity_dispatch_fallback_before capacity_dispatch_fallback_after
+  local capacity_dispatch_rejection_before capacity_dispatch_rejection_after
   local half_close_metrics_before half_close_metrics_after
   local half_close_eof_before half_close_eof_after
   local half_close_io_before half_close_io_after
   local half_close_cancel_before half_close_cancel_after
   local operation_id
+
+  capacity_stats_before="$(compio_transport_alt_control_stats)"
+  capacity_accepted_before="$(compio_transport_connection_count \
+    "${capacity_stats_before}" accepted)"
+  capacity_metrics_before="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  capacity_compio_selected_before="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_before}" compio selected)"
+  capacity_compio_fallback_before="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_before}" compio fallback)"
+  capacity_compio_error_before="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_before}" compio error)"
+  capacity_hyper_selected_before="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_before}" tokio_hyper selected)"
+  capacity_dispatch_fallback_before="$(compio_transport_service_metric_value \
+    "${capacity_metrics_before}" \
+    oxibelt_http_compio_direct_h1_dispatch_total \
+    outcome \
+    predispatch_fallback)"
+  capacity_dispatch_rejection_before="$(compio_transport_service_metric_value \
+    "${capacity_metrics_before}" \
+    oxibelt_http_compio_direct_h1_dispatch_total \
+    outcome \
+    predispatch_rejection)"
+  capacity_burst_file="${work_dir}/compio-capacity-burst.json"
+
+  "${repo_root}/tests/scripts/run-bounded-http-burst.sh" \
+    --network "${network_name}" \
+    --image "${mock_image}" \
+    --label "${test_label}" \
+    --target-host proxy \
+    --port 8443 \
+    --scheme https \
+    --authority capacity.example.test \
+    --path "/capacity-limit?operation_id=capacity-burst&body=capacity&content_type=text/plain&gate=compio-capacity&gate_timeout_ms=10000" \
+    --allowed-statuses 200,503 \
+    --concurrency 3 \
+    --timeout-seconds 10 \
+    --output "${capacity_burst_file}" \
+    --ca-file "${cert_dir}/fullchain.pem" &
+  capacity_burst_pid="$!"
+
+  for _ in {1..100}; do
+    capacity_gate_status="$(compio_transport_alt_gate_request \
+      GET /__fault/gates/compio-capacity)"
+    capacity_gate_polls="$((capacity_gate_polls + 1))"
+    if jq -e \
+      '.body | fromjson | .waiting == 2 and .released == false' \
+      <<<"${capacity_gate_status}" >/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ! jq -e \
+    '.body | fromjson | .waiting == 2 and .released == false' \
+    <<<"${capacity_gate_status}" >/dev/null; then
+    compio_transport_alt_gate_request \
+      POST /__fault/gates/compio-capacity/release >/dev/null 2>&1 || true
+    wait "${capacity_burst_pid}" >/dev/null 2>&1 || true
+    fail_with_diagnostics \
+      "Compio capacity burst did not stop at exactly two admitted origin operations"
+  fi
+  capacity_gate_status="$(compio_transport_alt_gate_request \
+    POST /__fault/gates/compio-capacity/release)"
+  assert_response_jq \
+    "${capacity_gate_status}" \
+    '.body | fromjson | .released == true'
+  if ! wait "${capacity_burst_pid}"; then
+    fail_with_diagnostics "Compio capacity burst client failed after gate release"
+  fi
+
+  if ! jq -e '
+    ([.[].status] | sort) == [200, 200, 503]
+    and ([.[] | select(.status == 200 and .body == "capacity")] | length) == 2
+    and ([.[]
+      | select(
+          .status == 503
+          and .body == "request admission unavailable"
+          and .headers["retry-after"] == "3"
+        )
+      ] | length) == 1
+  ' "${capacity_burst_file}" >/dev/null; then
+    fail_with_diagnostics \
+      "Compio capacity burst did not return two successes and one typed admission rejection"
+  fi
+
+  capacity_stats_after="$(compio_transport_alt_control_stats)"
+  capacity_accepted_after="$(compio_transport_connection_count \
+    "${capacity_stats_after}" accepted)"
+  # Every bounded gate poll and the release request use the mock's main port,
+  # so they are included in its accepted-connection counter. After removing
+  # those exact control connections, only the two admitted burst connections
+  # may remain; a Hyper escape would add a third.
+  capacity_expected_connections="$((capacity_gate_polls + 3))"
+  if ((capacity_accepted_after - capacity_accepted_before != capacity_expected_connections)); then
+    fail_with_diagnostics \
+      "Compio capacity burst escaped the two-connection per-origin limit; before=${capacity_accepted_before} after=${capacity_accepted_after} gate_polls=${capacity_gate_polls}"
+  fi
+  if [[ "$(compio_transport_operation_count \
+    "${capacity_stats_after}" capacity-burst)" != "2" ]]; then
+    fail_with_diagnostics \
+      "Compio capacity rejection reached the alternate origin instead of failing closed"
+  fi
+
+  capacity_metrics_after="$(plain_client_request_on_port 9090 "ops.test" "/metrics" 200)"
+  capacity_compio_selected_after="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_after}" compio selected)"
+  capacity_compio_fallback_after="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_after}" compio fallback)"
+  capacity_compio_error_after="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_after}" compio error)"
+  capacity_hyper_selected_after="$(compio_transport_backend_metric_value \
+    "${capacity_metrics_after}" tokio_hyper selected)"
+  capacity_dispatch_fallback_after="$(compio_transport_service_metric_value \
+    "${capacity_metrics_after}" \
+    oxibelt_http_compio_direct_h1_dispatch_total \
+    outcome \
+    predispatch_fallback)"
+  capacity_dispatch_rejection_after="$(compio_transport_service_metric_value \
+    "${capacity_metrics_after}" \
+    oxibelt_http_compio_direct_h1_dispatch_total \
+    outcome \
+    predispatch_rejection)"
+  if ((capacity_compio_selected_after - capacity_compio_selected_before != 3)); then
+    fail_with_diagnostics "capacity burst should select Compio exactly three times"
+  fi
+  if ((capacity_compio_error_after - capacity_compio_error_before != 1)); then
+    fail_with_diagnostics "capacity burst should record exactly one Compio error"
+  fi
+  if ((capacity_compio_fallback_after - capacity_compio_fallback_before != 0)); then
+    fail_with_diagnostics "capacity rejection must not record a Compio fallback"
+  fi
+  if ((capacity_hyper_selected_after - capacity_hyper_selected_before != 0)); then
+    fail_with_diagnostics "capacity rejection must not select Hyper"
+  fi
+  if ((capacity_dispatch_fallback_after - capacity_dispatch_fallback_before != 0)); then
+    fail_with_diagnostics "capacity rejection must not record a pre-dispatch fallback"
+  fi
+  if ((capacity_dispatch_rejection_after - capacity_dispatch_rejection_before != 1)); then
+    fail_with_diagnostics "capacity burst should record exactly one pre-dispatch rejection"
+  fi
 
   stats_before="$(compio_transport_control_stats)"
   accepted_before="$(compio_transport_connection_count "${stats_before}" accepted)"

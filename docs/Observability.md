@@ -203,7 +203,7 @@ The service exports the following public-safe metric families:
 - `oxibelt_http_compio_direct_h1_workers{state}` with `state="starting|healthy|unhealthy|draining|stopped"`;
 - `oxibelt_http_compio_direct_h1_connections{state}` with `state="active|idle"`;
 - `oxibelt_http_compio_direct_h1_connection_events_total{event}` with `event="created|reused|retired_idle_timeout|retired_absolute_lifetime|retired_stale_generation|retired_peer_close|retired_eof|retired_upgrade|retired_protocol|retired_timeout|retired_cancellation|retired_residual_bytes|retired_pool_full|retired_io_error|retired_worker_failure|closed_shutdown"`;
-- `oxibelt_http_compio_direct_h1_dispatch_total{outcome}` with `outcome="predispatch_fallback|postdispatch_failure"`;
+- `oxibelt_http_compio_direct_h1_dispatch_total{outcome}` with `outcome="predispatch_fallback|predispatch_rejection|postdispatch_failure"`;
 - `oxibelt_http_compio_direct_h1_buffer_events_total{event}` with `event="allocate|reuse|discard"`;
 - `oxibelt_http_compio_direct_h1_operation_wait_observations_total` and `oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total`;
 - `oxibelt_http_compio_direct_h1_connect_observations_total` and `oxibelt_http_compio_direct_h1_connect_duration_ns_total`;
@@ -212,7 +212,7 @@ The service exports the following public-safe metric families:
   the owned upstream request wire buffer; response reads append directly into
   the owned parser buffer).
 
-Compute mean wait, connect, or cancellation completion time only when its matching observation delta is positive. A `predispatch_fallback` is safe to replay through the established path because no upstream request byte was written; a `postdispatch_failure` is not fallback evidence and must not be retried outside the existing replay-safety policy. Connection `reused` should rise during eligible keep-alive traffic. Any retirement reason means that connection was not returned to the idle pool.
+Compute mean wait, connect, or cancellation completion time only when its matching observation delta is positive. A `predispatch_fallback` is safe to replay through the established path because no upstream request byte was written. A `predispatch_rejection` means policy suppressed fallback before dispatch, including capacity exhaustion or cancellation. A `postdispatch_failure` is not fallback evidence and must not be retried outside the existing replay-safety policy. Connection `reused` should rise during eligible keep-alive traffic. Any retirement reason means that connection was not returned to the idle pool.
 
 The version-`2` redacted support bundle includes the resolved runtime topology,
 the resolved shared-state feature/backend mapping, and bounded failure-policy

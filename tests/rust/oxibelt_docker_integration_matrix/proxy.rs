@@ -71,10 +71,11 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     docker_case(
       "http-semantics",
       "compio-transport-service",
-      "persistent Compio direct-H1 reuses clean connections and keeps bodyful controls on Hyper",
+      "persistent Compio direct-H1 reuses clean connections, fails closed on capacity, and keeps bodyful controls on Hyper",
       ExpectStart::Success,
       Needs {
         http_upstream: true,
+        alt_upstream: true,
         ..Needs::default()
       },
       None,

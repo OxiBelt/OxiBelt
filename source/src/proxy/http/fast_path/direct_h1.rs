@@ -20,6 +20,8 @@ use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 use crate::circuit_breakers::CircuitBreakerRuntime;
+#[cfg(target_os = "linux")]
+use crate::circuit_breakers::{AdmissionRejection, AdmissionRejectionReason};
 use crate::config::{
   EarlyHintsMode, HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig,
 };
@@ -498,16 +500,16 @@ async fn send_prepared_request(
         source,
       } => {
         if !compio_predispatch_allows_hyper_fallback(reason) {
+          metrics
+            .record_compio_direct_h1_dispatch(CompioDirectH1DispatchOutcome::PredispatchRejection);
           if metric_options.diagnostic_metrics {
             runtime_backend.record_error(metrics, protocol);
           }
-          let source = source.unwrap_or_else(|| {
-            anyhow::anyhow!("Compio direct-H1 operation was cancelled before dispatch")
-          });
+          let source = compio_predispatch_rejection_source(pool.as_ref(), reason, source);
           debug!(
             error = %source,
             ?reason,
-            "Compio direct H1 was cancelled before dispatch; suppressing upstream fallback"
+            "Compio direct H1 was rejected before dispatch; suppressing upstream fallback"
           );
           return Err(source);
         }
@@ -586,7 +588,50 @@ async fn send_prepared_request(
 
 #[cfg(target_os = "linux")]
 fn compio_predispatch_allows_hyper_fallback(reason: CompioDirectH1PredispatchReason) -> bool {
-  reason != CompioDirectH1PredispatchReason::Cancelled
+  match reason {
+    CompioDirectH1PredispatchReason::Unhealthy
+    | CompioDirectH1PredispatchReason::Draining
+    | CompioDirectH1PredispatchReason::Resolve
+    | CompioDirectH1PredispatchReason::Connect => true,
+    CompioDirectH1PredispatchReason::QueueFull
+    | CompioDirectH1PredispatchReason::ConnectionLimit
+    | CompioDirectH1PredispatchReason::Cancelled => false,
+  }
+}
+
+#[cfg(target_os = "linux")]
+fn compio_predispatch_rejection_source(
+  pool: &DirectH1Pool,
+  reason: CompioDirectH1PredispatchReason,
+  source: Option<anyhow::Error>,
+) -> anyhow::Error {
+  if let Some(source) = source {
+    return source;
+  }
+
+  let retry_after = pool
+    .circuit_breakers
+    .as_ref()
+    .map_or(Duration::ZERO, |runtime| runtime.capacity_retry_after());
+  match reason {
+    CompioDirectH1PredispatchReason::QueueFull => anyhow::Error::new(AdmissionRejection {
+      reason: AdmissionRejectionReason::QueueFull,
+      retry_after,
+    }),
+    CompioDirectH1PredispatchReason::ConnectionLimit => anyhow::Error::new(AdmissionRejection {
+      reason: AdmissionRejectionReason::ActiveLimit,
+      retry_after,
+    }),
+    CompioDirectH1PredispatchReason::Cancelled => {
+      anyhow::anyhow!("Compio direct-H1 operation was cancelled before dispatch")
+    }
+    CompioDirectH1PredispatchReason::Unhealthy
+    | CompioDirectH1PredispatchReason::Draining
+    | CompioDirectH1PredispatchReason::Resolve
+    | CompioDirectH1PredispatchReason::Connect => {
+      anyhow::anyhow!("Compio direct-H1 fallback reason {reason:?} reached the rejection path")
+    }
+  }
 }
 
 #[allow(clippy::too_many_arguments)]

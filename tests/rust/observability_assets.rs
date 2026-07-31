@@ -144,6 +144,7 @@ fn observability_docs_publish_fixed_compio_direct_h1_service_metrics() {
   }
   for boundary in [
     "predispatch_fallback",
+    "predispatch_rejection",
     "postdispatch_failure",
     "retired_residual_bytes",
     "retired_pool_full",
