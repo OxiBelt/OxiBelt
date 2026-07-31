@@ -1,21 +1,14 @@
 //! Owned Compio socket operations with cancellation and deadline control.
 //!
-//! # Safety model
+//! # Receive buffer invariants
 //!
-//! - `BytesMut` reserves the complete writable receive range before ownership
-//!   crosses into a Compio operation, so its allocation cannot move while the
-//!   driver holds it.
-//! - The receive count is checked against that reserved range before the
-//!   initialized length is advanced.
-//! - Rustix and Compio return only after the kernel has initialized the
-//!   reported bytes. Cancellation and timeout await terminal driver ownership
-//!   before this module advances or drops a submitted buffer.
-
-#![allow(
-  unsafe_code,
-  reason = "raw Compio receive completion requires advancing an owned BytesMut initialized length"
-)]
-#![deny(unsafe_op_in_unsafe_fn)]
+//! - `BytesMut` initializes the complete bounded receive range before ownership
+//!   crosses into a Compio operation, so neither completion path needs to
+//!   expose uninitialized storage.
+//! - The receive count is checked against that range before the initialized
+//!   buffer is truncated to the exact appended length.
+//! - Cancellation and timeout await terminal driver ownership before this
+//!   module truncates or drops a submitted buffer.
 
 use std::cell::Cell;
 use std::future::Future;
@@ -27,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
+use compio::buf::{IntoInner, IoBuf, IoBufMut};
 use compio::runtime::{CancelToken as DriverCancelToken, FutureExt as _, Runtime};
 use compio_driver::op::{Connect, Recv, RecvFlags, Send, SendFlags};
 use compio_driver::{Extra, OpCode, PollFirst, SharedFd};
@@ -219,7 +212,7 @@ pub(super) async fn recv_once(
       "Compio direct-H1 upstream receive buffer length overflow",
     )
   })?;
-  buffer.reserve(capacity);
+  buffer.resize(end_offset, 0);
   let mut buffer = IoBuf::slice(buffer, begin..end_offset);
   if socket_nonempty != Some(false) {
     loop {
@@ -235,10 +228,9 @@ pub(super) async fn recv_once(
               "Compio direct-H1 upstream receive reported an invalid byte count",
             ));
           }
-          // SAFETY: `recv` initialized exactly `count` bytes in this slice,
-          // and the checked count is within the reserved writable range.
-          unsafe { buffer.set_len(count) };
-          return Ok((buffer.into_inner(), count, None));
+          let mut buffer = buffer.into_inner();
+          buffer.truncate(begin + count);
+          return Ok((buffer, count, None));
         }
         Err(rustix::io::Errno::INTR) => continue,
         Err(rustix::io::Errno::WOULDBLOCK) => break,
@@ -252,7 +244,7 @@ pub(super) async fn recv_once(
   }
   let (result, extra) = submit_controlled(operation, fd, remaining(end)?, cancellation).await?;
   let (result, operation) = result.into_parts();
-  let mut buffer = operation.into_inner();
+  let buffer = operation.into_inner();
   let count = result?;
   if count > capacity {
     return Err(io::Error::new(
@@ -260,10 +252,9 @@ pub(super) async fn recv_once(
       "Compio direct-H1 upstream receive reported an invalid byte count",
     ));
   }
-  // SAFETY: terminal completion returned ownership after the driver
-  // initialized exactly `count` bytes in the checked slice range.
-  unsafe { buffer.set_len(count) };
-  Ok((buffer.into_inner(), count, extra.sock_nonempty().ok()))
+  let mut buffer = buffer.into_inner();
+  buffer.truncate(begin + count);
+  Ok((buffer, count, extra.sock_nonempty().ok()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -533,7 +524,35 @@ mod tests {
         .unwrap();
 
       assert_eq!(count, b"-response".len());
+      assert_eq!(buffer.len(), b"prefix-response".len());
       assert_eq!(&buffer[..], b"prefix-response");
+    }
+  }
+
+  #[test]
+  fn receive_eof_preserves_prefix_without_initialized_tail() {
+    for socket_nonempty in [None, Some(false)] {
+      let (fd, peer) = connected_sockets();
+      drop(peer);
+      let (cancellation, _guard) = CancellationToken::pair();
+      let runtime = compio_runtime();
+      let (buffer, count, _) = runtime
+        .block_on(async {
+          Runtime::current().attach(fd.as_raw_fd()).unwrap();
+          recv_once(
+            &fd,
+            BytesMut::from(&b"prefix"[..]),
+            32,
+            socket_nonempty,
+            Duration::from_secs(1),
+            &cancellation,
+          )
+          .await
+        })
+        .unwrap();
+
+      assert_eq!(count, 0);
+      assert_eq!(&buffer[..], b"prefix");
     }
   }
 }
