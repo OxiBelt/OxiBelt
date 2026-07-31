@@ -11,7 +11,7 @@ use serde_json::{Map, json};
 use super::{allowed_config_keys, shape::join_key_path};
 
 pub const NATIVE_CONFIG_SCHEMA_EPOCH: u32 = 1;
-pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 2;
 
 const NATIVE_CONFIG_SCHEMA_JSON: &str =
   include_str!(concat!(env!("OUT_DIR"), "/oxibelt-config-v1.schema.json"));
@@ -237,7 +237,16 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
     NativeConfigActivation::DownstreamTlsReload,
   ),
+  conditional("runtime.main_runtime"),
+  conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
+  conditional("runtime.workers"),
+  restart("runtime.workers.tokio"),
+  full_reload("runtime.workers.compio_direct_h1"),
+  conditional("runtime.worker_multipliers"),
+  restart("runtime.worker_multipliers.runtime"),
+  restart("runtime.worker_multipliers.tokio"),
+  full_reload("runtime.worker_multipliers.compio_direct_h1"),
   restart("admin.mutations"),
   restart("admin.mutations.*"),
   restart("admin.audit"),
@@ -291,6 +300,30 @@ const fn restart(path: &'static str) -> NativeConfigFieldMetadata {
     replacement: None,
     secret_class: NativeConfigSecretClass::None,
     config_activation: NativeConfigActivation::RestartRequired,
+    reference_activation: NativeConfigActivation::None,
+  }
+}
+
+const fn full_reload(path: &'static str) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
+    deprecated_epoch: None,
+    replacement: None,
+    secret_class: NativeConfigSecretClass::None,
+    config_activation: NativeConfigActivation::FullReload,
+    reference_activation: NativeConfigActivation::None,
+  }
+}
+
+const fn conditional(path: &'static str) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
+    deprecated_epoch: None,
+    replacement: None,
+    secret_class: NativeConfigSecretClass::None,
+    config_activation: NativeConfigActivation::Conditional,
     reference_activation: NativeConfigActivation::None,
   }
 }
@@ -611,7 +644,14 @@ fn boolean_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn auto_integer_path(path: &str) -> bool {
-  matches!(path, "runtime.worker_threads")
+  matches!(
+    path,
+    "runtime.worker_threads"
+      | "runtime.workers.tokio"
+      | "runtime.workers.compio_direct_h1"
+      | "runtime.accept.workers"
+      | "quic.socket.workers"
+  )
 }
 
 #[cfg(feature = "config-tooling")]
@@ -688,7 +728,11 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
     ),
     (
       "runtime.main_runtime",
-      vec!["compio", "tokio_hyper", "auto"],
+      vec!["hybrid_compio", "tokio_hyper", "auto", "compio"],
+    ),
+    (
+      "runtime.topology_policy",
+      vec!["allow_fallback", "require_exact"],
     ),
     (
       "shared_state.failure_policies.udp_flows",
@@ -727,8 +771,13 @@ fn default_value(path: &str) -> Option<Value> {
     "logging.level" => json!("info"),
     "runtime.direct_h1_io" => json!("auto"),
     "runtime.hot_reload.mode" => json!("off"),
-    "runtime.main_runtime" => json!("compio"),
+    "runtime.main_runtime" => json!("hybrid_compio"),
+    "runtime.topology_policy" => json!("allow_fallback"),
     "runtime.worker_threads" => json!("auto"),
+    "runtime.workers.tokio" | "runtime.workers.compio_direct_h1" => json!("auto"),
+    "runtime.worker_multipliers.runtime"
+    | "runtime.worker_multipliers.tokio"
+    | "runtime.worker_multipliers.compio_direct_h1" => json!(1.0),
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
     "stream_listeners.udp_flow_state" => json!("local"),

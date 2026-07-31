@@ -112,6 +112,12 @@ async fn config_explain_reads_the_redacted_active_config_and_source_origin() {
   assert_eq!(body["source"]["kind"], "entry");
   assert_eq!(body["source"]["file"], "oxibelt.toml");
   assert_eq!(body["constraints"]["secret_class"], "none");
+  assert_eq!(body["runtime_resolution"]["basis"], "active");
+  assert_eq!(body["runtime_resolution"]["activated"], true);
+  assert_eq!(
+    body["runtime_resolution"]["topology"]["resolved_preset"],
+    "external"
+  );
   assert!(!body["source"]["file"].as_str().unwrap().starts_with('/'));
 
   let request = hyper::Request::builder()
@@ -211,7 +217,7 @@ async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
     String::from_utf8_lossy(&body)
   );
   let body: serde_json::Value = serde_json::from_slice(&body).expect("response should be JSON");
-  assert_eq!(body["report_schema_version"], 1);
+  assert_eq!(body["report_schema_version"], 2);
   assert_eq!(body["ok"], true);
   assert_eq!(body["diagnostics"], json!([]));
 
@@ -243,7 +249,7 @@ async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
   let encoded = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
   assert!(!encoded.contains(secret));
   let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
-  assert_eq!(body["details"]["config_report"]["report_schema_version"], 1);
+  assert_eq!(body["details"]["config_report"]["report_schema_version"], 2);
   assert_eq!(body["details"]["config_report"]["ok"], false);
   assert_eq!(
     body["details"]["config_report"]["diagnostics"][0]["severity"],

@@ -116,6 +116,18 @@ compio_transport_unlabelled_metric_value() {
   compio_transport_require_canonical_nonnegative_decimal "${value}" "${metric}"
 }
 
+compio_transport_require_exact_metric_sample() {
+  local metrics="$1" sample="$2" value="$3"
+  if ! jq -e \
+    --arg expected "${sample} ${value}" \
+    '.body | split("\n") | index($expected) != null' \
+    <<<"${metrics}" >/dev/null; then
+    fail_with_diagnostics \
+      "missing exact runtime topology metric sample ${sample} ${value}"
+    return 1
+  fi
+}
+
 compio_transport_expect_response_body_failure() {
   local path="$1"
   local client_container output=""
@@ -368,6 +380,35 @@ run_case_checks() {
   if ((hyper_selected_after - hyper_selected_before != 2)); then
     fail_with_diagnostics "bodyful controls should select Hyper exactly twice"
   fi
+  if ((compio_selected_after < 1)); then
+    fail_with_diagnostics \
+      "runtime topology reported Compio direct-H1 without an actually selected Compio request"
+  fi
+
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_topology_info{requested_preset="compio",resolved_preset="hybrid_compio",outcome="exact",reason="legacy_alias"}' \
+    1
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_subsystem_owner{subsystem="startup_orchestration",owner="compio"}' \
+    1
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_subsystem_owner{subsystem="general_http",owner="tokio"}' \
+    1
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_subsystem_owner{subsystem="direct_h1_transport",owner="compio"}' \
+    1
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_worker_allocation{pool="tokio_executor",owner="tokio"}' \
+    1
+  compio_transport_require_exact_metric_sample \
+    "${metrics_after}" \
+    'oxibelt_runtime_worker_allocation{pool="compio_direct_h1",owner="compio"}' \
+    1
 
   stats_after="$(compio_transport_control_stats)"
   for operation_id in fixed-post split-post; do

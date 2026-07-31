@@ -4,6 +4,7 @@ use ::http::{Response, StatusCode};
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
+use crate::runtime_health::RuntimeSubsystem;
 use crate::state::AppSnapshot;
 
 pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Response<ProxyBody>> {
@@ -86,7 +87,30 @@ fn with_rollout_identity_headers(
 ) -> Response<ProxyBody> {
   let response =
     with_config_revision_headers(response, snapshot.config.rollout.applied_header_values());
-  with_overload_status_header(with_backend_status_header(response, snapshot), snapshot)
+  let response = with_backend_status_header(response, snapshot);
+  let response = with_overload_status_header(response, snapshot);
+  with_runtime_status_header(response, snapshot)
+}
+
+fn with_runtime_status_header(
+  mut response: Response<ProxyBody>,
+  snapshot: &AppSnapshot,
+) -> Response<ProxyBody> {
+  let acceleration_degraded = snapshot
+    .runtime_health
+    .subsystem_is_unhealthy(RuntimeSubsystem::CompioDirectH1);
+  let value = if acceleration_degraded && snapshot.runtime_topology.direct_h1.active {
+    "required_acceleration_degraded"
+  } else if snapshot.runtime_health.is_ready() {
+    "ready"
+  } else {
+    "runtime_unavailable"
+  };
+  response.headers_mut().insert(
+    ::http::HeaderName::from_static("x-oxibelt-runtime-status"),
+    ::http::HeaderValue::from_static(value),
+  );
+  response
 }
 
 fn with_backend_status_header(

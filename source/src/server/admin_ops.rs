@@ -226,20 +226,23 @@ where
         .source_paths
         .field_origins
         .get(field_path.as_str());
-      admin::json_response(
-        StatusCode::OK,
-        &admin_config_introspection::explain_success(
-          &field_path,
-          value,
-          origin,
-          snapshot.config.source_paths.config_entry.as_deref(),
-          if revision > 1 {
-            crate::config::ConfigOriginKind::Admin
-          } else {
-            crate::config::ConfigOriginKind::Default
-          },
-        ),
-      )
+      let mut report = admin_config_introspection::explain_success(
+        &field_path,
+        value,
+        origin,
+        snapshot.config.source_paths.config_entry.as_deref(),
+        if revision > 1 {
+          crate::config::ConfigOriginKind::Admin
+        } else {
+          crate::config::ConfigOriginKind::Default
+        },
+      );
+      report.runtime_resolution = Some(serde_json::json!({
+        "basis": "active",
+        "activated": true,
+        "topology": &snapshot.runtime_topology,
+      }));
+      admin::json_response(StatusCode::OK, &report)
     }
     (&::http::Method::POST, "/admin/v1/config/validate") => {
       if !authorization.is_allowed("config:Validate", "*") {

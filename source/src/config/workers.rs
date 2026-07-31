@@ -7,10 +7,9 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  Config, HotReloadConfig, QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig,
-  QuicUpstreamPoolConfig, QuicZeroRttMode, RawQuicTransportConfig, RuntimeDirectH1IoMode,
-  RuntimeDrainConfig, RuntimeHardeningConfig, RuntimeMainRuntimeMode,
-  default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
+  Config, HotReloadConfig, RuntimeDirectH1IoMode, RuntimeDrainConfig, RuntimeHardeningConfig,
+  RuntimeMainRuntimeMode, RuntimeTopologyPolicy, default_accept_error_backoff_ms,
+  default_runtime_accept_backlog, default_true,
 };
 
 pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
@@ -101,7 +100,7 @@ impl WorkerParallelism {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-enum WorkerCountSetting {
+pub(super) enum WorkerCountSetting {
   #[default]
   Auto,
   Fixed(usize),
@@ -156,9 +155,56 @@ impl<'de> Deserialize<'de> for WorkerCountSetting {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+struct RawWorkerMultipliersConfig {
+  #[serde(default)]
+  runtime: Option<f64>,
+  #[serde(default)]
+  tokio: Option<f64>,
+  #[serde(default)]
+  compio_direct_h1: Option<f64>,
+  #[serde(default = "default_accept_worker_multiplier")]
+  accept: f64,
+  #[serde(default = "default_quic_socket_worker_multiplier")]
+  quic_socket: f64,
+}
+
+impl Default for RawWorkerMultipliersConfig {
+  fn default() -> Self {
+    Self {
+      runtime: None,
+      tokio: None,
+      compio_direct_h1: None,
+      accept: default_accept_worker_multiplier(),
+      quic_socket: default_quic_socket_worker_multiplier(),
+    }
+  }
+}
+
+impl RawWorkerMultipliersConfig {
+  fn resolve(self) -> anyhow::Result<WorkerMultipliersConfig> {
+    let runtime = self
+      .runtime
+      .unwrap_or_else(default_runtime_worker_multiplier);
+    let resolved = WorkerMultipliersConfig {
+      runtime,
+      tokio: self.tokio.unwrap_or(runtime),
+      compio_direct_h1: self.compio_direct_h1.unwrap_or(runtime),
+      accept: self.accept,
+      quic_socket: self.quic_socket,
+    };
+    resolved.validate()?;
+    Ok(resolved)
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub struct WorkerMultipliersConfig {
   #[serde(default = "default_runtime_worker_multiplier")]
   pub runtime: f64,
+  #[serde(default = "default_runtime_worker_multiplier")]
+  pub tokio: f64,
+  #[serde(default = "default_runtime_worker_multiplier")]
+  pub compio_direct_h1: f64,
   #[serde(default = "default_accept_worker_multiplier")]
   pub accept: f64,
   #[serde(default = "default_quic_socket_worker_multiplier")]
@@ -169,6 +215,8 @@ impl Default for WorkerMultipliersConfig {
   fn default() -> Self {
     Self {
       runtime: default_runtime_worker_multiplier(),
+      tokio: default_runtime_worker_multiplier(),
+      compio_direct_h1: default_runtime_worker_multiplier(),
       accept: default_accept_worker_multiplier(),
       quic_socket: default_quic_socket_worker_multiplier(),
     }
@@ -178,8 +226,48 @@ impl Default for WorkerMultipliersConfig {
 impl WorkerMultipliersConfig {
   fn validate(&self) -> anyhow::Result<()> {
     validate_worker_multiplier("runtime.worker_multipliers.runtime", self.runtime)?;
+    validate_worker_multiplier("runtime.worker_multipliers.tokio", self.tokio)?;
+    validate_worker_multiplier(
+      "runtime.worker_multipliers.compio_direct_h1",
+      self.compio_direct_h1,
+    )?;
     validate_worker_multiplier("runtime.worker_multipliers.accept", self.accept)?;
     validate_worker_multiplier("runtime.worker_multipliers.quic_socket", self.quic_socket)
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+struct RawRuntimeWorkersConfig {
+  #[serde(default)]
+  tokio: Option<WorkerCountSetting>,
+  #[serde(default)]
+  compio_direct_h1: Option<WorkerCountSetting>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub struct RuntimeWorkersConfig {
+  pub tokio: usize,
+  pub compio_direct_h1: usize,
+}
+
+impl Default for RuntimeWorkersConfig {
+  fn default() -> Self {
+    Self {
+      tokio: 1,
+      compio_direct_h1: 1,
+    }
+  }
+}
+
+impl RuntimeWorkersConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.tokio == 0 {
+      bail!("runtime.workers.tokio must be greater than 0");
+    }
+    if self.compio_direct_h1 == 0 {
+      bail!("runtime.workers.compio_direct_h1 must be greater than 0");
+    }
+    Ok(())
   }
 }
 
@@ -188,6 +276,8 @@ pub struct WorkerResolutionConfig {
   pub available_parallelism: usize,
   pub fallback_error: Option<&'static str>,
   pub runtime_multiplier: f64,
+  pub tokio_multiplier: f64,
+  pub compio_direct_h1_multiplier: f64,
   pub accept_multiplier: f64,
   pub quic_socket_multiplier: f64,
 }
@@ -198,6 +288,8 @@ impl Default for WorkerResolutionConfig {
       available_parallelism: 1,
       fallback_error: None,
       runtime_multiplier: default_runtime_worker_multiplier(),
+      tokio_multiplier: default_runtime_worker_multiplier(),
+      compio_direct_h1_multiplier: default_runtime_worker_multiplier(),
       accept_multiplier: default_accept_worker_multiplier(),
       quic_socket_multiplier: default_quic_socket_worker_multiplier(),
     }
@@ -215,11 +307,15 @@ pub(super) struct RawRuntimeConfig {
   #[serde(default = "default_true")]
   unprivileged_mode: bool,
   #[serde(default)]
-  worker_threads: WorkerCountSetting,
+  worker_threads: Option<WorkerCountSetting>,
+  #[serde(default)]
+  workers: RawRuntimeWorkersConfig,
   #[serde(default)]
   main_runtime: RuntimeMainRuntimeMode,
   #[serde(default)]
-  worker_multipliers: WorkerMultipliersConfig,
+  topology_policy: RuntimeTopologyPolicy,
+  #[serde(default)]
+  worker_multipliers: RawWorkerMultipliersConfig,
   #[serde(default)]
   accept: RawRuntimeAcceptConfig,
   #[serde(default)]
@@ -241,9 +337,11 @@ impl Default for RawRuntimeConfig {
       read_only_rootfs_compatible: true,
       memory_only_state: true,
       unprivileged_mode: true,
-      worker_threads: WorkerCountSetting::Auto,
-      main_runtime: RuntimeMainRuntimeMode::Compio,
-      worker_multipliers: WorkerMultipliersConfig::default(),
+      worker_threads: None,
+      workers: RawRuntimeWorkersConfig::default(),
+      main_runtime: RuntimeMainRuntimeMode::HybridCompio,
+      topology_policy: RuntimeTopologyPolicy::AllowFallback,
+      worker_multipliers: RawWorkerMultipliersConfig::default(),
       accept: RawRuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
@@ -260,8 +358,11 @@ pub struct RuntimeConfig {
   pub read_only_rootfs_compatible: bool,
   pub memory_only_state: bool,
   pub unprivileged_mode: bool,
+  /// Compatibility projection of `workers.tokio` for existing runtime consumers.
   pub worker_threads: usize,
+  pub workers: RuntimeWorkersConfig,
   pub main_runtime: RuntimeMainRuntimeMode,
+  pub topology_policy: RuntimeTopologyPolicy,
   pub worker_multipliers: WorkerMultipliersConfig,
   pub accept: RuntimeAcceptConfig,
   pub drain: RuntimeDrainConfig,
@@ -281,7 +382,9 @@ impl Default for RuntimeConfig {
       memory_only_state: true,
       unprivileged_mode: true,
       worker_threads: 1,
-      main_runtime: RuntimeMainRuntimeMode::Compio,
+      workers: RuntimeWorkersConfig::default(),
+      main_runtime: RuntimeMainRuntimeMode::HybridCompio,
+      topology_policy: RuntimeTopologyPolicy::AllowFallback,
       worker_multipliers: WorkerMultipliersConfig::default(),
       accept: RuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
@@ -299,26 +402,37 @@ impl RuntimeConfig {
     raw: RawRuntimeConfig,
     parallelism: WorkerParallelism,
   ) -> anyhow::Result<Self> {
-    raw.worker_multipliers.validate()?;
-    let worker_threads = resolve_worker_count(
-      "runtime.worker_threads",
-      raw.worker_threads,
-      raw.worker_multipliers.runtime,
-      parallelism.available,
-    )?;
-    let accept = RuntimeAcceptConfig::resolve(
-      raw.accept,
-      raw.worker_multipliers.accept,
-      parallelism.available,
-    )?;
+    let multipliers = raw.worker_multipliers.resolve()?;
+    let legacy_worker_setting = raw.worker_threads.unwrap_or_default();
+    let workers = RuntimeWorkersConfig {
+      tokio: resolve_worker_count(
+        "runtime.workers.tokio",
+        raw.workers.tokio.unwrap_or(legacy_worker_setting),
+        multipliers.tokio,
+        parallelism.available,
+      )?,
+      compio_direct_h1: resolve_worker_count(
+        "runtime.workers.compio_direct_h1",
+        raw
+          .workers
+          .compio_direct_h1
+          .unwrap_or(legacy_worker_setting),
+        multipliers.compio_direct_h1,
+        parallelism.available,
+      )?,
+    };
+    let accept =
+      RuntimeAcceptConfig::resolve(raw.accept, multipliers.accept, parallelism.available)?;
     Ok(Self {
       linux_only: raw.linux_only,
       read_only_rootfs_compatible: raw.read_only_rootfs_compatible,
       memory_only_state: raw.memory_only_state,
       unprivileged_mode: raw.unprivileged_mode,
-      worker_threads,
+      worker_threads: workers.tokio,
+      workers,
       main_runtime: raw.main_runtime,
-      worker_multipliers: raw.worker_multipliers,
+      topology_policy: raw.topology_policy,
+      worker_multipliers: multipliers,
       accept,
       drain: raw.drain,
       hot_reload: raw.hot_reload,
@@ -328,9 +442,11 @@ impl RuntimeConfig {
       worker_resolution: WorkerResolutionConfig {
         available_parallelism: parallelism.available,
         fallback_error: parallelism.fallback_error,
-        runtime_multiplier: raw.worker_multipliers.runtime,
-        accept_multiplier: raw.worker_multipliers.accept,
-        quic_socket_multiplier: raw.worker_multipliers.quic_socket,
+        runtime_multiplier: multipliers.runtime,
+        tokio_multiplier: multipliers.tokio,
+        compio_direct_h1_multiplier: multipliers.compio_direct_h1,
+        accept_multiplier: multipliers.accept,
+        quic_socket_multiplier: multipliers.quic_socket,
       },
     })
   }
@@ -340,6 +456,10 @@ impl RuntimeConfig {
     if self.worker_threads == 0 {
       bail!("runtime.worker_threads must be greater than 0");
     }
+    if self.worker_threads != self.workers.tokio {
+      bail!("runtime.worker_threads compatibility projection must equal runtime.workers.tokio");
+    }
+    self.workers.validate()?;
     self.accept.validate()?;
     self.drain.validate()?;
     self.hot_reload.validate()?;
@@ -467,209 +587,6 @@ impl RuntimeAcceptConfig {
   }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub(super) struct RawQuicConfig {
-  #[serde(default)]
-  retry: bool,
-  #[serde(default)]
-  zero_rtt: QuicZeroRttMode,
-  #[serde(default)]
-  host_key_file: Option<PathBuf>,
-  #[serde(default)]
-  alt_svc: QuicAltSvcConfig,
-  #[serde(default)]
-  transport: QuicTransportConfig,
-  #[serde(default)]
-  downstream: RawQuicEndpointConfig,
-  #[serde(default)]
-  upstream: RawQuicEndpointConfig,
-  #[serde(default)]
-  socket: RawQuicSocketConfig,
-  #[serde(default)]
-  upstream_pool: QuicUpstreamPoolConfig,
-}
-
-impl Default for RawQuicConfig {
-  fn default() -> Self {
-    Self {
-      retry: false,
-      zero_rtt: QuicZeroRttMode::Off,
-      host_key_file: None,
-      alt_svc: QuicAltSvcConfig::default(),
-      transport: QuicTransportConfig::default(),
-      downstream: RawQuicEndpointConfig::default(),
-      upstream: RawQuicEndpointConfig::default(),
-      socket: RawQuicSocketConfig::default(),
-      upstream_pool: QuicUpstreamPoolConfig::default(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicConfig {
-  pub retry: bool,
-  pub zero_rtt: QuicZeroRttMode,
-  pub host_key_file: Option<PathBuf>,
-  pub alt_svc: QuicAltSvcConfig,
-  pub transport: QuicTransportConfig,
-  pub downstream: QuicEndpointConfig,
-  pub upstream: QuicEndpointConfig,
-  pub socket: QuicSocketConfig,
-  pub upstream_pool: QuicUpstreamPoolConfig,
-}
-
-impl Default for QuicConfig {
-  fn default() -> Self {
-    Self {
-      retry: false,
-      zero_rtt: QuicZeroRttMode::Off,
-      host_key_file: None,
-      alt_svc: QuicAltSvcConfig::default(),
-      transport: QuicTransportConfig::default(),
-      downstream: QuicEndpointConfig::default(),
-      upstream: QuicEndpointConfig::default(),
-      socket: QuicSocketConfig::default(),
-      upstream_pool: QuicUpstreamPoolConfig::default(),
-    }
-  }
-}
-
-impl QuicConfig {
-  pub(super) fn resolve(
-    raw: RawQuicConfig,
-    multipliers: WorkerMultipliersConfig,
-    parallelism: WorkerParallelism,
-  ) -> anyhow::Result<Self> {
-    let transport = raw.transport;
-    let downstream = raw.downstream.resolve(&transport);
-    let upstream = raw.upstream.resolve(&transport);
-    Ok(Self {
-      retry: raw.retry,
-      zero_rtt: raw.zero_rtt,
-      host_key_file: raw.host_key_file,
-      alt_svc: raw.alt_svc,
-      transport,
-      downstream,
-      upstream,
-      socket: QuicSocketConfig::resolve(
-        raw.socket,
-        multipliers.quic_socket,
-        parallelism.available,
-      )?,
-      upstream_pool: raw.upstream_pool,
-    })
-  }
-
-  pub(super) fn validate(&self, http3_enabled: bool) -> anyhow::Result<()> {
-    if self.alt_svc.max_age_seconds == 0 {
-      bail!("quic.alt_svc.max_age_seconds must be greater than 0");
-    }
-    self.transport.validate("quic.transport")?;
-    self
-      .downstream
-      .transport
-      .validate("quic.downstream.transport")?;
-    self
-      .upstream
-      .transport
-      .validate("quic.upstream.transport")?;
-    if self.upstream_pool.max_connections_per_upstream == 0 {
-      bail!("quic.upstream_pool.max_connections_per_upstream must be greater than 0");
-    }
-    if self.upstream_pool.max_lifetime_ms == 0 {
-      bail!("quic.upstream_pool.max_lifetime_ms must be greater than 0");
-    }
-    self.socket.validate(http3_enabled)?;
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-struct RawQuicEndpointConfig {
-  #[serde(default)]
-  transport: RawQuicTransportConfig,
-}
-
-impl RawQuicEndpointConfig {
-  fn resolve(&self, base_transport: &QuicTransportConfig) -> QuicEndpointConfig {
-    QuicEndpointConfig {
-      transport: self.transport.resolve(base_transport),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-struct RawQuicSocketConfig {
-  #[serde(default)]
-  receive_buffer_bytes: usize,
-  #[serde(default)]
-  send_buffer_bytes: usize,
-  #[serde(default)]
-  workers: WorkerCountSetting,
-  #[serde(default)]
-  reuse_port: bool,
-}
-
-impl Default for RawQuicSocketConfig {
-  fn default() -> Self {
-    Self {
-      receive_buffer_bytes: 0,
-      send_buffer_bytes: 0,
-      workers: WorkerCountSetting::Auto,
-      reuse_port: false,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct QuicSocketConfig {
-  pub receive_buffer_bytes: usize,
-  pub send_buffer_bytes: usize,
-  pub workers: usize,
-  pub reuse_port: bool,
-}
-
-impl Default for QuicSocketConfig {
-  fn default() -> Self {
-    Self {
-      receive_buffer_bytes: 0,
-      send_buffer_bytes: 0,
-      workers: 1,
-      reuse_port: false,
-    }
-  }
-}
-
-impl QuicSocketConfig {
-  fn resolve(
-    raw: RawQuicSocketConfig,
-    multiplier: f64,
-    available_parallelism: usize,
-  ) -> anyhow::Result<Self> {
-    Ok(Self {
-      receive_buffer_bytes: raw.receive_buffer_bytes,
-      send_buffer_bytes: raw.send_buffer_bytes,
-      workers: resolve_worker_count(
-        "quic.socket.workers",
-        raw.workers,
-        multiplier,
-        available_parallelism,
-      )?,
-      reuse_port: raw.reuse_port,
-    })
-  }
-
-  fn validate(&self, http3_enabled: bool) -> anyhow::Result<()> {
-    if self.workers == 0 {
-      bail!("quic.socket.workers must be greater than 0");
-    }
-    if http3_enabled && self.workers > 1 && !self.reuse_port {
-      bail!("quic.socket.reuse_port must be true when quic.socket.workers is greater than 1");
-    }
-    Ok(())
-  }
-}
-
 fn default_runtime_worker_multiplier() -> f64 {
   1.0
 }
@@ -720,7 +637,7 @@ pub fn resolve_auto_worker_count(
   Ok((resolved as usize).max(1))
 }
 
-fn resolve_worker_count(
+pub(super) fn resolve_worker_count(
   field_name: &str,
   setting: WorkerCountSetting,
   multiplier: f64,
@@ -733,3 +650,6 @@ fn resolve_worker_count(
     WorkerCountSetting::Fixed(value) => Ok(value),
   }
 }
+
+#[cfg(test)]
+mod tests;

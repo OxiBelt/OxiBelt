@@ -101,6 +101,8 @@ pub struct ConfigExplainReport {
   pub redacted: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub effective_value: Option<Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub runtime_resolution: Option<Value>,
   pub constraints: ConfigExplainConstraints,
 }
 
@@ -187,6 +189,7 @@ fn validate_native_config_inner(
     Err(error) => diagnostics.extend(load_error_diagnostics(path, &document, &error.to_string())),
   }
   append_deprecations(path, &document, &mut diagnostics);
+  append_runtime_compatibility_diagnostics(path, &document, &mut diagnostics);
   sort_diagnostics(&mut diagnostics);
   diagnostics.dedup();
   report(diagnostics)
@@ -203,6 +206,7 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
   let value = lookup_toml_value(&effective, &field_path)
     .ok_or_else(|| anyhow::anyhow!("unknown native configuration field path {field_path}"))?;
   let metadata = native_config_field_metadata(&field_path);
+  let config = Config::load(path)?;
   let redacted = metadata.secret_class != NativeConfigSecretClass::None;
   let entry_root = absolute_entry_parent(path);
   let origin = document.origins.get(&field_path);
@@ -227,6 +231,19 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
     } else {
       Some(serde_json::to_value(value)?)
     },
+    runtime_resolution: Some(serde_json::json!({
+      "basis": "preflight",
+      "activated": false,
+      "requested_preset": config.runtime.main_runtime.as_str(),
+      "canonical_preset": config.runtime.main_runtime.canonical().as_str(),
+      "topology_policy": config.runtime.topology_policy.as_str(),
+      "workers": {
+        "tokio_executor_workers": config.runtime.workers.tokio,
+        "tcp_accept_workers": config.runtime.accept.workers,
+        "quic_socket_workers": config.quic.socket.workers,
+        "compio_direct_h1_workers": config.runtime.workers.compio_direct_h1,
+      }
+    })),
     constraints: ConfigExplainConstraints {
       schema: schema_for_field(&field_path).unwrap_or(Value::Object(Default::default())),
       introduced_epoch: metadata.introduced_epoch,
@@ -366,6 +383,60 @@ fn append_deprecations(
       message: format!("native configuration field `{path}` is deprecated"),
       suggestions: Vec::new(),
       replacement: metadata.replacement.map(ToOwned::to_owned),
+    });
+  }
+}
+
+fn append_runtime_compatibility_diagnostics(
+  entry: &Path,
+  document: &NativeConfigDocument,
+  diagnostics: &mut Vec<ConfigDiagnostic>,
+) {
+  if lookup_toml_value(&document.value, "runtime.main_runtime").and_then(toml::Value::as_str)
+    == Some("compio")
+  {
+    diagnostics.push(ConfigDiagnostic {
+      code: "CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS".to_string(),
+      severity: ConfigDiagnosticSeverity::Warning,
+      stage: ConfigDiagnosticStage::Semantic,
+      field_path: "runtime.main_runtime".to_string(),
+      source: source_for_path(entry, &document.origins, "runtime.main_runtime"),
+      message: "runtime.main_runtime = \"compio\" is a compatibility alias for the hybrid_compio topology preset".to_string(),
+      suggestions: vec!["use runtime.main_runtime = \"hybrid_compio\"".to_string()],
+      replacement: None,
+    });
+  }
+
+  for (field_path, message, suggestions) in [
+    (
+      "runtime.worker_threads",
+      "legacy runtime.worker_threads supplies missing per-owner worker counts; explicit runtime.workers fields override only their owner",
+      vec![
+        "set runtime.workers.tokio explicitly".to_string(),
+        "set runtime.workers.compio_direct_h1 explicitly".to_string(),
+      ],
+    ),
+    (
+      "runtime.worker_multipliers.runtime",
+      "legacy runtime.worker_multipliers.runtime supplies missing per-owner multipliers; explicit per-owner multipliers override only their owner",
+      vec![
+        "set runtime.worker_multipliers.tokio explicitly".to_string(),
+        "set runtime.worker_multipliers.compio_direct_h1 explicitly".to_string(),
+      ],
+    ),
+  ] {
+    if lookup_toml_value(&document.value, field_path).is_none() {
+      continue;
+    }
+    diagnostics.push(ConfigDiagnostic {
+      code: "CFG_RUNTIME_WORKER_THREADS_COMPATIBILITY_ALIAS".to_string(),
+      severity: ConfigDiagnosticSeverity::Warning,
+      stage: ConfigDiagnosticStage::Semantic,
+      field_path: field_path.to_string(),
+      source: source_for_path(entry, &document.origins, field_path),
+      message: message.to_string(),
+      suggestions,
+      replacement: None,
     });
   }
 }
@@ -595,23 +666,4 @@ fn sort_diagnostics(diagnostics: &mut [ConfigDiagnostic]) {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn parses_indexed_field_paths() {
-    let value: toml::Value = toml::from_str("[[routes]]\nname = 'main'\n").unwrap();
-    assert_eq!(
-      lookup_toml_value(&value, "routes[0].name").and_then(toml::Value::as_str),
-      Some("main")
-    );
-  }
-
-  #[test]
-  fn converts_json_pointer_indexes_to_native_paths() {
-    assert_eq!(
-      json_pointer_to_field_path("/routes/0/tls/min_version"),
-      "routes[0].tls.min_version"
-    );
-  }
-}
+mod tests;

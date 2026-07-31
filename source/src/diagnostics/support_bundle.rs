@@ -11,6 +11,7 @@ use url::Url;
 use crate::cache::CacheStats;
 use crate::pools::PoolRuntimeSnapshot;
 use crate::runtime::backend::RuntimeBackendSnapshot;
+use crate::runtime::topology::RuntimeTopologySnapshot;
 use crate::state::AppSnapshot;
 use crate::tls::TlsServerSessionStorageStats;
 
@@ -26,7 +27,7 @@ use process::process_snapshot;
 pub use shared_state::BackendFailurePolicySnapshot;
 pub use tls::{DownstreamTlsCertificateRuntimeSnapshot, TlsRuntimeSnapshot};
 
-const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 1;
+const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 2;
 const WAF_RULE_LIMIT: usize = 50;
 
 /// Redacted support bundle assembled from runtime, config, and system snapshots.
@@ -66,6 +67,7 @@ pub struct SupportBundleConfig {
 #[derive(Debug, Serialize)]
 pub struct RuntimeSnapshot {
   pub runtime_backend: RuntimeBackendSnapshot,
+  pub runtime_topology: RuntimeTopologySnapshot,
   pub lifecycle: LifecycleSnapshot,
   pub listeners: ListenerSnapshot,
   pub admin: AdminRuntimeSnapshot,
@@ -297,6 +299,8 @@ pub async fn build_support_bundle(
   );
   snapshot.overload.append_prometheus(&mut metrics);
   snapshot.circuit_breakers.append_prometheus(&mut metrics);
+  snapshot.runtime_health.append_prometheus(&mut metrics);
+  snapshot.runtime_topology.append_prometheus(&mut metrics);
   SupportBundle {
     metadata: SupportBundleMetadata {
       format_version: SUPPORT_BUNDLE_FORMAT_VERSION,
@@ -326,7 +330,8 @@ pub async fn build_support_bundle(
 pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
   let runtime_health = snapshot.runtime_health.snapshot();
   RuntimeSnapshot {
-    runtime_backend: crate::runtime::backend::runtime_backend_snapshot(),
+    runtime_backend: snapshot.runtime_topology.legacy_backend_snapshot(),
+    runtime_topology: snapshot.runtime_topology.clone(),
     lifecycle: LifecycleSnapshot {
       draining: snapshot.lifecycle.is_draining(),
       reason: snapshot.lifecycle.reason().to_string(),

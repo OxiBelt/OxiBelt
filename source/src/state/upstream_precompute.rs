@@ -4,10 +4,14 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 
-use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode, UpstreamConfig};
+use crate::config::UpstreamConfig;
+#[cfg(test)]
+use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode};
 use crate::proxy::http::uri::UpstreamUriParts;
+#[cfg(test)]
 use crate::runtime::backend::{RuntimeBackendSnapshot, TOKIO_HYPER_RUNTIME_NAME};
 
+#[cfg(test)]
 pub(super) fn effective_direct_h1_io_for_backend(
   config: &Config,
   runtime_backend: RuntimeBackendSnapshot,

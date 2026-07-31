@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::config::{Config, HotReloadMode, RuntimeOverrides, TlsConfig};
 use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::routes::RouteTable;
+use crate::runtime::topology::RuntimeTopologyChangePlan;
 use crate::server::ListenerSupervisor;
 use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::tls;
@@ -149,6 +150,7 @@ impl ReloadManager {
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
+      runtime_topology: active.runtime_topology.clone(),
       route_table,
       sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),
@@ -338,6 +340,7 @@ impl ReloadManager {
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
+      runtime_topology: active.runtime_topology.clone(),
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),
@@ -429,11 +432,20 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
   active: &Config,
   replacement: &Config,
 ) -> anyhow::Result<()> {
-  if replacement.runtime.worker_threads != active.runtime.worker_threads {
+  if classify_runtime_topology_change(active, replacement)
+    == RuntimeTopologyChangePlan::RestartRequired
+  {
+    if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical() {
+      bail!(
+        "full hot reload rejected because runtime.main_runtime would change the active main topology from {} to {}; restart OxiBelt to replace the main runtime",
+        active.runtime.main_runtime.canonical().as_str(),
+        replacement.runtime.main_runtime.canonical().as_str()
+      );
+    }
     bail!(
-      "full hot reload rejected because runtime.worker_threads changed from {} to {}; restart OxiBelt to resize the async runtime",
-      active.runtime.worker_threads,
-      replacement.runtime.worker_threads
+      "full hot reload rejected because runtime.workers.tokio changed from {} to {}; restart OxiBelt to resize the Tokio executor",
+      active.runtime.workers.tokio,
+      replacement.runtime.workers.tokio
     );
   }
   #[cfg(feature = "admin-runtime")]
@@ -455,6 +467,19 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
     );
   }
   Ok(())
+}
+
+pub(crate) fn classify_runtime_topology_change(
+  active: &Config,
+  replacement: &Config,
+) -> RuntimeTopologyChangePlan {
+  if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical()
+    || replacement.runtime.workers.tokio != active.runtime.workers.tokio
+  {
+    RuntimeTopologyChangePlan::RestartRequired
+  } else {
+    RuntimeTopologyChangePlan::InProcess
+  }
 }
 
 pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {

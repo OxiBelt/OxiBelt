@@ -4204,6 +4204,13 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     "compio_selected_after - compio_selected_before != 0",
     "compio_fallback_after - compio_fallback_before != 2",
     "hyper_selected_after - hyper_selected_before != 2",
+    "compio_transport_require_exact_metric_sample",
+    "compio_selected_after < 1",
+    "requested_preset=\"compio\",resolved_preset=\"hybrid_compio\",outcome=\"exact\",reason=\"legacy_alias\"",
+    "subsystem=\"general_http\",owner=\"tokio\"",
+    "subsystem=\"direct_h1_transport\",owner=\"compio\"",
+    "pool=\"tokio_executor\",owner=\"tokio\"",
+    "pool=\"compio_direct_h1\",owner=\"compio\"",
     "oxibelt_http_compio_direct_h1_queue_occupancy",
     "retired_protocol",
     "retired_eof",
@@ -4238,6 +4245,11 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     config["runtime"]["worker_threads"].as_integer(),
     Some(1),
     "the functional fixture should use one deterministic runtime worker"
+  );
+  assert_eq!(
+    config["runtime"]["main_runtime"].as_str(),
+    Some("compio"),
+    "the fixture should exercise legacy requested-preset provenance"
   );
   assert_eq!(config["runtime"]["direct_h1_io"].as_str(), Some("compio"));
   assert_eq!(
@@ -4747,11 +4759,11 @@ fn oxibelt_main_builds_startup_snapshot_on_tokio_task() {
   let main = oxibelt_main_text();
 
   assert!(
-    main.contains("build_app_handle(config, observability.into_telemetry())"),
+    main.contains("build_app_handle(config, observability.into_telemetry(), topology)"),
     "startup should delegate application snapshot construction to the task-backed helper"
   );
   assert!(
-    main.contains("tokio::task::spawn(async move {\n    oxibelt::state::AppSnapshot::new_with_telemetry(config, telemetry)"),
+    main.contains("tokio::task::spawn(async move {\n    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology(config, telemetry, topology)"),
     "AppSnapshot startup construction should not be polled directly on the block_on caller stack"
   );
 }

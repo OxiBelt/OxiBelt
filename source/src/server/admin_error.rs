@@ -465,7 +465,7 @@ mod tests {
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(
       body["error"]["details"]["config_report"]["report_schema_version"],
-      1
+      crate::config::NATIVE_CONFIG_REPORT_SCHEMA_VERSION
     );
     assert_eq!(body["error"]["details"]["config_report"]["ok"], false);
   }

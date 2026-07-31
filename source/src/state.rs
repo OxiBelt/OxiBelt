@@ -29,7 +29,7 @@ use crate::proxy::http::uri::UpstreamUriParts;
 use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
-use crate::runtime::backend::runtime_backend_snapshot;
+use crate::runtime::topology::RuntimeTopologySnapshot;
 use crate::runtime_health::RuntimeHealth;
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
@@ -54,6 +54,7 @@ pub(crate) mod handle;
 mod http1_upgrade;
 mod request_path_features;
 mod runtime_services;
+mod runtime_topology;
 mod secret_references;
 mod stream_pool_update;
 mod upstream_clients;
@@ -66,11 +67,12 @@ use stream_pool_update::next_stream_pool_generation;
 pub use upstream_clients::UpstreamBody;
 use upstream_clients::build_clients;
 pub(crate) use upstream_clients::{UpstreamClientPools, UpstreamClientRef};
-use upstream_precompute::{build_upstream_uri_parts, effective_direct_h1_io_for_backend};
+use upstream_precompute::build_upstream_uri_parts;
 /// Immutable snapshot of runtime configuration and derived state.
 #[derive(Clone)]
 pub struct AppSnapshot {
   pub config: Config,
+  pub runtime_topology: RuntimeTopologySnapshot,
   pub(crate) secret_references: SecretReferenceRuntime,
   pub(crate) effective_direct_h1_io: RuntimeDirectH1IoMode,
   pub route_table: RouteTable,
@@ -182,26 +184,37 @@ impl AppSnapshot {
     config: Config,
     telemetry: TelemetryRuntime,
   ) -> anyhow::Result<Self> {
-    Self::new_with_previous_and_telemetry(config, None, Some(telemetry)).await
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), None).await
+  }
+
+  pub async fn new_with_telemetry_and_topology(
+    config: Config,
+    telemetry: TelemetryRuntime,
+    topology: RuntimeTopologySnapshot,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), Some(topology)).await
   }
 
   pub async fn new_with_previous(
     config: Config,
     previous: Option<&AppSnapshot>,
   ) -> anyhow::Result<Self> {
-    Self::new_with_previous_and_telemetry(config, previous, None).await
+    Self::new_with_previous_and_telemetry(config, previous, None, None).await
   }
 
   async fn new_with_previous_and_telemetry(
     mut config: Config,
     previous: Option<&AppSnapshot>,
     initial_telemetry: Option<TelemetryRuntime>,
+    supplied_topology: Option<RuntimeTopologySnapshot>,
   ) -> anyhow::Result<Self> {
     if config.rollout.is_immutable() {
       config
         .validate()
         .context("failed to validate immutable rollout configuration")?;
     }
+    let runtime_topology =
+      runtime_topology::for_snapshot_build(&config, supplied_topology, previous)?;
     crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
@@ -493,7 +506,7 @@ impl AppSnapshot {
     let upstream_pool_generation = next_upstream_pool_generation(&config, previous);
     let stream_pool_generation = next_stream_pool_generation(&config, previous);
     let effective_direct_h1_io =
-      effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
+      runtime_topology::effective_direct_h1_io(&config, &runtime_topology);
     let compio_direct_h1_budget = (effective_direct_h1_io == RuntimeDirectH1IoMode::Compio)
       .then(|| crate::circuit_breakers::compio_direct_h1_budget(&config))
       .transpose()?;
@@ -527,6 +540,7 @@ impl AppSnapshot {
     config.rollout.mark_applied();
     Ok(Self {
       config,
+      runtime_topology,
       secret_references,
       effective_direct_h1_io,
       route_table,
@@ -696,8 +710,9 @@ impl AppSnapshot {
     let upstream_pool_generation = next_upstream_pool_generation(&config, Some(previous));
     let stream_pool_generation = next_stream_pool_generation(&config, Some(previous));
     let http1_upgrades_possible = http1_upgrade::http1_upgrades_possible(&config, &upstreams);
+    let runtime_topology = runtime_topology::for_snapshot_build(&config, None, Some(previous))?;
     let effective_direct_h1_io =
-      effective_direct_h1_io_for_backend(&config, runtime_backend_snapshot());
+      runtime_topology::effective_direct_h1_io(&config, &runtime_topology);
     let compio_direct_h1_budget = (effective_direct_h1_io == RuntimeDirectH1IoMode::Compio)
       .then(|| crate::circuit_breakers::compio_direct_h1_budget(&config))
       .transpose()?;
@@ -738,6 +753,7 @@ impl AppSnapshot {
     let secret_references = secret_references::build(&config, Some(previous))?;
     Ok(Self {
       config,
+      runtime_topology,
       secret_references,
       effective_direct_h1_io,
       route_table,

@@ -52,10 +52,11 @@ tracked-tree state (`clean`, `dirty`, or `unknown`), and build kind
 (`official_release`, `tagged_development`, `git_development`, or
 `source_archive`). `package_version` is the effective OxiBelt version and is
 never inferred from Cargo's private `0.0.0` workspace sentinel. Runtime
-introspection and support-bundle format version 1 carry the same additive
-`package_version`, `source_revision`, `source_ref`, `source_dirty`, and
-`build_kind` metadata. The unauthenticated health endpoints intentionally omit
-build identity; use these authenticated metadata surfaces for inventory.
+snapshot, runtime-introspection, and support-bundle format version `2` carry
+the same `package_version`, `source_revision`, `source_ref`, `source_dirty`,
+and `build_kind` metadata together with the resolved runtime topology. The
+unauthenticated health endpoints intentionally omit build identity; use these
+authenticated metadata surfaces for inventory.
 Admin listener responses include `X-OxiBelt-Request-Id` and
 `X-OxiBelt-API-Version`. Non-2xx Admin errors use a JSON envelope:
 `{ "error": { "code": "...", "message": "...", "details": { ... } },
@@ -64,6 +65,37 @@ operation hint to expose. Permission denials may include the checked IPM
 `action` and resolved `resource`; ETag failures may include the `If-Match`
 header name and expected ETag. Generation ETags are concurrency diagnostics,
 not bearer secrets.
+
+## Runtime topology and capability resolution
+
+Authenticated runtime snapshot, runtime introspection, and redacted support
+bundle responses expose a shared version-`2` `runtime_topology` object. It
+reports the requested and resolved main-runtime presets, `topology_policy`,
+resolution outcome and fixed reason, subsystem owners, worker allocations,
+blocking strategy, compatibility boundaries, and requested, resolved, and
+active direct-H1 state. A resolved `hybrid_compio` preset truthfully reports a
+Compio bootstrap boundary and Tokio ownership of listener, general HTTP,
+HTTP/3 and QUIC, DNS/discovery, timer, and background/control work; it reports
+Compio direct-H1 ownership only when that experimental service is active.
+
+- `GET /admin/v1/runtime/snapshot?redact=true` requires
+  `runtime:ReadSnapshot` on `runtime:snapshot/current` and returns the active
+  generation's redacted runtime snapshot.
+- `GET /admin/v1/runtime/introspection?redact=true` requires
+  `runtime:ReadIntrospection` on `runtime:introspection/current` and adds live
+  connection, request, stream, tunnel, and flow counters.
+- `GET /admin/v1/diagnostics/support-bundle?redact=true` requires
+  `diagnostics:ReadSupportBundle` and embeds the same active-generation
+  topology.
+- `GET /admin/v1/config/explain` uses config-report format version `2` and
+  reports the active topology with `basis = "active"`; offline config explain
+  uses `basis = "preflight"` and does not claim activation.
+
+The fixed outcome vocabulary is `exact`, `fallback`, `rejected`, and
+`feature_disabled`. A `require_exact` candidate that cannot be activated is
+rejected instead of publishing a degraded topology. These surfaces omit raw
+capability-probe errors, paths, hostnames, routes, peers, configuration secret
+values, and credentials.
 
 Successful protected mutation executions and terminal replay responses include
 `X-OxiBelt-Mutation-Request-Id`, `X-OxiBelt-Mutation-Revision`, and

@@ -398,6 +398,13 @@ impl RuntimeHealth {
     true
   }
 
+  pub(crate) fn subsystem_is_unhealthy(&self, subsystem: RuntimeSubsystem) -> bool {
+    let active = self.active_generation();
+    let packed = self.subsystem_states[subsystem as usize].load(Ordering::Acquire);
+    record_applies(packed, active)
+      && RuntimeSubsystemState::from_bits(packed) != RuntimeSubsystemState::Healthy
+  }
+
   #[cfg(feature = "admin-runtime")]
   pub(crate) fn snapshot(&self) -> RuntimeHealthSnapshot {
     let active = self.active_generation();

@@ -11,7 +11,7 @@ fn config() -> Config {
 #[test]
 fn compio_budget_projects_existing_queue_and_connection_limits() {
   let mut config = config();
-  config.runtime.worker_threads = 4;
+  config.runtime.workers.compio_direct_h1 = 4;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(4);
   config.circuit_breakers.global.pending_queue_timeout_ms = 37;
   config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(20);
@@ -30,7 +30,7 @@ fn compio_budget_projects_existing_queue_and_connection_limits() {
 #[test]
 fn compio_budget_keeps_physical_queues_bounded_when_waiting_is_disabled() {
   let mut config = config();
-  config.runtime.worker_threads = 3;
+  config.runtime.workers.compio_direct_h1 = 3;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
   config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(2);
   config.circuit_breakers.pool_defaults.max_connections = CapacitySetting::Fixed(8);
@@ -46,7 +46,7 @@ fn compio_budget_keeps_physical_queues_bounded_when_waiting_is_disabled() {
 #[test]
 fn compio_budget_handoff_covers_each_workers_share_of_active_operations() {
   let mut config = config();
-  config.runtime.worker_threads = 4;
+  config.runtime.workers.compio_direct_h1 = 4;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
   config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(120);
 
@@ -61,10 +61,10 @@ fn compio_budget_handoff_covers_each_workers_share_of_active_operations() {
 #[test]
 fn compio_budget_rejects_invalid_or_overflowing_worker_projections() {
   let mut config = config();
-  config.runtime.worker_threads = 0;
+  config.runtime.workers.compio_direct_h1 = 0;
   assert!(compio_direct_h1_budget(&config).is_err());
 
-  config.runtime.worker_threads = usize::MAX;
+  config.runtime.workers.compio_direct_h1 = usize::MAX;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(usize::MAX);
   let error = compio_direct_h1_budget(&config)
     .expect_err("impossible worker and queue allocations must fail closed");
@@ -74,7 +74,7 @@ fn compio_budget_rejects_invalid_or_overflowing_worker_projections() {
 #[test]
 fn compio_budget_rejects_impossible_fixed_queue_and_connection_limits() {
   let mut config = config();
-  config.runtime.worker_threads = 1;
+  config.runtime.workers.compio_direct_h1 = 1;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(usize::MAX);
   let queue_error =
     compio_direct_h1_budget(&config).expect_err("an impossible fixed queue must fail closed");
@@ -94,7 +94,7 @@ fn compio_budget_rejects_impossible_fixed_queue_and_connection_limits() {
 #[test]
 fn compio_budget_counts_physical_queue_slots_and_waiters_together() {
   let mut config = config();
-  config.runtime.worker_threads = 1;
+  config.runtime.workers.compio_direct_h1 = 1;
   config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(4_096);
   let error = compio_direct_h1_budget(&config)
     .expect_err("the combined physical queue and waiter population must fail closed");

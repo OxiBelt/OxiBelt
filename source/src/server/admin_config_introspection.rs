@@ -239,6 +239,7 @@ pub(super) fn explain_success(
     } else {
       serde_json::to_value(value).ok()
     },
+    runtime_resolution: None,
     constraints: ConfigExplainConstraints {
       schema,
       introduced_epoch: metadata.introduced_epoch,

@@ -6,9 +6,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use oxibelt::config::{Config, HotReloadMode, RuntimeMainRuntimeMode, RuntimeOverrides};
-use oxibelt::runtime::backend::{CompioDriverSelection, RuntimeBackendSnapshot};
+use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
+use oxibelt::runtime::backend::CompioDriverSelection;
 use oxibelt::runtime::main_runtime::{ActiveMainRuntime, MainRuntime};
+use oxibelt::runtime::topology::{
+  RuntimeCapability, RuntimeRequestedPreset, RuntimeResolvedPreset, RuntimeTopologyPolicy,
+  RuntimeTopologyReason, RuntimeTopologySnapshot, resolve_runtime_topology,
+};
+use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
 
 mod runtime_diagnostics;
 use runtime_diagnostics::{
@@ -16,8 +21,6 @@ use runtime_diagnostics::{
   handle_runtime_probe_command, run_compio_main_child, run_compio_probe_child,
 };
 
-const COMPAT_RUNTIME_HINT: &str =
-  "set runtime.main_runtime = \"tokio_hyper\" or \"auto\" to avoid Compio in this environment";
 const LIFECYCLE_PRESTOP_COMMAND: &str = "__lifecycle-prestop";
 const LIFECYCLE_PRESTOP_MIN_WAIT_SECONDS: u64 = 1;
 const LIFECYCLE_PRESTOP_MAX_WAIT_SECONDS: u64 = 86_400;
@@ -214,30 +217,61 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
   }
 
   config.log_worker_resolution();
-  let worker_threads = config.runtime.worker_threads;
-  let compio_preflight = preflight_compio_for_startup(config.runtime.main_runtime, worker_threads)?;
-  let active_runtime = active_runtime_for_startup(config.runtime.main_runtime, &compio_preflight)?;
-  let runtime_backend = startup_stage("runtime_backend_snapshot", || {
-    Ok::<_, anyhow::Error>(runtime_backend_snapshot(
-      active_runtime,
-      compio_preflight.driver,
-    ))
-  })?;
+  let worker_threads = config.runtime.workers.tokio;
+  let request = request_from_config(&config);
+  let compio_preflight = preflight_compio_for_startup(request.requested_preset, worker_threads);
+  let mut capabilities = available_capabilities(compio_preflight.driver);
+  if let Some(reason) = compio_preflight.failure_reason {
+    capabilities.compio_main = RuntimeCapability::Unavailable(reason);
+  }
+  let mut topology = resolve_runtime_topology(request, capabilities)
+    .context("requested runtime topology cannot be activated")?;
+  let mut active_runtime = active_runtime_for_topology(&topology);
+  let runtime = match build_main_runtime(active_runtime, worker_threads) {
+    Ok(runtime) => runtime,
+    Err(_error)
+      if request.requested_preset == RuntimeRequestedPreset::Auto
+        && request.policy == RuntimeTopologyPolicy::AllowFallback
+        && active_runtime == ActiveMainRuntime::Compio =>
+    {
+      tracing::warn!(
+        reason = RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str(),
+        worker_threads,
+        "runtime topology capability changed during activation; resolving once more"
+      );
+      capabilities.compio_main =
+        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed);
+      topology = resolve_runtime_topology(request, capabilities)
+        .context("fallback runtime topology cannot be activated")?;
+      active_runtime = active_runtime_for_topology(&topology);
+      build_main_runtime(active_runtime, worker_threads).with_context(|| {
+        format!(
+          "fallback runtime build failed after {}",
+          RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str()
+        )
+      })?
+    }
+    Err(error) => return Err(error.context("resolved main runtime failed to build")),
+  };
+  let runtime_backend = topology.legacy_backend_snapshot();
   oxibelt::runtime::backend::set_runtime_backend_snapshot(runtime_backend);
   tracing::info!(
-    target_runtime = runtime_backend.target_runtime,
-    target_io_driver = runtime_backend.target_io_driver,
-    active_runtime = runtime_backend.active_runtime,
-    compatibility_runtime = runtime_backend.compatibility_runtime,
-    compatibility_island_count = runtime_backend.compatibility_island_count,
-    "resolved async runtime backend"
+    requested_preset = topology.requested_preset.as_str(),
+    resolved_preset = topology.resolved_preset.as_str(),
+    topology_policy = topology.policy.as_str(),
+    outcome = topology.outcome.as_str(),
+    reason = topology.reason.as_str(),
+    compatibility_island_count = topology.compatibility_boundaries.compatibility_island_count,
+    tokio_executor_workers = topology.workers.tokio_executor_workers,
+    compio_direct_h1_workers = topology.workers.compio_direct_h1_workers,
+    direct_h1_backend = topology.direct_h1.resolved.as_str(),
+    "resolved async runtime topology"
   );
-  let runtime = build_main_runtime(active_runtime, worker_threads)?;
   let check = cli.check;
   runtime.block_on(async move {
     let state = startup_stage_async(
       "app_snapshot_new_with_telemetry",
-      build_app_handle(config, observability.into_telemetry()),
+      build_app_handle(config, observability.into_telemetry(), topology),
     )
     .await?;
     if check {
@@ -261,9 +295,10 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
 async fn build_app_handle(
   config: Config,
   telemetry: oxibelt::telemetry::TelemetryRuntime,
+  topology: RuntimeTopologySnapshot,
 ) -> anyhow::Result<oxibelt::state::AppHandle> {
   tokio::task::spawn(async move {
-    oxibelt::state::AppSnapshot::new_with_telemetry(config, telemetry)
+    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology(config, telemetry, topology)
       .await
       .context("failed to initialize application state")
       .map(oxibelt::state::AppHandle::new)
@@ -275,71 +310,72 @@ async fn build_app_handle(
 #[derive(Debug, Clone, Copy)]
 struct CompioStartupPreflight {
   driver: Option<CompioDriverSelection>,
-  failed: bool,
+  failure_reason: Option<RuntimeTopologyReason>,
 }
 
 fn preflight_compio_for_startup(
-  mode: RuntimeMainRuntimeMode,
+  requested_preset: RuntimeRequestedPreset,
   worker_threads: usize,
-) -> anyhow::Result<CompioStartupPreflight> {
-  if mode == RuntimeMainRuntimeMode::TokioHyper {
-    return Ok(CompioStartupPreflight {
+) -> CompioStartupPreflight {
+  if requested_preset == RuntimeRequestedPreset::TokioHyper {
+    return CompioStartupPreflight {
       driver: None,
-      failed: false,
-    });
+      failure_reason: None,
+    };
   }
-  let driver = match startup_stage("compio_probe_runtime_build", run_compio_probe_child) {
+  let driver = match startup_capability_stage(
+    "compio_probe_runtime_build",
+    RuntimeTopologyReason::CompioProbeFailed,
+    run_compio_probe_child,
+  ) {
     Ok(driver) => driver,
-    Err(error) if mode == RuntimeMainRuntimeMode::Auto => {
+    Err(_) => {
       tracing::warn!(
-        error = %error,
+        reason = RuntimeTopologyReason::CompioProbeFailed.as_str(),
         worker_threads,
-        "Compio runtime probe failed; falling back to Tokio/Hyper main runtime"
+        "Compio runtime capability preflight failed"
       );
-      return Ok(CompioStartupPreflight {
+      return CompioStartupPreflight {
         driver: None,
-        failed: true,
-      });
-    }
-    Err(error) => {
-      return Err(error.context(format!(
-        "Compio runtime probe failed; {COMPAT_RUNTIME_HINT}"
-      )));
+        failure_reason: Some(RuntimeTopologyReason::CompioProbeFailed),
+      };
     }
   };
-  if mode == RuntimeMainRuntimeMode::Auto && !compio_driver_safe_for_auto_main_runtime(driver) {
+  if requested_preset == RuntimeRequestedPreset::Auto
+    && !compio_driver_safe_for_auto_main_runtime(driver)
+  {
     tracing::warn!(
       driver = driver.as_str(),
+      reason = RuntimeTopologyReason::UnsafeCompioDriver.as_str(),
       worker_threads,
-      "Compio probe selected a fallback I/O driver; falling back to Tokio/Hyper main runtime"
+      "Compio probe selected a driver that is unsafe for automatic activation"
     );
-    return Ok(CompioStartupPreflight {
+    return CompioStartupPreflight {
       driver: Some(driver),
-      failed: true,
-    });
+      failure_reason: Some(RuntimeTopologyReason::UnsafeCompioDriver),
+    };
   }
 
-  match startup_stage("main_compio_runtime_build", || {
-    run_compio_main_child(worker_threads)
-  }) {
-    Ok(()) => Ok(CompioStartupPreflight {
+  match startup_capability_stage(
+    "main_compio_runtime_build",
+    RuntimeTopologyReason::CompioRuntimeBuildFailed,
+    || run_compio_main_child(worker_threads),
+  ) {
+    Ok(()) => CompioStartupPreflight {
       driver: Some(driver),
-      failed: false,
-    }),
-    Err(error) if mode == RuntimeMainRuntimeMode::Auto => {
+      failure_reason: None,
+    },
+    Err(_) => {
       tracing::warn!(
-        error = %error,
+        reason = RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str(),
         worker_threads,
-        "Compio main runtime preflight failed; falling back to Tokio/Hyper main runtime"
+        "Compio main runtime capability preflight failed"
       );
-      Ok(CompioStartupPreflight {
+      CompioStartupPreflight {
         driver: None,
-        failed: true,
-      })
+        failure_reason: Some(RuntimeTopologyReason::CompioRuntimeBuildFailed),
+      }
     }
-    Err(error) => Err(error.context(format!(
-      "Compio main runtime preflight failed; {COMPAT_RUNTIME_HINT}"
-    ))),
   }
 }
 
@@ -350,20 +386,12 @@ fn compio_driver_safe_for_auto_main_runtime(driver: CompioDriverSelection) -> bo
   )
 }
 
-fn active_runtime_for_startup(
-  mode: RuntimeMainRuntimeMode,
-  preflight: &CompioStartupPreflight,
-) -> anyhow::Result<ActiveMainRuntime> {
-  match mode {
-    RuntimeMainRuntimeMode::Compio => {
-      if preflight.failed {
-        bail!("Compio startup preflight failed");
-      }
-      Ok(ActiveMainRuntime::Compio)
+fn active_runtime_for_topology(topology: &RuntimeTopologySnapshot) -> ActiveMainRuntime {
+  match topology.resolved_preset {
+    RuntimeResolvedPreset::HybridCompio => ActiveMainRuntime::Compio,
+    RuntimeResolvedPreset::TokioHyper | RuntimeResolvedPreset::External => {
+      ActiveMainRuntime::TokioHyper
     }
-    RuntimeMainRuntimeMode::TokioHyper => Ok(ActiveMainRuntime::TokioHyper),
-    RuntimeMainRuntimeMode::Auto if preflight.failed => Ok(ActiveMainRuntime::TokioHyper),
-    RuntimeMainRuntimeMode::Auto => Ok(ActiveMainRuntime::Compio),
   }
 }
 
@@ -379,13 +407,6 @@ fn build_main_runtime(
       MainRuntime::build_tokio(worker_threads)
     }),
   }
-}
-
-fn runtime_backend_snapshot(
-  active_runtime: ActiveMainRuntime,
-  driver: Option<CompioDriverSelection>,
-) -> RuntimeBackendSnapshot {
-  oxibelt::runtime::backend::runtime_backend_snapshot_for(active_runtime, driver)
 }
 
 fn startup_stage<T>(
@@ -406,6 +427,30 @@ fn startup_stage<T>(
       elapsed_ms = started.elapsed().as_millis(),
       error = %error,
       "startup stage failed"
+    ),
+  }
+  result
+}
+
+fn startup_capability_stage<T>(
+  name: &'static str,
+  failure_reason: RuntimeTopologyReason,
+  action: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+  let started = Instant::now();
+  tracing::info!(startup_stage = name, "startup capability stage started");
+  let result = action();
+  match &result {
+    Ok(_) => tracing::info!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      "startup capability stage completed"
+    ),
+    Err(_) => tracing::error!(
+      startup_stage = name,
+      elapsed_ms = started.elapsed().as_millis(),
+      reason = failure_reason.as_str(),
+      "startup capability stage failed"
     ),
   }
   result
@@ -639,110 +684,5 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn version_flag_reports_canonical_build_identity() {
-    let error = Cli::try_parse_from(["oxibelt", "--version"])
-      .expect_err("--version should exit through Clap");
-    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
-    assert!(
-      error
-        .to_string()
-        .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
-    );
-  }
-
-  fn lifecycle_args(values: &[&str]) -> Vec<OsString> {
-    std::iter::once(OsString::from("oxibelt"))
-      .chain(values.iter().map(OsString::from))
-      .collect()
-  }
-
-  #[test]
-  fn lifecycle_prestop_parser_accepts_bounded_waits() {
-    assert_eq!(
-      parse_lifecycle_prestop_args(&lifecycle_args(&[
-        LIFECYCLE_PRESTOP_COMMAND,
-        "--wait-seconds",
-        "1",
-      ]))
-      .expect("minimum wait should parse"),
-      Some(1)
-    );
-    assert_eq!(
-      parse_lifecycle_prestop_args(&lifecycle_args(&[
-        LIFECYCLE_PRESTOP_COMMAND,
-        "--wait-seconds",
-        "86400",
-      ]))
-      .expect("maximum wait should parse"),
-      Some(86_400)
-    );
-  }
-
-  #[test]
-  fn lifecycle_prestop_parser_rejects_unsafe_or_ambiguous_arguments() {
-    for values in [
-      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "0"],
-      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "86401"],
-      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "invalid"],
-      vec![LIFECYCLE_PRESTOP_COMMAND, "--wait-seconds", "1", "extra"],
-      vec![LIFECYCLE_PRESTOP_COMMAND, "--other", "1"],
-    ] {
-      assert!(parse_lifecycle_prestop_args(&lifecycle_args(&values)).is_err());
-    }
-  }
-
-  #[test]
-  fn lifecycle_prestop_parser_leaves_public_cli_unchanged() {
-    assert_eq!(
-      parse_lifecycle_prestop_args(&lifecycle_args(&["--config", "oxibelt.toml"]))
-        .expect("public CLI should not be intercepted"),
-      None
-    );
-  }
-
-  #[test]
-  fn auto_main_runtime_treats_polling_compio_driver_as_unsafe() {
-    assert!(!compio_driver_safe_for_auto_main_runtime(
-      CompioDriverSelection::Polling
-    ));
-
-    let selected = active_runtime_for_startup(
-      RuntimeMainRuntimeMode::Auto,
-      &CompioStartupPreflight {
-        driver: Some(CompioDriverSelection::Polling),
-        failed: true,
-      },
-    )
-    .expect("auto should fall back after an unsafe Compio preflight");
-
-    assert_eq!(selected, ActiveMainRuntime::TokioHyper);
-  }
-
-  #[test]
-  fn auto_main_runtime_allows_production_compio_drivers() {
-    assert!(compio_driver_safe_for_auto_main_runtime(
-      CompioDriverSelection::IoUring
-    ));
-    assert!(compio_driver_safe_for_auto_main_runtime(
-      CompioDriverSelection::Iocp
-    ));
-  }
-
-  #[test]
-  fn explicit_compio_runtime_still_selects_compio_after_successful_polling_preflight() {
-    let selected = active_runtime_for_startup(
-      RuntimeMainRuntimeMode::Compio,
-      &CompioStartupPreflight {
-        driver: Some(CompioDriverSelection::Polling),
-        failed: false,
-      },
-    )
-    .expect("explicit Compio should preserve the caller's selected runtime");
-
-    assert_eq!(selected, ActiveMainRuntime::Compio);
-  }
-}
+#[path = "main/tests.rs"]
+mod tests;

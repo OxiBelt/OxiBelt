@@ -17,6 +17,7 @@ impl AppSnapshot {
 
     Ok(Self {
       config,
+      runtime_topology: previous.runtime_topology.clone(),
       secret_references: previous.secret_references.clone(),
       effective_direct_h1_io: previous.effective_direct_h1_io,
       route_table: previous.route_table.clone(),

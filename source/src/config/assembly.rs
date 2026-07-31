@@ -88,9 +88,13 @@ impl Config {
     tracing::info!(
       available_parallelism = resolution.available_parallelism,
       runtime_multiplier = resolution.runtime_multiplier,
+      tokio_multiplier = resolution.tokio_multiplier,
+      compio_direct_h1_multiplier = resolution.compio_direct_h1_multiplier,
       accept_multiplier = resolution.accept_multiplier,
       quic_socket_multiplier = resolution.quic_socket_multiplier,
       runtime_worker_threads = self.runtime.worker_threads,
+      tokio_workers = self.runtime.workers.tokio,
+      compio_direct_h1_workers = self.runtime.workers.compio_direct_h1,
       accept_workers = self.runtime.accept.workers,
       quic_socket_workers = self.quic.socket.workers,
       "resolved worker auto-scaling"
@@ -155,15 +159,45 @@ impl Config {
     &self,
     value: &mut toml::Value,
   ) -> anyhow::Result<()> {
+    set_toml_value_path(
+      value,
+      &["runtime", "main_runtime"],
+      toml::Value::String(self.runtime.main_runtime.as_str().to_string()),
+    )?;
+    set_toml_value_path(
+      value,
+      &["runtime", "topology_policy"],
+      toml::Value::String(self.runtime.topology_policy.as_str().to_string()),
+    )?;
     set_toml_integer_path(
       value,
       &["runtime", "worker_threads"],
       self.runtime.worker_threads,
     )?;
+    set_toml_integer_path(
+      value,
+      &["runtime", "workers", "tokio"],
+      self.runtime.workers.tokio,
+    )?;
+    set_toml_integer_path(
+      value,
+      &["runtime", "workers", "compio_direct_h1"],
+      self.runtime.workers.compio_direct_h1,
+    )?;
     set_toml_float_path(
       value,
       &["runtime", "worker_multipliers", "runtime"],
       self.runtime.worker_multipliers.runtime,
+    )?;
+    set_toml_float_path(
+      value,
+      &["runtime", "worker_multipliers", "tokio"],
+      self.runtime.worker_multipliers.tokio,
+    )?;
+    set_toml_float_path(
+      value,
+      &["runtime", "worker_multipliers", "compio_direct_h1"],
+      self.runtime.worker_multipliers.compio_direct_h1,
     )?;
     set_toml_float_path(
       value,

@@ -53,6 +53,7 @@ mod path_helpers;
 mod path_resolution;
 mod provenance;
 mod quic;
+mod quic_workers;
 mod rate_limit;
 mod redaction;
 mod retry;
@@ -141,8 +142,11 @@ use path_helpers::{
 pub use provenance::{ConfigOriginIndex, ConfigOriginKind, ConfigValueOrigin};
 pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
+pub use quic_workers::*;
 pub use rate_limit::*;
-use redaction::{redact_effective_toml, set_toml_float_path, set_toml_integer_path};
+use redaction::{
+  redact_effective_toml, set_toml_float_path, set_toml_integer_path, set_toml_value_path,
+};
 pub use retry::*;
 pub use rollout_identity::{ConfigRolloutApplyState, ConfigRolloutIdentity, ConfigRolloutMode};
 pub use route::*;

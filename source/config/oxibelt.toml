@@ -40,12 +40,17 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
-worker_threads = "auto"
-main_runtime = "tokio_hyper" # compio | tokio_hyper | auto
+main_runtime = "tokio_hyper" # hybrid_compio | tokio_hyper | auto; legacy: compio
+topology_policy = "allow_fallback" # allow_fallback | require_exact
 direct_h1_io = "auto" # auto | tokio_hyper | compio
 
+[runtime.workers]
+tokio = "auto"
+compio_direct_h1 = "auto"
+
 [runtime.worker_multipliers]
-runtime = 1.0
+tokio = 1.0
+compio_direct_h1 = 1.0
 accept = 0.5
 quic_socket = 1.0
 

@@ -231,10 +231,10 @@ pub(crate) struct CompioDirectH1Budget {
 }
 
 pub(crate) fn compio_direct_h1_budget(config: &Config) -> anyhow::Result<CompioDirectH1Budget> {
-  let worker_count = config.runtime.worker_threads;
+  let worker_count = config.runtime.workers.compio_direct_h1;
   ensure!(
     worker_count > 0,
-    "runtime.worker_threads must be greater than 0 before resolving the Compio direct-H1 budget"
+    "runtime.workers.compio_direct_h1 must be greater than 0 before resolving the Compio direct-H1 budget"
   );
 
   let resources = RuntimeResources::discover(config);

@@ -39,6 +39,22 @@ fn admin_openapi_is_31_and_covers_current_v1_paths() {
 }
 
 #[test]
+fn config_explain_documents_runtime_resolution_basis() {
+  let spec = openapi();
+  let runtime_resolution =
+    &spec["components"]["schemas"]["ConfigExplainReport"]["properties"]["runtime_resolution"];
+
+  assert_eq!(runtime_resolution["type"], "object");
+  assert_eq!(
+    json_string_set(
+      &runtime_resolution["properties"]["basis"]["enum"],
+      "ConfigExplainReport.runtime_resolution.basis"
+    ),
+    BTreeSet::from(["active".to_string(), "preflight".to_string()])
+  );
+}
+
+#[test]
 fn admin_version_documents_embedded_asset_identity() {
   let spec = openapi();
   let schema = &spec["components"]["schemas"]["AdminVersion"];
@@ -213,7 +229,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let validation = &spec["components"]["schemas"]["ConfigValidationReport"];
   assert_eq!(
     validation["properties"]["report_schema_version"]["const"],
-    1
+    2
   );
   assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
 
@@ -233,7 +249,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let explain_report = &spec["components"]["schemas"]["ConfigExplainReport"];
   assert_eq!(
     explain_report["properties"]["report_schema_version"]["const"],
-    1
+    2
   );
   assert_eq!(
     explain_report["properties"]["native_schema_epoch"]["const"],

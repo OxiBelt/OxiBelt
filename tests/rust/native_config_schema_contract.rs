@@ -328,6 +328,13 @@ fn explain_tracks_include_origin_and_never_returns_private_key_material() {
     explain_native_config(&entry, "logging.level").expect("included field should be explainable");
   assert_eq!(logging.source.kind, ConfigOriginKind::Include);
   assert_eq!(logging.source.file.as_deref(), Some("logging.toml"));
+  let runtime_resolution = logging
+    .runtime_resolution
+    .as_ref()
+    .expect("offline explain should include a preflight runtime plan");
+  assert_eq!(runtime_resolution["basis"], "preflight");
+  assert_eq!(runtime_resolution["activated"], false);
+  assert_eq!(runtime_resolution["canonical_preset"], "hybrid_compio");
 
   let private_key = explain_native_config(&entry, "tls.private_key")
     .expect("private key field should be explainable");

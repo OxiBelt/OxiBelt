@@ -590,12 +590,17 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
-worker_threads = "auto"
-main_runtime = "tokio_hyper" # compio | tokio_hyper | auto
+main_runtime = "tokio_hyper" # hybrid_compio | tokio_hyper | auto; legacy: compio
+topology_policy = "allow_fallback" # allow_fallback | require_exact
 direct_h1_io = "auto" # auto | tokio_hyper | compio
 
+[runtime.workers]
+tokio = "auto"
+compio_direct_h1 = "auto"
+
 [runtime.worker_multipliers]
-runtime = 1.0
+tokio = 1.0
+compio_direct_h1 = 1.0
 accept = 0.5
 quic_socket = 1.0
 
@@ -634,15 +639,23 @@ read_paths = []
 read_write_paths = []
 ```
 
-`unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`. `worker_threads` accepts a positive integer or `"auto"`; omitted values default to `"auto"`. Auto worker sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, multiplies by `[runtime.worker_multipliers].runtime`, and rounds up. While the Compio direct-H1 response engine remains experimental, the checked-in example and conservative production recommendation explicitly select `main_runtime = "tokio_hyper"` and `direct_h1_io = "auto"`. For configuration compatibility, omitting `main_runtime` still resolves to Compio; operators should select the intended backend explicitly rather than treating omission as a readiness recommendation. `main_runtime = "tokio_hyper"` runs the main server directly on Tokio/Hyper, while `main_runtime = "auto"` probes Compio at startup and falls back to Tokio/Hyper when Compio is unavailable or unsafe. `[runtime.worker_multipliers]` defaults to `runtime = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`; the lower accept default keeps TCP accept loops more conservative while runtime and HTTP/3 socket worker counts continue to track available parallelism. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior.
+`unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`. While the Compio direct-H1 response engine remains experimental, the checked-in example and conservative production recommendation explicitly select `main_runtime = "tokio_hyper"` and `direct_h1_io = "auto"`.
 
-`direct_h1_io = "auto"` and `direct_h1_io = "tokio_hyper"` use the established Hyper direct-H1 transport. `direct_h1_io = "compio"` is an explicit Linux-only experimental selection and applies only after the normal direct-H1 route, upstream, body, retry, transform, upgrade, and CONNECT guards pass. It also requires an active Compio main runtime; when the active main runtime is Tokio/Hyper because `main_runtime = "tokio_hyper"` is configured or `main_runtime = "auto"` falls back after Compio preflight, OxiBelt uses Tokio/Hyper direct-H1 IO for the serving process.
+`main_runtime = "hybrid_compio"` is the canonical default. It owns one Compio bootstrap driver around a Tokio compatibility island; TCP accept, general HTTP, HTTP/3 and QUIC, DNS and discovery, timers, background/control work, and Tokio-managed blocking work execute on Tokio. Only an activated Compio direct-H1 worker fleet owns direct-H1 transport work. The legacy value `main_runtime = "compio"` remains behavior-identical, resolves to `hybrid_compio`, and emits `CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS`; no removal deadline is assigned. `main_runtime = "tokio_hyper"` runs the same server subsystems directly on Tokio/Hyper. `main_runtime = "auto"` prefers a safe hybrid topology and records a fallback to Tokio/Hyper when Compio is unavailable or unsafe.
 
-The Compio selection starts a persistent service at subsystem startup. Its worker count is derived from the resolved runtime worker plan, and each worker owns one long-lived Compio execution context plus a bounded submission queue. Queue capacity, per-origin idle connections, total idle connections, retained buffer count, idle lifetime, and absolute connection lifetime derive from existing runtime and upstream-pool limits; there are no independent public Compio tuning knobs in this release. Shutdown stops admission, waits only within the configured process drain deadline, cancels remaining operations, closes idle connections, and joins workers. OxiBelt reserves the final bounded portion of that same configured window for terminal worker cleanup (up to 5 seconds, using the whole window when it is shorter than 100 ms; there is no new public knob), so native thread joining cannot extend shutdown beyond the operator's deadline. If a native worker still owns driver I/O at that hard deadline, OxiBelt aborts the process so a supervisor can replace it instead of detaching the worker into a continuing server.
+`topology_policy = "allow_fallback"` preserves the compatibility fallback behavior. `require_exact` rejects startup or reload when `auto` cannot retain the preferred hybrid topology or an explicitly requested Compio direct-H1 transport would require a compatibility fallback. Capability resolution is deterministic and reports `exact`, `fallback`, `rejected`, or `feature_disabled` together with a fixed reason; it accounts for the OS, architecture, compiled support, Compio driver safety and preflight, required socket/protocol capabilities, hardening, and worker/resource budgets. Raw probe errors are not exposed in logs, metrics, config explain, runtime snapshots, or support bundles.
+
+`[runtime.workers].tokio` and `compio_direct_h1` accept a positive integer or `"auto"`. Auto sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, applies the matching `[runtime.worker_multipliers]` value, and rounds up. Multiplier defaults are `tokio = 1.0`, `compio_direct_h1 = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`. Legacy `runtime.worker_threads` and `runtime.worker_multipliers.runtime` remain accepted: each supplies a canonical owner only when that owner's new field is omitted, so an explicit owner-specific value takes precedence. Legacy use emits a fixed migration diagnostic, and a legacy-only configuration preserves its previous resolved counts. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior.
+
+`direct_h1_io = "auto"` and `direct_h1_io = "tokio_hyper"` use the established Hyper direct-H1 transport. `direct_h1_io = "compio"` is an explicit Linux-only experimental selection and applies only after the normal direct-H1 route, upstream, body, retry, transform, upgrade, and CONNECT guards pass. It requires the hybrid Compio compatibility boundary. With `topology_policy = "allow_fallback"`, an incompatible resolved main topology records a Tokio/Hyper compatibility fallback; with `require_exact`, startup or reload rejects the candidate instead.
+
+The Compio selection starts a persistent service at subsystem startup. Its worker count is the resolved `[runtime.workers].compio_direct_h1` allocation, and each worker owns one long-lived Compio execution context plus a bounded submission queue. Queue capacity, per-origin idle connections, total idle connections, retained buffer count, idle lifetime, and absolute connection lifetime derive from existing runtime and upstream-pool limits; worker count is the only independent public Compio allocation in this release. Shutdown stops admission, waits only within the configured process drain deadline, cancels remaining operations, closes idle connections, and joins workers. OxiBelt reserves the final bounded portion of that same configured window for terminal worker cleanup (up to 5 seconds, using the whole window when it is shorter than 100 ms; there is no new public knob), so native thread joining cannot extend shutdown beyond the operator's deadline. If a native worker still owns driver I/O at that hard deadline, OxiBelt aborts the process so a supervisor can replace it instead of detaching the worker into a continuing server.
 
 Only guarded empty `GET` or `HEAD` requests can enter this service, including prevalidated downstream H2/H3 requests, and only when the upstream hop is direct plaintext HTTP/1.1. Bodyful, chunked, streaming, upgrade, CONNECT, retry-unsafe, transformed, or otherwise ineligible requests remain on the Hyper direct-H1 transport and record a pre-dispatch Compio fallback. A full or unhealthy submission queue may fall back only before an upstream request byte is written. Once dispatch is externally observable, a Compio failure closes the connection and returns the established upstream failure; it never implicitly replays the operation through Hyper.
 
-Reusable Compio connections are returned to the bounded idle pool only after complete unambiguous response framing with no residual bytes, no peer `Connection: close`, and a matching configuration generation. Parser failure, EOF, timeout, cancellation in uncertain framing, upgrade, stale generation, worker failure, pool overflow, and I/O failure retire the connection. The response engine bounds response heads, interim-response chains, chunk metadata, and trailers internally and fails closed on unsupported or ambiguous framing. Full hot reload rejects changes to the resolved `runtime.worker_threads` value because the async runtime and persistent Compio worker set cannot be resized in-process.
+Reusable Compio connections are returned to the bounded idle pool only after complete unambiguous response framing with no residual bytes, no peer `Connection: close`, and a matching configuration generation. Parser failure, EOF, timeout, cancellation in uncertain framing, upgrade, stale generation, worker failure, pool overflow, and I/O failure retire the connection. The response engine bounds response heads, interim-response chains, chunk metadata, and trailers internally and fails closed on unsupported or ambiguous framing.
+
+Full hot reload rejects a different resolved main topology or `[runtime.workers].tokio` count with a restart-required diagnostic. A direct-H1 backend or worker-count change can activate in-process only after the replacement fleet is staged successfully; otherwise the prior configuration, service, and reported topology remain active. Accept and QUIC worker changes retain listener-rebind behavior. A `topology_policy` change is accepted in-process only when re-resolution validates the active topology and is rejected otherwise.
 
 `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
@@ -2989,18 +3002,34 @@ redacted JSON support bundle for sharing during incident response. It requires
 therefore require the same `diagnostics:RunProbe` coarse and target
 permissions before any network or Unix socket probe is opened. The bundled
 `oxibeltctl support-bundle --redact` command calls this endpoint and prints the
-JSON to stdout. Unredacted bundles are not supported.
+JSON to stdout. Unredacted bundles are not supported. Support-bundle format
+version `2` includes the resolved `runtime_topology` object used by the active
+configuration generation.
 
 `GET /admin/v1/runtime/snapshot?redact=true` returns the runtime snapshot
 section used by the support bundle and requires `runtime:ReadSnapshot` on
-`oxibelt:<namespace>:runtime:snapshot/current`.
+`oxibelt:<namespace>:runtime:snapshot/current`. Runtime snapshot format
+version `2` reports the requested and resolved runtime presets, topology
+policy, resolution outcome and fixed reason, subsystem owners, worker
+allocations, blocking strategy, compatibility boundaries, and requested,
+resolved, and active direct-H1 transport state.
 
 `GET /admin/v1/runtime/introspection?redact=true` returns the redacted runtime
 snapshot plus live active connection, request, stream, WebSocket,
 WebTransport, stream-listener, and TURN TCP/TLS counters. It requires the
 separate `runtime:ReadIntrospection` action on
 `oxibelt:<namespace>:runtime:introspection/current`; `runtime:ReadSnapshot`
-does not authorize this endpoint.
+does not authorize this endpoint. Runtime-introspection format version `2`
+uses the same topology object, so subsystem ownership and the active direct-H1
+transport can be compared with live counters without inferring topology from a
+mode name. The object contains fixed enums and counts only; it omits raw
+preflight errors, paths, hostnames, routes, peers, and secrets.
+
+Active `GET /admin/v1/config/explain` responses use config-report format
+version `2` and include the same resolved topology with `basis = "active"`.
+Offline `oxibeltctl config explain` reports the deterministic preflight result
+with `basis = "preflight"`; it does not claim that listeners, worker pools, or
+an experimental direct-H1 transport have been activated.
 
 OxiBelt initializes the IPM schema when `[ipm].backend` is configured:
 
@@ -4117,7 +4146,7 @@ Configuration validation rejects:
 - No enabled downstream HTTP versions or SNI forwarding protocols.
 - Privileged listener ports when `runtime.unprivileged_mode = true`, except configured data-plane listener ports `1..1023` when `runtime.netport_switcher.enabled = true`.
 - Non-Linux runtime when `runtime.linux_only = true`.
-- Invalid hot reload mode, zero worker counts, non-positive worker multipliers, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
+- Invalid main-runtime or topology-policy values, an unsatisfied `require_exact` topology, zero worker counts, non-positive worker multipliers, invalid hot reload mode, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
 - Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts, or QUIC SNI forwarding without downstream HTTP/3.
 - Invalid stream upstream-pool origins, unsupported stream pool algorithms, duplicate stream SNI rule names or server-name patterns, stream listener/SNI rule target conflicts, missing stream listener defaults without SNI rules, UDP stream listeners with PROXY protocol egress, stream listeners that reference a pool without matching `tcp://` or `udp://` servers, or `shared_required` UDP state without its shared backend, identity key, timeout floor, and same-backend connection-limit prerequisites.

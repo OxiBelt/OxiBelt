@@ -150,7 +150,8 @@ questions.
 
 | Question | Primary signal | Notes |
 | --- | --- | --- |
-| Is the proxy up? | `/ready`, `/live`, `oxibelt_requests_total`, `oxibelt_responses_total` | Readiness returns `503 draining` while lifecycle drain is active and `503 overloaded` for configured hard overload. Health responses include `X-OxiBelt-Backend-Status` and `X-OxiBelt-Overload-State` without exposing request data. |
+| Is the proxy up? | `/ready`, `/live`, `oxibelt_requests_total`, `oxibelt_responses_total` | Readiness returns `503 draining` while lifecycle drain is active and `503 overloaded` for configured hard overload. Health responses include `X-OxiBelt-Backend-Status`, `X-OxiBelt-Overload-State`, and fixed-vocabulary `X-OxiBelt-Runtime-Status` without exposing request data. |
+| Which runtime topology is active? | `oxibelt_runtime_topology_info`, `oxibelt_runtime_subsystem_owner`, `oxibelt_runtime_worker_allocation`, `oxibelt_runtime_compatibility_boundary`, authenticated runtime introspection | Compare requested and resolved presets, fallback outcome/reason, every subsystem owner, final worker allocations, compatibility islands, and active direct-H1 state. `hybrid_compio` means a Compio bootstrap around Tokio-owned server work, not an all-Compio server. |
 | Is overload protection active? | `oxibelt_overload_state`, `oxibelt_overload_resource_ratio`, `oxibelt_overload_active_work`, `oxibelt_overload_rejections_total`, `oxibelt_overload_transitions_total`, `oxibelt_overload_control_plane_active` | Alert when `state="hard"` persists, resource ratios approach hard thresholds, or rejections rise. Signal, work-kind, action, boundary, and control-plane labels are fixed vocabularies; no labels contain routes, client identities, URLs, or raw errors. |
 | Are request queues or upstream circuits limiting traffic? | `oxibelt_circuit_breaker_active`, `oxibelt_circuit_breaker_queued`, `oxibelt_circuit_breaker_rejections_total`, `oxibelt_circuit_breaker_state`, `oxibelt_circuit_breaker_transitions_total`, `oxibelt_circuit_breaker_priority_active`, `oxibelt_circuit_breaker_priority_capacity`, `oxibelt_circuit_breaker_priority_queued`, `oxibelt_circuit_breaker_priority_rejections_total`, `oxibelt_circuit_breaker_priority_queue_wait_milliseconds_total` | Alert on sustained queued work, rising `queue_timeout`/`retry_budget` or per-priority `share_limit` rejections, or a route/pool `state="open"`. Scope labels are configuration-derived and capped; priority, capacity, and reason labels use fixed vocabularies only and never include paths, host headers, client identities, origins, or raw errors. |
 | Is the persistent Compio direct-H1 service healthy? | `oxibelt_http_compio_direct_h1_submissions_total`, `oxibelt_http_compio_direct_h1_queue_occupancy`, `oxibelt_http_compio_direct_h1_workers`, `oxibelt_http_compio_direct_h1_connections`, `oxibelt_http_compio_direct_h1_connection_events_total`, `oxibelt_http_compio_direct_h1_dispatch_total`, wait/connect/cancellation duration counters, buffer events, and copied bytes | This Linux-only experimental service is present only when Compio direct-H1 is selected. Alert on nonzero `full`, `unhealthy`, or `draining` submissions; sustained queue occupancy; an unhealthy worker; post-dispatch failures; retirement churn; or active connections that do not return to zero after load. These series use fixed state/outcome/event vocabularies and never label an origin, host, route, path, peer, request, or raw error. |
@@ -163,6 +164,35 @@ questions.
 | Is Admin audit evidence externally anchored? | `GET /admin/v1/capabilities`, `oxibelt_admin_audit_anchor_submissions_total`, `oxibelt_admin_audit_anchor_submission_failures_total`, `oxibelt_admin_audit_anchor_verification_failures_total`, `oxibelt_admin_audit_anchor_last_sequence`, `oxibelt_admin_audit_anchor_lag_sequences`, `oxibelt_admin_audit_anchor_pending_checkpoints`, `oxibelt_admin_audit_anchor_pending_bytes`, `oxibelt_runtime_subsystem_state{subsystem="admin_audit"}`, `oxibelt_runtime_task_state{task="admin_audit_anchor"}` | Alert on any signature/continuity verification failure, rising submission failures, sustained nonzero lag, or pending evidence approaching configured checkpoint/byte bounds. Failure reasons are the fixed values `capacity_exhausted`, `signer_unavailable`, `authority_unavailable`, `continuity_failure`, and `worker_failure`; verification reasons are `local_chain`, `checkpoint_signature`, and `checkpoint_continuity`. Required anchoring makes the Admin audit subsystem/task readiness-critical and `/ready` returns `503` while it is unavailable; best-effort anchoring reports `degraded` without failing readiness. Metrics and capability status omit authority URLs, stream/instance IDs, event content, key IDs, and raw errors. Independently schedule `oxibeltctl audit verify`; runtime health is not a substitute for witness-based historical verification. |
 | Is HTTP/3 working? | detailed HTTP protocol labels and `oxibelt_quic_retries_total` | Detailed metrics must be enabled for per-protocol request panels. |
 | Are reloads and drains safe? | `/ready`, Admin lifecycle state, runtime snapshot endpoints | Use `redact=true` on runtime and support-bundle endpoints. |
+
+### Runtime topology and readiness signals
+
+Startup and successful full-reload events report the version-`2` topology
+using fixed enum values and counts. The active Admin config explain, runtime
+snapshot, runtime introspection, and redacted support bundle report the same
+active-generation topology. Offline config explain reports
+`basis = "preflight"` and must not be used as proof that a listener or worker
+fleet was activated.
+
+The public metrics surface exports:
+
+- `oxibelt_runtime_topology_info{requested_preset,resolved_preset,outcome,reason}`;
+- `oxibelt_runtime_subsystem_owner{subsystem,owner}`;
+- `oxibelt_runtime_worker_allocation{pool,owner}`;
+- `oxibelt_runtime_compatibility_boundary{boundary}`.
+
+These labels come from bounded preset, outcome, reason, subsystem, owner,
+pool, and boundary vocabularies. Worker counts are gauge values, not label
+values. Logs, metrics, and support surfaces omit raw capability errors,
+hostnames, paths, routes, peers, request data, and secrets.
+
+`X-OxiBelt-Runtime-Status` is `ready`,
+`required_acceleration_degraded`, or `runtime_unavailable`. A
+`require_exact` activation failure is rejected and never published as a
+degraded active topology. Readiness returns `503` when required acceleration
+or another readiness-critical runtime subsystem is unavailable; authenticated
+runtime output carries the fixed subsystem and reason while the public body
+remains generic.
 
 ### Persistent Compio direct-H1 metrics
 
@@ -184,7 +214,11 @@ The service exports the following public-safe metric families:
 
 Compute mean wait, connect, or cancellation completion time only when its matching observation delta is positive. A `predispatch_fallback` is safe to replay through the established path because no upstream request byte was written; a `postdispatch_failure` is not fallback evidence and must not be retried outside the existing replay-safety policy. Connection `reused` should rise during eligible keep-alive traffic. Any retirement reason means that connection was not returned to the idle pool.
 
-The redacted support bundle includes the resolved shared-state feature/backend mapping and bounded failure-policy state (`mode`, backend name, backend kind, degraded flag, and stale-snapshot age). It omits connection URLs, credentials, request keys, and raw backend errors.
+The version-`2` redacted support bundle includes the resolved runtime topology,
+the resolved shared-state feature/backend mapping, and bounded failure-policy
+state (`mode`, backend name, backend kind, degraded flag, and stale-snapshot
+age). It omits connection URLs, credentials, request keys, raw capability
+errors, and raw backend errors.
 
 For `udp_flow_state = "shared_required"`, correlate stream lifecycle counters
 with `oxibelt_shared_state_operations_total`,

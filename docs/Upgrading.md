@@ -342,10 +342,31 @@ behavior.
 Post-`0.7.1-beta.2` development keeps `compio-direct-h1-io` experimental.
 The checked-in production example now explicitly recommends
 `runtime.main_runtime = "tokio_hyper"` with
-`runtime.direct_h1_io = "auto"`. This recommendation does not change the
-configuration schema or deserialization defaults: omitted values still
-resolve to `compio` and `auto`, existing explicit values remain valid, and no
-configuration or persisted-state migration is required.
+`runtime.direct_h1_io = "auto"`. The canonical omitted/default main-runtime
+preset is now named `hybrid_compio`, which describes the existing execution
+behavior: one Compio bootstrap driver surrounds a Tokio compatibility island,
+and Tokio owns listeners, general HTTP, QUIC, DNS/discovery, timers, and
+background/control work. This is a topology-name clarification rather than a
+Tokio-to-Compio runtime rewrite.
+
+Existing `runtime.main_runtime = "compio"` values remain valid and
+behavior-identical. They resolve to `hybrid_compio` and emit
+`CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS`; no removal deadline is
+assigned. Operators may adopt the canonical spelling immediately or retain
+the alias while updating automation that previously interpreted `compio` as
+proof that all server subsystems ran on Compio. `runtime.main_runtime =
+"auto"` still prefers the hybrid preset. Add `runtime.topology_policy =
+"require_exact"` when a startup or reload must reject rather than record a
+Tokio fallback; omitted policy defaults to `allow_fallback`.
+
+Worker ownership is additive. `[runtime.workers].tokio` sizes the Tokio
+executor/island and `[runtime.workers].compio_direct_h1` sizes the experimental
+Compio direct-H1 fleet, with matching owner-specific multipliers. Legacy
+`runtime.worker_threads` and `runtime.worker_multipliers.runtime` remain valid
+and supply each owner whose canonical field is omitted. A legacy-only
+configuration therefore retains its previous resolved counts, while an
+operator can migrate one owner at a time. Validate the effective configuration
+and fixed migration diagnostics before removing the legacy keys.
 
 Operators that deliberately select an active Compio runtime with
 `runtime.direct_h1_io = "compio"` must continue to treat the Linux-only path
@@ -368,8 +389,19 @@ validate representative upstream responses and monitor
 `oxibelt_http_compio_direct_h1_*` queue, worker, connection, dispatch, wait,
 connect, cancellation, buffer, and copied-byte metrics. Roll back by restoring
 `runtime.direct_h1_io = "auto"` or `"tokio_hyper"` and restarting the process;
-do not treat a hot reload that changes the resolved runtime worker plan as
-supported.
+do not treat a main-topology or Tokio-worker change as an in-process resize.
+Those changes require a process restart. A direct-H1 backend or worker-count
+change may full-reload only after OxiBelt stages the replacement service; a
+failure keeps the previous configuration, service, and reported topology
+active.
+
+Runtime snapshot, runtime introspection, support-bundle, and active config
+explain consumers must accept format version `2` before this upgrade. Version
+`2` adds the requested and resolved presets, fallback outcome/reason,
+subsystem owners, worker allocations, compatibility boundaries, and active
+direct-H1 state. Public readiness also adds the bounded
+`X-OxiBelt-Runtime-Status` header. These surfaces do not expose raw capability
+probe errors, paths, hostnames, routes, peers, or secrets.
 
 This post-beta.2 compatibility change requires a later governed beta and
 fresh exact-revision evidence; it is not part of beta.2's immutable release

@@ -305,6 +305,7 @@ fn ops_response(
       snapshot.overload.append_prometheus(&mut body);
       snapshot.circuit_breakers.append_prometheus(&mut body);
       snapshot.runtime_health.append_prometheus(&mut body);
+      snapshot.runtime_topology.append_prometheus(&mut body);
       text_response(StatusCode::OK, &body)
     }
     OpsKind::Health => {

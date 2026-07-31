@@ -37,9 +37,38 @@ fn full_reload_rejects_runtime_worker_thread_resize() {
   assert!(
     error
       .to_string()
-      .contains("runtime.worker_threads changed from 2 to 3"),
+      .contains("runtime.workers.tokio changed from 2 to 3"),
     "unexpected error: {error}"
   );
+}
+
+#[test]
+fn full_reload_accepts_legacy_compio_alias_to_canonical_name() {
+  let mut active = parse_worker_reload_config(2);
+  active.runtime.main_runtime = crate::config::RuntimeMainRuntimeMode::Compio;
+  let mut replacement = active.clone();
+  replacement.runtime.main_runtime = crate::config::RuntimeMainRuntimeMode::HybridCompio;
+
+  assert_eq!(
+    classify_runtime_topology_change(&active, &replacement),
+    crate::runtime::topology::RuntimeTopologyChangePlan::InProcess
+  );
+  validate_full_reload_runtime_compatibility(&active, &replacement)
+    .expect("renaming the compatibility alias must not require a restart");
+}
+
+#[test]
+fn full_reload_accepts_compio_direct_h1_worker_resize() {
+  let active = parse_worker_reload_config(2);
+  let mut replacement = active.clone();
+  replacement.runtime.workers.compio_direct_h1 = 3;
+
+  assert_eq!(
+    classify_runtime_topology_change(&active, &replacement),
+    crate::runtime::topology::RuntimeTopologyChangePlan::InProcess
+  );
+  validate_full_reload_runtime_compatibility(&active, &replacement)
+    .expect("the replacement Compio direct-H1 fleet can be staged in process");
 }
 
 #[test]

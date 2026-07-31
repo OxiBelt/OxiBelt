@@ -124,7 +124,7 @@ fn compio_direct_h1_operator_docs_define_service_upgrade_and_evidence_contracts(
   for expected in [
     "persistent service at subsystem startup",
     "bounded submission queue",
-    "there are no independent public Compio tuning knobs",
+    "worker count is the only independent public Compio allocation in this release",
     "before an upstream request byte is written",
     "never implicitly replays the operation through Hyper",
     "returned to the bounded idle pool only after complete unambiguous response framing",

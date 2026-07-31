@@ -14872,27 +14872,17 @@
               "x-oxibelt-secret-class": "none"
             },
             "workers": {
-              "anyOf": [
+              "description": "OxiBelt native field `quic.socket.workers`. Production Rust validation is authoritative.",
+              "oneOf": [
                 {
-                  "type": "string"
-                },
-                {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
+                  "const": "auto",
+                  "type": "string"
                 }
               ],
-              "description": "OxiBelt native field `quic.socket.workers`. Production Rust validation is authoritative.",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
@@ -19729,27 +19719,17 @@
               "x-oxibelt-secret-class": "none"
             },
             "workers": {
-              "anyOf": [
+              "description": "OxiBelt native field `runtime.accept.workers`. Production Rust validation is authoritative.",
+              "oneOf": [
                 {
-                  "type": "string"
-                },
-                {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
+                  "const": "auto",
+                  "type": "string"
                 }
               ],
-              "description": "OxiBelt native field `runtime.accept.workers`. Production Rust validation is authoritative.",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
@@ -20002,15 +19982,16 @@
           "x-oxibelt-secret-class": "none"
         },
         "main_runtime": {
-          "default": "compio",
+          "default": "hybrid_compio",
           "description": "OxiBelt native field `runtime.main_runtime`. Production Rust validation is authoritative.",
           "enum": [
-            "compio",
+            "hybrid_compio",
             "tokio_hyper",
-            "auto"
+            "auto",
+            "compio"
           ],
           "type": "string",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "conditional",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -20205,6 +20186,19 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "topology_policy": {
+          "default": "allow_fallback",
+          "description": "OxiBelt native field `runtime.topology_policy`. Production Rust validation is authoritative.",
+          "enum": [
+            "allow_fallback",
+            "require_exact"
+          ],
+          "type": "string",
+          "x-oxibelt-config-activation": "conditional",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "unprivileged_mode": {
           "anyOf": [
             {
@@ -20263,6 +20257,34 @@
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
+            "compio_direct_h1": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array"
+                },
+                {
+                  "type": "object"
+                }
+              ],
+              "default": 1.0,
+              "description": "OxiBelt native field `runtime.worker_multipliers.compio_direct_h1`. Production Rust validation is authoritative.",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "quic_socket": {
               "anyOf": [
                 {
@@ -20311,15 +20333,44 @@
                   "type": "object"
                 }
               ],
+              "default": 1.0,
               "description": "OxiBelt native field `runtime.worker_multipliers.runtime`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "tokio": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array"
+                },
+                {
+                  "type": "object"
+                }
+              ],
+              "default": 1.0,
+              "description": "OxiBelt native field `runtime.worker_multipliers.tokio`. Production Rust validation is authoritative.",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "conditional",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -20338,6 +20389,53 @@
             }
           ],
           "x-oxibelt-config-activation": "restart_required",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "workers": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `runtime.workers`. Production Rust validation is authoritative.",
+          "properties": {
+            "compio_direct_h1": {
+              "default": "auto",
+              "description": "OxiBelt native field `runtime.workers.compio_direct_h1`. Production Rust validation is authoritative.",
+              "oneOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "const": "auto",
+                  "type": "string"
+                }
+              ],
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "tokio": {
+              "default": "auto",
+              "description": "OxiBelt native field `runtime.workers.tokio`. Production Rust validation is authoritative.",
+              "oneOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "const": "auto",
+                  "type": "string"
+                }
+              ],
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "conditional",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"

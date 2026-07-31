@@ -10,6 +10,8 @@ pub mod backend;
 pub mod compio;
 pub mod main_runtime;
 pub mod tokio_island;
+pub mod topology;
+pub mod topology_config;
 
 pub(crate) const TOKIO_RUNTIME_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
 

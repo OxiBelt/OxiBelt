@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use super::upstream_precompute::effective_direct_h1_io_for_backend;
 use super::*;
 
 mod common {

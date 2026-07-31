@@ -31,7 +31,7 @@ async fn runtime_snapshot_redacts_upstream_origin_credentials_and_queries() {
   let value = serde_json::to_string(&build_runtime_snapshot(&snapshot))
     .expect("runtime snapshot should serialize");
 
-  let runtime_backend = crate::runtime::backend::runtime_backend_snapshot();
+  let runtime_backend = snapshot.runtime_topology.legacy_backend_snapshot();
   assert!(value.contains("https://app.internal.example/private"));
   assert!(
     value.contains(&format!(
@@ -55,6 +55,8 @@ async fn runtime_snapshot_redacts_upstream_origin_credentials_and_queries() {
     "runtime snapshot should include compatibility runtime: {value}"
   );
   assert!(value.contains("\"failure_policy\":\"drop_stale\""));
+  assert!(value.contains("\"runtime_topology\""));
+  assert!(value.contains("\"resolved_preset\":\"external\""));
   assert!(!value.contains("user:secret"));
   assert!(!value.contains("token=secret"));
 }

@@ -7691,7 +7691,7 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -7804,7 +7804,7 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -7826,6 +7826,41 @@
           },
           "effective_value": {
             "description": "Omitted whenever the field is classified as secret-bearing or its effective value was redacted."
+          },
+          "runtime_resolution": {
+            "type": "object",
+            "required": [
+              "basis",
+              "activated"
+            ],
+            "properties": {
+              "basis": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "preflight"
+                ]
+              },
+              "activated": {
+                "type": "boolean"
+              },
+              "topology": {
+                "type": "object"
+              },
+              "requested_preset": {
+                "type": "string"
+              },
+              "canonical_preset": {
+                "type": "string"
+              },
+              "topology_policy": {
+                "type": "string"
+              },
+              "workers": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": false
           },
           "constraints": {
             "$ref": "#/components/schemas/ConfigExplainConstraints"

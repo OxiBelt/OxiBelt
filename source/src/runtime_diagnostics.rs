@@ -10,7 +10,13 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use oxibelt::config::{Config, HttpListenerMode, RuntimeOverrides};
 use oxibelt::runtime::backend::CompioDriverSelection;
+use oxibelt::runtime::topology::{
+  RuntimeCapability, RuntimeRequestedPreset, RuntimeTopologyPolicy, RuntimeTopologyReason,
+  resolve_runtime_topology,
+};
+use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
 use serde::Serialize;
+use serde_json::json;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 #[derive(Debug, Args)]
@@ -58,6 +64,8 @@ enum RuntimeProbeSubcommand {
 struct RuntimeCheckReport {
   ok: bool,
   stages: Vec<RuntimeCheckStage>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  topology_resolution: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +82,7 @@ impl RuntimeCheckReport {
     Self {
       ok: true,
       stages: Vec::new(),
+      topology_resolution: None,
     }
   }
 
@@ -105,6 +114,41 @@ impl RuntimeCheckReport {
           required,
           elapsed_ms: started.elapsed().as_millis(),
           message: format!("{error:#}"),
+        });
+        None
+      }
+    }
+  }
+
+  fn capability_stage<T>(
+    &mut self,
+    name: &'static str,
+    required: bool,
+    failure_reason: RuntimeTopologyReason,
+    action: impl FnOnce() -> anyhow::Result<T>,
+  ) -> Option<T> {
+    let started = Instant::now();
+    match action() {
+      Ok(value) => {
+        self.stages.push(RuntimeCheckStage {
+          name,
+          status: "ok",
+          required,
+          elapsed_ms: started.elapsed().as_millis(),
+          message: "ok".to_string(),
+        });
+        Some(value)
+      }
+      Err(_) => {
+        if required {
+          self.ok = false;
+        }
+        self.stages.push(RuntimeCheckStage {
+          name,
+          status: "failed",
+          required,
+          elapsed_ms: started.elapsed().as_millis(),
+          message: failure_reason.as_str().to_string(),
         });
         None
       }
@@ -162,6 +206,7 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
       );
       report.skip("tls_certificate_key_load", true, "config did not load");
       report.skip("listener_bind_dry_run", true, "config did not load");
+      report.skip("runtime_topology_resolution", true, "config did not load");
       return report;
     }
   };
@@ -193,16 +238,108 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
     report.skip("hardening_application", true, "config validation failed");
   }
 
-  report.stage("compio_probe_runtime_build", true, || {
-    run_compio_probe_child().map(|_| ())
-  });
-  report.stage("main_compio_runtime_build", true, || {
-    run_compio_main_child(config.runtime.worker_threads)
-  });
+  let topology_request = request_from_config(&config);
+  let compio_requested = topology_request.requested_preset != RuntimeRequestedPreset::TokioHyper;
+  let compio_required = compio_requested
+    && (topology_request.requested_preset != RuntimeRequestedPreset::Auto
+      || topology_request.policy == RuntimeTopologyPolicy::RequireExact);
+  let driver = if compio_requested {
+    report.capability_stage(
+      "compio_probe_runtime_build",
+      compio_required,
+      RuntimeTopologyReason::CompioProbeFailed,
+      run_compio_probe_child,
+    )
+  } else {
+    report.skip(
+      "compio_probe_runtime_build",
+      false,
+      "Compio main topology was not requested",
+    );
+    None
+  };
+  let unsafe_auto_driver = topology_request.requested_preset == RuntimeRequestedPreset::Auto
+    && driver.is_some_and(|driver| !super::compio_driver_safe_for_auto_main_runtime(driver));
+  let compio_main_ok = if driver.is_some() && !unsafe_auto_driver {
+    report
+      .capability_stage(
+        "main_compio_runtime_build",
+        compio_required,
+        RuntimeTopologyReason::CompioRuntimeBuildFailed,
+        || run_compio_main_child(config.runtime.workers.tokio),
+      )
+      .is_some()
+  } else {
+    report.skip(
+      "main_compio_runtime_build",
+      compio_required,
+      if unsafe_auto_driver {
+        RuntimeTopologyReason::UnsafeCompioDriver.as_str()
+      } else if compio_requested {
+        RuntimeTopologyReason::CompioProbeFailed.as_str()
+      } else {
+        "Compio main topology was not requested"
+      },
+    );
+    false
+  };
   report.stage("tokio_compatibility_island_build", true, || {
-    oxibelt::runtime::tokio_island::TokioIslandRuntime::build(config.runtime.worker_threads)
+    oxibelt::runtime::tokio_island::TokioIslandRuntime::build(config.runtime.workers.tokio)
       .map(|_| ())
   });
+
+  if validation_ok {
+    let mut capabilities = available_capabilities(driver);
+    if compio_requested {
+      capabilities.compio_main = if driver.is_none() {
+        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioProbeFailed)
+      } else if unsafe_auto_driver {
+        RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsafeCompioDriver)
+      } else if !compio_main_ok {
+        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed)
+      } else {
+        RuntimeCapability::Available
+      };
+    }
+    let started = Instant::now();
+    match resolve_runtime_topology(topology_request, capabilities) {
+      Ok(topology) => {
+        report.stages.push(RuntimeCheckStage {
+          name: "runtime_topology_resolution",
+          status: "ok",
+          required: true,
+          elapsed_ms: started.elapsed().as_millis(),
+          message: topology.outcome.as_str().to_string(),
+        });
+        report.topology_resolution = Some(json!({
+          "basis": "preflight",
+          "activated": false,
+          "topology": topology,
+        }));
+      }
+      Err(rejection) => {
+        report.ok = false;
+        report.stages.push(RuntimeCheckStage {
+          name: "runtime_topology_resolution",
+          status: "failed",
+          required: true,
+          elapsed_ms: started.elapsed().as_millis(),
+          message: rejection.reason.as_str().to_string(),
+        });
+        report.topology_resolution = Some(json!({
+          "basis": "preflight",
+          "activated": false,
+          "rejection": rejection,
+        }));
+      }
+    }
+  } else {
+    report.skip(
+      "runtime_topology_resolution",
+      true,
+      "config validation failed",
+    );
+  }
 
   if validation_ok {
     report.stage("tls_certificate_key_load", true, || {
@@ -230,6 +367,12 @@ fn print_runtime_check_text(report: &RuntimeCheckReport) {
       stage.name,
       if stage.required { "" } else { " (optional)" },
       stage.message
+    );
+  }
+  if let Some(topology_resolution) = &report.topology_resolution {
+    println!(
+      "- runtime_topology: {}",
+      serde_json::to_string(topology_resolution).unwrap_or_else(|_| "unavailable".to_string())
     );
   }
 }

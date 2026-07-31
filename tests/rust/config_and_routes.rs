@@ -2261,7 +2261,7 @@ fn accept_scaling_defaults_are_auto_workers() {
 }
 
 #[test]
-fn runtime_main_runtime_mode_parses_and_defaults_to_compio() {
+fn runtime_main_runtime_mode_parses_and_defaults_to_hybrid_compio() {
   let temp_dir = common::TempDir::new("runtime-main-runtime");
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "runtime-main-runtime");
@@ -2282,7 +2282,7 @@ fn runtime_main_runtime_mode_parses_and_defaults_to_compio() {
 
   assert_eq!(
     default_config.runtime.main_runtime,
-    RuntimeMainRuntimeMode::Compio
+    RuntimeMainRuntimeMode::HybridCompio
   );
   assert_eq!(
     auto_config.runtime.main_runtime,
@@ -2368,7 +2368,7 @@ fn accept_scaling_rejects_invalid_values() {
   let cases = [
     (
       base.replace("worker_threads = \"auto\"", "worker_threads = 0"),
-      "runtime.worker_threads must be greater than 0",
+      "runtime.workers.tokio must be greater than 0",
     ),
     (
       base.replace("workers = \"auto\"", "workers = 0"),
