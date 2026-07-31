@@ -582,7 +582,7 @@ def _safe_header_value(key, value):
 
 def main():
   port = int(os.environ.get("LISTEN_PORT", "18080"))
-  control_port = int(os.environ.get("CONTROL_PORT", "18081"))
+  control_port = int(os.environ.get("CONTROL_PORT", str(port + 1)))
   server = CountingThreadingHTTPServer(("0.0.0.0", port), EchoHandler)
   control_server = ThreadingHTTPServer(("127.0.0.1", control_port), ControlHandler)
   if TLS_ENABLED:

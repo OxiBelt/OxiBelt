@@ -4131,6 +4131,7 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
   let order = read("tests/rust/oxibelt_docker_integration_matrix/mod.rs");
   let proxy = read("tests/rust/oxibelt_docker_integration_matrix/proxy.rs");
   let mock_upstream = read("tests/docker/mock_upstream/server.py");
+  let matrix_script = read("tests/scripts/run-proxy-integration-matrix.sh");
   let checks = read(
     "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-transport-service/checks.sh",
   );
@@ -4154,6 +4155,7 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     "\"malformed_head\"",
     "\"truncated_fixed\"",
     "CountingThreadingHTTPServer",
+    "control_port = int(os.environ.get(\"CONTROL_PORT\", str(port + 1)))",
     "ThreadingHTTPServer((\"127.0.0.1\", control_port), ControlHandler)",
     "if self.path != \"/__control/stats\"",
     "if h1_fault not in H1_FAULTS",
@@ -4170,10 +4172,21 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     "shell=True",
     "0.0.0.0\", control_port",
     "query.get(\"raw_response\"",
+    "os.environ.get(\"CONTROL_PORT\", \"18081\")",
   ] {
     assert!(
       !mock_upstream.contains(forbidden),
       "the mock origin control plane must not contain {forbidden}"
+    );
+  }
+
+  for expected in [
+    "--network-alias mock-http \\\n    -e LISTEN_PORT=18080",
+    "--network-alias mock-alt \\\n    -e LISTEN_PORT=18081",
+  ] {
+    assert!(
+      matrix_script.contains(expected),
+      "the mock upstream matrix should preserve the non-conflicting derived control-port contract {expected}"
     );
   }
 
