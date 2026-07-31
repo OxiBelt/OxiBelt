@@ -33,7 +33,18 @@ their callers.
 3. **Configuration isolation.** Production configuration modules parse,
    normalize, resolve, and validate typed configuration. They must not depend
    on proxy handling, server orchestration, application state, or runtime
-   ownership. Runtime and proxy layers consume validated configuration.
+   ownership. Runtime and proxy layers consume validated configuration. The
+   public `activation_plan` model and TOML/projection comparison core remain
+   side-effect-free policy: they may consume native-schema metadata, validated
+   values, redacted projections, and process-local secret-equality tags, but
+   may not bind listeners, own snapshots, inspect Kubernetes, authorize Admin
+   work, drain connections, or execute an activation. The `config-tooling`
+   file adapter may invoke the production loader; it does not move file I/O
+   into the comparison core. Admin server code may enrich a report from
+   bounded active config and authorization projections, while `oxibeltctl`
+   consumes the public report through its existing explicit
+   `admin-runtime`/`config-tooling` bridge. Neither adapter creates a reverse
+   dependency from configuration policy into Admin routing or CLI code.
 4. **Pure WAF isolation.** OxiRule expressions, compilation, plans, and
    evaluators operate on supplied representations. They must not load
    configuration or files and must not reach into databases, runtime/server

@@ -175,8 +175,22 @@ mode = "off"
 
 In this mode the chart declares `OXIBELT_CONFIG_ROLLOUT_MODE`, assigned
 revision and digest Downward API fields, the generated-file path, and the Pod
-UID. For a chart-created, content-addressed base, the Pod template initially
-sets `oxibelt.dev/config-revision` to the immutable base ConfigMap name and
+UID. It also supplies the all-or-none planning context
+`OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE`,
+`OXIBELT_CONFIG_ROLLOUT_TARGET_KIND`, and
+`OXIBELT_CONFIG_ROLLOUT_TARGET_NAME`. The namespace comes from Pod metadata;
+the workload kind and workload name come from chart-owned Pod-template
+annotations through the Downward API, so the name identifies the owning
+Deployment or DaemonSet rather than an individual Pod. This context lets a
+configuration activation plan name the immutable rollout target. It is not
+Kubernetes API authorization or proof that the target still exists. OxiBelt
+treats absent, partial, or malformed target context as unavailable planning
+enrichment without weakening or failing the immutable revision proof. The
+chart does not add a service-account token, Kubernetes API access, or RBAC for
+this enrichment.
+
+For a chart-created, content-addressed base, the Pod template initially sets
+`oxibelt.dev/config-revision` to the immutable base ConfigMap name and
 `oxibelt.dev/config-digest` to the SHA-256 of the empty managed placeholder.
 This bootstrap identity does not weaken configuration validation; a base
 configuration without routes remains unready until the controller assigns its

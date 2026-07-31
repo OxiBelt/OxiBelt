@@ -25,6 +25,8 @@ mod config_migrate;
 mod config_migrate_transform;
 #[path = "config_output.rs"]
 mod config_output;
+#[path = "config_plan.rs"]
+mod config_plan;
 #[path = "config_schema.rs"]
 mod config_schema;
 #[path = "config_validate.rs"]
@@ -113,6 +115,11 @@ async fn run() -> anyhow::Result<i32> {
   if let Some(code) = config_migrate::run_if_requested(&cli.command, cli.admin.output)? {
     return Ok(code);
   }
+  let prepared_config_plan = match config_plan::prepare_if_requested(&cli.command)? {
+    config_plan::ConfigPlanDispatch::NotRequested => None,
+    config_plan::ConfigPlanDispatch::Complete(code) => return Ok(code),
+    config_plan::ConfigPlanDispatch::Online(prepared) => Some(prepared),
+  };
   let prepared_validation =
     match config_validate::prepare_if_requested(&cli.command, cli.admin.output)? {
       config_validate::ValidationDispatch::NotRequested => None,
@@ -132,6 +139,22 @@ async fn run() -> anyhow::Result<i32> {
     return Ok(0);
   }
   let client = build_client(&cli.admin)?;
+  if let Some(prepared) = prepared_config_plan {
+    let request = prepared.request_plan();
+    let response = mutation_signer::request_json(
+      &client,
+      None,
+      request.method,
+      &request.endpoint,
+      request.body,
+      None,
+    )
+    .await?;
+    if response.status == http::StatusCode::FORBIDDEN {
+      print_permission_hint(&request.permission);
+    }
+    return prepared.finish(&response);
+  }
   let mutation_signer = mutation_signer::MutationSigner::from_args(&cli.admin.mutation)?;
   if rulepack::run_remote_if_requested_signed(
     &client,

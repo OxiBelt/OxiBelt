@@ -148,7 +148,10 @@ use redaction::{
   redact_effective_toml, set_toml_float_path, set_toml_integer_path, set_toml_value_path,
 };
 pub use retry::*;
-pub use rollout_identity::{ConfigRolloutApplyState, ConfigRolloutIdentity, ConfigRolloutMode};
+pub use rollout_identity::{
+  ConfigRolloutApplyState, ConfigRolloutIdentity, ConfigRolloutMode, KubernetesRolloutTarget,
+  KubernetesRolloutTargetKind,
+};
 pub use route::*;
 pub use route_actions::*;
 pub use route_header_policy::*;

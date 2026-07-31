@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
 use url::Url;
 
@@ -139,6 +139,11 @@ pub(crate) enum ConfigSubcommand {
   Explain(ConfigExplainArgs),
   Migrate(ConfigMigrateArgs),
   Diff(FileArg),
+  /// Compute an activation plan without applying it.
+  ///
+  /// A valid plan exits 0, including plans that require restart or rollout.
+  /// Invalid, unsupported, blocked, or failed plans exit 1.
+  Plan(ConfigPlanArgs),
   Apply(ConfigApplyArgs),
   Rollback(EtagsArgs),
   #[command(name = "lb-policy-compat")]
@@ -181,6 +186,30 @@ pub(crate) struct ConfigMigrateArgs {
 #[derive(Debug, Args)]
 pub(crate) struct FileArg {
   pub(crate) file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+  ArgGroup::new("source")
+    .required(true)
+    .multiple(false)
+    .args(["current", "online"])
+))]
+pub(crate) struct ConfigPlanArgs {
+  #[arg(long, value_name = "CURRENT")]
+  pub(crate) current: Option<PathBuf>,
+  #[arg(long)]
+  pub(crate) online: bool,
+  #[arg(long, value_name = "CANDIDATE", required = true)]
+  pub(crate) candidate: PathBuf,
+  #[arg(long, value_enum, default_value_t = ConfigPlanOutputFormat::Text)]
+  pub(crate) format: ConfigPlanOutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ConfigPlanOutputFormat {
+  Text,
+  Json,
 }
 
 #[derive(Debug, Args)]

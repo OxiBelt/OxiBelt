@@ -3,9 +3,7 @@
 
 use anyhow::{Context, anyhow, bail};
 
-use super::{
-  Config, ConfigPathRoots, operational_profile, redact_effective_toml, validate_merged_toml_shape,
-};
+use super::{Config, ConfigPathRoots, operational_profile, validate_merged_toml_shape};
 
 impl Config {
   pub fn load_admin_inline_toml(raw: &str, active: &Self) -> anyhow::Result<Self> {
@@ -27,6 +25,15 @@ impl Config {
     raw: &str,
     active: &Self,
   ) -> anyhow::Result<toml::Value> {
+    Ok(Self::redact_effective_toml_value(
+      &Self::load_admin_inline_effective_toml_for_activation(raw, active)?,
+    ))
+  }
+
+  pub(crate) fn load_admin_inline_effective_toml_for_activation(
+    raw: &str,
+    active: &Self,
+  ) -> anyhow::Result<toml::Value> {
     let mut value: toml::Value = toml::from_str(raw).context("failed to parse inline TOML")?;
     reject_inline_include(&value)?;
     operational_profile::apply_to_toml(&mut value)?;
@@ -34,7 +41,6 @@ impl Config {
     let config = Self::load_admin_inline_toml(raw, active)?;
     config.validate()?;
     config.write_resolved_workers_to_toml(&mut value)?;
-    redact_effective_toml(&mut value);
     Ok(value)
   }
 }

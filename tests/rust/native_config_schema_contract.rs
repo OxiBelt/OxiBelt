@@ -170,6 +170,29 @@ fn secret_reference_metadata_covers_runtime_credential_boundaries() {
 }
 
 #[test]
+fn startup_owned_fields_are_explicitly_restart_classified() {
+  for path in [
+    "runtime.hardening.landlock.mode",
+    "runtime.hot_reload.mode",
+    "runtime.netport_switcher.enabled",
+    "runtime.unprivileged_mode",
+    "crypto.tls_provider",
+    "logging.level",
+    "metrics.enabled",
+    "metrics.bind",
+    "health.enabled",
+    "health.bind",
+    "admin.operations.enabled",
+  ] {
+    assert_eq!(
+      native_config_field_metadata(path).config_activation,
+      NativeConfigActivation::RestartRequired,
+      "{path} must not be published by an in-process snapshot replacement"
+    );
+  }
+}
+
+#[test]
 fn generated_schema_preserves_metadata_through_array_items() {
   let schema: serde_json::Value =
     serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))

@@ -403,6 +403,47 @@ direct-H1 state. Public readiness also adds the bounded
 `X-OxiBelt-Runtime-Status` header. These surfaces do not expose raw capability
 probe errors, paths, hostnames, routes, peers, or secrets.
 
+Post-beta.2 development also adds experimental activation-plan schema version
+`1` to `POST /admin/v1/config/diff`. Existing consumers may continue reading
+the preserved `changes[].path` and `changes[].op` fields, but strict response
+decoders must accept the new root `activation_plan_schema_version`,
+`native_schema_epoch`, `ok`, `basis`, and nested `activation_plan` fields.
+Array changes are now expanded into deterministic indexed leaf paths instead
+of one aggregate array entry, so consumers that group paths must normalize
+indices deliberately.
+This is an additive Admin API and CLI change; the native configuration schema
+remains epoch `1` and no TOML migration is required.
+
+Before applying an upgrade candidate, operators can compare production-loaded
+files without Admin authority:
+
+```sh
+oxibeltctl config plan \
+  --current /etc/oxibelt/config/oxibelt.toml \
+  --candidate ./review/oxibelt.toml \
+  --format json
+```
+
+Use `--online` instead of `--current` to enrich the same fixed schema with the
+active executor, resolved listener, confinement, and deployment context. The
+online command needs `config:Diff`; exact fixed-member identities additionally
+need `config:GetInstances`. Neither mode applies the candidate, satisfies a
+mutation envelope, or proves zero downtime. Exit `0` means the candidate has a
+valid, supported, non-blocked plan, including restart or rollout. Exit `1`
+means invalid, unsupported, blocked, unauthorized, or failed planning.
+
+Automation must inspect both `minimum_required_operation` and
+`selected_operation`, every `conditional` and prerequisite availability,
+listener bind conflicts, long-connection effects, and rollback class. Treat
+`filesystem_manifest`, mount, and active-seccomp evidence as unresolved until
+P1-05 is implemented; do not infer fit from a known-path subset or requested
+profile. In Kubernetes immutable mode retain the previous immutable artifact
+and let the workload controller perform rollout. In `admin_cluster` mode keep
+the signed/durable artifact, exact membership, all-member acknowledgement, and
+protected-write flow authoritative. Roll back this tooling change by ignoring
+the additive fields or using the previous CLI; do not roll back an activated
+configuration merely because its advisory plan format changed.
+
 This post-beta.2 compatibility change requires a later governed beta and
 fresh exact-revision evidence; it is not part of beta.2's immutable release
 record.

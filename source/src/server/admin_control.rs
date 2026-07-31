@@ -8,6 +8,10 @@ use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{info, warn};
 
+use crate::activation_plan::{
+  ConfigActivationReport, ConfigComparisonKey, ConfigComparisonProjection, PlanningBasis,
+  plan_config_projections,
+};
 use crate::config::{Config, RuntimeOverrides};
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
@@ -62,18 +66,24 @@ pub(super) struct AdminOperationStatus {
   message: Option<String>,
 }
 
-#[derive(Debug)]
 struct AdminControlState {
   revision: u64,
-  effective_config: Option<String>,
+  effective_config: Option<AdminEffectiveConfig>,
+  comparison_key: ConfigComparisonKey,
   last_operation: Option<AdminOperationStatus>,
   rollback_available: bool,
 }
 
 #[derive(Clone)]
+pub(super) struct AdminEffectiveConfig {
+  rendered: String,
+  comparison: ConfigComparisonProjection,
+}
+
+#[derive(Clone)]
 pub(super) struct RollbackSnapshot {
   snapshot: AppSnapshot,
-  effective_config: Option<String>,
+  effective_config: Option<AdminEffectiveConfig>,
   secret_runtime_revision: Option<String>,
   expires_at: Option<Instant>,
 }
@@ -87,15 +97,24 @@ pub(super) struct AdminControlResponse {
 impl AdminControlHandle {
   pub(super) fn new(
     effective_config: Option<String>,
-  ) -> (Self, mpsc::UnboundedReceiver<AdminControlCommand>) {
+    activation_config: Option<&toml::Value>,
+  ) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<AdminControlCommand>)> {
     let (sender, receiver) = mpsc::unbounded_channel();
+    let comparison_key = ConfigComparisonKey::generate()?;
+    let effective_config = effective_config
+      .zip(activation_config)
+      .map(|(rendered, value)| AdminEffectiveConfig {
+        rendered,
+        comparison: ConfigComparisonProjection::from_value(value, &comparison_key),
+      });
     let state = Arc::new(Mutex::new(AdminControlState {
       revision: 1,
       effective_config,
+      comparison_key,
       last_operation: None,
       rollback_available: false,
     }));
-    (Self { sender, state }, receiver)
+    Ok((Self { sender, state }, receiver))
   }
 
   pub(super) async fn status(&self) -> serde_json::Value {
@@ -111,10 +130,39 @@ impl AdminControlHandle {
 
   pub(super) async fn effective_config(&self) -> Option<(u64, String, String)> {
     let state = self.state.lock().await;
-    state
-      .effective_config
-      .clone()
-      .map(|config| (state.revision, etag_for_revision(state.revision), config))
+    state.effective_config.as_ref().map(|config| {
+      (
+        state.revision,
+        etag_for_revision(state.revision),
+        config.rendered.clone(),
+      )
+    })
+  }
+
+  pub(super) async fn activation_plan(
+    &self,
+    candidate: &toml::Value,
+  ) -> Option<ConfigActivationReport> {
+    let state = self.state.lock().await;
+    let current = &state.effective_config.as_ref()?.comparison;
+    let candidate = ConfigComparisonProjection::from_value(candidate, &state.comparison_key);
+    Some(plan_config_projections(
+      current,
+      &candidate,
+      PlanningBasis::OnlineActive,
+    ))
+  }
+
+  pub(super) async fn effective_config_update(
+    &self,
+    rendered: String,
+    activation_config: &toml::Value,
+  ) -> AdminEffectiveConfig {
+    let state = self.state.lock().await;
+    AdminEffectiveConfig {
+      rendered,
+      comparison: ConfigComparisonProjection::from_value(activation_config, &state.comparison_key),
+    }
   }
 
   pub(super) async fn load_config(
@@ -436,9 +484,7 @@ async fn apply_full_from_files(
   }
   config.validate()?;
   validate_full_reload_runtime_compatibility(&active.config, &config)?;
-  let effective = Config::load_effective_toml_redacted(config_entry)
-    .and_then(|value| toml::to_string_pretty(&value).map_err(Into::into))
-    .ok();
+  let effective = Some(load_effective_config_update(control, config_entry).await?);
   let snapshot = AppSnapshot::new_with_previous(config, Some(active.as_ref())).await?;
   install_snapshot(
     snapshot,
@@ -484,7 +530,25 @@ async fn apply_oxirule_from_files(
     active.mitigation.clone(),
   )?;
   let snapshot = build_oxirule_reload_snapshot(active.as_ref(), config, waf);
-  install_snapshot(snapshot, state, listeners, Some(rollback), control, None).await
+  let effective = Some(load_effective_config_update(control, config_entry).await?);
+  install_snapshot(
+    snapshot,
+    state,
+    listeners,
+    Some(rollback),
+    control,
+    effective,
+  )
+  .await
+}
+
+async fn load_effective_config_update(
+  control: &AdminControlHandle,
+  config_entry: &std::path::Path,
+) -> anyhow::Result<AdminEffectiveConfig> {
+  let activation = Config::load_effective_toml_for_activation(config_entry)?;
+  let rendered = toml::to_string_pretty(&Config::redact_effective_toml_value(&activation))?;
+  Ok(control.effective_config_update(rendered, &activation).await)
 }
 
 fn build_oxirule_reload_snapshot(
@@ -536,7 +600,10 @@ async fn check_if_match(
   }
 }
 
-async fn advance_revision(control: &AdminControlHandle, effective_config: Option<String>) {
+async fn advance_revision(
+  control: &AdminControlHandle,
+  effective_config: Option<AdminEffectiveConfig>,
+) {
   let mut state = control.state.lock().await;
   state.revision += 1;
   if effective_config.is_some() {

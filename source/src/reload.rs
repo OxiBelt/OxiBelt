@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::config::{Config, HotReloadMode, RuntimeOverrides, TlsConfig};
 use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::routes::RouteTable;
+#[cfg(test)]
 use crate::runtime::topology::RuntimeTopologyChangePlan;
 use crate::server::ListenerSupervisor;
 use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
@@ -432,43 +433,166 @@ pub(crate) fn validate_full_reload_runtime_compatibility(
   active: &Config,
   replacement: &Config,
 ) -> anyhow::Result<()> {
-  if classify_runtime_topology_change(active, replacement)
-    == RuntimeTopologyChangePlan::RestartRequired
+  if let FullReloadCompatibility::RestartRequired(reason) =
+    classify_full_reload_runtime_compatibility(active, replacement)
   {
-    if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical() {
-      bail!(
+    bail!(reason.message(active, replacement));
+  }
+  Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FullReloadCompatibility {
+  InProcess,
+  RestartRequired(FullReloadRestartReason),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FullReloadRestartReason {
+  MainRuntime,
+  TokioWorkers,
+  RuntimeHardening,
+  HotReloadManager,
+  NetportSwitcher,
+  CryptoProvider,
+  LoggingLevel,
+  MetricsListener,
+  HealthListener,
+  #[cfg(feature = "admin-runtime")]
+  AdminMutations,
+  #[cfg(feature = "admin-runtime")]
+  AdminAudit,
+  #[cfg(feature = "admin-runtime")]
+  AdminOperations,
+  #[cfg(feature = "admin-runtime")]
+  AdminStorageAuthority,
+}
+
+impl FullReloadRestartReason {
+  fn message(self, active: &Config, replacement: &Config) -> String {
+    match self {
+      Self::MainRuntime => format!(
         "full hot reload rejected because runtime.main_runtime would change the active main topology from {} to {}; restart OxiBelt to replace the main runtime",
         active.runtime.main_runtime.canonical().as_str(),
         replacement.runtime.main_runtime.canonical().as_str()
-      );
+      ),
+      Self::TokioWorkers => format!(
+        "full hot reload rejected because runtime.workers.tokio changed from {} to {}; restart OxiBelt to resize the Tokio executor",
+        active.runtime.workers.tokio, replacement.runtime.workers.tokio
+      ),
+      Self::RuntimeHardening => {
+        "full hot reload rejected because runtime.hardening is an irreversible startup boundary"
+          .to_string()
+      }
+      Self::HotReloadManager => {
+        "full hot reload rejected because runtime.hot_reload manager ownership is restart-only"
+          .to_string()
+      }
+      Self::NetportSwitcher => {
+        "full hot reload rejected because runtime.netport_switcher process state is restart-only"
+          .to_string()
+      }
+      Self::CryptoProvider => {
+        "full hot reload rejected because crypto provider selection is process-global"
+          .to_string()
+      }
+      Self::LoggingLevel => {
+        "full hot reload rejected because logging.level is installed before the runtime starts"
+          .to_string()
+      }
+      Self::MetricsListener => {
+        "full hot reload rejected because metrics listener ownership is restart-only".to_string()
+      }
+      Self::HealthListener => {
+        "full hot reload rejected because health listener ownership is restart-only".to_string()
+      }
+      #[cfg(feature = "admin-runtime")]
+      Self::AdminMutations => {
+        "full hot reload rejected because admin.mutations is a restart-only control-plane trust root"
+          .to_string()
+      }
+      #[cfg(feature = "admin-runtime")]
+      Self::AdminAudit => {
+        "full hot reload rejected because admin.audit persistence, storage, or integrity authority is restart-only"
+          .to_string()
+      }
+      #[cfg(feature = "admin-runtime")]
+      Self::AdminOperations => {
+        "full hot reload rejected because admin.operations runtime ownership is restart-only"
+          .to_string()
+      }
+      #[cfg(feature = "admin-runtime")]
+      Self::AdminStorageAuthority => {
+        "full hot reload rejected because active Admin mutation audit, storage, and namespace authority are restart-only"
+          .to_string()
+      }
     }
-    bail!(
-      "full hot reload rejected because runtime.workers.tokio changed from {} to {}; restart OxiBelt to resize the Tokio executor",
-      active.runtime.workers.tokio,
-      replacement.runtime.workers.tokio
-    );
+  }
+}
+
+pub(crate) fn classify_full_reload_runtime_compatibility(
+  active: &Config,
+  replacement: &Config,
+) -> FullReloadCompatibility {
+  if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical() {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::MainRuntime);
+  }
+  if replacement.runtime.workers.tokio != active.runtime.workers.tokio {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::TokioWorkers);
+  }
+  if replacement.runtime.hardening != active.runtime.hardening {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::RuntimeHardening);
+  }
+  if replacement.runtime.hot_reload != active.runtime.hot_reload {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::HotReloadManager);
+  }
+  if replacement.runtime.netport_switcher != active.runtime.netport_switcher
+    || replacement.runtime.unprivileged_mode != active.runtime.unprivileged_mode
+  {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::NetportSwitcher);
+  }
+  if replacement.crypto != active.crypto {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::CryptoProvider);
+  }
+  if replacement.logging.level != active.logging.level {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::LoggingLevel);
+  }
+  if replacement.metrics.enabled != active.metrics.enabled
+    || replacement.metrics.bind != active.metrics.bind
+  {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::MetricsListener);
+  }
+  if replacement.health.enabled != active.health.enabled
+    || replacement.health.bind != active.health.bind
+  {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::HealthListener);
   }
   #[cfg(feature = "admin-runtime")]
   if replacement.admin.mutations != active.admin.mutations {
-    bail!(
-      "full hot reload rejected because admin.mutations is a restart-only control-plane trust root"
-    );
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::AdminMutations);
   }
   #[cfg(feature = "admin-runtime")]
-  audit::validate_runtime_compatibility(active, replacement)?;
+  if audit::validate_runtime_compatibility(active, replacement).is_err() {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::AdminAudit);
+  }
+  #[cfg(feature = "admin-runtime")]
+  if replacement.admin.operations != active.admin.operations {
+    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::AdminOperations);
+  }
   #[cfg(feature = "admin-runtime")]
   if active.admin.mutations.mode.enabled()
     && (replacement.shared_state != active.shared_state
       || replacement.ipm.backend != active.ipm.backend
       || replacement.ipm.namespace != active.ipm.namespace)
   {
-    bail!(
-      "full hot reload rejected because active Admin mutation audit, storage, and namespace authority are restart-only"
+    return FullReloadCompatibility::RestartRequired(
+      FullReloadRestartReason::AdminStorageAuthority,
     );
   }
-  Ok(())
+  FullReloadCompatibility::InProcess
 }
 
+#[cfg(test)]
 pub(crate) fn classify_runtime_topology_change(
   active: &Config,
   replacement: &Config,

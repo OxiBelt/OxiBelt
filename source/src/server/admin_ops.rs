@@ -291,31 +291,40 @@ where
         return response;
       }
       let active = state.snapshot();
-      let candidate =
-        match Config::load_admin_inline_effective_toml_redacted(&payload.config, &active.config) {
-          Ok(value) => value,
-          Err(error) => {
-            let error = error.to_string();
-            validation_failed(authorization.actor, "config.diff", &error);
-            return admin::json_response(
-              StatusCode::BAD_REQUEST,
-              &json!({ "ok": false, "error": error }),
-            );
-          }
-        };
-      let Some((_, _, current_raw)) = admin_control.effective_config().await else {
+      let candidate = match Config::load_admin_inline_effective_toml_for_activation(
+        &payload.config,
+        &active.config,
+      ) {
+        Ok(value) => value,
+        Err(error) => {
+          let error = error.to_string();
+          validation_failed(authorization.actor, "config.diff", &error);
+          return admin::json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "ok": false, "error": error }),
+          );
+        }
+      };
+      let Some(mut report) = admin_control.activation_plan(&candidate).await else {
         return text_response(StatusCode::NOT_FOUND, "effective config is unavailable");
       };
-      let current = toml::from_str::<toml::Value>(&current_raw)
-        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-      let mut changes = Vec::new();
-      super::admin_config_diff::diff_toml_values(
-        "",
-        Some(&current),
-        Some(&candidate),
-        &mut changes,
+      let candidate_config = match Config::load_admin_inline_toml(&payload.config, &active.config) {
+        Ok(config) => config,
+        Err(error) => {
+          validation_failed(authorization.actor, "config.diff", &error.to_string());
+          return admin::json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "ok": false, "error": error.to_string() }),
+          );
+        }
+      };
+      super::admin_config_diff::enrich_activation_plan(
+        &mut report,
+        &active.config,
+        &candidate_config,
+        authorization,
       );
-      admin::json_response(StatusCode::OK, &json!({ "changes": changes }))
+      admin::json_response(StatusCode::OK, &report)
     }
     (&::http::Method::POST, "/admin/v1/config/load") => {
       if !authorization.is_allowed("config:Load", "*") {

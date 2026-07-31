@@ -811,7 +811,14 @@
         },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Validated, redacted configuration activation plan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigActivationReport"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -7789,6 +7796,514 @@
           "conditional",
           "none"
         ]
+      },
+      "ConfigActivationOperation": {
+        "type": "string",
+        "enum": [
+          "none",
+          "oxi_rule_reload",
+          "downstream_tls_reload",
+          "full_snapshot_reload",
+          "listener_transition",
+          "graceful_drain",
+          "process_restart",
+          "kubernetes_immutable_rollout",
+          "admin_cluster_rollout",
+          "blocked_by_confinement",
+          "invalid_or_unsupported"
+        ]
+      },
+      "ConfigActivationReasonCode": {
+        "type": "string",
+        "enum": [
+          "no_configuration_change",
+          "oxi_rule_changed",
+          "downstream_tls_material_changed",
+          "full_snapshot_reload",
+          "startup_only_subsystem",
+          "runtime_capability_context_required",
+          "runtime_not_resizable",
+          "listener_added",
+          "listener_removed",
+          "listener_rebind_required",
+          "listener_bind_conflict",
+          "graceful_drain_required",
+          "landlock_policy_expansion",
+          "confinement_evidence_unavailable",
+          "external_seccomp_profile_required",
+          "immutable_config_requires_rollout",
+          "deployment_target_unavailable",
+          "admin_cluster_coordinated_rollout",
+          "admin_cluster_membership_epoch",
+          "signed_artifact_required",
+          "durable_artifact_required",
+          "all_members_acknowledgement_required",
+          "rollback_artifact_unavailable",
+          "change_limit_exceeded",
+          "invalid_configuration",
+          "unsupported_activation"
+        ]
+      },
+      "ConfigActivationPrerequisite": {
+        "type": "string",
+        "enum": [
+          "runtime_capability_context",
+          "resolved_listener_inventory",
+          "filesystem_manifest",
+          "active_landlock_policy",
+          "active_seccomp_profile",
+          "mount_policy_evidence",
+          "deployment_target_identity",
+          "prior_rollback_artifact",
+          "signed_mutation_artifact",
+          "durable_mutation_artifact",
+          "protected_write_authorization",
+          "cluster_membership_revision",
+          "all_members_acknowledgement"
+        ]
+      },
+      "ConfigActivationPrerequisiteStatus": {
+        "type": "object",
+        "required": [
+          "prerequisite",
+          "availability"
+        ],
+        "properties": {
+          "prerequisite": {
+            "$ref": "#/components/schemas/ConfigActivationPrerequisite"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "available",
+              "missing",
+              "unknown",
+              "not_applicable"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationRollback": {
+        "type": "string",
+        "enum": [
+          "automatic",
+          "manual",
+          "conditional",
+          "unavailable",
+          "not_applicable"
+        ]
+      },
+      "ConfigActivationChange": {
+        "type": "object",
+        "required": [
+          "path",
+          "op",
+          "secret",
+          "native_activation",
+          "metadata_provenance",
+          "resolved_operation",
+          "reason_code",
+          "conditional",
+          "prerequisite_missing",
+          "missing_prerequisites",
+          "long_connections_affected",
+          "rollback"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "add",
+              "remove",
+              "change"
+            ]
+          },
+          "secret": {
+            "type": "boolean"
+          },
+          "native_activation": {
+            "$ref": "#/components/schemas/NativeConfigActivation"
+          },
+          "metadata_provenance": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "pattern",
+              "conservative_default"
+            ]
+          },
+          "resolved_operation": {
+            "$ref": "#/components/schemas/ConfigActivationOperation"
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/ConfigActivationReasonCode"
+          },
+          "conditional": {
+            "type": "boolean"
+          },
+          "prerequisite_missing": {
+            "type": "boolean"
+          },
+          "missing_prerequisites": {
+            "type": "array",
+            "maxItems": 13,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationPrerequisite"
+            }
+          },
+          "long_connections_affected": {
+            "type": "boolean"
+          },
+          "rollback": {
+            "$ref": "#/components/schemas/ConfigActivationRollback"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationListenerPlan": {
+        "type": "object",
+      "required": [
+        "unchanged",
+        "additions",
+          "removals",
+          "rebinds",
+          "bind_conflicts",
+          "external_port_availability"
+        ],
+      "properties": {
+        "unchanged": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "string"
+          }
+        },
+        "additions": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string"
+            }
+          },
+          "removals": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string"
+            }
+          },
+          "rebinds": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string"
+            }
+          },
+          "bind_conflicts": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string"
+            }
+          },
+          "external_port_availability": {
+            "type": "string",
+            "enum": [
+              "available",
+              "missing",
+              "unknown",
+              "not_applicable"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationConnectionPlan": {
+        "type": "object",
+        "required": [
+          "http1_keepalive",
+          "http2",
+          "http3",
+          "websocket",
+          "connect_tunnel",
+          "webtransport",
+          "tcp_streams",
+          "udp_flows",
+          "configured_drain_timeout_ms",
+          "effective_force_close_timeout_ms"
+        ],
+        "properties": {
+          "http1_keepalive": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "http2": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "http3": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "websocket": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "connect_tunnel": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "webtransport": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "tcp_streams": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "udp_flows": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionEffect"
+          },
+          "configured_drain_timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "effective_force_close_timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationConnectionEffect": {
+        "type": "string",
+        "enum": [
+          "unaffected",
+          "graceful_drain",
+          "force_close",
+          "process_restart"
+        ]
+      },
+      "ConfigActivationConfinementPlan": {
+        "type": "object",
+        "required": [
+          "filesystem",
+          "landlock",
+          "seccomp",
+          "mount_policy",
+          "requires_policy_expansion",
+          "restart_required",
+          "missing_prerequisites"
+        ],
+        "properties": {
+          "filesystem": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementFit"
+          },
+          "landlock": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementFit"
+          },
+          "seccomp": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementFit"
+          },
+          "mount_policy": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementFit"
+          },
+          "requires_policy_expansion": {
+            "type": "boolean"
+          },
+          "restart_required": {
+            "type": "boolean"
+          },
+          "missing_prerequisites": {
+            "type": "array",
+            "maxItems": 13,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationPrerequisite"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationConfinementFit": {
+        "type": "string",
+        "enum": [
+          "fits",
+          "expansion_required",
+          "impossible",
+          "unknown"
+        ]
+      },
+      "ConfigActivationDeploymentPlan": {
+        "type": "object",
+        "required": [
+          "mode",
+          "target_count",
+          "target_identities",
+          "identities_withheld",
+          "membership_revision",
+          "signed_artifact_required",
+          "durable_artifact_required",
+          "all_members_acknowledgement_required",
+          "missing_prerequisites"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "standalone",
+              "kubernetes_immutable",
+              "admin_cluster"
+            ]
+          },
+          "target_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "target_identities": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string"
+            }
+          },
+          "identities_withheld": {
+            "type": "boolean"
+          },
+          "membership_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signed_artifact_required": {
+            "type": "boolean"
+          },
+          "durable_artifact_required": {
+            "type": "boolean"
+          },
+          "all_members_acknowledgement_required": {
+            "type": "boolean"
+          },
+          "missing_prerequisites": {
+            "type": "array",
+            "maxItems": 13,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationPrerequisite"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationPlan": {
+        "type": "object",
+        "required": [
+          "minimum_required_operation",
+          "selected_operation",
+          "reason_codes",
+          "can_apply_in_process",
+          "conditional",
+          "prerequisites",
+          "listener",
+          "connections",
+          "confinement",
+          "deployment",
+          "rollback"
+        ],
+        "properties": {
+          "minimum_required_operation": {
+            "$ref": "#/components/schemas/ConfigActivationOperation"
+          },
+          "selected_operation": {
+            "$ref": "#/components/schemas/ConfigActivationOperation"
+          },
+          "reason_codes": {
+            "type": "array",
+            "maxItems": 26,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationReasonCode"
+            }
+          },
+          "can_apply_in_process": {
+            "type": "boolean"
+          },
+          "conditional": {
+            "type": "boolean"
+          },
+          "prerequisites": {
+            "type": "array",
+            "maxItems": 13,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationPrerequisiteStatus"
+            }
+          },
+          "listener": {
+            "$ref": "#/components/schemas/ConfigActivationListenerPlan"
+          },
+          "connections": {
+            "$ref": "#/components/schemas/ConfigActivationConnectionPlan"
+          },
+          "confinement": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementPlan"
+          },
+          "deployment": {
+            "$ref": "#/components/schemas/ConfigActivationDeploymentPlan"
+          },
+          "rollback": {
+            "$ref": "#/components/schemas/ConfigActivationRollback"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationReport": {
+        "type": "object",
+        "required": [
+          "activation_plan_schema_version",
+          "native_schema_epoch",
+          "ok",
+          "basis",
+          "changes",
+          "activation_plan"
+        ],
+        "properties": {
+          "activation_plan_schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "native_schema_epoch": {
+            "type": "integer",
+            "const": 1
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "offline_config",
+              "online_active"
+            ]
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationChange"
+            }
+          },
+          "activation_plan": {
+            "$ref": "#/components/schemas/ConfigActivationPlan"
+          }
+        },
+        "additionalProperties": false
       },
       "ConfigExplainReport": {
         "type": "object",

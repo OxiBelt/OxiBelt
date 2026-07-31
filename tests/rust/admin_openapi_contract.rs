@@ -233,6 +233,54 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   );
   assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
 
+  let diff = &spec["paths"]["/admin/v1/config/diff"]["post"];
+  assert_eq!(
+    diff["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+    "#/components/schemas/ConfigActivationReport"
+  );
+  let activation = &spec["components"]["schemas"]["ConfigActivationReport"];
+  assert_eq!(
+    activation["properties"]["activation_plan_schema_version"]["const"],
+    1
+  );
+  assert_eq!(activation["properties"]["native_schema_epoch"]["const"], 1);
+  assert_eq!(activation["properties"]["changes"]["maxItems"], 4096);
+  let listener = &spec["components"]["schemas"]["ConfigActivationListenerPlan"];
+  assert!(
+    json_string_set(
+      &listener["required"],
+      "ConfigActivationListenerPlan.required"
+    )
+    .contains("unchanged")
+  );
+  assert_eq!(listener["properties"]["unchanged"]["maxItems"], 4096);
+  assert_eq!(
+    json_string_set(
+      &activation["properties"]["basis"]["enum"],
+      "ConfigActivationReport.basis.enum"
+    ),
+    BTreeSet::from(["offline_config".to_string(), "online_active".to_string()])
+  );
+  assert_eq!(
+    json_string_set(
+      &spec["components"]["schemas"]["ConfigActivationOperation"]["enum"],
+      "ConfigActivationOperation.enum"
+    ),
+    BTreeSet::from([
+      "admin_cluster_rollout".to_string(),
+      "blocked_by_confinement".to_string(),
+      "downstream_tls_reload".to_string(),
+      "full_snapshot_reload".to_string(),
+      "graceful_drain".to_string(),
+      "invalid_or_unsupported".to_string(),
+      "kubernetes_immutable_rollout".to_string(),
+      "listener_transition".to_string(),
+      "none".to_string(),
+      "oxi_rule_reload".to_string(),
+      "process_restart".to_string(),
+    ])
+  );
+
   let explain = &spec["paths"]["/admin/v1/config/explain"]["get"];
   assert_eq!(
     explain["responses"]["200"]["$ref"],

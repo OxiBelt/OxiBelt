@@ -14,6 +14,9 @@ pub const CONFIG_ROLLOUT_MODE_ENV: &str = "OXIBELT_CONFIG_ROLLOUT_MODE";
 pub const CONFIG_REVISION_ENV: &str = "OXIBELT_CONFIG_REVISION";
 pub const CONFIG_DIGEST_ENV: &str = "OXIBELT_CONFIG_DIGEST";
 pub const CONFIG_REVISION_FILE_ENV: &str = "OXIBELT_CONFIG_REVISION_FILE";
+pub const CONFIG_ROLLOUT_TARGET_NAMESPACE_ENV: &str = "OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE";
+pub const CONFIG_ROLLOUT_TARGET_KIND_ENV: &str = "OXIBELT_CONFIG_ROLLOUT_TARGET_KIND";
+pub const CONFIG_ROLLOUT_TARGET_NAME_ENV: &str = "OXIBELT_CONFIG_ROLLOUT_TARGET_NAME";
 pub const INSTANCE_ID_ENV: &str = "OXIBELT_INSTANCE_ID";
 
 const KUBERNETES_IMMUTABLE_MODE: &str = "kubernetes_immutable";
@@ -65,6 +68,69 @@ impl ConfigRolloutApplyState {
   }
 }
 
+/// Kubernetes workload kind supplied as optional activation-planning context.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum KubernetesRolloutTargetKind {
+  Deployment,
+  DaemonSet,
+}
+
+impl KubernetesRolloutTargetKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Deployment => "Deployment",
+      Self::DaemonSet => "DaemonSet",
+    }
+  }
+
+  fn parse(value: &str) -> Option<Self> {
+    match value {
+      "Deployment" => Some(Self::Deployment),
+      "DaemonSet" => Some(Self::DaemonSet),
+      _ => None,
+    }
+  }
+}
+
+/// Optional identity of the Kubernetes workload replaced by an immutable rollout.
+///
+/// This is planning context asserted by the Pod template, not Kubernetes API
+/// authorization or proof that the target still exists.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct KubernetesRolloutTarget {
+  namespace: String,
+  kind: KubernetesRolloutTargetKind,
+  name: String,
+}
+
+impl KubernetesRolloutTarget {
+  pub fn namespace(&self) -> &str {
+    &self.namespace
+  }
+
+  pub fn kind(&self) -> KubernetesRolloutTargetKind {
+    self.kind
+  }
+
+  pub fn name(&self) -> &str {
+    &self.name
+  }
+
+  fn from_environment_values(values: &EnvironmentValues) -> Option<Self> {
+    let namespace = values.rollout_target_namespace.as_deref()?;
+    let kind = KubernetesRolloutTargetKind::parse(values.rollout_target_kind.as_deref()?)?;
+    let name = values.rollout_target_name.as_deref()?;
+    if !is_kubernetes_dns_label(namespace) || !is_kubernetes_dns_label(name) {
+      return None;
+    }
+    Some(Self {
+      namespace: namespace.to_string(),
+      kind,
+      name: name.to_string(),
+    })
+  }
+}
+
 /// Immutable revision metadata supplied by the Kubernetes Pod template.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct ConfigRolloutIdentity {
@@ -73,6 +139,7 @@ pub struct ConfigRolloutIdentity {
   desired_revision: Option<String>,
   digest: Option<String>,
   revision_file: Option<PathBuf>,
+  kubernetes_rollout_target: Option<KubernetesRolloutTarget>,
   apply_state: ConfigRolloutApplyState,
 }
 
@@ -106,6 +173,40 @@ impl ConfigRolloutIdentity {
 
   pub fn instance_id(&self) -> Option<&str> {
     self.instance_id.as_deref()
+  }
+
+  /// Returns optional, all-or-none Kubernetes workload context for planning.
+  ///
+  /// Missing, partial, or malformed environment metadata intentionally returns
+  /// `None` without invalidating an otherwise valid immutable Pod identity.
+  pub fn kubernetes_rollout_target(&self) -> Option<&KubernetesRolloutTarget> {
+    self.kubernetes_rollout_target.as_ref()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn immutable_for_planning_test(namespace: &str, kind: &str, name: &str) -> Self {
+    Self {
+      mode: ConfigRolloutMode::KubernetesImmutable,
+      instance_id: Some("planning-test".to_string()),
+      kubernetes_rollout_target: Some(KubernetesRolloutTarget {
+        namespace: namespace.to_string(),
+        kind: KubernetesRolloutTargetKind::parse(kind)
+          .expect("planning test workload kind should be supported"),
+        name: name.to_string(),
+      }),
+      apply_state: ConfigRolloutApplyState::Pending,
+      ..Self::default()
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn admin_cluster_for_planning_test(instance_id: &str) -> Self {
+    Self {
+      mode: ConfigRolloutMode::AdminCluster,
+      instance_id: Some(instance_id.to_string()),
+      apply_state: ConfigRolloutApplyState::NotConfigured,
+      ..Self::default()
+    }
   }
 
   pub fn blocks_per_pod_mutation(&self) -> bool {
@@ -217,6 +318,7 @@ impl ConfigRolloutIdentity {
         Ok(Self::default())
       }
       Some(KUBERNETES_IMMUTABLE_MODE) => {
+        let kubernetes_rollout_target = KubernetesRolloutTarget::from_environment_values(&values);
         let instance_id = required_metadata_value(INSTANCE_ID_ENV, values.instance_id)?;
         let desired_revision = required_revision(values.revision)?;
         let digest = required_digest(values.digest)?;
@@ -227,6 +329,7 @@ impl ConfigRolloutIdentity {
           desired_revision: Some(desired_revision),
           digest: Some(digest),
           revision_file: Some(revision_file),
+          kubernetes_rollout_target,
           apply_state: ConfigRolloutApplyState::Pending,
         };
         identity.validate(source_paths, HotReloadMode::Off)?;
@@ -245,6 +348,7 @@ impl ConfigRolloutIdentity {
           desired_revision: None,
           digest: None,
           revision_file: None,
+          kubernetes_rollout_target: None,
           apply_state: ConfigRolloutApplyState::NotConfigured,
         })
       }
@@ -275,6 +379,9 @@ struct EnvironmentValues {
   digest: Option<String>,
   revision_file: Option<String>,
   instance_id: Option<String>,
+  rollout_target_namespace: Option<String>,
+  rollout_target_kind: Option<String>,
+  rollout_target_name: Option<String>,
 }
 
 impl EnvironmentValues {
@@ -291,6 +398,12 @@ impl EnvironmentValues {
       digest: read_environment(CONFIG_DIGEST_ENV)?,
       revision_file: read_environment(CONFIG_REVISION_FILE_ENV)?,
       instance_id: read_environment(selected_instance_id_env)?,
+      // Deployment target metadata is advisory planning context. In contrast
+      // to the immutable revision proof above, unreadable or malformed values
+      // must not prevent the process from starting.
+      rollout_target_namespace: read_planning_environment(CONFIG_ROLLOUT_TARGET_NAMESPACE_ENV),
+      rollout_target_kind: read_planning_environment(CONFIG_ROLLOUT_TARGET_KIND_ENV),
+      rollout_target_name: read_planning_environment(CONFIG_ROLLOUT_TARGET_NAME_ENV),
     })
   }
 
@@ -305,6 +418,10 @@ fn read_environment(name: &str) -> anyhow::Result<Option<String>> {
     Err(std::env::VarError::NotPresent) => Ok(None),
     Err(std::env::VarError::NotUnicode(_)) => bail!("{name} must be valid UTF-8"),
   }
+}
+
+fn read_planning_environment(name: &str) -> Option<String> {
+  std::env::var(name).ok()
 }
 
 fn required_metadata_value(name: &str, value: Option<String>) -> anyhow::Result<String> {
@@ -415,6 +532,16 @@ fn is_kubernetes_name(value: &str) -> bool {
       .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
 }
 
+fn is_kubernetes_dns_label(value: &str) -> bool {
+  !value.is_empty()
+    && value.len() <= 63
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    && !value.starts_with('-')
+    && !value.ends_with('-')
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
   let digest = Sha256::digest(bytes);
   let mut value = String::with_capacity(SHA256_HEX_LEN);
@@ -520,6 +647,66 @@ mod tests {
   }
 
   #[test]
+  fn immutable_mode_exposes_complete_rollout_target_for_planning() {
+    let fixture = ImmutableFixture::new("[generated]\nvalue = \"expected\"\n");
+    for (kind, expected_kind) in [
+      ("Deployment", KubernetesRolloutTargetKind::Deployment),
+      ("DaemonSet", KubernetesRolloutTargetKind::DaemonSet),
+    ] {
+      let mut values = fixture.values();
+      values.rollout_target_namespace = Some("edge-system".to_string());
+      values.rollout_target_kind = Some(kind.to_string());
+      values.rollout_target_name = Some("oxibelt-edge".to_string());
+
+      let identity = ConfigRolloutIdentity::from_environment_values(values, &fixture.source_paths)
+        .expect("complete rollout target context must not affect identity validation");
+      let target = identity
+        .kubernetes_rollout_target()
+        .expect("complete rollout target context should be available to the planner");
+      assert_eq!(target.namespace(), "edge-system");
+      assert_eq!(target.kind(), expected_kind);
+      assert_eq!(target.kind().as_str(), kind);
+      assert_eq!(target.name(), "oxibelt-edge");
+    }
+  }
+
+  #[test]
+  fn immutable_mode_treats_unusable_rollout_target_context_as_unavailable() {
+    let fixture = ImmutableFixture::new("[generated]\nvalue = \"expected\"\n");
+    for (namespace, kind, name) in [
+      (None, None, None),
+      (Some("edge-system"), None, Some("oxibelt-edge")),
+      (
+        Some("Edge-System"),
+        Some("Deployment"),
+        Some("oxibelt-edge"),
+      ),
+      (
+        Some("edge-system"),
+        Some("StatefulSet"),
+        Some("oxibelt-edge"),
+      ),
+      (
+        Some("edge-system"),
+        Some("Deployment"),
+        Some("oxibelt_edge"),
+      ),
+    ] {
+      let mut values = fixture.values();
+      values.rollout_target_namespace = namespace.map(str::to_string);
+      values.rollout_target_kind = kind.map(str::to_string);
+      values.rollout_target_name = name.map(str::to_string);
+
+      let identity = ConfigRolloutIdentity::from_environment_values(values, &fixture.source_paths)
+        .expect("optional planning context must never invalidate immutable startup identity");
+      assert!(
+        identity.kubernetes_rollout_target().is_none(),
+        "absent, partial, or malformed rollout target context must be unavailable"
+      );
+    }
+  }
+
+  #[test]
   fn immutable_mode_rejects_an_excluded_or_mismatched_file() {
     let fixture = ImmutableFixture::new("[generated]\nvalue = \"expected\"\n");
     let mut excluded = fixture.source_paths.clone();
@@ -582,6 +769,7 @@ mod tests {
         digest: Some(self.digest.clone()),
         revision_file: Some("conf.d/gateway-api.generated.toml".to_string()),
         instance_id: Some("f6e8c15f-bf90-45f4-bdfa-ff3cb0f72a57".to_string()),
+        ..EnvironmentValues::default()
       }
     }
   }

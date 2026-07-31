@@ -94,6 +94,48 @@ fn full_reload_rejects_admin_audit_authority_changes() {
   assert!(error.to_string().contains("admin.audit"));
 }
 
+#[test]
+fn full_reload_rejects_runtime_hardening_changes() {
+  let active = parse_worker_reload_config(2);
+  let mut replacement = active.clone();
+  replacement.runtime.hardening.close_range = crate::config::HardeningAutoMode::Required;
+
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &replacement),
+    FullReloadCompatibility::RestartRequired(FullReloadRestartReason::RuntimeHardening)
+  );
+  let error = validate_full_reload_runtime_compatibility(&active, &replacement)
+    .expect_err("irreversible hardening changes must require process restart");
+  assert!(error.to_string().contains("runtime.hardening"));
+}
+
+#[test]
+fn full_reload_rejects_process_owned_listener_changes() {
+  let active = parse_worker_reload_config(2);
+  let mut replacement = active.clone();
+  replacement.metrics.enabled = !active.metrics.enabled;
+
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &replacement),
+    FullReloadCompatibility::RestartRequired(FullReloadRestartReason::MetricsListener)
+  );
+  let error = validate_full_reload_runtime_compatibility(&active, &replacement)
+    .expect_err("metrics listener ownership must require process restart");
+  assert!(error.to_string().contains("metrics listener"));
+}
+
+#[test]
+fn full_reload_rejects_hot_reload_manager_changes() {
+  let active = parse_worker_reload_config(2);
+  let mut replacement = active.clone();
+  replacement.runtime.hot_reload.mode = crate::config::HotReloadMode::Full;
+
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &replacement),
+    FullReloadCompatibility::RestartRequired(FullReloadRestartReason::HotReloadManager)
+  );
+}
+
 fn parse_worker_reload_config(worker_threads: usize) -> Config {
   toml::from_str(&format!(
     r#"

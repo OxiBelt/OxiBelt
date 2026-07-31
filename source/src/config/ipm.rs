@@ -548,6 +548,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
     "config" => &[
       "GetStatus",
       "GetEffective",
+      "GetInstances",
       "Validate",
       "Diff",
       "Load",

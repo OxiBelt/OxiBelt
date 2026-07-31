@@ -320,6 +320,7 @@ guarantees.
 
 | Feature ID | Security consequence |
 | --- | --- |
+| `config-activation-planner` | A candidate TOML document and its referenced deployment context are untrusted planning inputs. The planner validates before semantic classification, bounds and deterministically orders changes, compares secret leaves through process-local domain-separated HMAC tags, and returns only redacted fixed-vocabulary facts. `config:Diff` is distinct from apply, protected-write, signed-artifact, and rollout authority. Online listener results cannot prove external port availability, Kubernetes target identity does not grant API authority, Admin member identities require `config:GetInstances`, and filesystem/mount/seccomp fit stays conditional until P1-05 provides complete observed manifest evidence. Treating a conditional or advisory result as execution or zero-downtime proof can still cause outage or policy drift. |
 | `compio-direct-h1-io` | Operator-selected upstream responses and timing remain untrusted at this Linux-only experimental parser/transport boundary. The persistent worker fleet bounds queues, waiters, connections, and retained buffers; each physical worker handoff covers its share of the already-bounded operation ceiling, the global semaphore caps queued plus active operations, and external waiters remain separately bounded. A stable origin key seeds bounded worker striping while shared counters preserve the fleet-wide per-origin connection and idle limits without placing the origin in public metrics. Admission failure may reach Hyper only before an upstream request byte is written. Parser failure, ambiguous residual bytes, EOF, timeout, cancellation in uncertain framing, peer close, upgrade, stale generation, pool overflow, I/O error, or worker failure retires the connection instead of reusing it. Bodyful and streaming requests stay on Hyper, preserving the existing retry policy and no-duplicate-dispatch boundary. Queue saturation, slow or malicious origins, cancellation storms, worker failure, and pool churn remain availability risks; fixed-cardinality service metrics, Hyper differential/fuzz evidence, paired CPU/request and p99 results, and the 30-minute FD/thread/RSS/active-connection soak remain promotion gates. |
 | `crlite` | Revocation filter coverage, managed downloads, cache integrity, and degraded-allow behavior require deployment-specific review. |
 | `tls-upstream-revocation` | Outbound OCSP/CRLite reachability, freshness, and failure policy can affect upstream availability and trust. |
@@ -373,6 +374,7 @@ canonical references.
 | Threat | Boundary and asset | Existing controls | Attacker story and residual risk |
 | --- | --- | --- | --- |
 | Admin credential replay | Management client → Admin bearer/IPM authority | Dedicated listener, TLS/mTLS options, default bearer authentication, exact mTLS workload binding, IPM checks, token digests, and rotation/revocation reduce credential exposure. Protected mutations additionally require an expiring signer/principal-bound envelope and durable request-ID ledger. | A stolen bearer remains replayable for unprotected reads and writes until revoked. A stolen mutation signing key can authorize its scoped protected actions until removed; signer custody and rotation remain external duties. |
+| Misused configuration plan | Candidate TOML/runtime context → operator or automation activation decision | Authoritative validation, bounded deterministic classification, fixed reason/prerequisite enums, redacted secret equality, minimum-versus-selected operations, explicit listener/connection/confinement/deployment subplans, and strict separation from apply authority make uncertainty visible. | A caller can ignore `conditional`, unavailable prerequisites, bind conflicts, long-connection effects, or the distinction between a plan and successful execution. Runtime, filesystem, mount, Kubernetes, and cluster authority may change after planning. Revalidate immediately before an independently authorized apply and do not advertise zero downtime from a plan alone. |
 | Configuration rollback attack | Admin/controller/operator → active security policy | Validation, signed previous/new revisions, exact content digests, durable receipts, retained committed artifacts, immutable Kubernetes revisions, and rollout status make revision changes visible. | An authorized signer can intentionally select an older valid policy unless external approval policy forbids it. A compromised artifact key or PostgreSQL authority can corrupt rollback state. |
 | Partial cluster rollout | Desired revision → multiple data-plane instances | Kubernetes immutable rollout proves owned Ready Pods. Fixed-member Admin rollout binds exact membership, encrypts artifacts, validates all members, uses deterministic canary observation, fences every worker/coordinator transition, requires all-member revision/digest ACKs, and rolls back every possibly applied target on failure. | A compromised Kubernetes or PostgreSQL authority, signer, artifact key, or member host can forge or subvert its evidence. Member loss denies Admin writes, and an ambiguous external effect becomes blocking `indeterminate` rather than a success claim. |
 | Stale Gateway controller leader | Lease holder → ConfigMap/workload/status authority | Every write requires a fresh exact-Lease proof; workload state records Lease UID, transition epoch, and holder; status uses source/workload resource-version and owner-chain proof; followers do not translate or mutate. | Kubernetes Lease election is not a distributed transaction across resources. A compromised or partitioned API server can violate observations, and an already accepted request cannot be recalled. Resource-version conflicts, immutable artifacts, term annotations, short renew bounds, and pre-commit revalidation reduce this residual race; cluster API integrity remains required. |
@@ -438,6 +440,20 @@ canonical endpoint and action inventory is the
 [Admin OpenAPI document](../source/assets/admin-openapi.json); new mutation
 families must define equivalent authorization, concurrency/replay behavior, and
 audit semantics.
+
+Configuration activation planning is not a mutation family. It requires
+`config:Diff` on `*`, accepts neither `If-Match` nor a mutation envelope, and
+must not create a revision, ETag, snapshot, listener, drain, rollback entry, or
+durable artifact. That read authority does not imply `config:Load`,
+`admin:UpdateConfig`, `ipm:UpdateConfig`, or cluster/Kubernetes write
+authority. Exact Admin-cluster member identities are a separate
+`config:GetInstances` disclosure on `instances/current`; callers without it
+receive only the bounded count and `identities_withheld = true`.
+Secret values and process-local HMAC tags are never returned, but the
+changed/unchanged result is an equality oracle for callers that can submit
+candidate secrets. Treat `config:Diff` as sensitive read authority, prefer
+high-entropy secrets, and monitor repeated guesses; redaction does not protect
+a low-entropy literal from an authorized online guessing campaign.
 
 | Mutation family | Authorization and concurrency requirement | Audit and residual requirement |
 | --- | --- | --- |

@@ -55,6 +55,8 @@ spec:
         {{- end }}
         {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
         oxibelt.dev/immutable-config-rollout: "true"
+        oxibelt.dev/config-rollout-target-kind: "DaemonSet"
+        oxibelt.dev/config-rollout-target-name: {{ include "oxibelt.name" . | quote }}
         {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
         oxibelt.dev/config-revision: {{ include "oxibelt.configMapName" . | quote }}
         oxibelt.dev/config-digest: {{ "" | sha256sum | quote }}
@@ -112,6 +114,18 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        - name: OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: OXIBELT_CONFIG_ROLLOUT_TARGET_KIND
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/config-rollout-target-kind']"
+        - name: OXIBELT_CONFIG_ROLLOUT_TARGET_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/config-rollout-target-name']"
         {{- end }}
         {{- with .Values.extraEnv }}
 {{ toYaml . | indent 8 }}

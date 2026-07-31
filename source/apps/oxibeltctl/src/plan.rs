@@ -240,6 +240,7 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
     | ConfigSubcommand::Validate(_)
     | ConfigSubcommand::Explain(_)
     | ConfigSubcommand::Migrate(_)
+    | ConfigSubcommand::Plan(_)
     | ConfigSubcommand::LbPolicyCompat(_) => bail!("requested config command is local-only"),
   }
 }

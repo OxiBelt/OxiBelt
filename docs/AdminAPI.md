@@ -359,6 +359,178 @@ scope, rejects new matching sessions with `503`, waits for `grace_ms` or
 sessions; it also remains explicitly ephemeral. Cancelling the drain removes
 the rule but does not restore sessions already closed.
 
+## Configuration Activation Planning
+
+`POST /admin/v1/config/diff` remains the authenticated, non-mutating
+configuration comparison endpoint and now returns activation-plan schema
+version `1`. The request body is unchanged: `format` is `"toml"` and `config`
+contains the candidate. The response preserves the existing ordered
+`changes[].path` and `changes[].op` fields and additively returns this root
+shape:
+
+```json
+{
+  "activation_plan_schema_version": 1,
+  "native_schema_epoch": 1,
+  "ok": true,
+  "basis": "online_active",
+  "changes": [],
+  "activation_plan": {
+    "minimum_required_operation": "none",
+    "selected_operation": "none",
+    "reason_codes": ["no_configuration_change"],
+    "can_apply_in_process": true,
+    "conditional": false,
+    "prerequisites": [],
+    "listener": {
+      "unchanged": [],
+      "additions": [],
+      "removals": [],
+      "rebinds": [],
+      "bind_conflicts": [],
+      "external_port_availability": "not_applicable"
+    },
+    "connections": {
+      "http1_keepalive": "unaffected",
+      "http2": "unaffected",
+      "http3": "unaffected",
+      "websocket": "unaffected",
+      "connect_tunnel": "unaffected",
+      "webtransport": "unaffected",
+      "tcp_streams": "unaffected",
+      "udp_flows": "unaffected",
+      "configured_drain_timeout_ms": null,
+      "effective_force_close_timeout_ms": null
+    },
+    "confinement": {
+      "filesystem": "unknown",
+      "landlock": "unknown",
+      "seccomp": "unknown",
+      "mount_policy": "unknown",
+      "requires_policy_expansion": false,
+      "restart_required": false,
+      "missing_prerequisites": []
+    },
+    "deployment": {
+      "mode": "standalone",
+      "target_count": null,
+      "target_identities": [],
+      "identities_withheld": false,
+      "membership_revision": null,
+      "signed_artifact_required": false,
+      "durable_artifact_required": false,
+      "all_members_acknowledgement_required": false,
+      "missing_prerequisites": []
+    },
+    "rollback": "not_applicable"
+  }
+}
+```
+
+Each change has `path`, `op`, `secret`, `native_activation`,
+`metadata_provenance`, `resolved_operation`, `reason_code`, `conditional`,
+`prerequisite_missing`, `missing_prerequisites`,
+`long_connections_affected`, and `rollback`. `op` is `add`, `remove`, or
+`change`; metadata provenance is `explicit`, `pattern`, or
+`conservative_default`. Native activation is `none`, `oxi_rule_reload`,
+`downstream_tls_reload`, `full_reload`, `restart_required`, or `conditional`.
+Resolved operations use the fixed weakest-to-strongest vocabulary `none`,
+`oxi_rule_reload`, `downstream_tls_reload`, `full_snapshot_reload`,
+`listener_transition`, `graceful_drain`, `process_restart`,
+`kubernetes_immutable_rollout`, `admin_cluster_rollout`,
+`blocked_by_confinement`, and `invalid_or_unsupported`. Rollback is
+`automatic`, `manual`, `conditional`, `unavailable`, or `not_applicable`.
+`basis` is `offline_config` or `online_active`; the Admin endpoint always emits
+`online_active`. `ok = false` means invalid, unsupported, overflowed, or
+terminally blocked rather than an executable success.
+
+`minimum_required_operation` is the intrinsic activation required by the
+changed fields after available runtime facts are considered.
+`selected_operation` is the operation the current online executor and
+deployment mode must use; it may be stronger. For example, the Admin config
+load executor selects `full_snapshot_reload` for an otherwise specialized
+in-process reload, while immutable and fixed-member modes select their
+orchestrated rollout. A stronger selected operation is not proof that it has
+been authorized, scheduled, or executed. `conditional = true` and
+`prerequisites[].availability` (`available`, `missing`, `unknown`, or
+`not_applicable`) identify evidence that the planner cannot prove.
+
+The fixed reason-code set is `no_configuration_change`, `oxi_rule_changed`,
+`downstream_tls_material_changed`, `full_snapshot_reload`,
+`startup_only_subsystem`, `runtime_capability_context_required`,
+`runtime_not_resizable`, `listener_added`, `listener_removed`,
+`listener_rebind_required`, `listener_bind_conflict`,
+`graceful_drain_required`, `landlock_policy_expansion`,
+`confinement_evidence_unavailable`, `external_seccomp_profile_required`,
+`immutable_config_requires_rollout`, `deployment_target_unavailable`,
+`admin_cluster_coordinated_rollout`, `admin_cluster_membership_epoch`,
+`signed_artifact_required`, `durable_artifact_required`,
+`all_members_acknowledgement_required`, `rollback_artifact_unavailable`,
+`change_limit_exceeded`, `invalid_configuration`, and
+`unsupported_activation`. The prerequisite vocabulary is
+`runtime_capability_context`, `resolved_listener_inventory`,
+`filesystem_manifest`, `active_landlock_policy`, `active_seccomp_profile`,
+`mount_policy_evidence`, `deployment_target_identity`,
+`prior_rollback_artifact`, `signed_mutation_artifact`,
+`durable_mutation_artifact`, `protected_write_authorization`,
+`cluster_membership_revision`, and `all_members_acknowledgement`. Reports
+contain at most 4,096 changes and reject overflow rather than truncating it.
+
+The listener subplan reports sorted unchanged listeners, additions, removals, rebinds, bind
+conflicts, and external-port availability. The connection subplan reports the
+effect on HTTP/1 keep-alive, HTTP/2, HTTP/3, WebSocket, CONNECT, WebTransport,
+TCP streams, and UDP flows plus configured and effective close deadlines.
+Connection effects are `unaffected`, `graceful_drain`, `force_close`, or
+`process_restart`. Confinement fit is `fits`, `expansion_required`,
+`impossible`, or `unknown`; deployment mode is `standalone`,
+`kubernetes_immutable`, or `admin_cluster`.
+Listener additions are planned before removal/drain where the live executor
+supports overlap, but unknown external port ownership or an incompatible
+same-bind replacement remains conditional; the plan does not claim zero
+downtime. Snapshot publication can drain HTTP and long-lived protocol
+generations even when their socket remains bound.
+
+The endpoint requires only `config:Diff` on `*`. It accepts no `If-Match` or
+`X-OxiBelt-Mutation`, and success does not satisfy `config:Load`,
+`admin:UpdateConfig`, `ipm:UpdateConfig`, protected-write, signed-artifact, or
+rollout authority. Planning does not bind a socket, publish a snapshot, update
+an ETag/revision, create rollback state, or contact Kubernetes. In
+`admin_cluster` mode, `config:Diff` reveals the bounded target count and
+membership revision; exact member identities are returned only when the same
+caller also has `config:GetInstances` on `instances/current`.
+
+Secret-bearing leaves remain visible only as changed/unchanged facts. OxiBelt
+compares process-local, domain-separated HMAC-SHA-256 equality tags before
+redaction; raw values, equality tags, provider-reference values, secret URLs,
+and absolute secret file paths are not returned, logged, or retained in the
+plan. The changed/unchanged bit is nevertheless a secret-equality oracle:
+grant `config:Diff` only to principals trusted to test candidate secrets, use
+high-entropy secret material, and monitor repeated plan requests. Redaction
+prevents direct value disclosure; it does not make low-entropy guessing safe.
+
+`oxibeltctl config plan --current CURRENT --candidate CANDIDATE --format
+text|json` performs offline planning; `oxibeltctl config plan --online
+--candidate CANDIDATE --format text|json` uses this endpoint. Exactly one of
+`--current` and `--online` is required. Text is the default. Exit `0` covers
+every valid supported plan, including restart or rollout; invalid,
+unsupported, blocked, denied, or failed planning exits `1`. The pre-existing
+`oxibeltctl config diff FILE` command remains available.
+
+Online confinement enrichment is deliberately conservative. It can identify
+a known read-path expansion under an already enforced Landlock policy and
+require restart, but filesystem fit and mount policy remain `unknown` until
+the future P1-05 complete filesystem manifest exists. Active seccomp/profile
+identity also remains unknown without evidence; requested configuration and
+checked-in profiles are not treated as proof. Kubernetes immutable plans never
+apply per Pod and report rollout target identity only when supplied by the
+deployment. Fixed-member Admin plans report signed/durable artifact,
+all-member acknowledgement, and rollback prerequisites; the planner never
+creates or authorizes those artifacts. Membership or protected mutation,
+audit, storage, and write-authority boundary changes carry
+`admin_cluster_membership_epoch` and require an out-of-band coordinated
+process restart; the active cluster cannot approve replacement of its own
+trust boundary.
+
 ## Resource Scoping
 
 Admin authorization uses `oxibelt:<namespace>:<service>:<resource>` resource

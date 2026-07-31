@@ -101,6 +101,13 @@ assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/effective-
 assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/feature-status: \"experimental\""
 assert_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/kubernetes-support-policy: \"1\""
 assert_not_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/immutable-config-rollout: \"true\""
+assert_not_contains "${work_dir}/chart_created_default.yaml" "oxibelt.dev/config-rollout-target-kind:"
+for target_env in \
+  OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE \
+  OXIBELT_CONFIG_ROLLOUT_TARGET_KIND \
+  OXIBELT_CONFIG_ROLLOUT_TARGET_NAME; do
+  assert_not_contains "${work_dir}/chart_created_default.yaml" "name: ${target_env}"
+done
 
 render explicit_effective_version --set-string effectiveVersion=0.7.0-dev.abc12345
 assert_contains "${work_dir}/explicit_effective_version.yaml" \
@@ -114,8 +121,28 @@ for workload_kind in Deployment DaemonSet; do
     --set-string "configRollout.mode=kubernetes_immutable"
   assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "kind: ${workload_kind}"
   assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "oxibelt.dev/immutable-config-rollout: \"true\""
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "oxibelt.dev/config-rollout-target-kind: \"${workload_kind}\""
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "oxibelt.dev/config-rollout-target-name: \"oxibelt\""
   assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "oxibelt.dev/config-revision: \"oxibelt-config-"
   assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "oxibelt.dev/config-digest: \"${empty_config_digest}\""
+  for target_env in \
+    OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE \
+    OXIBELT_CONFIG_ROLLOUT_TARGET_KIND \
+    OXIBELT_CONFIG_ROLLOUT_TARGET_NAME; do
+    assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "name: ${target_env}"
+  done
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" "fieldPath: metadata.namespace"
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "fieldPath: \"metadata.annotations['oxibelt.dev/config-rollout-target-kind']\""
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "fieldPath: \"metadata.annotations['oxibelt.dev/config-rollout-target-name']\""
+  assert_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "automountServiceAccountToken: false"
+  assert_not_contains "${work_dir}/chart_created_${workload_kind}.yaml" "name: kube-api-access"
+  assert_not_contains "${work_dir}/chart_created_${workload_kind}.yaml" \
+    "# Source: oxibelt/templates/rbac.yaml"
 
   for config_create in true false; do
     render "external_${workload_kind}_${config_create}" \

@@ -79,7 +79,9 @@ async fn test_state(name: &str) -> (common::TempDir, AppHandle, String, String) 
 #[tokio::test]
 async fn config_explain_reads_the_redacted_active_config_and_source_origin() {
   let (_temp_dir, state, _raw, effective) = test_state("admin-config-explain").await;
-  let (control, _receiver) = AdminControlHandle::new(Some(effective));
+  let activation: toml::Value = toml::from_str(&effective).expect("effective TOML should parse");
+  let (control, _receiver) = AdminControlHandle::new(Some(effective), Some(&activation))
+    .expect("Admin control should initialize");
   let (actor, ipm) = actor_and_ipm("config:GetEffective");
   let context = IpmRequestContext::default();
   let authorization = AdminAuthorization::new(&actor, &ipm, &context);
@@ -156,7 +158,9 @@ async fn config_explain_reads_the_redacted_active_config_and_source_origin() {
 #[tokio::test]
 async fn config_explain_requires_get_effective_permission() {
   let (_temp_dir, state, _raw, effective) = test_state("admin-config-explain-auth").await;
-  let (control, _receiver) = AdminControlHandle::new(Some(effective));
+  let activation: toml::Value = toml::from_str(&effective).expect("effective TOML should parse");
+  let (control, _receiver) = AdminControlHandle::new(Some(effective), Some(&activation))
+    .expect("Admin control should initialize");
   let (actor, ipm) = actor_and_ipm("config:GetStatus");
   let context = IpmRequestContext::default();
   let authorization = AdminAuthorization::new(&actor, &ipm, &context);
@@ -182,7 +186,8 @@ async fn config_explain_requires_get_effective_permission() {
 #[tokio::test]
 async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
   let (_temp_dir, state, candidate, _effective) = test_state("admin-config-validate-report").await;
-  let (control, _receiver) = admin_control::AdminControlHandle::new(None);
+  let (control, _receiver) =
+    admin_control::AdminControlHandle::new(None, None).expect("Admin control should initialize");
   let (actor, ipm) = actor_and_ipm("config:Validate");
   let context = IpmRequestContext::default();
   let authorization = AdminAuthorization::new(&actor, &ipm, &context);
@@ -255,4 +260,99 @@ async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
     body["details"]["config_report"]["diagnostics"][0]["severity"],
     "fatal"
   );
+}
+
+#[tokio::test]
+async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
+  let (temp_dir, state, candidate, effective) = test_state("admin-config-diff-plan").await;
+  let current: toml::Value = toml::from_str(&candidate).expect("current TOML should parse");
+  let (control, _receiver) = AdminControlHandle::new(Some(effective), Some(&current))
+    .expect("Admin control should initialize");
+  let before = control.status().await;
+
+  let mut candidate_value = current.clone();
+  candidate_value["logging"]["level"] = toml::Value::String("debug".to_string());
+  let current_key = candidate_value["tls"]["private_key"]
+    .as_str()
+    .expect("test config should include a private-key reference");
+  let alternate_key = "alternate-private-key.pem";
+  std::fs::copy(
+    temp_dir.path().join(current_key),
+    temp_dir.path().join(alternate_key),
+  )
+  .expect("alternate private key should be copied");
+  candidate_value["tls"]["private_key"] = toml::Value::String(alternate_key.to_string());
+  let candidate = toml::to_string(&candidate_value).expect("candidate should encode");
+
+  let (actor, ipm) = actor_and_ipm("config:Diff");
+  let context = IpmRequestContext::default();
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let request = hyper::Request::builder()
+    .method(::http::Method::POST)
+    .uri("/admin/v1/config/diff")
+    .body(Full::new(Bytes::from(
+      serde_json::to_vec(&json!({ "format": "toml", "config": candidate }))
+        .expect("request should serialize"),
+    )))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state.clone(),
+    control.clone(),
+    &authorization,
+    &::http::Method::POST,
+    "/admin/v1/config/diff",
+  )
+  .await;
+  let status = response.status();
+  let body = response
+    .into_body()
+    .collect()
+    .await
+    .expect("response should collect")
+    .to_bytes();
+  assert_eq!(
+    status,
+    StatusCode::OK,
+    "unexpected diff response: {}",
+    String::from_utf8_lossy(&body)
+  );
+  let encoded = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+  assert!(!encoded.contains(alternate_key));
+  assert!(!encoded.contains(&temp_dir.path().display().to_string()));
+  let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
+  assert_eq!(body["activation_plan_schema_version"], 1);
+  assert_eq!(body["native_schema_epoch"], 1);
+  assert_eq!(body["ok"], true);
+  assert_eq!(body["basis"], "online_active");
+  assert!(body["changes"].as_array().is_some_and(|changes| {
+    changes.iter().any(|change| {
+      change["path"] == "tls.private_key"
+        && change["secret"] == true
+        && change.get("current_value").is_none()
+        && change.get("candidate_value").is_none()
+    })
+  }));
+  assert_eq!(control.status().await, before);
+
+  let (actor, ipm) = actor_and_ipm("config:Load");
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let request = hyper::Request::builder()
+    .method(::http::Method::POST)
+    .uri("/admin/v1/config/diff")
+    .body(Full::new(Bytes::from(
+      serde_json::to_vec(&json!({ "format": "toml", "config": candidate }))
+        .expect("request should serialize"),
+    )))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state,
+    control,
+    &authorization,
+    &::http::Method::POST,
+    "/admin/v1/config/diff",
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }

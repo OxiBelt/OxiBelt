@@ -38,11 +38,15 @@ async fn serve_inner(
   runtime_overrides: RuntimeOverrides,
 ) -> anyhow::Result<()> {
   let (error_tx, mut error_rx) = mpsc::unbounded_channel();
-  let effective_config = config_path
+  let activation_config = config_path
     .as_ref()
-    .and_then(|path| Config::load_effective_toml_redacted(path).ok())
+    .and_then(|path| Config::load_effective_toml_for_activation(path).ok());
+  let effective_config = activation_config
+    .as_ref()
+    .map(Config::redact_effective_toml_value)
     .and_then(|value| toml::to_string_pretty(&value).ok());
-  let (admin_control, admin_control_rx) = AdminControlHandle::new(effective_config);
+  let (admin_control, admin_control_rx) =
+    AdminControlHandle::new(effective_config, activation_config.as_ref())?;
   let prepared_cluster =
     PreparedAdminClusterRuntime::prepare(&state, &admin_control, error_tx.clone()).await?;
   let admin_operations = {

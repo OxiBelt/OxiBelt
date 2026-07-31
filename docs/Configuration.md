@@ -2747,6 +2747,74 @@ oxibeltctl lifecycle drain
 oxibeltctl auth check --action config:GetStatus --resource '*'
 ```
 
+Configuration activation planning is additive to `config diff`; neither
+command applies a candidate. Offline planning loads and validates both files
+through the production include, operational-profile, path-root, and semantic
+configuration pipeline:
+
+```sh
+oxibeltctl config plan \
+  --current /etc/oxibelt/config/oxibelt.toml \
+  --candidate ./review/oxibelt.toml \
+  --format text
+```
+
+Online planning merges the candidate's local includes, authenticates to the
+configured Admin listener, and calls `POST /admin/v1/config/diff`:
+
+```sh
+oxibeltctl config plan \
+  --online \
+  --candidate ./review/oxibelt.toml \
+  --format json
+```
+
+Exactly one of `--current CURRENT` and `--online` is required, and
+`--candidate CANDIDATE` is always required. `--format` is `text` by default or
+`json` for the stable activation-plan schema. A valid plan exits `0`, including
+one that requires a process restart or orchestrated rollout. An invalid,
+unsupported, confinement-blocked, authorization-failed, or otherwise failed
+plan exits `1`. Offline output uses `basis = "offline_config"`; Admin-enriched
+output uses `basis = "online_active"`.
+
+The report separates the intrinsic `minimum_required_operation` from the
+executor/deployment-aware `selected_operation`. It classifies each changed
+schema field, unchanged listeners, listener additions/removals/rebinds and bind conflicts,
+long-lived connection effects, rollback mode, confinement fit, and deployment
+prerequisites. Mixed OxiRule and downstream-TLS changes promote to a full
+snapshot reload. A plan never calls listener preparation, binds a socket,
+publishes a snapshot, creates a signed/durable artifact, or grants apply
+authority. Online planning can therefore select an operation that the caller
+is not authorized to perform.
+
+Secret fields emit only their stable config path, change operation, and
+`secret = true`. Process-local domain-separated HMAC equality tags distinguish
+unchanged from changed secret material before redaction, then remain
+non-serializable and zeroized; raw secret values, tags, URLs, provider
+references, and absolute secret paths never enter plan output. Because the
+changed/unchanged result is still an equality oracle, grant `config:Diff` only
+to principals trusted to test candidate secrets and avoid low-entropy literal
+secrets. The report is bounded to 4,096 per-field changes and rejects overflow
+instead of truncating.
+
+Listener transition output is a feasibility plan, not a zero-downtime promise.
+An addition is ordered before removal where compatible live socket ownership
+permits overlap; external port availability remains unknown until the executor
+binds, and same-bind incompatible TCP/QUIC options or TURN replacement can
+require drain or restart. A snapshot change may gracefully drain HTTP/1
+keep-alive, HTTP/2, HTTP/3, WebSocket, CONNECT, and WebTransport generations
+even if their socket remains. TCP streams and UDP flows are affected when
+their listener generation or process is replaced. Configured and effective
+force-close deadlines are reported separately.
+
+Confinement output is intentionally incomplete until P1-05 supplies a complete
+filesystem-access manifest. The current planner can detect expansion of known
+configuration read paths under enforced Landlock and select restart, but it
+reports filesystem and mount fit as `unknown`; a known subset is not proof of
+complete fit. Requested seccomp settings and checked-in runtime profiles do not
+prove the active seccomp identity. No planning command expands Landlock,
+installs seccomp, remounts a filesystem, or probes `/proc` to invent evidence.
+
 Dynamic mitigation commands are panic-button wrappers around the dynamic policy
 automation API. Durations accept seconds or `s`, `m`, `h`, and `d` suffixes;
 `--dry-run` records match context without enforcing the action. If `--reason`
@@ -2934,6 +3002,21 @@ snapshot, mutation, or immutable-rollout conflicts; `412` for stale
 `If-Match`; `413` above the 16 KiB request limit; `428` for missing `If-Match`
 or required mutation metadata; and `503` for an unavailable provider, entropy
 source, mutation store, audit authority, or cluster rollout dependency.
+
+An Admin-cluster activation plan always selects an all-member coordinated
+rollout for an ordinary config change. Membership, mutation, audit, storage,
+or protected-write boundary changes use the fixed
+`admin_cluster_membership_epoch` reason and require out-of-band coordination;
+the selected cluster rollout includes a coordinated process restart, and an
+active cluster cannot authorize replacement of its own trust boundary.
+Planning reports the exact bounded target count, canonical membership
+revision, and signed/durable artifact, all-member acknowledgement, protected
+write, and rollback prerequisites. It returns member IDs only when the caller
+has both `config:Diff` on `*` and `config:GetInstances` on
+`instances/current`; otherwise `identities_withheld = true`. The plan does not
+construct an envelope, encrypt or persist an artifact, perform canary apply,
+or satisfy any of those prerequisites.
+
 Kubernetes immutable rollout mode specifically returns
 `409 immutable_rollout_conflict` without changing state. Break-glass activation is
 exposed through `GET /admin/v1/break-glass/activations/self`,
@@ -2957,6 +3040,19 @@ revision, digest, and apply state without replacing its existing process-local
 revision or ETag fields. In this mode, the per-Pod config load, rollback,
 file-sync, and downstream TLS reload mutations return `409`; read-only
 validate, diff, effective-config, and status operations remain available.
+
+Immutable Pods may also supply the optional all-or-none planning context
+`OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE`,
+`OXIBELT_CONFIG_ROLLOUT_TARGET_KIND` (`Deployment` or `DaemonSet`), and
+`OXIBELT_CONFIG_ROLLOUT_TARGET_NAME`. The Helm chart populates these from its
+workload identity and the Pod namespace. Missing, partial, or malformed values
+do not invalidate the already verified config revision; the plan instead
+reports `deployment_target_identity` unavailable. These values identify an
+operator-asserted rollout target only. OxiBelt does not contact the Kubernetes
+API, authorize a patch, prove that the workload still exists, or discover a
+prior rollback artifact. `kubernetes_immutable` plans therefore select
+`kubernetes_immutable_rollout`, prohibit per-Pod apply, and keep rollback
+conditional unless an external controller supplies retained artifact evidence.
 
 Admin diagnostics endpoints return the same production preflight report shape as
 `oxibeltctl doctor`: `schema_version` (currently `1`), `ok`, `profile`,

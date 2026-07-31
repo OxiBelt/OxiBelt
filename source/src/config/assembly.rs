@@ -47,6 +47,18 @@ impl Config {
   }
 
   pub fn load_effective_toml_redacted(path: &Path) -> anyhow::Result<toml::Value> {
+    Ok(Self::redact_effective_toml_value(
+      &Self::load_effective_toml_for_activation(path)?,
+    ))
+  }
+
+  pub(crate) fn redact_effective_toml_value(value: &toml::Value) -> toml::Value {
+    let mut redacted = value.clone();
+    redact_effective_toml(&mut redacted);
+    redacted
+  }
+
+  pub(crate) fn load_effective_toml_for_activation(path: &Path) -> anyhow::Result<toml::Value> {
     let loaded = load_toml_with_includes(path)?;
     let mut value = loaded.value;
     operational_profile::apply_to_toml(&mut value)?;
@@ -55,7 +67,6 @@ impl Config {
     let config = Self::load(path)?;
     config.validate()?;
     config.write_resolved_workers_to_toml(&mut value)?;
-    redact_effective_toml(&mut value);
     Ok(value)
   }
 

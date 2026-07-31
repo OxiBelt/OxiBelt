@@ -197,10 +197,22 @@ pub(super) async fn apply_config_load(
     record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
     return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
   }
+  let activation_config =
+    match Config::load_admin_inline_effective_toml_for_activation(&raw, &active.config) {
+      Ok(value) => value,
+      Err(error) => {
+        record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
+        return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+      }
+    };
   let effective = match Config::load_admin_inline_effective_toml_redacted(&raw, &active.config)
     .and_then(|value| toml::to_string_pretty(&value).map_err(Into::into))
   {
-    Ok(value) => Some(value),
+    Ok(value) => Some(
+      control
+        .effective_config_update(value, &activation_config)
+        .await,
+    ),
     Err(error) => {
       record_operation(control, "config_load", "rejected", Some(error.to_string())).await;
       return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
@@ -416,7 +428,7 @@ pub(super) async fn install_snapshot(
   listeners: &mut ListenerSupervisor,
   rollback: Option<&mut Option<RollbackSnapshot>>,
   control: &AdminControlHandle,
-  effective_config: Option<String>,
+  effective_config: Option<AdminEffectiveConfig>,
 ) -> anyhow::Result<()> {
   let active = state.snapshot();
   let pending = listeners.prepare(&snapshot).await?;

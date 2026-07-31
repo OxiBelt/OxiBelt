@@ -304,7 +304,9 @@ pub(super) async fn bind_admin_listener(bind: SocketAddr) -> anyhow::Result<Boun
 
 #[cfg(all(test, feature = "admin-runtime"))]
 pub(super) fn test_admin_control() -> AdminControlHandle {
-  AdminControlHandle::new(None).0
+  AdminControlHandle::new(None, None)
+    .expect("test Admin control should initialize")
+    .0
 }
 
 #[cfg(all(test, feature = "admin-runtime"))]

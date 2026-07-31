@@ -304,6 +304,30 @@ Hot reload modes:
 - `downstream_tls`: reload the current downstream certificate, private key, static OCSP response, or live OCSP runtime.
 - `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
+Configuration activation planning is deterministic, bounded, redacted, and
+side-effect-free. For each effective-schema change it reports the native
+activation, resolved operation, fixed reason, prerequisites, long-connection
+effect, and rollback class, then aggregates the strongest safe operation.
+Mixed specialized reloads may promote to a full snapshot. The report separates
+the intrinsic minimum from the operation selected by the current executor and
+deployment authority, so an Admin full-snapshot choice, process restart,
+Kubernetes immutable rollout, fixed-member Admin rollout, confinement block,
+or invalid candidate is explicit rather than represented as zero downtime.
+Offline planning uses two production-loaded files; online planning adds active
+runtime, listener, deployment, authorization, and bounded confinement context.
+
+Planning never executes activation. It does not prepare or bind listeners,
+publish a snapshot, drain connections, restart a process, mutate Kubernetes,
+create rollout artifacts, or grant protected-write authority. Secret changes
+are detected with process-local domain-separated HMAC equality tags and exposed
+only as redacted change facts. Listener feasibility accounts for additions,
+removals, rebinds, same-bind conflicts, HTTP/QUIC socket compatibility, TURN,
+and the effective graceful/long-connection close bounds; unknown external port
+ownership remains conditional. Filesystem and mount-policy fit remain unknown
+until P1-05 supplies a complete access manifest. Known Landlock read expansion
+can require restart, but a known subset, requested seccomp setting, or checked-in
+profile is not evidence that active confinement permits the candidate.
+
 Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place. Successful reloads publish a new data-plane snapshot and gracefully drain HTTP connections that captured the previous snapshot, even when listener binds do not change. Successful full reloads also activate replacement listeners before old listener generations drain, so readiness remains OK for the active instance while in-flight requests on the old generation finish. HTTP/1.1 and HTTP/2 listener or snapshot-generation drain asks Hyper to gracefully close old connections; HTTP/3 stops accepting new streams and sends graceful connection shutdown before its endpoint closes after the graceful timeout when a listener generation is retired. Upgraded tunnels, WebTransport, and TCP stream bridges are protected by the configured long-connection close delay, but new request streams received by a drained WebTransport HTTP/3 bridge are rejected instead of being evaluated against the old snapshot.
 
 Kubernetes-native immutable rollout mode is intentionally outside this
@@ -398,7 +422,7 @@ Lifecycle endpoints are:
 - `GET /admin/v1/mutations/{request_id}`: returns the caller-authorized redacted durable mutation receipt.
 - `GET /admin/v1/config/effective`: requires `config:GetEffective`, returns the redacted active effective TOML and ETag, including the canonical profile/version and injected v1 defaults when a profile is selected.
 - `POST /admin/v1/config/validate`: requires `config:Validate`, validates submitted TOML against the active path roots without installing it.
-- `POST /admin/v1/config/diff`: requires `config:Diff`, returns a coarse redacted effective-config diff for submitted TOML.
+- `POST /admin/v1/config/diff`: requires `config:Diff`, preserves the redacted ordered `path`/`op` diff and additively returns activation-plan schema version `1` with per-field classification plus aggregate listener, connection, confinement, deployment, prerequisite, and rollback plans. It accepts no apply authority and performs no mutation. Exact fixed-member target identities additionally require `config:GetInstances` on `instances/current`.
 - `POST /admin/v1/config/load`: requires `config:Load` and matching `If-Match`, installs a runtime-only config snapshot. Changes to `[admin]` additionally require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config`; changes to `[ipm]` additionally require `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config`. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.
 - `POST /admin/v1/config/rollback`: requires `config:Rollback` and matching `If-Match`, restores the last-good runtime snapshot. Rollbacks that change `[admin]` or `[ipm]` require the same protected config update actions as config load. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.
 - `POST /admin/v1/files/sync`: requires matching `If-Match`, writes an all-or-nothing batch under configured config/OxiRule roots, and can apply `none`, `oxirule`, `full`, or `downstream_tls`. Config-root writes require `config:SyncFiles`; OxiRule and OxiRule group writes require the matching `waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, or `waf:DeleteOxiRuleGroup`. OxiRule file-sync roots are suffix-bound: `oxirule` accepts `.oxirule.toml` paths and `oxirule_group` accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule`. Config-root writes and `apply = "full"` are prechecked so staged or disk-candidate `[admin]` and `[ipm]` changes require the protected config update actions before files are committed. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.

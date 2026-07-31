@@ -1745,7 +1745,7 @@
               "description": "OxiBelt native field `admin.operations.artifact_max_bytes`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1772,7 +1772,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.backend`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1781,7 +1781,7 @@
               "description": "OxiBelt native field `admin.operations.checkpoint_max_bytes`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1789,7 +1789,7 @@
             "enabled": {
               "description": "OxiBelt native field `admin.operations.enabled`. Production Rust validation is authoritative.",
               "type": "boolean",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1816,7 +1816,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.event_buffer`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1825,7 +1825,7 @@
               "description": "OxiBelt native field `admin.operations.lease_renew_seconds`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1834,7 +1834,7 @@
               "description": "OxiBelt native field `admin.operations.lease_seconds`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1843,7 +1843,7 @@
               "description": "OxiBelt native field `admin.operations.max_lifetime_seconds`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1870,7 +1870,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.max_queued`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1897,7 +1897,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.max_running`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1924,7 +1924,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.max_stored`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1951,7 +1951,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.persistence`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1960,7 +1960,7 @@
               "description": "OxiBelt native field `admin.operations.result_max_bytes`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1969,7 +1969,7 @@
               "description": "OxiBelt native field `admin.operations.retention_seconds`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -1996,7 +1996,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.websocket`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -2023,7 +2023,7 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.webtransport`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -2050,14 +2050,14 @@
                 }
               ],
               "description": "OxiBelt native field `admin.operations.webtransport_max_sessions`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -7299,7 +7299,7 @@
             }
           ],
           "description": "OxiBelt native field `crypto.primitive_backend`. Production Rust validation is authoritative.",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -7330,7 +7330,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitive_backends.aes_gcm`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7357,7 +7357,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitive_backends.chacha20poly1305`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7384,7 +7384,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitive_backends.hkdf`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7411,7 +7411,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitive_backends.hmac_sha256`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7438,14 +7438,14 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitive_backends.sha2`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -7457,7 +7457,7 @@
             "aws_lc_rs"
           ],
           "type": "string",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -7488,7 +7488,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitives.aes_gcm`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7515,7 +7515,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitives.chacha20poly1305`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7542,7 +7542,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitives.hkdf`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7569,7 +7569,7 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitives.hmac_sha256`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -7596,14 +7596,14 @@
                 }
               ],
               "description": "OxiBelt native field `crypto.primitives.sha2`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -7615,14 +7615,14 @@
             "ring"
           ],
           "type": "string",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         }
       },
       "type": "object",
-      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-config-activation": "restart_required",
       "x-oxibelt-introduced-epoch": 1,
       "x-oxibelt-reference-activation": "none",
       "x-oxibelt-secret-class": "none"
@@ -8968,7 +8968,7 @@
             }
           ],
           "description": "OxiBelt native field `health.bind`. Production Rust validation is authoritative.",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -8976,7 +8976,7 @@
         "enabled": {
           "description": "OxiBelt native field `health.enabled`. Production Rust validation is authoritative.",
           "type": "boolean",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -10688,7 +10688,7 @@
           ],
           "default": "info",
           "description": "OxiBelt native field `logging.level`. Production Rust validation is authoritative.",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -10726,7 +10726,7 @@
             }
           ],
           "description": "OxiBelt native field `metrics.bind`. Production Rust validation is authoritative.",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -10761,7 +10761,7 @@
         "enabled": {
           "description": "OxiBelt native field `metrics.enabled`. Production Rust validation is authoritative.",
           "type": "boolean",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -19806,7 +19806,7 @@
                 "required"
               ],
               "type": "string",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -19822,7 +19822,7 @@
                     "enforce"
                   ],
                   "type": "string",
-                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
@@ -19849,7 +19849,7 @@
                     }
                   ],
                   "description": "OxiBelt native field `runtime.hardening.landlock.read_paths`. Production Rust validation is authoritative.",
-                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
@@ -19876,14 +19876,14 @@
                     }
                   ],
                   "description": "OxiBelt native field `runtime.hardening.landlock.read_write_paths`. Production Rust validation is authoritative.",
-                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
                 }
               },
               "type": "object",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -19900,21 +19900,21 @@
                     "enforce"
                   ],
                   "type": "string",
-                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
                 }
               },
               "type": "object",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -19933,7 +19933,7 @@
                 "full"
               ],
               "type": "string",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -19942,14 +19942,14 @@
               "description": "OxiBelt native field `runtime.hot_reload.poll_interval_ms`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -20030,7 +20030,7 @@
             "enabled": {
               "description": "OxiBelt native field `runtime.netport_switcher.enabled`. Production Rust validation is authoritative.",
               "type": "boolean",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -20039,7 +20039,7 @@
               "description": "OxiBelt native field `runtime.netport_switcher.io_timeout_ms`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -20066,7 +20066,7 @@
                 }
               ],
               "description": "OxiBelt native field `runtime.netport_switcher.main_gid`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -20093,7 +20093,7 @@
                 }
               ],
               "description": "OxiBelt native field `runtime.netport_switcher.main_uid`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -20120,7 +20120,7 @@
                 }
               ],
               "description": "OxiBelt native field `runtime.netport_switcher.pidfd_supervision`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
@@ -20147,14 +20147,14 @@
                 }
               ],
               "description": "OxiBelt native field `runtime.netport_switcher.socket_dir`. Production Rust validation is authoritative.",
-              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-config-activation": "restart_required",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
@@ -20221,7 +20221,7 @@
             }
           ],
           "description": "OxiBelt native field `runtime.unprivileged_mode`. Production Rust validation is authoritative.",
-          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-config-activation": "restart_required",
           "x-oxibelt-introduced-epoch": 1,
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
