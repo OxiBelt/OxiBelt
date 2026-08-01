@@ -438,6 +438,21 @@ connect-failure, saturation, and wait changes. To roll back, restore or omit the
 resolver fields and perform another full reload; this does not authorize
 cross-origin connection reuse or post-dispatch request replay.
 
+Post-beta.2 development also refreshes the pinned RISC-V `cross-rs` builder
+source and image together with the rootless Docker input used for independent
+release rebuilds. The compiler version, target, linker, compiler-file hash,
+`/x-tools`-only copy boundary, executable and image roles, repositories,
+packaging layout, runtime capabilities, configuration, and persisted state are
+unchanged, so this maintenance update requires no configuration or state
+migration.
+
+A later release candidate must rebuild every official artifact and produce
+fresh exact-revision vulnerability, attestation, provenance, and independent-
+rebuild evidence with the refreshed inputs; evidence produced with earlier
+pins must not be reused. Roll back a deployed candidate by restoring the
+retained prior immutable image digests rather than by changing configuration or
+persisted state.
+
 Before applying an upgrade candidate, operators can compare production-loaded
 files without Admin authority:
 
