@@ -1,0 +1,25 @@
+{{- include "oxibelt.validateConfigRollout" . -}}
+{{- include "oxibelt.validateBaseConfigKey" . -}}
+{{- include "oxibelt.validateKubernetesServiceAccount" . -}}
+{{- include "oxibelt.validateRedisSecretProjections" . -}}
+{{- include "oxibelt.validateOperationalProfile" . -}}
+{{- include "oxibelt.validateAdmin" . -}}
+{{- include "oxibelt.validateRuntimeHardening" . -}}
+{{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- include "oxibelt.validateOperationalProfileV2" . -}}
+{{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oxibelt.profileReportName" . }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+    oxibelt.dev/profile-report-schema: "1"
+  annotations:
+    helm.sh/resource-policy: keep
+    oxibelt.dev/profile-report-digest: {{ include "oxibelt.profileReportDigest" . | quote }}
+immutable: true
+data:
+  report.json: |-
+{{ include "oxibelt.profileReportContent" . | indent 4 }}
+{{- end }}

@@ -9,6 +9,7 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt"
 secure_values="${chart_dir}/examples/edge-secure-medium-v1-values.yaml"
+v2_values="${chart_dir}/examples/edge-secure-medium-v2-values.yaml"
 admin_values="${chart_dir}/examples/admin-mtls-values.yaml"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
@@ -124,6 +125,14 @@ assert_contains "${work_dir}/secure_profile.yaml" "kubernetes.io/metadata.name: 
 assert_contains "${work_dir}/secure_profile.yaml" "app.kubernetes.io/name: prometheus"
 assert_contains "${work_dir}/secure_profile.yaml" "k8s-app: kube-dns"
 assert_not_contains "${work_dir}/secure_profile.yaml" "endPort:"
+
+render secure_profile_v2 -f "${v2_values}"
+assert_contains "${work_dir}/secure_profile_v2.yaml" "name: oxibelt-default-deny"
+assert_contains "${work_dir}/secure_profile_v2.yaml" "name: oxibelt-public-ingress"
+assert_contains "${work_dir}/secure_profile_v2.yaml" "name: oxibelt-metrics-ingress"
+assert_contains "${work_dir}/secure_profile_v2.yaml" "name: oxibelt-egress"
+assert_contains "${work_dir}/secure_profile_v2.yaml" '"defaultDenyIngress": true'
+assert_contains "${work_dir}/secure_profile_v2.yaml" '"defaultDenyEgress": true'
 
 render portable_show_only \
   --set networkPolicy.enabled=true \
@@ -249,5 +258,17 @@ expect_failure_contains missing_kubernetes_api_destination_helper \
   --skip-schema-validation \
   --set networkPolicy.enabled=true \
   --set kubernetesDiscovery.rbac.create=true
+
+expect_failure_contains v2_unreviewed_world_cidr \
+  "OBP106-UNRESTRICTED-CIDR" \
+  -f "${v2_values}" \
+  --skip-schema-validation \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+
+render v2_reviewed_world_cidr \
+  -f "${v2_values}" \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":"reviewed public TLS origin"},"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+assert_contains "${work_dir}/v2_reviewed_world_cidr.yaml" "cidr: 0.0.0.0/0"
+assert_contains "${work_dir}/v2_reviewed_world_cidr.yaml" '"justification": "reviewed public TLS origin"'
 
 echo "Helm NetworkPolicy check passed"

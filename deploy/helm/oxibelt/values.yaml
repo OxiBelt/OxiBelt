@@ -70,6 +70,10 @@ kubernetesDiscovery:
     # Set this for externally managed discovery RBAC. Chart-created RBAC also
     # enables the projection so an operator cannot grant unusable access.
     enabled: false
+    # V2 requires an explicit audience whenever a projected Kubernetes API
+    # credential is enabled. V1 keeps the Kubernetes API server default when
+    # this is empty.
+    audience: ""
     # Bound projected tokens rotate before expiry. Keep their requested
     # lifetime at or below one hour.
     expirationSeconds: 3600
@@ -115,7 +119,12 @@ networkPolicy:
     # audit label; it does not broaden the generated policy.
     destinations: []
     # - name: primary-upstream
-    #   category: upstream # upstream | shared-state | revocation | kubernetes-api | external-dependency
+    #   category: upstream # upstream | shared-state | telemetry | revocation | kubernetes-api | external-dependency
+    #   # A destination containing 0.0.0.0/0 or ::/0 is rejected by v2 unless
+    #   # this local, reviewable exception is explicitly enabled and justified.
+    #   unrestrictedCidrs:
+    #     enabled: false
+    #     justification: ""
     #   to:
     #   - namespaceSelector:
     #       matchLabels:
@@ -390,6 +399,25 @@ runtimeHardening:
     externalProfile:
       identity: ""
       digest: "" # sha256:<64 lower-case hex characters>
+  filesystemManifest:
+    # Required by edge-secure-medium v2. Generate this from the fully resolved
+    # native configuration with `oxibeltctl config filesystem-access`.
+    expectedDigest: "" # sha256:<64 lower-case hex characters>
+
+# V2 permits writable storage only through this typed, reportable interface.
+# Each item selects exactly one bounded emptyDir or an existing PVC. The array
+# must remain empty for unprofiled and v1 deployments.
+writableVolumes: []
+# - name: cache
+#   mountPath: /var/cache/oxibelt
+#   purpose: response-cache
+#   emptyDir:
+#     sizeLimit: 128Mi
+# - name: durable-state
+#   mountPath: /var/lib/oxibelt
+#   purpose: durable-state
+#   persistentVolumeClaim:
+#     claimName: oxibelt-state
 
 extraEnv: []
 extraVolumes: []

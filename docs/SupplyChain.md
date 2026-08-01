@@ -148,6 +148,14 @@ keysigner, or standalone image. The Helm chart validates official
 repository/role combinations so selecting `dataplane-strict` cannot silently
 run the compatibility `oxibelt` executable.
 
+`edge-secure-medium` v2 is intentionally stricter than the general chart: it
+admits only `ghcr.io/oxibelt/oxibelt-dataplane-strict` at an immutable digest
+and records that exact tuple in its Secret-free profile report. This is digest
+selection, not attestation admission. The report's `supplyChainBundle` remains
+unset until the separately designed `OB-P2-04` contract can bind and verify an
+exact trusted bundle. Do not populate a lookalike value, infer success from an
+OCI referrer, or treat a ConfigMap checksum as provenance evidence.
+
 ## Verify GitHub attestations
 
 Use a current GitHub CLI, authenticate it for the OxiBelt repository, and

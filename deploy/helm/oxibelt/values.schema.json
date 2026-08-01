@@ -74,7 +74,7 @@
         },
         "category": {
           "type": "string",
-          "enum": ["upstream", "shared-state", "revocation", "kubernetes-api", "external-dependency"]
+          "enum": ["upstream", "shared-state", "telemetry", "revocation", "kubernetes-api", "control-plane", "external-dependency"]
         },
         "to": {
           "type": "array",
@@ -85,6 +85,15 @@
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/definitions/networkPolicyPort" }
+        },
+        "unrestrictedCidrs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "justification"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "justification": { "type": "string", "maxLength": 512 }
+          }
         }
       }
     },
@@ -109,7 +118,7 @@
         },
         "category": {
           "type": "string",
-          "enum": ["upstream", "shared-state", "revocation", "kubernetes-api", "external-dependency"]
+          "enum": ["upstream", "shared-state", "telemetry", "revocation", "kubernetes-api", "control-plane", "external-dependency"]
         },
         "matchNames": {
           "type": "array",
@@ -150,6 +159,58 @@
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "targetPort": { "type": "integer", "minimum": 1024, "maximum": 65535 }
       }
+    },
+    "writableVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "mountPath", "purpose"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "not": { "enum": ["config", "tls", "oxirule", "kube-api-access"] }
+        },
+        "mountPath": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$"
+        },
+        "emptyDir": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sizeLimit"],
+          "properties": {
+            "sizeLimit": { "type": "string", "minLength": 1 }
+          }
+        },
+        "persistentVolumeClaim": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["claimName"],
+          "properties": {
+            "claimName": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+            }
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["emptyDir"],
+          "not": { "required": ["persistentVolumeClaim"] }
+        },
+        {
+          "required": ["persistentVolumeClaim"],
+          "not": { "required": ["emptyDir"] }
+        }
+      ]
     }
   },
   "properties": {
@@ -161,7 +222,7 @@
           "type": "string",
           "enum": ["", "edge-secure-medium"]
         },
-        "version": { "type": "integer", "minimum": 1 },
+        "version": { "type": "integer", "minimum": 1, "maximum": 2 },
         "wafMode": { "type": "string", "enum": ["enforcing", "monitor"] }
       }
     },
@@ -254,6 +315,7 @@
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
+            "audience": { "type": "string", "maxLength": 253 },
             "expirationSeconds": { "type": "integer", "minimum": 600, "maximum": 3600 }
           }
         },
@@ -582,7 +644,7 @@
     "runtimeHardening": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["seccomp"],
+      "required": ["seccomp", "filesystemManifest"],
       "properties": {
         "seccomp": {
           "type": "object",
@@ -610,8 +672,24 @@
               }
             }
           }
+        },
+        "filesystemManifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expectedDigest"],
+          "properties": {
+            "expectedDigest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$"
+            }
+          }
         }
       }
+    },
+    "writableVolumes": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/definitions/writableVolume" }
     },
     "extraEnv": {
       "type": "array",
@@ -621,6 +699,31 @@
         "required": ["name"],
         "properties": {
           "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "extraVolumes": { "type": "array" },
+    "extraVolumeMounts": { "type": "array" },
+    "podLabels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "privileged": { "type": "boolean" },
+        "allowPrivilegeEscalation": { "type": "boolean" },
+        "readOnlyRootFilesystem": { "type": "boolean" },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "drop": { "type": "array", "items": { "type": "string" } },
+            "add": { "type": "array", "items": { "type": "string" } }
+          }
         }
       }
     },
@@ -735,6 +838,99 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "required": ["operationalProfile"],
+        "properties": {
+          "operationalProfile": {
+            "required": ["name", "version"],
+            "properties": {
+              "name": { "const": "edge-secure-medium" },
+              "version": { "const": 2 }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": ["image", "networkPolicy", "runtimeHardening", "writableVolumes"],
+        "properties": {
+          "image": {
+            "required": ["role", "repository", "digest"],
+            "properties": {
+              "role": { "const": "dataplane-strict" },
+              "repository": {
+                "enum": ["", "ghcr.io/oxibelt/oxibelt-dataplane-strict"]
+              },
+              "digest": { "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          },
+          "networkPolicy": {
+            "required": ["enabled"],
+            "properties": { "enabled": { "const": true } }
+          },
+          "cacheVolume": {
+            "required": ["mode", "sizeLimit"],
+            "properties": {
+              "mode": { "const": "auto" },
+              "sizeLimit": { "const": "" }
+            }
+          },
+          "runtimeHardening": {
+            "required": ["seccomp", "filesystemManifest"],
+            "properties": {
+              "seccomp": {
+                "required": ["expectation"],
+                "properties": { "expectation": { "const": "required" } }
+              },
+              "filesystemManifest": {
+                "required": ["expectedDigest"],
+                "properties": {
+                  "expectedDigest": { "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              }
+            }
+          },
+          "extraVolumes": { "maxItems": 0 },
+          "extraVolumeMounts": { "maxItems": 0 },
+          "securityContext": {
+            "additionalProperties": false,
+            "properties": {
+              "privileged": { "const": false },
+              "allowPrivilegeEscalation": { "const": false },
+              "readOnlyRootFilesystem": { "const": true },
+              "capabilities": {
+                "additionalProperties": false,
+                "properties": {
+                  "drop": {
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": { "const": "ALL" }
+                  },
+                  "add": { "maxItems": 0 }
+                }
+              }
+            }
+          },
+          "podSecurityContext": {
+            "additionalProperties": false,
+            "properties": {
+              "runAsNonRoot": { "const": true },
+              "runAsUser": { "const": 10001 },
+              "runAsGroup": { "const": 10001 },
+              "fsGroup": { "const": 10001 },
+              "seccompProfile": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "type": { "enum": ["RuntimeDefault", "Localhost"] },
+                  "localhostProfile": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "if": {
         "required": ["config"],

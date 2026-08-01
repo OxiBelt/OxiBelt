@@ -169,7 +169,9 @@ and an operator-tested LSM policy remain separate layers.
   NetworkPolicy controls appropriate to their trust boundary.
 - When the Helm NetworkPolicy baseline is enabled, the cluster runs a CNI that
   enforces it and operators declare every intended DNS, upstream, shared-state,
-  revocation, Kubernetes API, and external-dependency path before rollout.
+  telemetry, revocation, Kubernetes API, and external-dependency path before
+  rollout. A v2 world-CIDR escape is an explicit reviewed residual risk, not a
+  representation of a bounded peer.
 - Mutually distrustful tenants use separate OxiBelt instances, credentials,
   configuration roots, state namespaces/backends, cache storage, and management
   authority. Route names, host matching, cache partition keys, and shared-state
@@ -336,7 +338,7 @@ guarantees.
 | `gateway-api-tcproute` | Raw TCP forwarding bypasses HTTP routing/WAF controls. Listener and Service port ownership, `ReferenceGrant`, deterministic winner selection, and upstream protocol security remain material deployment boundaries. |
 | `gateway-api-udproute` | Attacker-selected UDP peers can consume flow-table, shared-store, and socket resources. The controller refuses generated UDP state unless `shared_required` is explicit. Bounded new-flow/datagram admission, atomic scope capacity, idle expiry, keyed identities, configuration-generation checks, and fenced ownership reduce but do not eliminate amplification, contention, backend-exhaustion, or state-exhaustion risk. Compromise or accidental rotation of the identity key invalidates recoverability; backend compromise remains an availability and affinity threat even though stored identifiers are opaque. Recovery does not preserve socket/source-port/NAT/exact-endpoint/in-flight/application-session continuity. |
 | `gateway-api-backendtlspolicy` | The stable subset binds SNI and certificate authentication to one hostname and exact System or ConfigMap CA trust. Referenced ConfigMap integrity and controller RBAC are trust boundaries; unsupported Secret identity, SAN override, option, mTLS, and pin fields fail closed. |
-| `helm-data-plane` | Chart output depends on operator values and cluster controls and is not a complete security deployment attestation. |
+| `helm-data-plane` | Chart output depends on operator values and cluster controls and is not a complete security deployment attestation. V2 treats values, labels, mounts, dependency declarations, seccomp annotations, and expected manifest digests as untrusted deployment inputs; strict helper/schema validation, reserved selectors, typed writable volumes, default deny, digest-pinned role identity, and a Secret-free report make intended authority reviewable. A compromised chart release, admission controller, ServiceAccount signer, node/runtime, CNI, storage provider, registry, or operator can still subvert those intentions. The report cannot prove runtime-observed seccomp/Landlock, Secret contents, CNI enforcement, image provenance, or future supply-chain-bundle validity. |
 | `helm-gateway-controller` | The controller has a deliberately projected API token, exact-name Lease RBAC, and narrowly scoped default namespace authority, but its Gateway/rollout permissions and any explicit cluster-wide watch choice still require namespace and cluster-policy review. Lease deletion denies writes until Helm recreates the exact object. |
 
 All Kubernetes rows remain experimental while mandatory graduation gates are

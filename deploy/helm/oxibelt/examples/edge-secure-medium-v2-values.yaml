@@ -1,0 +1,127 @@
+# Secret-free `edge-secure-medium` v2 deployment example. Replace the example
+# digests, DNS name, Secret references, and dependency selectors before use.
+operationalProfile:
+  name: edge-secure-medium
+  version: 2
+  wafMode: enforcing
+
+image:
+  role: dataplane-strict
+  repository: ghcr.io/oxibelt/oxibelt-dataplane-strict
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+runtimeHardening:
+  seccomp:
+    expectation: required
+  filesystemManifest:
+    expectedDigest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+# Declare each writable path through exactly one bounded emptyDir or existing
+# PVC. Keep the list empty when the resolved manifest needs no writable path.
+writableVolumes: []
+
+tls:
+  enabled: true
+  secretName: oxibelt-public-tls-v1
+  serverNames:
+  - edge.example.test
+
+quic:
+  hostKeySecretName: oxibelt-quic-host-key-v1
+  hostKeySecretKey: quic-host-key.b64
+
+replicaCount: 3
+autoscaling:
+  minReplicas: 3
+
+workload:
+  deployment:
+    maxUnavailable: 0
+    maxSurge: 1
+  daemonSet:
+    maxUnavailable: 0
+    maxSurge: 1
+
+lifecycle:
+  terminationGracePeriodSeconds: 360
+  preStop:
+    enabled: true
+    drainSeconds: 300
+
+podDistribution:
+  enabled: true
+  nodeSpread:
+    enabled: true
+    maxSkew: 1
+    minDomains: 2
+    whenUnsatisfiable: DoNotSchedule
+  zoneSpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  podAntiAffinity:
+    enabled: true
+    weight: 100
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: null
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+networkPolicy:
+  enabled: true
+  ingress:
+    public:
+      allowAll: true
+    metrics:
+      from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+    admin:
+      from: []
+  egress:
+    dns:
+      enabled: true
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    destinations:
+    - name: primary-upstream
+      category: upstream
+      to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: application
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: upstream
+      ports:
+      - port: 8443
+        protocol: TCP
+  cilium:
+    enabled: false
+
+# V2 retains no ambient Kubernetes credential. Enabling the projection requires
+# a nonempty audience and exactly one matching kubernetes-api destination.
+kubernetesDiscovery:
+  serviceAccountToken:
+    enabled: false
+    audience: ""
+    expirationSeconds: 3600
+  rbac:
+    create: false
+    namespaces: []
+
+admin:
+  enabled: false
+  service:
+    enabled: false

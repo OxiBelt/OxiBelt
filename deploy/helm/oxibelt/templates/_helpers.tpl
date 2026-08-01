@@ -97,6 +97,10 @@ ghcr.io/oxibelt/oxibelt-dataplane
 {{- if or (lt $expirationSeconds 600) (gt $expirationSeconds 3600) -}}
 {{- fail "kubernetesDiscovery.serviceAccountToken.expirationSeconds must be between 600 and 3600" -}}
 {{- end -}}
+{{- $audience := .Values.kubernetesDiscovery.serviceAccountToken.audience | default "" -}}
+{{- if or (not (kindIs "string" $audience)) (gt (len $audience) 253) -}}
+{{- fail "kubernetesDiscovery.serviceAccountToken.audience must be a string of at most 253 characters" -}}
+{{- end -}}
 {{- $namespaces := .Values.kubernetesDiscovery.rbac.namespaces | default (list) -}}
 {{- if not (kindIs "slice" $namespaces) -}}
 {{- fail "kubernetesDiscovery.rbac.namespaces must be an array" -}}
@@ -190,6 +194,17 @@ expectation = {{ $seccomp.expectation | quote }}
 profile_identity = {{ $seccomp.externalProfile.identity | quote }}
 profile_digest = {{ $seccomp.externalProfile.digest | quote }}
 {{- end }}
+{{ end -}}
+{{- $filesystemManifest := .Values.runtimeHardening.filesystemManifest -}}
+{{- if $filesystemManifest.expectedDigest }}
+
+[runtime.hardening.filesystem_manifest]
+expected_digest = {{ $filesystemManifest.expectedDigest | quote }}
+{{- $writablePaths := list -}}
+{{- range $volume := .Values.writableVolumes -}}
+{{- $writablePaths = append $writablePaths $volume.mountPath -}}
+{{- end }}
+expected_writable_paths = {{ $writablePaths | toJson }}
 {{ end -}}
 {{- end -}}
 
@@ -591,11 +606,14 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "operationalProfile.name requires chart-owned config.create=true with no config.existingConfigMap" -}}
 {{- end -}}
 {{- if eq $name "edge-secure-medium" -}}
-{{- if ne $version 1 -}}
-{{- fail "operationalProfile edge-secure-medium supports only version 1" -}}
+{{- if not (has $version (list 1 2)) -}}
+{{- fail "operationalProfile edge-secure-medium supports only versions 1 and 2" -}}
 {{- end -}}
-{{- if not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version)) -}}
+{{- if and (eq $version 1) (not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
 {{- fail "operationalProfile edge-secure-medium requires Kubernetes 1.31 or later" -}}
+{{- end -}}
+{{- if and (eq $version 2) (not (semverCompare ">=1.34.0-0 <1.37.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "OBP106-KUBERNETES-VERSION: operationalProfile edge-secure-medium v2 requires Kubernetes >=1.34.0 and <1.37.0" -}}
 {{- end -}}
 {{- if not .Values.tls.enabled -}}
 {{- fail "operationalProfile edge-secure-medium requires tls.enabled=true" -}}
@@ -894,6 +912,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 
 {{- define "oxibelt.validateRuntimeHardening" -}}
+{{- if and (gt (len (.Values.writableVolumes | default (list))) 0) (ne (include "oxibelt.isOperationalProfileV2" .) "true") -}}
+{{- fail "writableVolumes is available only with operationalProfile edge-secure-medium v2" -}}
+{{- end -}}
 {{- $seccomp := .Values.runtimeHardening.seccomp -}}
 {{- $expectation := $seccomp.expectation -}}
 {{- $externalProfile := $seccomp.externalProfile -}}
@@ -956,6 +977,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "a Localhost profile with runtimeHardening.seccomp.expectation=optional or required requires externalProfile.identity and digest" -}}
 {{- end -}}
 {{- $reservedEnv := list "OXIBELT_SECCOMP_PROFILE_IDENTITY" "OXIBELT_SECCOMP_PROFILE_DIGEST" -}}
+{{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" -}}
+{{- $reservedEnv = concat $reservedEnv (list "OXIBELT_ADMIN_TOKEN" "OXIBELT_KUBERNETES_CPU_REQUEST" "OXIBELT_KUBERNETES_MEMORY_REQUEST_BYTES" "OXIBELT_CONFIG_ROLLOUT_MODE" "OXIBELT_CONFIG_REVISION" "OXIBELT_CONFIG_DIGEST" "OXIBELT_CONFIG_REVISION_FILE" "OXIBELT_INSTANCE_ID" "OXIBELT_CONFIG_ROLLOUT_TARGET_NAMESPACE" "OXIBELT_CONFIG_ROLLOUT_TARGET_KIND" "OXIBELT_CONFIG_ROLLOUT_TARGET_NAME") -}}
+{{- end -}}
 {{- if not (kindIs "slice" .Values.extraEnv) -}}
 {{- fail "extraEnv must be an array of Kubernetes EnvVar objects" -}}
 {{- end -}}
@@ -1124,8 +1148,14 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or (not (hasKey $destination "name")) (not (kindIs "string" $destination.name)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $destination.name)) (gt (len $destination.name) 63) -}}
 {{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
 {{- end -}}
-{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "revocation" "kubernetes-api" "external-dependency"))) -}}
-{{- fail (printf "%s.category must be upstream, shared-state, revocation, kubernetes-api, or external-dependency" $field) -}}
+{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "telemetry" "revocation" "kubernetes-api" "control-plane" "external-dependency"))) -}}
+{{- fail (printf "%s.category must be upstream, shared-state, telemetry, revocation, kubernetes-api, control-plane, or external-dependency" $field) -}}
+{{- end -}}
+{{- if hasKey $destination "unrestrictedCidrs" -}}
+{{- $escape := $destination.unrestrictedCidrs -}}
+{{- if not (kindIs "map" $escape) -}}{{- fail (printf "%s.unrestrictedCidrs must be an object" $field) -}}{{- end -}}
+{{- if or (not (hasKey $escape "enabled")) (not (kindIs "bool" $escape.enabled)) -}}{{- fail (printf "%s.unrestrictedCidrs.enabled must be a boolean" $field) -}}{{- end -}}
+{{- if or (not (hasKey $escape "justification")) (not (kindIs "string" $escape.justification)) (gt (len $escape.justification) 512) -}}{{- fail (printf "%s.unrestrictedCidrs.justification must be a string of at most 512 characters" $field) -}}{{- end -}}
 {{- end -}}
 {{- if not (hasKey $destination "to") -}}
 {{- fail (printf "%s.to is required" $field) -}}
@@ -1146,8 +1176,8 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or (not (hasKey $destination "name")) (not (kindIs "string" $destination.name)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $destination.name)) (gt (len $destination.name) 63) -}}
 {{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
 {{- end -}}
-{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "revocation" "kubernetes-api" "external-dependency"))) -}}
-{{- fail (printf "%s.category must be upstream, shared-state, revocation, kubernetes-api, or external-dependency" $field) -}}
+{{- if or (not (hasKey $destination "category")) (not (kindIs "string" $destination.category)) (not (has $destination.category (list "upstream" "shared-state" "telemetry" "revocation" "kubernetes-api" "control-plane" "external-dependency"))) -}}
+{{- fail (printf "%s.category must be upstream, shared-state, telemetry, revocation, kubernetes-api, control-plane, or external-dependency" $field) -}}
 {{- end -}}
 {{- if or (not (hasKey $destination "matchNames")) (not (kindIs "slice" $destination.matchNames)) (eq (len $destination.matchNames) 0) -}}
 {{- fail (printf "%s.matchNames must contain at least one exact DNS name" $field) -}}

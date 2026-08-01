@@ -195,10 +195,11 @@ expect_failure_contains profile_short_grace \
   --set lifecycle.terminationGracePeriodSeconds=339
 
 expect_failure_contains profile_unsupported_version \
-  "operationalProfile edge-secure-medium supports only version 1" \
+  "operationalProfile edge-secure-medium supports only versions 1 and 2" \
   --kube-version "${profile_kube_version}" \
   -f "${profile_values}" \
-  --set operationalProfile.version=2
+  --skip-schema-validation \
+  --set operationalProfile.version=3
 
 expect_failure_contains profile_metrics_disabled \
   "operationalProfile edge-secure-medium requires metrics.enabled=true" \

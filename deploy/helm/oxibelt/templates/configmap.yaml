@@ -3,6 +3,8 @@
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
+{{- include "oxibelt.validateRuntimeHardening" . -}}
+{{- include "oxibelt.validateOperationalProfileV2" . -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap

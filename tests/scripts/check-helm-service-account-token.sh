@@ -8,6 +8,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 data_chart_dir="${repo_root}/deploy/helm/oxibelt"
+v2_values="${data_chart_dir}/examples/edge-secure-medium-v2-values.yaml"
 controller_chart_dir="${repo_root}/deploy/helm/oxibelt-gateway-controller"
 kubernetes_version="1.34.8"
 temp_root="${TMPDIR:-/tmp}"
@@ -225,6 +226,23 @@ expect_data_failure_contains discovery_oversized_namespace_helper \
   "kubernetesDiscovery.rbac.namespaces must contain safe Kubernetes namespace names" \
   --skip-schema-validation \
   --set-json 'kubernetesDiscovery.rbac.namespaces=["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]'
+
+# V2 requires an explicit audience and exactly one matching Kubernetes API
+# dependency; ordinary v1 projection behavior remains compatible above.
+render_data v2_discovery_projection \
+  -f "${v2_values}" \
+  --set kubernetesDiscovery.serviceAccountToken.enabled=true \
+  --set-string kubernetesDiscovery.serviceAccountToken.audience=oxibelt-discovery \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"kubernetes-api","category":"kubernetes-api","to":[{"ipBlock":{"cidr":"192.0.2.1/32"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+assert_contains "${work_dir}/data-v2_discovery_projection.yaml" 'audience: "oxibelt-discovery"'
+assert_contains "${work_dir}/data-v2_discovery_projection.yaml" '"audience": "oxibelt-discovery"'
+expect_data_failure_contains v2_missing_audience \
+  "OBP106-TOKEN-AUDIENCE" \
+  -f "${v2_values}" \
+  --skip-schema-validation \
+  --set kubernetesDiscovery.serviceAccountToken.enabled=true \
+  --set-string kubernetesDiscovery.serviceAccountToken.audience= \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"kubernetes-api","category":"kubernetes-api","to":[{"ipBlock":{"cidr":"192.0.2.1/32"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 
 # The controller always needs the Kubernetes API, but it receives a bounded
 # explicit projection and scopes its Gateway reads to its release namespace by

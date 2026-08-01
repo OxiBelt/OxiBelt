@@ -75,6 +75,10 @@ The role/repository mapping is fail closed for official OxiBelt repositories.
 Custom repositories remain possible, but they are operator-owned artifacts and
 must provide the executable contract declared by `image.role`. Person Proof is
 available in both data-plane roles and does not require the Gateway Controller.
+The `edge-secure-medium` v2 deployment envelope is narrower: it accepts only
+the official `ghcr.io/oxibelt/oxibelt-dataplane-strict` repository at a
+lowercase SHA-256 digest and records that exact repository/digest/role tuple in
+its Secret-free profile report.
 
 The release workflow creates and verifies GitHub API-hosted keyless SLSA
 provenance and CycloneDX SBOM attestations before promoting these image digests.
@@ -223,6 +227,31 @@ a nonempty `cacheVolume.sizeLimit`. Other writable state uses deliberately
 reviewed `extraVolumes`/`extraVolumeMounts`; mounting a writable host path or a
 Kubernetes API credential changes the strict deployment's threat boundary.
 
+`edge-secure-medium` v2 does not accept the legacy generic writable-mount
+escape. Declare every writable path with `writableVolumes` and exactly one
+bounded `emptyDir` or named PVC:
+
+```yaml
+writableVolumes:
+- name: response-cache
+  mountPath: /var/cache/oxibelt
+  purpose: response-cache
+  emptyDir:
+    sizeLimit: 128Mi
+- name: durable-state
+  mountPath: /var/lib/oxibelt
+  purpose: durable-state
+  persistentVolumeClaim:
+    claimName: oxibelt-state-v1
+```
+
+V2 rejects `hostPath`, overlapping or ambiguous paths, `subPath`, generic
+`extraVolumes`/`extraVolumeMounts`, and an unbounded `emptyDir`. The chart
+places the normalized paths in native
+`runtime.hardening.filesystem_manifest.expected_writable_paths` and the
+profile report. A PVC declaration names a mount contract; storage-class,
+encryption, backup, tenancy, and access-mode guarantees remain operator owned.
+
 `RuntimeDefault` is the portable seccomp baseline. Clusters that install the
 repository profiles from `deploy/seccomp/` may instead select a `Localhost`
 profile appropriate to the configured Tokio or Compio runtime. Test that
@@ -317,6 +346,7 @@ kubernetesDiscovery:
   # Use this only when RBAC is managed outside this chart.
   serviceAccountToken:
     enabled: false
+    audience: ""
     expirationSeconds: 3600
   rbac:
     # This also enables the explicit projection below.
@@ -338,7 +368,9 @@ only after granting the equivalent minimum permissions elsewhere.
 Either opt-in mounts a read-only `kube-api-access` projected volume at the
 standard service-account path. It contains a short-lived token and the
 `kube-root-ca.crt` CA only; the token lifetime must be from 600 through 3600
-seconds and defaults to 3600. Configure the corresponding OxiBelt Kubernetes
+seconds and defaults to 3600. V2 additionally requires a nonempty explicit
+audience; do not reuse an audience granted to a different service boundary.
+Configure the corresponding OxiBelt Kubernetes
 discovery `token_file` to use that path. When `networkPolicy.enabled: true`, a
 token projection requires an explicit `kubernetes-api` egress destination;
 the chart fails rendering instead of granting a credential that its policy
@@ -381,11 +413,18 @@ Kubernetes `NetworkPolicy` baseline:
   default.
 - egress is deny-by-default except for TCP/UDP DNS to the configured resolver
   peers and each explicitly declared destination. A destination has a
-  reviewable category (`upstream`, `shared-state`, `revocation`,
-  `kubernetes-api`, or `external-dependency`), concrete peers, and bounded
-  TCP/UDP ports. The category documents the trust decision; it does not widen
-  the policy. Enabling an explicit Kubernetes discovery token projection also
-  requires a `kubernetes-api` destination.
+  reviewable category (`upstream`, `shared-state`, `telemetry`, `revocation`,
+  `kubernetes-api`, `control-plane`, or `external-dependency`), concrete peers,
+  and bounded TCP/UDP ports. The category documents the trust decision; it does
+  not widen the policy. Enabling an explicit Kubernetes discovery token
+  projection also requires a `kubernetes-api` destination.
+
+V2 emits an explicit ingress-and-egress default-deny policy plus separate
+allow policies. It rejects IPv4 or IPv6 world CIDRs unless the individual
+destination sets `unrestrictedCidrs.enabled: true`, includes a nonempty review
+justification, and lists explicit ports. That marker does not make the peer
+safe; it makes a deliberately broad trust decision visible and local to one
+dependency. The Admin-free v2 role rejects `control-plane` traffic.
 
 The secure companion
 [`edge-secure-medium-v1-values.yaml`](../deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml)
@@ -396,6 +435,12 @@ each upstream, Redis/Valkey or PostgreSQL backend, OCSP/CRL responder, API
 server, and other external dependency that the selected configuration actually
 uses. An undeclared dependency is intentionally unavailable rather than
 implicitly allowed.
+
+The opt-in v2 companion
+[`edge-secure-medium-v2-values.yaml`](../deploy/helm/oxibelt/examples/edge-secure-medium-v2-values.yaml)
+adds the strict image, hardening-manifest, typed writable-storage, rollout, and
+profile-report contracts described below. Its placeholder digests are not
+production identities; replace and independently approve them before rollout.
 
 The optional `networkPolicy.cilium` section emits a `CiliumNetworkPolicy` only
 when both it and the portable baseline are enabled. It requires an already
@@ -410,7 +455,7 @@ namespace labels used by monitoring and management workloads:
 
 ```sh
 helm template oxibelt deploy/helm/oxibelt \
-  -f deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml
+  -f deploy/helm/oxibelt/examples/edge-secure-medium-v2-values.yaml
 ```
 
 NetworkPolicy enforcement is supplied by the cluster CNI, not by Kubernetes
@@ -419,6 +464,41 @@ sources; installed policies selecting the same Pods can combine with this
 baseline. In particular, confirm cluster probe and DNS behavior before a
 production cutover, and keep CNI-specific host/node traffic behavior in the
 deployment review.
+
+### `edge-secure-medium` v2 profile report and rollout identity
+
+The v2 chart renders an immutable, content-addressed ConfigMap containing a
+deterministic schema-v1 profile report. It contains only allowlisted facts:
+the selected profile, exact image identity, Pod-security and seccomp intent,
+token projection and audience, ingress/egress dependency classes, writable
+mount paths and purposes, availability settings, safe artifact-reference
+identities, and stable unmet-requirement codes. A deployable render has no
+unmet requirements; Helm otherwise fails with the same requirement code.
+
+Pod-template checksums cover the generated configuration, OxiRule content,
+Secret references, hardening inputs, and profile report. Secret-reference
+checksums hash only canonical names, keys, and projected paths—never Secret
+data and never live `lookup` results. Rotate Secret contents by creating a new
+immutable/versioned Secret name and rolling the reference. The report is
+review evidence for chart intent, not a runtime or admission attestation.
+
+Before installing v2, generate the resolved filesystem-access manifest in a
+trusted local environment and set
+`runtimeHardening.filesystemManifest.expectedDigest` to the path-disclosing
+SHA-256 value. Namespace admission should enforce, audit, and warn on the
+restricted Pod Security Standard:
+
+```sh
+kubectl label namespace oxibelt \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted
+```
+
+Use `RuntimeDefault` when only portable kernel filter/NNP evidence is available.
+Use `Localhost` only after the exact node-installed profile identity and digest
+have been independently managed and injected through the admission boundary.
+Neither the chart nor `RuntimeDefault` invents a semantic seccomp digest.
 
 ### Admin Listener
 

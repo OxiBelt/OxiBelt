@@ -7,6 +7,7 @@
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateAdditionalServicePorts" . -}}
 {{- include "oxibelt.validateRuntimeHardening" . -}}
+{{- include "oxibelt.validateOperationalProfileV2" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
@@ -54,6 +55,12 @@ spec:
         {{- if .Values.oxirule.enabled }}
         checksum/oxibelt-oxirule: {{ include "oxibelt.oxiruleConfigMapDigest" . | quote }}
         {{- end }}
+        {{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" }}
+        checksum/oxibelt-secret-references: {{ include "oxibelt.secretReferencesDigest" . | quote }}
+        checksum/oxibelt-hardening-profile: {{ include "oxibelt.hardeningProfileDigest" . | quote }}
+        checksum/oxibelt-profile-report: {{ include "oxibelt.profileReportDigest" . | quote }}
+        oxibelt.dev/profile-report: {{ include "oxibelt.profileReportName" . | quote }}
+        {{- end }}
         {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
         oxibelt.dev/immutable-config-rollout: "true"
         oxibelt.dev/config-rollout-target-kind: "DaemonSet"
@@ -66,6 +73,11 @@ spec:
     spec:
       serviceAccountName: {{ include "oxibelt.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" }}
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      {{- end }}
       {{- if gt (int .Values.lifecycle.terminationGracePeriodSeconds) 0 }}
       terminationGracePeriodSeconds: {{ int .Values.lifecycle.terminationGracePeriodSeconds }}
       {{- end }}
@@ -191,7 +203,7 @@ spec:
           failureThreshold: 30
           periodSeconds: 2
         securityContext:
-{{ toYaml .Values.securityContext | indent 10 }}
+{{ include "oxibelt.containerSecurityContext" . | indent 10 }}
         volumeMounts:
         - name: config
           mountPath: {{ .Values.config.mountPath }}
@@ -214,6 +226,10 @@ spec:
         {{- if $cacheVolumeEnabled }}
         - name: cache
           mountPath: /var/cache/oxibelt
+        {{- end }}
+        {{- range $volume := .Values.writableVolumes }}
+        - name: {{ $volume.name }}
+          mountPath: {{ $volume.mountPath | quote }}
         {{- end }}
         {{- with .Values.extraVolumeMounts }}
 {{ toYaml . | indent 8 }}
@@ -289,6 +305,9 @@ spec:
           sources:
           - serviceAccountToken:
               expirationSeconds: {{ .Values.kubernetesDiscovery.serviceAccountToken.expirationSeconds }}
+              {{- if .Values.kubernetesDiscovery.serviceAccountToken.audience }}
+              audience: {{ .Values.kubernetesDiscovery.serviceAccountToken.audience | quote }}
+              {{- end }}
               path: token
           - configMap:
               name: kube-root-ca.crt
@@ -303,6 +322,16 @@ spec:
           sizeLimit: {{ .Values.cacheVolume.sizeLimit | quote }}
           {{- else }} {}
           {{- end }}
+      {{- end }}
+      {{- range $volume := .Values.writableVolumes }}
+      - name: {{ $volume.name }}
+        {{- if hasKey $volume "emptyDir" }}
+        emptyDir:
+          sizeLimit: {{ $volume.emptyDir.sizeLimit | quote }}
+        {{- else }}
+        persistentVolumeClaim:
+          claimName: {{ $volume.persistentVolumeClaim.claimName | quote }}
+        {{- end }}
       {{- end }}
 {{- with .Values.extraVolumes }}
 {{ toYaml . | indent 6 }}

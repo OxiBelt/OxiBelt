@@ -1,7 +1,9 @@
 {{- include "oxibelt.validateNetworkPolicy" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
+{{- include "oxibelt.validateOperationalProfileV2" . -}}
 {{- if .Values.networkPolicy.enabled -}}
+{{- $isV2 := eq (include "oxibelt.isOperationalProfileV2" .) "true" -}}
 {{- $public := .Values.networkPolicy.ingress.public -}}
 {{- $metrics := .Values.networkPolicy.ingress.metrics -}}
 {{- $admin := .Values.networkPolicy.ingress.admin -}}
@@ -53,6 +55,24 @@
 {{- end -}}
 {{- $egressRules = append $egressRules (dict "to" $destination.to "ports" $destinationPorts) -}}
 {{- end -}}
+{{- if $isV2 }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "default-deny") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress: []
+  egress: []
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -102,6 +122,59 @@ spec:
 {{ toYaml $adminIngress | indent 4 }}
 ---
 {{- end }}
+{{- if $isV2 }}
+{{- if $dns.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" . "suffix" "egress-dns") }}
+  labels:
+{{ include "oxibelt.labels" . | indent 4 }}
+    oxibelt.dev/dependency-category: dns
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" . | indent 6 }}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+{{ toYaml $dns.to | indent 4 }}
+    ports:
+    - port: 53
+      protocol: TCP
+    - port: 53
+      protocol: UDP
+---
+{{- end }}
+{{- range $destination := $destinations }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt.networkPolicyName" (dict "root" $ "suffix" (printf "egress-%s" $destination.name)) }}
+  labels:
+{{ include "oxibelt.labels" $ | indent 4 }}
+    oxibelt.dev/dependency-category: {{ $destination.category | quote }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "oxibelt.selectorLabels" $ | indent 6 }}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+{{ toYaml $destination.to | indent 4 }}
+    ports:
+    {{- range $port := $destination.ports }}
+    - port: {{ $port.port }}
+      protocol: {{ $port.protocol }}
+      {{- if hasKey $port "endPort" }}
+      endPort: {{ $port.endPort }}
+      {{- end }}
+    {{- end }}
+---
+{{- end }}
+{{- else }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -116,4 +189,5 @@ spec:
   - Egress
   egress:
 {{ toYaml $egressRules | indent 4 }}
+{{- end }}
 {{- end }}

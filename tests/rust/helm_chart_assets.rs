@@ -106,6 +106,10 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     values["kubernetesDiscovery"]["serviceAccountToken"]["expirationSeconds"],
     3600
   );
+  assert_eq!(
+    values["kubernetesDiscovery"]["serviceAccountToken"]["audience"],
+    ""
+  );
   assert_eq!(values["kubernetesDiscovery"]["rbac"]["create"], false);
   assert!(values["kubernetesDiscovery"]["rbac"]["namespaces"].is_array());
   assert!(values["sharedState"]["redisSecretProjections"].is_array());
@@ -117,6 +121,12 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert!(values["networkPolicy"]["egress"]["destinations"].is_array());
   assert_eq!(values["networkPolicy"]["cilium"]["enabled"], false);
   assert!(values["networkPolicy"]["cilium"]["fqdnDestinations"].is_array());
+  assert_eq!(
+    values["runtimeHardening"]["filesystemManifest"]["expectedDigest"],
+    ""
+  );
+  assert!(values["writableVolumes"].is_array());
+  assert_eq!(values["writableVolumes"].as_array().unwrap().len(), 0);
   assert!(values["config"]["inline"].as_str().is_some_and(|inline| {
     inline.contains("[runtime.accept]\nreuse_port = true")
       && inline.contains("[quic.socket]\nreuse_port = true")
@@ -170,17 +180,40 @@ fn data_plane_chart_metadata_and_values_are_valid() {
       ["items"]["items"]["properties"]["path"]["pattern"],
     "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
   );
+  let all_of = schema["allOf"]
+    .as_array()
+    .expect("chart schema allOf should be an array");
+  let existing_config_digest_clause = all_of
+    .iter()
+    .find(|clause| {
+      clause
+        .pointer("/then/properties/config/properties/existingConfigMapDigest/pattern")
+        .is_some()
+    })
+    .expect("chart schema should require an existing ConfigMap digest");
   assert_eq!(
-    schema["allOf"][0]["then"]["properties"]["config"]["properties"]["existingConfigMapDigest"]["pattern"],
-    "^[a-f0-9]{64}$"
+    existing_config_digest_clause
+      .pointer("/then/properties/config/properties/existingConfigMapDigest/pattern")
+      .and_then(Value::as_str),
+    Some("^[a-f0-9]{64}$")
   );
+  let external_config_clause = all_of
+    .iter()
+    .find(|clause| {
+      clause
+        .pointer("/if/properties/config/properties/create/const")
+        .and_then(Value::as_bool)
+        == Some(false)
+        && clause
+          .pointer("/then/properties/config/properties/existingConfigMap/minLength")
+          .is_some()
+    })
+    .expect("chart schema should require an external ConfigMap name");
   assert_eq!(
-    schema["allOf"][5]["if"]["properties"]["config"]["properties"]["create"]["const"],
-    false
-  );
-  assert_eq!(
-    schema["allOf"][5]["then"]["properties"]["config"]["properties"]["existingConfigMap"]["minLength"],
-    1
+    external_config_clause
+      .pointer("/then/properties/config/properties/existingConfigMap/minLength")
+      .and_then(Value::as_u64),
+    Some(1)
   );
   assert_eq!(
     schema["properties"]["admin"]["properties"]["bindAddress"]["enum"][3],
@@ -269,6 +302,12 @@ fn data_plane_chart_metadata_and_values_are_valid() {
       ["expirationSeconds"]["maximum"],
     3600
   );
+  assert_eq!(
+    schema["properties"]["runtimeHardening"]["properties"]["filesystemManifest"]["properties"]["expectedDigest"]
+      ["pattern"],
+    "^$|^sha256:[0-9a-f]{64}$"
+  );
+  assert_eq!(schema["properties"]["writableVolumes"]["maxItems"], 16);
   assert_eq!(
     schema["properties"]["kubernetesDiscovery"]["properties"]["rbac"]["properties"]["namespaces"]["uniqueItems"],
     true
@@ -378,6 +417,50 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     false
   );
 
+  let edge_secure_medium_v2_example =
+    read_yaml("deploy/helm/oxibelt/examples/edge-secure-medium-v2-values.yaml");
+  assert_eq!(
+    edge_secure_medium_v2_example["operationalProfile"]["name"],
+    "edge-secure-medium"
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["operationalProfile"]["version"],
+    2
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["image"]["role"],
+    "dataplane-strict"
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["image"]["repository"],
+    "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+  );
+  assert!(
+    edge_secure_medium_v2_example["image"]["digest"]
+      .as_str()
+      .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+  );
+  assert!(
+    edge_secure_medium_v2_example["runtimeHardening"]["filesystemManifest"]["expectedDigest"]
+      .as_str()
+      .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["networkPolicy"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["kubernetesDiscovery"]["serviceAccountToken"]["enabled"],
+    false
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["writableVolumes"]
+      .as_array()
+      .unwrap()
+      .len(),
+    0
+  );
+
   let edge_secure_medium_autoscaling_example =
     read_yaml("deploy/helm/oxibelt/examples/edge-secure-medium-v1-autoscaling-values.yaml");
   assert_eq!(
@@ -422,6 +505,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   );
   assert!(
     repo_root()
+      .join("tests/scripts/check-helm-edge-secure-medium-v2.sh")
+      .is_file(),
+    "the edge-secure-medium v2 Helm renderer check should be present"
+  );
+  assert!(
+    repo_root()
       .join("tests/scripts/check-helm-network-policy.sh")
       .is_file(),
     "the NetworkPolicy Helm renderer check should be present"
@@ -446,10 +535,12 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   );
   let expected = [
     "templates/_helpers.tpl",
+    "templates/_profile_v2.tpl",
     "templates/NOTES.txt",
     "templates/serviceaccount.yaml",
     "templates/rbac.yaml",
     "templates/configmap.yaml",
+    "templates/profile-report.yaml",
     "templates/deployment.yaml",
     "templates/daemonset.yaml",
     "templates/service.yaml",
