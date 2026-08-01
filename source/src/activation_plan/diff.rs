@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+#[cfg(any(feature = "config-tooling", test))]
 use std::path::Path;
 
 #[cfg(feature = "config-tooling")]
@@ -86,6 +87,7 @@ pub fn plan_config_projections(
   ConfigActivationReport::new(basis, true, collector.changes, activation_plan)
 }
 
+#[cfg(any(feature = "config-tooling", test))]
 pub(super) fn add_relative_file_reference_root_changes(
   report: &mut ConfigActivationReport,
   current: &toml::Value,
@@ -127,6 +129,7 @@ pub(super) fn add_relative_file_reference_root_changes(
   report.activation_plan = aggregate(&report.changes);
 }
 
+#[cfg(any(feature = "config-tooling", test))]
 fn collect_identical_relative_file_references(
   path: &str,
   current: &toml::Value,
