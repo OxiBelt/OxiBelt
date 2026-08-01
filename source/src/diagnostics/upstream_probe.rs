@@ -385,6 +385,10 @@ async fn probe_h3_get(
   timeout_ms: u64,
 ) -> anyhow::Result<http::StatusCode> {
   let url = &upstream.origin;
+  // This operator-invoked probe intentionally uses an isolated, fresh system
+  // lookup: it must report current external reachability without populating or
+  // depending on the data-plane resolver cache. Production pooled, one-shot,
+  // and WebTransport H3 paths share the bounded TTL-aware resolver instead.
   let remote = resolve_url_addr(url).await?;
   let inherited_roots = config
     .proxy

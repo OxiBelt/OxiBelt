@@ -228,6 +228,45 @@ pub fn exercise_http3_webtransport(data: &[u8]) {
   }
 }
 
+/// Exercises the shared upstream DNS response parser without performing I/O.
+pub fn exercise_upstream_dns_resolution(data: &[u8]) {
+  let decoded;
+  let packet = if let Some(hex) = data.strip_prefix(b"hex:") {
+    decoded = decode_ascii_hex(hex);
+    decoded.as_deref().unwrap_or(data)
+  } else {
+    data
+  };
+  crate::upstream_resolution::fuzz_parse_dns_response(packet);
+}
+
+fn decode_ascii_hex(input: &[u8]) -> Option<Vec<u8>> {
+  let digits = input
+    .iter()
+    .copied()
+    .filter(|byte| !byte.is_ascii_whitespace())
+    .collect::<Vec<_>>();
+  if digits.len() % 2 != 0 {
+    return None;
+  }
+  let mut decoded = Vec::with_capacity(digits.len() / 2);
+  for pair in digits.chunks_exact(2) {
+    let high = hex_value(pair[0])?;
+    let low = hex_value(pair[1])?;
+    decoded.push((high << 4) | low);
+  }
+  Some(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+  match byte {
+    b'0'..=b'9' => Some(byte - b'0'),
+    b'a'..=b'f' => Some(byte - b'a' + 10),
+    b'A'..=b'F' => Some(byte - b'A' + 10),
+    _ => None,
+  }
+}
+
 pub fn exercise_websocket_frame(data: &[u8]) {
   let data = bounded(data);
   let mut input = FuzzInput::new(data);

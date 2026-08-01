@@ -1339,6 +1339,32 @@ protocol_probe_client() {
   protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem"
 }
 
+protocol_probe_http_get() {
+  local host="$1"
+  local port="$2"
+  local path="$3"
+  local client_container output status
+  client_container="$(unique_docker_container_name "oxibelt-http-client")"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${protocol_probe_image}" \
+    http-get \
+    --host "${host}" \
+    --port "${port}" \
+    --path "${path}" >/dev/null
+  if output="$(docker_start_stdout_only "${client_container}")"; then
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    printf '%s' "${output}"
+    return 0
+  fi
+  status=$?
+  append_container_stderr "${client_container}"
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  fail_with_diagnostics "plain HTTP probe failed with status ${status}: host=${host} port=${port} path=${path}"
+}
+
 protocol_probe_client_with_sni_and_ca() {
   local protocol="$1"
   local server_name="$2"
@@ -1621,6 +1647,18 @@ protocol_probe_client_with_headers() {
   echo "protocol probe client failed after retries with status ${status}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "protocol probe did not reach expected status ${expect_status}"
+}
+
+mock_dns_control() {
+  local command="$1"
+  docker exec "${dns_container}" python -c '
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", 54), timeout=2) as connection:
+  connection.sendall(sys.argv[1].encode("ascii") + b"\n")
+  print(connection.recv(4096).decode("ascii").strip())
+' "${command}"
 }
 
 protocol_probe_generated_body_request() {
@@ -2463,12 +2501,21 @@ fi
 
 proxy_dns_args=()
 if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
-  if [[ "${CASE_NEED_HTTP_UPSTREAM}" != "1" ]]; then
-    fail_with_diagnostics "DNS server matrix cases require the HTTP upstream"
+  dns_target_ip=""
+  dns_valid_a_ips=""
+  if [[ "${CASE_NEED_HTTP_UPSTREAM}" == "1" ]]; then
+    dns_target_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${http_container}")"
+  elif [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
+    dns_target_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${h3_container}")"
+  else
+    fail_with_diagnostics "DNS server matrix cases require an HTTP or HTTP/3 upstream"
   fi
-  http_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${http_container}")"
-  if [[ -z "${http_container_ip}" ]]; then
-    fail_with_diagnostics "failed to inspect mock HTTP upstream IP for DNS case"
+  if [[ -z "${dns_target_ip}" ]]; then
+    fail_with_diagnostics "failed to inspect upstream IP for DNS case"
+  fi
+  dns_valid_a_ips="${dns_target_ip}"
+  if [[ "${case_name}" == "h3-adaptive-multi-address" || "${case_name}" == "h3-adaptive-cold-coalescing" ]]; then
+    dns_valid_a_ips="127.0.0.2,${dns_target_ip}"
   fi
   docker run -d \
     --name "${dns_container}" \
@@ -2476,16 +2523,21 @@ if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
     --network "${network_name}" \
     --network-alias mock-dns \
     -e VALID_A_NAME=valid.discovery.test \
-    -e VALID_A_IP="${http_container_ip}" \
+    -e VALID_A_IPS="${dns_valid_a_ips}" \
+    -e VALID_TTL=1 \
     -e SPOOF_A_NAME=spoofed.discovery.test \
     -e SPOOF_A_IP=203.0.113.66 \
     -e LISTEN_HOST=0.0.0.0 \
+    -e CONTROL_PORT=54 \
     "${mock_dns_image}" >/dev/null
   dns_container_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${dns_container}")"
   if [[ -z "${dns_container_ip}" ]]; then
     fail_with_diagnostics "failed to inspect mock DNS server IP"
   fi
-  proxy_dns_args+=(--dns "${dns_container_ip}" --add-host "mock-http:${http_container_ip}")
+  proxy_dns_args+=(--dns "${dns_container_ip}")
+  if [[ "${CASE_NEED_HTTP_UPSTREAM}" == "1" ]]; then
+    proxy_dns_args+=(--add-host "mock-http:${dns_target_ip}")
+  fi
   sleep 1
 fi
 

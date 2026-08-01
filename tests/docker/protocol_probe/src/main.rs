@@ -147,6 +147,12 @@ struct DownstreamArgs {
   expect_status: Option<u16>,
 }
 
+struct HttpGetArgs {
+  host: String,
+  port: u16,
+  path: String,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DpiTlsProfile {
   ByedpiSplitSni,
@@ -382,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
     "turn-upstream" => serve_turn_upstream(parse_turn_upstream_args(args)?).await,
     "turn-client" => run_turn_client(parse_turn_client_args(args)?).await,
     "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
+    "http-get" => run_http_get(parse_http_get_args(args)?).await,
     "dpi-tls-client" => run_dpi_tls_client(parse_dpi_tls_args(args)?).await,
     "tls-resumption-load" => run_tls_resumption_load(parse_tls_resumption_load_args(args)?).await,
     "webtransport-multiplex" => {
@@ -402,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -924,6 +931,41 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     tls_version,
     expect_status,
+  })
+}
+
+fn parse_http_get_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<HttpGetArgs> {
+  let mut host = None;
+  let mut port = None;
+  let mut path = None;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--path" => path = Some(validate_origin_form_path(&value)?),
+      _ => bail!("unknown http-get flag: {flag}"),
+    }
+  }
+  let host = host.ok_or_else(|| anyhow!("--host is required"))?;
+  if host.is_empty()
+    || host.len() > 253
+    || !host.bytes().all(|byte| {
+      byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']')
+    })
+  {
+    bail!("--host must be a bounded DNS name or IP literal");
+  }
+  let path = path.ok_or_else(|| anyhow!("--path is required"))?;
+  if path.len() > 8 * 1024 {
+    bail!("--path exceeds the 8192-byte HTTP probe limit");
+  }
+  Ok(HttpGetArgs {
+    host,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    path,
   })
 }
 
@@ -1961,6 +2003,62 @@ async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
   }
 
   println!("{}", serde_json::to_string(&output)?);
+  Ok(())
+}
+
+async fn run_http_get(args: HttpGetArgs) -> anyhow::Result<()> {
+  const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+  const MAX_HEAD_BYTES: usize = 64 * 1024;
+  let address = lookup_host((args.host.as_str(), args.port))
+    .await
+    .context("failed to resolve HTTP probe host")?
+    .next()
+    .ok_or_else(|| anyhow!("HTTP probe host resolved without an address"))?;
+  let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address))
+    .await
+    .context("HTTP probe connection timed out")?
+    .context("failed to connect HTTP probe")?;
+  let request = format!(
+    "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+    args.path, args.host
+  );
+  tokio::time::timeout(Duration::from_secs(5), stream.write_all(request.as_bytes()))
+    .await
+    .context("HTTP probe write timed out")?
+    .context("failed to write HTTP probe request")?;
+  let mut response = Vec::new();
+  tokio::time::timeout(
+    Duration::from_secs(5),
+    stream
+      .take(MAX_RESPONSE_BYTES.saturating_add(1))
+      .read_to_end(&mut response),
+  )
+  .await
+  .context("HTTP probe read timed out")?
+  .context("failed to read HTTP probe response")?;
+  if response.len() as u64 > MAX_RESPONSE_BYTES {
+    bail!("HTTP probe response exceeded {MAX_RESPONSE_BYTES} bytes");
+  }
+  let separator = response
+    .windows(4)
+    .position(|window| window == b"\r\n\r\n")
+    .ok_or_else(|| anyhow!("HTTP probe response had no header terminator"))?;
+  if separator > MAX_HEAD_BYTES {
+    bail!("HTTP probe response head exceeded {MAX_HEAD_BYTES} bytes");
+  }
+  let head =
+    std::str::from_utf8(&response[..separator]).context("HTTP probe head was not UTF-8")?;
+  let status = head
+    .lines()
+    .next()
+    .and_then(|line| line.split_ascii_whitespace().nth(1))
+    .ok_or_else(|| anyhow!("HTTP probe response had no status"))?;
+  if status != "200" {
+    bail!("HTTP probe expected status 200, got {status}");
+  }
+  let body = std::str::from_utf8(&response[separator + 4..])
+    .context("HTTP probe response body was not UTF-8")?;
+  print!("{body}");
   Ok(())
 }
 

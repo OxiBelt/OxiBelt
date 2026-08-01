@@ -51,6 +51,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "upstream_dns_resolution"
+path = "fuzz_targets/upstream_dns_resolution.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "websocket_frame"
 path = "fuzz_targets/websocket_frame.rs"
 test = false

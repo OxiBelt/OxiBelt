@@ -80,6 +80,18 @@ regression_path = "tests/fixtures/fuzz-regressions/http3_webtransport"
 leak_policy = "enabled"
 
 [[target]]
+name = "upstream_dns_resolution"
+owner = "Upstream resolution and HTTP/3 maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted raw or hex-prefixed bytes interpreted as a bounded DNS response for a fixed synthetic A query."
+invariants = ["DNS parsing never panics or reads beyond the response", "transaction, question, owner, and name bounds fail closed", "accepted endpoint and metadata counts remain bounded"]
+unsupported_states = ["live DNS sockets", "resolver cache tasks", "QUIC connection attempts"]
+seed_dir = "fuzz/seeds/upstream_dns_resolution"
+coverage_landmarks = ["source/src/fuzzing.rs:exercise_upstream_dns_resolution", "source/src/upstream_resolution/dns.rs:parse_dns_response"]
+regression_path = "tests/fixtures/fuzz-regressions/upstream_dns_resolution"
+leak_policy = "enabled"
+
+[[target]]
 name = "websocket_frame"
 owner = "WebSocket and stream WAF maintainers"
 max_input_bytes = 4096

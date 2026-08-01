@@ -6,9 +6,9 @@ use anyhow::bail;
 use serde::Deserialize;
 
 use super::{
-  QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig, QuicUpstreamPoolConfig,
-  QuicZeroRttMode, RawQuicTransportConfig, WorkerCountSetting, WorkerMultipliersConfig,
-  WorkerParallelism, resolve_worker_count,
+  QuicAltSvcConfig, QuicEndpointConfig, QuicTransportConfig, QuicUpstreamConfig,
+  QuicUpstreamPoolConfig, QuicUpstreamResolutionConfig, QuicZeroRttMode, RawQuicTransportConfig,
+  WorkerCountSetting, WorkerMultipliersConfig, WorkerParallelism, resolve_worker_count,
 };
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -26,7 +26,7 @@ pub(super) struct RawQuicConfig {
   #[serde(default)]
   downstream: RawQuicEndpointConfig,
   #[serde(default)]
-  upstream: RawQuicEndpointConfig,
+  upstream: RawQuicUpstreamConfig,
   #[serde(default)]
   socket: RawQuicSocketConfig,
   #[serde(default)]
@@ -42,7 +42,7 @@ impl Default for RawQuicConfig {
       alt_svc: QuicAltSvcConfig::default(),
       transport: QuicTransportConfig::default(),
       downstream: RawQuicEndpointConfig::default(),
-      upstream: RawQuicEndpointConfig::default(),
+      upstream: RawQuicUpstreamConfig::default(),
       socket: RawQuicSocketConfig::default(),
       upstream_pool: QuicUpstreamPoolConfig::default(),
     }
@@ -57,7 +57,7 @@ pub struct QuicConfig {
   pub alt_svc: QuicAltSvcConfig,
   pub transport: QuicTransportConfig,
   pub downstream: QuicEndpointConfig,
-  pub upstream: QuicEndpointConfig,
+  pub upstream: QuicUpstreamConfig,
   pub socket: QuicSocketConfig,
   pub upstream_pool: QuicUpstreamPoolConfig,
 }
@@ -71,7 +71,7 @@ impl Default for QuicConfig {
       alt_svc: QuicAltSvcConfig::default(),
       transport: QuicTransportConfig::default(),
       downstream: QuicEndpointConfig::default(),
-      upstream: QuicEndpointConfig::default(),
+      upstream: QuicUpstreamConfig::default(),
       socket: QuicSocketConfig::default(),
       upstream_pool: QuicUpstreamPoolConfig::default(),
     }
@@ -117,6 +117,7 @@ impl QuicConfig {
       .upstream
       .transport
       .validate("quic.upstream.transport")?;
+    self.upstream.resolution.validate()?;
     if self.upstream_pool.max_connections_per_upstream == 0 {
       bail!("quic.upstream_pool.max_connections_per_upstream must be greater than 0");
     }
@@ -138,6 +139,23 @@ impl RawQuicEndpointConfig {
   fn resolve(&self, base_transport: &QuicTransportConfig) -> QuicEndpointConfig {
     QuicEndpointConfig {
       transport: self.transport.resolve(base_transport),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+struct RawQuicUpstreamConfig {
+  #[serde(default)]
+  transport: RawQuicTransportConfig,
+  #[serde(default)]
+  resolution: QuicUpstreamResolutionConfig,
+}
+
+impl RawQuicUpstreamConfig {
+  fn resolve(&self, base_transport: &QuicTransportConfig) -> QuicUpstreamConfig {
+    QuicUpstreamConfig {
+      transport: self.transport.resolve(base_transport),
+      resolution: self.resolution.clone(),
     }
   }
 }

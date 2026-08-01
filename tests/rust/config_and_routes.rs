@@ -9517,6 +9517,17 @@ fn quic_defaults_are_parsed() {
   assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 20);
   assert_eq!(config.quic.downstream.transport, config.quic.transport);
   assert_eq!(config.quic.upstream.transport, config.quic.transport);
+  assert_eq!(config.quic.upstream.resolution.max_endpoint_count, 16);
+  assert_eq!(config.quic.upstream.resolution.min_ttl_ms, 1_000);
+  assert_eq!(config.quic.upstream.resolution.max_ttl_ms, 30_000);
+  assert_eq!(config.quic.upstream.resolution.negative_ttl_ms, 1_000);
+  assert_eq!(
+    config.quic.upstream.resolution.address_family_stagger_ms,
+    250
+  );
+  assert_eq!(config.quic.upstream.resolution.max_connect_attempts, 4);
+  assert_eq!(config.quic.upstream.resolution.cooldown_base_ms, 1_000);
+  assert_eq!(config.quic.upstream.resolution.cooldown_max_ms, 30_000);
   assert_eq!(config.quic.socket.receive_buffer_bytes, 0);
   assert!(config.quic.upstream_pool.enabled);
 }
@@ -9561,6 +9572,16 @@ interval_ms = 111000
 black_hole_cooldown_ms = 222000
 minimum_change = 30
 
+[quic.upstream.resolution]
+max_endpoint_count = 12
+min_ttl_ms = 500
+max_ttl_ms = 45000
+negative_ttl_ms = 750
+address_family_stagger_ms = 100
+max_connect_attempts = 6
+cooldown_base_ms = 500
+cooldown_max_ms = 20000
+
 [quic.socket]
 receive_buffer_bytes = 8192
 send_buffer_bytes = 16384
@@ -9599,6 +9620,17 @@ max_lifetime_ms = 7777
   assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 30);
   assert_eq!(config.quic.downstream.transport, config.quic.transport);
   assert_eq!(config.quic.upstream.transport, config.quic.transport);
+  assert_eq!(config.quic.upstream.resolution.max_endpoint_count, 12);
+  assert_eq!(config.quic.upstream.resolution.min_ttl_ms, 500);
+  assert_eq!(config.quic.upstream.resolution.max_ttl_ms, 45_000);
+  assert_eq!(config.quic.upstream.resolution.negative_ttl_ms, 750);
+  assert_eq!(
+    config.quic.upstream.resolution.address_family_stagger_ms,
+    100
+  );
+  assert_eq!(config.quic.upstream.resolution.max_connect_attempts, 6);
+  assert_eq!(config.quic.upstream.resolution.cooldown_base_ms, 500);
+  assert_eq!(config.quic.upstream.resolution.cooldown_max_ms, 20_000);
   assert_eq!(config.quic.socket.receive_buffer_bytes, 8192);
   assert!(!config.quic.upstream_pool.enabled);
 }
@@ -9721,6 +9753,107 @@ idle_timeout_ms = 0
       .contains("quic.transport numeric values must be greater than 0"),
     "unexpected error: {error}"
   );
+}
+
+#[test]
+fn quic_upstream_resolution_invalid_values_are_rejected() {
+  let temp_dir = common::TempDir::new("quic-upstream-resolution-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "quic-upstream-resolution-invalid");
+  let cases = [
+    (
+      "zero endpoints",
+      "max_endpoint_count = 0",
+      "quic.upstream.resolution.max_endpoint_count must be between 1 and 64",
+    ),
+    (
+      "too many endpoints",
+      "max_endpoint_count = 65",
+      "quic.upstream.resolution.max_endpoint_count must be between 1 and 64",
+    ),
+    (
+      "zero minimum TTL",
+      "min_ttl_ms = 0",
+      "quic.upstream.resolution.min_ttl_ms must be between 1 and 3600000",
+    ),
+    (
+      "minimum TTL above maximum TTL",
+      "min_ttl_ms = 30001",
+      "quic.upstream.resolution.min_ttl_ms must be less than or equal to quic.upstream.resolution.max_ttl_ms",
+    ),
+    (
+      "maximum TTL above cap",
+      "max_ttl_ms = 3600001",
+      "quic.upstream.resolution.max_ttl_ms must be between 1 and 3600000",
+    ),
+    (
+      "zero negative TTL",
+      "negative_ttl_ms = 0",
+      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 30000",
+    ),
+    (
+      "negative TTL above cap",
+      "negative_ttl_ms = 30001",
+      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 30000",
+    ),
+    (
+      "negative TTL above maximum TTL",
+      "min_ttl_ms = 500\nmax_ttl_ms = 500\nnegative_ttl_ms = 501",
+      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 500",
+    ),
+    (
+      "zero address-family stagger",
+      "address_family_stagger_ms = 0",
+      "quic.upstream.resolution.address_family_stagger_ms must be between 1 and 5000",
+    ),
+    (
+      "address-family stagger above cap",
+      "address_family_stagger_ms = 5001",
+      "quic.upstream.resolution.address_family_stagger_ms must be between 1 and 5000",
+    ),
+    (
+      "zero connect attempts",
+      "max_connect_attempts = 0",
+      "quic.upstream.resolution.max_connect_attempts must be between 1 and 16",
+    ),
+    (
+      "connect attempts above cap",
+      "max_connect_attempts = 17",
+      "quic.upstream.resolution.max_connect_attempts must be between 1 and 16",
+    ),
+    (
+      "zero cooldown base",
+      "cooldown_base_ms = 0",
+      "quic.upstream.resolution.cooldown_base_ms must be greater than 0",
+    ),
+    (
+      "cooldown maximum above cap",
+      "cooldown_max_ms = 300001",
+      "quic.upstream.resolution.cooldown_max_ms must be between 1 and 300000",
+    ),
+    (
+      "cooldown base above maximum",
+      "cooldown_base_ms = 30001",
+      "quic.upstream.resolution.cooldown_base_ms must be less than or equal to quic.upstream.resolution.cooldown_max_ms",
+    ),
+  ];
+
+  for (name, resolution_toml, expected) in cases {
+    let raw = format!(
+      "{}\n\n[quic.upstream.resolution]\n{}\n",
+      common::minimal_config_toml(&cert_path, &key_path),
+      resolution_toml
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = match config.validate() {
+      Ok(()) => panic!("{name} should fail validation"),
+      Err(error) => error,
+    };
+    assert!(
+      error.to_string().contains(expected),
+      "{name} produced unexpected error: {error}"
+    );
+  }
 }
 
 #[test]

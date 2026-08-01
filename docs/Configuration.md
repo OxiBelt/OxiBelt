@@ -996,6 +996,16 @@ stream_receive_window_bytes = 2097152
 [quic.upstream.transport.mtu_discovery]
 upper_bound = 1472
 
+[quic.upstream.resolution]
+max_endpoint_count = 16
+min_ttl_ms = 1000
+max_ttl_ms = 30000
+negative_ttl_ms = 1000
+address_family_stagger_ms = 250
+max_connect_attempts = 4
+cooldown_base_ms = 1000
+cooldown_max_ms = 30000
+
 [quic.socket]
 receive_buffer_bytes = 16777216
 send_buffer_bytes = 16777216
@@ -1022,7 +1032,13 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. QUIC transport and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`; socket receive/send buffer `0` is the explicit OS-default sentinel.
 
-The upstream HTTP/3 pool multiplexes ordinary HTTP/3 request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary HTTP/3 upstream requests use one-shot QUIC connections. WebTransport forwarding keeps a dedicated QUIC connection per session.
+`[quic.upstream.resolution]` controls the shared upstream HTTP/3 endpoint resolver. Successful A and AAAA answers are retained up to `max_endpoint_count` and cached until their DNS TTL after clamping it to `min_ttl_ms..=max_ttl_ms`. Selected NXDOMAIN and NODATA results are cached for `negative_ttl_ms`; this value may not exceed `min(max_ttl_ms, 30000)`. An existing healthy QUIC connection may continue while its endpoint set refreshes, but a new connection attempt does not rely indefinitely on an expired set.
+
+The resolver prefers a recently successful address without pinning it forever, rotates among eligible candidates, and applies per-address cooldown starting at `cooldown_base_ms` and capped by `cooldown_max_ms`. IPv6 and IPv4 attempts are staggered by `address_family_stagger_ms`. At most `min(max_connect_attempts, max_endpoint_count)` candidates are tried for one connection operation. `max_endpoint_count` must be `1..=64`; both TTL clamps must be `1..=3600000` with `min_ttl_ms <= max_ttl_ms`; `address_family_stagger_ms` must be `1..=5000`; `max_connect_attempts` must be `1..=16`; and cooldown values must be positive with `cooldown_base_ms <= cooldown_max_ms <= 300000`.
+
+The upstream HTTP/3 pool multiplexes ordinary request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary requests use one-shot QUIC connections. One-shot HTTP/3 and WebTransport retain their dedicated connection lifetimes, but use the same bounded resolver component. Resolution, connection coalescing, and slot waits are bounded by the effective request deadline. Candidate failover is allowed only before request dispatch; a post-dispatch failure does not implicitly replay the request.
+
+Reusable connections are keyed by logical security and routing identity: protocol mode, normalized authority and TLS server name, verification/trust policy, client identity, configuration generation, and discovery identity. The selected IP address is connection state, not pool identity. OxiBelt does not coalesce across origins merely because their addresses or certificates overlap. Changing any `[quic.upstream.resolution]` field requires a full reload. These additive fields keep native configuration schema epoch `1`; omitted fields use the defaults above and require no migration.
 
 ## SNI Forwarding
 

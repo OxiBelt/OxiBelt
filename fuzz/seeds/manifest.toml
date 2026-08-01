@@ -155,3 +155,11 @@ sha256 = "2a5530b1d2f2ad4dad72fe8adfb02e94b2f54b60a187de3515c0e9ba3a1dd924"
 origin = "Repository-authored certificate-metadata vocabulary containing no certificate or private key."
 license = "Apache-2.0"
 classification = "non-secret"
+
+[[seed]]
+target = "upstream_dns_resolution"
+path = "fuzz/seeds/upstream_dns_resolution/a-response.hex"
+sha256 = "4fd29884da293d4c51663fa70c74bf8fecf6b3b9111bb9727dd585789e4cf184"
+origin = "Repository-authored synthetic DNS A response for example.test using a documentation address."
+license = "Apache-2.0"
+classification = "non-secret"

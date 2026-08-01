@@ -277,6 +277,32 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "protocol-proxying",
+      "h3-adaptive-multi-address",
+      "HTTP/3 resolution fails over within one TTL-bound endpoint set and preserves pooled identity",
+      ExpectStart::Success,
+      Needs {
+        h3_upstream: true,
+        dns_server: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
+      "h3-adaptive-cold-coalescing",
+      "concurrent cold HTTP/3 requests coalesce DNS and connection establishment",
+      ExpectStart::Success,
+      Needs {
+        h3_upstream: true,
+        dns_server: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
       "alt-svc-https-response",
       "HTTPS HTTP/1.1 and HTTP/2 responses advertise HTTP/3 with Alt-Svc",
       ExpectStart::Success,

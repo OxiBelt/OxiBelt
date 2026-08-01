@@ -416,6 +416,19 @@ indices deliberately.
 This is an additive Admin API and CLI change; the native configuration schema
 remains epoch `1` and no TOML migration is required.
 
+Post-beta.2 development also adds optional upstream HTTP/3 resolver controls
+under `[quic.upstream.resolution]`. Existing TOML remains valid and uses the
+documented defaults when these fields are omitted. The native configuration
+schema remains epoch `1`; no TOML migration or compatibility alias is needed.
+Changing any resolver field is classified as `full_reload`, which replaces the
+resolver and pool snapshot for new work while already-draining connections keep
+their normal bounded lifetime. Validate candidate TTL, endpoint, attempt,
+address-family stagger, and cooldown limits before activation, then monitor the
+fixed-cardinality upstream HTTP/3 resolver and pool metrics for negative-cache,
+connect-failure, saturation, and wait changes. To roll back, restore or omit the
+resolver fields and perform another full reload; this does not authorize
+cross-origin connection reuse or post-dispatch request replay.
+
 Before applying an upgrade candidate, operators can compare production-loaded
 files without Admin authority:
 

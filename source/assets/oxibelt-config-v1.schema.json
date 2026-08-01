@@ -15235,6 +15235,105 @@
           "additionalProperties": false,
           "description": "OxiBelt native field `quic.upstream`. Production Rust validation is authoritative.",
           "properties": {
+            "resolution": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `quic.upstream.resolution`. Production Rust validation is authoritative.",
+              "properties": {
+                "address_family_stagger_ms": {
+                  "default": 250,
+                  "description": "OxiBelt native field `quic.upstream.resolution.address_family_stagger_ms`. Production Rust validation is authoritative.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "cooldown_base_ms": {
+                  "default": 1000,
+                  "description": "OxiBelt native field `quic.upstream.resolution.cooldown_base_ms`. Production Rust validation is authoritative.",
+                  "maximum": 300000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "cooldown_max_ms": {
+                  "default": 30000,
+                  "description": "OxiBelt native field `quic.upstream.resolution.cooldown_max_ms`. Production Rust validation is authoritative.",
+                  "maximum": 300000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_connect_attempts": {
+                  "default": 4,
+                  "description": "OxiBelt native field `quic.upstream.resolution.max_connect_attempts`. Production Rust validation is authoritative.",
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_endpoint_count": {
+                  "default": 16,
+                  "description": "OxiBelt native field `quic.upstream.resolution.max_endpoint_count`. Production Rust validation is authoritative.",
+                  "maximum": 64,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_ttl_ms": {
+                  "default": 30000,
+                  "description": "OxiBelt native field `quic.upstream.resolution.max_ttl_ms`. Production Rust validation is authoritative.",
+                  "maximum": 3600000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "min_ttl_ms": {
+                  "default": 1000,
+                  "description": "OxiBelt native field `quic.upstream.resolution.min_ttl_ms`. Production Rust validation is authoritative.",
+                  "maximum": 3600000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "negative_ttl_ms": {
+                  "default": 1000,
+                  "description": "OxiBelt native field `quic.upstream.resolution.negative_ttl_ms`. Production Rust validation is authoritative.",
+                  "maximum": 30000,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "transport": {
               "additionalProperties": false,
               "description": "OxiBelt native field `quic.upstream.transport`. Production Rust validation is authoritative.",

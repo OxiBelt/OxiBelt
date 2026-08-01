@@ -171,7 +171,17 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "minimum_change",
       "upper_bound",
     ][..],
-    "quic.upstream" => &["transport"][..],
+    "quic.upstream" => &["resolution", "transport"][..],
+    "quic.upstream.resolution" => &[
+      "address_family_stagger_ms",
+      "cooldown_base_ms",
+      "cooldown_max_ms",
+      "max_connect_attempts",
+      "max_endpoint_count",
+      "max_ttl_ms",
+      "min_ttl_ms",
+      "negative_ttl_ms",
+    ][..],
     "quic.upstream.transport" => &[
       "datagram_receive_buffer_bytes",
       "datagram_send_buffer_bytes",

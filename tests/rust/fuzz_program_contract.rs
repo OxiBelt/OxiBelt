@@ -20,6 +20,7 @@ const EXPECTED_TARGETS: &[&str] = &[
   "tls_certificate_metadata",
   "tls_client_hello",
   "turn_protocol",
+  "upstream_dns_resolution",
   "webrtc_turn",
   "websocket_frame",
 ];
@@ -199,7 +200,7 @@ fn catalog_defines_the_complete_bounded_program() {
   assert_eq!(
     targets.keys().cloned().collect::<BTreeSet<_>>(),
     string_set(EXPECTED_TARGETS.iter().copied()),
-    "the fuzz catalog must preserve all seventeen registered targets"
+    "the fuzz catalog must preserve all eighteen registered targets"
   );
 
   assert_eq!(table_integer(&program, "max_seed_files_per_target"), 128);

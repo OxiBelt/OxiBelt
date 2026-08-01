@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
@@ -26,7 +26,6 @@ use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
-use crate::tls;
 use crate::waf::WafProtocol;
 
 type H3BidiStream = crate::quic::h3::BidiStream<Bytes>;
@@ -37,7 +36,6 @@ type H3RequestRecvStream =
   h3::server::RequestStream<<H3BidiStream as h3::quic::BidiStream<Bytes>>::RecvStream, Bytes>;
 type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
-const H3_POOL_SELECTION_RETRIES: usize = 4;
 const H3_MAX_FIELD_SECTION_SIZE: u64 = (1_u64 << 62) - 1;
 
 mod fast_response;
@@ -48,14 +46,13 @@ mod response_body;
 mod tests;
 mod tls_metadata;
 mod upstream_connection;
+mod upstream_endpoints;
 mod upstream_pool;
 mod webtransport_bridge;
 
 use tls_metadata::downstream_quic_tls_metadata;
+use upstream_connection::connect_upstream_webtransport;
 pub(crate) use upstream_connection::forward_request;
-use upstream_connection::{
-  connect_h3_upstream, connect_upstream_webtransport, resolve_upstream_addr, send_h3_request,
-};
 pub(crate) use upstream_pool::UpstreamH3Pools;
 
 #[cfg(test)]

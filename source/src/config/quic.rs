@@ -48,6 +48,12 @@ impl Default for QuicAltSvcConfig {
 const QUIC_VARINT_MAX: u64 = 4_611_686_018_427_387_903;
 const QUIC_MIN_UDP_PAYLOAD_SIZE: u16 = 1200;
 const QUIC_MAX_UDP_PAYLOAD_SIZE: u16 = 65_527;
+const QUIC_UPSTREAM_RESOLUTION_MAX_ENDPOINT_COUNT: usize = 64;
+const QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS: u64 = 3_600_000;
+const QUIC_UPSTREAM_RESOLUTION_MAX_NEGATIVE_TTL_MS: u64 = 30_000;
+const QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS: u64 = 5_000;
+const QUIC_UPSTREAM_RESOLUTION_MAX_CONNECT_ATTEMPTS: usize = 16;
+const QUIC_UPSTREAM_RESOLUTION_MAX_COOLDOWN_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct QuicTransportConfig {
@@ -326,6 +332,113 @@ pub struct QuicEndpointConfig {
   pub transport: QuicTransportConfig,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct QuicUpstreamConfig {
+  #[serde(default)]
+  pub transport: QuicTransportConfig,
+  #[serde(default)]
+  pub resolution: QuicUpstreamResolutionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicUpstreamResolutionConfig {
+  #[serde(default = "default_quic_upstream_resolution_max_endpoint_count")]
+  pub max_endpoint_count: usize,
+  #[serde(default = "default_quic_upstream_resolution_min_ttl_ms")]
+  pub min_ttl_ms: u64,
+  #[serde(default = "default_quic_upstream_resolution_max_ttl_ms")]
+  pub max_ttl_ms: u64,
+  #[serde(default = "default_quic_upstream_resolution_negative_ttl_ms")]
+  pub negative_ttl_ms: u64,
+  #[serde(default = "default_quic_upstream_resolution_address_family_stagger_ms")]
+  pub address_family_stagger_ms: u64,
+  #[serde(default = "default_quic_upstream_resolution_max_connect_attempts")]
+  pub max_connect_attempts: usize,
+  #[serde(default = "default_quic_upstream_resolution_cooldown_base_ms")]
+  pub cooldown_base_ms: u64,
+  #[serde(default = "default_quic_upstream_resolution_cooldown_max_ms")]
+  pub cooldown_max_ms: u64,
+}
+
+impl Default for QuicUpstreamResolutionConfig {
+  fn default() -> Self {
+    Self {
+      max_endpoint_count: default_quic_upstream_resolution_max_endpoint_count(),
+      min_ttl_ms: default_quic_upstream_resolution_min_ttl_ms(),
+      max_ttl_ms: default_quic_upstream_resolution_max_ttl_ms(),
+      negative_ttl_ms: default_quic_upstream_resolution_negative_ttl_ms(),
+      address_family_stagger_ms: default_quic_upstream_resolution_address_family_stagger_ms(),
+      max_connect_attempts: default_quic_upstream_resolution_max_connect_attempts(),
+      cooldown_base_ms: default_quic_upstream_resolution_cooldown_base_ms(),
+      cooldown_max_ms: default_quic_upstream_resolution_cooldown_max_ms(),
+    }
+  }
+}
+
+impl QuicUpstreamResolutionConfig {
+  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    if !(1..=QUIC_UPSTREAM_RESOLUTION_MAX_ENDPOINT_COUNT).contains(&self.max_endpoint_count) {
+      bail!(
+        "quic.upstream.resolution.max_endpoint_count must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_ENDPOINT_COUNT}"
+      );
+    }
+    if self.min_ttl_ms == 0 || self.min_ttl_ms > QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS {
+      bail!(
+        "quic.upstream.resolution.min_ttl_ms must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS}"
+      );
+    }
+    if self.max_ttl_ms == 0 || self.max_ttl_ms > QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS {
+      bail!(
+        "quic.upstream.resolution.max_ttl_ms must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS}"
+      );
+    }
+    if self.min_ttl_ms > self.max_ttl_ms {
+      bail!(
+        "quic.upstream.resolution.min_ttl_ms must be less than or equal to quic.upstream.resolution.max_ttl_ms"
+      );
+    }
+    let maximum_negative_ttl_ms = self
+      .max_ttl_ms
+      .min(QUIC_UPSTREAM_RESOLUTION_MAX_NEGATIVE_TTL_MS);
+    if self.negative_ttl_ms == 0 || self.negative_ttl_ms > maximum_negative_ttl_ms {
+      bail!(
+        "quic.upstream.resolution.negative_ttl_ms must be between 1 and {maximum_negative_ttl_ms}"
+      );
+    }
+    if self.address_family_stagger_ms == 0
+      || self.address_family_stagger_ms > QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS
+    {
+      bail!(
+        "quic.upstream.resolution.address_family_stagger_ms must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS}"
+      );
+    }
+    if !(1..=QUIC_UPSTREAM_RESOLUTION_MAX_CONNECT_ATTEMPTS).contains(&self.max_connect_attempts) {
+      bail!(
+        "quic.upstream.resolution.max_connect_attempts must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_CONNECT_ATTEMPTS}"
+      );
+    }
+    if self.cooldown_base_ms == 0 {
+      bail!("quic.upstream.resolution.cooldown_base_ms must be greater than 0");
+    }
+    if self.cooldown_max_ms == 0 || self.cooldown_max_ms > QUIC_UPSTREAM_RESOLUTION_MAX_COOLDOWN_MS
+    {
+      bail!(
+        "quic.upstream.resolution.cooldown_max_ms must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_COOLDOWN_MS}"
+      );
+    }
+    if self.cooldown_base_ms > self.cooldown_max_ms {
+      bail!(
+        "quic.upstream.resolution.cooldown_base_ms must be less than or equal to quic.upstream.resolution.cooldown_max_ms"
+      );
+    }
+    Ok(())
+  }
+
+  pub(crate) fn effective_max_connect_attempts(&self) -> usize {
+    self.max_connect_attempts.min(self.max_endpoint_count)
+  }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct QuicUpstreamPoolConfig {
   #[serde(default = "default_true")]
@@ -408,4 +521,36 @@ fn default_quic_upstream_pool_max_connections() -> usize {
 
 fn default_quic_upstream_pool_max_lifetime_ms() -> u64 {
   600_000
+}
+
+fn default_quic_upstream_resolution_max_endpoint_count() -> usize {
+  16
+}
+
+fn default_quic_upstream_resolution_min_ttl_ms() -> u64 {
+  1_000
+}
+
+fn default_quic_upstream_resolution_max_ttl_ms() -> u64 {
+  30_000
+}
+
+fn default_quic_upstream_resolution_negative_ttl_ms() -> u64 {
+  1_000
+}
+
+fn default_quic_upstream_resolution_address_family_stagger_ms() -> u64 {
+  250
+}
+
+fn default_quic_upstream_resolution_max_connect_attempts() -> usize {
+  4
+}
+
+fn default_quic_upstream_resolution_cooldown_base_ms() -> u64 {
+  1_000
+}
+
+fn default_quic_upstream_resolution_cooldown_max_ms() -> u64 {
+  30_000
 }

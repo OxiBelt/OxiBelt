@@ -237,6 +237,8 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
     NativeConfigActivation::DownstreamTlsReload,
   ),
+  full_reload("quic.upstream.resolution"),
+  full_reload("quic.upstream.resolution.*"),
   conditional("runtime.main_runtime"),
   conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
@@ -574,6 +576,9 @@ fn scalar_schema(path: &str) -> Value {
   if let Some(values) = enum_values(path) {
     return json!({"type": "string", "enum": values});
   }
+  if let Some((minimum, maximum)) = bounded_integer_range(path) {
+    return json!({"type": "integer", "minimum": minimum, "maximum": maximum});
+  }
   if auto_integer_path(path) {
     return json!({
       "oneOf": [
@@ -604,6 +609,22 @@ fn scalar_schema(path: &str) -> Value {
       {"type": "object"}
     ]
   })
+}
+
+#[cfg(feature = "config-tooling")]
+fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
+  let range = match path {
+    "quic.upstream.resolution.max_endpoint_count" => (1, 64),
+    "quic.upstream.resolution.min_ttl_ms" | "quic.upstream.resolution.max_ttl_ms" => (1, 3_600_000),
+    "quic.upstream.resolution.negative_ttl_ms" => (1, 30_000),
+    "quic.upstream.resolution.address_family_stagger_ms" => (1, 5_000),
+    "quic.upstream.resolution.max_connect_attempts" => (1, 16),
+    "quic.upstream.resolution.cooldown_base_ms" | "quic.upstream.resolution.cooldown_max_ms" => {
+      (1, 300_000)
+    }
+    _ => return None,
+  };
+  Some(range)
 }
 
 #[cfg(feature = "config-tooling")]
@@ -797,6 +818,14 @@ fn default_value(path: &str) -> Option<Value> {
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
     "stream_listeners.udp_flow_state" => json!("local"),
+    "quic.upstream.resolution.address_family_stagger_ms" => json!(250),
+    "quic.upstream.resolution.cooldown_base_ms" => json!(1_000),
+    "quic.upstream.resolution.cooldown_max_ms" => json!(30_000),
+    "quic.upstream.resolution.max_connect_attempts" => json!(4),
+    "quic.upstream.resolution.max_endpoint_count" => json!(16),
+    "quic.upstream.resolution.max_ttl_ms" => json!(30_000),
+    "quic.upstream.resolution.min_ttl_ms" => json!(1_000),
+    "quic.upstream.resolution.negative_ttl_ms" => json!(1_000),
     "tls.max_version" | "tls.min_version" => json!("tls1.3"),
     "tls.ssl_early_data" => json!("off"),
     _ => return None,

@@ -28,6 +28,7 @@ matrices, and this metadata from drifting apart.
 | `http_semantics` | Methods, URIs, authority, versions, and headers; ambiguous framing and forwarding state fail closed | Network I/O, connections, streaming bodies |
 | `compio_h1_response` | At most 128 KiB of response bytes, bounded fragmentation, and validated small protocol limits; framing and metadata remain deterministic and bounded | Live sockets, transport cancellation, and changes to Hyper |
 | `http3_webtransport` | HTTP/3 metadata, early-data state, and extended CONNECT protocols | Live QUIC/H3 sessions and datagrams |
+| `upstream_dns_resolution` | Bounded DNS response parsing, query identity, names, TTLs, and endpoint records | Live DNS sockets, cache tasks, and QUIC dialing |
 | `websocket_frame` | At most eight bounded data/control frames and WAF prefix inspection | Upgraded sockets and unbounded reassembly |
 | `webrtc_turn` | TURN/STUN integrity, nonce, fingerprint, padding, and address cases | Relay listeners, databases, network allocation |
 | `syscall_boundaries` | Reversible ABI and marshalling decisions only | Applying Landlock, socket options, or other process-wide syscalls |

@@ -16,6 +16,7 @@ mod crlite;
 mod detail;
 pub(crate) mod fast_path;
 mod fast_path_methods;
+pub(crate) mod http3_upstream;
 mod http_io;
 mod ocsp;
 mod outbound_revocation;
@@ -75,6 +76,7 @@ pub struct Metrics {
   outbound_revocation: outbound_revocation::OutboundRevocationMetrics,
   fast_path: fast_path::FastPathMetrics,
   http_io: http_io::HttpIoMetrics,
+  http3_upstream: http3_upstream::Http3UpstreamMetrics,
   upstream_client: upstream_client::UpstreamClientMetrics,
   sni_forward: sni_forward::SniForwardMetrics,
   stream: stream::StreamMetrics,
@@ -695,6 +697,7 @@ impl Metrics {
     self.compio_direct_h1.append_prometheus(&mut output);
     self.append_upstream_client_prometheus(&mut output);
     self.append_http_io_prometheus(&mut output);
+    self.http3_upstream.append_prometheus(&mut output);
     self.append_sni_forward_prometheus(&mut output);
     self.append_stream_prometheus(&mut output);
     self.pool.append_prometheus(&mut output);

@@ -267,6 +267,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
     "protocol-proxying",
     "downstream-h2-upstream-h3-pooled-reconnect",
   ),
+  ("protocol-proxying", "h3-adaptive-multi-address"),
+  ("protocol-proxying", "h3-adaptive-cold-coalescing"),
   ("protocol-proxying", "alt-svc-https-response"),
   ("protocol-proxying", "alt-svc-port-overrides"),
   ("protocol-proxying", "alt-svc-skip-rules"),

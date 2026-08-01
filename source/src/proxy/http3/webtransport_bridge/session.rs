@@ -158,25 +158,26 @@ pub(super) async fn accept_webtransport_session(
     return Ok(());
   }
 
-  let upstream = match connect_upstream_webtransport(&prepared, snapshot.as_ref()).await {
-    Ok(upstream) => upstream,
-    Err(error) => {
-      warn!(
-        ?session_id,
-        error = %error,
-        "failed to connect upstream WebTransport session"
-      );
-      respond_to_h3_request(
-        stream,
-        text_response(
-          StatusCode::BAD_GATEWAY,
-          "upstream WebTransport CONNECT failed",
-        ),
-      )
-      .await?;
-      return Ok(());
-    }
-  };
+  let (upstream, upstream_connection_guard) =
+    match connect_upstream_webtransport(&prepared, snapshot.as_ref()).await {
+      Ok(upstream) => upstream,
+      Err(error) => {
+        warn!(
+          ?session_id,
+          error = %error,
+          "failed to connect upstream WebTransport session"
+        );
+        respond_to_h3_request(
+          stream,
+          text_response(
+            StatusCode::BAD_GATEWAY,
+            "upstream WebTransport CONNECT failed",
+          ),
+        )
+        .await?;
+        return Ok(());
+      }
+    };
 
   stream
     .send_response(
@@ -232,6 +233,7 @@ pub(super) async fn accept_webtransport_session(
     session_id,
     ActiveWebTransportSession {
       upstream,
+      _upstream_connection_guard: upstream_connection_guard,
       connect_stream: stream,
       #[cfg(feature = "admin-runtime")]
       admin_guard,
