@@ -671,9 +671,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -681,9 +681,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -711,9 +711,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clubcard"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ef474a1b4f0f838c9f513e224f6b5b74ee63a55d9ec42874bfb343b0fce29c8"
+checksum = "1f8c5e5335283f9165377506b6b99cdc34fa9634927b201cca7d79fa4d0c8259"
 dependencies = [
  "rand 0.8.7",
  "serde",
@@ -721,11 +721,11 @@ dependencies = [
 
 [[package]]
 name = "clubcard-crlite"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "077423e546548daf83d605a1f8427fe926be6d714585a9807096a71a4b1aa984"
+checksum = "13ce4da6470d99f98f70935dbd70f518aeabba208f27b54cddd87fba1e89418c"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "clubcard",
  "serde",
  "serde_json",
@@ -1340,13 +1340,13 @@ dependencies = [
 
 [[package]]
 name = "enum-ordinalize-derive"
-version = "4.4.1"
+version = "4.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42e528e2d34ba8a67a1a650b86beae8ef69fc5fdb638016f386b973226590432"
+checksum = "a65863d15a4ce2888bd2f0f543cc963d3879c3a022c8ee43f6141d479a3ac815"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]

@@ -27,8 +27,8 @@ base64 = { version = "0.23.0", default-features = false, features = ["std"] }
 brotli = "8.0.4"
 bytes = "1.12.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
-clap = { version = "4.6.4", features = ["derive"] }
-clubcard-crlite = { version = "0.6.0", default-features = false, features = ["builder"] }
+clap = { version = "4.6.5", features = ["derive"] }
+clubcard-crlite = { version = "0.6.1", default-features = false, features = ["builder"] }
 der = "0.8.1"
 deadpool = { version = "0.13.0", default-features = false, features = ["managed", "rt_tokio_1"] }
 glob = "0.3.4"
@@ -99,7 +99,7 @@ oxibelt-control-protocol.workspace = true
 aws-lc-rs = { version = "1.17.3", default-features = false, features = ["bindgen"] }
 
 [dev-dependencies]
-clubcard = { version = "0.3.3", features = ["builder"] }
+clubcard = { version = "0.3.4", features = ["builder"] }
 criterion = { version = "0.8.2", default-features = false }
 loom = "0.7.2"
 pretty_assertions = "1.4.1"

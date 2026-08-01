@@ -407,7 +407,7 @@ jobs:
           - name: stable
             toolchain: stable
           - name: asan
-            toolchain: nightly-2026-07-31
+            toolchain: nightly-2026-08-01
         fuzz_target:
           - turn_protocol
           - tls_client_hello
@@ -548,7 +548,7 @@ jobs:
             --platform linux/riscv64 \
             --target riscv64-musl-check \
             --build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64 \
-            --build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-c12165aa \
+            --build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-60372bf6 \
             --progress plain \
             -f source/ops/Dockerfile.alpine \
             .

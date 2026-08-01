@@ -815,8 +815,8 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   );
 
   for expected in [
-    "FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:c12165aac0b52abaee935d0be8ceaa93f63a0f0447597811377417e3120f2247 AS riscv64-cross-toolchain",
-    "1d07d3f9cc465c435256f1aabc1d18024517891a",
+    "FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:60372bf6ad955bc04ac9b0689476b05955b4e90fc2030d311be687025672cc6d AS riscv64-cross-toolchain",
+    "55f847251389c5406df85579191c0eac412fab3a",
     "FROM builder-base AS builder-riscv64",
     "COPY --from=riscv64-cross-toolchain /x-tools /x-tools",
     "COPY source/ops/riscv64-musl-toolchain.cmake /opt/oxibelt/riscv64-musl-toolchain.cmake",
@@ -4879,7 +4879,7 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     "Cargo check for RISC-V musl target",
     "--platform linux/riscv64",
     "--target riscv64-musl-check",
-    "--build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-c12165aa",
+    "--build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-60372bf6",
     "--build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64",
   ] {
     assert!(
@@ -7262,7 +7262,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "expected_count=30",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.7.0",
+    "version: v29.7.1",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",

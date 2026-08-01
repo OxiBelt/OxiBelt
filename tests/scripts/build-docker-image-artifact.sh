@@ -187,7 +187,7 @@ case "${artifact_arch}" in
     fi
     rust_target="riscv64gc-unknown-linux-musl"
     rust_builder_stage="builder-riscv64"
-    rust_build_cache_key="riscv64gc-musl-cross-rs-c12165aa"
+    rust_build_cache_key="riscv64gc-musl-cross-rs-60372bf6"
     ;;
   *)
     usage

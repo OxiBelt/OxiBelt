@@ -61,11 +61,35 @@ criteria = "safe-to-deploy"
 version = "4.6.4"
 notes = "Reviewed complete 4.6.4 source and the 4.6.2 delta; the facade forbids unsafe code, only reexports clap_builder and optional derive support, has no build-time side effects, and the source delta is documentation-only."
 
+[[audits.clap]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "4.6.4 -> 4.6.5"
+notes = "Reviewed the complete checksum-matched 4.6.4-to-4.6.5 source delta; the facade still forbids unsafe code and has no build script or external IO, production source changes only documentation, while package metadata advances the separately audited clap_builder dependency and adds example snapshot coverage."
+
+[[audits.clap_builder]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "4.6.2 -> 4.6.5"
+notes = "Reviewed the complete checksum-matched 4.6.2-to-4.6.5 source delta; it corrects help-display bracketing for partially optional option values and documents existing empty-range assertions without changing argument parsing, and the crate continues to forbid unsafe code and has no build script or external side effects."
+
 [[audits.clap_derive]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "4.6.4"
 notes = "Reviewed complete 4.6.4 proc-macro source and the 4.6.1 delta; it forbids unsafe code and has no file, network, or process effects, while the delta normalizes literal expression parsing and updates AST matching for Syn 3."
+
+[[audits.clubcard]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.3 -> 0.3.4"
+notes = "Reviewed the complete checksum-matched 0.3.3-to-0.3.4 source delta; inverted approximate ribbons encode the complement consistently, exact-filter insertions are pruned against the approximate filter's pre-inversion equations, and exact ribbons inherit and apply the block inversion. Builders reject items on the wrong side of the encoded set; the only unsafe code remains an unchanged test-only slice reinterpretation, and no build script or external side effect was added."
+
+[[audits.clubcard-crlite]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.6.0 -> 0.6.1"
+notes = "Reviewed the complete checksum-matched 0.6.0-to-0.6.1 source delta; V4 serialization now rejects lengths, counts, ranks, and offsets that exceed their wire prefixes instead of truncating them, while decoding and membership-query behavior remain unchanged. The crate contains no unsafe code or build script, and its only dependency-line change advances base64 from 0.22 to the separately audited 0.23 line."
 
 [[audits.ctor]]
 who = "OpenAI Codex"
@@ -96,6 +120,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "4.4.1 -> 4.4.2"
 notes = "Reviewed the complete checksum-matched 4.4.1-to-4.4.2 source delta; production code, generated ordinal conversions, unsafe APIs, and dependencies are unchanged, and the release only adds documentation showing checked Serde deserialization through from_ordinal."
+
+[[audits.enum-ordinalize-derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "4.4.1 -> 4.4.2"
+notes = "Reviewed the complete checksum-matched 4.4.1-to-4.4.2 proc-macro delta; production macro source and generated ordinal and unsafe-transmute code are byte-for-byte unchanged, while dependencies move to the already admitted Syn 3, quote, and proc-macro2 versions. The crate has no build script, filesystem, network, process, or environment access."
 
 [[audits.event-listener]]
 who = "OpenAI Codex"

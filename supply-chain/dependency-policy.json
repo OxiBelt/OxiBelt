@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-07-31",
+  "reviewedOn": "2026-08-01",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
+      "lockfileSha256": "e1598e00451c74c6f0587ac0211657797c54783be3ae2afa1d3079406ec38200",
       "exemptionInventorySha256": "40d9bc34e0647219920215d20a455622783a778729adfdba0104f91801fe5bc7",
       "exemptedPackageVersions": 421
     },
@@ -189,24 +189,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
+      "subject": "Cargo.lock@sha256:e1598e00451c74c6f0587ac0211657797c54783be3ae2afa1d3079406ec38200",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-31",
+      "reviewedOn": "2026-08-01",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:f14252fa1e14194fb5b9c99a95d6cf6fa894c0f4927fabfca0bf468fd9aeda5d",
+      "subject": "Cargo.lock@sha256:e1598e00451c74c6f0587ac0211657797c54783be3ae2afa1d3079406ec38200",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-31",
+      "reviewedOn": "2026-08-01",
       "expiresOn": "2026-10-19"
     },
     {
@@ -244,27 +244,27 @@
       "expiresOn": "2026-10-19"
     },
     {
-      "id": "rust-license-clubcard-0.3.3",
+      "id": "rust-license-clubcard-0.3.4",
       "ecosystem": "rust",
       "control": "license",
-      "subject": "clubcard@0.3.3:MPL-2.0",
+      "subject": "clubcard@0.3.4:MPL-2.0",
       "rationale": "CRLite uses this exact package for probabilistic certificate-revocation data; keep MPL approval package-local.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-21",
+      "reviewedOn": "2026-08-01",
       "expiresOn": "2026-10-19"
     },
     {
-      "id": "rust-license-clubcard-crlite-0.6.0",
+      "id": "rust-license-clubcard-crlite-0.6.1",
       "ecosystem": "rust",
       "control": "license",
-      "subject": "clubcard-crlite@0.6.0:MPL-2.0",
+      "subject": "clubcard-crlite@0.6.1:MPL-2.0",
       "rationale": "OxiBelt's CRLite integration directly relies on this exact MPL-licensed implementation.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-22",
+      "reviewedOn": "2026-08-01",
       "expiresOn": "2026-10-19"
     },
     {

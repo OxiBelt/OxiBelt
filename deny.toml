@@ -74,8 +74,8 @@ allow = [
 ]
 exceptions = [
   { crate = "buffered-reader@1.4.1", allow = ["LGPL-2.0-or-later"] },
-  { crate = "clubcard@0.3.3", allow = ["MPL-2.0"] },
-  { crate = "clubcard-crlite@0.6.0", allow = ["MPL-2.0"] },
+  { crate = "clubcard@0.3.4", allow = ["MPL-2.0"] },
+  { crate = "clubcard-crlite@0.6.1", allow = ["MPL-2.0"] },
   { crate = "sequoia-openpgp@2.4.1", allow = ["LGPL-2.0-or-later"] },
 ]
 
