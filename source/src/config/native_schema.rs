@@ -618,6 +618,9 @@ fn scalar_schema(path: &str) -> Value {
   if string_array_path(path) {
     return json!({"type": "array", "items": {"type": "string"}});
   }
+  if string_path(path) {
+    return json!({"type": "string"});
+  }
   json!({
     "anyOf": [
       {"type": "string"},
@@ -740,6 +743,9 @@ fn integer_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn string_array_path(path: &str) -> bool {
+  if path == "runtime.hardening.filesystem_manifest.expected_writable_paths" {
+    return true;
+  }
   path.rsplit('.').next().is_some_and(|name| {
     name.ends_with("_binds")
       || name.ends_with("_certs")
@@ -747,6 +753,11 @@ fn string_array_path(path: &str) -> bool {
       || name.ends_with("_groups")
       || name.ends_with("_names")
   })
+}
+
+#[cfg(feature = "config-tooling")]
+fn string_path(path: &str) -> bool {
+  path == "runtime.hardening.filesystem_manifest.expected_digest"
 }
 
 #[cfg(feature = "config-tooling")]

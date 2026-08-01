@@ -123,9 +123,12 @@ pub async fn run_with_options(mut config: Config, options: RunOptions) -> anyhow
   let filesystem_manifest = filesystem_access::FilesystemAccessManifest::from_config(&config)
     .context("failed to generate filesystem-access manifest")?;
   let manifest_projection = filesystem_manifest.landlock_projection();
-  let hardening = hardening::apply_runtime_hardening_with_manifest(
+  let hardening = hardening::apply_runtime_hardening_with_manifest_and_policy(
     &config.runtime.hardening,
     Some(&manifest_projection),
+    hardening::RequiredHardeningFailurePolicy::for_operational_profile(
+      config.operational_profile.as_ref(),
+    ),
   )?;
   tracing::info!(
     hardening = %serde_json::to_string(&hardening)?,

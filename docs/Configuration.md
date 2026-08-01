@@ -290,12 +290,12 @@ Required routing inputs:
 
 Operational profiles are compiled-in, versioned configuration baselines. They
 reduce omission and configuration drift, but do not replace the operator's
-deployment-specific policy, certificate, identity, or Secret management. The
-only shipped profile is `edge-secure-medium` version `1`:
+deployment-specific policy, certificate, identity, or Secret management.
+OxiBelt ships immutable `edge-secure-medium` versions `1` and `2`:
 
 ```toml
 profile = "edge-secure-medium"
-# Optional in source. Omission permanently selects version 1.
+# Optional in source. Omission permanently selects version 1, never latest.
 profile_version = 1
 
 [tls]
@@ -316,9 +316,9 @@ unknown or malformed name/version pair, or more than one effective selector is
 rejected even when `[config] strict_unknown_fields = false`.
 
 Profile definitions are built into the OxiBelt binary. There are no profile
-files, URLs, remote catalogs, or operator-supplied profile definitions. The
-catalog representation can add separately documented name/version entries in a
-future release, but v1 will not change silently. This operational-profile
+files, URLs, remote catalogs, or operator-supplied profile definitions. New
+catalog entries require a separately documented version; v1 will not change
+silently. This operational-profile
 feature is separate from the `oxibeltctl mitigate <profile>` local/remote
 dynamic-policy rendering feature described later in this document.
 
@@ -327,8 +327,10 @@ compiled-in profile defaults, then explicit merged TOML (including all
 `include` files), then supported runtime/CLI configuration overrides. An
 explicit scalar or table leaf replaces the profile leaf; an explicit array
 replaces the profile array rather than appending to it. A profile-protected
-value is accepted only when the result preserves the v1 security boundary;
-unsafe weakening is rejected rather than silently clamped. Configurations
+value is accepted only when the result preserves the selected version's
+security boundary; unsafe weakening is rejected rather than silently clamped.
+V1 and v2 use separate validators so selecting v2 does not retroactively
+change v1. Configurations
 without `profile` keep their existing defaults and behavior.
 
 ### `edge-secure-medium` v1 contract
@@ -361,9 +363,48 @@ redacted, expanded TOML. Support bundles include this profile metadata and the
 redacted effective configuration. Treat a selected profile or version change
 as a full configuration change, not an OxiRule-only reload.
 
-### Helm companion preset
+### `edge-secure-medium` v2 runtime contract
 
-The optional Helm companion preset is
+V2 keeps the v1 public-edge limits and requires the runtime confinement
+contract to gate readiness. Select it explicitly and bind the expected
+path-disclosing manifest digest and writable-path set:
+
+```toml
+profile = "edge-secure-medium"
+profile_version = 2
+
+[runtime.hardening.filesystem_manifest]
+expected_digest = "sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST"
+expected_writable_paths = []
+```
+
+V2 requires `runtime.hardening.close_range = "required"`,
+`runtime.hardening.seccomp.expectation = "required"`, and
+`runtime.hardening.landlock.mode = "manifest"`. Generate the expected digest
+only after resolving the final configuration and mounts:
+
+```sh
+oxibeltctl config filesystem-access CONFIG --check
+oxibeltctl config filesystem-access CONFIG --show-paths
+```
+
+`--show-paths` deliberately discloses paths and the stable comparison digest;
+run it only in a trusted local terminal. Startup compares both the digest and
+the normalized read-write path set before building application state. Missing
+expectation fields fail configuration validation. Mismatched runtime evidence
+produces a blocked hardening snapshot and keeps readiness closed; the process
+and liveness endpoint remain available so an operator can inspect the fixed
+failure reason without creating a probe-driven restart loop. Ordinary redacted
+config, logs, diagnostics, and support bundles report only whether an
+expectation was present and matched; they never serialize the raw path-derived
+digest. Runtime hardening snapshots use schema version `3` and add the bounded
+`filesystem_manifest` expectation-present, digest-match, and writable-path-match
+states. Fixed blocking reasons distinguish unavailable manifest evidence,
+digest mismatch, and writable-path mismatch.
+
+### Helm companion presets
+
+The compatibility Helm companion preset is
 `deploy/helm/oxibelt/examples/edge-secure-medium-v1-values.yaml`. It is not
 selected by the chart's default values, preserving existing chart upgrade
 behavior. Its public interface is:
@@ -428,6 +469,18 @@ and pin immutable image digests and own freshness, rollback, vulnerability, and
 admission policy. See [Release Image Trust and
 Attestations](SupplyChain.md), especially before upgrading a cluster whose
 fail-closed policy expects registry-resident historical referrers.
+
+The opt-in v2 deployment envelope is
+`deploy/helm/oxibelt/examples/edge-secure-medium-v2-values.yaml`. In addition
+to selecting the native v2 profile, it requires the official
+`dataplane-strict` repository at a lowercase SHA-256 digest, explicit default
+deny networking, the v2 filesystem-manifest expectation, typed writable
+`emptyDir` or PVC declarations, and the fixed Pod-security boundary. Replace
+the example image and filesystem digests before installation; the placeholders
+are intentionally not deployable evidence. The chart emits a Secret-free
+profile report for review, but that report is a deterministic description of
+rendered intent, not proof of CNI enforcement, kernel confinement, image
+provenance, or admission-policy success.
 
 ## Includes
 

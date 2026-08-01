@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{HardeningAutoMode, RuntimeLandlockMode, RuntimeSeccompExpectation};
 
-pub const RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const MAX_HARDENING_REASONS: usize = 16;
 pub(super) const MAX_EFFECTIVE_LANDLOCK_RULE_SUMMARIES: usize = 64;
 
@@ -29,6 +29,9 @@ pub enum RuntimeHardeningReason {
   ProfileAssertionMalformed,
   ProfileIdentityMismatch,
   ProfileDigestMismatch,
+  FilesystemManifestUnavailable,
+  FilesystemManifestDigestMismatch,
+  FilesystemWritablePathsMismatch,
   ReadOnlyRootfsIncompatible,
 }
 
@@ -45,8 +48,20 @@ impl RuntimeHardeningReason {
       Self::ProfileAssertionMalformed => "profile_assertion_malformed",
       Self::ProfileIdentityMismatch => "profile_identity_mismatch",
       Self::ProfileDigestMismatch => "profile_digest_mismatch",
+      Self::FilesystemManifestUnavailable => "filesystem_manifest_unavailable",
+      Self::FilesystemManifestDigestMismatch => "filesystem_manifest_digest_mismatch",
+      Self::FilesystemWritablePathsMismatch => "filesystem_writable_paths_mismatch",
       Self::ReadOnlyRootfsIncompatible => "read_only_rootfs_incompatible",
     }
+  }
+
+  const fn is_filesystem_manifest(self) -> bool {
+    matches!(
+      self,
+      Self::FilesystemManifestUnavailable
+        | Self::FilesystemManifestDigestMismatch
+        | Self::FilesystemWritablePathsMismatch
+    )
   }
 }
 
@@ -192,12 +207,22 @@ pub struct RuntimeSeccompSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FilesystemManifestVerificationSnapshot {
+  pub expectation_present: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub digest_matches: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub writable_paths_match: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeHardeningSnapshot {
   pub schema_version: u32,
   pub outcome: RuntimeHardeningOutcome,
   pub close_range: CloseRangeSnapshot,
   pub landlock: LandlockSnapshot,
   pub seccomp: RuntimeSeccompSnapshot,
+  pub filesystem_manifest: FilesystemManifestVerificationSnapshot,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub filesystem_manifest_digest: Option<String>,
   #[serde(default)]
@@ -214,11 +239,53 @@ impl RuntimeHardeningSnapshot {
     &self,
     _manifest_digest: String,
     read_only_rootfs: ReadOnlyRootfsCompatibility,
+    filesystem_manifest: FilesystemManifestVerificationSnapshot,
+    filesystem_blocking_reasons: Vec<RuntimeHardeningReason>,
   ) -> Self {
     let mut next = self.clone();
+    next.filesystem_manifest = filesystem_manifest;
     next.filesystem_manifest_digest = None;
     next.filesystem_manifest_digest_withheld = true;
     next.read_only_rootfs = read_only_rootfs;
+    next
+      .blocking_reasons
+      .retain(|reason| !reason.is_filesystem_manifest());
+    for reason in filesystem_blocking_reasons {
+      push_reason(&mut next.blocking_reasons, reason);
+    }
+
+    next.degraded_reasons.clear();
+    if next.close_range.effective == CloseRangeEffectiveState::Unavailable {
+      push_reason(
+        &mut next.degraded_reasons,
+        RuntimeHardeningReason::CloseRangeUnavailable,
+      );
+    }
+    if !next.landlock.unsupported_rights.is_empty() {
+      push_reason(
+        &mut next.degraded_reasons,
+        RuntimeHardeningReason::LandlockRightsDowngraded,
+      );
+    }
+    if next.seccomp.verification == SeccompVerificationState::Degraded {
+      for reason in &next.seccomp.reasons {
+        push_reason(&mut next.degraded_reasons, *reason);
+      }
+    }
+    if read_only_rootfs == ReadOnlyRootfsCompatibility::Incompatible {
+      push_reason(
+        &mut next.degraded_reasons,
+        RuntimeHardeningReason::ReadOnlyRootfsIncompatible,
+      );
+    }
+    next.outcome = if !next.blocking_reasons.is_empty() {
+      next.degraded_reasons.clear();
+      RuntimeHardeningOutcome::Blocked
+    } else if next.degraded_reasons.is_empty() {
+      RuntimeHardeningOutcome::Satisfied
+    } else {
+      RuntimeHardeningOutcome::Degraded
+    };
     next
   }
 }

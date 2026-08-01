@@ -472,6 +472,34 @@ restarting with the prior immutable image. Landlock and seccomp are irreversible
 inside a running process, so rollback always replaces the process rather than
 attempting to weaken its current policy.
 
+`edge-secure-medium` v2 is an explicit opt-in and never replaces an omitted or
+explicit v1 selector. Before changing `profile_version = 1` to `2` in Helm or
+native TOML:
+
+1. switch to the official `dataplane-strict` repository and independently
+   approve its exact lowercase SHA-256 digest;
+2. inventory all ingress and egress dependencies, replace implicit reachability
+   with typed peers/ports, and review each world-CIDR escape individually;
+3. replace generic writable mounts with bounded `writableVolumes`, then run
+   `oxibeltctl config filesystem-access CONFIG --check --show-paths` in a
+   trusted environment and record the final expected manifest digest;
+4. verify versioned TLS/rule/other Secret references, restricted Pod Security
+   admission, projected-token audience/expiry when API access is required, and
+   the Secret-free profile report; and
+5. canary the immutable rollout while monitoring hardening status, readiness,
+   DNS/upstream reachability, and CNI policy events.
+
+V2 changes the Pod template for image identity, security, networking,
+hardening, report, and safe reference checksums, so it is restart-required.
+Runtime-check and hardening snapshots advance from schema version `2` to `3`;
+consumers must accept the new bounded `filesystem_manifest` object and fixed
+mismatch reasons without expecting raw digests or paths.
+Roll back by restoring the retained v1 values and v1 image reference as one
+immutable Helm revision. Do not weaken NetworkPolicy, seccomp, Landlock, Pod
+Security admission, or a validating webhook in place to make a failed v2
+rollout proceed. Existing v1 behavior, omission semantics, and tag-based image
+compatibility remain available through the explicit rollback revision.
+
 Post-beta.2 development also adds optional upstream HTTP/3 resolver controls
 under `[quic.upstream.resolution]`. Existing TOML remains valid and uses the
 documented defaults when these fields are omitted. The native configuration

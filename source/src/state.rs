@@ -195,10 +195,18 @@ impl AppSnapshot {
         );
       }
     }
-    Ok(self.hardening.with_current_manifest(
+    let (filesystem_manifest, filesystem_blocking_reasons) =
+      crate::hardening::assess_filesystem_manifest_expectation(
+        &candidate.runtime.hardening,
+        Some(&projection),
+      );
+    let hardening = self.hardening.with_current_manifest(
       candidate_manifest.digest().to_string(),
       projection.read_only_rootfs,
-    ))
+      filesystem_manifest,
+      filesystem_blocking_reasons,
+    );
+    Ok(hardening)
   }
 
   #[inline]

@@ -1,12 +1,13 @@
 //! Runtime hardening and runtime backend configuration.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::bail;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 const MAX_SECCOMP_PROFILE_IDENTITY_LEN: usize = 128;
+const MAX_EXPECTED_WRITABLE_PATHS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +77,8 @@ pub struct RuntimeHardeningConfig {
   pub seccomp: RuntimeSeccompConfig,
   #[serde(default)]
   pub landlock: RuntimeLandlockConfig,
+  #[serde(default)]
+  pub filesystem_manifest: RuntimeFilesystemManifestConfig,
 }
 
 impl Default for RuntimeHardeningConfig {
@@ -84,6 +87,7 @@ impl Default for RuntimeHardeningConfig {
       close_range: HardeningAutoMode::Auto,
       seccomp: RuntimeSeccompConfig::default(),
       landlock: RuntimeLandlockConfig::default(),
+      filesystem_manifest: RuntimeFilesystemManifestConfig::default(),
     }
   }
 }
@@ -92,6 +96,7 @@ impl RuntimeHardeningConfig {
   pub(super) fn validate(&self) -> anyhow::Result<()> {
     self.seccomp.validate()?;
     self.landlock.validate()?;
+    self.filesystem_manifest.validate()?;
     #[cfg(not(target_os = "linux"))]
     {
       if self.close_range == HardeningAutoMode::Required {
@@ -106,6 +111,90 @@ impl RuntimeHardeningConfig {
     }
     Ok(())
   }
+}
+
+/// Trusted deployment expectations for the manifest derived from the fully
+/// resolved configuration. The digest and raw paths remain configuration-only
+/// inputs and are never copied into redaction-safe runtime snapshots.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RuntimeFilesystemManifestConfig {
+  #[serde(default)]
+  pub expected_digest: Option<String>,
+  #[serde(default)]
+  pub expected_writable_paths: Option<Vec<PathBuf>>,
+}
+
+impl RuntimeFilesystemManifestConfig {
+  pub const fn expectation_configured(&self) -> bool {
+    self.expected_digest.is_some() && self.expected_writable_paths.is_some()
+  }
+
+  fn validate(&self) -> anyhow::Result<()> {
+    if self.expected_digest.is_some() != self.expected_writable_paths.is_some() {
+      bail!(
+        "runtime.hardening.filesystem_manifest.expected_digest and expected_writable_paths must be configured together"
+      );
+    }
+    let Some(digest) = self.expected_digest.as_deref() else {
+      return Ok(());
+    };
+    validate_sha256_digest(
+      digest,
+      "runtime.hardening.filesystem_manifest.expected_digest",
+    )?;
+
+    let Some(paths) = self.expected_writable_paths.as_deref() else {
+      bail!(
+        "runtime.hardening.filesystem_manifest.expected_digest and expected_writable_paths must be configured together"
+      );
+    };
+    if paths.len() > MAX_EXPECTED_WRITABLE_PATHS {
+      bail!(
+        "runtime.hardening.filesystem_manifest.expected_writable_paths supports at most {MAX_EXPECTED_WRITABLE_PATHS} entries"
+      );
+    }
+    for path in paths {
+      validate_expected_writable_path(path)?;
+    }
+    for (index, path) in paths.iter().enumerate() {
+      if paths[..index].iter().any(|previous| {
+        path == previous || path.starts_with(previous) || previous.starts_with(path)
+      }) {
+        bail!(
+          "runtime.hardening.filesystem_manifest.expected_writable_paths must be unique and non-overlapping"
+        );
+      }
+    }
+    Ok(())
+  }
+}
+
+fn validate_expected_writable_path(path: &Path) -> anyhow::Result<()> {
+  if !path.is_absolute()
+    || path == Path::new("/")
+    || path
+      .components()
+      .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+  {
+    bail!(
+      "runtime.hardening.filesystem_manifest.expected_writable_paths entries must be normalized absolute paths below the filesystem root"
+    );
+  }
+  Ok(())
+}
+
+fn validate_sha256_digest(digest: &str, field: &str) -> anyhow::Result<()> {
+  let Some(encoded) = digest.strip_prefix("sha256:") else {
+    bail!("{field} must use sha256:<lowercase-hex>");
+  };
+  if encoded.len() != 64
+    || !encoded
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+  {
+    bail!("{field} must use sha256:<lowercase-hex>");
+  }
+  Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,17 +364,7 @@ fn validate_profile_identity(identity: &str) -> anyhow::Result<()> {
 }
 
 fn validate_profile_digest(digest: &str) -> anyhow::Result<()> {
-  let Some(encoded) = digest.strip_prefix("sha256:") else {
-    bail!("runtime.hardening.seccomp.profile_digest must use sha256:<lowercase-hex>");
-  };
-  if encoded.len() != 64
-    || !encoded
-      .bytes()
-      .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-  {
-    bail!("runtime.hardening.seccomp.profile_digest must use sha256:<lowercase-hex>");
-  }
-  Ok(())
+  validate_sha256_digest(digest, "runtime.hardening.seccomp.profile_digest")
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -413,5 +492,43 @@ mod tests {
     config
       .validate()
       .expect("manifest mode may receive all paths from its projection");
+  }
+
+  #[test]
+  fn filesystem_manifest_expectations_are_paired_and_bounded() {
+    let valid: RuntimeHardeningConfig = toml::from_str(
+      r#"
+[filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expected_writable_paths = ["/var/cache/oxibelt", "/var/lib/oxibelt"]
+"#,
+    )
+    .expect("filesystem-manifest expectation should parse");
+    valid
+      .validate()
+      .expect("paired normalized expectations should validate");
+
+    for raw in [
+      r#"
+[filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#,
+      r#"
+[filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expected_writable_paths = ["relative"]
+"#,
+      r#"
+[filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expected_writable_paths = ["/var/cache", "/var/cache/oxibelt"]
+"#,
+    ] {
+      let invalid: RuntimeHardeningConfig =
+        toml::from_str(raw).expect("invalid semantic fixture should still parse");
+      invalid
+        .validate()
+        .expect_err("unpaired or unsafe expectations must fail validation");
+    }
   }
 }

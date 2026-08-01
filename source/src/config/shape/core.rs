@@ -65,7 +65,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "shutdown_delay_ms",
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
-    "runtime.hardening" => &["close_range", "landlock", "seccomp"][..],
+    "runtime.hardening" => &["close_range", "filesystem_manifest", "landlock", "seccomp"][..],
+    "runtime.hardening.filesystem_manifest" => &["expected_digest", "expected_writable_paths"][..],
     "runtime.hardening.seccomp" => {
       &["expectation", "mode", "profile_digest", "profile_identity"][..]
     }

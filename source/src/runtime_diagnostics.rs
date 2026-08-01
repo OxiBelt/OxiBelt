@@ -414,9 +414,12 @@ pub(crate) fn handle_runtime_probe_command(command: &RuntimeProbeCommand) -> any
       config.validate()?;
       let manifest = oxibelt::filesystem_access::FilesystemAccessManifest::from_config(&config)?;
       let projection = manifest.landlock_projection();
-      let snapshot = oxibelt::hardening::apply_runtime_hardening_with_manifest(
+      let snapshot = oxibelt::hardening::apply_runtime_hardening_with_manifest_and_policy(
         &config.runtime.hardening,
         Some(&projection),
+        oxibelt::hardening::RequiredHardeningFailurePolicy::for_operational_profile(
+          config.operational_profile.as_ref(),
+        ),
       )?;
       println!("{}", serde_json::to_string(&snapshot)?);
       Ok(())

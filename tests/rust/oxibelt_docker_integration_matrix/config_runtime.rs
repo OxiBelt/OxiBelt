@@ -25,6 +25,16 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       None,
     ),
     docker_case(
+      "config-invalid",
+      "edge-secure-medium-v2-missing-manifest",
+      "edge-secure-medium v2 fails closed without a filesystem expectation",
+      ExpectStart::Failure,
+      Needs::default(),
+      Some(
+        "edge-secure-medium v2 requires runtime.hardening.filesystem_manifest.expected_digest and expected_writable_paths",
+      ),
+    ),
+    docker_case(
       "config-valid",
       "modular-include-glob",
       "configuration split through sorted include globs",

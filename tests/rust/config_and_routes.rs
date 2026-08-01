@@ -28,6 +28,7 @@ use oxibelt::config::{
   UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
   resolve_auto_worker_count,
 };
+use oxibelt::hardening::RequiredHardeningFailurePolicy;
 use oxibelt::quic::load_host_key;
 use oxibelt::waf::{
   PersonProofTokenBinding, RouteWafHttpBodyCompressionMode, WafHttpBodyCompressionMode,
@@ -131,6 +132,10 @@ fn edge_secure_medium_profile_expands_and_validates_the_v1_baseline() {
     .expect("profile selection should be retained");
   assert_eq!(profile.name(), "edge-secure-medium");
   assert_eq!(profile.version(), 1);
+  assert_eq!(
+    RequiredHardeningFailurePolicy::for_operational_profile(Some(profile)),
+    RequiredHardeningFailurePolicy::FailStartup
+  );
   assert_eq!(config.tls.min_version, TlsVersion::Tls13);
   assert_eq!(config.tls.max_version, TlsVersion::Tls13);
   assert!(config.tls.require_sni);
@@ -144,6 +149,58 @@ fn edge_secure_medium_profile_expands_and_validates_the_v1_baseline() {
   assert_eq!(
     config.waf.http_body_compression.mode,
     WafHttpBodyCompressionMode::Transform
+  );
+}
+
+#[test]
+fn edge_secure_medium_v2_requires_and_retains_the_manifest_contract() {
+  let temp_dir = common::TempDir::new("edge-secure-medium-v2");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "edge-secure-medium-v2");
+  let raw = edge_secure_medium_config_toml(&cert_path, &key_path).replacen(
+    "profile = \"edge-secure-medium\"",
+    "profile = \"edge-secure-medium\"\nprofile_version = 2",
+    1,
+  );
+
+  let missing: Config = toml::from_str(&raw).expect("v2 profile should expand before validation");
+  let error = missing
+    .validate()
+    .expect_err("v2 must reject a missing filesystem-manifest expectation");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime.hardening.filesystem_manifest.expected_digest"),
+    "unexpected error: {error}"
+  );
+
+  let configured = format!(
+    r#"{raw}
+[runtime.hardening.filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expected_writable_paths = []
+"#
+  );
+  let config: Config = toml::from_str(&configured).expect("v2 profile config should parse");
+  config
+    .validate()
+    .expect("complete v2 profile should validate");
+  let profile = config
+    .operational_profile
+    .as_ref()
+    .expect("v2 profile selection should be retained");
+  assert_eq!(profile.name(), "edge-secure-medium");
+  assert_eq!(profile.version(), 2);
+  assert_eq!(
+    RequiredHardeningFailurePolicy::for_operational_profile(Some(profile)),
+    RequiredHardeningFailurePolicy::BlockReadiness
+  );
+  assert!(
+    config
+      .runtime
+      .hardening
+      .filesystem_manifest
+      .expectation_configured()
   );
 }
 

@@ -26,16 +26,17 @@ pub use profile_assertion::{
 };
 use snapshot::push_reason;
 pub use snapshot::{
-  CloseRangeEffectiveState, CloseRangeSnapshot, LandlockEffectiveRuleSummary,
-  LandlockEnforcementState, LandlockFilesystemRight, LandlockRuleScope, LandlockSnapshot,
-  ProcessEvidenceState, ProfileAssertionBasis, RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION,
-  ReadOnlyRootfsCompatibility, RuntimeHardeningOutcome, RuntimeHardeningReason,
-  RuntimeHardeningSnapshot, RuntimeSeccompSnapshot, SeccompVerificationState,
+  CloseRangeEffectiveState, CloseRangeSnapshot, FilesystemManifestVerificationSnapshot,
+  LandlockEffectiveRuleSummary, LandlockEnforcementState, LandlockFilesystemRight,
+  LandlockRuleScope, LandlockSnapshot, ProcessEvidenceState, ProfileAssertionBasis,
+  RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION, ReadOnlyRootfsCompatibility, RuntimeHardeningOutcome,
+  RuntimeHardeningReason, RuntimeHardeningSnapshot, RuntimeSeccompSnapshot,
+  SeccompVerificationState,
 };
 
 use crate::config::{
-  HardeningAutoMode, RuntimeHardeningConfig, RuntimeLandlockConfig, RuntimeLandlockMode,
-  RuntimeSeccompConfig, RuntimeSeccompExpectation,
+  HardeningAutoMode, OperationalProfile, RuntimeHardeningConfig, RuntimeLandlockConfig,
+  RuntimeLandlockMode, RuntimeSeccompConfig, RuntimeSeccompExpectation,
 };
 
 const MAX_SUPPORTED_LANDLOCK_ABI: u32 = 3;
@@ -132,6 +133,24 @@ pub struct LandlockManifestProjection {
   pub parent_scope_representable: bool,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RequiredHardeningFailurePolicy {
+  FailStartup,
+  BlockReadiness,
+}
+
+impl RequiredHardeningFailurePolicy {
+  pub fn for_operational_profile(profile: Option<&OperationalProfile>) -> Self {
+    if profile
+      .is_some_and(|profile| profile.name() == "edge-secure-medium" && profile.version() == 2)
+    {
+      Self::BlockReadiness
+    } else {
+      Self::FailStartup
+    }
+  }
+}
+
 impl LandlockManifestProjection {
   fn validate(&self) -> anyhow::Result<()> {
     validate_sha256_digest(&self.manifest_digest, "Landlock manifest digest")?;
@@ -175,11 +194,27 @@ pub fn apply_runtime_hardening_with_manifest(
   config: &RuntimeHardeningConfig,
   manifest: Option<&LandlockManifestProjection>,
 ) -> anyhow::Result<RuntimeHardeningSnapshot> {
+  apply_runtime_hardening_with_manifest_and_policy(
+    config,
+    manifest,
+    RequiredHardeningFailurePolicy::FailStartup,
+  )
+}
+
+/// Applies process hardening with an explicit policy for missing required
+/// external controls. `BlockReadiness` is reserved for deployment contracts
+/// that keep liveness available for permanent orchestration errors.
+pub fn apply_runtime_hardening_with_manifest_and_policy(
+  config: &RuntimeHardeningConfig,
+  manifest: Option<&LandlockManifestProjection>,
+  required_failure_policy: RequiredHardeningFailurePolicy,
+) -> anyhow::Result<RuntimeHardeningSnapshot> {
   apply_runtime_hardening_with_sources(
     config,
     manifest,
     &ProcSelfStatusSource,
     &EnvironmentProfileAssertionSource,
+    required_failure_policy,
   )
 }
 
@@ -191,20 +226,25 @@ pub fn observe_runtime_hardening(
   manifest: Option<&LandlockManifestProjection>,
 ) -> RuntimeHardeningSnapshot {
   let seccomp = assess_external_seccomp(&config.seccomp, &ProcSelfStatusSource);
-  let (outcome, degraded_reasons, blocking_reasons) = match seccomp.verification {
-    SeccompVerificationState::Blocked => (
-      RuntimeHardeningOutcome::Blocked,
-      Vec::new(),
-      seccomp.reasons.clone(),
-    ),
-    SeccompVerificationState::Degraded => (
-      RuntimeHardeningOutcome::Degraded,
-      seccomp.reasons.clone(),
-      Vec::new(),
-    ),
+  let (filesystem_manifest, filesystem_blocking_reasons) =
+    assess_filesystem_manifest_expectation(config, manifest);
+  let (mut degraded_reasons, mut blocking_reasons) = match seccomp.verification {
+    SeccompVerificationState::Blocked => (Vec::new(), seccomp.reasons.clone()),
+    SeccompVerificationState::Degraded => (seccomp.reasons.clone(), Vec::new()),
     SeccompVerificationState::NotRequired | SeccompVerificationState::Satisfied => {
-      (RuntimeHardeningOutcome::Satisfied, Vec::new(), Vec::new())
+      (Vec::new(), Vec::new())
     }
+  };
+  for reason in filesystem_blocking_reasons {
+    push_reason(&mut blocking_reasons, reason);
+  }
+  let outcome = if !blocking_reasons.is_empty() {
+    degraded_reasons.clear();
+    RuntimeHardeningOutcome::Blocked
+  } else if !degraded_reasons.is_empty() {
+    RuntimeHardeningOutcome::Degraded
+  } else {
+    RuntimeHardeningOutcome::Satisfied
   };
   let manifest_digest = manifest.map(|manifest| manifest.manifest_digest.clone());
   RuntimeHardeningSnapshot {
@@ -237,6 +277,7 @@ pub fn observe_runtime_hardening(
       installed_authority: None,
     },
     seccomp,
+    filesystem_manifest,
     filesystem_manifest_digest: None,
     filesystem_manifest_digest_withheld: manifest_digest.is_some(),
     read_only_rootfs: manifest
@@ -252,12 +293,17 @@ fn apply_runtime_hardening_with_sources(
   manifest: Option<&LandlockManifestProjection>,
   process_status: &dyn ProcessStatusSource,
   profile_assertions: &dyn ProfileAssertionSource,
+  required_failure_policy: RequiredHardeningFailurePolicy,
 ) -> anyhow::Result<RuntimeHardeningSnapshot> {
+  let (filesystem_manifest, filesystem_blocking_reasons) =
+    assess_filesystem_manifest_expectation(config, manifest);
   // This observation must precede Landlock, because Landlock sets no_new_privs
   // for its own installation and must not be credited to the external seccomp contract.
   let seccomp =
     assess_external_seccomp_with_assertions(&config.seccomp, process_status, profile_assertions);
-  if seccomp.verification == SeccompVerificationState::Blocked {
+  if seccomp.verification == SeccompVerificationState::Blocked
+    && required_failure_policy == RequiredHardeningFailurePolicy::FailStartup
+  {
     let reason = seccomp
       .reasons
       .first()
@@ -281,6 +327,12 @@ fn apply_runtime_hardening_with_sources(
       push_reason(&mut degraded_reasons, *reason);
     }
   }
+  let mut blocking_reasons = filesystem_blocking_reasons;
+  if seccomp.verification == SeccompVerificationState::Blocked {
+    for reason in &seccomp.reasons {
+      push_reason(&mut blocking_reasons, *reason);
+    }
+  }
   let read_only_rootfs = manifest
     .map(|manifest| manifest.read_only_rootfs)
     .unwrap_or(ReadOnlyRootfsCompatibility::Unknown);
@@ -290,7 +342,10 @@ fn apply_runtime_hardening_with_sources(
       RuntimeHardeningReason::ReadOnlyRootfsIncompatible,
     );
   }
-  let outcome = if degraded_reasons.is_empty() {
+  let outcome = if !blocking_reasons.is_empty() {
+    degraded_reasons.clear();
+    RuntimeHardeningOutcome::Blocked
+  } else if degraded_reasons.is_empty() {
     RuntimeHardeningOutcome::Satisfied
   } else {
     RuntimeHardeningOutcome::Degraded
@@ -302,12 +357,77 @@ fn apply_runtime_hardening_with_sources(
     close_range,
     landlock,
     seccomp,
+    filesystem_manifest,
     filesystem_manifest_digest: None,
     filesystem_manifest_digest_withheld: manifest.is_some(),
     read_only_rootfs,
     degraded_reasons,
-    blocking_reasons: Vec::new(),
+    blocking_reasons,
   })
+}
+
+pub(crate) fn assess_filesystem_manifest_expectation(
+  config: &RuntimeHardeningConfig,
+  manifest: Option<&LandlockManifestProjection>,
+) -> (
+  FilesystemManifestVerificationSnapshot,
+  Vec<RuntimeHardeningReason>,
+) {
+  let expectation = &config.filesystem_manifest;
+  if !expectation.expectation_configured() {
+    return (
+      FilesystemManifestVerificationSnapshot {
+        expectation_present: false,
+        digest_matches: None,
+        writable_paths_match: None,
+      },
+      Vec::new(),
+    );
+  }
+
+  let Some(manifest) = manifest else {
+    return (
+      FilesystemManifestVerificationSnapshot {
+        expectation_present: true,
+        digest_matches: None,
+        writable_paths_match: None,
+      },
+      vec![RuntimeHardeningReason::FilesystemManifestUnavailable],
+    );
+  };
+  let digest_matches =
+    expectation.expected_digest.as_deref() == Some(manifest.manifest_digest.as_str());
+  let mut expected_writable_paths = expectation
+    .expected_writable_paths
+    .clone()
+    .unwrap_or_default();
+  expected_writable_paths.sort();
+  let mut actual_writable_paths = manifest.read_write_paths.clone();
+  actual_writable_paths.sort();
+  actual_writable_paths.dedup();
+  let writable_paths_match = expected_writable_paths == actual_writable_paths;
+
+  let mut reasons = Vec::new();
+  if !digest_matches {
+    push_reason(
+      &mut reasons,
+      RuntimeHardeningReason::FilesystemManifestDigestMismatch,
+    );
+  }
+  if !writable_paths_match {
+    push_reason(
+      &mut reasons,
+      RuntimeHardeningReason::FilesystemWritablePathsMismatch,
+    );
+  }
+  (
+    FilesystemManifestVerificationSnapshot {
+      expectation_present: true,
+      digest_matches: Some(digest_matches),
+      writable_paths_match: Some(writable_paths_match),
+    },
+    reasons,
+  )
 }
 
 /// Produces a bounded assessment without changing process state. Profile names
@@ -1039,12 +1159,14 @@ mod tests {
       close_range: HardeningAutoMode::Off,
       seccomp: RuntimeSeccompConfig::default(),
       landlock: RuntimeLandlockConfig::default(),
+      ..RuntimeHardeningConfig::default()
     };
     let snapshot = apply_runtime_hardening_with_sources(
       &config,
       None,
       &StaticStatus("Seccomp: 0\nNoNewPrivs: 0\n"),
       &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
     )
     .expect("off hardening should not require Linux mutations");
     assert_eq!(snapshot.outcome, RuntimeHardeningOutcome::Satisfied);
@@ -1088,15 +1210,72 @@ mod tests {
       close_range: HardeningAutoMode::Required,
       seccomp: seccomp(RuntimeSeccompExpectation::Required),
       landlock: RuntimeLandlockConfig::default(),
+      ..RuntimeHardeningConfig::default()
     };
     let error = apply_runtime_hardening_with_sources(
       &config,
       None,
       &StaticStatus("NoNewPrivs: 0\nSeccomp: 0\n"),
       &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
     )
     .expect_err("required external seccomp must fail before local mutation");
     assert!(error.to_string().contains("seccomp_filter_not_active"));
+  }
+
+  #[test]
+  fn only_explicit_v2_policy_reports_required_seccomp_as_a_readiness_block() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let config = RuntimeHardeningConfig {
+      close_range: HardeningAutoMode::Off,
+      seccomp: seccomp(RuntimeSeccompExpectation::Required),
+      filesystem_manifest: crate::config::RuntimeFilesystemManifestConfig {
+        expected_digest: Some(digest.clone()),
+        expected_writable_paths: Some(Vec::new()),
+      },
+      ..RuntimeHardeningConfig::default()
+    };
+    let manifest = LandlockManifestProjection {
+      manifest_digest: digest,
+      read_paths: Vec::new(),
+      read_write_paths: Vec::new(),
+      rules: Vec::new(),
+      read_only_rootfs: ReadOnlyRootfsCompatibility::Compatible,
+      parent_scope_representable: true,
+    };
+
+    let error = apply_runtime_hardening_with_sources(
+      &config,
+      Some(&manifest),
+      &StaticStatus("NoNewPrivs: 0\nSeccomp: 0\n"),
+      &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
+    )
+    .expect_err("a manifest expectation alone must not weaken fail-fast seccomp behavior");
+    assert!(error.to_string().contains("seccomp_filter_not_active"));
+
+    let snapshot = apply_runtime_hardening_with_sources(
+      &config,
+      Some(&manifest),
+      &StaticStatus("NoNewPrivs: 0\nSeccomp: 0\n"),
+      &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::BlockReadiness,
+    )
+    .expect("v2-style hardening absence should remain observable through health endpoints");
+
+    assert_eq!(snapshot.outcome, RuntimeHardeningOutcome::Blocked);
+    assert_eq!(
+      snapshot.blocking_reasons,
+      vec![
+        RuntimeHardeningReason::SeccompFilterNotActive,
+        RuntimeHardeningReason::NoNewPrivilegesNotActive,
+      ]
+    );
+    assert_eq!(snapshot.filesystem_manifest.digest_matches, Some(true));
+    assert_eq!(
+      snapshot.filesystem_manifest.writable_paths_match,
+      Some(true)
+    );
   }
 
   #[test]
@@ -1168,12 +1347,14 @@ mod tests {
         read_paths: Vec::new(),
         read_write_paths: Vec::new(),
       },
+      ..RuntimeHardeningConfig::default()
     };
     let error = apply_runtime_hardening_with_sources(
       &config,
       None,
       &StaticStatus("NoNewPrivs: 0\nSeccomp: 0\n"),
       &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
     )
     .expect_err("manifest mode must not silently become manual mode");
     assert!(error.to_string().contains("generated manifest projection"));
@@ -1185,6 +1366,7 @@ mod tests {
       close_range: HardeningAutoMode::Off,
       seccomp: RuntimeSeccompConfig::default(),
       landlock: RuntimeLandlockConfig::default(),
+      ..RuntimeHardeningConfig::default()
     };
     let digest = format!("sha256:{}", "b".repeat(64));
     let manifest = LandlockManifestProjection {
@@ -1200,6 +1382,7 @@ mod tests {
       Some(&manifest),
       &StaticStatus("NoNewPrivs: 0\nSeccomp: 0\n"),
       &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
     )
     .expect("an off Landlock mode should still report the manifest summary");
     assert_eq!(snapshot.filesystem_manifest_digest, None);
@@ -1212,6 +1395,79 @@ mod tests {
       snapshot.read_only_rootfs,
       ReadOnlyRootfsCompatibility::Compatible
     );
+  }
+
+  #[test]
+  fn filesystem_manifest_mismatch_blocks_without_exposing_digest_or_paths() {
+    let expected_digest = format!("sha256:{}", "a".repeat(64));
+    let actual_digest = format!("sha256:{}", "b".repeat(64));
+    let config = RuntimeHardeningConfig {
+      close_range: HardeningAutoMode::Required,
+      filesystem_manifest: crate::config::RuntimeFilesystemManifestConfig {
+        expected_digest: Some(expected_digest.clone()),
+        expected_writable_paths: Some(vec![PathBuf::from("/var/cache/oxibelt")]),
+      },
+      ..RuntimeHardeningConfig::default()
+    };
+    let manifest = LandlockManifestProjection {
+      manifest_digest: actual_digest.clone(),
+      read_paths: Vec::new(),
+      read_write_paths: vec![PathBuf::from("/var/lib/oxibelt")],
+      rules: Vec::new(),
+      read_only_rootfs: ReadOnlyRootfsCompatibility::Compatible,
+      parent_scope_representable: true,
+    };
+
+    let snapshot = apply_runtime_hardening_with_sources(
+      &config,
+      Some(&manifest),
+      &StaticStatus("Seccomp: 0\nNoNewPrivs: 0\n"),
+      &StaticAssertions::default(),
+      RequiredHardeningFailurePolicy::FailStartup,
+    )
+    .expect("manifest mismatch should become a nonfatal readiness block");
+
+    assert_eq!(snapshot.schema_version, 3);
+    assert_eq!(snapshot.outcome, RuntimeHardeningOutcome::Blocked);
+    assert_eq!(
+      snapshot.close_range.effective,
+      CloseRangeEffectiveState::Applied
+    );
+    assert_eq!(snapshot.landlock.enforcement, LandlockEnforcementState::Off);
+    assert_eq!(snapshot.filesystem_manifest.digest_matches, Some(false));
+    assert_eq!(
+      snapshot.filesystem_manifest.writable_paths_match,
+      Some(false)
+    );
+    assert_eq!(
+      snapshot.blocking_reasons,
+      vec![
+        RuntimeHardeningReason::FilesystemManifestDigestMismatch,
+        RuntimeHardeningReason::FilesystemWritablePathsMismatch,
+      ]
+    );
+    let serialized = serde_json::to_string(&snapshot).expect("serialize hardening snapshot");
+    for sensitive in [
+      expected_digest.as_str(),
+      actual_digest.as_str(),
+      "/var/cache/oxibelt",
+      "/var/lib/oxibelt",
+    ] {
+      assert!(!serialized.contains(sensitive), "leaked {sensitive}");
+    }
+
+    let recovered = snapshot.with_current_manifest(
+      expected_digest,
+      ReadOnlyRootfsCompatibility::Compatible,
+      FilesystemManifestVerificationSnapshot {
+        expectation_present: true,
+        digest_matches: Some(true),
+        writable_paths_match: Some(true),
+      },
+      Vec::new(),
+    );
+    assert_eq!(recovered.outcome, RuntimeHardeningOutcome::Satisfied);
+    assert!(recovered.blocking_reasons.is_empty());
   }
 
   #[test]

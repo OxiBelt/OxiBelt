@@ -19910,6 +19910,36 @@
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
+            "filesystem_manifest": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `runtime.hardening.filesystem_manifest`. Production Rust validation is authoritative.",
+              "properties": {
+                "expected_digest": {
+                  "description": "OxiBelt native field `runtime.hardening.filesystem_manifest.expected_digest`. Production Rust validation is authoritative.",
+                  "type": "string",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "expected_writable_paths": {
+                  "description": "OxiBelt native field `runtime.hardening.filesystem_manifest.expected_writable_paths`. Production Rust validation is authoritative.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "landlock": {
               "additionalProperties": false,
               "description": "OxiBelt native field `runtime.hardening.landlock`. Production Rust validation is authoritative.",

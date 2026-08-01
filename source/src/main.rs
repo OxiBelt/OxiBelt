@@ -232,9 +232,12 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     )
   } else {
     oxibelt::netport_switcher::ensure_required_runtime_socket(&config)?;
-    oxibelt::hardening::apply_runtime_hardening_with_manifest(
+    oxibelt::hardening::apply_runtime_hardening_with_manifest_and_policy(
       &config.runtime.hardening,
       Some(&manifest_projection),
+      oxibelt::hardening::RequiredHardeningFailurePolicy::for_operational_profile(
+        config.operational_profile.as_ref(),
+      ),
     )?
   };
   tracing::info!(

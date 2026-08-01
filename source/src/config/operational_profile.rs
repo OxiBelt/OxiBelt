@@ -15,12 +15,14 @@ use crate::waf::{
 
 use super::{
   AdminAuditMode, AdminAuditRequiredSink, AdminTransportMode, Config, ForwardedClientIpSource,
-  ForwardedHeaderMode, LbPolicyCompatProfile, MetricsDetail, QuicZeroRttMode, RedisPlaintextPolicy,
-  TlsClientAuthMode, TlsEarlyDataMode, TlsVersion, TrailerMode,
+  ForwardedHeaderMode, HardeningAutoMode, LbPolicyCompatProfile, MetricsDetail, QuicZeroRttMode,
+  RedisPlaintextPolicy, RuntimeLandlockMode, RuntimeSeccompExpectation, TlsClientAuthMode,
+  TlsEarlyDataMode, TlsVersion, TrailerMode,
 };
 
 const EDGE_SECURE_MEDIUM_NAME: &str = "edge-secure-medium";
 const EDGE_SECURE_MEDIUM_VERSION: u32 = 1;
+const EDGE_SECURE_MEDIUM_V2_VERSION: u32 = 2;
 const EDGE_SECURE_MEDIUM_MAX_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
 const EDGE_SECURE_MEDIUM_MAX_CONNECTIONS: usize = 65_536;
 const EDGE_SECURE_MEDIUM_MAX_CONNECTIONS_PER_IP: usize = 128;
@@ -169,19 +171,44 @@ enabled = true
 redis_plaintext_policy = "deny"
 "#;
 
+const EDGE_SECURE_MEDIUM_V2_DEFAULTS: &str = r#"
+[runtime.hardening]
+close_range = "required"
+
+[runtime.hardening.seccomp]
+expectation = "required"
+
+[runtime.hardening.landlock]
+mode = "manifest"
+"#;
+
+const EDGE_SECURE_MEDIUM_V1_DEFAULT_LAYERS: &[&str] = &[EDGE_SECURE_MEDIUM_V1_DEFAULTS];
+const EDGE_SECURE_MEDIUM_V2_DEFAULT_LAYERS: &[&str] = &[
+  EDGE_SECURE_MEDIUM_V1_DEFAULTS,
+  EDGE_SECURE_MEDIUM_V2_DEFAULTS,
+];
+
 struct BuiltInProfileDefinition {
   name: &'static str,
   version: u32,
-  defaults: &'static str,
+  default_layers: &'static [&'static str],
   validate: fn(&Config, &OperationalProfile) -> anyhow::Result<()>,
 }
 
-const BUILTIN_PROFILE_CATALOG: &[BuiltInProfileDefinition] = &[BuiltInProfileDefinition {
-  name: EDGE_SECURE_MEDIUM_NAME,
-  version: EDGE_SECURE_MEDIUM_VERSION,
-  defaults: EDGE_SECURE_MEDIUM_V1_DEFAULTS,
-  validate: validate_edge_secure_medium,
-}];
+const BUILTIN_PROFILE_CATALOG: &[BuiltInProfileDefinition] = &[
+  BuiltInProfileDefinition {
+    name: EDGE_SECURE_MEDIUM_NAME,
+    version: EDGE_SECURE_MEDIUM_VERSION,
+    default_layers: EDGE_SECURE_MEDIUM_V1_DEFAULT_LAYERS,
+    validate: validate_edge_secure_medium_v1,
+  },
+  BuiltInProfileDefinition {
+    name: EDGE_SECURE_MEDIUM_NAME,
+    version: EDGE_SECURE_MEDIUM_V2_VERSION,
+    default_layers: EDGE_SECURE_MEDIUM_V2_DEFAULT_LAYERS,
+    validate: validate_edge_secure_medium_v2,
+  },
+];
 
 /// The selected built-in operational profile and the operator-provided paths
 /// that were present before profile expansion.
@@ -247,13 +274,17 @@ pub(super) fn apply_to_toml(value: &mut toml::Value) -> anyhow::Result<Option<Op
 
   let mut explicit_paths = BTreeSet::new();
   collect_explicit_paths(value, "", &mut explicit_paths);
-  let defaults: toml::Value = toml::from_str(definition.defaults).with_context(|| {
-    format!(
-      "built-in operational profile {} v{} defaults must be valid TOML",
-      definition.name, definition.version
-    )
-  })?;
-  fill_missing_values(value, &defaults)?;
+  for (layer_index, raw_defaults) in definition.default_layers.iter().enumerate() {
+    let defaults: toml::Value = toml::from_str(raw_defaults).with_context(|| {
+      format!(
+        "built-in operational profile {} v{} defaults layer {} must be valid TOML",
+        definition.name,
+        definition.version,
+        layer_index + 1
+      )
+    })?;
+    fill_missing_values(value, &defaults)?;
+  }
   let Some(root) = value.as_table_mut() else {
     bail!("configuration root must be a table after profile expansion");
   };
@@ -330,7 +361,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
   (definition.validate)(config, profile)
 }
 
-fn validate_edge_secure_medium(
+fn validate_edge_secure_medium_v1(
   config: &Config,
   profile: &OperationalProfile,
 ) -> anyhow::Result<()> {
@@ -342,6 +373,47 @@ fn validate_edge_secure_medium(
   validate_operations(config)?;
   validate_admin(config)?;
   validate_rulepacks(config)?;
+  Ok(())
+}
+
+fn validate_edge_secure_medium_v2(
+  config: &Config,
+  profile: &OperationalProfile,
+) -> anyhow::Result<()> {
+  // Keep the v1 validator and its diagnostics immutable. Version 2 is an
+  // additive deployment-hardening contract over that established baseline.
+  validate_edge_secure_medium_v1(config, profile)?;
+
+  if config.runtime.hardening.close_range != HardeningAutoMode::Required
+    || config.runtime.hardening.seccomp.expectation != RuntimeSeccompExpectation::Required
+    || config.runtime.hardening.landlock.mode != RuntimeLandlockMode::Manifest
+  {
+    bail!(
+      "edge-secure-medium v2 requires close_range, external seccomp verification, and manifest-derived Landlock enforcement"
+    );
+  }
+  if !config
+    .runtime
+    .hardening
+    .filesystem_manifest
+    .expectation_configured()
+  {
+    bail!(
+      "edge-secure-medium v2 requires runtime.hardening.filesystem_manifest.expected_digest and expected_writable_paths"
+    );
+  }
+  if !config.runtime.hardening.landlock.read_paths.is_empty()
+    || !config
+      .runtime
+      .hardening
+      .landlock
+      .read_write_paths
+      .is_empty()
+  {
+    bail!(
+      "edge-secure-medium v2 forbids manual Landlock path additions outside the generated filesystem manifest"
+    );
+  }
   Ok(())
 }
 
@@ -711,6 +783,45 @@ max_headers = 64
   }
 
   #[test]
+  fn profile_v2_inherits_v1_and_adds_immutable_runtime_hardening_defaults() {
+    let mut value: toml::Value = toml::from_str(
+      r#"
+profile = "edge-secure-medium"
+profile_version = 2
+
+[waf]
+enabled = true
+
+[runtime.hardening.filesystem_manifest]
+expected_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+expected_writable_paths = []
+"#,
+    )
+    .expect("profile fixture should parse");
+
+    let profile = apply_to_toml(&mut value)
+      .expect("profile should expand")
+      .expect("profile should be selected");
+
+    assert_eq!(profile.name(), EDGE_SECURE_MEDIUM_NAME);
+    assert_eq!(profile.version(), EDGE_SECURE_MEDIUM_V2_VERSION);
+    assert_eq!(value["profile_version"].as_integer(), Some(2));
+    assert_eq!(value["tls"]["min_version"].as_str(), Some("tls1.3"));
+    assert_eq!(
+      value["runtime"]["hardening"]["close_range"].as_str(),
+      Some("required")
+    );
+    assert_eq!(
+      value["runtime"]["hardening"]["seccomp"]["expectation"].as_str(),
+      Some("required")
+    );
+    assert_eq!(
+      value["runtime"]["hardening"]["landlock"]["mode"].as_str(),
+      Some("manifest")
+    );
+  }
+
+  #[test]
   fn profile_version_without_profile_fails_closed() {
     let mut value: toml::Value =
       toml::from_str("profile_version = 1").expect("profile fixture should parse");
@@ -722,7 +833,7 @@ max_headers = 64
   fn unknown_profile_name_or_version_fails_closed() {
     for raw in [
       "profile = \"unknown\"",
-      "profile = \"edge-secure-medium\"\nprofile_version = 2",
+      "profile = \"edge-secure-medium\"\nprofile_version = 3",
     ] {
       let mut value: toml::Value = toml::from_str(raw).expect("profile fixture should parse");
       let error = apply_to_toml(&mut value).expect_err("unsupported profile must fail");

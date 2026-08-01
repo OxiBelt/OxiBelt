@@ -80,6 +80,11 @@ pidfd_supervision = true
 [runtime.hardening]
 close_range = "auto" # auto | off | required
 
+[runtime.hardening.filesystem_manifest]
+# Configure both fields together to bind startup to the exact resolved manifest.
+# expected_digest = "sha256:<64 lower-case hex>"
+# expected_writable_paths = ["/var/cache/oxibelt"]
+
 [runtime.hardening.seccomp]
 expectation = "off" # off | optional | required
 # profile_identity = "oxibelt-tokio-v1" # optional external assertion
