@@ -2808,10 +2808,13 @@ Secret fields emit only their stable config path, change operation, and
 unchanged from changed secret material before redaction, then remain
 non-serializable and zeroized; raw secret values, tags, URLs, provider
 references, and absolute secret paths never enter plan output. Because the
-changed/unchanged result is still an equality oracle, grant `config:Diff` only
-to principals trusted to test candidate secrets and avoid low-entropy literal
-secrets. The report is bounded to 4,096 per-field changes and rejects overflow
-instead of truncating.
+changed/unchanged result is still an equality oracle, grant
+`config:DiffSecrets` only to principals trusted to test candidate secrets and
+avoid low-entropy literal secrets. The legacy `config:Diff` action remains
+valid in policy documents for migration compatibility but does not authorize
+the endpoint; broad `config:*` and `*` grants include the new action. The
+report is bounded to 4,096 per-field changes and rejects overflow instead of
+truncating.
 
 Listener transition output is a feasibility plan, not a zero-downtime promise.
 An addition is ordered before removal where compatible live socket ownership
@@ -3028,7 +3031,7 @@ active cluster cannot authorize replacement of its own trust boundary.
 Planning reports the exact bounded target count, canonical membership
 revision, and signed/durable artifact, all-member acknowledgement, protected
 write, and rollback prerequisites. It returns member IDs only when the caller
-has both `config:Diff` on `*` and `config:GetInstances` on
+has both `config:DiffSecrets` on `*` and `config:GetInstances` on
 `instances/current`; otherwise `identities_withheld = true`. The plan does not
 construct an envelope, encrypt or persist an artifact, perform canary apply,
 or satisfy any of those prerequisites.

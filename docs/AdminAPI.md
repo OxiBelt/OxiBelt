@@ -490,12 +490,15 @@ same-bind replacement remains conditional; the plan does not claim zero
 downtime. Snapshot publication can drain HTTP and long-lived protocol
 generations even when their socket remains bound.
 
-The endpoint requires only `config:Diff` on `*`. It accepts no `If-Match` or
+The endpoint requires `config:DiffSecrets` on `*`. The legacy `config:Diff`
+action remains valid in policy documents for migration compatibility but does
+not authorize this endpoint. Broad `config:*` and `*` grants continue to match
+the new action. The endpoint accepts no `If-Match` or
 `X-OxiBelt-Mutation`, and success does not satisfy `config:Load`,
 `admin:UpdateConfig`, `ipm:UpdateConfig`, protected-write, signed-artifact, or
 rollout authority. Planning does not bind a socket, publish a snapshot, update
 an ETag/revision, create rollback state, or contact Kubernetes. In
-`admin_cluster` mode, `config:Diff` reveals the bounded target count and
+`admin_cluster` mode, `config:DiffSecrets` reveals the bounded target count and
 membership revision; exact member identities are returned only when the same
 caller also has `config:GetInstances` on `instances/current`.
 
@@ -504,9 +507,10 @@ compares process-local, domain-separated HMAC-SHA-256 equality tags before
 redaction; raw values, equality tags, provider-reference values, secret URLs,
 and absolute secret file paths are not returned, logged, or retained in the
 plan. The changed/unchanged bit is nevertheless a secret-equality oracle:
-grant `config:Diff` only to principals trusted to test candidate secrets, use
-high-entropy secret material, and monitor repeated plan requests. Redaction
-prevents direct value disclosure; it does not make low-entropy guessing safe.
+grant `config:DiffSecrets` only to principals trusted to test candidate
+secrets, use high-entropy secret material, and monitor repeated plan requests.
+Redaction prevents direct value disclosure; it does not make low-entropy
+guessing safe.
 
 `oxibeltctl config plan --current CURRENT --candidate CANDIDATE --format
 text|json` performs offline planning; `oxibeltctl config plan --online

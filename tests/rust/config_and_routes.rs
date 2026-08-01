@@ -8645,13 +8645,14 @@ name = "control-plane-config"
 
 [[ipm.policies.statements]]
 effect = "allow"
-actions = ["admin:ReadMetadata", "admin:UpdateConfig", "admin:*", "ipm:UpdateConfig", "ipm:*"]
+actions = ["admin:ReadMetadata", "admin:UpdateConfig", "admin:*", "ipm:UpdateConfig", "ipm:*", "config:Diff", "config:DiffSecrets"]
 resources = [
     "oxibelt:default:admin:metadata/openapi",
     "oxibelt:default:admin:config",
     "oxibelt:default:admin:*",
     "oxibelt:default:ipm:config",
     "oxibelt:default:ipm:*",
+    "oxibelt:default:config:*",
 ]
 
 [[ipm.bindings]]

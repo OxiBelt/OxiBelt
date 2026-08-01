@@ -271,6 +271,8 @@ async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
   let before = control.status().await;
 
   let mut candidate_value = current.clone();
+  let matching_secret_candidate =
+    toml::to_string(&current).expect("matching candidate should encode");
   candidate_value["logging"]["level"] = toml::Value::String("debug".to_string());
   let current_key = candidate_value["tls"]["private_key"]
     .as_str()
@@ -284,7 +286,7 @@ async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
   candidate_value["tls"]["private_key"] = toml::Value::String(alternate_key.to_string());
   let candidate = toml::to_string(&candidate_value).expect("candidate should encode");
 
-  let (actor, ipm) = actor_and_ipm("config:Diff");
+  let (actor, ipm) = actor_and_ipm("config:DiffSecrets");
   let context = IpmRequestContext::default();
   let authorization = AdminAuthorization::new(&actor, &ipm, &context);
   let request = hyper::Request::builder()
@@ -333,6 +335,65 @@ async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
         && change.get("candidate_value").is_none()
     })
   }));
+  assert_eq!(control.status().await, before);
+
+  let (actor, ipm) = actor_and_ipm("config:Diff");
+  let authorization = AdminAuthorization::new(&actor, &ipm, &context);
+  let mut legacy_responses = Vec::new();
+  for legacy_candidate in [&matching_secret_candidate, &candidate] {
+    let request = hyper::Request::builder()
+      .method(::http::Method::POST)
+      .uri("/admin/v1/config/diff")
+      .body(Full::new(Bytes::from(
+        serde_json::to_vec(&json!({ "format": "toml", "config": legacy_candidate }))
+          .expect("request should serialize"),
+      )))
+      .expect("request should build");
+    let response = admin_config_response(
+      request,
+      state.clone(),
+      control.clone(),
+      &authorization,
+      &::http::Method::POST,
+      "/admin/v1/config/diff",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    legacy_responses.push(
+      response
+        .into_body()
+        .collect()
+        .await
+        .expect("response should collect")
+        .to_bytes(),
+    );
+  }
+  let request = hyper::Request::builder()
+    .method(::http::Method::POST)
+    .uri("/admin/v1/config/diff")
+    .body(Full::new(Bytes::from_static(b"{")))
+    .expect("request should build");
+  let response = admin_config_response(
+    request,
+    state.clone(),
+    control.clone(),
+    &authorization,
+    &::http::Method::POST,
+    "/admin/v1/config/diff",
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::FORBIDDEN);
+  legacy_responses.push(
+    response
+      .into_body()
+      .collect()
+      .await
+      .expect("response should collect")
+      .to_bytes(),
+  );
+  assert_eq!(legacy_responses[0], legacy_responses[1]);
+  assert_eq!(legacy_responses[0], legacy_responses[2]);
+  assert_eq!(legacy_responses[0].as_ref(), b"forbidden");
   assert_eq!(control.status().await, before);
 
   let (actor, ipm) = actor_and_ipm("config:Load");

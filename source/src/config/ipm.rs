@@ -551,6 +551,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "GetInstances",
       "Validate",
       "Diff",
+      "DiffSecrets",
       "Load",
       "Rollback",
       "SyncFiles",

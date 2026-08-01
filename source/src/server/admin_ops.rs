@@ -279,8 +279,8 @@ where
       }
     }
     (&::http::Method::POST, "/admin/v1/config/diff") => {
-      if !authorization.is_allowed("config:Diff", "*") {
-        return permission_denied(authorization.actor, "config:Diff");
+      if !authorization.is_allowed("config:DiffSecrets", "*") {
+        return permission_denied(authorization.actor, "config:DiffSecrets");
       }
       let payload =
         match collect_admin_json_body::<admin_control::AdminConfigPayload, _>(request).await {

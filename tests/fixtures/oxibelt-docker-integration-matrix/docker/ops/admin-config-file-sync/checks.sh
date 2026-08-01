@@ -6,7 +6,8 @@ admin_config_etag() {
 }
 
 run_case_checks() {
-  local response raw_config validate_body loaded_config load_body etag synced_group sync_body bad_body
+  local response raw_config validate_body loaded_config load_body guessed_secret_config guessed_secret_body
+  local legacy_matching legacy_mismatching etag synced_group sync_body bad_body
 
   response="$(client_request "example.test" "/app/admin-before" 200)"
   assert_body_jq "${response}" '.upstream == "http-upstream" and .path == "/origin/app/admin-before"'
@@ -47,8 +48,20 @@ TOML
 )"
   load_body="$(jq -cn --arg config "${loaded_config}" '{format:"toml",config:$config}')"
 
-  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/diff" 200 "POST" "${load_body}" "Authorization: Bearer matrix-upstream-token")"
-  assert_response_jq "${response}" '(.body | fromjson | .changes | length) > 0'
+  guessed_secret_config="${loaded_config/REST-SHARED-SECRET-LEAK/GUESSED-REST-SHARED-SECRET}"
+  guessed_secret_body="$(jq -cn --arg config "${guessed_secret_config}" '{format:"toml",config:$config}')"
+
+  legacy_matching="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/diff" 403 "POST" "${load_body}" "Authorization: Bearer matrix-upstream-token")"
+  legacy_mismatching="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/diff" 403 "POST" "${guessed_secret_body}" "Authorization: Bearer matrix-upstream-token")"
+  assert_response_jq "${legacy_matching}" '(.body | fromjson) as $body | $body.error.code == "permission_denied" and $body.error.message == "forbidden" and $body.error.details.action == "config:DiffSecrets" and $body.error.details.resource == "oxibelt:oxibelt:config:*"'
+  assert_response_jq "${legacy_mismatching}" '(.body | fromjson) as $body | $body.error.code == "permission_denied" and $body.error.message == "forbidden" and $body.error.details.action == "config:DiffSecrets" and $body.error.details.resource == "oxibelt:oxibelt:config:*"'
+  if [[ "$(jq -c '.body | fromjson | del(.request_id)' <<<"${legacy_matching}")" != "$(jq -c '.body | fromjson | del(.request_id)' <<<"${legacy_mismatching}")" ]]; then
+    fail_with_diagnostics "legacy config:Diff responses exposed secret equality"
+  fi
+
+  response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/diff" 200 "POST" "${guessed_secret_body}" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.activation_plan_schema_version == 1 and any($body.changes[]; .path == "webrtc_turn_listeners[0].auth.rest_shared_secret" and .secret == true and (has("current_value") | not) and (has("candidate_value") | not))'
+  assert_response_jq "${response}" '(.body | contains("GUESSED-REST-SHARED-SECRET")) | not'
 
   etag="$(admin_config_etag)"
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/load" 403 "POST" "${load_body}" "Authorization: Bearer matrix-upstream-token" "If-Match: ${etag}")"

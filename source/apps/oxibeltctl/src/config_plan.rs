@@ -75,7 +75,7 @@ impl PreparedOnlinePlan {
         "config": self.candidate_toml,
       })),
       if_match: None,
-      permission: PermissionHint::new("config:Diff", "*"),
+      permission: PermissionHint::new("config:DiffSecrets", "*"),
       filter: ResponseFilter::None,
     }
   }
@@ -472,7 +472,7 @@ prerequisites: 0\n"
     let request = prepared.request_plan();
     assert_eq!(request.method, Method::POST);
     assert_eq!(request.endpoint, "/admin/v1/config/diff");
-    assert_eq!(request.permission.action, "config:Diff");
+    assert_eq!(request.permission.action, "config:DiffSecrets");
     assert!(request.if_match.is_none());
   }
 }

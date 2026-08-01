@@ -214,9 +214,12 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
         "*",
       )
     }
-    ConfigSubcommand::Diff(args) => {
-      config_file_post("/admin/v1/config/diff", &args.file, "config:Diff", None)
-    }
+    ConfigSubcommand::Diff(args) => config_file_post(
+      "/admin/v1/config/diff",
+      &args.file,
+      "config:DiffSecrets",
+      None,
+    ),
     ConfigSubcommand::Apply(args) => {
       let etag = etag_or_current(client, &args.etag).await?;
       config_file_post(

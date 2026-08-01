@@ -192,6 +192,15 @@ fn explicit_deny_wins_over_allow() {
     ),
     IpmDecision::Allow
   );
+  assert_eq!(
+    runtime.authorize(
+      &actor,
+      "config:DiffSecrets",
+      "oxibelt:oxibelt:config:*",
+      &IpmRequestContext::default()
+    ),
+    IpmDecision::Allow
+  );
 }
 
 #[test]

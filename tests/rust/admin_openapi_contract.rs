@@ -234,6 +234,11 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
 
   let diff = &spec["paths"]["/admin/v1/config/diff"]["post"];
+  assert!(
+    diff["description"]
+      .as_str()
+      .is_some_and(|description| description.contains("config:DiffSecrets"))
+  );
   assert_eq!(
     diff["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
     "#/components/schemas/ConfigActivationReport"

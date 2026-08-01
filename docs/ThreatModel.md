@@ -321,7 +321,7 @@ guarantees.
 
 | Feature ID | Security consequence |
 | --- | --- |
-| `config-activation-planner` | A candidate TOML document and its referenced deployment context are untrusted planning inputs. The planner validates before semantic classification, bounds and deterministically orders changes, compares secret leaves through process-local domain-separated HMAC tags, and returns only redacted fixed-vocabulary facts. `config:Diff` is distinct from apply, protected-write, signed-artifact, and rollout authority. Online listener results cannot prove external port availability, Kubernetes target identity does not grant API authority, Admin member identities require `config:GetInstances`, and filesystem/mount/seccomp fit stays conditional until P1-05 provides complete observed manifest evidence. Treating a conditional or advisory result as execution or zero-downtime proof can still cause outage or policy drift. |
+| `config-activation-planner` | A candidate TOML document and its referenced deployment context are untrusted planning inputs. The planner validates before semantic classification, bounds and deterministically orders changes, compares secret leaves through process-local domain-separated HMAC tags, and returns only redacted fixed-vocabulary facts. Online planning requires the secret-equivalent `config:DiffSecrets` authority, which is distinct from apply, protected-write, signed-artifact, and rollout authority; the legacy `config:Diff` action remains policy-valid but does not authorize the endpoint. Online listener results cannot prove external port availability, Kubernetes target identity does not grant API authority, Admin member identities require `config:GetInstances`, and filesystem/mount/seccomp fit stays conditional until P1-05 provides complete observed manifest evidence. Treating a conditional or advisory result as execution or zero-downtime proof can still cause outage or policy drift. |
 | `compio-direct-h1-io` | Operator-selected upstream responses and timing remain untrusted at this Linux-only experimental parser/transport boundary. The persistent worker fleet bounds queues, waiters, connections, and retained buffers; each physical worker handoff covers its share of the already-bounded operation ceiling, the global semaphore caps queued plus active operations, and external waiters remain separately bounded. A stable origin key seeds bounded worker striping while shared counters preserve the fleet-wide per-origin connection and idle limits without placing the origin in public metrics. An unhealthy or draining service, or a resolution or connection failure, may reach Hyper only before an upstream request byte is written; queue and connection-capacity admission failures never do. Parser failure, ambiguous residual bytes, EOF, timeout, cancellation in uncertain framing, peer close, upgrade, stale generation, pool overflow, I/O error, or worker failure retires the connection instead of reusing it. Bodyful and streaming requests stay on Hyper, preserving the existing retry policy and no-duplicate-dispatch boundary. Queue saturation, slow or malicious origins, cancellation storms, worker failure, and pool churn remain availability risks; fixed-cardinality service metrics, Hyper differential/fuzz evidence, paired CPU/request and p99 results, and the 30-minute FD/thread/RSS/active-connection soak remain promotion gates. |
 | `crlite` | Revocation filter coverage, managed downloads, cache integrity, and degraded-allow behavior require deployment-specific review. |
 | `tls-upstream-revocation` | Outbound OCSP/CRLite reachability, freshness, and failure policy can affect upstream availability and trust. |
@@ -444,7 +444,7 @@ families must define equivalent authorization, concurrency/replay behavior, and
 audit semantics.
 
 Configuration activation planning is not a mutation family. It requires
-`config:Diff` on `*`, accepts neither `If-Match` nor a mutation envelope, and
+`config:DiffSecrets` on `*`, accepts neither `If-Match` nor a mutation envelope, and
 must not create a revision, ETag, snapshot, listener, drain, rollback entry, or
 durable artifact. That read authority does not imply `config:Load`,
 `admin:UpdateConfig`, `ipm:UpdateConfig`, or cluster/Kubernetes write
@@ -453,9 +453,12 @@ authority. Exact Admin-cluster member identities are a separate
 receive only the bounded count and `identities_withheld = true`.
 Secret values and process-local HMAC tags are never returned, but the
 changed/unchanged result is an equality oracle for callers that can submit
-candidate secrets. Treat `config:Diff` as sensitive read authority, prefer
-high-entropy secrets, and monitor repeated guesses; redaction does not protect
-a low-entropy literal from an authorized online guessing campaign.
+candidate secrets. Treat `config:DiffSecrets` as secret-equivalent read
+authority, prefer high-entropy secrets, and monitor repeated guesses;
+redaction does not protect a low-entropy literal from an authorized online
+guessing campaign. The legacy `config:Diff` action remains syntactically valid
+for policy migration but does not authorize the endpoint; broad `config:*` and
+`*` grants include the new action.
 
 | Mutation family | Authorization and concurrency requirement | Audit and residual requirement |
 | --- | --- | --- |

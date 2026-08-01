@@ -806,6 +806,7 @@
         ],
         "operationId": "diffConfig",
         "summary": "Diff candidate effective config against the active effective config.",
+        "description": "Requires config:DiffSecrets on *. The exact changed/unchanged result for secret fields is sensitive equality information; config:Diff alone does not authorize this endpoint.",
         "requestBody": {
           "$ref": "#/components/requestBodies/ConfigPayload"
         },

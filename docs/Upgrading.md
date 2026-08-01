@@ -416,6 +416,15 @@ indices deliberately.
 This is an additive Admin API and CLI change; the native configuration schema
 remains epoch `1` and no TOML migration is required.
 
+Online activation planning now requires `config:DiffSecrets` on `*` because
+the exact changed/unchanged classification for secret fields is
+secret-equivalent information. Update explicit `config:Diff` grants used for
+`POST /admin/v1/config/diff`, `oxibeltctl config diff`, or
+`oxibeltctl config plan --online`; the legacy action remains policy-valid but
+receives `403` from the endpoint. Broad `config:*` and `*` grants continue to
+authorize planning. This authorization migration does not change activation
+plan schema version `1`, native configuration schema epoch `1`, or TOML syntax.
+
 Post-beta.2 development also adds optional upstream HTTP/3 resolver controls
 under `[quic.upstream.resolution]`. Existing TOML remains valid and uses the
 documented defaults when these fields are omitted. The native configuration
@@ -441,11 +450,12 @@ oxibeltctl config plan \
 
 Use `--online` instead of `--current` to enrich the same fixed schema with the
 active executor, resolved listener, confinement, and deployment context. The
-online command needs `config:Diff`; exact fixed-member identities additionally
-need `config:GetInstances`. Neither mode applies the candidate, satisfies a
-mutation envelope, or proves zero downtime. Exit `0` means the candidate has a
-valid, supported, non-blocked plan, including restart or rollout. Exit `1`
-means invalid, unsupported, blocked, unauthorized, or failed planning.
+online command needs `config:DiffSecrets`; exact fixed-member identities
+additionally need `config:GetInstances`. Neither mode applies the candidate,
+satisfies a mutation envelope, or proves zero downtime. Exit `0` means the
+candidate has a valid, supported, non-blocked plan, including restart or
+rollout. Exit `1` means invalid, unsupported, blocked, unauthorized, or failed
+planning.
 
 Automation must inspect both `minimum_required_operation` and
 `selected_operation`, every `conditional` and prerequisite availability,
