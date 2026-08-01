@@ -6,6 +6,7 @@
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateAdditionalServicePorts" . -}}
+{{- include "oxibelt.validateRuntimeHardening" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
@@ -88,7 +89,7 @@ spec:
               - --wait-seconds
               - {{ int .Values.lifecycle.preStop.drainSeconds | quote }}
         {{- end }}
-        {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") }}
+        {{- if or .Values.admin.enabled .Values.extraEnv (eq .Values.configRollout.mode "kubernetes_immutable") .Values.runtimeHardening.seccomp.externalProfile.identity }}
         env:
         {{- if .Values.admin.enabled }}
         - name: OXIBELT_ADMIN_TOKEN
@@ -126,6 +127,12 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: "metadata.annotations['oxibelt.dev/config-rollout-target-name']"
+        {{- end }}
+        {{- if .Values.runtimeHardening.seccomp.externalProfile.identity }}
+        - name: OXIBELT_SECCOMP_PROFILE_IDENTITY
+          value: {{ .Values.runtimeHardening.seccomp.externalProfile.identity | quote }}
+        - name: OXIBELT_SECCOMP_PROFILE_DIGEST
+          value: {{ .Values.runtimeHardening.seccomp.externalProfile.digest | quote }}
         {{- end }}
         {{- with .Values.extraEnv }}
 {{ toYaml . | indent 8 }}

@@ -385,6 +385,19 @@ pub(super) async fn apply_downstream_tls_reload(
     .await;
     return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
   }
+  let hardening = match active.admitted_reload_hardening(&config) {
+    Ok(hardening) => hardening,
+    Err(error) => {
+      record_operation(
+        control,
+        "tls_downstream_reload",
+        "rejected",
+        Some(error.to_string()),
+      )
+      .await;
+      return AdminControlResponse::error(StatusCode::BAD_REQUEST, error.to_string());
+    }
+  };
   let (crlite, ocsp_staple, tls_server_config, quic_server_config) =
     match tls_reload::build_downstream_tls_reload_configs(&config, active.as_ref()).await {
       Ok(configs) => configs,
@@ -401,6 +414,7 @@ pub(super) async fn apply_downstream_tls_reload(
     };
   let mut snapshot = active.as_ref().clone();
   snapshot.config = config;
+  snapshot.hardening = hardening;
   snapshot.crlite = crlite;
   snapshot.ocsp_staple = ocsp_staple;
   snapshot.tls_server_config = tls_server_config;

@@ -81,10 +81,12 @@ pidfd_supervision = true
 close_range = "auto" # auto | off | required
 
 [runtime.hardening.seccomp]
-mode = "off" # off | log | enforce
+expectation = "off" # off | optional | required
+# profile_identity = "oxibelt-tokio-v1" # optional external assertion
+# profile_digest = "sha256:<64 lower-case hex>" # optional external assertion
 
 [runtime.hardening.landlock]
-mode = "off" # off | enforce
+mode = "off" # off | enforce (manual) | manifest
 read_paths = []
 read_write_paths = []
 

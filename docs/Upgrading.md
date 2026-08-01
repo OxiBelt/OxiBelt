@@ -405,16 +405,19 @@ direct-H1 state. Public readiness also adds the bounded
 `X-OxiBelt-Runtime-Status` header. These surfaces do not expose raw capability
 probe errors, paths, hostnames, routes, peers, or secrets.
 
-Post-beta.2 development also adds experimental activation-plan schema version
-`1` to `POST /admin/v1/config/diff`. Existing consumers may continue reading
+Post-beta.2 development first added experimental activation-plan schema version
+`1` to `POST /admin/v1/config/diff`; the runtime-confinement contract advances
+that schema to version `2`. Existing consumers may continue reading
 the preserved `changes[].path` and `changes[].op` fields, but strict response
 decoders must accept the new root `activation_plan_schema_version`,
 `native_schema_epoch`, `ok`, `basis`, and nested `activation_plan` fields.
+Version `2` adds active-policy/current/candidate manifest digests plus a bounded
+redacted confinement-difference list; it never adds raw filesystem paths.
 Array changes are now expanded into deterministic indexed leaf paths instead
 of one aggregate array entry, so consumers that group paths must normalize
 indices deliberately.
 This is an additive Admin API and CLI change; the native configuration schema
-remains epoch `1` and no TOML migration is required.
+remains epoch `1`.
 
 Online activation planning now requires `config:DiffSecrets` on `*` because
 the exact changed/unchanged classification for secret fields is
@@ -422,8 +425,38 @@ secret-equivalent information. Update explicit `config:Diff` grants used for
 `POST /admin/v1/config/diff`, `oxibeltctl config diff`, or
 `oxibeltctl config plan --online`; the legacy action remains policy-valid but
 receives `403` from the endpoint. Broad `config:*` and `*` grants continue to
-authorize planning. This authorization migration does not change activation
-plan schema version `1`, native configuration schema epoch `1`, or TOML syntax.
+authorize planning. This authorization migration does not independently change
+activation-plan or native configuration schema versions.
+
+The runtime-confinement contract replaces canonical
+`runtime.hardening.seccomp.mode` with `expectation = "off" | "optional" |
+"required"`. Compatibility loading maps legacy `off` to `off`, `log` to
+`optional`, and `enforce` to `required` and emits a fixed migration diagnostic;
+mixing `mode` with `expectation` is invalid. Optional `profile_identity` and
+`profile_digest` are expected external assertions, not kernel-observed facts.
+Edit the field and run `oxibeltctl config validate`; the epoch migrator only
+handles the explicit epoch `0` to `1` transform and does not rewrite this
+same-epoch compatibility alias.
+The alias remains accepted throughout native schema epoch `1`; removal is
+reserved for a future incompatible schema epoch.
+
+Landlock gains `mode = "manifest"`; existing `mode = "enforce"` remains the
+manual allowlist and needs no migration. Before selecting manifest mode, run
+`oxibeltctl config filesystem-access CONFIG --check`, review the redacted
+requirements, mount every required writable parent narrowly, and use
+`--show-paths` only in a trusted local terminal. A candidate requiring broader
+active rules cannot hot reload; retain the previous process or immutable
+workload until the restart/rollout plan succeeds.
+
+Support-bundle format advances from `2` to `3`, config-explain from `2` to `3`,
+and runtime-check JSON gains schema version `1` for the bounded hardening
+snapshot. Required seccomp now fails before listener startup unless Linux
+reports filter mode `2` and `NoNewPrivs: 1`; ensure Docker/Kubernetes applies
+the filter and no-new-privileges before changing from `off` or `optional`.
+Rollback by restoring `expectation = "off"` or the retained prior config and
+restarting with the prior immutable image. Landlock and seccomp are irreversible
+inside a running process, so rollback always replaces the process rather than
+attempting to weaken its current policy.
 
 Post-beta.2 development also adds optional upstream HTTP/3 resolver controls
 under `[quic.upstream.resolution]`. Existing TOML remains valid and uses the
@@ -474,9 +507,9 @@ planning.
 
 Automation must inspect both `minimum_required_operation` and
 `selected_operation`, every `conditional` and prerequisite availability,
-listener bind conflicts, long-connection effects, and rollback class. Treat
-`filesystem_manifest`, mount, and active-seccomp evidence as unresolved until
-P1-05 is implemented; do not infer fit from a known-path subset or requested
+listener bind conflicts, long-connection effects, rollback class, confinement
+digests, and bounded differences. Offline mount/kernel evidence can remain
+unresolved; do not infer it from requested configuration or a checked-in
 profile. In Kubernetes immutable mode retain the previous immutable artifact
 and let the workload controller perform rollout. In `admin_cluster` mode keep
 the signed/durable artifact, exact membership, all-member acknowledgement, and

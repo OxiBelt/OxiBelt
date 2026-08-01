@@ -4786,11 +4786,11 @@ fn oxibelt_main_builds_startup_snapshot_on_tokio_task() {
   let main = oxibelt_main_text();
 
   assert!(
-    main.contains("build_app_handle(config, observability.into_telemetry(), topology)"),
+    main.contains("build_app_handle(config, telemetry, topology, hardening)"),
     "startup should delegate application snapshot construction to the task-backed helper"
   );
   assert!(
-    main.contains("tokio::task::spawn(async move {\n    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology(config, telemetry, topology)"),
+    main.contains("tokio::task::spawn(async move {\n    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology_and_hardening("),
     "AppSnapshot startup construction should not be polled directly on the block_on caller stack"
   );
 }

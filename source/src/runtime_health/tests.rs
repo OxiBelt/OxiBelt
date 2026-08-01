@@ -38,6 +38,34 @@ fn optional_degradation_does_not_fail_readiness() {
 }
 
 #[test]
+fn hardening_uses_fixed_label_and_only_required_failures_block_readiness() {
+  let health = RuntimeHealth::default();
+  let generation = health.allocate_generation();
+  health.activate_generation(generation);
+  health.set_subsystem_state(
+    generation,
+    RuntimeSubsystem::Hardening,
+    RuntimeSubsystemState::Degraded,
+    false,
+  );
+  assert!(health.is_ready());
+  assert_eq!(health.snapshot().degraded_subsystems, vec!["hardening"]);
+
+  health.set_subsystem_state(
+    generation,
+    RuntimeSubsystem::Hardening,
+    RuntimeSubsystemState::Failed,
+    true,
+  );
+  assert!(!health.is_ready());
+  assert_eq!(health.snapshot().failed_subsystems, vec!["hardening"]);
+
+  let mut metrics = String::new();
+  health.append_prometheus(&mut metrics);
+  assert!(metrics.contains("subsystem=\"hardening\""));
+}
+
+#[test]
 fn admin_mutation_cluster_health_uses_fixed_labels_and_fails_closed() {
   let health = RuntimeHealth::default();
   let generation = health.allocate_generation();

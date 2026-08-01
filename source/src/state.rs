@@ -12,6 +12,11 @@ use crate::config::{Config, RuntimeDirectH1IoMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
+use crate::filesystem_access::FilesystemAccessManifest;
+use crate::hardening::{
+  LandlockEnforcementState, RuntimeHardeningOutcome, RuntimeHardeningSnapshot,
+  observe_runtime_hardening,
+};
 use crate::ipm::IpmRuntime;
 use crate::lifecycle::LifecycleState;
 use crate::limits::LimitState;
@@ -30,7 +35,7 @@ use crate::proxy::http::waf_body_coding::WafBodyCodingState;
 use crate::proxy::http3::UpstreamH3Pools;
 use crate::routes::RouteTable;
 use crate::runtime::topology::RuntimeTopologySnapshot;
-use crate::runtime_health::RuntimeHealth;
+use crate::runtime_health::{RuntimeHealth, RuntimeSubsystem, RuntimeSubsystemState};
 use crate::runtime_introspection::{
   RuntimeCounterGuard, RuntimeIntrospectionCounter, RuntimeIntrospectionState,
 };
@@ -73,6 +78,7 @@ use upstream_precompute::build_upstream_uri_parts;
 pub struct AppSnapshot {
   pub config: Config,
   pub runtime_topology: RuntimeTopologySnapshot,
+  pub hardening: RuntimeHardeningSnapshot,
   pub(crate) secret_references: SecretReferenceRuntime,
   pub(crate) effective_direct_h1_io: RuntimeDirectH1IoMode,
   pub route_table: RouteTable,
@@ -144,6 +150,37 @@ pub struct AppSnapshot {
   pub(crate) http1_upgrades_possible: bool,
 }
 impl AppSnapshot {
+  pub(crate) fn admitted_reload_hardening(
+    &self,
+    candidate: &Config,
+  ) -> anyhow::Result<RuntimeHardeningSnapshot> {
+    let candidate_manifest = FilesystemAccessManifest::from_config(candidate)
+      .context("failed to generate candidate filesystem-access manifest")?;
+    let projection = candidate_manifest.landlock_projection();
+    if self.hardening.landlock.enforcement == LandlockEnforcementState::Active {
+      let installed_manifest = (self.hardening.landlock.requested_mode
+        == crate::config::RuntimeLandlockMode::Manifest)
+        .then(|| FilesystemAccessManifest::from_config(&self.config))
+        .transpose()
+        .context("failed to reconstruct the active filesystem-access manifest")?;
+      let expansion = candidate_manifest.access_expansion_from_landlock(
+        installed_manifest.as_ref(),
+        &self.config.runtime.hardening.landlock.read_paths,
+        &self.config.runtime.hardening.landlock.read_write_paths,
+      );
+      if !expansion.is_empty() {
+        anyhow::bail!(
+          "filesystem_access_expansion: candidate manifest requires {} path policies outside active Landlock rules; restart required",
+          expansion.len()
+        );
+      }
+    }
+    Ok(self.hardening.with_current_manifest(
+      candidate_manifest.digest().to_string(),
+      projection.read_only_rootfs,
+    ))
+  }
+
   #[inline]
   pub(crate) fn record_hot_path_request(&self) {
     if self.request_path_features.hot_path_metrics {
@@ -184,7 +221,16 @@ impl AppSnapshot {
     config: Config,
     telemetry: TelemetryRuntime,
   ) -> anyhow::Result<Self> {
-    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), None).await
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), None, None).await
+  }
+
+  pub async fn new_with_telemetry_and_hardening(
+    config: Config,
+    telemetry: TelemetryRuntime,
+    hardening: RuntimeHardeningSnapshot,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), None, Some(hardening))
+      .await
   }
 
   pub async fn new_with_telemetry_and_topology(
@@ -192,14 +238,30 @@ impl AppSnapshot {
     telemetry: TelemetryRuntime,
     topology: RuntimeTopologySnapshot,
   ) -> anyhow::Result<Self> {
-    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), Some(topology)).await
+    Self::new_with_previous_and_telemetry(config, None, Some(telemetry), Some(topology), None).await
+  }
+
+  pub async fn new_with_telemetry_and_topology_and_hardening(
+    config: Config,
+    telemetry: TelemetryRuntime,
+    topology: RuntimeTopologySnapshot,
+    hardening: RuntimeHardeningSnapshot,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_previous_and_telemetry(
+      config,
+      None,
+      Some(telemetry),
+      Some(topology),
+      Some(hardening),
+    )
+    .await
   }
 
   pub async fn new_with_previous(
     config: Config,
     previous: Option<&AppSnapshot>,
   ) -> anyhow::Result<Self> {
-    Self::new_with_previous_and_telemetry(config, previous, None, None).await
+    Self::new_with_previous_and_telemetry(config, previous, None, None, None).await
   }
 
   async fn new_with_previous_and_telemetry(
@@ -207,6 +269,7 @@ impl AppSnapshot {
     previous: Option<&AppSnapshot>,
     initial_telemetry: Option<TelemetryRuntime>,
     supplied_topology: Option<RuntimeTopologySnapshot>,
+    supplied_hardening: Option<RuntimeHardeningSnapshot>,
   ) -> anyhow::Result<Self> {
     if config.rollout.is_immutable() {
       config
@@ -215,6 +278,16 @@ impl AppSnapshot {
     }
     let runtime_topology =
       runtime_topology::for_snapshot_build(&config, supplied_topology, previous)?;
+    let filesystem_manifest = FilesystemAccessManifest::from_config(&config)
+      .context("failed to generate filesystem-access manifest")?;
+    let manifest_projection = filesystem_manifest.landlock_projection();
+    let hardening = match (previous, supplied_hardening) {
+      (Some(previous), None) => previous.admitted_reload_hardening(&config)?,
+      (_, Some(hardening)) => hardening,
+      (None, None) => {
+        observe_runtime_hardening(&config.runtime.hardening, Some(&manifest_projection))
+      }
+    };
     crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
@@ -227,6 +300,17 @@ impl AppSnapshot {
       .unwrap_or_default();
     let (runtime_health, runtime_generation, overload, circuit_breakers) =
       runtime_services::build(&config, previous)?;
+    let (hardening_state, readiness_critical) = match hardening.outcome {
+      RuntimeHardeningOutcome::Satisfied => (RuntimeSubsystemState::Healthy, false),
+      RuntimeHardeningOutcome::Degraded => (RuntimeSubsystemState::Degraded, false),
+      RuntimeHardeningOutcome::Blocked => (RuntimeSubsystemState::Failed, true),
+    };
+    runtime_health.set_subsystem_state(
+      runtime_generation,
+      RuntimeSubsystem::Hardening,
+      hardening_state,
+      readiness_critical,
+    );
     let lifecycle = previous
       .map(|snapshot| snapshot.lifecycle.clone())
       .unwrap_or_default();
@@ -541,6 +625,7 @@ impl AppSnapshot {
     Ok(Self {
       config,
       runtime_topology,
+      hardening,
       secret_references,
       effective_direct_h1_io,
       route_table,
@@ -614,6 +699,7 @@ impl AppSnapshot {
     config: Config,
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
+    let hardening = previous.admitted_reload_hardening(&config)?;
     crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
@@ -678,6 +764,17 @@ impl AppSnapshot {
     let metrics = previous.metrics.clone();
     let runtime_health = previous.runtime_health.clone();
     let runtime_generation = runtime_health.allocate_generation();
+    let (hardening_state, readiness_critical) = match hardening.outcome {
+      RuntimeHardeningOutcome::Satisfied => (RuntimeSubsystemState::Healthy, false),
+      RuntimeHardeningOutcome::Degraded => (RuntimeSubsystemState::Degraded, false),
+      RuntimeHardeningOutcome::Blocked => (RuntimeSubsystemState::Failed, true),
+    };
+    runtime_health.set_subsystem_state(
+      runtime_generation,
+      RuntimeSubsystem::Hardening,
+      hardening_state,
+      readiness_critical,
+    );
     previous
       .runtime_introspection
       .set_enabled(config.admin.enabled);
@@ -754,6 +851,7 @@ impl AppSnapshot {
     Ok(Self {
       config,
       runtime_topology,
+      hardening,
       secret_references,
       effective_direct_h1_io,
       route_table,

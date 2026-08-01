@@ -484,9 +484,12 @@ impl Config {
     if self.admin.legacy_token_store.is_some() {
       configured.push("admin.token_store");
     }
+    if self.runtime.hardening.seccomp.expectation != RuntimeSeccompExpectation::Required {
+      configured.push("runtime.hardening.seccomp.expectation");
+    }
     if !configured.is_empty() {
       bail!(
-        "strict data-plane artifact cannot enable or customize Admin capabilities: {}",
+        "strict data-plane artifact requires disabled Admin capabilities and runtime.hardening.seccomp.expectation = \"required\": {}",
         configured.join(", ")
       );
     }

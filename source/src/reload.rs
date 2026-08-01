@@ -106,6 +106,7 @@ impl ReloadManager {
       self.last_fingerprints = fingerprints;
       return Ok(false);
     }
+    let hardening = active.admitted_reload_hardening(&config)?;
 
     let waf = WafEngine::new_with_previous_limits_and_mitigation(
       &config,
@@ -152,6 +153,7 @@ impl ReloadManager {
       .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
       runtime_topology: active.runtime_topology.clone(),
+      hardening,
       route_table,
       sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),
@@ -267,6 +269,7 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
+    let hardening = active.admitted_reload_hardening(&config)?;
     let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
@@ -342,6 +345,7 @@ impl ReloadManager {
       .context("failed to build precomputed Alt-Svc header values")?;
     let snapshot = AppSnapshot {
       runtime_topology: active.runtime_topology.clone(),
+      hardening,
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
       upstreams: active.upstreams.clone(),

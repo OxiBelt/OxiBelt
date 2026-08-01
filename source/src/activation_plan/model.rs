@@ -3,7 +3,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::{NATIVE_CONFIG_SCHEMA_EPOCH, NativeConfigActivation};
 
 /// Schema version for the stable activation-plan JSON representation.
-pub const ACTIVATION_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const ACTIVATION_PLAN_SCHEMA_VERSION: u32 = 2;
+
+/// Maximum number of redacted confinement differences emitted in one plan.
+///
+/// The aggregate fit and digest fields remain authoritative when the bounded
+/// explanatory list is truncated.
+pub const MAX_CONFINEMENT_DIFFERENCES: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,9 +117,13 @@ pub enum ActivationReasonCode {
   ListenerRebindRequired,
   ListenerBindConflict,
   GracefulDrainRequired,
+  FilesystemAccessExpansion,
+  FilesystemAccessUnavailable,
   LandlockPolicyExpansion,
+  MountPolicyIncompatible,
   ConfinementEvidenceUnavailable,
   ExternalSeccompProfileRequired,
+  SeccompExpectationUnsatisfied,
   ImmutableConfigRequiresRollout,
   DeploymentTargetUnavailable,
   AdminClusterCoordinatedRollout,
@@ -232,6 +242,31 @@ pub enum ConfinementFit {
   Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfinementDifferenceKind {
+  PathAdded,
+  RightsExpanded,
+  ScopeExpanded,
+  PathUnavailable,
+  TypeMismatch,
+  MountUnavailable,
+  SeccompAssertionMismatch,
+}
+
+/// Redacted explanation of one confinement-relevant candidate difference.
+///
+/// `path_id` is an ordinal identifier scoped to this report. It is
+/// deliberately not a stable unkeyed path hash, which would disclose common
+/// filesystem locations through dictionary attacks.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConfinementDifference {
+  pub path_id: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_config_path: Option<String>,
+  pub kind: ConfinementDifferenceKind,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ConfinementActivationPlan {
   pub filesystem: ConfinementFit,
@@ -240,6 +275,14 @@ pub struct ConfinementActivationPlan {
   pub mount_policy: ConfinementFit,
   pub requires_policy_expansion: bool,
   pub restart_required: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub active_policy_digest: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub current_manifest_digest: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub candidate_manifest_digest: Option<String>,
+  pub differences: Vec<ConfinementDifference>,
+  pub differences_truncated: bool,
   pub missing_prerequisites: Vec<ActivationPrerequisite>,
 }
 

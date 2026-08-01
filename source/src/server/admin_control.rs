@@ -522,6 +522,7 @@ async fn apply_oxirule_from_files(
   if active.config.waf_equivalent(&config) {
     return Ok(());
   }
+  let hardening = active.admitted_reload_hardening(&config)?;
   let waf = WafEngine::new_with_previous_limits_and_mitigation(
     &config,
     Some(&active.waf),
@@ -530,6 +531,8 @@ async fn apply_oxirule_from_files(
     active.mitigation.clone(),
   )?;
   let snapshot = build_oxirule_reload_snapshot(active.as_ref(), config, waf);
+  let mut snapshot = snapshot;
+  snapshot.hardening = hardening;
   let effective = Some(load_effective_config_update(control, config_entry).await?);
   install_snapshot(
     snapshot,

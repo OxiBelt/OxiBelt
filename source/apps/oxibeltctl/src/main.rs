@@ -19,6 +19,8 @@ mod cli;
 mod config_compat;
 #[path = "config_explain.rs"]
 mod config_explain;
+#[path = "config_filesystem_access.rs"]
+mod config_filesystem_access;
 #[path = "config_migrate.rs"]
 mod config_migrate;
 #[path = "config_migrate_transform.rs"]
@@ -110,6 +112,9 @@ async fn run() -> anyhow::Result<i32> {
     return Ok(code);
   }
   if let Some(code) = config_explain::run_local_if_requested(&cli.command, cli.admin.output)? {
+    return Ok(code);
+  }
+  if let Some(code) = config_filesystem_access::run_if_requested(&cli.command)? {
     return Ok(code);
   }
   if let Some(code) = config_migrate::run_if_requested(&cli.command, cli.admin.output)? {

@@ -92,3 +92,30 @@ compio_direct_h1 = 0.5
 
   assert!(diagnostics.is_empty());
 }
+
+#[test]
+fn reports_legacy_seccomp_mapping_with_a_stable_diagnostic() {
+  let document = document(
+    r#"
+[runtime.hardening.seccomp]
+mode = "enforce"
+"#,
+  );
+  let mut diagnostics = Vec::new();
+  append_runtime_compatibility_diagnostics(Path::new("oxibelt.toml"), &document, &mut diagnostics);
+
+  assert_eq!(diagnostics.len(), 1);
+  assert_eq!(
+    diagnostics[0].code,
+    "CFG_RUNTIME_SECCOMP_MODE_COMPATIBILITY_ALIAS"
+  );
+  assert_eq!(
+    diagnostics[0].replacement.as_deref(),
+    Some("runtime.hardening.seccomp.expectation")
+  );
+  assert!(
+    diagnostics[0]
+      .message
+      .contains("expectation = \"required\"")
+  );
+}

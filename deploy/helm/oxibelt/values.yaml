@@ -372,6 +372,21 @@ oxirule:
   existingConfigMapDigest: ""
   mountPath: /etc/oxibelt/oxirule
 
+# Helm manages this config fragment only when `expectation` is nonempty. Empty
+# preserves authority for an existing ConfigMap or a manually authored
+# `[runtime.hardening.seccomp]` section in `config.inline`.
+runtimeHardening:
+  seccomp:
+    expectation: "" # "" | off | optional | required
+    # Kubernetes cannot expose the semantic identity of a loaded filter. For a
+    # Localhost profile, these literals are an external orchestrator assertion;
+    # OxiBelt reports them separately from kernel-observed Seccomp/NoNewPrivs.
+    # RuntimeDefault must leave both values empty because its rules vary by
+    # container runtime and version.
+    externalProfile:
+      identity: ""
+      digest: "" # sha256:<64 lower-case hex characters>
+
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []

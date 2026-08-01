@@ -16,6 +16,16 @@ cacheVolume:
 admin:
   enabled: false
 
+# Require the strict runtime to observe both an active seccomp filter and
+# no_new_privs. RuntimeDefault has no stable semantic profile identity, so the
+# external identity and digest intentionally remain empty.
+runtimeHardening:
+  seccomp:
+    expectation: required
+    externalProfile:
+      identity: ""
+      digest: ""
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10001

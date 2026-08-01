@@ -207,6 +207,9 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
     .ok_or_else(|| anyhow::anyhow!("unknown native configuration field path {field_path}"))?;
   let metadata = native_config_field_metadata(&field_path);
   let config = Config::load(path)?;
+  let filesystem_manifest =
+    crate::filesystem_access::FilesystemAccessManifest::from_config(&config)?;
+  let filesystem_check = filesystem_manifest.check_current(false);
   let redacted = metadata.secret_class != NativeConfigSecretClass::None;
   let entry_root = absolute_entry_parent(path);
   let origin = document.origins.get(&field_path);
@@ -242,6 +245,13 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
         "tcp_accept_workers": config.runtime.accept.workers,
         "quic_socket_workers": config.quic.socket.workers,
         "compio_direct_h1_workers": config.runtime.workers.compio_direct_h1,
+      },
+      "filesystem_access": {
+        "schema_version": filesystem_manifest.schema_version(),
+        "manifest_digest": filesystem_manifest.digest(),
+        "entry_count": filesystem_manifest.entries().len(),
+        "paths_redacted": true,
+        "read_only_rootfs_compatible": filesystem_check.read_only_rootfs_compatible,
       }
     })),
     constraints: ConfigExplainConstraints {
@@ -392,6 +402,35 @@ fn append_runtime_compatibility_diagnostics(
   document: &NativeConfigDocument,
   diagnostics: &mut Vec<ConfigDiagnostic>,
 ) {
+  if let Some(mode) = lookup_toml_value(&document.value, "runtime.hardening.seccomp.mode")
+    .and_then(toml::Value::as_str)
+  {
+    let expectation = match mode {
+      "off" => "off",
+      "log" => "optional",
+      "enforce" => "required",
+      _ => mode,
+    };
+    diagnostics.push(ConfigDiagnostic {
+      code: "CFG_RUNTIME_SECCOMP_MODE_COMPATIBILITY_ALIAS".to_string(),
+      severity: ConfigDiagnosticSeverity::Warning,
+      stage: ConfigDiagnosticStage::Semantic,
+      field_path: "runtime.hardening.seccomp.mode".to_string(),
+      source: source_for_path(
+        entry,
+        &document.origins,
+        "runtime.hardening.seccomp.mode",
+      ),
+      message: format!(
+        "legacy runtime.hardening.seccomp.mode = \"{mode}\" maps to runtime.hardening.seccomp.expectation = \"{expectation}\""
+      ),
+      suggestions: vec![format!(
+        "use runtime.hardening.seccomp.expectation = \"{expectation}\""
+      )],
+      replacement: Some("runtime.hardening.seccomp.expectation".to_string()),
+    });
+  }
+
   if lookup_toml_value(&document.value, "runtime.main_runtime").and_then(toml::Value::as_str)
     == Some("compio")
   {

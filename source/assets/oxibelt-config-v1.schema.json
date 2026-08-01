@@ -19918,7 +19918,8 @@
                   "description": "OxiBelt native field `runtime.hardening.landlock.mode`. Production Rust validation is authoritative.",
                   "enum": [
                     "off",
-                    "enforce"
+                    "enforce",
+                    "manifest"
                   ],
                   "type": "string",
                   "x-oxibelt-config-activation": "restart_required",
@@ -19991,7 +19992,21 @@
               "additionalProperties": false,
               "description": "OxiBelt native field `runtime.hardening.seccomp`. Production Rust validation is authoritative.",
               "properties": {
+                "expectation": {
+                  "description": "OxiBelt native field `runtime.hardening.seccomp.expectation`. Production Rust validation is authoritative.",
+                  "enum": [
+                    "off",
+                    "optional",
+                    "required"
+                  ],
+                  "type": "string",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
                 "mode": {
+                  "deprecated": true,
                   "description": "OxiBelt native field `runtime.hardening.seccomp.mode`. Production Rust validation is authoritative.",
                   "enum": [
                     "off",
@@ -19999,6 +20014,62 @@
                     "enforce"
                   ],
                   "type": "string",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-deprecated-epoch": 1,
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-replacement": "runtime.hardening.seccomp.expectation",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "profile_digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `runtime.hardening.seccomp.profile_digest`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "profile_identity": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `runtime.hardening.seccomp.profile_identity`. Production Rust validation is authoritative.",
                   "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",

@@ -106,6 +106,13 @@ awk '
     /^[[:space:]]*\[/ { drop_admin = 0 }
     !drop_admin { print }
   ' "${config_source}" >/opt/oxibelt-strict.toml
+awk '
+    /^\[runtime[.]hardening[.]seccomp\]$/ { in_seccomp = 1; print; next }
+    /^\[/ { in_seccomp = 0 }
+    in_seccomp && /^expectation[[:space:]]*=/ { print "expectation = \"required\""; next }
+    { print }
+  ' /opt/oxibelt-strict.toml >/opt/oxibelt-strict.toml.next
+mv /opt/oxibelt-strict.toml.next /opt/oxibelt-strict.toml
 if grep -Eq '^[[:space:]]*\[\[?[[:space:]]*admin([[:space:]]*[.]|[[:space:]]*\])' \
   /opt/oxibelt-strict.toml; then
   fail "strict configuration still contains an Admin table"

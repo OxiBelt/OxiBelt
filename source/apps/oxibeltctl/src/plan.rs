@@ -241,6 +241,7 @@ async fn plan_config(client: &AdminClient, command: &ConfigCommand) -> anyhow::R
     }
     ConfigSubcommand::Schema(_)
     | ConfigSubcommand::Validate(_)
+    | ConfigSubcommand::FilesystemAccess(_)
     | ConfigSubcommand::Explain(_)
     | ConfigSubcommand::Migrate(_)
     | ConfigSubcommand::Plan(_)

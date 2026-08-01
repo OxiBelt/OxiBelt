@@ -34,6 +34,7 @@ pub(crate) mod crypto;
 pub mod diagnostics;
 pub mod dynamic_policy;
 pub mod external_auth;
+pub mod filesystem_access;
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing;
 mod h2_tuning;
@@ -101,16 +102,32 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 /// Runs OxiBelt with explicit runtime metadata for reload and admin surfaces.
 pub async fn run_with_options(mut config: Config, options: RunOptions) -> anyhow::Result<()> {
   config.resolve_rollout_identity_from_environment()?;
-  let observability = runtime::init_observability(&config)?;
+  runtime::init_startup_logging(&config.logging)?;
   config.validate()?;
-  hardening::apply_runtime_hardening(&config.runtime.hardening)?;
+  if config.runtime.hardening.landlock.mode != config::RuntimeLandlockMode::Off {
+    anyhow::bail!(
+      "embedded_runtime_landlock_ownership_unproven: run_with_options cannot install thread-scoped Landlock for a caller-owned runtime; use the standalone binary or set runtime.hardening.landlock.mode = \"off\""
+    );
+  }
   configure_crypto_runtime(&config);
   netport_switcher::ensure_required_runtime_socket(&config)?;
+  let filesystem_manifest = filesystem_access::FilesystemAccessManifest::from_config(&config)
+    .context("failed to generate filesystem-access manifest")?;
+  let manifest_projection = filesystem_manifest.landlock_projection();
+  let hardening = hardening::apply_runtime_hardening_with_manifest(
+    &config.runtime.hardening,
+    Some(&manifest_projection),
+  )?;
+  tracing::info!(
+    hardening = %serde_json::to_string(&hardening)?,
+    "resolved runtime hardening contract"
+  );
+  let telemetry = runtime::init_telemetry(&config)?;
   config.log_worker_resolution();
   tls::install_configured_provider(&config.crypto)?;
 
   let state = AppHandle::new(
-    AppSnapshot::new_with_telemetry(config, observability.into_telemetry())
+    AppSnapshot::new_with_telemetry_and_hardening(config, telemetry, hardening)
       .await
       .context("failed to initialize application state")?,
   );

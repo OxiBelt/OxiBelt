@@ -229,7 +229,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let validation = &spec["components"]["schemas"]["ConfigValidationReport"];
   assert_eq!(
     validation["properties"]["report_schema_version"]["const"],
-    2
+    3
   );
   assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
 
@@ -246,7 +246,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let activation = &spec["components"]["schemas"]["ConfigActivationReport"];
   assert_eq!(
     activation["properties"]["activation_plan_schema_version"]["const"],
-    1
+    2
   );
   assert_eq!(activation["properties"]["native_schema_epoch"]["const"], 1);
   assert_eq!(activation["properties"]["changes"]["maxItems"], 4096);
@@ -259,6 +259,12 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
     .contains("unchanged")
   );
   assert_eq!(listener["properties"]["unchanged"]["maxItems"], 4096);
+  let confinement = &spec["components"]["schemas"]["ConfigActivationConfinementPlan"];
+  assert_eq!(confinement["properties"]["differences"]["maxItems"], 64);
+  assert_eq!(
+    confinement["properties"]["candidate_manifest_digest"]["pattern"],
+    "^sha256:[0-9a-f]{64}$"
+  );
   assert_eq!(
     json_string_set(
       &activation["properties"]["basis"]["enum"],
@@ -302,7 +308,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let explain_report = &spec["components"]["schemas"]["ConfigExplainReport"];
   assert_eq!(
     explain_report["properties"]["report_schema_version"]["const"],
-    2
+    3
   );
   assert_eq!(
     explain_report["properties"]["native_schema_epoch"]["const"],

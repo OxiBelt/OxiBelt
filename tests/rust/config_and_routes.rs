@@ -59,11 +59,18 @@ fn edge_secure_medium_config_toml(cert_path: &Path, key_path: &Path) -> String {
   format!("{raw}\n[waf]\nenabled = true\n")
 }
 
+fn strict_data_plane_config_toml(cert_path: &Path, key_path: &Path) -> String {
+  format!(
+    "{}\n[runtime.hardening.seccomp]\nexpectation = \"required\"\n",
+    common::minimal_config_toml(cert_path, key_path)
+  )
+}
+
 #[test]
 fn strict_data_plane_accepts_disabled_default_admin_configuration() {
   let temp_dir = common::TempDir::new("strict-admin-defaults");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "strict-defaults");
-  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+  let config: Config = toml::from_str(&strict_data_plane_config_toml(&cert_path, &key_path))
     .expect("minimal config should parse");
 
   config
@@ -72,12 +79,30 @@ fn strict_data_plane_accepts_disabled_default_admin_configuration() {
 }
 
 #[test]
+fn strict_data_plane_requires_verified_external_seccomp() {
+  let temp_dir = common::TempDir::new("strict-seccomp-required");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "strict-seccomp-required");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("minimal config should parse");
+
+  let error = config
+    .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
+    .expect_err("strict artifact must require external seccomp verification");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime.hardening.seccomp.expectation")
+  );
+}
+
+#[test]
 fn strict_data_plane_reports_every_customized_admin_capability() {
   let temp_dir = common::TempDir::new("strict-admin-rejection");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "strict-rejection");
   let raw = format!(
     "{}\n[admin]\nenabled = true\nbind = \"127.0.0.1:9192\"\ntransport = \"plaintext\"\n",
-    common::minimal_config_toml(&cert_path, &key_path)
+    strict_data_plane_config_toml(&cert_path, &key_path)
   );
   let config: Config = toml::from_str(&raw).expect("Admin config should parse");
 

@@ -52,9 +52,10 @@ tracked-tree state (`clean`, `dirty`, or `unknown`), and build kind
 (`official_release`, `tagged_development`, `git_development`, or
 `source_archive`). `package_version` is the effective OxiBelt version and is
 never inferred from Cargo's private `0.0.0` workspace sentinel. Runtime
-snapshot, runtime-introspection, and support-bundle format version `2` carry
-the same `package_version`, `source_revision`, `source_ref`, `source_dirty`,
-and `build_kind` metadata together with the resolved runtime topology. The
+snapshot and runtime-introspection format version `2`, plus support-bundle
+format version `3`, carry the same `package_version`, `source_revision`,
+`source_ref`, `source_dirty`, and `build_kind` metadata together with the
+resolved runtime topology and bounded hardening evidence. The
 unauthenticated health endpoints intentionally omit build identity; use these
 authenticated metadata surfaces for inventory.
 Admin listener responses include `X-OxiBelt-Request-Id` and
@@ -363,14 +364,14 @@ the rule but does not restore sessions already closed.
 
 `POST /admin/v1/config/diff` remains the authenticated, non-mutating
 configuration comparison endpoint and now returns activation-plan schema
-version `1`. The request body is unchanged: `format` is `"toml"` and `config`
+version `2`. The request body is unchanged: `format` is `"toml"` and `config`
 contains the candidate. The response preserves the existing ordered
 `changes[].path` and `changes[].op` fields and additively returns this root
 shape:
 
 ```json
 {
-  "activation_plan_schema_version": 1,
+  "activation_plan_schema_version": 2,
   "native_schema_epoch": 1,
   "ok": true,
   "basis": "online_active",
@@ -409,6 +410,8 @@ shape:
       "mount_policy": "unknown",
       "requires_policy_expansion": false,
       "restart_required": false,
+      "differences": [],
+      "differences_truncated": false,
       "missing_prerequisites": []
     },
     "deployment": {
@@ -460,8 +463,10 @@ The fixed reason-code set is `no_configuration_change`, `oxi_rule_changed`,
 `startup_only_subsystem`, `runtime_capability_context_required`,
 `runtime_not_resizable`, `listener_added`, `listener_removed`,
 `listener_rebind_required`, `listener_bind_conflict`,
-`graceful_drain_required`, `landlock_policy_expansion`,
-`confinement_evidence_unavailable`, `external_seccomp_profile_required`,
+`graceful_drain_required`, `filesystem_access_expansion`,
+`filesystem_access_unavailable`, `landlock_policy_expansion`,
+`mount_policy_incompatible`, `confinement_evidence_unavailable`,
+`external_seccomp_profile_required`, `seccomp_expectation_unsatisfied`,
 `immutable_config_requires_rollout`, `deployment_target_unavailable`,
 `admin_cluster_coordinated_rollout`, `admin_cluster_membership_epoch`,
 `signed_artifact_required`, `durable_artifact_required`,
@@ -520,12 +525,16 @@ every valid supported plan, including restart or rollout; invalid,
 unsupported, blocked, denied, or failed planning exits `1`. The pre-existing
 `oxibeltctl config diff FILE` command remains available.
 
-Online confinement enrichment is deliberately conservative. It can identify
-a known read-path expansion under an already enforced Landlock policy and
-require restart, but filesystem fit and mount policy remain `unknown` until
-the future P1-05 complete filesystem manifest exists. Active seccomp/profile
-identity also remains unknown without evidence; requested configuration and
-checked-in profiles are not treated as proof. Kubernetes immutable plans never
+Online confinement enrichment compares the fully resolved candidate manifest
+with the process-installed Landlock policy and captured mount/seccomp evidence.
+It reports active-policy/current/candidate digests and at most 64 redacted
+differences using report-local `path_id` values, optional source configuration
+paths, and fixed kinds. Equal/subset requirements fit; path, scope, or rights
+expansion requires restart/rollout; incompatible required paths, mounts, or ABI
+rights block in-process activation. Missing runtime evidence remains `unknown`
+and conditional. Seccomp uses kernel-observed filter/NNP state plus a separately
+labeled external profile assertion; requested configuration and checked-in
+profiles are never treated as observation. Kubernetes immutable plans never
 apply per Pod and report rollout target identity only when supplied by the
 deployment. Fixed-member Admin plans report signed/durable artifact,
 all-member acknowledgement, and rollback prerequisites; the planner never

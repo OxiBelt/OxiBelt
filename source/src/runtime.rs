@@ -19,6 +19,20 @@ pub fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
   init_logging(config)
 }
 
+/// Initializes only the synchronous tracing subscriber.
+///
+/// Process-wide hardening must run after this function and before
+/// [`init_telemetry`], because an enabled OTLP exporter owns a background
+/// thread that would otherwise escape thread-scoped Landlock installation.
+pub fn init_startup_logging(config: &LoggingConfig) -> anyhow::Result<()> {
+  init_logging(config)
+}
+
+/// Starts telemetry resources after process-wide hardening is active.
+pub fn init_telemetry(config: &Config) -> anyhow::Result<TelemetryRuntime> {
+  TelemetryRuntime::new(&config.telemetry.tracing).context("failed to initialize telemetry")
+}
+
 pub struct ObservabilityGuard {
   telemetry: TelemetryRuntime,
 }
@@ -30,9 +44,8 @@ impl ObservabilityGuard {
 }
 
 pub fn init_observability(config: &Config) -> anyhow::Result<ObservabilityGuard> {
-  init_logging(&config.logging)?;
-  let telemetry =
-    TelemetryRuntime::new(&config.telemetry.tracing).context("failed to initialize telemetry")?;
+  init_startup_logging(&config.logging)?;
+  let telemetry = init_telemetry(config)?;
   Ok(ObservabilityGuard { telemetry })
 }
 

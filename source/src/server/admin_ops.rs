@@ -322,6 +322,7 @@ where
         &mut report,
         &active.config,
         &candidate_config,
+        Some(&active.hardening),
         authorization,
       );
       admin::json_response(StatusCode::OK, &report)

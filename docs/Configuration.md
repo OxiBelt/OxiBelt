@@ -631,10 +631,12 @@ pidfd_supervision = true
 close_range = "auto" # auto | off | required
 
 [runtime.hardening.seccomp]
-mode = "off" # off | log | enforce
+expectation = "off" # off | optional | required
+# profile_identity = "oxibelt-tokio-v1"
+# profile_digest = "sha256:<64 lower-case hex>"
 
 [runtime.hardening.landlock]
-mode = "off" # off | enforce
+mode = "off" # off | enforce (manual) | manifest
 read_paths = []
 read_write_paths = []
 ```
@@ -680,7 +682,19 @@ API and does not bypass Admin/IPM authorization.
 
 `[runtime.netport_switcher]` is an opt-in Linux root wrapper for privileged data-plane ports. When enabled, the wrapper creates a Unix control socket under `socket_dir`, starts the main OxiBelt process as `main_uid:main_gid`, and brokers only startup-allowed privileged binds for HTTPS TCP, HTTP/3 UDP, plain HTTP, stream TCP/UDP, and WebRTC TURN UDP/TCP/TLS. The wrapper needs `CAP_NET_BIND_SERVICE` to bind low ports and `CAP_SETUID`/`CAP_SETGID` to launch the child as `main_uid:main_gid`. The broker validates protocol, bind address, purpose, worker count, `SO_REUSEPORT`, TCP backlog, and UDP buffer options before passing a socket FD over `SCM_RIGHTS`. Admin, metrics, and health listeners are control/ops surfaces and are never brokered. `pidfd_supervision = true` uses Linux pidfds for child signal forwarding when available and falls back to PID signaling if pidfd setup fails; it forwards the drain-only `SIGUSR1` signal as well as normal shutdown/reload signals. `--check` and `--dump-effective-config` remain offline validation commands and do not require the wrapper socket.
 
-`[runtime.hardening]` contains Linux hardening hooks. `close_range = "auto"` marks file descriptors `3..` close-on-exec with `close_range(CLOSE_RANGE_CLOEXEC)` when the kernel supports it; `required` fails startup on error. `seccomp.mode = "log"` or `"enforce"` is intended for the generated backend-aware OCI profiles under `deploy/seccomp/` (`oxibelt-tokio.json`, `oxibelt-compio.json`, and `oxibelt-netport-switcher.json`) and fails closed if requested in-process. `landlock.mode = "enforce"` installs a Landlock filesystem sandbox from `read_paths` and `read_write_paths`; at least one allowlist path is required, unsupported kernels fail startup, and the sandbox is applied after config validation and before listeners start.
+`[runtime.hardening]` contains Linux hardening hooks. `close_range = "auto"` marks file descriptors `3..` close-on-exec with `close_range(CLOSE_RANGE_CLOEXEC)` when the kernel supports it; `required` fails startup on error. `seccomp.expectation` verifies an externally installed filter: `required` requires the startup process to report Linux filter mode `2` and `NoNewPrivs: 1` before OxiBelt mutates either state, `optional` records a bounded degradation when that contract is absent, and `off` makes no enforcement claim. Optional `profile_identity` and `profile_digest` values are expectations for the reserved orchestrator environment assertion; OxiBelt compares them but always labels them `kernel_verified = false`. Legacy `seccomp.mode` maps `off` to `off`, `log` to `optional`, and `enforce` to `required` with a migration diagnostic; mixing old and new fields is invalid. The alias remains accepted for native schema epoch `1` and is reserved for removal only in a future incompatible schema epoch.
+
+`landlock.mode = "enforce"` preserves the operator-owned manual allowlist in `read_paths` and `read_write_paths`. `landlock.mode = "manifest"` derives the minimum filesystem rules from the fully resolved configuration and unions those explicit lists as exceptional additions. OxiBelt installs the rules before telemetry exporters, async runtimes, workers, and listeners, reports requested and effective ABI rights plus policy/manifest digests, and rejects a required operation that the active ABI cannot represent. The existing embedded API rejects Landlock activation when it cannot prove single-thread process ownership instead of claiming whole-process confinement.
+
+Generate and inspect the same access contract locally with:
+
+```sh
+oxibeltctl config filesystem-access ./source/config/oxibelt.toml --format text
+oxibeltctl config filesystem-access ./source/config/oxibelt.toml --format json --check
+oxibeltctl config filesystem-access ./source/config/oxibelt.toml --show-paths
+```
+
+Text and JSON redact paths to deterministic report-local identifiers by default. `--show-paths` is an explicit local disclosure mode. `--check` adds non-mutating existence, type, access, parent, mount, and read-only-rootfs evidence; observations do not affect the deterministic manifest digest. Certificate/key rotation records replacement-parent read scope but not parent write, while cache, audit, spool, state, and generated artifacts receive parent write only where OxiBelt itself performs create, rename, truncate, or removal.
 
 Example Docker activation for container port `443`:
 
@@ -2826,13 +2840,17 @@ even if their socket remains. TCP streams and UDP flows are affected when
 their listener generation or process is replaced. Configured and effective
 force-close deadlines are reported separately.
 
-Confinement output is intentionally incomplete until P1-05 supplies a complete
-filesystem-access manifest. The current planner can detect expansion of known
-configuration read paths under enforced Landlock and select restart, but it
-reports filesystem and mount fit as `unknown`; a known subset is not proof of
-complete fit. Requested seccomp settings and checked-in runtime profiles do not
-prove the active seccomp identity. No planning command expands Landlock,
-installs seccomp, remounts a filesystem, or probes `/proc` to invent evidence.
+Confinement output uses the candidate filesystem manifest and the process-installed
+hardening snapshot. Equal and subset path/right requirements fit; a new path,
+broader scope, or added right requires restart or orchestrated rollout; an
+unavailable required path, incompatible mount, or unrepresentable right blocks
+in-process activation. Online plans expose only bounded report-local path IDs,
+source configuration paths, manifest/policy digests, and fixed difference kinds.
+Offline plans remain conditional when active kernel or mount evidence is absent.
+Seccomp fit comes from observed filter/NNP state plus separately labeled external
+assertions, never from requested configuration or a checked-in profile alone.
+Planning remains non-mutating and cannot expand Landlock, install seccomp, or
+remount a filesystem.
 
 Dynamic mitigation commands are panic-button wrappers around the dynamic policy
 automation API. Durations accept seconds or `s`, `m`, `h`, and `d` suffixes;

@@ -62,8 +62,11 @@ enum RuntimeProbeSubcommand {
 
 #[derive(Debug, Serialize)]
 struct RuntimeCheckReport {
+  schema_version: u32,
   ok: bool,
   stages: Vec<RuntimeCheckStage>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  hardening: Option<oxibelt::hardening::RuntimeHardeningSnapshot>,
   #[serde(skip_serializing_if = "Option::is_none")]
   topology_resolution: Option<serde_json::Value>,
 }
@@ -80,8 +83,10 @@ struct RuntimeCheckStage {
 impl RuntimeCheckReport {
   fn new() -> Self {
     Self {
+      schema_version: 1,
       ok: true,
       stages: Vec::new(),
+      hardening: None,
       topology_resolution: None,
     }
   }
@@ -229,7 +234,7 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
       oxibelt::configure_crypto_runtime(&config);
       oxibelt::tls::install_configured_provider(&config.crypto)
     });
-    report.stage("hardening_application", true, || {
+    report.hardening = report.stage("hardening_application", true, || {
       run_hardening_child(config_path)
     });
   } else {
@@ -375,6 +380,12 @@ fn print_runtime_check_text(report: &RuntimeCheckReport) {
       serde_json::to_string(topology_resolution).unwrap_or_else(|_| "unavailable".to_string())
     );
   }
+  if let Some(hardening) = &report.hardening {
+    println!(
+      "- hardening: {}",
+      serde_json::to_string(hardening).unwrap_or_else(|_| "unavailable".to_string())
+    );
+  }
 }
 
 pub(crate) fn handle_runtime_probe_command(command: &RuntimeProbeCommand) -> anyhow::Result<()> {
@@ -401,7 +412,14 @@ pub(crate) fn handle_runtime_probe_command(command: &RuntimeProbeCommand) -> any
       let config =
         Config::load(config).with_context(|| format!("failed to load {}", config.display()))?;
       config.validate()?;
-      oxibelt::hardening::apply_runtime_hardening(&config.runtime.hardening)
+      let manifest = oxibelt::filesystem_access::FilesystemAccessManifest::from_config(&config)?;
+      let projection = manifest.landlock_projection();
+      let snapshot = oxibelt::hardening::apply_runtime_hardening_with_manifest(
+        &config.runtime.hardening,
+        Some(&projection),
+      )?;
+      println!("{}", serde_json::to_string(&snapshot)?);
+      Ok(())
     }
   }
 }
@@ -422,9 +440,12 @@ pub(crate) fn run_compio_main_child(worker_threads: usize) -> anyhow::Result<()>
   .map(|_| ())
 }
 
-fn run_hardening_child(config_path: &Path) -> anyhow::Result<()> {
+fn run_hardening_child(
+  config_path: &Path,
+) -> anyhow::Result<oxibelt::hardening::RuntimeHardeningSnapshot> {
   let config_path = config_path.display().to_string();
-  run_probe_child(&["__runtime-probe", "hardening", "--config", &config_path]).map(|_| ())
+  let stdout = run_probe_child(&["__runtime-probe", "hardening", "--config", &config_path])?;
+  serde_json::from_str(stdout.trim()).context("hardening probe output was not valid JSON")
 }
 
 fn run_tracing_child(config_path: &Path) -> anyhow::Result<()> {

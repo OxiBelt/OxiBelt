@@ -579,6 +579,73 @@
         "mountPath": { "type": "string", "minLength": 1 }
       }
     },
+    "runtimeHardening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seccomp"],
+      "properties": {
+        "seccomp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expectation", "externalProfile"],
+          "properties": {
+            "expectation": {
+              "type": "string",
+              "enum": ["", "off", "optional", "required"]
+            },
+            "externalProfile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["identity", "digest"],
+              "properties": {
+                "identity": {
+                  "type": "string",
+                  "maxLength": 128,
+                  "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]$"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^$|^sha256:[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "seccompProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["RuntimeDefault", "Localhost", "Unconfined"]
+            },
+            "localhostProfile": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            }
+          }
+        }
+      }
+    },
     "autoscaling": {
       "type": "object",
       "properties": {

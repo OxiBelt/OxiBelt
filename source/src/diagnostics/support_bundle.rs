@@ -27,7 +27,7 @@ use process::process_snapshot;
 pub use shared_state::BackendFailurePolicySnapshot;
 pub use tls::{DownstreamTlsCertificateRuntimeSnapshot, TlsRuntimeSnapshot};
 
-const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 2;
+const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 3;
 const WAF_RULE_LIMIT: usize = 50;
 
 /// Redacted support bundle assembled from runtime, config, and system snapshots.
@@ -68,6 +68,7 @@ pub struct SupportBundleConfig {
 pub struct RuntimeSnapshot {
   pub runtime_backend: RuntimeBackendSnapshot,
   pub runtime_topology: RuntimeTopologySnapshot,
+  pub hardening: crate::hardening::RuntimeHardeningSnapshot,
   pub lifecycle: LifecycleSnapshot,
   pub listeners: ListenerSnapshot,
   pub admin: AdminRuntimeSnapshot,
@@ -332,6 +333,7 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
   RuntimeSnapshot {
     runtime_backend: snapshot.runtime_topology.legacy_backend_snapshot(),
     runtime_topology: snapshot.runtime_topology.clone(),
+    hardening: snapshot.hardening.clone(),
     lifecycle: LifecycleSnapshot {
       draining: snapshot.lifecycle.is_draining(),
       reason: snapshot.lifecycle.reason().to_string(),

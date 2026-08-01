@@ -16,7 +16,7 @@ fn rejects_unknown_schema_epoch() {
 #[test]
 fn keeps_native_epoch_and_advances_report_contract() {
   assert_eq!(NATIVE_CONFIG_SCHEMA_EPOCH, 1);
-  assert_eq!(NATIVE_CONFIG_REPORT_SCHEMA_VERSION, 2);
+  assert_eq!(NATIVE_CONFIG_REPORT_SCHEMA_VERSION, 3);
 }
 
 #[test]

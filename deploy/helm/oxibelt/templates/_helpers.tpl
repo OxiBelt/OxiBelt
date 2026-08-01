@@ -176,7 +176,21 @@ reject_unknown_sni = true
 {{- define "oxibelt.generatedConfigContent" -}}
 {{- include "oxibelt.operationalProfileConfig" . -}}
 {{- tpl .Values.config.inline . -}}
+{{- include "oxibelt.runtimeHardeningConfig" . -}}
 {{- include "oxibelt.operationalProfileWafConfig" . -}}
+{{- end -}}
+
+{{- define "oxibelt.runtimeHardeningConfig" -}}
+{{- $seccomp := .Values.runtimeHardening.seccomp -}}
+{{- if $seccomp.expectation }}
+
+[runtime.hardening.seccomp]
+expectation = {{ $seccomp.expectation | quote }}
+{{- if $seccomp.externalProfile.identity }}
+profile_identity = {{ $seccomp.externalProfile.identity | quote }}
+profile_digest = {{ $seccomp.externalProfile.digest | quote }}
+{{- end }}
+{{ end -}}
 {{- end -}}
 
 {{- define "oxibelt.certMountPath" -}}
@@ -858,6 +872,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or (not $pod.runAsNonRoot) (ne (int $pod.runAsUser) 10001) (ne (int $pod.runAsGroup) 10001) -}}
 {{- fail "image.role=dataplane-strict requires podSecurityContext.runAsNonRoot=true and runAsUser/runAsGroup=10001" -}}
 {{- end -}}
+{{- if ne .Values.runtimeHardening.seccomp.expectation "required" -}}
+{{- fail "image.role=dataplane-strict requires runtimeHardening.seccomp.expectation=required" -}}
+{{- end -}}
 {{- if or $container.allowPrivilegeEscalation (not $container.readOnlyRootFilesystem) -}}
 {{- fail "image.role=dataplane-strict requires securityContext.allowPrivilegeEscalation=false and readOnlyRootFilesystem=true" -}}
 {{- end -}}
@@ -873,6 +890,73 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- if and (eq $seccomp.type "Localhost") (not $seccomp.localhostProfile) -}}
 {{- fail "podSecurityContext.seccompProfile.localhostProfile is required when type=Localhost" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateRuntimeHardening" -}}
+{{- $seccomp := .Values.runtimeHardening.seccomp -}}
+{{- $expectation := $seccomp.expectation -}}
+{{- $externalProfile := $seccomp.externalProfile -}}
+{{- $identity := $externalProfile.identity -}}
+{{- $digest := $externalProfile.digest -}}
+{{- $podSeccomp := .Values.podSecurityContext.seccompProfile -}}
+{{- $profileType := $podSeccomp.type -}}
+{{- $localhostProfile := $podSeccomp.localhostProfile | default "" -}}
+{{- if not (has $expectation (list "" "off" "optional" "required")) -}}
+{{- fail "runtimeHardening.seccomp.expectation must be empty, off, optional, or required" -}}
+{{- end -}}
+{{- if not (has $profileType (list "RuntimeDefault" "Localhost" "Unconfined")) -}}
+{{- fail "podSecurityContext.seccompProfile.type must be RuntimeDefault, Localhost, or Unconfined" -}}
+{{- end -}}
+{{- if eq $profileType "Localhost" -}}
+{{- if or (gt (len $localhostProfile) 255) (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $localhostProfile)) -}}
+{{- fail "podSecurityContext.seccompProfile.localhostProfile must be a safe relative path of at most 255 characters" -}}
+{{- end -}}
+{{- else if $localhostProfile -}}
+{{- fail "podSecurityContext.seccompProfile.localhostProfile is valid only when type=Localhost" -}}
+{{- end -}}
+{{- if and $expectation (or (not .Values.config.create) .Values.config.existingConfigMap) -}}
+{{- fail "runtimeHardening.seccomp.expectation requires chart-owned config.create=true with no config.existingConfigMap" -}}
+{{- end -}}
+{{- if and $expectation (regexMatch "(?m)^[[:space:]]*\\[runtime[.]hardening[.]seccomp\\]" (tpl .Values.config.inline .)) -}}
+{{- fail "runtimeHardening.seccomp.expectation cannot be combined with a [runtime.hardening.seccomp] section in config.inline" -}}
+{{- end -}}
+{{- if and (eq $expectation "required") (or (not (hasKey .Values.securityContext "allowPrivilegeEscalation")) .Values.securityContext.allowPrivilegeEscalation) -}}
+{{- fail "runtimeHardening.seccomp.expectation=required requires securityContext.allowPrivilegeEscalation=false" -}}
+{{- end -}}
+{{- if and (eq $expectation "required") (eq $profileType "Unconfined") -}}
+{{- fail "runtimeHardening.seccomp.expectation=required cannot use an Unconfined seccomp profile" -}}
+{{- end -}}
+{{- if or $identity $digest -}}
+{{- if not (and $identity $digest) -}}
+{{- fail "runtimeHardening.seccomp.externalProfile.identity and digest must be set together" -}}
+{{- end -}}
+{{- if not (has $expectation (list "optional" "required")) -}}
+{{- fail "runtimeHardening.seccomp.externalProfile requires expectation=optional or required" -}}
+{{- end -}}
+{{- if ne $profileType "Localhost" -}}
+{{- fail "runtimeHardening.seccomp.externalProfile is valid only with a Localhost seccomp profile; RuntimeDefault has no stable semantic identity" -}}
+{{- end -}}
+{{- if or (gt (len $identity) 128) (not (regexMatch "^[a-z0-9][a-z0-9._-]*[a-z0-9]$" $identity)) -}}
+{{- fail "runtimeHardening.seccomp.externalProfile.identity must be a safe lower-case identifier between 2 and 128 characters" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "runtimeHardening.seccomp.externalProfile.digest must be a lower-case sha256 digest" -}}
+{{- end -}}
+{{- else if and (eq $profileType "Localhost") (has $expectation (list "optional" "required")) -}}
+{{- fail "a Localhost profile with runtimeHardening.seccomp.expectation=optional or required requires externalProfile.identity and digest" -}}
+{{- end -}}
+{{- $reservedEnv := list "OXIBELT_SECCOMP_PROFILE_IDENTITY" "OXIBELT_SECCOMP_PROFILE_DIGEST" -}}
+{{- if not (kindIs "slice" .Values.extraEnv) -}}
+{{- fail "extraEnv must be an array of Kubernetes EnvVar objects" -}}
+{{- end -}}
+{{- range $index, $env := .Values.extraEnv -}}
+{{- if or (not (kindIs "map" $env)) (not (hasKey $env "name")) (not (kindIs "string" $env.name)) -}}
+{{- fail (printf "extraEnv[%d] must be a Kubernetes EnvVar object with a string name" $index) -}}
+{{- end -}}
+{{- if has $env.name $reservedEnv -}}
+{{- fail (printf "extraEnv[%d].name uses reserved hardening assertion variable %s" $index $env.name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

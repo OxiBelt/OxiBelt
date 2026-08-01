@@ -7699,7 +7699,7 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 2
+            "const": 3
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -7829,9 +7829,13 @@
           "listener_rebind_required",
           "listener_bind_conflict",
           "graceful_drain_required",
+          "filesystem_access_expansion",
+          "filesystem_access_unavailable",
           "landlock_policy_expansion",
+          "mount_policy_incompatible",
           "confinement_evidence_unavailable",
           "external_seccomp_profile_required",
+          "seccomp_expectation_unsatisfied",
           "immutable_config_requires_rollout",
           "deployment_target_unavailable",
           "admin_cluster_coordinated_rollout",
@@ -8099,6 +8103,8 @@
           "mount_policy",
           "requires_policy_expansion",
           "restart_required",
+          "differences",
+          "differences_truncated",
           "missing_prerequisites"
         ],
         "properties": {
@@ -8120,6 +8126,28 @@
           "restart_required": {
             "type": "boolean"
           },
+          "active_policy_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "current_manifest_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "candidate_manifest_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "differences": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/ConfigActivationConfinementDifference"
+            }
+          },
+          "differences_truncated": {
+            "type": "boolean"
+          },
           "missing_prerequisites": {
             "type": "array",
             "maxItems": 13,
@@ -8138,6 +8166,39 @@
           "impossible",
           "unknown"
         ]
+      },
+      "ConfigActivationConfinementDifferenceKind": {
+        "type": "string",
+        "enum": [
+          "path_added",
+          "rights_expanded",
+          "scope_expanded",
+          "path_unavailable",
+          "type_mismatch",
+          "mount_unavailable",
+          "seccomp_assertion_mismatch"
+        ]
+      },
+      "ConfigActivationConfinementDifference": {
+        "type": "object",
+        "required": [
+          "path_id",
+          "kind"
+        ],
+        "properties": {
+          "path_id": {
+            "type": "string",
+            "pattern": "^path-[0-9]{4}$"
+          },
+          "source_config_path": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConfigActivationConfinementDifferenceKind"
+          }
+        },
+        "additionalProperties": false
       },
       "ConfigActivationDeploymentPlan": {
         "type": "object",
@@ -8227,7 +8288,7 @@
           },
           "reason_codes": {
             "type": "array",
-            "maxItems": 26,
+            "maxItems": 30,
             "uniqueItems": true,
             "items": {
               "$ref": "#/components/schemas/ConfigActivationReasonCode"
@@ -8277,7 +8338,7 @@
         "properties": {
           "activation_plan_schema_version": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -8320,7 +8381,7 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 2
+            "const": 3
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -8374,6 +8435,40 @@
               },
               "workers": {
                 "type": "object"
+              },
+              "filesystem_access": {
+                "type": "object",
+                "required": [
+                  "schema_version",
+                  "manifest_digest",
+                  "entry_count",
+                  "paths_redacted"
+                ],
+                "properties": {
+                  "schema_version": {
+                    "type": "integer",
+                    "const": 1
+                  },
+                  "manifest_digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$"
+                  },
+                  "entry_count": {
+                    "type": "integer",
+                    "maximum": 8192
+                  },
+                  "paths_redacted": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "read_only_rootfs_compatible": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "additionalProperties": false

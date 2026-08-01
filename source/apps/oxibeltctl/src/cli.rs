@@ -136,6 +136,9 @@ pub(crate) enum ConfigSubcommand {
   Effective,
   Schema(ConfigSchemaArgs),
   Validate(ConfigValidateArgs),
+  /// Derive the resolved filesystem-access contract without changing the filesystem.
+  #[command(name = "filesystem-access")]
+  FilesystemAccess(ConfigFilesystemAccessArgs),
   Explain(ConfigExplainArgs),
   Migrate(ConfigMigrateArgs),
   Diff(FileArg),
@@ -161,6 +164,25 @@ pub(crate) struct ConfigValidateArgs {
   pub(crate) file: PathBuf,
   #[arg(long)]
   pub(crate) local_only: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigFilesystemAccessArgs {
+  pub(crate) file: PathBuf,
+  #[arg(long, value_enum, default_value_t = ConfigFilesystemAccessOutputFormat::Text)]
+  pub(crate) format: ConfigFilesystemAccessOutputFormat,
+  /// Check the current process and mount state without creating probe files.
+  #[arg(long)]
+  pub(crate) check: bool,
+  /// Include normalized filesystem paths in output. Paths are redacted by default.
+  #[arg(long)]
+  pub(crate) show_paths: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ConfigFilesystemAccessOutputFormat {
+  Text,
+  Json,
 }
 
 #[derive(Debug, Args)]

@@ -8,16 +8,36 @@ impl AppSnapshot {
     config: Config,
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
+    let hardening = previous.admitted_reload_hardening(&config)?;
     let stream_pool_generation = next_stream_pool_generation(&config, Some(previous));
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
     let circuit_breakers = previous.circuit_breakers.clone();
     circuit_breakers.configure(&config);
     let runtime_health = previous.runtime_health.clone();
     let runtime_generation = runtime_health.allocate_generation();
+    let (hardening_state, readiness_critical) = match hardening.outcome {
+      crate::hardening::RuntimeHardeningOutcome::Satisfied => {
+        (crate::runtime_health::RuntimeSubsystemState::Healthy, false)
+      }
+      crate::hardening::RuntimeHardeningOutcome::Degraded => (
+        crate::runtime_health::RuntimeSubsystemState::Degraded,
+        false,
+      ),
+      crate::hardening::RuntimeHardeningOutcome::Blocked => {
+        (crate::runtime_health::RuntimeSubsystemState::Failed, true)
+      }
+    };
+    runtime_health.set_subsystem_state(
+      runtime_generation,
+      crate::runtime_health::RuntimeSubsystem::Hardening,
+      hardening_state,
+      readiness_critical,
+    );
 
     Ok(Self {
       config,
       runtime_topology: previous.runtime_topology.clone(),
+      hardening,
       secret_references: previous.secret_references.clone(),
       effective_direct_h1_io: previous.effective_direct_h1_io,
       route_table: previous.route_table.clone(),

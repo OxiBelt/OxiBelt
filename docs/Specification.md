@@ -129,8 +129,9 @@ authentication decision; release tag, commit, workflow identity, artifact
 digest, and provenance establish trust. Admin version metadata, capabilities,
 runtime introspection, support bundles, cluster build fencing, executable
 `--version`, OCI labels, and release artifact contracts consume this canonical
-identity. The additive metadata fields do not change the introspection or
-support-bundle format version. Public readiness and liveness responses retain
+identity. Runtime introspection retains format version `2`; the confinement
+contract advances the support-bundle format to version `3` to add bounded,
+redacted hardening evidence. Public readiness and liveness responses retain
 their existing non-identifying contract.
 
 ## Request Pipeline
@@ -323,10 +324,15 @@ are detected with process-local domain-separated HMAC equality tags and exposed
 only as redacted change facts. Listener feasibility accounts for additions,
 removals, rebinds, same-bind conflicts, HTTP/QUIC socket compatibility, TURN,
 and the effective graceful/long-connection close bounds; unknown external port
-ownership remains conditional. Filesystem and mount-policy fit remain unknown
-until P1-05 supplies a complete access manifest. Known Landlock read expansion
-can require restart, but a known subset, requested seccomp setting, or checked-in
-profile is not evidence that active confinement permits the candidate.
+ownership remains conditional. The fully resolved filesystem-access manifest
+classifies exact paths, scopes, access rights, purposes, parent operations, and
+optional entries, and the online planner compares those requirements with the
+process-installed Landlock policy and captured mount evidence. Equal/subset
+requirements fit, expansion requires restart or rollout, and an incompatible
+required path, mount, or ABI right blocks activation. Seccomp fit uses the
+kernel-observed filter and `no_new_privs` values plus a separately labeled
+orchestrator assertion; requested settings and checked-in profiles are not
+runtime evidence.
 
 Reload apply behavior is failure-safe: invalid TOML, invalid rules, invalid certificate/key pairs, unreadable files, failed upstream client setup, failed database access-log setup, or failed listener binds leave the previous active state in place. Successful reloads publish a new data-plane snapshot and gracefully drain HTTP connections that captured the previous snapshot, even when listener binds do not change. Successful full reloads also activate replacement listeners before old listener generations drain, so readiness remains OK for the active instance while in-flight requests on the old generation finish. HTTP/1.1 and HTTP/2 listener or snapshot-generation drain asks Hyper to gracefully close old connections; HTTP/3 stops accepting new streams and sends graceful connection shutdown before its endpoint closes after the graceful timeout when a listener generation is retired. Upgraded tunnels, WebTransport, and TCP stream bridges are protected by the configured long-connection close delay, but new request streams received by a drained WebTransport HTTP/3 bridge are rejected instead of being evaluated against the old snapshot.
 
@@ -422,7 +428,7 @@ Lifecycle endpoints are:
 - `GET /admin/v1/mutations/{request_id}`: returns the caller-authorized redacted durable mutation receipt.
 - `GET /admin/v1/config/effective`: requires `config:GetEffective`, returns the redacted active effective TOML and ETag, including the canonical profile/version and injected v1 defaults when a profile is selected.
 - `POST /admin/v1/config/validate`: requires `config:Validate`, validates submitted TOML against the active path roots without installing it.
-- `POST /admin/v1/config/diff`: requires the secret-equivalent `config:DiffSecrets` authority, preserves the redacted ordered `path`/`op` diff and additively returns activation-plan schema version `1` with per-field classification plus aggregate listener, connection, confinement, deployment, prerequisite, and rollback plans. The policy-valid legacy `config:Diff` action does not authorize this endpoint. It accepts no apply authority and performs no mutation. Exact fixed-member target identities additionally require `config:GetInstances` on `instances/current`.
+- `POST /admin/v1/config/diff`: requires the secret-equivalent `config:DiffSecrets` authority, preserves the redacted ordered `path`/`op` diff and returns activation-plan schema version `2` with per-field classification plus aggregate listener, connection, confinement, deployment, prerequisite, and rollback plans. Confinement adds active-policy/current/candidate digests and at most 64 report-local redacted differences. The policy-valid legacy `config:Diff` action does not authorize this endpoint. It accepts no apply authority and performs no mutation. Exact fixed-member target identities additionally require `config:GetInstances` on `instances/current`.
 - `POST /admin/v1/config/load`: requires `config:Load` and matching `If-Match`, installs a runtime-only config snapshot. Changes to `[admin]` additionally require `admin:UpdateConfig` on `oxibelt:<namespace>:admin:config`; changes to `[ipm]` additionally require `ipm:UpdateConfig` on `oxibelt:<namespace>:ipm:config`. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.
 - `POST /admin/v1/config/rollback`: requires `config:Rollback` and matching `If-Match`, restores the last-good runtime snapshot. Rollbacks that change `[admin]` or `[ipm]` require the same protected config update actions as config load. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.
 - `POST /admin/v1/files/sync`: requires matching `If-Match`, writes an all-or-nothing batch under configured config/OxiRule roots, and can apply `none`, `oxirule`, `full`, or `downstream_tls`. Config-root writes require `config:SyncFiles`; OxiRule and OxiRule group writes require the matching `waf:PutOxiRule`, `waf:DeleteOxiRule`, `waf:PutOxiRuleGroup`, or `waf:DeleteOxiRuleGroup`. OxiRule file-sync roots are suffix-bound: `oxirule` accepts `.oxirule.toml` paths and `oxirule_group` accepts `.oxirule-group.toml` paths. `apply = "oxirule"` requires `waf:ReloadOxiRule`. Config-root writes and `apply = "full"` are prechecked so staged or disk-candidate `[admin]` and `[ipm]` changes require the protected config update actions before files are committed. Kubernetes-native immutable rollout Pods reject this local mutation with `409`.

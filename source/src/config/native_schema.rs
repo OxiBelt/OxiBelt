@@ -11,7 +11,7 @@ use serde_json::{Map, json};
 use super::{allowed_config_keys, shape::join_key_path};
 
 pub const NATIVE_CONFIG_SCHEMA_EPOCH: u32 = 1;
-pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 3;
 
 const NATIVE_CONFIG_SCHEMA_JSON: &str =
   include_str!(concat!(env!("OUT_DIR"), "/oxibelt-config-v1.schema.json"));
@@ -49,6 +49,10 @@ pub struct NativeConfigFieldMetadata {
 }
 
 const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
+  deprecated_restart(
+    "runtime.hardening.seccomp.mode",
+    "runtime.hardening.seccomp.expectation",
+  ),
   deprecated("tls.key_exchange_groups", "tls.1_3.key_exchange_groups"),
   deprecated("tls.session_tickets", "tls.resumption.mode"),
   deprecated(
@@ -283,6 +287,21 @@ const fn deprecated(path: &'static str, replacement: &'static str) -> NativeConf
     replacement: Some(replacement),
     secret_class: NativeConfigSecretClass::None,
     config_activation: NativeConfigActivation::FullReload,
+    reference_activation: NativeConfigActivation::None,
+  }
+}
+
+const fn deprecated_restart(
+  path: &'static str,
+  replacement: &'static str,
+) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
+    deprecated_epoch: Some(1),
+    replacement: Some(replacement),
+    secret_class: NativeConfigSecretClass::None,
+    config_activation: NativeConfigActivation::RestartRequired,
     reference_activation: NativeConfigActivation::None,
   }
 }
@@ -754,7 +773,14 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       "runtime.hardening.close_range",
       vec!["auto", "off", "required"],
     ),
-    ("runtime.hardening.landlock.mode", vec!["off", "enforce"]),
+    (
+      "runtime.hardening.landlock.mode",
+      vec!["off", "enforce", "manifest"],
+    ),
+    (
+      "runtime.hardening.seccomp.expectation",
+      vec!["off", "optional", "required"],
+    ),
     (
       "runtime.hardening.seccomp.mode",
       vec!["off", "log", "enforce"],

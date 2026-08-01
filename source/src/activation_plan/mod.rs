@@ -15,8 +15,9 @@ pub use diff::{plan_config_projections, plan_toml_values};
 pub use model::{
   ACTIVATION_PLAN_SCHEMA_VERSION, ActivationPlan, ActivationPrerequisite,
   ActivationPrerequisiteStatus, ActivationReasonCode, ChangeOperation, ConfigActivationChange,
-  ConfigActivationReport, ConfinementActivationPlan, ConfinementFit, ConnectionActivationPlan,
-  ConnectionEffect, DeploymentActivationPlan, DeploymentMode, ListenerActivationPlan,
+  ConfigActivationReport, ConfinementActivationPlan, ConfinementDifference,
+  ConfinementDifferenceKind, ConfinementFit, ConnectionActivationPlan, ConnectionEffect,
+  DeploymentActivationPlan, DeploymentMode, ListenerActivationPlan, MAX_CONFINEMENT_DIFFERENCES,
   MetadataProvenance, NativeActivation, PlanningBasis, PrerequisiteAvailability,
   ResolvedActivationOperation, RollbackKind,
 };

@@ -222,7 +222,7 @@ async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
     String::from_utf8_lossy(&body)
   );
   let body: serde_json::Value = serde_json::from_slice(&body).expect("response should be JSON");
-  assert_eq!(body["report_schema_version"], 2);
+  assert_eq!(body["report_schema_version"], 3);
   assert_eq!(body["ok"], true);
   assert_eq!(body["diagnostics"], json!([]));
 
@@ -254,7 +254,7 @@ async fn config_validate_returns_stable_reports_and_redacts_parse_source() {
   let encoded = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
   assert!(!encoded.contains(secret));
   let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
-  assert_eq!(body["details"]["config_report"]["report_schema_version"], 2);
+  assert_eq!(body["details"]["config_report"]["report_schema_version"], 3);
   assert_eq!(body["details"]["config_report"]["ok"], false);
   assert_eq!(
     body["details"]["config_report"]["diagnostics"][0]["severity"],
@@ -323,7 +323,7 @@ async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
   assert!(!encoded.contains(alternate_key));
   assert!(!encoded.contains(&temp_dir.path().display().to_string()));
   let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
-  assert_eq!(body["activation_plan_schema_version"], 1);
+  assert_eq!(body["activation_plan_schema_version"], 2);
   assert_eq!(body["native_schema_epoch"], 1);
   assert_eq!(body["ok"], true);
   assert_eq!(body["basis"], "online_active");

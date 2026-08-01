@@ -59,12 +59,13 @@ pub(crate) enum RuntimeSubsystem {
   ClientIdentity,
   AdminAudit,
   AdminMutation,
+  Hardening,
   Waf,
   CompioDirectH1,
 }
 
 impl RuntimeSubsystem {
-  pub(crate) const ALL: [Self; 16] = [
+  pub(crate) const ALL: [Self; 17] = [
     Self::AppState,
     Self::TaskRegistry,
     Self::ResponseCache,
@@ -79,6 +80,7 @@ impl RuntimeSubsystem {
     Self::ClientIdentity,
     Self::AdminAudit,
     Self::AdminMutation,
+    Self::Hardening,
     Self::Waf,
     Self::CompioDirectH1,
   ];
@@ -101,6 +103,7 @@ impl RuntimeSubsystem {
       Self::ClientIdentity => "client_identity",
       Self::AdminAudit => "admin_audit",
       Self::AdminMutation => "admin_mutation",
+      Self::Hardening => "hardening",
       Self::Waf => "waf",
       Self::CompioDirectH1 => "compio_direct_h1",
     }

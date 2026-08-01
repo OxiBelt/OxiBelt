@@ -66,7 +66,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "runtime.hot_reload" => &["mode", "poll_interval_ms"][..],
     "runtime.hardening" => &["close_range", "landlock", "seccomp"][..],
-    "runtime.hardening.seccomp" => &["mode"][..],
+    "runtime.hardening.seccomp" => {
+      &["expectation", "mode", "profile_digest", "profile_identity"][..]
+    }
     "runtime.hardening.landlock" => &["mode", "read_paths", "read_write_paths"][..],
     "runtime.netport_switcher" => workers::NETPORT_SWITCHER_CONFIG_KEYS,
     "listeners" => &[

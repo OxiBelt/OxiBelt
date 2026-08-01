@@ -197,7 +197,7 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     config.validate_for_artifact(oxibelt::config::RuntimeArtifact::StrictDataPlane)?;
   }
 
-  let observability = oxibelt::runtime::init_observability(&config)?;
+  oxibelt::runtime::init_startup_logging(&config.logging)?;
   for warning in override_warnings {
     tracing::warn!("{warning}");
   }
@@ -211,10 +211,27 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     println!("{}", toml::to_string_pretty(&value)?);
     return Ok(());
   }
-  if !cli.check {
+  let filesystem_manifest =
+    oxibelt::filesystem_access::FilesystemAccessManifest::from_config(&config)
+      .context("failed to generate filesystem-access manifest")?;
+  let manifest_projection = filesystem_manifest.landlock_projection();
+  let hardening = if cli.check {
+    oxibelt::hardening::observe_runtime_hardening(
+      &config.runtime.hardening,
+      Some(&manifest_projection),
+    )
+  } else {
     oxibelt::netport_switcher::ensure_required_runtime_socket(&config)?;
-    oxibelt::hardening::apply_runtime_hardening(&config.runtime.hardening)?;
-  }
+    oxibelt::hardening::apply_runtime_hardening_with_manifest(
+      &config.runtime.hardening,
+      Some(&manifest_projection),
+    )?
+  };
+  tracing::info!(
+    hardening = %serde_json::to_string(&hardening)?,
+    "resolved runtime hardening contract"
+  );
+  let telemetry = oxibelt::runtime::init_telemetry(&config)?;
 
   config.log_worker_resolution();
   let worker_threads = config.runtime.workers.tokio;
@@ -271,7 +288,7 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
   runtime.block_on(async move {
     let state = startup_stage_async(
       "app_snapshot_new_with_telemetry",
-      build_app_handle(config, observability.into_telemetry(), topology),
+      build_app_handle(config, telemetry, topology, hardening),
     )
     .await?;
     if check {
@@ -296,12 +313,15 @@ async fn build_app_handle(
   config: Config,
   telemetry: oxibelt::telemetry::TelemetryRuntime,
   topology: RuntimeTopologySnapshot,
+  hardening: oxibelt::hardening::RuntimeHardeningSnapshot,
 ) -> anyhow::Result<oxibelt::state::AppHandle> {
   tokio::task::spawn(async move {
-    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology(config, telemetry, topology)
-      .await
-      .context("failed to initialize application state")
-      .map(oxibelt::state::AppHandle::new)
+    oxibelt::state::AppSnapshot::new_with_telemetry_and_topology_and_hardening(
+      config, telemetry, topology, hardening,
+    )
+    .await
+    .context("failed to initialize application state")
+    .map(oxibelt::state::AppHandle::new)
   })
   .await
   .context("application state initialization task failed")?

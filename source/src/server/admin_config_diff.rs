@@ -5,14 +5,18 @@
 //! control command.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use crate::activation_plan::{
   ActivationPrerequisite, ActivationPrerequisiteStatus, ActivationReasonCode,
-  ConfigActivationReport, ConfinementFit, ConnectionEffect, DeploymentMode,
-  PrerequisiteAvailability, ResolvedActivationOperation, RollbackKind,
+  ConfigActivationReport, ConfinementDifference, ConfinementDifferenceKind, ConfinementFit,
+  ConnectionEffect, DeploymentMode, MAX_CONFINEMENT_DIFFERENCES, PrerequisiteAvailability,
+  ResolvedActivationOperation, RollbackKind,
 };
 use crate::config::{Config, HttpListenerMode, RuntimeLandlockMode, StreamNetwork};
+use crate::filesystem_access::{FilesystemAccessFindingCode, FilesystemAccessManifest};
+use crate::hardening::{
+  LandlockEnforcementState, RuntimeHardeningSnapshot, SeccompVerificationState,
+};
 use crate::reload::{
   FullReloadCompatibility, FullReloadRestartReason, classify_full_reload_runtime_compatibility,
 };
@@ -23,12 +27,13 @@ pub(super) fn enrich_activation_plan(
   report: &mut ConfigActivationReport,
   active: &Config,
   candidate: &Config,
+  hardening: Option<&RuntimeHardeningSnapshot>,
   authorization: &AdminAuthorization<'_>,
 ) {
   resolve_runtime_compatibility(report, active, candidate);
   select_online_config_load_operation(report);
   resolve_listener_transition(report, active, candidate);
-  resolve_confinement(report, active, candidate);
+  resolve_confinement(report, active, candidate, hardening);
   resolve_deployment(report, active, candidate, authorization);
   resolve_connection_impact(report, active);
   normalize_plan(report);
@@ -328,52 +333,207 @@ fn resolve_connection_impact(report: &mut ConfigActivationReport, active: &Confi
   }
 }
 
-fn resolve_confinement(report: &mut ConfigActivationReport, active: &Config, candidate: &Config) {
+fn resolve_confinement(
+  report: &mut ConfigActivationReport,
+  active: &Config,
+  candidate: &Config,
+  hardening: Option<&RuntimeHardeningSnapshot>,
+) {
   if report.changes.is_empty() {
     return;
   }
-  let access_expands = known_access_expands(active, candidate);
-  {
-    let confinement = &mut report.activation_plan.confinement;
-    confinement.filesystem = ConfinementFit::Unknown;
-    confinement.mount_policy = ConfinementFit::Unknown;
-    push_unique(
-      &mut confinement.missing_prerequisites,
-      ActivationPrerequisite::FilesystemManifest,
-    );
-    push_unique(
-      &mut confinement.missing_prerequisites,
-      ActivationPrerequisite::MountPolicyEvidence,
-    );
+  let current_manifest = FilesystemAccessManifest::from_config(active);
+  let candidate_manifest = FilesystemAccessManifest::from_config(candidate);
+  let mut landlock_expands = false;
+  let mut impossible = false;
+  let mut mount_impossible = false;
+  let mut seccomp_unsatisfied = false;
 
-    if active.runtime.hardening.landlock.mode == RuntimeLandlockMode::Enforce {
-      if access_expands {
-        confinement.landlock = ConfinementFit::ExpansionRequired;
-        confinement.requires_policy_expansion = true;
-        confinement.restart_required = true;
+  match (current_manifest.as_ref(), candidate_manifest.as_ref()) {
+    (Ok(current), Ok(candidate_manifest)) => {
+      let check = candidate_manifest.check_current(false);
+      let confinement = &mut report.activation_plan.confinement;
+      confinement.current_manifest_digest = Some(current.digest().to_string());
+      confinement.candidate_manifest_digest = Some(candidate_manifest.digest().to_string());
+      confinement.filesystem = if check.ok {
+        ConfinementFit::Fits
       } else {
-        confinement.landlock = ConfinementFit::Unknown;
-      }
-    } else {
-      confinement.landlock = ConfinementFit::Fits;
-    }
+        impossible = true;
+        ConfinementFit::Impossible
+      };
+      confinement.mount_policy = match check.read_only_rootfs_compatible {
+        Some(true) => ConfinementFit::Fits,
+        Some(false) => {
+          impossible = true;
+          mount_impossible = true;
+          ConfinementFit::Impossible
+        }
+        None => {
+          push_unique(
+            &mut confinement.missing_prerequisites,
+            ActivationPrerequisite::MountPolicyEvidence,
+          );
+          ConfinementFit::Unknown
+        }
+      };
 
-    if active.runtime.hardening.seccomp.mode == crate::config::RuntimeSeccompMode::Off {
-      confinement.seccomp = ConfinementFit::Fits;
-    } else {
-      confinement.seccomp = ConfinementFit::Unknown;
+      let installed_manifest = hardening.and_then(|snapshot| {
+        (snapshot.landlock.enforcement == LandlockEnforcementState::Active
+          && snapshot.landlock.requested_mode == RuntimeLandlockMode::Manifest)
+          .then_some(current)
+      });
+      let expansion = hardening
+        .filter(|snapshot| snapshot.landlock.enforcement == LandlockEnforcementState::Active)
+        .map(|_| {
+          candidate_manifest.access_expansion_from_landlock(
+            installed_manifest,
+            &active.runtime.hardening.landlock.read_paths,
+            &active.runtime.hardening.landlock.read_write_paths,
+          )
+        })
+        .unwrap_or_default();
+      landlock_expands = !expansion.is_empty();
+      confinement.landlock = match hardening {
+        Some(snapshot) if snapshot.landlock.enforcement == LandlockEnforcementState::Active => {
+          confinement.active_policy_digest = snapshot.landlock.policy_digest.clone();
+          if landlock_expands {
+            confinement.requires_policy_expansion = true;
+            confinement.restart_required = true;
+            ConfinementFit::ExpansionRequired
+          } else {
+            ConfinementFit::Fits
+          }
+        }
+        Some(_) if active.runtime.hardening.landlock.mode == RuntimeLandlockMode::Off => {
+          ConfinementFit::Fits
+        }
+        _ => {
+          push_unique(
+            &mut confinement.missing_prerequisites,
+            ActivationPrerequisite::ActiveLandlockPolicy,
+          );
+          ConfinementFit::Unknown
+        }
+      };
+
+      for (index, entry) in expansion
+        .iter()
+        .take(MAX_CONFINEMENT_DIFFERENCES)
+        .enumerate()
+      {
+        confinement.differences.push(ConfinementDifference {
+          path_id: format!("path-{:04}", index + 1),
+          source_config_path: entry.source_config_path().map(ToOwned::to_owned),
+          kind: ConfinementDifferenceKind::PathAdded,
+        });
+      }
+      confinement.differences_truncated = expansion.len() > MAX_CONFINEMENT_DIFFERENCES;
+      for finding in check.findings.iter().filter(|finding| {
+        matches!(
+          finding.code,
+          FilesystemAccessFindingCode::PathMissing
+            | FilesystemAccessFindingCode::PathTypeMismatch
+            | FilesystemAccessFindingCode::ReadOnlyMount
+        )
+      }) {
+        if confinement.differences.len() >= MAX_CONFINEMENT_DIFFERENCES {
+          confinement.differences_truncated = true;
+          break;
+        }
+        let kind = match finding.code {
+          FilesystemAccessFindingCode::PathTypeMismatch => ConfinementDifferenceKind::TypeMismatch,
+          FilesystemAccessFindingCode::ReadOnlyMount => ConfinementDifferenceKind::MountUnavailable,
+          _ => ConfinementDifferenceKind::PathUnavailable,
+        };
+        confinement.differences.push(ConfinementDifference {
+          path_id: finding
+            .path_id
+            .clone()
+            .unwrap_or_else(|| format!("path-{:04}", confinement.differences.len() + 1)),
+          source_config_path: finding.source_config_path.clone(),
+          kind,
+        });
+      }
+    }
+    _ => {
+      impossible = true;
+      let confinement = &mut report.activation_plan.confinement;
+      confinement.filesystem = ConfinementFit::Impossible;
+      confinement.landlock = ConfinementFit::Unknown;
+      confinement.mount_policy = ConfinementFit::Unknown;
       push_unique(
         &mut confinement.missing_prerequisites,
-        ActivationPrerequisite::ActiveSeccompProfile,
+        ActivationPrerequisite::FilesystemManifest,
       );
     }
   }
-  if access_expands && active.runtime.hardening.landlock.mode == RuntimeLandlockMode::Enforce {
+
+  {
+    let confinement = &mut report.activation_plan.confinement;
+    confinement.seccomp = match hardening {
+      Some(snapshot)
+        if candidate.runtime.hardening.seccomp.profile_identity
+          != snapshot.seccomp.expected_profile_identity
+          || candidate.runtime.hardening.seccomp.profile_digest
+            != snapshot.seccomp.expected_profile_digest =>
+      {
+        confinement.requires_policy_expansion = true;
+        confinement.restart_required = true;
+        ConfinementFit::ExpansionRequired
+      }
+      Some(snapshot) => match snapshot.seccomp.verification {
+        SeccompVerificationState::NotRequired
+          if candidate.runtime.hardening.seccomp.expectation
+            == crate::config::RuntimeSeccompExpectation::Off =>
+        {
+          ConfinementFit::Fits
+        }
+        SeccompVerificationState::NotRequired => ConfinementFit::ExpansionRequired,
+        SeccompVerificationState::Satisfied => ConfinementFit::Fits,
+        SeccompVerificationState::Degraded => ConfinementFit::Unknown,
+        SeccompVerificationState::Blocked => {
+          impossible = true;
+          seccomp_unsatisfied = true;
+          ConfinementFit::Impossible
+        }
+      },
+      None => {
+        push_unique(
+          &mut confinement.missing_prerequisites,
+          ActivationPrerequisite::ActiveSeccompProfile,
+        );
+        ConfinementFit::Unknown
+      }
+    };
+  }
+
+  if landlock_expands {
     promote(
       report,
       ResolvedActivationOperation::ProcessRestart,
       ActivationReasonCode::LandlockPolicyExpansion,
     );
+    add_reason(report, ActivationReasonCode::FilesystemAccessExpansion);
+  }
+  if report.activation_plan.confinement.seccomp == ConfinementFit::ExpansionRequired {
+    promote(
+      report,
+      ResolvedActivationOperation::ProcessRestart,
+      ActivationReasonCode::ExternalSeccompProfileRequired,
+    );
+  }
+  if impossible {
+    promote(
+      report,
+      ResolvedActivationOperation::BlockedByConfinement,
+      ActivationReasonCode::FilesystemAccessUnavailable,
+    );
+  }
+  if mount_impossible {
+    add_reason(report, ActivationReasonCode::MountPolicyIncompatible);
+  }
+  if seccomp_unsatisfied {
+    add_reason(report, ActivationReasonCode::SeccompExpectationUnsatisfied);
   }
   for prerequisite in report
     .activation_plan
@@ -385,15 +545,13 @@ fn resolve_confinement(report: &mut ConfigActivationReport, active: &Config, can
   }
   if !report
     .activation_plan
-    .reason_codes
-    .contains(&ActivationReasonCode::ConfinementEvidenceUnavailable)
+    .confinement
+    .missing_prerequisites
+    .is_empty()
   {
-    report
-      .activation_plan
-      .reason_codes
-      .push(ActivationReasonCode::ConfinementEvidenceUnavailable);
+    add_reason(report, ActivationReasonCode::ConfinementEvidenceUnavailable);
+    report.activation_plan.conditional = true;
   }
-  report.activation_plan.conditional = true;
 }
 
 fn resolve_deployment(
@@ -529,6 +687,13 @@ fn promote(
   operation: ResolvedActivationOperation,
   reason: ActivationReasonCode,
 ) {
+  if matches!(
+    operation,
+    ResolvedActivationOperation::BlockedByConfinement
+      | ResolvedActivationOperation::InvalidOrUnsupported
+  ) {
+    report.ok = false;
+  }
   if operation.strength() > report.activation_plan.minimum_required_operation.strength() {
     report.activation_plan.minimum_required_operation = operation;
   }
@@ -648,29 +813,10 @@ fn stream_listener_id(listener: &crate::config::StreamListenerConfig) -> String 
   format!("stream:{}:{network}:{}", listener.name, listener.bind)
 }
 
-fn known_access_expands(active: &Config, candidate: &Config) -> bool {
-  let landlock = &active.runtime.hardening.landlock;
-  let roots = landlock
-    .read_paths
-    .iter()
-    .chain(landlock.read_write_paths.iter())
-    .collect::<Vec<_>>();
-  known_read_paths(candidate)
-    .iter()
-    .any(|path| !roots.iter().any(|root| path_is_within(path, root)))
-}
-
-fn known_read_paths(config: &Config) -> Vec<std::path::PathBuf> {
-  let mut paths = config.source_paths.all_reload_files();
-  paths.extend(config.source_paths.discovery_files.iter().cloned());
-  paths.extend(config.source_paths.downstream_tls_files.iter().cloned());
-  paths.sort();
-  paths.dedup();
-  paths
-}
-
-fn path_is_within(path: &Path, root: &Path) -> bool {
-  path == root || path.starts_with(root)
+fn add_reason(report: &mut ConfigActivationReport, reason: ActivationReasonCode) {
+  if !report.activation_plan.reason_codes.contains(&reason) {
+    report.activation_plan.reason_codes.push(reason);
+  }
 }
 
 fn push_unique<T: Eq>(values: &mut Vec<T>, value: T) {
@@ -751,13 +897,6 @@ private_key = "privkey.pem"
   }
 
   #[test]
-  fn known_path_subset_and_expansion_are_conservative() {
-    let root = Path::new("/etc/oxibelt");
-    assert!(path_is_within(Path::new("/etc/oxibelt/cert.pem"), root));
-    assert!(!path_is_within(Path::new("/var/lib/oxibelt/key.pem"), root));
-  }
-
-  #[test]
   fn resolved_listener_plan_reports_unchanged_add_remove_conflict_and_drain() {
     let active = test_config();
 
@@ -830,6 +969,8 @@ private_key = "privkey.pem"
   #[test]
   fn enforced_landlock_known_path_expansion_requires_restart() {
     let mut active = test_config();
+    active.tls.cert_chain = "fullchain.pem".into();
+    active.tls.private_key = Some("privkey.pem".into());
     active.runtime.hardening.landlock.mode = RuntimeLandlockMode::Enforce;
     active
       .runtime
@@ -837,14 +978,24 @@ private_key = "privkey.pem"
       .landlock
       .read_paths
       .push("/etc/oxibelt".into());
+    assert_eq!(
+      active.tls.cert_chain,
+      std::path::PathBuf::from("fullchain.pem")
+    );
     let mut candidate = active.clone();
     candidate
       .source_paths
       .config_files
       .push("/var/lib/oxibelt/extra.toml".into());
     let mut report = changed_report();
+    let active_manifest =
+      FilesystemAccessManifest::from_config(&active).expect("active manifest should be generated");
+    let projection = active_manifest.landlock_projection();
+    let mut hardening =
+      crate::hardening::observe_runtime_hardening(&active.runtime.hardening, Some(&projection));
+    hardening.landlock.enforcement = LandlockEnforcementState::Active;
 
-    resolve_confinement(&mut report, &active, &candidate);
+    resolve_confinement(&mut report, &active, &candidate, Some(&hardening));
 
     assert_eq!(
       report.activation_plan.confinement.landlock,
@@ -853,8 +1004,9 @@ private_key = "privkey.pem"
     assert!(report.activation_plan.confinement.requires_policy_expansion);
     assert_eq!(
       report.activation_plan.selected_operation,
-      ResolvedActivationOperation::ProcessRestart
+      ResolvedActivationOperation::BlockedByConfinement
     );
+    assert!(!report.ok);
     assert!(
       report
         .activation_plan
