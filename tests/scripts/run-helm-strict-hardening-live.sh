@@ -255,6 +255,17 @@ esac
 
 kube wait --for=condition=Ready node --all --timeout="${timeout_seconds}s"
 kube create namespace "${namespace}" >/dev/null
+kube label namespace "${namespace}" \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted >/dev/null
+namespace_json="$(kube get namespace "${namespace}" -o json)"
+jq -e '
+  .metadata.labels["pod-security.kubernetes.io/enforce"] == "restricted"
+    and .metadata.labels["pod-security.kubernetes.io/audit"] == "restricted"
+    and .metadata.labels["pod-security.kubernetes.io/warn"] == "restricted"
+' >/dev/null <<<"${namespace_json}" \
+  || die "strict-hardening namespace does not retain restricted Pod Security labels"
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -subj '/CN=oxibelt-hardening.test' \
   -addext 'subjectAltName=DNS:oxibelt-hardening.test' \
@@ -423,6 +434,7 @@ kube -n "${namespace}" rollout status deployment/oxibelt --timeout="${timeout_se
 deployment_json="$(kube -n "${namespace}" get deployment oxibelt -o json)"
 jq -e '
   .spec.replicas == 1
+    and .spec.template.spec.automountServiceAccountToken == false
     and .spec.template.spec.securityContext.runAsNonRoot == true
     and .spec.template.spec.securityContext.runAsUser == 10001
     and .spec.template.spec.securityContext.runAsGroup == 10001
@@ -497,5 +509,7 @@ done
   || die "could not determine the bounded local health port"
 curl --fail --silent --show-error --max-time 10 \
   "http://127.0.0.1:${local_port}/ready" >/dev/null
+curl --fail --silent --show-error --max-time 10 \
+  "http://127.0.0.1:${local_port}/live" >/dev/null
 
 echo "Helm strict hardening live check passed (${provider})"

@@ -1678,6 +1678,9 @@ jobs:
       - name: Validate Helm edge-secure-medium profile
         run: tests/scripts/check-helm-edge-secure-medium-profile.sh
 
+      - name: Validate Helm edge-secure-medium v2 deployment envelope
+        run: tests/scripts/check-helm-edge-secure-medium-v2.sh
+
       - name: Validate Helm strict data-plane profile
         run: tests/scripts/check-helm-strict-dataplane.sh
 
@@ -1741,7 +1744,9 @@ jobs:
           version: v3.21.3
 
       - name: Validate strict hardening templates
-        run: tests/scripts/check-helm-strict-dataplane.sh
+        run: |
+          tests/scripts/check-helm-strict-dataplane.sh
+          tests/scripts/check-helm-edge-secure-medium-v2.sh
 
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
@@ -1923,6 +1928,7 @@ jobs:
           tests/scripts/check-helm-admin-config.sh
           tests/scripts/check-helm-base-config.sh
           tests/scripts/check-helm-edge-secure-medium-profile.sh
+          tests/scripts/check-helm-edge-secure-medium-v2.sh
           tests/scripts/check-helm-service-account-token.sh
           tests/scripts/check-helm-gateway-controller-ha.sh
           tests/scripts/check-helm-pod-lifecycle.sh
@@ -1959,16 +1965,24 @@ jobs:
 
           kubectl --context "${context}" version
           kubectl --context "${context}" create namespace "${namespace}"
+          kubectl --context "${context}" label namespace "${namespace}" \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/audit=restricted \
+            pod-security.kubernetes.io/warn=restricted
           helm lint deploy/helm/oxibelt --kube-version "${KUBERNETES_VERSION}"
           helm lint deploy/helm/oxibelt-gateway-controller --kube-version "${KUBERNETES_VERSION}"
           helm template oxibelt-current deploy/helm/oxibelt --namespace "${namespace}" \
             --kube-version "${KUBERNETES_VERSION}" \
             --set-string configRollout.mode=kubernetes_immutable \
-            | kubectl --context "${context}" --namespace "${namespace}" apply --dry-run=server --filename -
+            | kubectl --context "${context}" --namespace "${namespace}" apply --dry-run=server --validate=strict --filename -
+          helm template oxibelt-v2 deploy/helm/oxibelt --namespace "${namespace}" \
+            --kube-version "${KUBERNETES_VERSION}" \
+            -f deploy/helm/oxibelt/examples/edge-secure-medium-v2-values.yaml \
+            | kubectl --context "${context}" --namespace "${namespace}" apply --dry-run=server --validate=strict --filename -
           helm template oxibelt-gateway-controller deploy/helm/oxibelt-gateway-controller \
             --namespace "${namespace}" \
             --kube-version "${KUBERNETES_VERSION}" \
-            | kubectl --context "${context}" --namespace "${namespace}" apply --dry-run=server --filename -
+            | kubectl --context "${context}" --namespace "${namespace}" apply --dry-run=server --validate=strict --filename -
 
   docker-integration-config-runtime:
     name: Docker integration config-runtime (${{ matrix.name }})

@@ -93,6 +93,15 @@ and operate in a namespace enforcing the `restricted` Pod Security Standard.
 Operators still own cluster admission, CNI configuration, external DNS,
 load-balancing, storage, and certificate issuance.
 
+The `edge-secure-medium` v2 deployment envelope targets this same Kubernetes
+1.34–1.36 and Helm 3.21.3/4.2.3 range. CI verifies its exact digest-pinned
+strict-image render and server-side dry-run under restricted Pod Security
+labels, while the shared strict-data-plane harness supplies live
+RuntimeDefault/Landlock evidence. The live harness does not yet install the
+complete v2 values contract. A rendered profile report records intended
+controls but does not by itself satisfy the `pod-security-restricted`,
+`network-policy-cnis`, native-architecture, or supply-chain gates.
+
 <!-- BEGIN KUBERNETES GRADUATION GENERATED -->
 
 > Generated from `devops/config/kubernetes-feature-graduation.json` by

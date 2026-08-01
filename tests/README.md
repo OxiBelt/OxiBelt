@@ -109,6 +109,11 @@ manual dispatch events. Workflow integrity tests in
 `rust/ci_workflow_integrity.rs` enforce the role/platform/tag topology,
 immutable action pins, executable inventories, and permission separation. The
 static Helm digest check remains in `check-helm-image-digest.sh`.
+`check-helm-edge-secure-medium-v2.sh` exercises the digest-pinned image,
+default-deny dependency, typed writable-volume, hardening expectation,
+Secret-free report, and duplicate schema/helper validation boundaries without
+creating cluster resources. The focused Docker catalog also rejects a native
+v2 configuration that omits its filesystem-manifest expectation.
 The exact API verification/download model, consumer trust boundary, historical
 OCI referrer warning, and operator-owned admission guidance are documented in
 [`docs/SupplyChain.md`](../docs/SupplyChain.md).
