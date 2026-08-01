@@ -2,13 +2,44 @@ use pretty_assertions::assert_eq;
 
 use super::{
   ActivationPrerequisite, ActivationReasonCode, ChangeOperation, ConfigActivationChange,
-  ConfigComparisonKey, ConfigComparisonProjection, MAX_ACTIVATION_CHANGES, MetadataProvenance,
-  NativeActivation, PlanningBasis, ResolvedActivationOperation, RollbackKind,
-  plan_config_projections,
+  ConfigComparisonKey, ConfigComparisonProjection, ConfinementDifference,
+  ConfinementDifferenceKind, MAX_ACTIVATION_CHANGES, MetadataProvenance, NativeActivation,
+  PlanningBasis, ResolvedActivationOperation, RollbackKind, plan_config_projections,
 };
 
 fn parsed(value: &str) -> toml::Value {
   toml::from_str(value).expect("test TOML should parse")
+}
+
+#[test]
+fn confinement_differences_are_subject_tagged_and_seccomp_has_no_fake_path() {
+  let filesystem = ConfinementDifference::Filesystem {
+    path_id: "path-0001".to_string(),
+    source_config_path: Some("tls.cert_chain".to_string()),
+    kind: ConfinementDifferenceKind::RightsExpanded,
+  };
+  let seccomp = ConfinementDifference::Seccomp {
+    assertion_id: "profile_digest".to_string(),
+    kind: ConfinementDifferenceKind::SeccompAssertionMismatch,
+  };
+
+  assert_eq!(
+    serde_json::to_value(filesystem).expect("filesystem difference should serialize"),
+    serde_json::json!({
+      "subject": "filesystem",
+      "path_id": "path-0001",
+      "source_config_path": "tls.cert_chain",
+      "kind": "rights_expanded"
+    })
+  );
+  assert_eq!(
+    serde_json::to_value(seccomp).expect("seccomp difference should serialize"),
+    serde_json::json!({
+      "subject": "seccomp",
+      "assertion_id": "profile_digest",
+      "kind": "seccomp_assertion_mismatch"
+    })
+  );
 }
 
 fn plan(current: &str, candidate: &str) -> super::ConfigActivationReport {

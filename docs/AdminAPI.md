@@ -88,7 +88,7 @@ Compio direct-H1 ownership only when that experimental service is active.
 - `GET /admin/v1/diagnostics/support-bundle?redact=true` requires
   `diagnostics:ReadSupportBundle` and embeds the same active-generation
   topology.
-- `GET /admin/v1/config/explain` uses config-report format version `2` and
+- `GET /admin/v1/config/explain` uses config-report format version `3` and
   reports the active topology with `basis = "active"`; offline config explain
   uses `basis = "preflight"` and does not claim activation.
 
@@ -364,14 +364,14 @@ the rule but does not restore sessions already closed.
 
 `POST /admin/v1/config/diff` remains the authenticated, non-mutating
 configuration comparison endpoint and now returns activation-plan schema
-version `2`. The request body is unchanged: `format` is `"toml"` and `config`
+version `3`. The request body is unchanged: `format` is `"toml"` and `config`
 contains the candidate. The response preserves the existing ordered
 `changes[].path` and `changes[].op` fields and additively returns this root
 shape:
 
 ```json
 {
-  "activation_plan_schema_version": 2,
+  "activation_plan_schema_version": 3,
   "native_schema_epoch": 1,
   "ok": true,
   "basis": "online_active",
@@ -410,6 +410,7 @@ shape:
       "mount_policy": "unknown",
       "requires_policy_expansion": false,
       "restart_required": false,
+      "digests_withheld": true,
       "differences": [],
       "differences_truncated": false,
       "missing_prerequisites": []
@@ -527,14 +528,19 @@ unsupported, blocked, denied, or failed planning exits `1`. The pre-existing
 
 Online confinement enrichment compares the fully resolved candidate manifest
 with the process-installed Landlock policy and captured mount/seccomp evidence.
-It reports active-policy/current/candidate digests and at most 64 redacted
-differences using report-local `path_id` values, optional source configuration
-paths, and fixed kinds. Equal/subset requirements fit; path, scope, or rights
-expansion requires restart/rollout; incompatible required paths, mounts, or ABI
-rights block in-process activation. Missing runtime evidence remains `unknown`
-and conditional. Seccomp uses kernel-observed filter/NNP state plus a separately
-labeled external profile assertion; requested configuration and checked-in
-profiles are never treated as observation. Kubernetes immutable plans never
+It emits at most 64 subject-tagged differences. Filesystem differences use
+report-local `path_id` values, optional source configuration paths, and precise
+path, rights, scope, inode identity, type, access, parent, and mount kinds. Seccomp differences
+use `assertion_id = "expectation" | "profile_identity" | "profile_digest"` and
+never receive a fabricated filesystem path. Stable manifest and policy digests
+are withheld from this redacted endpoint because they permit dictionary tests
+of common paths; `digests_withheld` makes that omission explicit. Equal/subset
+requirements fit; path, scope, or rights expansion requires restart/rollout;
+incompatible required paths, mounts, or ABI rights block in-process activation.
+Missing runtime evidence remains `unknown` and conditional. Seccomp uses
+kernel-observed filter/NNP state plus a separately labeled external profile
+assertion; requested configuration and checked-in profiles are never treated
+as observation. Kubernetes immutable plans never
 apply per Pod and report rollout target identity only when supplied by the
 deployment. Fixed-member Admin plans report signed/durable artifact,
 all-member acknowledgement, and rollback prerequisites; the planner never

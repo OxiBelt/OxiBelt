@@ -201,9 +201,19 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
   for warning in override_warnings {
     tracing::warn!("{warning}");
   }
+  if let Some(mode) = config.runtime.hardening.seccomp.legacy_mode() {
+    tracing::warn!(
+      code = "CFG_RUNTIME_SECCOMP_MODE_COMPATIBILITY_ALIAS",
+      legacy_mode = ?mode,
+      expectation = config.runtime.hardening.seccomp.expectation.as_str(),
+      "legacy runtime.hardening.seccomp.mode maps to runtime.hardening.seccomp.expectation"
+    );
+  }
   config.validate()?;
   oxibelt::configure_crypto_runtime(&config);
   oxibelt::tls::install_configured_provider(&config.crypto)?;
+  oxibelt::tls::preload_native_redis_roots(&config)
+    .context("failed to preload native Redis trust roots before runtime confinement")?;
 
   if cli.dump_effective_config {
     let value = Config::load_effective_toml_redacted(config_path)

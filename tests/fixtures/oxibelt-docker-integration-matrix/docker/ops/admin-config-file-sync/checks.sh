@@ -60,7 +60,7 @@ TOML
   fi
 
   response="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/config/diff" 200 "POST" "${guessed_secret_body}" "Authorization: Bearer matrix-admin-token")"
-  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.activation_plan_schema_version == 2 and any($body.changes[]; .path == "webrtc_turn_listeners[0].auth.rest_shared_secret" and .secret == true and (has("current_value") | not) and (has("candidate_value") | not))'
+  assert_response_jq "${response}" '(.body | fromjson) as $body | $body.activation_plan_schema_version == 3 and any($body.changes[]; .path == "webrtc_turn_listeners[0].auth.rest_shared_secret" and .secret == true and (has("current_value") | not) and (has("candidate_value") | not))'
   assert_response_jq "${response}" '(.body | contains("GUESSED-REST-SHARED-SECRET")) | not'
 
   etag="$(admin_config_etag)"

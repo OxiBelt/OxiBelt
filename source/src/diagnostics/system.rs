@@ -45,7 +45,7 @@ fn diagnose_fd_limit(config: &Config, report: &mut DiagnosticReport) {
 }
 
 fn current_nofile_soft_limit() -> Option<u64> {
-  let raw = std::fs::read_to_string("/proc/self/limits").ok()?;
+  let raw = crate::platform_fs::read_to_string("/proc/self/limits").ok()?;
   raw.lines().find_map(|line| {
     let fields = line.strip_prefix("Max open files")?.trim();
     let soft = fields.split_whitespace().next()?;
@@ -184,7 +184,7 @@ fn cgroup_v2_cpu_quota() -> Option<f64> {
 
 #[cfg(target_arch = "x86_64")]
 fn diagnose_x86_64_v3(report: &mut DiagnosticReport) {
-  let Some(raw) = std::fs::read_to_string("/proc/cpuinfo").ok() else {
+  let Some(raw) = crate::platform_fs::read_to_string("/proc/cpuinfo").ok() else {
     return;
   };
   let Some(flags) = cpuinfo_flags(&raw) else {
@@ -299,7 +299,7 @@ fn push_low_port(binds: &mut Vec<String>, label: &str, bind: SocketAddr) {
 }
 
 fn has_cap_net_bind_service() -> bool {
-  let Some(raw) = std::fs::read_to_string("/proc/self/status").ok() else {
+  let Some(raw) = crate::platform_fs::read_to_string("/proc/self/status").ok() else {
     return false;
   };
   let Some(hex) = raw.lines().find_map(|line| line.strip_prefix("CapEff:")) else {
@@ -384,7 +384,7 @@ fn read_u64(path: &str) -> Option<u64> {
 }
 
 fn read_trimmed(path: &str) -> Option<String> {
-  std::fs::read_to_string(path)
+  crate::platform_fs::read_to_string(path)
     .ok()
     .map(|value| value.trim().to_string())
 }

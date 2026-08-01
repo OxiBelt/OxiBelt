@@ -166,7 +166,11 @@ async fn resolve_origin(
   }
   let resolved = tokio::time::timeout(
     remaining_resolution_time(deadline)?,
-    tokio::net::lookup_host((pool.origin.host.as_ref(), pool.origin.port)),
+    crate::upstream_resolution::resolve_socket_addrs(
+      pool.origin.host.as_ref(),
+      pool.origin.port,
+      deadline.into(),
+    ),
   )
   .await
   .context("Compio direct-H1 DNS resolution timed out")?
@@ -177,6 +181,7 @@ async fn resolve_origin(
     )
   })?;
   let addresses: Arc<[SocketAddr]> = resolved
+    .into_iter()
     .take(MAX_RESOLVED_ADDRESSES)
     .collect::<Vec<_>>()
     .into();

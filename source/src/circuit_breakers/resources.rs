@@ -4,7 +4,6 @@
 //! validated `"auto"` setting into a conservative process-local number, and
 //! therefore always has a safe one-core / modest-memory fallback.
 
-use std::fs;
 use std::time::Duration;
 
 use crate::config::{CircuitBreakerScopeConfig, Config};
@@ -357,7 +356,7 @@ fn compio_connection_memory_limit(memory_bytes: u64) -> usize {
 }
 
 fn cgroup_cpu_limit() -> Option<f64> {
-  let quota = fs::read_to_string("/sys/fs/cgroup/cpu.max")
+  let quota = crate::platform_fs::read_to_string("/sys/fs/cgroup/cpu.max")
     .ok()
     .and_then(|value| {
       let mut parts = value.split_whitespace();
@@ -367,7 +366,7 @@ fn cgroup_cpu_limit() -> Option<f64> {
         .then(|| quota.parse::<f64>().ok().map(|quota| quota / period))
         .flatten()
     });
-  let cpuset = fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective")
+  let cpuset = crate::platform_fs::read_to_string("/sys/fs/cgroup/cpuset.cpus.effective")
     .ok()
     .and_then(|value| parse_cpu_set(&value))
     .map(|count| count as f64);
@@ -386,7 +385,7 @@ fn cgroup_memory_limit() -> Option<u64> {
   ]
   .into_iter()
   .find_map(|path| {
-    let value = fs::read_to_string(path).ok()?;
+    let value = crate::platform_fs::read_to_string(path).ok()?;
     let value = value.trim();
     if value == "max" {
       return None;
@@ -398,7 +397,7 @@ fn cgroup_memory_limit() -> Option<u64> {
 }
 
 fn file_descriptor_limit() -> Option<u64> {
-  let limits = fs::read_to_string("/proc/self/limits").ok()?;
+  let limits = crate::platform_fs::read_to_string("/proc/self/limits").ok()?;
   limits.lines().find_map(|line| {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     (fields.len() >= 4 && fields[0] == "Max" && fields[1] == "open")

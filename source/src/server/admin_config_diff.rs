@@ -13,9 +13,12 @@ use crate::activation_plan::{
   ResolvedActivationOperation, RollbackKind,
 };
 use crate::config::{Config, HttpListenerMode, RuntimeLandlockMode, StreamNetwork};
-use crate::filesystem_access::{FilesystemAccessFindingCode, FilesystemAccessManifest};
+use crate::filesystem_access::{
+  FilesystemAccessExpansionKind, FilesystemAccessFindingCode, FilesystemAccessManifest,
+};
 use crate::hardening::{
-  LandlockEnforcementState, RuntimeHardeningSnapshot, SeccompVerificationState,
+  LandlockEnforcementState, LandlockManifestRule, RuntimeHardeningSnapshot,
+  SeccompVerificationState,
 };
 use crate::reload::{
   FullReloadCompatibility, FullReloadRestartReason, classify_full_reload_runtime_compatibility,
@@ -345,6 +348,8 @@ fn resolve_confinement(
   let current_manifest = FilesystemAccessManifest::from_config(active);
   let candidate_manifest = FilesystemAccessManifest::from_config(candidate);
   let mut landlock_expands = false;
+  let mut filesystem_authority_expands = false;
+  let mut landlock_authority_missing = false;
   let mut impossible = false;
   let mut mount_impossible = false;
   let mut seccomp_unsatisfied = false;
@@ -353,8 +358,11 @@ fn resolve_confinement(
     (Ok(current), Ok(candidate_manifest)) => {
       let check = candidate_manifest.check_current(false);
       let confinement = &mut report.activation_plan.confinement;
-      confinement.current_manifest_digest = Some(current.digest().to_string());
-      confinement.candidate_manifest_digest = Some(candidate_manifest.digest().to_string());
+      // Manifest and policy digests transitively encode normalized paths and
+      // are therefore dictionary-testable. The public activation report is
+      // always redacted, so retain those values only in internal hardening
+      // state and make their omission explicit here.
+      confinement.digests_withheld = true;
       confinement.filesystem = if check.ok {
         ConfinementFit::Fits
       } else {
@@ -377,25 +385,96 @@ fn resolve_confinement(
         }
       };
 
-      let installed_manifest = hardening.and_then(|snapshot| {
-        (snapshot.landlock.enforcement == LandlockEnforcementState::Active
-          && snapshot.landlock.requested_mode == RuntimeLandlockMode::Manifest)
-          .then_some(current)
-      });
-      let expansion = hardening
+      let candidate_projection = candidate_manifest.landlock_projection();
+      let explanatory_expansion = candidate_manifest.access_expansion_from(current);
+      let (candidate_explicit_rules, explicit_projection_failed) =
+        match crate::hardening::project_explicit_landlock_additions(
+          &candidate.runtime.hardening.landlock,
+        ) {
+          Ok(rules) => (rules, false),
+          Err(_) => (Vec::new(), true),
+        };
+      let active_explicit_rules =
+        crate::hardening::project_explicit_landlock_additions(&active.runtime.hardening.landlock)
+          .unwrap_or_default();
+      let candidate_path_ids = candidate_manifest
+        .entries()
+        .iter()
+        .zip(candidate_manifest.view(false).entries)
+        .map(|(entry, view)| (entry.path().to_path_buf(), view.path_id))
+        .collect::<BTreeMap<_, _>>();
+      let installed_authority = hardening
         .filter(|snapshot| snapshot.landlock.enforcement == LandlockEnforcementState::Active)
-        .map(|_| {
-          candidate_manifest.access_expansion_from_landlock(
-            installed_manifest,
-            &active.runtime.hardening.landlock.read_paths,
-            &active.runtime.hardening.landlock.read_write_paths,
-          )
+        .and_then(|snapshot| snapshot.landlock.installed_authority.as_ref());
+      let landlock_transition_required = hardening.is_some_and(|snapshot| {
+        (snapshot.landlock.enforcement == LandlockEnforcementState::Active)
+          != (candidate.runtime.hardening.landlock.mode != RuntimeLandlockMode::Off)
+      });
+      let uncovered_rule_count = installed_authority
+        .map(|authority| {
+          candidate_projection
+            .rules
+            .iter()
+            .filter(|rule| !authority.covers_rule(rule))
+            .count()
+            .saturating_add(
+              candidate_explicit_rules
+                .iter()
+                .filter(|rule| !authority.covers_rule(rule))
+                .count(),
+            )
         })
         .unwrap_or_default();
-      landlock_expands = !expansion.is_empty();
+      let expansion = installed_authority
+        .map(|authority| {
+          candidate_projection
+            .rules
+            .iter()
+            .filter(|rule| !authority.covers_rule(rule))
+            .filter_map(|rule| {
+              let entry = candidate_manifest
+                .entries()
+                .iter()
+                .find(|entry| entry.path() == rule.path)?;
+              let kind = explanatory_expansion
+                .iter()
+                .find(|expansion| expansion.entry().path() == rule.path)
+                .map(|expansion| expansion_kind(expansion.kind()))
+                .unwrap_or(ConfinementDifferenceKind::IdentityChanged);
+              Some((entry, kind))
+            })
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+      let explicit_expansion = installed_authority
+        .map(|authority| {
+          candidate_explicit_rules
+            .iter()
+            .filter(|rule| !authority.covers_rule(rule))
+            .map(|rule| {
+              let kind = classify_explicit_rule(rule, &active_explicit_rules);
+              let source = explicit_rule_source(rule, candidate);
+              (rule, kind, source)
+            })
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+      filesystem_authority_expands = uncovered_rule_count != 0;
+      landlock_expands = filesystem_authority_expands || landlock_transition_required;
       confinement.landlock = match hardening {
-        Some(snapshot) if snapshot.landlock.enforcement == LandlockEnforcementState::Active => {
-          confinement.active_policy_digest = snapshot.landlock.policy_digest.clone();
+        _ if explicit_projection_failed => {
+          impossible = true;
+          ConfinementFit::Impossible
+        }
+        Some(_) if landlock_transition_required => {
+          confinement.requires_policy_expansion = true;
+          confinement.restart_required = true;
+          ConfinementFit::ExpansionRequired
+        }
+        Some(snapshot)
+          if snapshot.landlock.enforcement == LandlockEnforcementState::Active
+            && installed_authority.is_some() =>
+        {
           if landlock_expands {
             confinement.requires_policy_expansion = true;
             confinement.restart_required = true;
@@ -407,6 +486,15 @@ fn resolve_confinement(
         Some(_) if active.runtime.hardening.landlock.mode == RuntimeLandlockMode::Off => {
           ConfinementFit::Fits
         }
+        Some(snapshot) if snapshot.landlock.enforcement == LandlockEnforcementState::Active => {
+          landlock_authority_missing = true;
+          confinement.restart_required = true;
+          push_unique(
+            &mut confinement.missing_prerequisites,
+            ActivationPrerequisite::ActiveLandlockPolicy,
+          );
+          ConfinementFit::Unknown
+        }
         _ => {
           push_unique(
             &mut confinement.missing_prerequisites,
@@ -416,43 +504,88 @@ fn resolve_confinement(
         }
       };
 
-      for (index, entry) in expansion
+      for (index, (entry, kind)) in expansion
         .iter()
         .take(MAX_CONFINEMENT_DIFFERENCES)
         .enumerate()
       {
-        confinement.differences.push(ConfinementDifference {
-          path_id: format!("path-{:04}", index + 1),
-          source_config_path: entry.source_config_path().map(ToOwned::to_owned),
-          kind: ConfinementDifferenceKind::PathAdded,
-        });
+        confinement
+          .differences
+          .push(ConfinementDifference::Filesystem {
+            path_id: candidate_path_ids
+              .get(entry.path())
+              .cloned()
+              .unwrap_or_else(|| format!("path-{:04}", index + 1)),
+            source_config_path: entry.source_config_path().map(ToOwned::to_owned),
+            kind: *kind,
+          });
       }
-      confinement.differences_truncated = expansion.len() > MAX_CONFINEMENT_DIFFERENCES;
-      for finding in check.findings.iter().filter(|finding| {
-        matches!(
-          finding.code,
-          FilesystemAccessFindingCode::PathMissing
-            | FilesystemAccessFindingCode::PathTypeMismatch
-            | FilesystemAccessFindingCode::ReadOnlyMount
-        )
-      }) {
+      for (index, (rule, kind, source_config_path)) in explicit_expansion.iter().enumerate() {
         if confinement.differences.len() >= MAX_CONFINEMENT_DIFFERENCES {
           confinement.differences_truncated = true;
           break;
         }
-        let kind = match finding.code {
-          FilesystemAccessFindingCode::PathTypeMismatch => ConfinementDifferenceKind::TypeMismatch,
-          FilesystemAccessFindingCode::ReadOnlyMount => ConfinementDifferenceKind::MountUnavailable,
-          _ => ConfinementDifferenceKind::PathUnavailable,
-        };
-        confinement.differences.push(ConfinementDifference {
-          path_id: finding
-            .path_id
-            .clone()
-            .unwrap_or_else(|| format!("path-{:04}", confinement.differences.len() + 1)),
-          source_config_path: finding.source_config_path.clone(),
-          kind,
-        });
+        confinement
+          .differences
+          .push(ConfinementDifference::Filesystem {
+            path_id: candidate_path_ids
+              .get(&rule.path)
+              .cloned()
+              .unwrap_or_else(|| {
+                format!(
+                  "path-{:04}",
+                  candidate_manifest
+                    .entries()
+                    .len()
+                    .saturating_add(index)
+                    .saturating_add(1)
+                )
+              }),
+            source_config_path: Some((*source_config_path).to_string()),
+            kind: *kind,
+          });
+      }
+      if explicit_projection_failed {
+        if confinement.differences.len() < MAX_CONFINEMENT_DIFFERENCES {
+          confinement
+            .differences
+            .push(ConfinementDifference::Filesystem {
+              path_id: "path-0000".to_string(),
+              source_config_path: Some("runtime.hardening.landlock".to_string()),
+              kind: ConfinementDifferenceKind::PathUnavailable,
+            });
+        } else {
+          confinement.differences_truncated = true;
+        }
+      }
+      confinement.differences_truncated = confinement.differences_truncated
+        || uncovered_rule_count
+          > expansion
+            .len()
+            .saturating_add(explicit_expansion.len())
+            .min(MAX_CONFINEMENT_DIFFERENCES);
+      if check.findings_truncated {
+        confinement.differences_truncated = true;
+      }
+      for (finding, kind) in check
+        .findings
+        .iter()
+        .filter_map(|finding| finding_kind(finding.code).map(|kind| (finding, kind)))
+      {
+        if confinement.differences.len() >= MAX_CONFINEMENT_DIFFERENCES {
+          confinement.differences_truncated = true;
+          break;
+        }
+        confinement
+          .differences
+          .push(ConfinementDifference::Filesystem {
+            path_id: finding
+              .path_id
+              .clone()
+              .unwrap_or_else(|| format!("path-{:04}", confinement.differences.len() + 1)),
+            source_config_path: finding.source_config_path.clone(),
+            kind,
+          });
       }
     }
     _ => {
@@ -470,13 +603,23 @@ fn resolve_confinement(
 
   {
     let confinement = &mut report.activation_plan.confinement;
+    let profile_identity_mismatch = hardening.is_some_and(|snapshot| {
+      candidate.runtime.hardening.seccomp.profile_identity
+        != snapshot.seccomp.expected_profile_identity
+    });
+    let profile_digest_mismatch = hardening.is_some_and(|snapshot| {
+      candidate.runtime.hardening.seccomp.profile_digest != snapshot.seccomp.expected_profile_digest
+    });
+    let expectation_mismatch = hardening.is_some_and(|snapshot| {
+      matches!(
+        snapshot.seccomp.verification,
+        SeccompVerificationState::Blocked
+      ) || (snapshot.seccomp.verification == SeccompVerificationState::NotRequired
+        && candidate.runtime.hardening.seccomp.expectation
+          != crate::config::RuntimeSeccompExpectation::Off)
+    });
     confinement.seccomp = match hardening {
-      Some(snapshot)
-        if candidate.runtime.hardening.seccomp.profile_identity
-          != snapshot.seccomp.expected_profile_identity
-          || candidate.runtime.hardening.seccomp.profile_digest
-            != snapshot.seccomp.expected_profile_digest =>
-      {
+      Some(_) if profile_identity_mismatch || profile_digest_mismatch => {
         confinement.requires_policy_expansion = true;
         confinement.restart_required = true;
         ConfinementFit::ExpansionRequired
@@ -505,6 +648,25 @@ fn resolve_confinement(
         ConfinementFit::Unknown
       }
     };
+    for assertion_id in [
+      expectation_mismatch.then_some("expectation"),
+      profile_identity_mismatch.then_some("profile_identity"),
+      profile_digest_mismatch.then_some("profile_digest"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+      if confinement.differences.len() >= MAX_CONFINEMENT_DIFFERENCES {
+        confinement.differences_truncated = true;
+        break;
+      }
+      confinement
+        .differences
+        .push(ConfinementDifference::Seccomp {
+          assertion_id: assertion_id.to_string(),
+          kind: ConfinementDifferenceKind::SeccompAssertionMismatch,
+        });
+    }
   }
 
   if landlock_expands {
@@ -513,7 +675,15 @@ fn resolve_confinement(
       ResolvedActivationOperation::ProcessRestart,
       ActivationReasonCode::LandlockPolicyExpansion,
     );
-    add_reason(report, ActivationReasonCode::FilesystemAccessExpansion);
+    if filesystem_authority_expands {
+      add_reason(report, ActivationReasonCode::FilesystemAccessExpansion);
+    }
+  } else if landlock_authority_missing {
+    promote(
+      report,
+      ResolvedActivationOperation::ProcessRestart,
+      ActivationReasonCode::ConfinementEvidenceUnavailable,
+    );
   }
   if report.activation_plan.confinement.seccomp == ConfinementFit::ExpansionRequired {
     promote(
@@ -551,6 +721,79 @@ fn resolve_confinement(
   {
     add_reason(report, ActivationReasonCode::ConfinementEvidenceUnavailable);
     report.activation_plan.conditional = true;
+  }
+}
+
+const fn expansion_kind(kind: FilesystemAccessExpansionKind) -> ConfinementDifferenceKind {
+  match kind {
+    FilesystemAccessExpansionKind::PathAdded => ConfinementDifferenceKind::PathAdded,
+    FilesystemAccessExpansionKind::RightsExpanded => ConfinementDifferenceKind::RightsExpanded,
+    FilesystemAccessExpansionKind::ScopeExpanded => ConfinementDifferenceKind::ScopeExpanded,
+    FilesystemAccessExpansionKind::ParentWriteExpanded => {
+      ConfinementDifferenceKind::ParentAccessExpanded
+    }
+  }
+}
+
+fn classify_explicit_rule(
+  required: &LandlockManifestRule,
+  active: &[LandlockManifestRule],
+) -> ConfinementDifferenceKind {
+  match active.iter().find(|rule| rule.path == required.path) {
+    None => ConfinementDifferenceKind::PathAdded,
+    Some(rule)
+      if required
+        .access
+        .iter()
+        .any(|right| !rule.access.contains(right)) =>
+    {
+      ConfinementDifferenceKind::RightsExpanded
+    }
+    Some(_) => ConfinementDifferenceKind::IdentityChanged,
+  }
+}
+
+fn explicit_rule_source(rule: &LandlockManifestRule, candidate: &Config) -> &'static str {
+  if candidate
+    .runtime
+    .hardening
+    .landlock
+    .read_write_paths
+    .iter()
+    .filter_map(|path| path.canonicalize().ok())
+    .any(|path| path == rule.path)
+  {
+    "runtime.hardening.landlock.read_write_paths"
+  } else {
+    "runtime.hardening.landlock.read_paths"
+  }
+}
+
+const fn finding_kind(code: FilesystemAccessFindingCode) -> Option<ConfinementDifferenceKind> {
+  match code {
+    FilesystemAccessFindingCode::PathMissing => Some(ConfinementDifferenceKind::PathUnavailable),
+    FilesystemAccessFindingCode::PathTypeMismatch
+    | FilesystemAccessFindingCode::ConflictingExpectation => {
+      Some(ConfinementDifferenceKind::TypeMismatch)
+    }
+    FilesystemAccessFindingCode::ReadDenied | FilesystemAccessFindingCode::WriteDenied => {
+      Some(ConfinementDifferenceKind::AccessUnavailable)
+    }
+    FilesystemAccessFindingCode::ParentMissing => {
+      Some(ConfinementDifferenceKind::ParentUnavailable)
+    }
+    FilesystemAccessFindingCode::ParentNotDirectory => {
+      Some(ConfinementDifferenceKind::ParentTypeMismatch)
+    }
+    FilesystemAccessFindingCode::ParentWriteDenied => {
+      Some(ConfinementDifferenceKind::ParentAccessUnavailable)
+    }
+    FilesystemAccessFindingCode::ParentScopeUnrepresentable => {
+      Some(ConfinementDifferenceKind::ParentScopeUnrepresentable)
+    }
+    FilesystemAccessFindingCode::ReadOnlyMount => Some(ConfinementDifferenceKind::MountUnavailable),
+    FilesystemAccessFindingCode::MountInfoUnavailable
+    | FilesystemAccessFindingCode::RedundantBroaderAccess => None,
   }
 }
 
@@ -967,7 +1210,8 @@ private_key = "privkey.pem"
   }
 
   #[test]
-  fn enforced_landlock_known_path_expansion_requires_restart() {
+  fn active_landlock_without_installed_authority_remains_unknown() {
+    let landlock_root = tempfile::tempdir().expect("temporary Landlock root should be created");
     let mut active = test_config();
     active.tls.cert_chain = "fullchain.pem".into();
     active.tls.private_key = Some("privkey.pem".into());
@@ -977,7 +1221,7 @@ private_key = "privkey.pem"
       .hardening
       .landlock
       .read_paths
-      .push("/etc/oxibelt".into());
+      .push(landlock_root.path().to_path_buf());
     assert_eq!(
       active.tls.cert_chain,
       std::path::PathBuf::from("fullchain.pem")
@@ -999,19 +1243,199 @@ private_key = "privkey.pem"
 
     assert_eq!(
       report.activation_plan.confinement.landlock,
+      ConfinementFit::Unknown
+    );
+    assert!(
+      report
+        .activation_plan
+        .confinement
+        .missing_prerequisites
+        .contains(&ActivationPrerequisite::ActiveLandlockPolicy)
+    );
+    assert!(
+      report
+        .activation_plan
+        .reason_codes
+        .contains(&ActivationReasonCode::ConfinementEvidenceUnavailable)
+    );
+    assert!(report.activation_plan.conditional);
+    assert!(report.activation_plan.confinement.restart_required);
+  }
+
+  #[test]
+  fn changing_landlock_enforcement_requires_process_restart() {
+    let active = test_config();
+    let mut candidate = active.clone();
+    candidate.runtime.hardening.landlock.mode = RuntimeLandlockMode::Manifest;
+    let manifest =
+      FilesystemAccessManifest::from_config(&active).expect("active manifest should be generated");
+    let projection = manifest.landlock_projection();
+    let hardening =
+      crate::hardening::observe_runtime_hardening(&active.runtime.hardening, Some(&projection));
+    let mut report = changed_report();
+
+    resolve_confinement(&mut report, &active, &candidate, Some(&hardening));
+
+    assert_eq!(
+      report.activation_plan.confinement.landlock,
       ConfinementFit::ExpansionRequired
     );
-    assert!(report.activation_plan.confinement.requires_policy_expansion);
-    assert_eq!(
-      report.activation_plan.selected_operation,
-      ResolvedActivationOperation::BlockedByConfinement
-    );
-    assert!(!report.ok);
+    assert!(report.activation_plan.confinement.restart_required);
     assert!(
       report
         .activation_plan
         .reason_codes
         .contains(&ActivationReasonCode::LandlockPolicyExpansion)
+    );
+  }
+
+  #[test]
+  fn seccomp_assertion_difference_is_not_given_a_filesystem_path() {
+    let mut active = test_config();
+    active.runtime.hardening.seccomp.profile_identity = Some("profile-a".to_string());
+    active.runtime.hardening.seccomp.profile_digest = Some(format!("sha256:{}", "a".repeat(64)));
+    let mut candidate = active.clone();
+    candidate.runtime.hardening.seccomp.profile_identity = Some("profile-b".to_string());
+    candidate.runtime.hardening.seccomp.profile_digest = Some(format!("sha256:{}", "b".repeat(64)));
+    let manifest =
+      FilesystemAccessManifest::from_config(&active).expect("active manifest should be generated");
+    let projection = manifest.landlock_projection();
+    let hardening =
+      crate::hardening::observe_runtime_hardening(&active.runtime.hardening, Some(&projection));
+    let mut report = changed_report();
+
+    resolve_confinement(&mut report, &active, &candidate, Some(&hardening));
+
+    let differences = serde_json::to_value(&report.activation_plan.confinement.differences)
+      .expect("differences should serialize");
+    let differences = differences
+      .as_array()
+      .expect("differences should be an array");
+    assert!(differences.iter().any(|difference| {
+      difference["subject"] == "seccomp"
+        && difference["assertion_id"] == "profile_identity"
+        && difference.get("path_id").is_none()
+    }));
+    assert!(differences.iter().any(|difference| {
+      difference["subject"] == "seccomp"
+        && difference["assertion_id"] == "profile_digest"
+        && difference.get("path_id").is_none()
+    }));
+  }
+
+  #[test]
+  fn filesystem_error_findings_have_specific_public_difference_kinds() {
+    let cases = [
+      (
+        FilesystemAccessFindingCode::PathMissing,
+        Some(ConfinementDifferenceKind::PathUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::PathTypeMismatch,
+        Some(ConfinementDifferenceKind::TypeMismatch),
+      ),
+      (
+        FilesystemAccessFindingCode::ReadDenied,
+        Some(ConfinementDifferenceKind::AccessUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::WriteDenied,
+        Some(ConfinementDifferenceKind::AccessUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::ParentMissing,
+        Some(ConfinementDifferenceKind::ParentUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::ParentNotDirectory,
+        Some(ConfinementDifferenceKind::ParentTypeMismatch),
+      ),
+      (
+        FilesystemAccessFindingCode::ParentWriteDenied,
+        Some(ConfinementDifferenceKind::ParentAccessUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::ParentScopeUnrepresentable,
+        Some(ConfinementDifferenceKind::ParentScopeUnrepresentable),
+      ),
+      (
+        FilesystemAccessFindingCode::ReadOnlyMount,
+        Some(ConfinementDifferenceKind::MountUnavailable),
+      ),
+      (
+        FilesystemAccessFindingCode::ConflictingExpectation,
+        Some(ConfinementDifferenceKind::TypeMismatch),
+      ),
+      (FilesystemAccessFindingCode::MountInfoUnavailable, None),
+      (FilesystemAccessFindingCode::RedundantBroaderAccess, None),
+    ];
+
+    for (code, expected) in cases {
+      assert_eq!(
+        finding_kind(code),
+        expected,
+        "unexpected mapping for {code:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn filesystem_expansions_preserve_their_public_classification() {
+    let cases = [
+      (
+        FilesystemAccessExpansionKind::PathAdded,
+        ConfinementDifferenceKind::PathAdded,
+      ),
+      (
+        FilesystemAccessExpansionKind::RightsExpanded,
+        ConfinementDifferenceKind::RightsExpanded,
+      ),
+      (
+        FilesystemAccessExpansionKind::ScopeExpanded,
+        ConfinementDifferenceKind::ScopeExpanded,
+      ),
+      (
+        FilesystemAccessExpansionKind::ParentWriteExpanded,
+        ConfinementDifferenceKind::ParentAccessExpanded,
+      ),
+    ];
+
+    for (expansion, expected) in cases {
+      assert_eq!(expansion_kind(expansion), expected);
+    }
+  }
+
+  #[test]
+  fn explicit_landlock_additions_distinguish_paths_rights_and_identity() {
+    use crate::hardening::LandlockFilesystemRight;
+
+    let active = LandlockManifestRule {
+      path: "/tmp/oxibelt".into(),
+      access: vec![LandlockFilesystemRight::ReadFile],
+    };
+    let added = LandlockManifestRule {
+      path: "/tmp/other".into(),
+      access: vec![LandlockFilesystemRight::ReadFile],
+    };
+    let broader = LandlockManifestRule {
+      path: active.path.clone(),
+      access: vec![
+        LandlockFilesystemRight::ReadFile,
+        LandlockFilesystemRight::WriteFile,
+      ],
+    };
+
+    assert_eq!(
+      classify_explicit_rule(&added, std::slice::from_ref(&active)),
+      ConfinementDifferenceKind::PathAdded
+    );
+    assert_eq!(
+      classify_explicit_rule(&broader, std::slice::from_ref(&active)),
+      ConfinementDifferenceKind::RightsExpanded
+    );
+    assert_eq!(
+      classify_explicit_rule(&active, std::slice::from_ref(&active)),
+      ConfinementDifferenceKind::IdentityChanged
     );
   }
 

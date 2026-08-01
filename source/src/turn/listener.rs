@@ -583,8 +583,12 @@ async fn resolve_turn_origin(origin: &Url) -> anyhow::Result<SocketAddr> {
       3478
     }
   });
-  tokio::net::lookup_host((host, port))
+  let deadline = tokio::time::Instant::now()
+    .checked_add(Duration::from_secs(6))
+    .context("TURN origin DNS deadline overflowed")?;
+  crate::upstream_resolution::resolve_socket_addrs(host, port, deadline)
     .await?
+    .into_iter()
     .next()
     .ok_or_else(|| anyhow::anyhow!("TURN origin resolved no addresses: {origin}"))
 }

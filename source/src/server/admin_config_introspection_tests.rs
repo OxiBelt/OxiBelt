@@ -323,7 +323,7 @@ async fn config_diff_is_secret_safe_side_effect_free_and_permission_scoped() {
   assert!(!encoded.contains(alternate_key));
   assert!(!encoded.contains(&temp_dir.path().display().to_string()));
   let body: serde_json::Value = serde_json::from_str(&encoded).expect("response should be JSON");
-  assert_eq!(body["activation_plan_schema_version"], 2);
+  assert_eq!(body["activation_plan_schema_version"], 3);
   assert_eq!(body["native_schema_epoch"], 1);
   assert_eq!(body["ok"], true);
   assert_eq!(body["basis"], "online_active");

@@ -56,6 +56,7 @@ oxibelt-control-http = { path = "source/crates/oxibelt-control-http" }
 oxibelt-control-protocol = { path = "source/crates/oxibelt-control-protocol" }
 oxibelt-deployment-diagnostics = { path = "source/crates/oxibelt-deployment-diagnostics" }
 openssl-sys = { version = "0.9.117", features = ["vendored"] }
+openssl-probe = "0.2.1"
 pretty_assertions = "1.4.1"
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "process", "std"] }

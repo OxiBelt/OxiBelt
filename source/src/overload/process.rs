@@ -16,7 +16,7 @@ pub(super) fn read_process_sample() -> Result<ProcessSample> {
   let rss_bytes = read_rss_bytes()?;
   let memory_current_bytes = read_u64_file("/sys/fs/cgroup/memory.current").unwrap_or(rss_bytes);
   let memory_limit_bytes = read_limit_file("/sys/fs/cgroup/memory.max").or_else(host_memory_bytes);
-  let fd_used = std::fs::read_dir("/proc/self/fd")?.count() as u64;
+  let fd_used = crate::platform_fs::count_directory_entries("/proc/self/fd")? as u64;
   let fd_limit = read_fd_limit()?;
   let cpu_usage_usec = read_cpu_usage_usec().unwrap_or(0);
   let cpu_capacity = read_cpu_capacity().unwrap_or_else(|| {
@@ -36,7 +36,7 @@ pub(super) fn read_process_sample() -> Result<ProcessSample> {
 }
 
 fn read_rss_bytes() -> Result<u64> {
-  std::fs::read_to_string("/proc/self/status")?
+  crate::platform_fs::read_to_string("/proc/self/status")?
     .lines()
     .find_map(|line| line.strip_prefix("VmRSS:"))
     .and_then(|value| value.split_whitespace().next())
@@ -46,7 +46,7 @@ fn read_rss_bytes() -> Result<u64> {
 }
 
 fn read_fd_limit() -> Result<u64> {
-  std::fs::read_to_string("/proc/self/limits")?
+  crate::platform_fs::read_to_string("/proc/self/limits")?
     .lines()
     .find(|line| line.starts_with("Max open files"))
     .and_then(|line| line.split_whitespace().nth(3))
@@ -55,17 +55,21 @@ fn read_fd_limit() -> Result<u64> {
 }
 
 fn read_u64_file(path: &str) -> Option<u64> {
-  std::fs::read_to_string(path).ok()?.trim().parse().ok()
+  crate::platform_fs::read_to_string(path)
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
 }
 
 fn read_limit_file(path: &str) -> Option<u64> {
-  let value = std::fs::read_to_string(path).ok()?;
+  let value = crate::platform_fs::read_to_string(path).ok()?;
   let value = value.trim();
   (value != "max").then(|| value.parse().ok()).flatten()
 }
 
 fn host_memory_bytes() -> Option<u64> {
-  std::fs::read_to_string("/proc/meminfo")
+  crate::platform_fs::read_to_string("/proc/meminfo")
     .ok()?
     .lines()
     .find_map(|line| line.strip_prefix("MemTotal:"))
@@ -75,7 +79,7 @@ fn host_memory_bytes() -> Option<u64> {
 }
 
 fn read_cpu_usage_usec() -> Option<u64> {
-  std::fs::read_to_string("/sys/fs/cgroup/cpu.stat")
+  crate::platform_fs::read_to_string("/sys/fs/cgroup/cpu.stat")
     .ok()?
     .lines()
     .find_map(|line| {
@@ -85,7 +89,7 @@ fn read_cpu_usage_usec() -> Option<u64> {
 }
 
 fn read_cpu_capacity() -> Option<f64> {
-  let value = std::fs::read_to_string("/sys/fs/cgroup/cpu.max").ok()?;
+  let value = crate::platform_fs::read_to_string("/sys/fs/cgroup/cpu.max").ok()?;
   let mut values = value.split_whitespace();
   let quota = values.next()?;
   let period = values.next()?.parse::<f64>().ok()?;

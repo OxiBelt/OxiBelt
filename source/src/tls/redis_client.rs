@@ -1,7 +1,8 @@
 //! Verified TLS client configuration for Redis-compatible shared-state backends.
 
 use std::fmt;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -13,10 +14,41 @@ use rustls::{
 };
 use subtle::ConstantTimeEq;
 
-use crate::config::{CryptoConfig, RedisTlsConfig, RedisTrustStore, TlsCryptoProvider};
+use crate::config::{
+  Config, CryptoConfig, RedisTlsConfig, RedisTrustStore, RuntimeLandlockMode,
+  SharedStateBackendKind, TlsCryptoProvider,
+};
 
 use super::certificate_io::{load_certs, load_private_key};
 use super::client_roots::load_webpki_root_store;
+
+static PRELOADED_NATIVE_REDIS_ROOTS: OnceLock<rustls::RootCertStore> = OnceLock::new();
+
+pub(crate) fn native_root_access_paths() -> Vec<PathBuf> {
+  let probe = openssl_probe::probe();
+  let mut paths = probe.cert_dir;
+  paths.extend(probe.cert_file);
+  paths.sort();
+  paths.dedup();
+  paths
+}
+
+pub fn preload_native_redis_roots(config: &Config) -> anyhow::Result<()> {
+  if config.runtime.hardening.landlock.mode != RuntimeLandlockMode::Manifest
+    || !config.shared_state.enabled
+    || !config.shared_state.backends.iter().any(|backend| {
+      backend.kind == SharedStateBackendKind::Redis
+        && backend.redis_tls.trust_store == RedisTrustStore::Native
+    })
+    || PRELOADED_NATIVE_REDIS_ROOTS.get().is_some()
+  {
+    return Ok(());
+  }
+
+  let roots = load_native_root_store()?;
+  let _ = PRELOADED_NATIVE_REDIS_ROOTS.set(roots);
+  Ok(())
+}
 
 #[derive(Clone)]
 pub(crate) struct RedisTlsClientConfig {
@@ -115,15 +147,11 @@ pub(crate) fn build_redis_tls_client_config(
 fn load_redis_root_store(tls: &RedisTlsConfig) -> anyhow::Result<rustls::RootCertStore> {
   match tls.trust_store {
     RedisTrustStore::Webpki => Ok(load_webpki_root_store()),
-    RedisTrustStore::Native => {
-      let result = rustls_native_certs::load_native_certs();
-      let mut roots = rustls::RootCertStore::empty();
-      let (added, _ignored) = roots.add_parsable_certificates(result.certs);
-      if added == 0 {
-        bail!("native Redis TLS trust store did not provide usable root certificates");
-      }
-      Ok(roots)
-    }
+    RedisTrustStore::Native => PRELOADED_NATIVE_REDIS_ROOTS
+      .get()
+      .cloned()
+      .map(Ok)
+      .unwrap_or_else(load_native_root_store),
     RedisTrustStore::Custom => {
       let path = tls
         .ca_cert
@@ -140,6 +168,16 @@ fn load_redis_root_store(tls: &RedisTlsConfig) -> anyhow::Result<rustls::RootCer
       Ok(roots)
     }
   }
+}
+
+fn load_native_root_store() -> anyhow::Result<rustls::RootCertStore> {
+  let result = rustls_native_certs::load_native_certs();
+  let mut roots = rustls::RootCertStore::empty();
+  let (added, _ignored) = roots.add_parsable_certificates(result.certs);
+  if added == 0 {
+    bail!("native Redis TLS trust store did not provide usable root certificates");
+  }
+  Ok(roots)
 }
 
 fn parse_spki_pins(raw_pins: &[String]) -> anyhow::Result<Vec<[u8; 32]>> {

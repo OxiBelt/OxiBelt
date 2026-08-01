@@ -2,7 +2,6 @@
 //! Platform details are collected read-only and reported without affecting runtime state.
 
 use std::collections::BTreeMap;
-use std::fs;
 
 use serde::Serialize;
 
@@ -23,9 +22,7 @@ pub struct LimitValue {
 pub(super) fn process_snapshot() -> ProcessSnapshot {
   let status = proc_status_values();
   ProcessSnapshot {
-    open_fds: fs::read_dir("/proc/self/fd")
-      .ok()
-      .map(|entries| entries.filter_map(Result::ok).count()),
+    open_fds: crate::platform_fs::count_directory_entries("/proc/self/fd").ok(),
     rss_kib: status.get("VmRSS").and_then(|value| parse_kib(value)),
     threads: status
       .get("Threads")
@@ -35,7 +32,7 @@ pub(super) fn process_snapshot() -> ProcessSnapshot {
 }
 
 fn proc_status_values() -> BTreeMap<String, String> {
-  let Ok(raw) = fs::read_to_string("/proc/self/status") else {
+  let Ok(raw) = crate::platform_fs::read_to_string("/proc/self/status") else {
     return BTreeMap::new();
   };
   raw
@@ -48,7 +45,7 @@ fn proc_status_values() -> BTreeMap<String, String> {
 }
 
 fn proc_max_open_files() -> Option<LimitValue> {
-  let raw = fs::read_to_string("/proc/self/limits").ok()?;
+  let raw = crate::platform_fs::read_to_string("/proc/self/limits").ok()?;
   raw.lines().find_map(|line| {
     let rest = line.strip_prefix("Max open files")?.trim();
     let mut parts = rest.split_whitespace();

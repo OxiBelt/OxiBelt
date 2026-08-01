@@ -233,6 +233,22 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   );
   assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
 
+  let filesystem_access = &spec["components"]["schemas"]["ConfigExplainReport"]["properties"]["runtime_resolution"]
+    ["properties"]["filesystem_access"];
+  assert_eq!(
+    filesystem_access["properties"]["schema_version"]["const"],
+    2
+  );
+  assert_eq!(
+    filesystem_access["properties"]["manifest_digest_withheld"]["const"],
+    true
+  );
+  assert!(
+    filesystem_access["properties"]
+      .get("manifest_digest")
+      .is_none()
+  );
+
   let diff = &spec["paths"]["/admin/v1/config/diff"]["post"];
   assert!(
     diff["description"]
@@ -246,7 +262,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let activation = &spec["components"]["schemas"]["ConfigActivationReport"];
   assert_eq!(
     activation["properties"]["activation_plan_schema_version"]["const"],
-    2
+    3
   );
   assert_eq!(activation["properties"]["native_schema_epoch"]["const"], 1);
   assert_eq!(activation["properties"]["changes"]["maxItems"], 4096);
@@ -262,8 +278,45 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let confinement = &spec["components"]["schemas"]["ConfigActivationConfinementPlan"];
   assert_eq!(confinement["properties"]["differences"]["maxItems"], 64);
   assert_eq!(
-    confinement["properties"]["candidate_manifest_digest"]["pattern"],
-    "^sha256:[0-9a-f]{64}$"
+    confinement["properties"]["digests_withheld"]["type"],
+    "boolean"
+  );
+  assert!(
+    confinement["properties"]
+      .get("candidate_manifest_digest")
+      .is_none()
+  );
+  let difference = &spec["components"]["schemas"]["ConfigActivationConfinementDifference"];
+  assert_eq!(difference["discriminator"]["propertyName"], "subject");
+  assert_eq!(difference["oneOf"].as_array().map(Vec::len), Some(2));
+  assert_eq!(
+    json_string_set(
+      &spec["components"]["schemas"]["ConfigActivationFilesystemDifferenceKind"]["enum"],
+      "ConfigActivationFilesystemDifferenceKind.enum"
+    ),
+    BTreeSet::from([
+      "access_unavailable".to_string(),
+      "identity_changed".to_string(),
+      "mount_unavailable".to_string(),
+      "parent_access_expanded".to_string(),
+      "parent_access_unavailable".to_string(),
+      "parent_scope_unrepresentable".to_string(),
+      "parent_type_mismatch".to_string(),
+      "parent_unavailable".to_string(),
+      "path_added".to_string(),
+      "path_unavailable".to_string(),
+      "rights_expanded".to_string(),
+      "scope_expanded".to_string(),
+      "type_mismatch".to_string(),
+    ])
+  );
+  let seccomp_difference = &spec["components"]["schemas"]["ConfigActivationSeccompDifference"];
+  assert!(
+    !json_string_set(
+      &seccomp_difference["required"],
+      "ConfigActivationSeccompDifference.required"
+    )
+    .contains("path_id")
   );
   assert_eq!(
     json_string_set(
@@ -365,6 +418,52 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
       "#/components/schemas/ConfigExplainReport".to_string(),
       "#/components/schemas/ConfigValidationReport".to_string(),
     ])
+  );
+}
+
+#[test]
+fn runtime_diagnostics_document_typed_redacted_hardening_evidence() {
+  let spec = openapi();
+  for (path, expected) in [
+    (
+      "/admin/v1/diagnostics/support-bundle",
+      "#/components/schemas/SupportBundleRedacted",
+    ),
+    (
+      "/admin/v1/runtime/snapshot",
+      "#/components/schemas/RuntimeSnapshotRedacted",
+    ),
+    (
+      "/admin/v1/runtime/introspection",
+      "#/components/schemas/RuntimeIntrospectionRedacted",
+    ),
+  ] {
+    assert_eq!(
+      spec["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+      expected,
+      "{path} should use its typed redacted response schema"
+    );
+  }
+
+  let hardening = &spec["components"]["schemas"]["RuntimeHardeningSnapshot"];
+  assert_eq!(hardening["properties"]["schema_version"]["const"], 2);
+  assert!(
+    hardening["properties"]
+      .get("filesystem_manifest_digest")
+      .is_none()
+  );
+  assert_eq!(
+    hardening["properties"]["filesystem_manifest_digest_withheld"]["type"],
+    "boolean"
+  );
+  let landlock = &spec["components"]["schemas"]["RuntimeHardeningLandlock"];
+  assert_eq!(landlock["properties"]["effective_rules"]["maxItems"], 64);
+  assert!(landlock["properties"].get("manifest_digest").is_none());
+  assert!(landlock["properties"].get("policy_digest").is_none());
+  let seccomp = &spec["components"]["schemas"]["RuntimeHardeningSeccomp"];
+  assert_eq!(
+    seccomp["properties"]["profile_identity_kernel_verified"]["const"],
+    false
   );
 }
 

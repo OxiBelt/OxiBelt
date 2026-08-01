@@ -694,7 +694,7 @@ oxibeltctl config filesystem-access ./source/config/oxibelt.toml --format json -
 oxibeltctl config filesystem-access ./source/config/oxibelt.toml --show-paths
 ```
 
-Text and JSON redact paths to deterministic report-local identifiers by default. `--show-paths` is an explicit local disclosure mode. `--check` adds non-mutating existence, type, access, parent, mount, and read-only-rootfs evidence; observations do not affect the deterministic manifest digest. Certificate/key rotation records replacement-parent read scope but not parent write, while cache, audit, spool, state, and generated artifacts receive parent write only where OxiBelt itself performs create, rename, truncate, or removal.
+Text and JSON schema version `2` redact paths to deterministic report-local identifiers by default and withhold the stable manifest digest, because an unkeyed digest would permit dictionary tests of common paths. `--show-paths` is an explicit local disclosure mode that also reveals the comparison digest. `--check` adds non-mutating existence, type, access, parent, mount, and read-only-rootfs evidence; observations do not affect that digest. Its bounded findings include `total_findings` and `findings_truncated`, so automation can detect omitted explanations. Certificate/key rotation records replacement-parent read scope but not parent write, while cache, audit, spool, state, and generated artifacts receive parent write only where OxiBelt itself performs create, rename, truncate, or removal.
 
 Example Docker activation for container port `443`:
 
@@ -2843,9 +2843,11 @@ force-close deadlines are reported separately.
 Confinement output uses the candidate filesystem manifest and the process-installed
 hardening snapshot. Equal and subset path/right requirements fit; a new path,
 broader scope, or added right requires restart or orchestrated rollout; an
-unavailable required path, incompatible mount, or unrepresentable right blocks
-in-process activation. Online plans expose only bounded report-local path IDs,
-source configuration paths, manifest/policy digests, and fixed difference kinds.
+unavailable or identity-changed required path, incompatible mount, or unrepresentable right blocks
+in-process activation. Online plans expose only bounded subject-tagged differences,
+report-local filesystem path IDs, source configuration paths, and fixed difference
+kinds. Seccomp assertion differences carry an assertion ID rather than a fabricated
+path. Stable path-derived manifest and policy digests are withheld.
 Offline plans remain conditional when active kernel or mount evidence is absent.
 Seccomp fit comes from observed filter/NNP state plus separately labeled external
 assertions, never from requested configuration or a checked-in profile alone.

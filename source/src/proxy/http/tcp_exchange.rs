@@ -185,9 +185,13 @@ pub(super) async fn resolve_upstream_tcp_addr(
   let host = origin
     .host_str()
     .ok_or_else(|| anyhow::anyhow!("upstream origin has no host: {origin}"))?;
-  tokio::net::lookup_host((host, port))
+  let deadline = tokio::time::Instant::now()
+    .checked_add(std::time::Duration::from_secs(6))
+    .context("upstream DNS deadline overflowed")?;
+  crate::upstream_resolution::resolve_socket_addrs(host, port, deadline)
     .await
     .with_context(|| format!("failed to resolve upstream host {host}:{port}"))?
+    .into_iter()
     .next()
     .ok_or_else(|| anyhow::anyhow!("upstream host resolved no addresses: {host}:{port}"))
 }

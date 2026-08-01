@@ -229,6 +229,44 @@ impl ResolvedEndpointSet {
   }
 }
 
+/// Resolves one configured socket origin through OxiBelt's bounded hosts/DNS
+/// backend rather than libc NSS.  This keeps post-confinement filesystem
+/// dependencies limited to the manifest-declared resolver inputs.
+pub(crate) async fn resolve_socket_addrs(
+  host: &str,
+  port: u16,
+  deadline: Instant,
+) -> Result<Vec<SocketAddr>, ResolutionError> {
+  let origin = ResolutionOrigin::new(host, port, "socket-origin")?;
+  let resolver = EndpointResolver::system(origin, ResolutionPolicy::default());
+  let resolved = resolver.resolve(deadline).await?;
+  Ok(
+    resolved
+      .endpoints()
+      .iter()
+      .map(ResolvedEndpoint::socket_addr)
+      .collect(),
+  )
+}
+
+pub(crate) fn resolve_socket_addrs_blocking(
+  host: &str,
+  port: u16,
+  timeout: Duration,
+) -> anyhow::Result<Vec<SocketAddr>> {
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_io()
+    .enable_time()
+    .build()
+    .map_err(|error| anyhow::anyhow!("failed to build bounded DNS runtime: {error}"))?;
+  let deadline = Instant::now()
+    .checked_add(timeout)
+    .ok_or_else(|| anyhow::anyhow!("DNS deadline overflowed"))?;
+  runtime
+    .block_on(resolve_socket_addrs(host, port, deadline))
+    .map_err(anyhow::Error::new)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolutionPolicy {
   max_endpoint_count: usize,

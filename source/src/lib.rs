@@ -48,6 +48,7 @@ pub mod metrics;
 pub mod mitigation;
 pub mod netport_switcher;
 pub mod overload;
+pub(crate) mod platform_fs;
 mod pool_health;
 pub mod pools;
 pub mod proxy;
@@ -103,6 +104,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 pub async fn run_with_options(mut config: Config, options: RunOptions) -> anyhow::Result<()> {
   config.resolve_rollout_identity_from_environment()?;
   runtime::init_startup_logging(&config.logging)?;
+  if let Some(mode) = config.runtime.hardening.seccomp.legacy_mode() {
+    tracing::warn!(
+      code = "CFG_RUNTIME_SECCOMP_MODE_COMPATIBILITY_ALIAS",
+      legacy_mode = ?mode,
+      expectation = config.runtime.hardening.seccomp.expectation.as_str(),
+      "legacy runtime.hardening.seccomp.mode maps to runtime.hardening.seccomp.expectation"
+    );
+  }
   config.validate()?;
   if config.runtime.hardening.landlock.mode != config::RuntimeLandlockMode::Off {
     anyhow::bail!(

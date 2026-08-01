@@ -521,9 +521,13 @@ async fn acquire_connection_permit(
 }
 
 pub(crate) async fn resolve_target_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
-  tokio::net::lookup_host((host, port))
+  let deadline = tokio::time::Instant::now()
+    .checked_add(Duration::from_secs(6))
+    .context("stream target DNS deadline overflowed")?;
+  crate::upstream_resolution::resolve_socket_addrs(host, port, deadline)
     .await
     .with_context(|| format!("failed to resolve stream target {host}:{port}"))?
+    .into_iter()
     .next()
     .ok_or_else(|| anyhow::anyhow!("stream target resolved no addresses: {host}:{port}"))
 }

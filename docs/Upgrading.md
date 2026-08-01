@@ -407,12 +407,18 @@ probe errors, paths, hostnames, routes, peers, or secrets.
 
 Post-beta.2 development first added experimental activation-plan schema version
 `1` to `POST /admin/v1/config/diff`; the runtime-confinement contract advances
-that schema to version `2`. Existing consumers may continue reading
+that schema through version `2` and now to version `3`. Existing consumers may continue reading
 the preserved `changes[].path` and `changes[].op` fields, but strict response
 decoders must accept the new root `activation_plan_schema_version`,
 `native_schema_epoch`, `ok`, `basis`, and nested `activation_plan` fields.
 Version `2` adds active-policy/current/candidate manifest digests plus a bounded
 redacted confinement-difference list; it never adds raw filesystem paths.
+Version `3` removes those stable, unkeyed path-derived digests from the redacted
+Admin response, adds `digests_withheld`, and changes each confinement difference
+to a `subject = "filesystem" | "seccomp"` tagged value. Filesystem differences
+retain report-local `path_id`; seccomp differences instead carry an
+`assertion_id` and never synthesize a filesystem path. Consumers must branch on
+`subject` before decoding subject-specific fields.
 Array changes are now expanded into deterministic indexed leaf paths instead
 of one aggregate array entry, so consumers that group paths must normalize
 indices deliberately.
@@ -448,9 +454,17 @@ requirements, mount every required writable parent narrowly, and use
 active rules cannot hot reload; retain the previous process or immutable
 workload until the restart/rollout plan succeeds.
 
+Filesystem-access manifest/check JSON advances from schema version `1` to `2`.
+The redacted default omits `manifest_digest` and sets
+`manifest_digest_withheld = true`; `--show-paths` reveals both paths and the
+stable comparison digest. Check reports add `total_findings` and
+`findings_truncated` so bounded output cannot be mistaken for a complete list.
+
 Support-bundle format advances from `2` to `3`, config-explain from `2` to `3`,
-and runtime-check JSON gains schema version `1` for the bounded hardening
-snapshot. Required seccomp now fails before listener startup unless Linux
+and runtime-check/hardening JSON advances to schema version `2` for bounded
+effective-rule summaries and explicit digest-withholding metadata. The installed
+authority used for reload admission remains internal and is never serialized.
+Required seccomp now fails before listener startup unless Linux
 reports filter mode `2` and `NoNewPrivs: 1`; ensure Docker/Kubernetes applies
 the filter and no-new-privileges before changing from `off` or `optional`.
 Rollback by restoring `expectation = "off"` or the retained prior config and

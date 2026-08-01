@@ -67,7 +67,11 @@ fn render_text(output: &FilesystemAccessOutput) -> String {
   let mut rendered = String::new();
   rendered.push_str("Filesystem access manifest\n");
   rendered.push_str(&format!("schema version: {}\n", manifest.schema_version));
-  rendered.push_str(&format!("manifest digest: {}\n", manifest.manifest_digest));
+  if let Some(digest) = &manifest.manifest_digest {
+    rendered.push_str(&format!("manifest digest: {digest}\n"));
+  } else {
+    rendered.push_str("manifest digest: withheld (pass --show-paths to reveal)\n");
+  }
   rendered.push_str(&format!(
     "paths: {}\n",
     if manifest.paths_redacted {
@@ -92,7 +96,12 @@ fn render_text(output: &FilesystemAccessOutput) -> String {
     if let Some(compatible) = check.read_only_rootfs_compatible {
       rendered.push_str(&format!("read-only rootfs compatible: {compatible}\n"));
     }
-    rendered.push_str(&format!("findings: {}\n", check.findings.len()));
+    rendered.push_str(&format!("findings: {}\n", check.total_findings));
+    rendered.push_str(&format!("findings shown: {}\n", check.findings.len()));
+    rendered.push_str(&format!(
+      "findings truncated: {}\n",
+      check.findings_truncated
+    ));
     for finding in &check.findings {
       let path = finding
         .path
@@ -133,6 +142,17 @@ mod tests {
   use super::*;
   use crate::cli::{Cli, ConfigCommand};
 
+  fn manifest_view(show_paths: bool) -> FilesystemAccessManifestView {
+    FilesystemAccessManifestView {
+      schema_version: 2,
+      manifest_digest: show_paths.then(|| format!("sha256:{}", "a".repeat(64))),
+      manifest_digest_withheld: !show_paths,
+      paths_redacted: !show_paths,
+      normalization: "descriptor_relative_v2",
+      entries: Vec::new(),
+    }
+  }
+
   #[test]
   fn filesystem_access_command_defaults_to_redacted_text_without_checks() {
     let cli = Cli::try_parse_from(["oxibeltctl", "config", "filesystem-access", "config.toml"])
@@ -171,5 +191,38 @@ mod tests {
     assert_eq!(args.format, ConfigFilesystemAccessOutputFormat::Json);
     assert!(args.check);
     assert!(args.show_paths);
+  }
+
+  #[test]
+  fn redacted_output_withholds_the_path_derived_manifest_digest() {
+    let output = FilesystemAccessOutput {
+      manifest: manifest_view(false),
+      check: None,
+    };
+
+    let text = render_text(&output);
+    assert!(text.contains("manifest digest: withheld"));
+    assert!(!text.contains("sha256:"));
+    let json = serde_json::to_value(&output).expect("output should serialize");
+    assert_eq!(json["manifest"]["manifest_digest_withheld"], true);
+    assert!(json["manifest"].get("manifest_digest").is_none());
+  }
+
+  #[test]
+  fn explicit_path_disclosure_also_reveals_the_comparison_digest() {
+    let output = FilesystemAccessOutput {
+      manifest: manifest_view(true),
+      check: None,
+    };
+
+    let text = render_text(&output);
+    assert!(text.contains("manifest digest: sha256:"));
+    let json = serde_json::to_value(&output).expect("output should serialize");
+    assert_eq!(json["manifest"]["manifest_digest_withheld"], false);
+    assert!(
+      json["manifest"]["manifest_digest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
   }
 }

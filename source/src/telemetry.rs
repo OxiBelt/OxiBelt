@@ -2,7 +2,7 @@
 //! Export paths are best-effort observability and must not become request authorization gates.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -376,11 +376,15 @@ fn post_otlp_http(
   timeout: Duration,
   payload: &[u8],
 ) -> anyhow::Result<()> {
-  let address = (endpoint.host.as_str(), endpoint.port)
-    .to_socket_addrs()
-    .context("failed to resolve OTLP endpoint")?
-    .next()
-    .ok_or_else(|| anyhow::anyhow!("OTLP endpoint resolved no addresses"))?;
+  let address = crate::upstream_resolution::resolve_socket_addrs_blocking(
+    &endpoint.host,
+    endpoint.port,
+    timeout,
+  )
+  .context("failed to resolve OTLP endpoint")?
+  .into_iter()
+  .next()
+  .ok_or_else(|| anyhow::anyhow!("OTLP endpoint resolved no addresses"))?;
   let mut stream =
     TcpStream::connect_timeout(&address, timeout).context("failed to connect OTLP endpoint")?;
   stream.set_read_timeout(Some(timeout)).ok();

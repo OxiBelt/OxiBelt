@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{HardeningAutoMode, RuntimeLandlockMode, RuntimeSeccompExpectation};
 
-pub const RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 const MAX_HARDENING_REASONS: usize = 16;
+pub(super) const MAX_EFFECTIVE_LANDLOCK_RULE_SUMMARIES: usize = 64;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +91,20 @@ pub enum LandlockFilesystemRight {
   Truncate,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandlockRuleScope {
+  Exact,
+  Descendants,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LandlockEffectiveRuleSummary {
+  pub rule_id: String,
+  pub access: Vec<LandlockFilesystemRight>,
+  pub scope: LandlockRuleScope,
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LandlockSnapshot {
   pub requested_mode: RuntimeLandlockMode,
@@ -104,10 +119,20 @@ pub struct LandlockSnapshot {
   pub effective_rights: Vec<LandlockFilesystemRight>,
   pub unsupported_rights: Vec<LandlockFilesystemRight>,
   pub rule_count: u32,
+  #[serde(default)]
+  pub effective_rules: Vec<LandlockEffectiveRuleSummary>,
+  #[serde(default)]
+  pub effective_rules_truncated: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub manifest_digest: Option<String>,
+  #[serde(default)]
+  pub manifest_digest_withheld: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub policy_digest: Option<String>,
+  #[serde(default)]
+  pub policy_digest_withheld: bool,
+  #[serde(skip, default)]
+  pub(crate) installed_authority: Option<super::InstalledLandlockAuthority>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -175,6 +200,8 @@ pub struct RuntimeHardeningSnapshot {
   pub seccomp: RuntimeSeccompSnapshot,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub filesystem_manifest_digest: Option<String>,
+  #[serde(default)]
+  pub filesystem_manifest_digest_withheld: bool,
   pub read_only_rootfs: ReadOnlyRootfsCompatibility,
   pub degraded_reasons: Vec<RuntimeHardeningReason>,
   pub blocking_reasons: Vec<RuntimeHardeningReason>,
@@ -185,11 +212,12 @@ impl RuntimeHardeningSnapshot {
   /// manifest required by the newly activated, already-admitted snapshot.
   pub fn with_current_manifest(
     &self,
-    manifest_digest: String,
+    _manifest_digest: String,
     read_only_rootfs: ReadOnlyRootfsCompatibility,
   ) -> Self {
     let mut next = self.clone();
-    next.filesystem_manifest_digest = Some(manifest_digest);
+    next.filesystem_manifest_digest = None;
+    next.filesystem_manifest_digest_withheld = true;
     next.read_only_rootfs = read_only_rootfs;
     next
   }

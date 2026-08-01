@@ -248,7 +248,7 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
       },
       "filesystem_access": {
         "schema_version": filesystem_manifest.schema_version(),
-        "manifest_digest": filesystem_manifest.digest(),
+        "manifest_digest_withheld": true,
         "entry_count": filesystem_manifest.entries().len(),
         "paths_redacted": true,
         "read_only_rootfs_compatible": filesystem_check.read_only_rootfs_compatible,

@@ -470,9 +470,13 @@ async fn resolve_url_addr(url: &url::Url) -> anyhow::Result<std::net::SocketAddr
   let host = url
     .host_str()
     .ok_or_else(|| anyhow!("upstream origin has no host: {url}"))?;
-  tokio::net::lookup_host((host, port))
+  let deadline = tokio::time::Instant::now()
+    .checked_add(std::time::Duration::from_secs(6))
+    .context("upstream probe DNS deadline overflowed")?;
+  crate::upstream_resolution::resolve_socket_addrs(host, port, deadline)
     .await
     .with_context(|| format!("failed to resolve upstream host {host}:{port}"))?
+    .into_iter()
     .next()
     .ok_or_else(|| anyhow!("upstream host resolved no addresses: {host}:{port}"))
 }

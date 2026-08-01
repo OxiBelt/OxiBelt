@@ -26,11 +26,11 @@ pub use profile_assertion::{
 };
 use snapshot::push_reason;
 pub use snapshot::{
-  CloseRangeEffectiveState, CloseRangeSnapshot, LandlockEnforcementState, LandlockFilesystemRight,
-  LandlockSnapshot, ProcessEvidenceState, ProfileAssertionBasis,
-  RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION, ReadOnlyRootfsCompatibility, RuntimeHardeningOutcome,
-  RuntimeHardeningReason, RuntimeHardeningSnapshot, RuntimeSeccompSnapshot,
-  SeccompVerificationState,
+  CloseRangeEffectiveState, CloseRangeSnapshot, LandlockEffectiveRuleSummary,
+  LandlockEnforcementState, LandlockFilesystemRight, LandlockRuleScope, LandlockSnapshot,
+  ProcessEvidenceState, ProfileAssertionBasis, RUNTIME_HARDENING_SNAPSHOT_SCHEMA_VERSION,
+  ReadOnlyRootfsCompatibility, RuntimeHardeningOutcome, RuntimeHardeningReason,
+  RuntimeHardeningSnapshot, RuntimeSeccompSnapshot, SeccompVerificationState,
 };
 
 use crate::config::{
@@ -40,11 +40,82 @@ use crate::config::{
 
 const MAX_SUPPORTED_LANDLOCK_ABI: u32 = 3;
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct InstalledLandlockRule {
+  path: PathBuf,
+  access: Vec<LandlockFilesystemRight>,
+  scope: LandlockRuleScope,
+  device: u64,
+  inode: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct InstalledLandlockAuthority {
+  rules: Vec<InstalledLandlockRule>,
+  manifest_digest: Option<String>,
+  policy_digest: String,
+}
+
+impl InstalledLandlockAuthority {
+  pub(crate) fn has_valid_policy_evidence(&self) -> bool {
+    validate_sha256_digest(&self.policy_digest, "installed Landlock policy digest").is_ok()
+      && self.manifest_digest.as_deref().is_none_or(|digest| {
+        validate_sha256_digest(digest, "installed filesystem manifest digest").is_ok()
+      })
+  }
+
+  pub(crate) fn covers_rule(&self, required: &LandlockManifestRule) -> bool {
+    self.rules.iter().any(|installed| {
+      let identity_matches = std::fs::symlink_metadata(&installed.path)
+        .ok()
+        .filter(|metadata| !metadata.file_type().is_symlink())
+        .is_some_and(|metadata| {
+          use std::os::unix::fs::MetadataExt;
+          metadata.dev() == installed.device && metadata.ino() == installed.inode
+        });
+      required
+        .access
+        .iter()
+        .all(|right| installed.access.contains(right))
+        && identity_matches
+        && (required.path == installed.path
+          || (installed.scope == LandlockRuleScope::Descendants
+            && required.path.starts_with(&installed.path)))
+    })
+  }
+
+  pub(crate) fn uncovered_rule_count(&self, candidate: &LandlockManifestProjection) -> usize {
+    candidate
+      .rules
+      .iter()
+      .filter(|required| !self.covers_rule(required))
+      .count()
+  }
+
+  fn summaries(&self) -> (Vec<LandlockEffectiveRuleSummary>, bool) {
+    let summaries = self
+      .rules
+      .iter()
+      .take(snapshot::MAX_EFFECTIVE_LANDLOCK_RULE_SUMMARIES)
+      .enumerate()
+      .map(|(index, rule)| LandlockEffectiveRuleSummary {
+        rule_id: format!("rule-{:04}", index + 1),
+        access: rule.access.clone(),
+        scope: rule.scope,
+      })
+      .collect::<Vec<_>>();
+    (
+      summaries,
+      self.rules.len() > snapshot::MAX_EFFECTIVE_LANDLOCK_RULE_SUMMARIES,
+    )
+  }
+}
+
 /// Normalized filesystem requirements supplied by the configuration-manifest layer.
 ///
-/// Paths are deliberately absent from serialized hardening snapshots. The digest is
-/// the stable public comparison handle; callers retain the complete manifest for
-/// explanation and activation planning.
+/// Paths are deliberately absent from serialized hardening snapshots. The raw
+/// digest remains internal because it is derived from paths; callers retain the
+/// complete manifest for privileged explanation and activation planning.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LandlockManifestRule {
   pub path: PathBuf,
@@ -157,11 +228,17 @@ pub fn observe_runtime_hardening(
       effective_rights: Vec::new(),
       unsupported_rights: Vec::new(),
       rule_count: 0,
-      manifest_digest: manifest_digest.clone(),
+      effective_rules: Vec::new(),
+      effective_rules_truncated: false,
+      manifest_digest: None,
+      manifest_digest_withheld: manifest_digest.is_some(),
       policy_digest: None,
+      policy_digest_withheld: false,
+      installed_authority: None,
     },
     seccomp,
-    filesystem_manifest_digest: manifest_digest,
+    filesystem_manifest_digest: None,
+    filesystem_manifest_digest_withheld: manifest_digest.is_some(),
     read_only_rootfs: manifest
       .map(|manifest| manifest.read_only_rootfs)
       .unwrap_or(ReadOnlyRootfsCompatibility::Unknown),
@@ -225,7 +302,8 @@ fn apply_runtime_hardening_with_sources(
     close_range,
     landlock,
     seccomp,
-    filesystem_manifest_digest: manifest.map(|manifest| manifest.manifest_digest.clone()),
+    filesystem_manifest_digest: None,
+    filesystem_manifest_digest_withheld: manifest.is_some(),
     read_only_rootfs,
     degraded_reasons,
     blocking_reasons: Vec::new(),
@@ -416,19 +494,28 @@ fn apply_landlock(
         effective_rights: Vec::new(),
         unsupported_rights: Vec::new(),
         rule_count: 0,
-        manifest_digest,
+        effective_rules: Vec::new(),
+        effective_rules_truncated: false,
+        manifest_digest: None,
+        manifest_digest_withheld: manifest_digest.is_some(),
         policy_digest: None,
+        policy_digest_withheld: false,
+        installed_authority: None,
       },
       None,
     )),
-    RuntimeLandlockMode::Enforce => install_landlock(
-      config.mode,
-      Vec::new(),
-      config.read_paths.clone(),
-      config.read_write_paths.clone(),
-      manifest_digest,
-    )
-    .context("failed to install manual Landlock filesystem sandbox"),
+    RuntimeLandlockMode::Enforce => {
+      let read_paths = canonicalize_landlock_additions(&config.read_paths)?;
+      let read_write_paths = canonicalize_landlock_additions(&config.read_write_paths)?;
+      install_landlock(
+        config.mode,
+        Vec::new(),
+        read_paths,
+        read_write_paths,
+        manifest_digest,
+      )
+      .context("failed to install manual Landlock filesystem sandbox")
+    }
     RuntimeLandlockMode::Manifest => {
       let manifest = manifest.ok_or_else(|| {
         anyhow::anyhow!(
@@ -461,7 +548,7 @@ fn canonicalize_landlock_additions(paths: &[PathBuf]) -> anyhow::Result<Vec<Path
     .map(|path| {
       path.canonicalize().with_context(|| {
         format!(
-          "failed to canonicalize explicit manifest-mode Landlock addition {}",
+          "failed to canonicalize explicit Landlock addition {}",
           path.display()
         )
       })
@@ -475,6 +562,41 @@ fn normalize_projected_paths(read_paths: &mut Vec<PathBuf>, read_write_paths: &m
   read_write_paths.sort();
   read_write_paths.dedup();
   read_paths.retain(|path| read_write_paths.binary_search(path).is_err());
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn project_explicit_landlock_additions(
+  config: &RuntimeLandlockConfig,
+) -> anyhow::Result<Vec<LandlockManifestRule>> {
+  if config.mode == RuntimeLandlockMode::Off {
+    return Ok(Vec::new());
+  }
+  let read_paths = canonicalize_landlock_additions(&config.read_paths)?;
+  let read_write_paths = canonicalize_landlock_additions(&config.read_write_paths)?;
+  if read_paths.is_empty() && read_write_paths.is_empty() {
+    return Ok(Vec::new());
+  }
+  let rules = build_landlock_path_rules(config.mode, Vec::new(), read_paths, read_write_paths)?;
+  Ok(
+    rules
+      .into_iter()
+      .map(|(path, access)| LandlockManifestRule {
+        path,
+        access: landlock_rights(access),
+      })
+      .collect(),
+  )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn project_explicit_landlock_additions(
+  config: &RuntimeLandlockConfig,
+) -> anyhow::Result<Vec<LandlockManifestRule>> {
+  if config.mode == RuntimeLandlockMode::Off {
+    Ok(Vec::new())
+  } else {
+    bail!("Landlock is Linux-only")
+  }
 }
 
 #[cfg(target_os = "linux")]
@@ -536,27 +658,14 @@ fn install_landlock(
   read_write_paths: Vec<PathBuf>,
   manifest_digest: Option<String>,
 ) -> anyhow::Result<(LandlockSnapshot, Option<RuntimeHardeningReason>)> {
-  use std::fs::OpenOptions;
   use std::os::fd::AsFd;
-  use std::os::unix::fs::OpenOptionsExt;
 
   let raw_abi = syscalls::landlock_abi_version().context("Landlock ABI version probe failed")?;
   let kernel_abi = u32::try_from(raw_abi).context("Landlock returned an invalid ABI version")?;
   let effective_abi = kernel_abi.min(MAX_SUPPORTED_LANDLOCK_ABI);
   let path_rules = build_landlock_path_rules(mode, manifest_rules, read_paths, read_write_paths)?;
-  let requested_access = if mode == RuntimeLandlockMode::Manifest {
-    manifest_operator_access(MAX_SUPPORTED_LANDLOCK_ABI)
-  } else {
-    syscalls::landlock_handled_access_fs(i64::from(MAX_SUPPORTED_LANDLOCK_ABI))
-  };
-  let kernel_supported_access = syscalls::landlock_handled_access_fs(i64::from(effective_abi));
-  let effective_access = requested_access & kernel_supported_access;
-  let unsupported_access = requested_access & !effective_access;
-  if mode == RuntimeLandlockMode::Manifest && unsupported_access != 0 {
-    bail!(
-      "Landlock kernel ABI {kernel_abi} cannot enforce every filesystem right required by manifest mode"
-    );
-  }
+  let (requested_access, effective_access, unsupported_access) =
+    resolve_landlock_access(mode, kernel_abi)?;
   let ruleset = syscalls::create_landlock_ruleset(effective_access)
     .context("landlock_create_ruleset failed")?;
   let policy_digest = landlock_policy_digest(
@@ -566,26 +675,40 @@ fn install_landlock(
     requested_access,
   );
 
+  let root = open_landlock_root()?;
+  let mut installed_rules = Vec::with_capacity(path_rules.len());
   for (path, access) in &path_rules {
-    let file = OpenOptions::new()
-      .read(true)
-      .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-      .open(path)
-      .with_context(|| format!("failed to open Landlock path {}", path.display()))?;
+    let file = open_landlock_path(root.as_fd(), path)
+      .with_context(|| format!("failed to securely open Landlock path {}", path.display()))?;
     let metadata = file
       .metadata()
       .with_context(|| format!("failed to inspect Landlock path {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-      bail!("Landlock path changed to a symlink after manifest resolution");
-    }
     let allowed_access = access & effective_access;
     syscalls::add_landlock_path_rule(ruleset.as_fd(), file.as_fd(), allowed_access)
       .with_context(|| format!("failed to add Landlock path {}", path.display()))?;
+    use std::os::unix::fs::MetadataExt;
+    installed_rules.push(InstalledLandlockRule {
+      path: path.clone(),
+      access: landlock_rights(allowed_access),
+      scope: if metadata.is_dir() {
+        LandlockRuleScope::Descendants
+      } else {
+        LandlockRuleScope::Exact
+      },
+      device: metadata.dev(),
+      inode: metadata.ino(),
+    });
   }
 
   enable_no_new_privs().context("failed to set no_new_privs before Landlock")?;
   syscalls::restrict_landlock(ruleset.as_fd()).context("landlock_restrict_self failed")?;
   let rule_count = path_rules.len();
+  let installed_authority = InstalledLandlockAuthority {
+    rules: installed_rules,
+    manifest_digest: manifest_digest.clone(),
+    policy_digest,
+  };
+  let (effective_rules, effective_rules_truncated) = installed_authority.summaries();
   Ok((
     LandlockSnapshot {
       requested_mode: mode,
@@ -597,11 +720,89 @@ fn install_landlock(
       effective_rights: landlock_rights(effective_access),
       unsupported_rights: landlock_rights(unsupported_access),
       rule_count: u32::try_from(rule_count).unwrap_or(u32::MAX),
-      manifest_digest,
-      policy_digest: Some(policy_digest),
+      effective_rules,
+      effective_rules_truncated,
+      manifest_digest: None,
+      manifest_digest_withheld: manifest_digest.is_some(),
+      policy_digest: None,
+      policy_digest_withheld: true,
+      installed_authority: Some(installed_authority),
     },
     (unsupported_access != 0).then_some(RuntimeHardeningReason::LandlockRightsDowngraded),
   ))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_landlock_access(
+  mode: RuntimeLandlockMode,
+  kernel_abi: u32,
+) -> anyhow::Result<(u64, u64, u64)> {
+  let effective_abi = kernel_abi.min(MAX_SUPPORTED_LANDLOCK_ABI);
+  let requested_access = if mode == RuntimeLandlockMode::Manifest {
+    // Manifest mode intentionally has a stable ABI-3 security baseline. Per-path
+    // rules remain least-authority grants within this handled-rights set.
+    manifest_operator_access(MAX_SUPPORTED_LANDLOCK_ABI)
+  } else {
+    syscalls::landlock_handled_access_fs(i64::from(MAX_SUPPORTED_LANDLOCK_ABI))
+  };
+  let kernel_supported_access = syscalls::landlock_handled_access_fs(i64::from(effective_abi));
+  let effective_access = requested_access & kernel_supported_access;
+  let unsupported_access = requested_access & !effective_access;
+  if mode == RuntimeLandlockMode::Manifest && unsupported_access != 0 {
+    bail!(
+      "manifest_landlock_abi_insufficient: Landlock kernel ABI {kernel_abi} cannot enforce the required ABI {MAX_SUPPORTED_LANDLOCK_ABI} handled-rights baseline"
+    );
+  }
+  Ok((requested_access, effective_access, unsupported_access))
+}
+
+#[cfg(target_os = "linux")]
+fn open_landlock_root() -> anyhow::Result<std::os::fd::OwnedFd> {
+  use nix::fcntl::{OFlag, open};
+  use nix::sys::stat::Mode;
+
+  open(
+    PathBuf::from("/").as_path(),
+    OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+    Mode::empty(),
+  )
+  .context("failed to securely open Landlock filesystem root")
+}
+
+#[cfg(target_os = "linux")]
+fn open_landlock_path(
+  root: std::os::fd::BorrowedFd<'_>,
+  path: &std::path::Path,
+) -> anyhow::Result<std::fs::File> {
+  use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
+
+  let secure_path = proc_self_path_for_current_process(path);
+  let relative = secure_path
+    .strip_prefix("/")
+    .context("Landlock paths must be absolute")?;
+  if relative.as_os_str().is_empty() {
+    bail!("Landlock paths must not grant the filesystem root");
+  }
+  let descriptor = openat2(
+    root,
+    relative,
+    OpenHow::new()
+      .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+      .resolve(
+        ResolveFlag::RESOLVE_BENEATH
+          | ResolveFlag::RESOLVE_NO_MAGICLINKS
+          | ResolveFlag::RESOLVE_NO_SYMLINKS,
+      ),
+  )?;
+  Ok(std::fs::File::from(descriptor))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_self_path_for_current_process(path: &std::path::Path) -> PathBuf {
+  let Ok(suffix) = path.strip_prefix("/proc/self") else {
+    return path.to_path_buf();
+  };
+  PathBuf::from(format!("/proc/{}", std::process::id())).join(suffix)
 }
 
 #[cfg(target_os = "linux")]
@@ -1001,8 +1202,12 @@ mod tests {
       &StaticAssertions::default(),
     )
     .expect("an off Landlock mode should still report the manifest summary");
-    assert_eq!(snapshot.filesystem_manifest_digest, Some(digest.clone()));
-    assert_eq!(snapshot.landlock.manifest_digest, Some(digest));
+    assert_eq!(snapshot.filesystem_manifest_digest, None);
+    assert!(snapshot.filesystem_manifest_digest_withheld);
+    assert_eq!(snapshot.landlock.manifest_digest, None);
+    assert!(snapshot.landlock.manifest_digest_withheld);
+    let serialized = serde_json::to_string(&snapshot).expect("serialize hardening snapshot");
+    assert!(!serialized.contains(&digest));
     assert_eq!(
       snapshot.read_only_rootfs,
       ReadOnlyRootfsCompatibility::Compatible
@@ -1039,5 +1244,168 @@ mod tests {
     let abi_one = manifest_operator_access(1);
     assert_eq!(abi_one & syscalls::LANDLOCK_ACCESS_FS_REFER, 0);
     assert_eq!(abi_one & syscalls::LANDLOCK_ACCESS_FS_TRUNCATE, 0);
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn manifest_mode_requires_the_stable_abi_three_baseline() {
+    for abi in [1, 2] {
+      let error = resolve_landlock_access(RuntimeLandlockMode::Manifest, abi)
+        .expect_err("older ABIs must not silently weaken manifest mode");
+      assert!(
+        error
+          .to_string()
+          .contains("manifest_landlock_abi_insufficient")
+      );
+    }
+    let (requested, effective, unsupported) =
+      resolve_landlock_access(RuntimeLandlockMode::Manifest, 3).expect("ABI 3 baseline");
+    assert_eq!(requested, effective);
+    assert_eq!(unsupported, 0);
+
+    let (_, _, unsupported) = resolve_landlock_access(RuntimeLandlockMode::Enforce, 1)
+      .expect("manual mode retains its downgrade contract");
+    assert_ne!(unsupported, 0);
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn candidate_explicit_additions_preserve_read_and_write_authority() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let read = temp.path().join("read");
+    let write = temp.path().join("write");
+    std::fs::create_dir(&read).expect("create read directory");
+    std::fs::create_dir(&write).expect("create write directory");
+    let config = RuntimeLandlockConfig {
+      mode: RuntimeLandlockMode::Manifest,
+      read_paths: vec![read.clone()],
+      read_write_paths: vec![write.clone()],
+    };
+    let rules = project_explicit_landlock_additions(&config).expect("project additions");
+    let read_rule = rules
+      .iter()
+      .find(|rule| rule.path == read)
+      .expect("read rule");
+    assert!(
+      read_rule
+        .access
+        .contains(&LandlockFilesystemRight::ReadFile)
+    );
+    assert!(
+      !read_rule
+        .access
+        .contains(&LandlockFilesystemRight::WriteFile)
+    );
+    let write_rule = rules
+      .iter()
+      .find(|rule| rule.path == write)
+      .expect("write rule");
+    assert!(
+      write_rule
+        .access
+        .contains(&LandlockFilesystemRight::WriteFile)
+    );
+    assert!(write_rule.access.contains(&LandlockFilesystemRight::Refer));
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn secure_landlock_open_rejects_symlink_components() {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let actual = temp.path().join("actual");
+    std::fs::create_dir(&actual).expect("create actual directory");
+    std::fs::write(actual.join("policy"), b"fixture").expect("write fixture");
+    let linked = temp.path().join("linked");
+    symlink(&actual, &linked).expect("create intermediate symlink");
+
+    let root = open_landlock_root().expect("open filesystem root");
+    let error = open_landlock_path(root.as_fd(), &linked.join("policy"))
+      .expect_err("secure rule installation must reject a symlink component");
+    assert!(
+      error
+        .to_string()
+        .contains("Too many levels of symbolic links")
+        || error.to_string().contains("ELOOP")
+    );
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn installed_exact_authority_rejects_same_path_inode_replacement() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("certificate.pem");
+    std::fs::write(&path, b"old").expect("write old file");
+    let metadata = std::fs::metadata(&path).expect("old metadata");
+    let authority = InstalledLandlockAuthority {
+      rules: vec![InstalledLandlockRule {
+        path: path.clone(),
+        access: vec![LandlockFilesystemRight::ReadFile],
+        scope: LandlockRuleScope::Exact,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+      }],
+      manifest_digest: Some(format!("sha256:{}", "b".repeat(64))),
+      policy_digest: format!("sha256:{}", "a".repeat(64)),
+    };
+    let projection = LandlockManifestProjection {
+      manifest_digest: format!("sha256:{}", "b".repeat(64)),
+      read_paths: vec![path.clone()],
+      read_write_paths: Vec::new(),
+      rules: vec![LandlockManifestRule {
+        path: path.clone(),
+        access: vec![LandlockFilesystemRight::ReadFile],
+      }],
+      read_only_rootfs: ReadOnlyRootfsCompatibility::Unknown,
+      parent_scope_representable: true,
+    };
+    assert_eq!(authority.uncovered_rule_count(&projection), 0);
+
+    let replacement = temp.path().join("replacement");
+    std::fs::write(&replacement, b"new").expect("write replacement");
+    std::fs::rename(&replacement, &path).expect("replace file atomically");
+    assert_eq!(authority.uncovered_rule_count(&projection), 1);
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn installed_descendant_authority_rejects_replaced_anchor() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let anchor = temp.path().join("cache");
+    std::fs::create_dir(&anchor).expect("create anchor");
+    let metadata = std::fs::metadata(&anchor).expect("anchor metadata");
+    let authority = InstalledLandlockAuthority {
+      rules: vec![InstalledLandlockRule {
+        path: anchor.clone(),
+        access: vec![LandlockFilesystemRight::ReadFile],
+        scope: LandlockRuleScope::Descendants,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+      }],
+      manifest_digest: Some(format!("sha256:{}", "d".repeat(64))),
+      policy_digest: format!("sha256:{}", "c".repeat(64)),
+    };
+    let projection = LandlockManifestProjection {
+      manifest_digest: format!("sha256:{}", "d".repeat(64)),
+      read_paths: vec![anchor.join("item")],
+      read_write_paths: Vec::new(),
+      rules: vec![LandlockManifestRule {
+        path: anchor.join("item"),
+        access: vec![LandlockFilesystemRight::ReadFile],
+      }],
+      read_only_rootfs: ReadOnlyRootfsCompatibility::Unknown,
+      parent_scope_representable: true,
+    };
+    assert_eq!(authority.uncovered_rule_count(&projection), 0);
+
+    std::fs::rename(&anchor, temp.path().join("old-cache")).expect("move old anchor");
+    std::fs::create_dir(&anchor).expect("replace anchor");
+    assert_eq!(authority.uncovered_rule_count(&projection), 1);
   }
 }

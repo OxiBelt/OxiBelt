@@ -68,8 +68,9 @@ pub(crate) use ocsp::OcspStapleRuntime;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
 #[cfg(feature = "admin-runtime")]
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;
+pub use redis_client::preload_native_redis_roots;
 pub(crate) use redis_client::{
-  RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config,
+  RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config, native_root_access_paths,
 };
 pub use resumption::{TlsResumptionState, TlsServerSessionStorageStats};
 use resumption::{

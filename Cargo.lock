@@ -3032,6 +3032,7 @@ dependencies = [
  "memchr",
  "nix",
  "online-dsl-forge",
+ "openssl-probe",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
  "pretty_assertions",

@@ -16,15 +16,16 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{
   BufferingMode, CacheStore, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, Config,
-  CrliteConfig, CrliteManagedStorage, CrliteMode,
+  CrliteConfig, CrliteManagedStorage, CrliteMode, RedisTrustStore, SharedStateBackendKind,
 };
 use crate::hardening::{
   LandlockFilesystemRight, LandlockManifestProjection, LandlockManifestRule,
   ReadOnlyRootfsCompatibility,
 };
 
-pub const FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const MAX_MANIFEST_ENTRIES: usize = 8_192;
+const MAX_FILESYSTEM_ACCESS_FINDINGS: usize = 256;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
 const MAX_MOUNTINFO_ENTRIES: usize = 4_096;
@@ -83,6 +84,9 @@ pub enum FilesystemAccessPurpose {
   RuntimeSocket,
   RuntimeState,
   ExternalServiceCredential,
+  SystemResolver,
+  PlatformObservation,
+  RuntimeDiagnostics,
   RuntimeData,
 }
 
@@ -151,6 +155,9 @@ impl FilesystemAccessEntry {
   }
 
   fn covers(&self, required: &Self) -> bool {
+    if required.requires_parent_write && !self.requires_parent_write {
+      return false;
+    }
     if !required
       .access
       .iter()
@@ -167,6 +174,62 @@ impl FilesystemAccessEntry {
       }
     }
   }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FilesystemAccessExpansionKind {
+  PathAdded,
+  RightsExpanded,
+  ScopeExpanded,
+  ParentWriteExpanded,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FilesystemAccessExpansion<'a> {
+  entry: &'a FilesystemAccessEntry,
+  kind: FilesystemAccessExpansionKind,
+}
+
+impl<'a> FilesystemAccessExpansion<'a> {
+  pub fn entry(self) -> &'a FilesystemAccessEntry {
+    self.entry
+  }
+
+  pub fn kind(self) -> FilesystemAccessExpansionKind {
+    self.kind
+  }
+}
+
+fn expansion_from_entries<'a>(
+  required: &'a FilesystemAccessEntry,
+  installed: &[FilesystemAccessEntry],
+) -> Option<FilesystemAccessExpansion<'a>> {
+  if installed.iter().any(|entry| entry.covers(required)) {
+    return None;
+  }
+  let mut same_path = installed.iter().filter(|entry| entry.path == required.path);
+  let kind = if required.requires_parent_write
+    && same_path.clone().any(|entry| !entry.requires_parent_write)
+  {
+    FilesystemAccessExpansionKind::ParentWriteExpanded
+  } else if same_path.clone().any(|entry| {
+    required
+      .access
+      .iter()
+      .any(|mode| !entry.access.contains(mode))
+  }) {
+    FilesystemAccessExpansionKind::RightsExpanded
+  } else if same_path.any(|entry| {
+    entry.scope == FilesystemPathScope::Exact && required.scope == FilesystemPathScope::Descendants
+  }) {
+    FilesystemAccessExpansionKind::ScopeExpanded
+  } else {
+    FilesystemAccessExpansionKind::PathAdded
+  };
+  Some(FilesystemAccessExpansion {
+    entry: required,
+    kind,
+  })
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -196,14 +259,14 @@ impl FilesystemAccessManifest {
   /// Returns entries whose access is not covered by `installed`.
   ///
   /// Purpose and source metadata are explanatory and do not affect containment.
-  pub fn access_expansion_from(
-    &self,
+  pub fn access_expansion_from<'a>(
+    &'a self,
     installed: &FilesystemAccessManifest,
-  ) -> Vec<&FilesystemAccessEntry> {
+  ) -> Vec<FilesystemAccessExpansion<'a>> {
     self
       .entries
       .iter()
-      .filter(|required| !installed.entries.iter().any(|entry| entry.covers(required)))
+      .filter_map(|required| expansion_from_entries(required, &installed.entries))
       .collect()
   }
 
@@ -219,7 +282,7 @@ impl FilesystemAccessManifest {
     installed: Option<&FilesystemAccessManifest>,
     explicit_read_paths: &[PathBuf],
     explicit_read_write_paths: &[PathBuf],
-  ) -> Vec<&'a FilesystemAccessEntry> {
+  ) -> Vec<FilesystemAccessExpansion<'a>> {
     let explicit_read_paths = explicit_read_paths
       .iter()
       .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
@@ -231,11 +294,11 @@ impl FilesystemAccessManifest {
     self
       .entries
       .iter()
-      .filter(|required| {
+      .filter_map(|required| {
         if installed
           .is_some_and(|installed| installed.entries.iter().any(|entry| entry.covers(required)))
         {
-          return false;
+          return None;
         }
         let covered_by = |roots: &[PathBuf]| {
           roots
@@ -243,10 +306,29 @@ impl FilesystemAccessManifest {
             .any(|root| required.path == *root || required.path.starts_with(root))
         };
         if required.requires_write() {
-          !covered_by(&explicit_read_write_paths)
+          if covered_by(&explicit_read_write_paths) {
+            return None;
+          }
         } else {
-          !covered_by(&explicit_read_paths) && !covered_by(&explicit_read_write_paths)
+          if covered_by(&explicit_read_paths) || covered_by(&explicit_read_write_paths) {
+            return None;
+          }
         }
+        let kind = installed
+          .and_then(|installed| {
+            expansion_from_entries(required, &installed.entries).map(|value| value.kind)
+          })
+          .unwrap_or_else(|| {
+            if required.requires_write() && covered_by(&explicit_read_paths) {
+              FilesystemAccessExpansionKind::RightsExpanded
+            } else {
+              FilesystemAccessExpansionKind::PathAdded
+            }
+          });
+        Some(FilesystemAccessExpansion {
+          entry: required,
+          kind,
+        })
       })
       .collect()
   }
@@ -260,9 +342,10 @@ impl FilesystemAccessManifest {
       .collect();
     FilesystemAccessManifestView {
       schema_version: self.schema_version,
-      manifest_digest: self.digest.clone(),
+      manifest_digest: show_paths.then(|| self.digest.clone()),
+      manifest_digest_withheld: !show_paths,
       paths_redacted: !show_paths,
-      normalization: "canonicalize_existing_components_v1",
+      normalization: "canonicalize_existing_components_preserve_proc_self_and_rotation_parent_v2",
       entries,
     }
   }
@@ -289,6 +372,9 @@ impl FilesystemAccessManifest {
       }
       if entry.requires_parent_write && !entry.path.exists() {
         parent_scope_representable = false;
+      }
+      if entry.optional && !entry.path.exists() {
+        continue;
       }
       let path = entry.path.clone();
       if entry.requires_write() {
@@ -336,7 +422,7 @@ impl FilesystemAccessManifest {
     let mounts = parsed_mounts
       .as_ref()
       .and_then(|result| result.as_ref().ok());
-    let mut findings = Vec::new();
+    let mut findings = FindingCollector::default();
 
     if let Some(Err(error)) = parsed_mounts.as_ref() {
       findings.push(FilesystemAccessFinding {
@@ -353,7 +439,7 @@ impl FilesystemAccessManifest {
       check_entry(entry, &path_ids, show_paths, mounts, &mut findings);
     }
     find_conflicts_and_redundancy(&self.entries, &path_ids, show_paths, &mut findings);
-    findings.sort_by(|left, right| {
+    findings.findings.sort_by(|left, right| {
       (
         left.severity,
         left.code,
@@ -374,21 +460,28 @@ impl FilesystemAccessManifest {
         .iter()
         .filter(|entry| entry.requires_write())
         .all(|entry| {
-          find_mount(entry.path(), mounts).is_some_and(|mount| mount.mount_point != Path::new("/"))
+          find_mount(entry.path(), mounts)
+            .is_some_and(|mount| mount.mount_point != Path::new("/") && !mount.read_only)
         })
     });
     let ok = !findings
+      .findings
       .iter()
       .any(|finding| finding.severity == FilesystemAccessFindingSeverity::Error);
+    let total_findings = findings.total;
+    let findings_truncated = total_findings > findings.findings.len();
 
     FilesystemAccessCheckReport {
       schema_version: self.schema_version,
-      manifest_digest: self.digest.clone(),
+      manifest_digest: show_paths.then(|| self.digest.clone()),
+      manifest_digest_withheld: !show_paths,
       paths_redacted: !show_paths,
       ok,
       read_only_rootfs_compatible,
       mountinfo_detected: mounts.is_some(),
-      findings,
+      total_findings: u32::try_from(total_findings).unwrap_or(u32::MAX),
+      findings_truncated,
+      findings: findings.findings,
     }
   }
 }
@@ -396,7 +489,9 @@ impl FilesystemAccessManifest {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct FilesystemAccessManifestView {
   pub schema_version: u32,
-  pub manifest_digest: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub manifest_digest: Option<String>,
+  pub manifest_digest_withheld: bool,
   pub paths_redacted: bool,
   pub normalization: &'static str,
   pub entries: Vec<FilesystemAccessEntryView>,
@@ -434,6 +529,7 @@ pub enum FilesystemAccessFindingCode {
   ParentMissing,
   ParentNotDirectory,
   ParentWriteDenied,
+  ParentScopeUnrepresentable,
   ReadOnlyMount,
   MountInfoUnavailable,
   ConflictingExpectation,
@@ -456,12 +552,31 @@ pub struct FilesystemAccessFinding {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct FilesystemAccessCheckReport {
   pub schema_version: u32,
-  pub manifest_digest: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub manifest_digest: Option<String>,
+  pub manifest_digest_withheld: bool,
   pub paths_redacted: bool,
   pub ok: bool,
   pub read_only_rootfs_compatible: Option<bool>,
   pub mountinfo_detected: bool,
+  pub total_findings: u32,
+  pub findings_truncated: bool,
   pub findings: Vec<FilesystemAccessFinding>,
+}
+
+#[derive(Debug, Default)]
+struct FindingCollector {
+  findings: Vec<FilesystemAccessFinding>,
+  total: usize,
+}
+
+impl FindingCollector {
+  fn push(&mut self, finding: FilesystemAccessFinding) {
+    self.total = self.total.saturating_add(1);
+    if self.findings.len() < MAX_FILESYSTEM_ACCESS_FINDINGS {
+      self.findings.push(finding);
+    }
+  }
 }
 
 impl FilesystemAccessCheckReport {
@@ -506,6 +621,7 @@ impl ManifestBuilder {
     builder.collect_sockets_and_generated_files(config)?;
     builder.collect_static_content(config)?;
     builder.collect_remaining_runtime_files(config)?;
+    builder.collect_intrinsic_runtime_reads(config)?;
     Ok(builder)
   }
 
@@ -596,15 +712,16 @@ impl ManifestBuilder {
       },
     )?;
     if rotation_parent {
-      let normalized = normalize_path(path, &self.cwd)?;
-      let parent = normalized.parent().ok_or_else(|| {
+      let logical = lexical_absolute_path(path, &self.cwd)?;
+      let logical_parent = logical.parent().ok_or_else(|| {
         anyhow!(
           "filesystem manifest path {} has no parent for rotation",
-          normalized.display()
+          logical.display()
         )
       })?;
+      let parent = normalize_path(logical_parent, &self.cwd)?;
       self.add(
-        parent,
+        &parent,
         ManifestEntrySpec {
           access: &[
             FilesystemAccessMode::ReadDirectory,
@@ -648,6 +765,49 @@ impl ManifestBuilder {
         scope: FilesystemPathScope::Descendants,
         requires_parent_write,
         optional: false,
+      },
+    )
+  }
+
+  fn add_optional_intrinsic_file(
+    &mut self,
+    path: &Path,
+    purpose: FilesystemAccessPurpose,
+    source: impl Into<String>,
+  ) -> anyhow::Result<()> {
+    self.add(
+      path,
+      ManifestEntrySpec {
+        access: &[FilesystemAccessMode::ReadFile],
+        purpose,
+        source_config_path: Some(source.into()),
+        expected_type: FilesystemPathType::RegularFile,
+        scope: FilesystemPathScope::Exact,
+        requires_parent_write: false,
+        optional: true,
+      },
+    )
+  }
+
+  fn add_optional_intrinsic_directory(
+    &mut self,
+    path: &Path,
+    purpose: FilesystemAccessPurpose,
+    source: impl Into<String>,
+  ) -> anyhow::Result<()> {
+    self.add(
+      path,
+      ManifestEntrySpec {
+        access: &[
+          FilesystemAccessMode::ReadDirectory,
+          FilesystemAccessMode::ReadFile,
+        ],
+        purpose,
+        source_config_path: Some(source.into()),
+        expected_type: FilesystemPathType::Directory,
+        scope: FilesystemPathScope::Descendants,
+        requires_parent_write: false,
+        optional: true,
       },
     )
   }
@@ -1109,6 +1269,136 @@ impl ManifestBuilder {
     }
     Ok(())
   }
+
+  fn collect_intrinsic_runtime_reads(&mut self, config: &Config) -> anyhow::Result<()> {
+    if !cfg!(target_os = "linux") {
+      return Ok(());
+    }
+
+    for (path, source) in [
+      ("/etc/resolv.conf", "runtime.system_resolver.resolv_conf"),
+      ("/etc/hosts", "runtime.system_resolver.hosts"),
+    ] {
+      self.add_optional_intrinsic_file(
+        Path::new(path),
+        FilesystemAccessPurpose::SystemResolver,
+        source,
+      )?;
+    }
+
+    for (path, source) in [
+      ("/proc/self/status", "runtime.platform.process_status"),
+      ("/proc/self/limits", "runtime.platform.process_limits"),
+      ("/proc/self/mountinfo", "runtime.platform.mountinfo"),
+      ("/proc/self/cgroup", "runtime.platform.cgroup_membership"),
+    ] {
+      self.add_optional_intrinsic_file(
+        Path::new(path),
+        FilesystemAccessPurpose::PlatformObservation,
+        source,
+      )?;
+    }
+    if config.overload.enabled
+      || config.circuit_breakers.enabled
+      || config.cache.enabled
+      || config.admin.enabled
+      || config
+        .routes
+        .iter()
+        .any(|route| route.static_root.is_some())
+    {
+      self.add_optional_intrinsic_directory(
+        Path::new("/proc/self/fd"),
+        FilesystemAccessPurpose::PlatformObservation,
+        "runtime.platform.open_file_descriptors",
+      )?;
+      for (path, source) in [
+        ("/proc/meminfo", "runtime.platform.host_memory"),
+        (
+          "/sys/fs/cgroup/memory.current",
+          "runtime.platform.cgroup_memory_current",
+        ),
+        (
+          "/sys/fs/cgroup/memory.max",
+          "runtime.platform.cgroup_memory_max",
+        ),
+        (
+          "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+          "runtime.platform.cgroup_v1_memory_limit",
+        ),
+        (
+          "/sys/fs/cgroup/cpu.stat",
+          "runtime.platform.cgroup_cpu_stat",
+        ),
+        ("/sys/fs/cgroup/cpu.max", "runtime.platform.cgroup_cpu_max"),
+        (
+          "/sys/fs/cgroup/cpuset.cpus.effective",
+          "runtime.platform.cgroup_cpuset",
+        ),
+      ] {
+        self.add_optional_intrinsic_file(
+          Path::new(path),
+          FilesystemAccessPurpose::PlatformObservation,
+          source,
+        )?;
+      }
+    }
+
+    for path in [
+      "/proc/sys/net/core/somaxconn",
+      "/proc/sys/net/ipv4/ip_local_port_range",
+      "/proc/sys/net/core/rmem_max",
+      "/proc/sys/net/core/wmem_max",
+      "/proc/sys/net/netfilter/nf_conntrack_max",
+      "/proc/cpuinfo",
+    ] {
+      self.add_optional_intrinsic_file(
+        Path::new(path),
+        FilesystemAccessPurpose::RuntimeDiagnostics,
+        format!(
+          "runtime.diagnostics.platform.{}",
+          path.trim_start_matches('/').replace('/', ".")
+        ),
+      )?;
+    }
+
+    if config.shared_state.enabled {
+      for (index, backend) in config.shared_state.backends.iter().enumerate() {
+        if backend.kind != SharedStateBackendKind::Redis
+          || backend.redis_tls.trust_store != RedisTrustStore::Native
+        {
+          continue;
+        }
+        let source = format!("shared_state.backends[{index}].redis_tls.trust_store");
+        for path in crate::tls::native_root_access_paths() {
+          if path.is_dir() {
+            self.add(
+              &path,
+              ManifestEntrySpec {
+                access: &[
+                  FilesystemAccessMode::ReadDirectory,
+                  FilesystemAccessMode::ReadFile,
+                ],
+                purpose: FilesystemAccessPurpose::TlsTrustStore,
+                source_config_path: Some(source.clone()),
+                expected_type: FilesystemPathType::Directory,
+                scope: FilesystemPathScope::Descendants,
+                requires_parent_write: false,
+                optional: true,
+              },
+            )?;
+          } else {
+            self.add_optional_intrinsic_file(
+              &path,
+              FilesystemAccessPurpose::TlsTrustStore,
+              source.clone(),
+            )?;
+          }
+        }
+      }
+    }
+    Ok(())
+  }
 }
 
 fn landlock_rights_for_entry(entry: &FilesystemAccessEntry) -> BTreeSet<LandlockFilesystemRight> {
@@ -1181,6 +1471,11 @@ fn normalize_path(path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
   } else {
     cwd.join(path)
   };
+  // `/proc/self` is a kernel-provided process-relative identity. Canonicalizing
+  // it would bake the current PID into the otherwise deterministic manifest.
+  if absolute.starts_with("/proc/self") {
+    return Ok(absolute);
+  }
   if let Ok(canonical) = absolute.canonicalize() {
     return Ok(canonical);
   }
@@ -1228,9 +1523,38 @@ fn normalize_path(path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
   }
 }
 
+fn lexical_absolute_path(path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
+  use std::path::Component;
+
+  let absolute = if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    cwd.join(path)
+  };
+  let mut normalized = PathBuf::new();
+  for component in absolute.components() {
+    match component {
+      Component::RootDir => normalized.push(Path::new("/")),
+      Component::CurDir => {}
+      Component::Normal(component) => normalized.push(component),
+      Component::ParentDir => {
+        bail!(
+          "filesystem rotation path {} must not contain parent traversal",
+          path.display()
+        )
+      }
+      Component::Prefix(_) => bail!("filesystem rotation paths must use Unix path syntax"),
+    }
+  }
+  if !normalized.is_absolute() {
+    bail!("filesystem rotation path must resolve to an absolute path");
+  }
+  Ok(normalized)
+}
+
 fn manifest_digest(entries: &[FilesystemAccessEntry]) -> String {
   let mut hasher = Sha256::new();
-  digest_part(&mut hasher, b"oxibelt-filesystem-access-manifest-v1");
+  digest_part(&mut hasher, b"oxibelt-filesystem-access-manifest-v2");
   digest_part(
     &mut hasher,
     &FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION.to_be_bytes(),
@@ -1396,7 +1720,7 @@ fn check_entry(
   path_ids: &BTreeMap<PathBuf, String>,
   show_paths: bool,
   mounts: Option<&Vec<MountInfo>>,
-  findings: &mut Vec<FilesystemAccessFinding>,
+  findings: &mut FindingCollector,
 ) {
   let path_id = path_ids.get(&entry.path).cloned();
   let visible_path = show_paths.then(|| display_path(&entry.path));
@@ -1412,11 +1736,19 @@ fn check_entry(
   let metadata = match fs::metadata(&entry.path) {
     Ok(metadata) => Some(metadata),
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-      if !entry.optional && !entry.requires_parent_write {
+      if !entry.optional {
         findings.push(finding(
           FilesystemAccessFindingSeverity::Error,
-          FilesystemAccessFindingCode::PathMissing,
-          "required path does not exist".to_string(),
+          if entry.requires_parent_write {
+            FilesystemAccessFindingCode::ParentScopeUnrepresentable
+          } else {
+            FilesystemAccessFindingCode::PathMissing
+          },
+          if entry.requires_parent_write {
+            "required write root must be pre-created before manifest-mode confinement".to_string()
+          } else {
+            "required path does not exist".to_string()
+          },
         ));
       }
       None
@@ -1444,7 +1776,7 @@ fn check_entry(
         format!("expected {:?}", entry.expected_type),
       ));
     }
-    if entry.access.iter().any(|mode| mode.requires_read()) {
+    if matches_type && entry.access.iter().any(|mode| mode.requires_read()) {
       let readable = match entry.expected_type {
         FilesystemPathType::RegularFile => File::open(&entry.path).is_ok(),
         FilesystemPathType::Directory => fs::read_dir(&entry.path).is_ok(),
@@ -1515,30 +1847,48 @@ fn find_conflicts_and_redundancy(
   entries: &[FilesystemAccessEntry],
   path_ids: &BTreeMap<PathBuf, String>,
   show_paths: bool,
-  findings: &mut Vec<FilesystemAccessFinding>,
+  findings: &mut FindingCollector,
 ) {
-  for (index, entry) in entries.iter().enumerate() {
-    for other in entries.iter().skip(index + 1) {
-      if entry.path == other.path && entry.expected_type != other.expected_type {
-        findings.push(FilesystemAccessFinding {
-          severity: FilesystemAccessFindingSeverity::Error,
-          code: FilesystemAccessFindingCode::ConflictingExpectation,
-          path_id: path_ids.get(&entry.path).cloned(),
-          path: show_paths.then(|| display_path(&entry.path)),
-          source_config_path: entry.source_config_path.clone(),
-          detail: "the same normalized path has conflicting type expectations".to_string(),
-        });
-      }
-      if entry.path != other.path && entry.covers(other) {
+  let mut entries_by_path = BTreeMap::<&Path, Vec<&FilesystemAccessEntry>>::new();
+  for entry in entries {
+    entries_by_path.entry(&entry.path).or_default().push(entry);
+  }
+
+  for (path, same_path_entries) in &entries_by_path {
+    let expected_types = same_path_entries
+      .iter()
+      .map(|entry| entry.expected_type)
+      .collect::<BTreeSet<_>>();
+    if expected_types.len() > 1 {
+      let entry = same_path_entries[0];
+      findings.push(FilesystemAccessFinding {
+        severity: FilesystemAccessFindingSeverity::Error,
+        code: FilesystemAccessFindingCode::ConflictingExpectation,
+        path_id: path_ids.get(*path).cloned(),
+        path: show_paths.then(|| display_path(path)),
+        source_config_path: entry.source_config_path.clone(),
+        detail: "the same normalized path has conflicting type expectations".to_string(),
+      });
+    }
+  }
+
+  for entry in entries {
+    let mut ancestor = entry.path.parent();
+    while let Some(path) = ancestor {
+      if let Some(broader_entries) = entries_by_path.get(path)
+        && broader_entries.iter().any(|broader| broader.covers(entry))
+      {
         findings.push(FilesystemAccessFinding {
           severity: FilesystemAccessFindingSeverity::Warning,
           code: FilesystemAccessFindingCode::RedundantBroaderAccess,
-          path_id: path_ids.get(&other.path).cloned(),
-          path: show_paths.then(|| display_path(&other.path)),
-          source_config_path: other.source_config_path.clone(),
+          path_id: path_ids.get(&entry.path).cloned(),
+          path: show_paths.then(|| display_path(&entry.path)),
+          source_config_path: entry.source_config_path.clone(),
           detail: "a broader manifest entry already covers this access".to_string(),
         });
+        break;
       }
+      ancestor = path.parent();
     }
   }
 }
@@ -1905,6 +2255,66 @@ location_template = "/fixture"
   }
 
   #[test]
+  fn kubernetes_secret_symlink_rotation_stays_within_the_logical_parent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let secret = temp.path().join("secret");
+    let first = secret.join("..2026_01");
+    let second = secret.join("..2026_02");
+    fs::create_dir_all(&first).expect("create first secret version");
+    fs::create_dir_all(&second).expect("create second secret version");
+    fs::write(first.join("tls.crt"), b"first").expect("write first certificate");
+    fs::write(second.join("tls.crt"), b"second").expect("write second certificate");
+    symlink("..2026_01", secret.join("..data")).expect("create data link");
+    symlink("..data/tls.crt", secret.join("tls.crt")).expect("create certificate link");
+
+    let build = || {
+      let mut builder = ManifestBuilder {
+        entries: Vec::new(),
+        precise_read_paths: BTreeSet::new(),
+        cwd: temp.path().to_path_buf(),
+      };
+      builder
+        .add_read_file(
+          &secret.join("tls.crt"),
+          FilesystemAccessPurpose::TlsCertificate,
+          "tls.cert_chain",
+          true,
+        )
+        .expect("build rotation manifest");
+      builder.finish().expect("finish rotation manifest")
+    };
+    let installed = build();
+    assert!(
+      installed
+        .entries
+        .iter()
+        .any(|entry| { entry.path == secret && entry.scope == FilesystemPathScope::Descendants })
+    );
+
+    symlink("..2026_02", secret.join("..data.next")).expect("create replacement data link");
+    fs::rename(secret.join("..data.next"), secret.join("..data"))
+      .expect("rotate data link atomically");
+    let rotated = build();
+    assert!(rotated.access_is_subset_of(&installed));
+
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).expect("create outside directory");
+    fs::write(outside.join("tls.crt"), b"outside").expect("write outside certificate");
+    symlink("../outside", secret.join("..data.next")).expect("create escaping data link");
+    fs::rename(secret.join("..data.next"), secret.join("..data"))
+      .expect("replace data link with escape");
+    let escaped = build();
+    assert!(!escaped.access_is_subset_of(&installed));
+  }
+
+  #[test]
+  fn rotation_paths_reject_parent_traversal() {
+    let error = lexical_absolute_path(Path::new("certs/../tls.crt"), Path::new("/etc/oxibelt"))
+      .expect_err("rotation anchors must not contain parent traversal");
+    assert!(error.to_string().contains("parent traversal"));
+  }
+
+  #[test]
   fn empty_paths_are_rejected() {
     let error = normalize_path(Path::new(""), Path::new("/")).expect_err("empty path");
     assert!(error.to_string().contains("must not be empty"));
@@ -1938,8 +2348,11 @@ location_template = "/fixture"
     let full = serde_json::to_string(&manifest.view(true)).expect("serialize full");
 
     assert!(!redacted.contains("private.pem"));
+    assert!(!redacted.contains(manifest.digest()));
+    assert!(redacted.contains("\"manifest_digest_withheld\":true"));
     assert!(redacted.contains("path-0001"));
     assert!(full.contains("/sensitive/private.pem"));
+    assert!(full.contains(manifest.digest()));
     assert_eq!(manifest.view(false), manifest.view(false));
   }
 
@@ -1972,6 +2385,21 @@ location_template = "/fixture"
       &[FilesystemAccessMode::ReadFile],
     );
     assert!(installed.covers(&required));
+  }
+
+  #[test]
+  fn parent_write_semantics_are_not_covered_by_path_rights_alone() {
+    let installed = entry(
+      Path::new("/var/lib/oxibelt/audit"),
+      &[FilesystemAccessMode::WriteFile],
+    );
+    let mut required = installed.clone();
+    required.requires_parent_write = true;
+    let expansion = expansion_from_entries(&required, &[installed]).expect("parent expansion");
+    assert_eq!(
+      expansion.kind(),
+      FilesystemAccessExpansionKind::ParentWriteExpanded
+    );
   }
 
   #[test]
@@ -2145,6 +2573,110 @@ location_template = "/fixture"
         .findings
         .iter()
         .any(|finding| finding.code == FilesystemAccessFindingCode::PathMissing)
+    );
+  }
+
+  #[test]
+  fn missing_parent_write_root_is_consistently_unrepresentable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("audit");
+    let entries = vec![FilesystemAccessEntry {
+      path: missing,
+      access: vec![FilesystemAccessMode::CreateFile],
+      purpose: FilesystemAccessPurpose::AuditSpool,
+      source_config_path: Some("admin.audit.spool.directory".to_string()),
+      expected_type: FilesystemPathType::Directory,
+      scope: FilesystemPathScope::Descendants,
+      requires_parent_write: true,
+      optional: false,
+    }];
+    let manifest = FilesystemAccessManifest {
+      schema_version: FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION,
+      digest: manifest_digest(&entries),
+      entries,
+    };
+
+    let report = manifest.check(false, Some("1 0 0:1 / / rw - rootfs rootfs rw\n"));
+    assert!(report.has_errors());
+    assert!(
+      report
+        .findings
+        .iter()
+        .any(|finding| { finding.code == FilesystemAccessFindingCode::ParentScopeUnrepresentable })
+    );
+    assert!(!manifest.landlock_projection().parent_scope_representable);
+  }
+
+  #[test]
+  fn read_only_root_compatibility_rejects_read_only_child_mounts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let entries = vec![FilesystemAccessEntry {
+      path: temp.path().to_path_buf(),
+      access: vec![FilesystemAccessMode::WriteFile],
+      purpose: FilesystemAccessPurpose::RuntimeState,
+      source_config_path: Some("runtime.state".to_string()),
+      expected_type: FilesystemPathType::Directory,
+      scope: FilesystemPathScope::Descendants,
+      requires_parent_write: false,
+      optional: false,
+    }];
+    let manifest = FilesystemAccessManifest {
+      schema_version: FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION,
+      digest: manifest_digest(&entries),
+      entries,
+    };
+    let mountinfo = format!(
+      "1 0 0:1 / / rw - rootfs rootfs rw\n2 1 0:2 / {} ro - tmpfs tmpfs ro\n",
+      temp.path().display()
+    );
+    let report = manifest.check(false, Some(&mountinfo));
+    assert_eq!(report.read_only_rootfs_compatible, Some(false));
+  }
+
+  #[test]
+  fn optional_missing_paths_are_not_projected_as_landlock_rules() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut optional = entry(
+      &temp.path().join("missing-platform-file"),
+      &[FilesystemAccessMode::ReadFile],
+    );
+    optional.optional = true;
+    let entries = vec![optional];
+    let manifest = FilesystemAccessManifest {
+      schema_version: FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION,
+      digest: manifest_digest(&entries),
+      entries,
+    };
+    assert!(manifest.landlock_projection().rules.is_empty());
+  }
+
+  #[test]
+  fn findings_are_bounded_and_report_truncation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let entries = (0..(MAX_FILESYSTEM_ACCESS_FINDINGS + 32))
+      .map(|index| {
+        entry(
+          &temp.path().join(format!("missing-{index}")),
+          &[FilesystemAccessMode::ReadFile],
+        )
+      })
+      .collect::<Vec<_>>();
+    let manifest = FilesystemAccessManifest {
+      schema_version: FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION,
+      digest: manifest_digest(&entries),
+      entries,
+    };
+    let report = manifest.check(false, Some("1 0 0:1 / / rw - rootfs rootfs rw\n"));
+    assert_eq!(report.findings.len(), MAX_FILESYSTEM_ACCESS_FINDINGS);
+    assert!(report.findings_truncated);
+    assert!(report.total_findings as usize > report.findings.len());
+  }
+
+  #[test]
+  fn proc_self_paths_remain_process_independent_in_the_manifest() {
+    assert_eq!(
+      normalize_path(Path::new("/proc/self/status"), Path::new("/")).expect("normalize proc path"),
+      Path::new("/proc/self/status")
     );
   }
 }

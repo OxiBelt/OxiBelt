@@ -2358,7 +2358,14 @@
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Redacted support bundle with typed hardening evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportBundleRedacted"
+                }
+              }
+            }
           },
           "202": {
             "$ref": "#/components/responses/AdminOperationAccepted"
@@ -2389,7 +2396,14 @@
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Redacted runtime snapshot with typed hardening evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSnapshotRedacted"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2417,7 +2431,14 @@
         ],
         "responses": {
           "200": {
-            "$ref": "#/components/responses/JsonObject"
+            "description": "Redacted runtime introspection with typed hardening evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeIntrospectionRedacted"
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -8094,6 +8115,363 @@
           "process_restart"
         ]
       },
+      "RuntimeSnapshotRedacted": {
+        "type": "object",
+        "required": [
+          "hardening"
+        ],
+        "properties": {
+          "hardening": {
+            "$ref": "#/components/schemas/RuntimeHardeningSnapshot"
+          }
+        },
+        "additionalProperties": true
+      },
+      "RuntimeIntrospectionRedacted": {
+        "type": "object",
+        "required": [
+          "runtime"
+        ],
+        "properties": {
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeSnapshotRedacted"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SupportBundleRedacted": {
+        "type": "object",
+        "required": [
+          "runtime_snapshot"
+        ],
+        "properties": {
+          "runtime_snapshot": {
+            "$ref": "#/components/schemas/RuntimeSnapshotRedacted"
+          }
+        },
+        "additionalProperties": true
+      },
+      "RuntimeHardeningSnapshot": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "outcome",
+          "close_range",
+          "landlock",
+          "seccomp",
+          "filesystem_manifest_digest_withheld",
+          "read_only_rootfs",
+          "degraded_reasons",
+          "blocking_reasons"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 2
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "satisfied",
+              "degraded",
+              "blocked"
+            ]
+          },
+          "close_range": {
+            "$ref": "#/components/schemas/RuntimeHardeningCloseRange"
+          },
+          "landlock": {
+            "$ref": "#/components/schemas/RuntimeHardeningLandlock"
+          },
+          "seccomp": {
+            "$ref": "#/components/schemas/RuntimeHardeningSeccomp"
+          },
+          "filesystem_manifest_digest_withheld": {
+            "type": "boolean"
+          },
+          "read_only_rootfs": {
+            "$ref": "#/components/schemas/RuntimeHardeningReadOnlyRootfs"
+          },
+          "degraded_reasons": {
+            "$ref": "#/components/schemas/RuntimeHardeningReasons"
+          },
+          "blocking_reasons": {
+            "$ref": "#/components/schemas/RuntimeHardeningReasons"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeHardeningCloseRange": {
+        "type": "object",
+        "required": [
+          "requested",
+          "effective"
+        ],
+        "properties": {
+          "requested": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "off",
+              "required"
+            ]
+          },
+          "effective": {
+            "type": "string",
+            "enum": [
+              "off",
+              "applied",
+              "unavailable"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeHardeningLandlock": {
+        "type": "object",
+        "required": [
+          "requested_mode",
+          "enforcement",
+          "requested_rights",
+          "effective_rights",
+          "unsupported_rights",
+          "rule_count",
+          "effective_rules",
+          "effective_rules_truncated",
+          "manifest_digest_withheld",
+          "policy_digest_withheld"
+        ],
+        "properties": {
+          "requested_mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "enforce",
+              "manifest"
+            ]
+          },
+          "enforcement": {
+            "type": "string",
+            "enum": [
+              "off",
+              "active"
+            ]
+          },
+          "requested_abi": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "kernel_abi": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "effective_abi": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "requested_rights": {
+            "$ref": "#/components/schemas/RuntimeHardeningLandlockRights"
+          },
+          "effective_rights": {
+            "$ref": "#/components/schemas/RuntimeHardeningLandlockRights"
+          },
+          "unsupported_rights": {
+            "$ref": "#/components/schemas/RuntimeHardeningLandlockRights"
+          },
+          "rule_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8192
+          },
+          "effective_rules": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/RuntimeHardeningLandlockRule"
+            }
+          },
+          "effective_rules_truncated": {
+            "type": "boolean"
+          },
+          "manifest_digest_withheld": {
+            "type": "boolean"
+          },
+          "policy_digest_withheld": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeHardeningLandlockRights": {
+        "type": "array",
+        "maxItems": 15,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "enum": [
+            "execute",
+            "write_file",
+            "read_file",
+            "read_dir",
+            "remove_dir",
+            "remove_file",
+            "make_char",
+            "make_dir",
+            "make_reg",
+            "make_sock",
+            "make_fifo",
+            "make_block",
+            "make_sym",
+            "refer",
+            "truncate"
+          ]
+        }
+      },
+      "RuntimeHardeningLandlockRule": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "access",
+          "scope"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "pattern": "^rule-[0-9]{4}$"
+          },
+          "access": {
+            "$ref": "#/components/schemas/RuntimeHardeningLandlockRights"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "descendants"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeHardeningSeccomp": {
+        "type": "object",
+        "required": [
+          "expectation",
+          "evidence",
+          "observed_mode",
+          "no_new_privs",
+          "verification",
+          "profile_identity_kernel_verified",
+          "reasons"
+        ],
+        "properties": {
+          "expectation": {
+            "type": "string",
+            "enum": [
+              "off",
+              "optional",
+              "required"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "enum": [
+              "observed",
+              "unavailable",
+              "malformed"
+            ]
+          },
+          "observed_mode": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "strict",
+              "filter",
+              "unknown"
+            ]
+          },
+          "no_new_privs": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "enabled",
+              "unknown"
+            ]
+          },
+          "seccomp_filters": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "verification": {
+            "type": "string",
+            "enum": [
+              "not_required",
+              "satisfied",
+              "degraded",
+              "blocked"
+            ]
+          },
+          "expected_profile_identity": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "expected_profile_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "asserted_profile_identity": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "asserted_profile_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "assertion_basis": {
+            "type": "string",
+            "const": "external_assertion"
+          },
+          "profile_assertions_match": {
+            "type": "boolean"
+          },
+          "profile_identity_kernel_verified": {
+            "type": "boolean",
+            "const": false
+          },
+          "reasons": {
+            "$ref": "#/components/schemas/RuntimeHardeningReasons"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuntimeHardeningReadOnlyRootfs": {
+        "type": "string",
+        "enum": [
+          "compatible",
+          "incompatible",
+          "unknown"
+        ]
+      },
+      "RuntimeHardeningReasons": {
+        "type": "array",
+        "maxItems": 16,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "enum": [
+            "close_range_unavailable",
+            "landlock_rights_downgraded",
+            "process_status_unavailable",
+            "process_status_malformed",
+            "seccomp_filter_not_active",
+            "no_new_privileges_not_active",
+            "profile_assertion_unavailable",
+            "profile_assertion_malformed",
+            "profile_identity_mismatch",
+            "profile_digest_mismatch",
+            "read_only_rootfs_incompatible"
+          ]
+        }
+      },
       "ConfigActivationConfinementPlan": {
         "type": "object",
         "required": [
@@ -8103,6 +8481,7 @@
           "mount_policy",
           "requires_policy_expansion",
           "restart_required",
+          "digests_withheld",
           "differences",
           "differences_truncated",
           "missing_prerequisites"
@@ -8126,17 +8505,9 @@
           "restart_required": {
             "type": "boolean"
           },
-          "active_policy_digest": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          },
-          "current_manifest_digest": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
-          },
-          "candidate_manifest_digest": {
-            "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
+          "digests_withheld": {
+            "type": "boolean",
+            "description": "True when stable policy and manifest digests are withheld because they encode redacted filesystem paths."
           },
           "differences": {
             "type": "array",
@@ -8167,25 +8538,53 @@
           "unknown"
         ]
       },
-      "ConfigActivationConfinementDifferenceKind": {
+      "ConfigActivationFilesystemDifferenceKind": {
         "type": "string",
         "enum": [
           "path_added",
           "rights_expanded",
           "scope_expanded",
+          "parent_access_expanded",
+          "identity_changed",
           "path_unavailable",
+          "access_unavailable",
           "type_mismatch",
-          "mount_unavailable",
-          "seccomp_assertion_mismatch"
+          "parent_unavailable",
+          "parent_type_mismatch",
+          "parent_access_unavailable",
+          "parent_scope_unrepresentable",
+          "mount_unavailable"
         ]
       },
       "ConfigActivationConfinementDifference": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ConfigActivationFilesystemDifference"
+          },
+          {
+            "$ref": "#/components/schemas/ConfigActivationSeccompDifference"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "subject",
+          "mapping": {
+            "filesystem": "#/components/schemas/ConfigActivationFilesystemDifference",
+            "seccomp": "#/components/schemas/ConfigActivationSeccompDifference"
+          }
+        }
+      },
+      "ConfigActivationFilesystemDifference": {
         "type": "object",
         "required": [
+          "subject",
           "path_id",
           "kind"
         ],
         "properties": {
+          "subject": {
+            "type": "string",
+            "const": "filesystem"
+          },
           "path_id": {
             "type": "string",
             "pattern": "^path-[0-9]{4}$"
@@ -8195,7 +8594,34 @@
             "maxLength": 1024
           },
           "kind": {
-            "$ref": "#/components/schemas/ConfigActivationConfinementDifferenceKind"
+            "$ref": "#/components/schemas/ConfigActivationFilesystemDifferenceKind"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConfigActivationSeccompDifference": {
+        "type": "object",
+        "required": [
+          "subject",
+          "assertion_id",
+          "kind"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "const": "seccomp"
+          },
+          "assertion_id": {
+            "type": "string",
+            "enum": [
+              "expectation",
+              "profile_identity",
+              "profile_digest"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "const": "seccomp_assertion_mismatch"
           }
         },
         "additionalProperties": false
@@ -8338,7 +8764,7 @@
         "properties": {
           "activation_plan_schema_version": {
             "type": "integer",
-            "const": 2
+            "const": 3
           },
           "native_schema_epoch": {
             "type": "integer",
@@ -8440,18 +8866,18 @@
                 "type": "object",
                 "required": [
                   "schema_version",
-                  "manifest_digest",
+                  "manifest_digest_withheld",
                   "entry_count",
                   "paths_redacted"
                 ],
                 "properties": {
                   "schema_version": {
                     "type": "integer",
-                    "const": 1
+                    "const": 2
                   },
-                  "manifest_digest": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$"
+                  "manifest_digest_withheld": {
+                    "type": "boolean",
+                    "const": true
                   },
                   "entry_count": {
                     "type": "integer",

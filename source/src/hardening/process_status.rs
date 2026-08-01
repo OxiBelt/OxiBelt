@@ -1,7 +1,6 @@
 //! Safe parsing and injection boundary for Linux process-hardening evidence.
 
 use std::fmt;
-use std::fs;
 use std::io;
 
 use serde::{Deserialize, Serialize};
@@ -44,7 +43,7 @@ pub struct ProcSelfStatusSource;
 
 impl ProcessStatusSource for ProcSelfStatusSource {
   fn read_process_status(&self) -> io::Result<String> {
-    fs::read_to_string("/proc/self/status")
+    crate::platform_fs::read_to_string("/proc/self/status")
   }
 }
 

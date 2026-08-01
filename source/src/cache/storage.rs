@@ -177,7 +177,7 @@ pub fn detect_memory_limit_bytes() -> Option<u64> {
     "/sys/fs/cgroup/memory.max",
     "/sys/fs/cgroup/memory/memory.limit_in_bytes",
   ] {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    let Ok(raw) = crate::platform_fs::read_to_string(path) else {
       continue;
     };
     let raw = raw.trim();
@@ -191,7 +191,7 @@ pub fn detect_memory_limit_bytes() -> Option<u64> {
       return Some(value);
     }
   }
-  std::fs::read_to_string("/proc/meminfo")
+  crate::platform_fs::read_to_string("/proc/meminfo")
     .ok()
     .and_then(|raw| {
       raw.lines().find_map(|line| {

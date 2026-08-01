@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -348,10 +348,12 @@ fn connect_otlp_endpoint(
   endpoint: &OtlpHttpEndpoint,
   timeout: Duration,
 ) -> anyhow::Result<TcpStream> {
-  let addresses = (endpoint.host.as_str(), endpoint.port)
-    .to_socket_addrs()
-    .context("failed to resolve access_log.otlp.endpoint")?
-    .collect::<Vec<_>>();
+  let addresses = crate::upstream_resolution::resolve_socket_addrs_blocking(
+    &endpoint.host,
+    endpoint.port,
+    timeout,
+  )
+  .context("failed to resolve access_log.otlp.endpoint")?;
   if addresses.is_empty() {
     bail!("access_log.otlp.endpoint resolved no addresses");
   }

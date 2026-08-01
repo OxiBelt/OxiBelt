@@ -158,20 +158,40 @@ impl AppSnapshot {
       .context("failed to generate candidate filesystem-access manifest")?;
     let projection = candidate_manifest.landlock_projection();
     if self.hardening.landlock.enforcement == LandlockEnforcementState::Active {
-      let installed_manifest = (self.hardening.landlock.requested_mode
-        == crate::config::RuntimeLandlockMode::Manifest)
-        .then(|| FilesystemAccessManifest::from_config(&self.config))
-        .transpose()
-        .context("failed to reconstruct the active filesystem-access manifest")?;
-      let expansion = candidate_manifest.access_expansion_from_landlock(
-        installed_manifest.as_ref(),
-        &self.config.runtime.hardening.landlock.read_paths,
-        &self.config.runtime.hardening.landlock.read_write_paths,
-      );
-      if !expansion.is_empty() {
+      if !projection.parent_scope_representable {
+        anyhow::bail!(
+          "manifest_landlock_parent_scope_unrepresentable: candidate write roots must be pre-created before reload"
+        );
+      }
+      let installed_authority = self
+        .hardening
+        .landlock
+        .installed_authority
+        .as_ref()
+        .context(
+          "installed_landlock_authority_unavailable: active Landlock rules cannot be reconstructed safely; restart required",
+        )?;
+      if !installed_authority.has_valid_policy_evidence() {
+        anyhow::bail!(
+          "installed_landlock_authority_invalid: active Landlock evidence is incomplete; restart required"
+        );
+      }
+      let explicit_rules = crate::hardening::project_explicit_landlock_additions(
+        &candidate.runtime.hardening.landlock,
+      )
+      .context("failed to project candidate explicit Landlock additions")?;
+      let expansion_count = installed_authority
+        .uncovered_rule_count(&projection)
+        .saturating_add(
+          explicit_rules
+            .iter()
+            .filter(|rule| !installed_authority.covers_rule(rule))
+            .count(),
+        );
+      if expansion_count != 0 {
         anyhow::bail!(
           "filesystem_access_expansion: candidate manifest requires {} path policies outside active Landlock rules; restart required",
-          expansion.len()
+          expansion_count
         );
       }
     }
