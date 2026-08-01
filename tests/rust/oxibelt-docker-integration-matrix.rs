@@ -15,7 +15,16 @@ struct DockerCase {
   needs: Needs,
   root_netport_switcher: bool,
   hardened_runtime: bool,
+  seccomp_profile: SeccompProfile,
   failure_contains: Option<&'static str>,
+  failure_excludes: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum SeccompProfile {
+  RuntimeDefault,
+  Catalog(&'static str),
+  Unconfined,
 }
 
 struct BrowserScenario {
@@ -392,9 +401,26 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     "CASE_HARDENED_RUNTIME={}\n",
     bool_env(case.hardened_runtime)
   ));
+  let (seccomp_mode, seccomp_file) = match case.seccomp_profile {
+    SeccompProfile::RuntimeDefault => ("runtime_default", ""),
+    SeccompProfile::Catalog(file) => ("catalog", file),
+    SeccompProfile::Unconfined => ("unconfined", ""),
+  };
+  manifest.push_str(&format!(
+    "CASE_SECCOMP_PROFILE_MODE={}\n",
+    shell_quote(seccomp_mode)
+  ));
+  manifest.push_str(&format!(
+    "CASE_SECCOMP_PROFILE_FILE={}\n",
+    shell_quote(seccomp_file)
+  ));
   manifest.push_str(&format!(
     "CASE_EXPECT_FAILURE_CONTAINS={}\n",
     shell_quote(case.failure_contains.unwrap_or(""))
+  ));
+  manifest.push_str(&format!(
+    "CASE_EXPECT_FAILURE_EXCLUDES={}\n",
+    shell_quote(case.failure_excludes.unwrap_or(""))
   ));
   copy_case_fixture_tree(case, &output)?;
   write_file(&output, "manifest.env", &manifest)?;
@@ -645,7 +671,9 @@ fn docker_case(
     needs,
     root_netport_switcher: false,
     hardened_runtime: false,
+    seccomp_profile: SeccompProfile::RuntimeDefault,
     failure_contains,
+    failure_excludes: None,
   }
 }
 
@@ -656,6 +684,17 @@ fn root_netport_switcher_case(mut case: DockerCase) -> DockerCase {
 
 fn hardened_runtime_case(mut case: DockerCase) -> DockerCase {
   case.hardened_runtime = true;
+  case
+}
+
+fn catalog_seccomp_case(mut case: DockerCase, profile: &'static str) -> DockerCase {
+  case.seccomp_profile = SeccompProfile::Catalog(profile);
+  case
+}
+
+fn unconfined_pre_listener_case(mut case: DockerCase) -> DockerCase {
+  case.seccomp_profile = SeccompProfile::Unconfined;
+  case.failure_excludes = Some("resolved async runtime topology");
   case
 }
 

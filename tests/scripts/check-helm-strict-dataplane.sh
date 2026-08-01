@@ -12,6 +12,7 @@ strict_values="${chart_dir}/examples/strict-dataplane-values.yaml"
 secure_values="${chart_dir}/examples/edge-secure-medium-v1-values.yaml"
 seccomp_validator="${repo_root}/tests/scripts/check-seccomp-profile-contract.py"
 seccomp_validator_tests="${repo_root}/tests/scripts/test-check-seccomp-profile-contract.py"
+seccomp_catalog="${repo_root}/deploy/seccomp/profile-catalog-v1.json"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 
@@ -82,10 +83,28 @@ done
 [[ -f "${secure_values}" ]] || die "secure profile values are unavailable: ${secure_values}"
 [[ -f "${seccomp_validator}" ]] || die "seccomp profile validator is unavailable: ${seccomp_validator}"
 [[ -f "${seccomp_validator_tests}" ]] || die "seccomp profile validator tests are unavailable: ${seccomp_validator_tests}"
+[[ -f "${seccomp_catalog}" ]] || die "seccomp profile catalog is unavailable: ${seccomp_catalog}"
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-helm-strict-dataplane.XXXXXX")"
 
 python3 "${seccomp_validator}" >"${work_dir}/seccomp-profile-contract.log"
 python3 "${seccomp_validator_tests}" >"${work_dir}/seccomp-profile-contract-tests.log" 2>&1
+python3 - "${seccomp_catalog}" >"${work_dir}/catalog-profile-contract.txt" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+catalog = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+matches = [entry for entry in catalog["profiles"] if entry["file"] == "oxibelt-tokio.json"]
+if len(matches) != 1:
+    raise SystemExit("oxibelt-tokio.json must resolve exactly once in the profile catalog")
+print(matches[0]["identity"])
+print(matches[0]["digest"])
+PY
+mapfile -t catalog_profile_contract <"${work_dir}/catalog-profile-contract.txt"
+[[ "${#catalog_profile_contract[@]}" == "2" ]] \
+  || die "catalog profile lookup returned an invalid identity/digest contract"
+catalog_profile_identity="${catalog_profile_contract[0]}"
+catalog_profile_digest="${catalog_profile_contract[1]}"
 helm lint --strict "${chart_dir}" >"${work_dir}/lint-default.log"
 helm lint --strict "${chart_dir}" -f "${strict_values}" >"${work_dir}/lint-strict.log"
 
@@ -130,31 +149,37 @@ render strict_bounded_cache -f "${strict_values}" \
 assert_contains "${work_dir}/strict_bounded_cache.yaml" 'mountPath: /var/cache/oxibelt'
 assert_contains "${work_dir}/strict_bounded_cache.yaml" 'sizeLimit: "128Mi"'
 
-operator_profile_identity="operator-profile-v1"
-operator_profile_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 render strict_local_seccomp -f "${strict_values}" \
   --set-string podSecurityContext.seccompProfile.type=Localhost \
-  --set-string podSecurityContext.seccompProfile.localhostProfile=operator/profile-v1.json \
-  --set-string runtimeHardening.seccomp.externalProfile.identity="${operator_profile_identity}" \
-  --set-string runtimeHardening.seccomp.externalProfile.digest="${operator_profile_digest}"
+  --set-string podSecurityContext.seccompProfile.localhostProfile=oxibelt-tokio.json \
+  --set-string runtimeHardening.seccomp.externalProfile.identity="${catalog_profile_identity}" \
+  --set-string runtimeHardening.seccomp.externalProfile.digest="${catalog_profile_digest}"
 assert_contains "${work_dir}/strict_local_seccomp.yaml" 'type: Localhost'
-assert_contains "${work_dir}/strict_local_seccomp.yaml" 'localhostProfile: operator/profile-v1.json'
-assert_contains "${work_dir}/strict_local_seccomp.yaml" "profile_identity = \"${operator_profile_identity}\""
-assert_contains "${work_dir}/strict_local_seccomp.yaml" "profile_digest = \"${operator_profile_digest}\""
+assert_contains "${work_dir}/strict_local_seccomp.yaml" 'localhostProfile: oxibelt-tokio.json'
+assert_contains "${work_dir}/strict_local_seccomp.yaml" "profile_identity = \"${catalog_profile_identity}\""
+assert_contains "${work_dir}/strict_local_seccomp.yaml" "profile_digest = \"${catalog_profile_digest}\""
 assert_contains "${work_dir}/strict_local_seccomp.yaml" 'name: OXIBELT_SECCOMP_PROFILE_IDENTITY'
-assert_contains "${work_dir}/strict_local_seccomp.yaml" "value: \"${operator_profile_identity}\""
+assert_contains "${work_dir}/strict_local_seccomp.yaml" "fieldPath: \"metadata.annotations['oxibelt.dev/seccomp-profile-identity']\""
 assert_contains "${work_dir}/strict_local_seccomp.yaml" 'name: OXIBELT_SECCOMP_PROFILE_DIGEST'
-assert_contains "${work_dir}/strict_local_seccomp.yaml" "value: \"${operator_profile_digest}\""
+assert_contains "${work_dir}/strict_local_seccomp.yaml" "fieldPath: \"metadata.annotations['oxibelt.dev/seccomp-profile-digest']\""
+assert_not_contains "${work_dir}/strict_local_seccomp.yaml" '        oxibelt.dev/seccomp-profile-identity:'
+assert_not_contains "${work_dir}/strict_local_seccomp.yaml" '        oxibelt.dev/seccomp-profile-digest:'
+assert_not_contains "${work_dir}/strict_local_seccomp.yaml" "value: \"${catalog_profile_identity}\""
+assert_not_contains "${work_dir}/strict_local_seccomp.yaml" "value: \"${catalog_profile_digest}\""
 
 render strict_local_seccomp_daemonset -f "${strict_values}" \
   --set-string workload.kind=DaemonSet \
   --set-string podSecurityContext.seccompProfile.type=Localhost \
-  --set-string podSecurityContext.seccompProfile.localhostProfile=operator/profile-v1.json \
-  --set-string runtimeHardening.seccomp.externalProfile.identity="${operator_profile_identity}" \
-  --set-string runtimeHardening.seccomp.externalProfile.digest="${operator_profile_digest}"
+  --set-string podSecurityContext.seccompProfile.localhostProfile=oxibelt-tokio.json \
+  --set-string runtimeHardening.seccomp.externalProfile.identity="${catalog_profile_identity}" \
+  --set-string runtimeHardening.seccomp.externalProfile.digest="${catalog_profile_digest}"
 assert_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" 'kind: DaemonSet'
 assert_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" 'name: OXIBELT_SECCOMP_PROFILE_IDENTITY'
 assert_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" 'name: OXIBELT_SECCOMP_PROFILE_DIGEST'
+assert_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" "fieldPath: \"metadata.annotations['oxibelt.dev/seccomp-profile-identity']\""
+assert_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" "fieldPath: \"metadata.annotations['oxibelt.dev/seccomp-profile-digest']\""
+assert_not_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" '        oxibelt.dev/seccomp-profile-identity:'
+assert_not_contains "${work_dir}/strict_local_seccomp_daemonset.yaml" '        oxibelt.dev/seccomp-profile-digest:'
 
 render standalone --set-string image.role=standalone
 assert_contains "${work_dir}/standalone.yaml" 'image: "ghcr.io/oxibelt/oxibelt:latest"'
@@ -206,17 +231,23 @@ expect_failure unsafe_local_seccomp_path 'localhostProfile' \
   -f "${strict_values}" \
   --set-string podSecurityContext.seccompProfile.type=Localhost \
   --set-string podSecurityContext.seccompProfile.localhostProfile=../profile-v1.json \
-  --set-string runtimeHardening.seccomp.externalProfile.identity="${operator_profile_identity}" \
-  --set-string runtimeHardening.seccomp.externalProfile.digest="${operator_profile_digest}"
+  --set-string runtimeHardening.seccomp.externalProfile.identity="${catalog_profile_identity}" \
+  --set-string runtimeHardening.seccomp.externalProfile.digest="${catalog_profile_digest}"
 expect_failure runtime_default_identity 'RuntimeDefault has no stable semantic identity' \
   -f "${strict_values}" \
-  --set-string runtimeHardening.seccomp.externalProfile.identity="${operator_profile_identity}" \
-  --set-string runtimeHardening.seccomp.externalProfile.digest="${operator_profile_digest}"
+  --set-string runtimeHardening.seccomp.externalProfile.identity="${catalog_profile_identity}" \
+  --set-string runtimeHardening.seccomp.externalProfile.digest="${catalog_profile_digest}"
 expect_failure local_seccomp_partial_assertion 'identity and digest must be set together' \
   -f "${strict_values}" \
   --set-string podSecurityContext.seccompProfile.type=Localhost \
   --set-string podSecurityContext.seccompProfile.localhostProfile=operator/profile-v1.json \
-  --set-string runtimeHardening.seccomp.externalProfile.identity="${operator_profile_identity}"
+  --set-string runtimeHardening.seccomp.externalProfile.identity="${catalog_profile_identity}"
+expect_failure reserved_identity_annotation 'podAnnotations key oxibelt.dev/seccomp-profile-identity is reserved' \
+  -f "${strict_values}" \
+  --set-json 'podAnnotations={"oxibelt.dev/seccomp-profile-identity":"spoofed"}'
+expect_failure reserved_digest_annotation 'podAnnotations key oxibelt.dev/seccomp-profile-digest is reserved' \
+  -f "${strict_values}" \
+  --set-json 'podAnnotations={"oxibelt.dev/seccomp-profile-digest":"spoofed"}'
 expect_failure reserved_identity_env 'uses reserved hardening assertion variable OXIBELT_SECCOMP_PROFILE_IDENTITY' \
   --set-string extraEnv[0].name=OXIBELT_SECCOMP_PROFILE_IDENTITY \
   --set-string extraEnv[0].value=spoofed

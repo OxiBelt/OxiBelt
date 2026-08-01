@@ -71,6 +71,48 @@ class SeccompProfileContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("duplicate syscall names", result.stderr)
 
+    def test_runtime_profile_requires_landlock_setup_syscalls(self) -> None:
+        file_name = "oxibelt-tokio.json"
+        profile_path = self.seccomp_dir / file_name
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["syscalls"][0]["names"].remove("landlock_restrict_self")
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        self.update_catalog_digest(file_name)
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must allow Landlock setup syscalls", result.stderr)
+
+    def test_runtime_profile_requires_hardened_oci_bootstrap_syscalls(self) -> None:
+        file_name = "oxibelt-tokio.json"
+        profile_path = self.seccomp_dir / file_name
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["syscalls"][0]["names"].remove("execve")
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        self.update_catalog_digest(file_name)
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must allow hardened OCI bootstrap syscalls", result.stderr)
+
+    def test_runtime_profile_requires_hardened_runtime_startup_syscalls(self) -> None:
+        file_name = "oxibelt-tokio.json"
+        profile_path = self.seccomp_dir / file_name
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["syscalls"][0]["names"].remove("readlink")
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        self.update_catalog_digest(file_name)
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must allow hardened runtime startup syscalls", result.stderr)
+
+    def test_profile_qualification_remains_explicitly_unverified(self) -> None:
+        catalog_path = self.seccomp_dir / "profile-catalog-v1.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog["profiles"][0]["qualification"] = "verified"
+        catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must remain unverified", result.stderr)
+
     def test_composed_profile_cannot_be_broader_than_its_union(self) -> None:
         file_name = "oxibelt-netport-switcher-tokio.json"
         profile_path = self.seccomp_dir / file_name

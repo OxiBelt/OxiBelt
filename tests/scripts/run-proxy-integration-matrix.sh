@@ -265,6 +265,79 @@ cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integratio
 # shellcheck source=/dev/null
 source "${case_dir}/manifest.env"
 
+seccomp_runtime_args=()
+seccomp_assertion_env_args=()
+case "${CASE_SECCOMP_PROFILE_MODE}" in
+  runtime_default)
+    [[ -z "${CASE_SECCOMP_PROFILE_FILE}" ]] \
+      || { echo "runtime-default seccomp case must not name a profile file" >&2; exit 1; }
+    ;;
+  catalog)
+    [[ "${CASE_SECCOMP_PROFILE_FILE}" =~ ^oxibelt-[a-z0-9-]+[.]json$ ]] \
+      || { echo "invalid catalog seccomp profile basename: ${CASE_SECCOMP_PROFILE_FILE}" >&2; exit 1; }
+    seccomp_profile_path="${repo_root}/deploy/seccomp/${CASE_SECCOMP_PROFILE_FILE}"
+    seccomp_catalog_path="${repo_root}/deploy/seccomp/profile-catalog-v1.json"
+    [[ -f "${seccomp_profile_path}" && -f "${seccomp_catalog_path}" ]] \
+      || { echo "catalog seccomp profile contract is incomplete" >&2; exit 1; }
+    python3 "${repo_root}/tests/scripts/check-seccomp-profile-contract.py" >/dev/null
+    mapfile -t seccomp_contract < <(
+      python3 - "${seccomp_catalog_path}" "${CASE_SECCOMP_PROFILE_FILE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+catalog = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+matches = [entry for entry in catalog["profiles"] if entry["file"] == sys.argv[2]]
+if len(matches) != 1:
+    raise SystemExit("catalog profile lookup must resolve exactly one entry")
+print(matches[0]["identity"])
+print(matches[0]["digest"])
+PY
+    )
+    [[ "${#seccomp_contract[@]}" == "2" ]] \
+      || { echo "catalog seccomp profile lookup returned an invalid contract" >&2; exit 1; }
+    seccomp_profile_identity="${seccomp_contract[0]}"
+    seccomp_profile_digest="${seccomp_contract[1]}"
+    [[ "${seccomp_profile_identity}" =~ ^[a-z0-9][a-z0-9-]*-v1$ ]] \
+      || { echo "catalog seccomp profile identity is invalid" >&2; exit 1; }
+    [[ "${seccomp_profile_digest}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+      || { echo "catalog seccomp profile digest is invalid" >&2; exit 1; }
+    python3 - \
+      "${case_dir}/config/oxibelt.toml" \
+      "${seccomp_profile_identity}" \
+      "${seccomp_profile_digest}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+identity_placeholder = "oxibelt-test-profile-placeholder-v1"
+digest_placeholder = "sha256:" + ("0" * 64)
+content = path.read_text(encoding="utf-8")
+if content.count(identity_placeholder) != 1 or content.count(digest_placeholder) != 1:
+    raise SystemExit("catalog seccomp fixture must contain each assertion placeholder exactly once")
+content = content.replace(identity_placeholder, sys.argv[2]).replace(digest_placeholder, sys.argv[3])
+temporary = path.with_name(path.name + ".seccomp.tmp")
+temporary.write_text(content, encoding="utf-8")
+os.replace(temporary, path)
+PY
+    seccomp_runtime_args=(--security-opt "seccomp=${seccomp_profile_path}")
+    seccomp_assertion_env_args=(
+      -e "OXIBELT_SECCOMP_PROFILE_IDENTITY=${seccomp_profile_identity}"
+      -e "OXIBELT_SECCOMP_PROFILE_DIGEST=${seccomp_profile_digest}"
+    )
+    ;;
+  unconfined)
+    [[ -z "${CASE_SECCOMP_PROFILE_FILE}" ]] \
+      || { echo "unconfined seccomp case must not name a profile file" >&2; exit 1; }
+    seccomp_runtime_args=(--security-opt seccomp=unconfined)
+    ;;
+  *)
+    echo "unsupported seccomp profile mode: ${CASE_SECCOMP_PROFILE_MODE}" >&2
+    exit 1
+    ;;
+esac
+
 collect_diagnostics() {
   mkdir -p "${logs_dir}"
   docker logs "${proxy_container}" >"${logs_dir}/proxy.log" 2>&1 || true
@@ -2128,7 +2201,7 @@ fi
 
 docker network create "${network_name}" >/dev/null
 
-if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" || "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
+if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_HARDENED_RUNTIME}" == "1" || "${CASE_NEED_HTTP_UPSTREAM}" == "1" || "${CASE_NEED_HTTPS_UPSTREAM}" == "1" || "${CASE_NEED_ALT_UPSTREAM}" == "1" || "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
   ensure_helper_image \
     "${mock_image}" \
     remove_mock_image \
@@ -2654,7 +2727,9 @@ docker create \
   -e OXIBELT_INSTANCE_ID=proxy-a \
   -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
   -e NOMAD_TOKEN=matrix-nomad-token \
+  "${seccomp_assertion_env_args[@]}" \
   "${proxy_runtime_args[@]}" \
+  "${seccomp_runtime_args[@]}" \
   "${hardened_fixture_mount_args[@]}" \
   "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
@@ -2668,7 +2743,7 @@ if [[ "${CASE_HARDENED_RUNTIME}" != "1" ]]; then
   fi
 fi
 
-if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
+if [[ "${CASE_HARDENED_RUNTIME}" == "1" && "${CASE_EXPECT_START}" == "success" ]]; then
   runtime_check_container="$(unique_docker_container_name "oxibelt-runtime-check")"
   docker create \
     --name "${runtime_check_container}" \
@@ -2683,7 +2758,9 @@ if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
     -e OXIBELT_INSTANCE_ID=runtime-check \
     -e KUBERNETES_SERVICE_TOKEN=matrix-kubernetes-token \
     -e NOMAD_TOKEN=matrix-nomad-token \
+    "${seccomp_assertion_env_args[@]}" \
     "${proxy_runtime_args[@]}" \
+    "${seccomp_runtime_args[@]}" \
     "${hardened_fixture_mount_args[@]}" \
     "${remote_signer_docker_args[@]}" \
     "${proxy_dns_args[@]}" \
@@ -2744,6 +2821,10 @@ if [[ "${CASE_EXPECT_START}" == "failure" ]]; then
   if [[ -n "${CASE_EXPECT_FAILURE_CONTAINS}" ]] && ! grep -F "${CASE_EXPECT_FAILURE_CONTAINS}" <<<"${logs}" >/dev/null; then
     echo "${logs}" >&2
     fail_with_diagnostics "proxy failure did not contain expected text: ${CASE_EXPECT_FAILURE_CONTAINS}"
+  fi
+  if [[ -n "${CASE_EXPECT_FAILURE_EXCLUDES}" ]] && grep -F "${CASE_EXPECT_FAILURE_EXCLUDES}" <<<"${logs}" >/dev/null; then
+    echo "${logs}" >&2
+    fail_with_diagnostics "proxy failure crossed the forbidden startup boundary: ${CASE_EXPECT_FAILURE_EXCLUDES}"
   fi
   echo "Docker matrix invalid case ${category}/${case_name} failed as expected"
   exit 0

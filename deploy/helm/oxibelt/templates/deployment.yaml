@@ -163,10 +163,16 @@ spec:
               fieldPath: "metadata.annotations['oxibelt.dev/config-rollout-target-name']"
         {{- end }}
         {{- if .Values.runtimeHardening.seccomp.externalProfile.identity }}
+        # Trusted admission or node provisioning must supply these reserved
+        # Pod annotations after Helm renders the configured expectation.
         - name: OXIBELT_SECCOMP_PROFILE_IDENTITY
-          value: {{ .Values.runtimeHardening.seccomp.externalProfile.identity | quote }}
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/seccomp-profile-identity']"
         - name: OXIBELT_SECCOMP_PROFILE_DIGEST
-          value: {{ .Values.runtimeHardening.seccomp.externalProfile.digest | quote }}
+          valueFrom:
+            fieldRef:
+              fieldPath: "metadata.annotations['oxibelt.dev/seccomp-profile-digest']"
         {{- end }}
         {{- with .Values.extraEnv }}
 {{ toYaml . | indent 8 }}

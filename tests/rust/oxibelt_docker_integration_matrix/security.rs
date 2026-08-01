@@ -1,4 +1,7 @@
-use crate::{DockerCase, ExpectStart, Needs, docker_case, hardened_runtime_case};
+use crate::{
+  DockerCase, ExpectStart, Needs, catalog_seccomp_case, docker_case, hardened_runtime_case,
+  unconfined_pre_listener_case,
+};
 
 pub(super) fn docker_cases() -> Vec<DockerCase> {
   vec![
@@ -14,6 +17,25 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     )),
+    catalog_seccomp_case(
+      hardened_runtime_case(docker_case(
+        "security",
+        "required-seccomp-manifest-landlock",
+        "catalog seccomp assertion and manifest Landlock remain active while serving static data",
+        ExpectStart::Success,
+        Needs::default(),
+        None,
+      )),
+      "oxibelt-tokio.json",
+    ),
+    unconfined_pre_listener_case(hardened_runtime_case(docker_case(
+      "security",
+      "required-seccomp-unconfined-pre-listener",
+      "required seccomp blocks an unconfined process before runtime and listener startup",
+      ExpectStart::Failure,
+      Needs::default(),
+      Some("runtime hardening blocked: seccomp_filter_not_active"),
+    ))),
     docker_case(
       "security",
       "external-auth-response-body-timeout",

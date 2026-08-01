@@ -1,0 +1,63 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+main_runtime = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[runtime.hardening]
+close_range = "required"
+
+[runtime.hardening.seccomp]
+expectation = "required"
+profile_identity = "oxibelt-test-profile-placeholder-v1"
+profile_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[runtime.hardening.landlock]
+mode = "manifest"
+read_paths = []
+read_write_paths = []
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[routes]]
+name = "assets"
+hosts = ["static.example.test"]
+path_prefix = "/assets"
+static_root = "public"

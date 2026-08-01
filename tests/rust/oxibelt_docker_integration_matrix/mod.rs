@@ -55,6 +55,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("http-semantics", "expect-priority"),
   ("http-semantics", "sse-grpc-errors"),
   ("security", "hardened-default-seccomp-runtime"),
+  ("security", "required-seccomp-manifest-landlock"),
+  ("security", "required-seccomp-unconfined-pre-listener"),
   ("security", "external-auth-response-body-timeout"),
   ("security", "external-auth-forwarded-uri"),
   ("security", "grpc-timeout-pool-health"),

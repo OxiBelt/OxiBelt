@@ -379,10 +379,14 @@ runtimeHardening:
   seccomp:
     expectation: "" # "" | off | optional | required
     # Kubernetes cannot expose the semantic identity of a loaded filter. For a
-    # Localhost profile, these literals are an external orchestrator assertion;
-    # OxiBelt reports them separately from kernel-observed Seccomp/NoNewPrivs.
-    # RuntimeDefault must leave both values empty because its rules vary by
-    # container runtime and version.
+    # Localhost profile, these values configure the identity and digest OxiBelt
+    # expects. They do not assert what the node loaded. Trusted admission or
+    # node provisioning must independently supply the observed values through
+    # the reserved Pod annotations `oxibelt.dev/seccomp-profile-identity` and
+    # `oxibelt.dev/seccomp-profile-digest`; the chart deliberately does not
+    # populate those annotations. OxiBelt reports them separately from
+    # kernel-observed Seccomp/NoNewPrivs. RuntimeDefault must leave both values
+    # empty because its rules vary by container runtime and version.
     externalProfile:
       identity: ""
       digest: "" # sha256:<64 lower-case hex characters>
@@ -391,6 +395,9 @@ extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
 
+# `oxibelt.dev/seccomp-profile-identity` and
+# `oxibelt.dev/seccomp-profile-digest` are reserved for trusted admission or
+# node provisioning and are rejected here to prevent chart values self-attestation.
 podAnnotations: {}
 podLabels: {}
 

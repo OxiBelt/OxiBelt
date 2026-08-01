@@ -38,6 +38,28 @@ EXECUTION_SCOPES = {
     "netport-switcher+dataplane",
 }
 RUNTIMES = {"none", "tokio", "compio"}
+HARDENED_OCI_BOOTSTRAP_SYSCALLS = {
+    "arch_prctl",
+    "execve",
+    "fstatfs",
+    "getdents64",
+}
+HARDENED_RUNTIME_STARTUP_SYSCALLS = {
+    "dup2",
+    "getcwd",
+    "getpid",
+    "lstat",
+    "open",
+    "readlink",
+    "socketpair",
+    "stat",
+    "wait4",
+}
+LANDLOCK_SETUP_SYSCALLS = {
+    "landlock_add_rule",
+    "landlock_create_ruleset",
+    "landlock_restrict_self",
+}
 MAX_JSON_BYTES = 1024 * 1024
 
 
@@ -162,6 +184,22 @@ def validate(seccomp_dir: Path) -> int:
         profile_path = seccomp_dir / file_name
         require(profile_path.is_file(), f"{identity} profile file is missing: {file_name}")
         profile, names, raw = validate_profile(profile_path)
+        if entry["runtime"] in {"tokio", "compio"}:
+            missing_bootstrap = sorted(HARDENED_OCI_BOOTSTRAP_SYSCALLS.difference(names))
+            require(
+                not missing_bootstrap,
+                f"{identity} must allow hardened OCI bootstrap syscalls: {', '.join(missing_bootstrap)}",
+            )
+            missing_runtime_startup = sorted(HARDENED_RUNTIME_STARTUP_SYSCALLS.difference(names))
+            require(
+                not missing_runtime_startup,
+                f"{identity} must allow hardened runtime startup syscalls: {', '.join(missing_runtime_startup)}",
+            )
+            missing_landlock = sorted(LANDLOCK_SETUP_SYSCALLS.difference(names))
+            require(
+                not missing_landlock,
+                f"{identity} must allow Landlock setup syscalls: {', '.join(missing_landlock)}",
+            )
         actual_digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
         require(actual_digest == digest, f"{identity} raw-file digest mismatch: expected {digest}, found {actual_digest}")
         profile_names[identity] = names

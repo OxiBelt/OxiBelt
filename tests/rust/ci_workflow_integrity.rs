@@ -106,6 +106,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "admin-operation-postgres",
   "admin-audit-anchor-postgres",
   "kubernetes-immutable-rollout",
+  "kubernetes-strict-hardening",
   "kubernetes-pod-lifecycle",
   "kubernetes-network-policy",
   "kubernetes-current-compatibility",
@@ -546,6 +547,11 @@ fn admin_audit_anchor_postgres_script_text() -> String {
 fn kubernetes_immutable_rollout_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-immutable-rollout.sh"))
     .expect("Kubernetes immutable rollout script should be readable")
+}
+
+fn helm_strict_hardening_live_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-helm-strict-hardening-live.sh"))
+    .expect("Helm strict hardening live script should be readable")
 }
 
 fn kubernetes_pod_lifecycle_script_text() -> String {
@@ -2773,6 +2779,72 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 }
 
 #[test]
+fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-strict-hardening")
+    .expect("workflow should define the Kubernetes strict hardening job");
+  let job_text = workflow_job_text(&workflow, "kubernetes-strict-hardening");
+  let script = helm_strict_hardening_live_script_text();
+
+  assert_eq!(
+    job.needs,
+    vec!["docker-alpine-musl-role-image-amd64".to_owned()],
+    "strict hardening CI should consume the role-specific strict image artifact"
+  );
+  for expected in [
+    "name: Kubernetes strict seccomp and Landlock hardening",
+    "actions: read",
+    "contents: read",
+    "tests/scripts/check-helm-strict-dataplane.sh",
+    "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
+    "OXIBELT_STRICT_DOCKER_IMAGE: oxibelt-dataplane-strict:alpine-musl-amd64",
+    "tests/scripts/run-helm-strict-hardening-live.sh --provider kind",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "strict hardening CI job should include {expected}"
+    );
+  }
+  for expected in [
+    "usage: $0 [--provider kind|minikube]",
+    "export KUBECONFIG=\"${work_dir}/kubeconfig\"",
+    "export MINIKUBE_HOME=\"${work_dir}/minikube-home\"",
+    "kind_cluster_is_owned",
+    "io.x-k8s.kind.cluster",
+    "kind delete cluster --name \"${cluster_name}\"",
+    "minikube delete --profile \"${cluster_name}\"",
+    "seccompProfile:\n    type: RuntimeDefault",
+    "mode = \"manifest\"",
+    "\"filesystem_manifest_digest_withheld\":true",
+    "\"manifest_digest_withheld\":true",
+    "\"policy_digest_withheld\":true",
+    "\"profile_identity_kernel_verified\":false",
+  ] {
+    assert!(
+      script.contains(expected),
+      "strict hardening live harness should include {expected}"
+    );
+  }
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "kind delete clusters --all",
+    "minikube delete --all",
+    "kubectl delete --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "strict hardening live harness must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
 fn kubernetes_immutable_rollout_lease_recovery_does_not_roll_controller() {
   let script = kubernetes_immutable_rollout_script_text();
   let cleanup = script
@@ -4749,6 +4821,12 @@ fn docker_integration_matrix_hardened_runtime_uses_readonly_fixture_volumes() {
   let script = docker_integration_matrix_script_text();
 
   assert!(
+    script.contains(
+      "if [[ \"${CASE_EXPECT_START}\" == \"success\" || \"${CASE_HARDENED_RUNTIME}\" == \"1\" ||"
+    ),
+    "hardened success and failure cases should prepare the helper image used to seed fixture volumes"
+  );
+  assert!(
     script.contains("seed_hardened_fixture_volume()")
       && script.contains("docker volume create --label \"${test_label}\" \"${volume}\"")
       && script.contains("docker cp \"${source_dir}/.\" \"${seed_container}:/fixture\"")
@@ -5625,7 +5703,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     serde_json::from_str(&summary_text).expect("success summary should be JSON");
   assert_eq!(summary["schema"], 1);
   assert_eq!(summary["overall"], "success");
-  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(34));
+  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(35));
   assert_eq!(summary["unexpected"], serde_json::json!([]));
   assert!(!summary_text.contains("synthetic-secret-output"));
   assert!(

@@ -5,7 +5,7 @@
     {
       "identity": "oxibelt-compio-v1",
       "file": "oxibelt-compio.json",
-      "digest": "sha256:c448bc6848bd68a4216641747bd8c09591440a5f1908551019dbd1f2c56d286c",
+      "digest": "sha256:6c5d54b4fa019c4677d5b3aaff53ca06ac56ecbfed9e0e69dae913a416f3be14",
       "qualification": "unverified",
       "execution_scope": "dataplane",
       "runtime": "compio",
@@ -14,7 +14,7 @@
     {
       "identity": "oxibelt-netport-switcher-compio-v1",
       "file": "oxibelt-netport-switcher-compio.json",
-      "digest": "sha256:85c45978b98fec705edad1081859d94b0ca95a74ab6e34e0e2af25f7694f8183",
+      "digest": "sha256:d105ce97306e95641f96b5b23e591e0d206778a3b46f943badf3b8b765b2214e",
       "qualification": "unverified",
       "execution_scope": "netport-switcher+dataplane",
       "runtime": "compio",
@@ -26,7 +26,7 @@
     {
       "identity": "oxibelt-netport-switcher-tokio-v1",
       "file": "oxibelt-netport-switcher-tokio.json",
-      "digest": "sha256:94c55e7d744817a2d5af9f5859471fa95fa7173ebbb08c79451703a13b87626c",
+      "digest": "sha256:4be5702015905dd9d06b5976f5e2138abc14486590133ad6b31ecea42849b141",
       "qualification": "unverified",
       "execution_scope": "netport-switcher+dataplane",
       "runtime": "tokio",
@@ -47,7 +47,7 @@
     {
       "identity": "oxibelt-tokio-v1",
       "file": "oxibelt-tokio.json",
-      "digest": "sha256:e9d2c892dc61b5c1946ed1d66c5857b563823e979c8cf81cc8ec663d0b48e5a7",
+      "digest": "sha256:12c82304c36eb58f4ba722cc1dd316d8d7565248c5b98791c7ef507582c68612",
       "qualification": "unverified",
       "execution_scope": "dataplane",
       "runtime": "tokio",

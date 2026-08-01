@@ -902,6 +902,15 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $podSeccomp := .Values.podSecurityContext.seccompProfile -}}
 {{- $profileType := $podSeccomp.type -}}
 {{- $localhostProfile := $podSeccomp.localhostProfile | default "" -}}
+{{- $reservedPodAnnotations := list "oxibelt.dev/seccomp-profile-identity" "oxibelt.dev/seccomp-profile-digest" -}}
+{{- if not (kindIs "map" .Values.podAnnotations) -}}
+{{- fail "podAnnotations must be an object" -}}
+{{- end -}}
+{{- range $annotation := $reservedPodAnnotations -}}
+{{- if hasKey $.Values.podAnnotations $annotation -}}
+{{- fail (printf "podAnnotations key %s is reserved for trusted admission or node provisioning" $annotation) -}}
+{{- end -}}
+{{- end -}}
 {{- if not (has $expectation (list "" "off" "optional" "required")) -}}
 {{- fail "runtimeHardening.seccomp.expectation must be empty, off, optional, or required" -}}
 {{- end -}}

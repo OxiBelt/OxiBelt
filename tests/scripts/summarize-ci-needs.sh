@@ -36,6 +36,7 @@ required_jobs=(
   admin-operation-postgres
   admin-audit-anchor-postgres
   kubernetes-immutable-rollout
+  kubernetes-strict-hardening
   kubernetes-pod-lifecycle
   kubernetes-network-policy
   kubernetes-current-compatibility
