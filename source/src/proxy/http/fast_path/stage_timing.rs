@@ -30,6 +30,12 @@ pub(crate) const STAGE_DIRECT_H1_RESPONSE_BODY_FIRST_FRAME: FastPathMetricStage 
   FastPathMetricStage::DirectH1ResponseBodyFirstFrame;
 pub(crate) const STAGE_DIRECT_H2_SEND_REQUEST: FastPathMetricStage =
   FastPathMetricStage::DirectH2SendRequest;
+pub(crate) const STAGE_DIRECT_H2_POOL_TAKE: FastPathMetricStage =
+  FastPathMetricStage::DirectH2PoolTake;
+pub(crate) const STAGE_DIRECT_H2_CONNECT: FastPathMetricStage =
+  FastPathMetricStage::DirectH2Connect;
+pub(crate) const STAGE_DIRECT_H2_CAPACITY_WAIT: FastPathMetricStage =
+  FastPathMetricStage::DirectH2CapacityWait;
 pub(crate) const STAGE_DOWNSTREAM_PROTOCOL_RECEIVE: FastPathMetricStage =
   FastPathMetricStage::DownstreamProtocolReceive;
 pub(crate) const STAGE_FAST_PATH_ELIGIBILITY: FastPathMetricStage =

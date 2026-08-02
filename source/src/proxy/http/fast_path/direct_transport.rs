@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use http::{Request, Response};
 use http_body_util::BodyExt;
 
@@ -40,12 +42,15 @@ pub(super) struct DirectTransportOutcome {
   pub(super) attempt: DirectTransportAttempt,
   pub(super) h1_lease: Option<DirectH1Lease>,
   pub(super) h2_lease: Option<DirectH2Lease>,
+  pub(super) fallback_deadline: Option<Instant>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn attempt_direct_transport(
   transport: Option<DirectFastPathTransport>,
   state: &AppSnapshot,
+  route_name: &str,
+  pool_name: Option<&str>,
   upstream_index: usize,
   upstream: &UpstreamConfig,
   upstream_version: HttpVersion,
@@ -61,6 +66,7 @@ pub(super) async fn attempt_direct_transport(
     .then(|| state.overload.lease(WorkKind::PendingUpstreamRequests, 1));
   let mut h1_lease = None;
   let mut h2_lease = None;
+  let mut fallback_deadline = None;
   let attempt = match transport {
     Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
       &state.direct_h1_pools,
@@ -94,6 +100,10 @@ pub(super) async fn attempt_direct_transport(
     Some(DirectFastPathTransport::H2) => match try_send_direct_h2(
       &state.direct_h2_pools,
       &state.metrics,
+      &state.circuit_breakers,
+      &state.overload,
+      route_name,
+      pool_name,
       upstream_index,
       upstream,
       upstream_version,
@@ -113,7 +123,10 @@ pub(super) async fn attempt_direct_transport(
           .response
           .map(|body| body.map_err(body::boxed_error).boxed())
       })),
-      DirectH2SendResult::Fallback(outbound) => DirectTransportAttempt::Fallback(outbound),
+      DirectH2SendResult::Fallback { request, deadline } => {
+        fallback_deadline = Some(deadline);
+        DirectTransportAttempt::Fallback(request)
+      }
     },
     None => DirectTransportAttempt::Fallback(outbound),
   };
@@ -121,6 +134,7 @@ pub(super) async fn attempt_direct_transport(
     attempt,
     h1_lease,
     h2_lease,
+    fallback_deadline,
   }
 }
 

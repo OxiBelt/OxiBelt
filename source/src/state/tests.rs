@@ -199,6 +199,41 @@ async fn replace_signals_old_data_plane_generation_and_installs_fresh_one() {
   assert!(!*new_connection.data_plane_drain.borrow());
 }
 
+#[tokio::test]
+async fn rollback_restages_retired_direct_h2_pool_generation() {
+  let temp_dir = common::TempDir::new("direct-h2-rollback-restage");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "direct-h2-rollback-restage");
+  let config = parse_config(&common::minimal_config_toml(&cert_path, &key_path));
+  let handle = AppHandle::new(
+    AppSnapshot::new(config.clone())
+      .await
+      .expect("initial snapshot should initialize"),
+  );
+  let original = handle.snapshot();
+  let rollback = original.as_ref().clone();
+  let replacement = AppSnapshot::new_with_previous(config, Some(original.as_ref()))
+    .await
+    .expect("replacement snapshot should initialize");
+
+  assert!(handle.replace_if_current(&original, replacement));
+  assert!(
+    rollback.direct_h2_pools.needs_restage(),
+    "the saved rollback generation should observe retirement"
+  );
+
+  let current = handle.snapshot();
+  assert!(handle.replace_if_current(&current, rollback));
+  let restored = handle.snapshot();
+  assert!(!restored.direct_h2_pools.needs_restage());
+  assert!(
+    !restored
+      .direct_h2_pools
+      .same_identity(&original.direct_h2_pools),
+    "rollback must publish a fresh direct-H2 pool identity"
+  );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_restages_retired_compio_fleet_with_bounded_overlap() {

@@ -54,6 +54,7 @@ fn test_timeouts() -> super::super::EffectiveTimeouts {
     upstream_first_byte: Duration::from_secs(30),
     upstream_read: Duration::from_secs(30),
     upstream_send: Duration::from_secs(30),
+    upstream_deadline: None,
   }
 }
 

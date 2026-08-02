@@ -1,20 +1,15 @@
 use std::sync::Arc;
 
 use crate::metrics::Metrics;
-use crate::metrics::fast_path::labels::{FastPathMetricProtocol, FastPathTransportMissReason};
+use crate::metrics::fast_path::labels::{
+  DirectH2PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
+};
 
 use super::DirectH2Pool;
 
-pub(super) fn pool_event(metrics: &Arc<Metrics>, enabled: bool, event: &'static str) {
+pub(super) fn pool_event(metrics: &Arc<Metrics>, enabled: bool, event: DirectH2PoolEvent) {
   if enabled {
-    metrics.record_direct_h2_pool_event(event);
-  }
-}
-
-pub(super) fn pool_stale_drop(metrics: &Arc<Metrics>, enabled: bool) {
-  if enabled {
-    metrics.record_direct_h2_pool_event("stale");
-    metrics.record_direct_h2_pool_event("drop");
+    metrics.record_direct_h2_pool_event_id(event);
   }
 }
 

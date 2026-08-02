@@ -365,6 +365,8 @@ impl AppSnapshot {
       &tls_resumption,
       &config.proxy.http2,
       &outbound_revocation,
+      circuit_breakers.clone(),
+      &config.upstream_pools,
     )
     .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -756,6 +758,8 @@ impl AppSnapshot {
       &previous.tls_resumption,
       &config.proxy.http2,
       &previous.outbound_revocation,
+      circuit_breakers.clone(),
+      &config.upstream_pools,
     )
     .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -945,6 +949,24 @@ impl AppSnapshot {
       alt_svc_header_values,
       http1_upgrades_possible,
     })
+  }
+
+  pub(super) fn restage_direct_h2_pools_for_publication(&mut self) -> anyhow::Result<()> {
+    if !self.direct_h2_pools.needs_restage() {
+      return Ok(());
+    }
+    self.direct_h2_pools = DirectH2Pools::new(
+      &self.upstreams,
+      &self.config.proxy.trusted_ca_certs,
+      &self.config.crypto,
+      &self.tls_resumption,
+      &self.config.proxy.http2,
+      &self.outbound_revocation,
+      self.circuit_breakers.clone(),
+      &self.config.upstream_pools,
+    )
+    .context("failed to restage direct HTTP/2 pools for snapshot publication")?;
+    Ok(())
   }
 }
 

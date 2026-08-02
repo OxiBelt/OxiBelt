@@ -809,6 +809,7 @@ fn direct_h1_test_timeouts() -> EffectiveTimeouts {
     upstream_first_byte: timeout,
     upstream_read: timeout,
     upstream_send: timeout,
+    upstream_deadline: None,
   }
 }
 

@@ -230,10 +230,13 @@ pub(crate) enum FastPathMetricStage {
   UpstreamRequestRebuild = 35,
   H2ResponseSend = 36,
   H3RequestTaskJoin = 37,
+  DirectH2PoolTake = 38,
+  DirectH2Connect = 39,
+  DirectH2CapacityWait = 40,
 }
 
 impl FastPathMetricStage {
-  pub(crate) const ALL: [Self; 38] = [
+  pub(crate) const ALL: [Self; 41] = [
     Self::DirectH1Connect,
     Self::DirectH1PoolTake,
     Self::DirectH1RequestBuild,
@@ -272,6 +275,9 @@ impl FastPathMetricStage {
     Self::UpstreamRequestRebuild,
     Self::H2ResponseSend,
     Self::H3RequestTaskJoin,
+    Self::DirectH2PoolTake,
+    Self::DirectH2Connect,
+    Self::DirectH2CapacityWait,
   ];
   pub(crate) const COUNT: usize = Self::ALL.len();
 
@@ -315,6 +321,9 @@ impl FastPathMetricStage {
       Self::UpstreamRequestRebuild => "upstream_request_rebuild",
       Self::H2ResponseSend => "h2_response_send",
       Self::H3RequestTaskJoin => "h3_request_task_join",
+      Self::DirectH2PoolTake => "direct_h2_pool_take",
+      Self::DirectH2Connect => "direct_h2_connect",
+      Self::DirectH2CapacityWait => "direct_h2_capacity_wait",
     }
   }
 
@@ -358,6 +367,9 @@ impl FastPathMetricStage {
       "upstream_request_rebuild" => Some(Self::UpstreamRequestRebuild),
       "h2_response_send" => Some(Self::H2ResponseSend),
       "h3_request_task_join" => Some(Self::H3RequestTaskJoin),
+      "direct_h2_pool_take" => Some(Self::DirectH2PoolTake),
+      "direct_h2_connect" => Some(Self::DirectH2Connect),
+      "direct_h2_capacity_wait" => Some(Self::DirectH2CapacityWait),
       _ => None,
     }
   }
@@ -524,6 +536,98 @@ pub(crate) enum DirectH1PoolEvent {
   Drop = 6,
   DropFull = 7,
   DropLocked = 8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(crate) enum DirectH2PoolEvent {
+  Hit = 0,
+  Miss = 1,
+  MissEmpty = 2,
+  MissSaturated = 3,
+  MissLocked = 4,
+  Connect = 5,
+  ConnectError = 6,
+  Reconnect = 7,
+  Stale = 8,
+  Drop = 9,
+  ConnectLeader = 10,
+  ConnectCoalesced = 11,
+  CapacityWait = 12,
+  CapacityReady = 13,
+  CapacityTimeout = 14,
+  CapacityFull = 15,
+  DrainStarted = 16,
+  DrainCompleted = 17,
+  GracefulClose = 18,
+  CooldownEntered = 19,
+  CooldownExpired = 20,
+  StaleGeneration = 21,
+}
+
+impl DirectH2PoolEvent {
+  pub(crate) const ALL: [Self; 22] = [
+    Self::Hit,
+    Self::Miss,
+    Self::MissEmpty,
+    Self::MissSaturated,
+    Self::MissLocked,
+    Self::Connect,
+    Self::ConnectError,
+    Self::Reconnect,
+    Self::Stale,
+    Self::Drop,
+    Self::ConnectLeader,
+    Self::ConnectCoalesced,
+    Self::CapacityWait,
+    Self::CapacityReady,
+    Self::CapacityTimeout,
+    Self::CapacityFull,
+    Self::DrainStarted,
+    Self::DrainCompleted,
+    Self::GracefulClose,
+    Self::CooldownEntered,
+    Self::CooldownExpired,
+    Self::StaleGeneration,
+  ];
+  pub(crate) const COUNT: usize = Self::ALL.len();
+
+  pub(crate) fn as_str(self) -> &'static str {
+    match self {
+      Self::Hit => "hit",
+      Self::Miss => "miss",
+      Self::MissEmpty => "miss_empty",
+      Self::MissSaturated => "miss_saturated",
+      Self::MissLocked => "miss_locked",
+      Self::Connect => "connect",
+      Self::ConnectError => "connect_error",
+      Self::Reconnect => "reconnect",
+      Self::Stale => "stale",
+      Self::Drop => "drop",
+      Self::ConnectLeader => "connect_leader",
+      Self::ConnectCoalesced => "connect_coalesced",
+      Self::CapacityWait => "capacity_wait",
+      Self::CapacityReady => "capacity_ready",
+      Self::CapacityTimeout => "capacity_timeout",
+      Self::CapacityFull => "capacity_full",
+      Self::DrainStarted => "drain_started",
+      Self::DrainCompleted => "drain_completed",
+      Self::GracefulClose => "graceful_close",
+      Self::CooldownEntered => "cooldown_entered",
+      Self::CooldownExpired => "cooldown_expired",
+      Self::StaleGeneration => "stale_generation",
+    }
+  }
+
+  pub(crate) fn from_str(value: &str) -> Option<Self> {
+    Self::ALL
+      .into_iter()
+      .find(|candidate| candidate.as_str() == value)
+  }
+
+  pub(crate) fn index(self) -> usize {
+    self as usize
+  }
 }
 
 impl DirectH1PoolEvent {

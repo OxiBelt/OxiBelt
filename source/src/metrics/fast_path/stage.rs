@@ -177,6 +177,9 @@ mod tests {
     metrics.record_duration_ns("plain_proxy", "h2", "fast_path_eligibility", "fallback", 13);
     metrics.record_duration_ns("plain_proxy", "h2", "transport_selection", "ok", 17);
     metrics.record_duration_ns("plain_proxy", "h2", "direct_h2_send_request", "error", 19);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h2_pool_take", "ok", 23);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h2_connect", "ok", 29);
+    metrics.record_duration_ns("plain_proxy", "h2", "direct_h2_capacity_wait", "ok", 31);
     metrics.record_duration_ns("plain_proxy", "h2", "downstream_protocol_receive", "ok", 31);
     metrics.record_duration_ns("plain_proxy", "h2", "upstream_request_rebuild", "ok", 37);
     metrics.record_duration_ns("plain_proxy", "h2", "h2_response_send", "ok", 41);
@@ -290,6 +293,24 @@ mod tests {
       stage_counter_index("plain_proxy", "h2", "direct_h2_send_request", "error").unwrap();
     assert_eq!(metrics.observations[direct_h2_send_index].load(), 1);
     assert_eq!(metrics.duration_ns[direct_h2_send_index].load(), 19);
+    let direct_h2_pool_take_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h2_pool_take", "ok").unwrap();
+    assert_eq!(metrics.observations[direct_h2_pool_take_index].load(), 1);
+    assert_eq!(metrics.duration_ns[direct_h2_pool_take_index].load(), 23);
+    let direct_h2_connect_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h2_connect", "ok").unwrap();
+    assert_eq!(metrics.observations[direct_h2_connect_index].load(), 1);
+    assert_eq!(metrics.duration_ns[direct_h2_connect_index].load(), 29);
+    let direct_h2_capacity_wait_index =
+      stage_counter_index("plain_proxy", "h2", "direct_h2_capacity_wait", "ok").unwrap();
+    assert_eq!(
+      metrics.observations[direct_h2_capacity_wait_index].load(),
+      1
+    );
+    assert_eq!(
+      metrics.duration_ns[direct_h2_capacity_wait_index].load(),
+      31
+    );
     let downstream_receive_index =
       stage_counter_index("plain_proxy", "h2", "downstream_protocol_receive", "ok").unwrap();
     assert_eq!(metrics.observations[downstream_receive_index].load(), 1);

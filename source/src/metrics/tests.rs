@@ -171,9 +171,25 @@ fn prometheus_output_includes_direct_h1_response_protocol_failures() {
 #[test]
 fn prometheus_output_includes_direct_h2_pool_events() {
   let metrics = Metrics::new();
-  metrics.record_direct_h2_pool_event("hit");
-  metrics.record_direct_h2_pool_event("miss_saturated");
-  metrics.record_direct_h2_pool_event("connect");
+  for event in [
+    "hit",
+    "miss_saturated",
+    "connect",
+    "connect_leader",
+    "connect_coalesced",
+    "capacity_wait",
+    "capacity_ready",
+    "capacity_timeout",
+    "capacity_full",
+    "drain_started",
+    "drain_completed",
+    "graceful_close",
+    "cooldown_entered",
+    "cooldown_expired",
+    "stale_generation",
+  ] {
+    metrics.record_direct_h2_pool_event(event);
+  }
   metrics.record_direct_h2_pool_event("unknown");
 
   let body = metrics.prometheus(
@@ -185,6 +201,24 @@ fn prometheus_output_includes_direct_h2_pool_events() {
   assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"hit\"} 1"));
   assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 1"));
   assert!(body.contains("oxibelt_http_direct_h2_pool_events_total{event=\"connect\"} 1"));
+  for event in [
+    "connect_leader",
+    "connect_coalesced",
+    "capacity_wait",
+    "capacity_ready",
+    "capacity_timeout",
+    "capacity_full",
+    "drain_started",
+    "drain_completed",
+    "graceful_close",
+    "cooldown_entered",
+    "cooldown_expired",
+    "stale_generation",
+  ] {
+    assert!(body.contains(&format!(
+      "oxibelt_http_direct_h2_pool_events_total{{event=\"{event}\"}} 1"
+    )));
+  }
   assert!(!body.contains("event=\"unknown\""));
 }
 

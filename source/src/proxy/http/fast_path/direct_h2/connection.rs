@@ -1,19 +1,46 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
+use std::time::Instant;
 
 use anyhow::Context;
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
-use tracing::warn;
 use url::Url;
 
 use crate::config::{CryptoConfig, ProxyHttp2Config, UpstreamConfig};
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
 
+pub(super) type DirectH2Driver =
+  Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send + 'static>>;
+
+pub(super) struct DirectH2Connected {
+  pub(super) sender: SendRequest<ProxyBody>,
+  pub(super) peer_max_streams: Arc<AtomicUsize>,
+  pub(super) driver: DirectH2Driver,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DirectH2ConnectErrorClass {
+  TcpConnect,
+  TlsHandshake,
+  H2Handshake,
+}
+
+pub(super) struct DirectH2ConnectFailure {
+  pub(super) class: DirectH2ConnectErrorClass,
+  pub(super) error: anyhow::Error,
+}
+
+#[derive(Clone)]
 pub(super) struct DirectH2Origin {
   pub(super) scheme: &'static str,
   pub(super) host: String,
@@ -35,23 +62,110 @@ impl DirectH2Origin {
   }
 }
 
-pub(super) async fn h2_handshake_with_timeout<I>(
+pub(super) async fn connect_direct_h2(
+  origin: &DirectH2Origin,
+  tls_server_name: Option<&str>,
+  tls_config: Option<Arc<rustls::ClientConfig>>,
+  http2_config: &ProxyHttp2Config,
+  deadline: Instant,
+  capacity_changed: Arc<Notify>,
+) -> Result<DirectH2Connected, DirectH2ConnectFailure> {
+  let stream = tokio::time::timeout_at(
+    deadline.into(),
+    TcpStream::connect((origin.host.as_str(), origin.port)),
+  )
+  .await
+  .map_err(|_| DirectH2ConnectFailure {
+    class: DirectH2ConnectErrorClass::TcpConnect,
+    error: anyhow::anyhow!("direct H2 upstream connect timed out"),
+  })?
+  .with_context(|| {
+    format!(
+      "failed to connect direct H2 upstream {}:{}",
+      origin.host, origin.port
+    )
+  })
+  .map_err(|error| DirectH2ConnectFailure {
+    class: DirectH2ConnectErrorClass::TcpConnect,
+    error,
+  })?;
+  stream
+    .set_nodelay(true)
+    .context("failed to enable TCP_NODELAY for direct H2 upstream")
+    .map_err(|error| DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::TcpConnect,
+      error,
+    })?;
+
+  match tls_config {
+    Some(tls_config) => {
+      let server_name = tls_server_name.unwrap_or(origin.host.as_str()).to_owned();
+      connect_tls_h2_until(
+        tls_config,
+        server_name,
+        stream,
+        http2_config,
+        deadline,
+        capacity_changed,
+      )
+      .await
+    }
+    None => {
+      h2_handshake_until_with_capacity_notify(stream, http2_config, deadline, capacity_changed)
+        .await
+        .map_err(|error| DirectH2ConnectFailure {
+          class: DirectH2ConnectErrorClass::H2Handshake,
+          error,
+        })
+    }
+  }
+}
+
+#[cfg(test)]
+pub(super) async fn h2_handshake_until<I>(
   io: I,
   http2_config: &ProxyHttp2Config,
-  timeout: Duration,
-) -> anyhow::Result<SendRequest<ProxyBody>>
+  deadline: Instant,
+) -> anyhow::Result<DirectH2Connected>
 where
   I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-  tokio::time::timeout(timeout, h2_handshake(io, http2_config))
-    .await
-    .context("direct H2 upstream HTTP/2 handshake timed out")?
+  h2_handshake_until_with_capacity_notify(io, http2_config, deadline, Arc::new(Notify::new())).await
 }
 
+async fn h2_handshake_until_with_capacity_notify<I>(
+  io: I,
+  http2_config: &ProxyHttp2Config,
+  deadline: Instant,
+  capacity_changed: Arc<Notify>,
+) -> anyhow::Result<DirectH2Connected>
+where
+  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+  tokio::time::timeout_at(
+    deadline.into(),
+    h2_handshake_with_capacity_notify(io, http2_config, capacity_changed),
+  )
+  .await
+  .context("direct H2 upstream HTTP/2 handshake timed out")?
+}
+
+#[cfg(test)]
 pub(super) async fn h2_handshake<I>(
   io: I,
   http2_config: &ProxyHttp2Config,
-) -> anyhow::Result<SendRequest<ProxyBody>>
+) -> anyhow::Result<DirectH2Connected>
+where
+  I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+  h2_handshake_with_capacity_notify(io, http2_config, Arc::new(Notify::new())).await
+}
+
+async fn h2_handshake_with_capacity_notify<I>(
+  io: I,
+  http2_config: &ProxyHttp2Config,
+  capacity_changed: Arc<Notify>,
+) -> anyhow::Result<DirectH2Connected>
 where
   I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -61,12 +175,25 @@ where
     .handshake(TokioIo::new(io))
     .await
     .context("failed to establish direct HTTP/2 upstream connection")?;
-  tokio::spawn(async move {
-    if let Err(error) = connection.await {
-      warn!(error = %error, "direct HTTP/2 upstream connection closed with error");
+  let peer_max_streams = Arc::new(AtomicUsize::new(connection.current_max_send_streams()));
+  let driver_peer_max_streams = peer_max_streams.clone();
+  let mut connection = Box::pin(connection);
+  let driver = Box::pin(std::future::poll_fn(move |cx| {
+    let result = connection.as_mut().poll(cx);
+    let current = connection.as_ref().get_ref().current_max_send_streams();
+    if driver_peer_max_streams.swap(current, Ordering::AcqRel) != current {
+      capacity_changed.notify_waiters();
     }
-  });
-  Ok(sender)
+    match result {
+      Poll::Ready(result) => Poll::Ready(result),
+      Poll::Pending => Poll::Pending,
+    }
+  }));
+  Ok(DirectH2Connected {
+    sender,
+    peer_max_streams,
+    driver,
+  })
 }
 
 pub(super) fn build_h2_tls_config(
@@ -100,21 +227,38 @@ pub(super) fn build_h2_tls_config(
   Ok(Arc::new(tls_config))
 }
 
-pub(super) async fn connect_tls_h2(
+async fn connect_tls_h2_until(
   tls_config: Arc<rustls::ClientConfig>,
   server_name: String,
-  stream: tokio::net::TcpStream,
+  stream: TcpStream,
   http2_config: &ProxyHttp2Config,
-  timeout: Duration,
-) -> anyhow::Result<SendRequest<ProxyBody>> {
-  let server_name = rustls::pki_types::ServerName::try_from(server_name)
-    .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
-  let tls = tokio::time::timeout(
-    timeout,
+  deadline: Instant,
+  capacity_changed: Arc<Notify>,
+) -> Result<DirectH2Connected, DirectH2ConnectFailure> {
+  let server_name = rustls::pki_types::ServerName::try_from(server_name).map_err(|error| {
+    DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::TlsHandshake,
+      error: anyhow::anyhow!("invalid upstream TLS server name: {error}"),
+    }
+  })?;
+  let tls = tokio::time::timeout_at(
+    deadline.into(),
     TlsConnector::from(tls_config).connect(server_name, stream),
   )
   .await
-  .context("direct H2 upstream TLS handshake timed out")?
-  .context("direct H2 upstream TLS handshake failed")?;
-  h2_handshake_with_timeout(tls, http2_config, timeout).await
+  .map_err(|_| DirectH2ConnectFailure {
+    class: DirectH2ConnectErrorClass::TlsHandshake,
+    error: anyhow::anyhow!("direct H2 upstream TLS handshake timed out"),
+  })?
+  .context("direct H2 upstream TLS handshake failed")
+  .map_err(|error| DirectH2ConnectFailure {
+    class: DirectH2ConnectErrorClass::TlsHandshake,
+    error,
+  })?;
+  h2_handshake_until_with_capacity_notify(tls, http2_config, deadline, capacity_changed)
+    .await
+    .map_err(|error| DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::H2Handshake,
+      error,
+    })
 }

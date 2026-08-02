@@ -503,6 +503,7 @@ mod tests {
       upstream_first_byte: Duration::from_secs(30),
       upstream_read: Duration::from_secs(30),
       upstream_send: Duration::from_secs(30),
+      upstream_deadline: None,
     };
 
     let (timeouts, caps) = cap_timeouts_for_grpc(timeouts, &headers, true);

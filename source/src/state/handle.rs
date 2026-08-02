@@ -78,6 +78,7 @@ impl AppHandle {
   pub fn replace(&self, mut snapshot: AppSnapshot) {
     let _update = self.update_guard();
     snapshot.runtime_generation = snapshot.runtime_health.allocate_generation();
+    snapshot.circuit_breakers.configure(&snapshot.config);
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
@@ -89,6 +90,10 @@ impl AppHandle {
     }));
     activate_published_snapshot(snapshot.as_ref(), Some(previous.snapshot.as_ref()));
     let _ = previous.data_plane_drain.send(true);
+    previous
+      .snapshot
+      .direct_h2_pools
+      .retire_if_replaced(&snapshot.direct_h2_pools);
     self.retire_replaced_compio_direct_h1(previous.snapshot.as_ref(), snapshot.as_ref());
   }
 
@@ -102,6 +107,13 @@ impl AppHandle {
     if !Arc::ptr_eq(&current.snapshot, expected) {
       return false;
     }
+    if let Err(error) = snapshot.restage_direct_h2_pools_for_publication() {
+      tracing::warn!(
+        error = %error,
+        "snapshot publication rejected while staging fresh direct-H2 pools"
+      );
+      return false;
+    }
     if let Err(error) = snapshot.restage_compio_direct_h1_service_for_publication() {
       tracing::warn!(
         error = %error,
@@ -110,6 +122,7 @@ impl AppHandle {
       return false;
     }
     snapshot.runtime_generation = snapshot.runtime_health.allocate_generation();
+    snapshot.circuit_breakers.configure(&snapshot.config);
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
@@ -121,6 +134,10 @@ impl AppHandle {
     }));
     activate_published_snapshot(snapshot.as_ref(), Some(previous.snapshot.as_ref()));
     let _ = previous.data_plane_drain.send(true);
+    previous
+      .snapshot
+      .direct_h2_pools
+      .retire_if_replaced(&snapshot.direct_h2_pools);
     self.retire_replaced_compio_direct_h1(previous.snapshot.as_ref(), snapshot.as_ref());
     true
   }

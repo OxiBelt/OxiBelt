@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use self::labels::{
-  DirectH1PoolEvent, DirectH1ResponseProtocolFailure, FastPathMetricProtocol,
+  DirectH1PoolEvent, DirectH1ResponseProtocolFailure, DirectH2PoolEvent, FastPathMetricProtocol,
   FastPathTransportMissReason,
 };
 use super::StripedCounter;
@@ -73,18 +73,6 @@ const DIRECT_H1_POOL_EVENTS: [&str; 9] = [
 ];
 const DIRECT_H1_RESPONSE_PROTOCOL_COUNTER_COUNT: usize =
   FastPathMetricProtocol::COUNT * DirectH1ResponseProtocolFailure::COUNT;
-const DIRECT_H2_POOL_EVENTS: [&str; 10] = [
-  "hit",
-  "miss",
-  "miss_empty",
-  "miss_saturated",
-  "miss_locked",
-  "connect",
-  "connect_error",
-  "reconnect",
-  "stale",
-  "drop",
-];
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
@@ -93,7 +81,7 @@ pub(super) struct FastPathMetrics {
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
   direct_h1_response_protocol_counters: Box<[StripedCounter]>,
-  direct_h2_pool_counters: [StripedCounter; DIRECT_H2_POOL_EVENTS.len()],
+  direct_h2_pool_counters: [StripedCounter; DirectH2PoolEvent::COUNT],
   direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
   static_fast_path_counters: [StripedCounter; static_response::COUNTER_COUNT],
   selection_counters: Box<[StripedCounter]>,
@@ -332,13 +320,11 @@ impl FastPathMetrics {
         );
       }
     }
-    for event in DIRECT_H2_POOL_EVENTS {
+    for event in DirectH2PoolEvent::ALL {
       append_direct_h2_pool_counter(
         output,
-        event,
-        self.direct_h2_pool_counters
-          [direct_h2_pool_event_index(event).expect("pool event counter exists")]
-        .load(),
+        event.as_str(),
+        self.direct_h2_pool_counters[event.index()].load(),
       );
     }
     direct_h1_io::append_prometheus(self, output);
@@ -443,9 +429,7 @@ fn direct_h1_pool_event_index(event: &str) -> Option<usize> {
 }
 
 fn direct_h2_pool_event_index(event: &str) -> Option<usize> {
-  DIRECT_H2_POOL_EVENTS
-    .iter()
-    .position(|candidate| *candidate == event)
+  DirectH2PoolEvent::from_str(event).map(DirectH2PoolEvent::index)
 }
 
 fn append_labeled_counter(
@@ -725,7 +709,9 @@ mod tests {
     metrics.record_direct_h2_pool_event("hit");
     metrics.record_direct_h2_pool_event("miss_saturated");
     metrics.record_direct_h2_pool_event("connect");
+    metrics.record_direct_h2_pool_event("connect_coalesced");
     metrics.record_direct_h2_pool_event("unknown");
+    metrics.record_direct_h2_pool_event_id(DirectH2PoolEvent::CapacityReady);
 
     assert_eq!(
       metrics.direct_h2_pool_counters[direct_h2_pool_event_index("hit").unwrap()].load(),
@@ -738,6 +724,45 @@ mod tests {
     assert_eq!(
       metrics.direct_h2_pool_counters[direct_h2_pool_event_index("connect").unwrap()].load(),
       1
+    );
+    assert_eq!(
+      metrics.direct_h2_pool_counters[DirectH2PoolEvent::ConnectCoalesced.index()].load(),
+      1
+    );
+    assert_eq!(
+      metrics.direct_h2_pool_counters[DirectH2PoolEvent::CapacityReady.index()].load(),
+      1
+    );
+  }
+
+  #[test]
+  fn direct_h2_pool_event_vocabulary_is_fixed() {
+    assert_eq!(
+      DirectH2PoolEvent::ALL.map(DirectH2PoolEvent::as_str),
+      [
+        "hit",
+        "miss",
+        "miss_empty",
+        "miss_saturated",
+        "miss_locked",
+        "connect",
+        "connect_error",
+        "reconnect",
+        "stale",
+        "drop",
+        "connect_leader",
+        "connect_coalesced",
+        "capacity_wait",
+        "capacity_ready",
+        "capacity_timeout",
+        "capacity_full",
+        "drain_started",
+        "drain_completed",
+        "graceful_close",
+        "cooldown_entered",
+        "cooldown_expired",
+        "stale_generation",
+      ]
     );
   }
 }

@@ -340,16 +340,15 @@ pub(super) async fn send_one_shot_with_state(
   state: &AppSnapshot,
   admission: Option<RetryAdmissionContext<'_>>,
 ) -> anyhow::Result<Response<Incoming>> {
-  send_attempt(
-    client,
-    request,
-    timeouts.upstream_first_byte.min(timeouts.upstream_request),
-    Instant::now().checked_add(timeouts.upstream_request),
-    state,
-    admission,
-    false,
-  )
-  .await
+  let deadline = timeouts
+    .upstream_deadline
+    .or_else(|| Instant::now().checked_add(timeouts.upstream_request));
+  let timeout = deadline
+    .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    .unwrap_or(timeouts.upstream_request)
+    .min(timeouts.upstream_first_byte)
+    .min(timeouts.upstream_request);
+  send_attempt(client, request, timeout, deadline, state, admission, false).await
 }
 
 pub(super) struct PoolRetrySuccess {
@@ -707,9 +706,12 @@ fn retry_body_can_be_buffered(request: &Request<ProxyBody>, state: &AppSnapshot)
 }
 
 fn retry_deadline(policy: &EffectiveRetryPolicy, timeouts: EffectiveTimeouts) -> Instant {
-  Instant::now()
+  let configured = Instant::now()
     .checked_add(policy.total_budget.min(timeouts.upstream_request))
-    .unwrap_or_else(Instant::now)
+    .unwrap_or_else(Instant::now);
+  timeouts
+    .upstream_deadline
+    .map_or(configured, |deadline| deadline.min(configured))
 }
 
 fn has_remaining_attempt(policy: &EffectiveRetryPolicy, attempt: usize) -> bool {

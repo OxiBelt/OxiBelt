@@ -82,10 +82,34 @@ pub(super) async fn send_attempt(
     ),
     None => None,
   };
+  let request_deadline = deadline
+    .unwrap_or_else(|| {
+      Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now)
+    })
+    .min(
+      Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now),
+    );
+  if Instant::now() >= request_deadline {
+    if let Some(lease) = circuit_lease.as_mut() {
+      lease.record_outcome(CircuitOutcome::Failure(
+        CircuitOutcomeFailure::FirstByteTimeout,
+      ));
+    }
+    return Err(UpstreamFirstByteTimeout::new(timeout).into());
+  }
   let _retry = retry.then(|| state.overload.lease(WorkKind::RetryConcurrency, 1));
   let _pending = state.overload.lease(WorkKind::PendingUpstreamRequests, 1);
-  let result = match tokio::time::timeout(timeout, client.request(request)).await {
-    Ok(Ok(mut response)) => {
+  let result = tokio::select! {
+    biased;
+    () = tokio::time::sleep_until(request_deadline.into()) => None,
+    response = client.request(request) => Some(response),
+  };
+  let result = match result {
+    Some(Ok(mut response)) => {
       if let Some(lease) = circuit_lease.as_mut() {
         lease.record_outcome(CircuitOutcome::Failure(CircuitOutcomeFailure::Status(
           response.status().as_u16(),
@@ -98,13 +122,13 @@ pub(super) async fn send_attempt(
       }
       Ok(response)
     }
-    Ok(Err(error)) => {
+    Some(Err(error)) => {
       if let Some(lease) = circuit_lease.as_mut() {
         lease.record_outcome(CircuitOutcome::Failure(CircuitOutcomeFailure::ConnectError));
       }
       Err(error.into())
     }
-    Err(_) => {
+    None => {
       if let Some(lease) = circuit_lease.as_mut() {
         lease.record_outcome(CircuitOutcome::Failure(
           CircuitOutcomeFailure::FirstByteTimeout,

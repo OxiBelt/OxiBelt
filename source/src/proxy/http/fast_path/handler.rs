@@ -482,6 +482,10 @@ impl PlainProxyFastPath {
     let direct_outcome = attempt_direct_transport(
       direct_transport,
       snapshot,
+      &resolved.route.name,
+      pool_selection
+        .as_ref()
+        .map(|selection| selection.pool_name.as_str()),
       upstream_index,
       upstream,
       upstream_version,
@@ -495,6 +499,7 @@ impl PlainProxyFastPath {
     .await;
     let mut direct_h1_lease = direct_outcome.h1_lease;
     let mut direct_h2_lease = direct_outcome.h2_lease;
+    let fallback_deadline = direct_outcome.fallback_deadline;
     let upstream_response_result = match direct_outcome.attempt {
       DirectTransportAttempt::Sent(result) => {
         timing::transport_result(
@@ -507,6 +512,9 @@ impl PlainProxyFastPath {
         result
       }
       DirectTransportAttempt::Fallback(outbound) => {
+        let timeouts = fallback_deadline
+          .map(|deadline| timeouts.cap_upstream_to_deadline(deadline))
+          .unwrap_or(timeouts);
         let general_started = timing::general_start(
           snapshot,
           metric_protocol,
